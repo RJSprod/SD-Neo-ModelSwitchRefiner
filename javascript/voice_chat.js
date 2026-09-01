@@ -3541,10 +3541,18 @@
         const master = row.querySelector("[data-mc-voice-pipeline-master]");
         const stages = Array.prototype.slice.call(
             row.querySelectorAll("[data-mc-voice-pipeline-toggle]"));
+        const threads = row.querySelector("[data-mc-voice-pipeline-threads]");
 
         function send() {
             const body = {stages: {}};
             if (master) body.enabled = !!master.checked;
+            // Only when it holds a number. An empty box mid-edit is not a
+            // request to set the budget to nothing, and the server refuses a
+            // value out of range rather than clamping it.
+            if (threads && threads.value !== "") {
+                const asked = parseInt(threads.value, 10);
+                if (!isNaN(asked)) body.threads = asked;
+            }
             stages.forEach(function (box) {
                 body.stages[box.getAttribute("data-mc-voice-pipeline-toggle")] =
                     !!box.checked;
@@ -3562,6 +3570,10 @@
 
         if (master) master.addEventListener("change", send);
         stages.forEach(function (box) { box.addEventListener("change", send); });
+        // ``change`` rather than ``input``: a number typed a digit at a time
+        // would otherwise post 1, then 12, and store the first thing that was
+        // never asked for.
+        if (threads) threads.addEventListener("change", send);
         whenOnScreen(row, function () { pollPipeline(holder, row, 0); });
     }
 

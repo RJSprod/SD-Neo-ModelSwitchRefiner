@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import array
+import contextlib
 import json
 import math
 import os
@@ -1050,6 +1051,57 @@ def _stage_backend(stage_id: str, root, config: dict, numpy_module):
     raise Refusal(f"unknown stage {stage_id!r}")
 
 
+@contextlib.contextmanager
+def _dpdf_session_budget(threads, inter):
+    """Build DPDFNet's session with a thread budget instead of upstream's one.
+
+    ``dpdfnet.onnx_backend.create_cpu_session`` hardcodes::
+
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+
+    and ``StreamEnhancer`` reaches it through ``build_runtime_model``, so the
+    budget this worker is given never reached the stage that needed it most. On
+    a sixteen-thread machine DPDFNet was running on one core, and the measured
+    result was a real-time factor of 2.38 -- the enhancement taking two and a
+    half seconds of compute per second of speech, holding the source back for
+    292 of a 300-second reply and starving playback fourteen times.
+
+    ``build_runtime_model`` looks the constructor up on its own module globals
+    when it is called rather than binding it at import, so replacing it around
+    the construction is enough and nothing in the vendored package is edited.
+    Restored in a ``finally`` because this process may build more than one
+    stage, and a patch left in place would be this stage's budget silently
+    applied to somebody else's session.
+
+    Still CPU-only, and still refused if it is not: the provider is a separate
+    decision from the thread count, made in the manifest, and widening one here
+    must not quietly widen the other.
+    """
+    from dpdfnet import onnx_backend
+
+    import onnxruntime
+
+    original = onnx_backend.create_cpu_session
+
+    def opened(onnx_path):
+        options = onnxruntime.SessionOptions()
+        options.intra_op_num_threads = max(1, int(threads))
+        options.inter_op_num_threads = max(1, int(inter))
+        options.log_severity_level = 3
+        session = onnxruntime.InferenceSession(
+            str(onnx_path), sess_options=options, providers=["CPUExecutionProvider"])
+        if any(name != "CPUExecutionProvider" for name in session.get_providers()):
+            raise Refusal("the enhancement runtime offered a provider other than the CPU")
+        return session
+
+    onnx_backend.create_cpu_session = opened
+    try:
+        yield
+    finally:
+        onnx_backend.create_cpu_session = original
+
+
 class _DpdfBackend:
     """Upstream DPDFNet's own StreamEnhancer, over a file this parent verified.
 
@@ -1089,8 +1141,9 @@ class _DpdfBackend:
         path = Path(root) / wanted
         if not path.is_file():
             raise Refusal("the DPDFNet model file is not where it was said to be")
-        self._enhancer = StreamEnhancer(model=str(config.get("model_id") or "dpdfnet2"),
-                                        onnx_path=path, verbose=False)
+        with _dpdf_session_budget(config.get("intraop", 2), config.get("interop", 1)):
+            self._enhancer = StreamEnhancer(model=str(config.get("model_id") or "dpdfnet2"),
+                                            onnx_path=path, verbose=False)
         self._model_rate = int(config.get("model_sample_rate") or 0) or None
         self._up = None
         self._down = None

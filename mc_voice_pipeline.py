@@ -88,6 +88,37 @@ cannot run at once under the same name.
 
 SCHEMA = 1
 
+MAX_INTRAOP_THREADS = 16
+"""The most this stage may be given, whatever is typed at it.
+
+Not a hardware limit -- a budget one. Beyond the cores actually present, more
+ONNX Runtime threads is contention rather than throughput, and every one of
+them is taken from the PocketTTS generation this stage exists to improve."""
+
+
+def threads() -> int:
+    """The enhancement stage's intra-op budget, as configured.
+
+    A setting rather than a constant since a user's own measurement beat the
+    reasoning behind the constant. Upstream's session is built with one thread
+    and this feature's own default was two, chosen so as not to crowd Pocket --
+    and on a sixteen-thread machine that produced a real-time factor of 2.38,
+    which is not a stage being polite, it is a stage that cannot keep up.
+
+    Whoever is listening has the only instrument that matters here: the
+    ``Voice pipeline ran`` line reports the measured factor for every reply, so
+    this is a dial to turn against a number rather than a guess to get right
+    first time.
+    """
+    try:
+        from modules import shared
+
+        found = int(shared.opts.data.get(OPT_THREADS, INTRAOP_THREADS))
+    except Exception:
+        return INTRAOP_THREADS
+    return max(1, min(MAX_INTRAOP_THREADS, found))
+
+
 INTRAOP_THREADS = 2
 INTEROP_THREADS = 1
 """The enhancement runtime's CPU budget, and it is smaller than everybody
@@ -158,6 +189,7 @@ class StageSpec:
 OPT_ENABLED = "model_chain_voice_pipeline"
 OPT_DPDFNET = "model_chain_voice_pipeline_dpdfnet"
 OPT_LAVASR = "model_chain_voice_pipeline_lavasr"
+OPT_THREADS = "model_chain_voice_pipeline_threads"
 
 STAGES = (
     StageSpec(
@@ -253,13 +285,14 @@ def desired_stages() -> tuple:
 
 def settings() -> dict:
     """The three switches, as the settings surface and the status route see them."""
-    found = {"enabled": enabled()}
+    found = {"enabled": enabled(), "threads": threads(),
+             "max_threads": MAX_INTRAOP_THREADS}
     for spec in STAGES:
         found[spec.id] = stage_enabled(spec.id)
     return found
 
 
-def remember(enabled_value=None, stages=None) -> dict:
+def remember(enabled_value=None, stages=None, threads_value=None) -> dict:
     """Write the switches through to the host's options store, and save once.
 
     One write for all three rather than one route per switch, because the three
@@ -280,6 +313,11 @@ def remember(enabled_value=None, stages=None) -> dict:
         value = (stages or {}).get(spec.id)
         if value is not None:
             wanted[spec.option] = bool(value)
+    if threads_value is not None:
+        try:
+            wanted[OPT_THREADS] = max(1, min(MAX_INTRAOP_THREADS, int(threads_value)))
+        except (TypeError, ValueError):
+            pass
     if wanted:
         try:
             from modules import shared
@@ -1471,7 +1509,7 @@ def _self_test(stage_id: str, staging: Path) -> dict:
     import mc_voice_models as models
 
     config = dict(stage_config(stage_id))
-    config["intraop"] = INTRAOP_THREADS
+    config["intraop"] = threads()
     config["interop"] = INTEROP_THREADS
     interpreter = runtime_python()
     if interpreter is None:
