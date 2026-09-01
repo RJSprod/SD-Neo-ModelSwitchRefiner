@@ -290,6 +290,33 @@ class _Gpu:
         return True
 
     def release(self):
+        """Give the card back. Idempotent, and called *before* the last word.
+
+        The ``finally`` in every generator below is a backstop, not the
+        mechanism, and the difference is what this docstring is for.
+
+        A generator's ``finally`` runs when the generator is resumed to
+        completion or closed. Gradio's ``cancels=`` does neither reliably: a
+        run stopped while it was streaming has already yielded its terminal
+        event, the panel returns out of its own ``for`` loop, and the handler
+        generator is left in the queue's hands. Until something finalises it
+        the card is still booked to a reply that finished, and every later run
+        on another thread queues behind it -- "Waiting for a conversation
+        reply…", from a conversation reply that is over. Nothing recovers it,
+        because :class:`mc_broker._JobLock` is reentrant by thread identity, so
+        the only runs that get through are the ones that happen to land on the
+        thread holding the leak.
+
+        That was visible in one user's log as three runs that started and never
+        reported an end at all, and as every stop-then-retry pair after the
+        first stop mid-stream. Runs stopped while *waiting* were fine, because
+        they held nothing to lose.
+
+        So the release happens on the way out, before the terminal event is
+        yielded, and finalisation is left to tidy up rather than to matter. By
+        the time the panel sees Stopped, Complete or an error, the GPU is
+        already somebody else's to take.
+        """
         if self._workload is not None:
             self._workload.__exit__(None, None, None)
             self._workload = None
@@ -415,6 +442,7 @@ def _prompt_studio(request, cancel: Cancellation):
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
 
@@ -431,6 +459,7 @@ def _prompt_studio(request, cancel: Cancellation):
             if note:
                 yield Event(STATUS, f"Intent expanded — {note}")
             if cancel.is_set():
+                gpu.release()
                 yield Event(CANCELLED, "Cancelled")
                 return
 
@@ -452,6 +481,7 @@ def _prompt_studio(request, cancel: Cancellation):
                 raw = result or ""
 
         if cancel.is_set():
+            gpu.release()
             yield Event(CANCELLED, "Generation cancelled")
             return
 
@@ -465,9 +495,11 @@ def _prompt_studio(request, cancel: Cancellation):
             yield Event(STATUS, "Negative pass…")
             auto = engine.run_smart_negative(positive, _chat_stream(client, request.seed, cancel))
         yield Event(NEGATIVE, engine.merge_negative(request, auto))
+        gpu.release()
         yield Event(DONE, f"Complete · Seed: {request.seed}")
     except Exception as exc:
         logger.debug("Model Chain: Prompt Studio run failed", exc_info=True)
+        gpu.release()
         yield Event(FAILED, str(exc))
     finally:
         gpu.release()
@@ -552,6 +584,7 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
 
@@ -575,11 +608,14 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
         if cancel.is_set():
             # Not an error and not a discard: what was streamed before the stop
             # is a real partial reply and the caller keeps it.
+            gpu.release()
             yield Event(CANCELLED, text)
             return
+        gpu.release()
         yield Event(DONE, text)
     except Exception as exc:
         logger.debug("Model Chain: conversation run failed", exc_info=True)
+        gpu.release()
         yield Event(FAILED, str(exc))
     finally:
         gpu.release()
@@ -605,6 +641,7 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
 
@@ -621,6 +658,7 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
                 lambda _text: None, cancel.event,
                 temperature=enhancer.CAPTION_TEMPERATURE, top_p=enhancer.CAPTION_TOP_P)
             if cancel.is_set():
+                gpu.release()
                 yield Event(CANCELLED, "Cancelled")
                 return
             caption = enhancer.clean(described)
@@ -641,14 +679,17 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
                 written = result or ""
 
         if cancel.is_set():
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
         cleaned = enhancer.clean(written)
         if not cleaned:
             raise RuntimeError("The model returned an empty prompt.")
+        gpu.release()
         yield Event(DONE, cleaned)
     except Exception as exc:
         logger.debug("Model Chain: MiniMax run failed", exc_info=True)
+        gpu.release()
         yield Event(FAILED, str(exc))
     finally:
         gpu.release()
@@ -714,6 +755,7 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
 
@@ -736,6 +778,7 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
                 seed, lambda _text: None, cancel.event,
                 temperature=enhancer.CAPTION_TEMPERATURE, top_p=enhancer.CAPTION_TOP_P)
             if cancel.is_set():
+                gpu.release()
                 yield Event(CANCELLED, "Cancelled")
                 return
             caption = enhancer.clean(described)
@@ -761,14 +804,17 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
                 written = result or ""
 
         if cancel.is_set():
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
         cleaned = enhancer.clean(written)
         if not cleaned:
             raise RuntimeError("The model returned an empty prompt.")
+        gpu.release()
         yield Event(DONE, cleaned)
     except Exception as exc:
         logger.debug("Model Chain: Krea run failed", exc_info=True)
+        gpu.release()
         yield Event(FAILED, str(exc))
     finally:
         gpu.release()
@@ -811,6 +857,7 @@ def _compose(source: str, scene: str, layout, ratio: str, seed: int,
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
 
@@ -832,6 +879,7 @@ def _compose(source: str, scene: str, layout, ratio: str, seed: int,
                 written = result or ""
 
         if cancel.is_set():
+            gpu.release()
             yield Event(CANCELLED, "Cancelled")
             return
 
@@ -844,9 +892,11 @@ def _compose(source: str, scene: str, layout, ratio: str, seed: int,
                            "ignored — the layout is the user's",
                            ", ".join(reached))
         composed, background = composer.parse(written)
+        gpu.release()
         yield Event(DONE, composed, data={"scene": composed, "background": background})
     except Exception as exc:
         logger.debug("Model Chain: the Spatial Composer failed", exc_info=True)
+        gpu.release()
         yield Event(FAILED, str(exc))
     finally:
         gpu.release()
