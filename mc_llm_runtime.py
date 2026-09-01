@@ -2547,6 +2547,9 @@ def without_gpu_selection(command):
     # turns that into the CPU start the machine can actually do, and leaves
     # :data:`_DEVICE_GONE` to mean what its docstring says it means -- a card
     # that *can* be enumerated and could not be this time.
+    global _dropped_the_card
+
+    _dropped_the_card = False
     selecting = ""
     if device != CPU_DEVICE_TOKEN:
         if not _NAMED_DEVICE.match(device):
@@ -2554,6 +2557,7 @@ def without_gpu_selection(command):
         if _runtime_enumerates_a_device(argv[0] if argv else "") is not False:
             return list(argv)
         selecting = "--device"
+        _dropped_the_card = True
 
     kept, dropped, skip = [], [], False
     for position, part in enumerate(argv):
@@ -2583,6 +2587,21 @@ def without_gpu_selection(command):
 
 _NAMED_DEVICE = re.compile(r"^(?:cuda|gpu|rocm|hip|sycl|vulkan|metal)\d+$")
 """A command that names one card, in llama.cpp's own device spelling."""
+
+_dropped_the_card = False
+"""Whether the last start had its card selection taken off the command line.
+
+Module state of the smallest kind, for the reason :data:`_pending_flags` is:
+it is written where the command is corrected and read a few lines later by the
+start that issued it, both inside the runtime's own lock.
+
+It exists because the readiness line reports the placement that was *planned*.
+When the selection has been dropped that line reads "all layers on the GPU ...
+0.0 GB VRAM" -- two halves of one sentence contradicting each other, with the
+true half the one nobody reads. ``_report_offload`` would normally catch it,
+and cannot here: a build with no backend writes no load report to disagree
+with.
+"""
 
 
 def _runtime_enumerates_a_device(executable) -> "bool | None":
@@ -4541,13 +4560,19 @@ class Runtime:
         else:
             mc_broker.retire(self.residency_key)
 
+        said = list(notes)
+        if _dropped_the_card:
+            # Corrects the first half of this very line, which describes the
+            # placement that was asked for rather than the one that happened.
+            said.append("on the processor after all — this build enumerates no "
+                        "offload device")
         logger.info(
             "Model Chain: %sllama-server ready — %s, %s token context, %.1f GB VRAM%s",
             self._said_for(),
             negotiated.placement.describe(),
             f"{negotiated.placement.context:,}",
             observed / _GB,
-            "" if not notes else f" ({'; '.join(notes)})",
+            "" if not said else f" ({'; '.join(said)})",
         )
         self._report_offload(negotiated)
 
