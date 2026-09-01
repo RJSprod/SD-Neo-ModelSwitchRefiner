@@ -912,6 +912,185 @@ def _installed_status(dpdf=True, lava=True, runtime_ready=True):
         master_enabled=pipeline.enabled(), message="Installed.", download_bytes=2048)
 
 
+# --------------------------------------------------------------------------- #
+# The real DPDFNet package
+# --------------------------------------------------------------------------- #
+
+
+DPDF_STUB_FREQ = 481
+"""(481 - 1) * 2 = 960 samples = 20 ms at 48 kHz, which is the window
+``infer_win_len`` derives for the model this feature installs."""
+
+
+def _stub_onnx(path):
+    """A DPDFNet-shaped ONNX with the real streaming signature and no opinions.
+
+    Two inputs, two outputs and the custom metadata upstream's
+    ``build_runtime_model`` insists on, wired as identity. It enhances nothing,
+    which is the point: what these tests are about is the adapter's plumbing and
+    its clock, and a network that changed the audio would make every assertion
+    about "what came out is what went in" impossible to write.
+    """
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper
+
+    state, erb, spec = 64, 8, 8
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["spec"], ["spec_e"]),
+         helper.make_node("Identity", ["state"], ["state_o"])],
+        "dpdfnet_stub",
+        [helper.make_tensor_value_info("spec", TensorProto.FLOAT,
+                                       [1, 1, DPDF_STUB_FREQ, 2]),
+         helper.make_tensor_value_info("state", TensorProto.FLOAT, [state])],
+        [helper.make_tensor_value_info("spec_e", TensorProto.FLOAT,
+                                       [1, 1, DPDF_STUB_FREQ, 2]),
+         helper.make_tensor_value_info("state_o", TensorProto.FLOAT, [state])])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    for key, value in {"state_size": str(state),
+                       "erb_norm_state_size": str(erb),
+                       "spec_norm_state_size": str(spec),
+                       "erb_norm_init": ",".join("0.5" for _ in range(erb)),
+                       "spec_norm_init": ",".join("0.25" for _ in range(spec))}.items():
+        entry = model.metadata_props.add()
+        entry.key, entry.value = key, value
+    onnx.save(model, str(path))
+    return path
+
+
+@pytest.fixture
+def dpdf_backend(tmp_path):
+    """The real ``_stage_backend`` for DPDFNet, over a stub model.
+
+    Skipped where the enhancement runtime is not installed, which is every
+    machine that has not run the installer -- these are the tests that only mean
+    something when upstream's own code is the code under them.
+    """
+    pytest.importorskip("dpdfnet")
+    pytest.importorskip("onnxruntime")
+    _stub_onnx(tmp_path / "dpdfnet8_48khz_hr.onnx")
+    return worker._stage_backend("dpdfnet", tmp_path, {
+        "model_file": "dpdfnet8_48khz_hr.onnx", "model_id": "dpdfnet8_48khz_hr",
+        "model_sample_rate": 48000, "intraop": 2, "interop": 1}, worker._numpy())
+
+
+class TestTheRealDpdfnetPackage:
+    """The adapter against upstream 0.6.0 rather than against a stand-in.
+
+    Everything above proves the adapter is right about its own arithmetic.
+    These prove it is right about the library it was written for -- which is a
+    different question, and the one that decides whether any of it works on
+    somebody's machine.
+    """
+
+    def _run(self, backend, total, block, rate=RATE):
+        backend.reset(rate)
+        stage = worker.DpdfStage(backend, rate)
+        turn = worker.Turn("t", rate, [stage])
+        source = speech(total, rate)
+        found, index = [], 0
+        while index < total:
+            found.extend(turn.feed(source[index:index + block]))
+            index += block
+        found.extend(turn.flush())
+        return stage, found
+
+    @pytest.mark.parametrize("seconds,block", [
+        (0.5, 2048), (1.0, 997), (2.0, 24000), (0.05, 1200), (0.005, 120)])
+    def test_it_gives_back_exactly_what_it_was_given(self, dpdf_backend, seconds, block):
+        """A-25, through the real library, at Pocket's own 24 kHz."""
+        total = int(RATE * seconds)
+        stage, found = self._run(dpdf_backend, total, block)
+        assert len(found) == total
+        assert stage.correction == 0, "the flush had to invent samples"
+        assert all(value == value for value in found), "a NaN reached the output"
+
+    def test_repacketising_changes_nothing_through_the_real_library(self, dpdf_backend):
+        """A-10, and the reason :class:`StreamResampler` exists.
+
+        Upstream's ``process`` resamples each call's chunk on its own, so with
+        its resampling in the loop the same audio delivered in 10 ms packets and
+        in one packet came back differing by about a fifth of full scale -- a
+        packet boundary somebody can hear. Resampling continuously on this side
+        and handing the model its native rate takes that out entirely.
+        """
+        total = int(RATE * 0.75)
+        _stage, reference = self._run(dpdf_backend, total, total)
+        for block in (240, 997, 2880, 13):
+            _stage, found = self._run(dpdf_backend, total, block)
+            assert len(found) == len(reference), block
+            assert found == reference, (
+                f"{block}-sample packets changed the audio by "
+                f"{max(abs(a - b) for a, b in zip(found, reference)):.3e}")
+
+    def test_the_audio_survives_the_round_trip(self, dpdf_backend):
+        """The stub is an identity, so what comes back should be the speech.
+
+        Cheap and load-bearing: every other assertion here would also pass if
+        the adapter returned the right number of zeros.
+        """
+        total = RATE
+        _stage, found = self._run(dpdf_backend, total, 4096)
+        assert max(abs(value) for value in found) == pytest.approx(0.25, rel=0.05)
+        assert max(abs(value) for value in found[-2400:]) == pytest.approx(0.25, rel=0.05)
+
+    def test_the_installers_self_test_passes_against_the_real_package(self, tmp_path):
+        pytest.importorskip("dpdfnet")
+        pytest.importorskip("onnxruntime")
+        _stub_onnx(tmp_path / "dpdfnet8_48khz_hr.onnx")
+        found = worker.selftest({"dpdfnet": str(tmp_path)}, {
+            "dpdfnet": {"model_file": "dpdfnet8_48khz_hr.onnx",
+                        "model_id": "dpdfnet8_48khz_hr", "model_sample_rate": 48000},
+            "test_rate": 24000})
+        assert found["ok"] is True
+        assert found["stages"]["dpdfnet"]["samples"] == 24000
+        assert found["stages"]["dpdfnet"]["correction"] == 0
+
+    def test_a_missing_model_file_is_refused_rather_than_downloaded(self, tmp_path):
+        """I-VP-22. Upstream would fetch a model by name; it is never given one.
+
+        ``resolve_model`` short-circuits on an explicit ``onnx_path``, so the
+        only way this backend could reach the network is by not passing one --
+        which is what this asserts it always does.
+        """
+        pytest.importorskip("dpdfnet")
+        with pytest.raises(worker.Refusal, match="not where it was said to be"):
+            worker._stage_backend("dpdfnet", tmp_path, {
+                "model_file": "dpdfnet8_48khz_hr.onnx"}, worker._numpy())
+        with pytest.raises(worker.Refusal, match="no DPDFNet model file"):
+            worker._stage_backend("dpdfnet", tmp_path, {}, worker._numpy())
+
+
+class TestTheStreamResampler:
+    """The piece written because upstream's per-call resampling could not be used."""
+
+    @pytest.mark.parametrize("block", [240, 997, 13, 6000])
+    def test_it_does_not_care_how_the_stream_was_cut(self, block):
+        source = speech(6000)
+        reference = worker.StreamResampler(24000, 48000)
+        whole = list(reference.feed(source)) + list(reference.flush())
+        found, index = [], 0
+        piece = worker.StreamResampler(24000, 48000)
+        while index < len(source):
+            found.extend(piece.feed(source[index:index + block]))
+            index += block
+        found.extend(piece.flush())
+        assert len(found) == len(whole) == 12000
+        assert found == whole
+
+    def test_it_keeps_the_clock(self):
+        for rate_in, rate_out, count in ((24000, 48000, 2400), (48000, 24000, 4800),
+                                         (24000, 16000, 3000), (22050, 48000, 2205)):
+            found = worker.StreamResampler(rate_in, rate_out)
+            out = list(found.feed([0.1] * count)) + list(found.flush())
+            assert len(out) == worker.deterministic_target(count, rate_in, rate_out)
+
+    def test_matching_rates_are_a_bypass(self):
+        found = worker.StreamResampler(24000, 24000)
+        assert found.transparent
+        assert found.feed([0.1, 0.2]) == [0.1, 0.2]
+
+
 class TestTheEngineSpelling:
     def test_the_pocket_runtime_and_the_registry_agree_on_the_name(self):
         """Two spellings of one engine id, held together by a test.
@@ -995,28 +1174,109 @@ class TestTheToggleMatrix:
 class TestTheManifestIsATrustRoot:
     """A-13, A-24, and the refusals section 20.3 names."""
 
-    def test_this_build_is_deliberately_not_installable(self):
-        """Phase 0 is blocking, and this is what makes that a refusal.
+    def test_the_runtime_closure_is_pinned_byte_for_byte(self):
+        """Every wheel sized and hashed. This is the executable half.
 
-        The day somebody runs the sweep and pins the manifest, this test starts
-        failing and is deleted along with the sentence it is testing. Until
-        then it is the thing standing between a user and a model whose clock
-        nobody has measured.
+        A model that arrives wrong makes bad audio; a wheel that arrives wrong
+        *runs*, so this is the one artifact set with no provisional path.
         """
-        assert pipeline.pinned() is False
-        assert "LavaSR" in pipeline.unpinned_reason()
+        found = pipeline.manifest()
+        platforms = found["runtime"]["platforms"]
+        assert platforms, "the manifest names no runtime platform at all"
+        for entry in platforms:
+            assert entry["artifacts"], entry["id"]
+            for item in entry["artifacts"]:
+                assert len(item["sha256"]) == 64, (entry["id"], item["local_name"])
+                assert item["bytes"] > 0, (entry["id"], item["local_name"])
+                assert item["url"].startswith("https://"), item["local_name"]
+
+    def test_dpdfnet_is_installable_where_its_closure_was_pinned(self, monkeypatch):
+        """The half of this feature that can be run, and can be.
+
+        Pinned for windows-x86_64-cp313 because that is the machine it was
+        brought up on. Somewhere else the answer is a sentence about that rather
+        than a stage that looks installable and is not.
+        """
+        import mc_voice_models as models
+
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        monkeypatch.setattr(pipeline, "_manifest_cache", None, raising=False)
+        assert pipeline.runtime_installable() is True
+        assert pipeline.stage_installable("dpdfnet") is True
+        assert pipeline.stage_unavailable_reason("dpdfnet") == ""
+
+        monkeypatch.setattr(models, "current_platform", lambda: ("linux", "x86_64", "3.11"))
+        assert pipeline.stage_installable("dpdfnet") is False
+        assert "operating system" in pipeline.stage_unavailable_reason("dpdfnet")
+
+    def test_lavasr_is_not_installable_and_says_why(self):
+        """Not "coming soon". A sentence naming what is actually missing.
+
+        Its rate contract *is* measured now -- upstream's own enhance() resamples
+        16000 to 48000 unconditionally, which is the number the adapter needed.
+        What is missing is a dependency closure: no wheel, Torch, and a vocos
+        fork pinned to a git branch rather than a release.
+        """
+        assert pipeline.stage_installable("lavasr") is False
+        reason = pipeline.stage_unavailable_reason("lavasr")
+        assert "LavaSR" in reason and "wheel" in reason
         with pytest.raises(pipeline.PipelineError, match="LavaSR"):
             pipeline.install("lavasr")
+
+    def test_the_measured_lava_rate_is_recorded_where_the_adapter_reads_it(self):
+        """The Phase-0 blocker, answered from upstream's source.
+
+        16000, because ``LavaSR/model.py``'s enhance() calls
+        ``resample(wav, 16000, 48000)`` in *both* branches -- so whatever it is
+        handed is interpreted as 16 kHz, and Pocket's 24 kHz would come back
+        half again too long with nothing saying so.
+        """
+        contract = pipeline.manifest()["stages"]["lavasr"]["contract"]
+        assert contract["backend_input_rate"] == 16000
+        assert contract["output_rate"] == 48000
+        assert contract["denoise"] is False
+        # Still unmeasured, and still what a release would wait for.
+        assert not contract.get("analysis_ms")
+        assert pipeline.pinned() is False
 
     def test_the_manifest_reads_and_describes_both_stages(self):
         found = pipeline.manifest()
         assert set(found["stages"]) == {"dpdfnet", "lavasr"}
         assert found["runtime"]["provider"] == "cpu"
 
-    def test_main_is_not_a_release_identity(self):
-        entry = dict(pipeline.manifest()["stages"]["dpdfnet"], revision="main")
+    def test_a_branch_is_not_a_release_identity(self):
+        """Section 13.4, enforced where it can be: 'main' means something else
+        next week and cannot be reproduced from this repository."""
+        entry = dict(pipeline.manifest()["stages"]["lavasr"], revision="main",
+                     provisional=False)
         with pytest.raises(pipeline.PipelineError, match="not a release identity"):
-            pipeline._read_stage(pipeline.stage("dpdfnet"), entry)
+            pipeline._read_stage(pipeline.stage("lavasr"), entry)
+
+    def test_a_branch_is_allowed_only_when_the_stage_declares_it(self):
+        """The one exception, and it is not a quiet one.
+
+        A stage pinned to a branch has to say ``provisional`` in the manifest,
+        and everything downstream then says so too -- the row, the status line
+        and the installed record. It exists so a model nobody could reach a hub
+        from can still be tested from a machine that can.
+        """
+        spec = pipeline.stage("lavasr")
+        entry = dict(pipeline.manifest()["stages"]["lavasr"], revision="main",
+                     provisional=True)
+        assert pipeline._read_stage(spec, entry)["provisional"] is True
+
+        found = pipeline.manifest()["stages"]["dpdfnet"]
+        assert found["provisional"] is True, "the shipped DPDFNet pin is provisional"
+        assert not pipeline._immutable(found["revision"])
+
+    def test_an_immutable_revision_needs_no_exception(self):
+        spec = pipeline.stage("lavasr")
+        sha = "0" * 40
+        entry = dict(pipeline.manifest()["stages"]["lavasr"], revision=sha,
+                     provisional=False)
+        assert pipeline._read_stage(spec, entry)["revision"] == sha
+        assert pipeline._immutable(sha) and not pipeline._immutable("main")
 
     def test_a_manifest_that_disagrees_about_the_order_is_refused(self):
         """The order cannot be moved from a file either, not only from the UI."""

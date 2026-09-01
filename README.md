@@ -3300,17 +3300,33 @@ nothing to enhance, they never outlive the WebUI, and Stop is exactly as
 immediate as it was — a cancelled reply's enhancement state is thrown away and
 no tail of it is ever played after the silence.
 
-**This release cannot install them yet, and says so.** The two upstream
-projects disagree with themselves about one number that decides whether speech
-plays at the right speed: LavaSR's own documentation advertises 8–48 kHz input
-while the code path we reviewed resamples 16 kHz internally. Guess wrong in one
-direction and speech plays a third too slowly; guess wrong in the other and it
-plays half again too fast. Both load cleanly, both return perfectly ordinary
-numbers, and neither says anything is wrong. So the manifest ships unpinned, the
-installer refuses before it touches the network, and the row tells you why —
-rather than downloading a model whose clock nobody has measured. The measurement
-and the pinning are `docs/19-voice-chat-pipeline.md` and
-`tools/pin_pipeline_models.py`.
+**DPDFNet installs and runs today. LavaSR does not, and the row says why.**
+
+DPDFNet's runtime is pinned byte for byte — thirty-two wheels resolved from PyPI
+for Windows on CPython 3.13, each checked against the digest PyPI publishes for
+it — and the speech path is upstream's own streaming enhancer, handed a model
+file this extension downloaded and verified rather than a name it could go
+looking for. Install the Voice Pipeline runtime first, then DPDFNet, both from
+Installation & Components.
+
+LavaSR is a different problem, and it is not the one it looked like. Its
+documentation advertises 8–48 kHz input; its code resamples 16 kHz to 48 kHz
+unconditionally, in both branches, so whatever you hand it is read as 16 kHz —
+give it PocketTTS's 24 kHz and the reply comes back half again too long,
+sounding like speech, with nothing saying anything is wrong. That question is
+now settled and written into the manifest. What stops it shipping is the
+dependency list: there is no published package, and it wants PyTorch plus a
+`vocos` fork pinned to a git branch rather than a release, which is not
+something this extension can check the way it checks everything else.
+
+The DPDFNet model is pinned to the publisher's current branch rather than to a
+fixed release, and its detail panel says so in those words. That is a real
+difference: a file with a committed hash is checked against a number this
+extension promised, and one without is checked against what the publisher says
+at the moment you download it. Both refuse a file that arrives wrong; only the
+first refuses a publisher who changed their mind.
+`docs/19-voice-chat-pipeline.md` and `tools/pin_pipeline_models.py` are the
+measurement and the pinning.
 
 ### From an Android phone
 

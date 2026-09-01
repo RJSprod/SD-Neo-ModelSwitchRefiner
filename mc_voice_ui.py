@@ -1662,14 +1662,27 @@ def pipeline_runtime_detail() -> str:
         "The isolated CPU runtime the enhancement stages run inside. Separate from "
         "PocketTTS\u2019s own runtime on purpose: a pipeline update must not be able to "
         "change the environment a working voice depends on.",
-        rows=[("Installation", found.runtime_install_state, found.runtime_message),
-              ("Runtime", live["runtime_state"],
+        rows=[("Installation", _state_label(found.runtime_install_state),
+               found.runtime_message),
+              ("Runtime", _state_label(live["runtime_state"]),
                "Loaded with PocketTTS and unloaded when PocketTTS unloads."),
               ("Runtime closure", found.runtime_closure_id or "\u2014", ""),
+              ("Download size", models._bytes_label(_runtime_bytes()) if _runtime_bytes()
+               else "\u2014",
+               "ONNX Runtime, NumPy, and the librosa stack DPDFNet imports."),
               ("Provider", "CPU only", "")],
         component="runtime",
-        installable=found.pinned and found.supported,
+        installable=pipeline.runtime_installable(),
         installed=found.runtime_ready)
+
+
+def _runtime_bytes() -> int:
+    import mc_voice_pipeline as pipeline
+
+    try:
+        return int(pipeline.manifest()["runtime"].get("about_bytes") or 0)
+    except Exception:
+        return 0
 
 
 def pipeline_stage_detail(stage_id: str) -> str:
@@ -1696,15 +1709,22 @@ def pipeline_stage_detail(stage_id: str) -> str:
         entry = {}
     purpose = {"dpdfnet": "Speech cleanup \u2014 noise and synthesis artefacts.",
                "lavasr": "Speech bandwidth extension \u2014 48 kHz mono output."}
+    revision = str(entry.get("revision") or "")
     rows = [("Purpose", purpose.get(stage_id, spec.summary), ""),
-            ("Installation", held.install_state if held else "not_installed",
+            ("Installation", _state_label(held.install_state if held else "not_installed"),
              held.message if held else ""),
-            ("Runtime", "loaded" if stage_id in live["loaded_stages"] else "unloaded",
+            ("Runtime", _state_label("loaded" if stage_id in live["loaded_stages"]
+                                     else "unloaded"),
              "Loaded with PocketTTS. Will unload when PocketTTS unloads."),
-            ("Pipeline", "enabled" if held and held.enabled else "disabled",
+            ("Pipeline", "Enabled" if held and held.enabled else "Disabled",
              f"Stage {spec.order // 100} of 2, in a fixed order."),
+            ("Model", entry.get("model_id") or "\u2014", ""),
             ("Model source", entry.get("repo") or "\u2014",
-             (entry.get("revision") or "")[:12]),
+             (f"revision {revision[:12]} \u2014 the publisher's current branch, not a "
+              f"pinned release" if entry.get("provisional")
+              else (f"revision {revision[:12]}" if revision else ""))),
+            ("Download size", models._bytes_label(entry.get("about_bytes") or 0)
+             if entry.get("about_bytes") else "\u2014", ""),
             ("Output", "48 kHz mono" if spec.output_rate_policy != "preserve"
              else "the rate it was given", ""),
             ("License", entry.get("license") or "\u2014", entry.get("attribution") or "")]
@@ -1716,8 +1736,9 @@ def pipeline_stage_detail(stage_id: str) -> str:
                      "Not selectable in this release. DPDFNet is the cleanup stage."))
     return _component_shell(
         spec.label, spec.summary, rows=rows, component=stage_id,
-        installable=found.pinned and found.supported,
-        installed=bool(held and held.install_state == "installed"))
+        installable=pipeline.stage_installable(stage_id),
+        installed=bool(held and held.install_state == "installed"),
+        note=pipeline.stage_unavailable_reason(stage_id))
 
 
 def _component_shell(title: str, blurb: str, rows, component: str,

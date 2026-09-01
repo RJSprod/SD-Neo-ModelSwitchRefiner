@@ -2058,6 +2058,7 @@ def pipeline_payload() -> dict:
         "input_rate": snapshot.input_rate,
         "output_rate": snapshot.output_rate,
         "pinned": found.pinned,
+        "runtime_installable": pipeline.runtime_installable(),
         "download_bytes": found.download_bytes,
         "runtime": {
             "install_state": found.runtime_install_state,
@@ -2081,6 +2082,8 @@ def pipeline_payload() -> dict:
                 "revision": held.revision[:12],
                 "license": held.license,
                 "about_bytes": held.about_bytes,
+                "installable": pipeline.stage_installable(held.id),
+                "unavailable_reason": pipeline.stage_unavailable_reason(held.id),
             }
             for held in found.stages
         ],
@@ -3129,8 +3132,13 @@ def install(_demo=None, app=None) -> bool:
             component = str(payload.get("component") or "")
             if component not in pipeline.COMPONENTS:
                 raise Refused(400, "That is not a Voice Pipeline component.")
-            if not pipeline.pinned():
-                raise Refused(409, pipeline.unpinned_reason())
+            if component == "runtime":
+                if not pipeline.runtime_installable():
+                    raise Refused(409, "This build has not pinned a Voice Pipeline runtime "
+                                       "closure for this machine.")
+            elif not pipeline.stage_installable(component):
+                raise Refused(409, pipeline.stage_unavailable_reason(component)
+                              or "That component cannot be installed by this build.")
             if (models.progress().get(pipeline.KIND) or {}).get("running"):
                 return JSONResponse({"ok": True, "already": True})
         except Refused as exc:

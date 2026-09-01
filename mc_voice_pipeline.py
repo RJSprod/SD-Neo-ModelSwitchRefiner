@@ -450,6 +450,7 @@ def _read_manifest(found) -> dict:
             "import_name": str(runtime.get("import_name") or ""),
             "license": str(runtime.get("license") or ""),
             "attribution": str(runtime.get("attribution") or ""),
+            "about_bytes": int(runtime.get("about_bytes") or 0),
             "platforms": platforms,
             "wanted": list(runtime.get("wanted") or ()),
         },
@@ -516,13 +517,22 @@ def _read_stage(spec: StageSpec, entry: dict) -> dict:
         read.append(found)
 
     revision = str(entry.get("revision") or "")
-    if revision == "main":
+    provisional = bool(entry.get("provisional"))
+    if revision and not _immutable(revision) and not provisional:
         # Section 13.4, said out loud where it can be enforced: a release whose
         # model identity is a branch name is a release that means something
         # different next week and cannot be reproduced from this repository.
+        #
+        # ``provisional`` is the deliberate exception, and it is not a loophole
+        # because it is not quiet: a stage in that state says so in its own
+        # settings row, in its status message and in the log line that installs
+        # it. It exists so that a branch nobody could reach a hub from can still
+        # be tested on a machine that can, and `tools/pin_pipeline_models.py`
+        # turns it into a real pin from there.
         raise PipelineError(
-            f"The Voice Pipeline manifest pins {spec.id!r} to 'main', which is not a "
-            f"release identity. It must name an immutable revision.")
+            f"The Voice Pipeline manifest pins {spec.id!r} to {revision!r}, which is not a "
+            f"release identity, and does not mark it provisional. It must name an "
+            f"immutable revision.")
 
     contract = entry.get("contract")
     if not isinstance(contract, dict):
@@ -530,6 +540,9 @@ def _read_stage(spec: StageSpec, entry: dict) -> dict:
                             f"contract.")
     return {
         "id": spec.id,
+        "provisional": provisional,
+        "available": bool(entry.get("available", True)),
+        "unavailable_reason": str(entry.get("unavailable_reason") or ""),
         "label": str(entry.get("label") or spec.label),
         "order": spec.order,
         "role": spec.role,
@@ -547,6 +560,88 @@ def _read_stage(spec: StageSpec, entry: dict) -> dict:
         "required_paths": [str(name) for name in (entry.get("required_paths") or ())],
         "contract": dict(contract),
     }
+
+
+def _immutable(revision: str) -> bool:
+    """Whether a revision names one thing forever. A 40-hex commit does."""
+    text = str(revision or "")
+    return len(text) == 40 and all(c in "0123456789abcdef" for c in text.casefold())
+
+
+def runtime_installable() -> bool:
+    """Whether this build has a runtime closure it could stand behind.
+
+    Every wheel sized and hashed, for a platform this machine matches. This is
+    the artifact set whose contents get *executed*, so it is the one place with
+    no provisional path at all: an unpinned wheel is a wheel nobody reviewed.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    entry = _platform_entry_or_none(found)
+    if entry is None or not entry["artifacts"]:
+        return False
+    return all(item["sha256"] and item["bytes"] > 0 for item in entry["artifacts"])
+
+
+def stage_installable(stage_id: str) -> bool:
+    """Whether one stage could be installed on this machine right now.
+
+    Per stage rather than all-or-nothing, and that is the whole shape of this
+    function. The two stages are independently installable by design (I-VP-02),
+    they are pinned by different people at different times, and a build where
+    one is ready and the other is not is the ordinary state of a feature being
+    brought up -- not a reason to refuse the half that works.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    entry = found["stages"].get(str(stage_id or ""))
+    if entry is None or not entry["available"]:
+        return False
+    if not runtime_installable():
+        return False
+    if not entry["revision"] or not entry["artifacts"]:
+        return False
+    if entry["provisional"]:
+        # A provisional stage is allowed to arrive unhashed: what it is checked
+        # against is the digest its publisher reports at download time, which
+        # the installed record then keeps.
+        return all(item["url"] for item in entry["artifacts"])
+    return all(item["sha256"] and item["bytes"] > 0 for item in entry["artifacts"])
+
+
+def stage_unavailable_reason(stage_id: str) -> str:
+    """Why a stage cannot be installed, as a sentence somebody can act on."""
+    try:
+        found = manifest()
+    except PipelineError as exc:
+        return str(exc)
+    entry = found["stages"].get(str(stage_id or ""))
+    if entry is None:
+        return "Not available in this build."
+    if not entry["available"]:
+        return entry["unavailable_reason"] or "Not available in this build."
+    if not runtime_installable():
+        return ("Not available — this build has no pinned Voice Pipeline runtime for this "
+                "operating system and Python version.")
+    if not entry["revision"] or not entry["artifacts"]:
+        return f"Not available — this build has not pinned {entry['label']}'s files yet."
+    return ""
+
+
+def _platform_entry_or_none(found: dict):
+    import mc_voice_models as models
+
+    system, machine, python = models.current_platform()
+    for entry in found["runtime"]["platforms"]:
+        machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
+        if (str(entry.get("system") or "").casefold() == system
+                and machine in machines and str(entry.get("python") or "") == python):
+            return entry
+    return None
 
 
 def pinned() -> bool:
@@ -655,22 +750,11 @@ def supported_platform() -> bool:
     answers False, which is the same answer for the same reason as everything
     else in this build.
     """
-    import mc_voice_models as models
-
     try:
         found = manifest()
     except PipelineError:
         return False
-    system, machine, python = models.current_platform()
-    for entry in found["runtime"]["platforms"]:
-        if not isinstance(entry, dict):
-            continue
-        machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
-        if (str(entry.get("system") or "").casefold() == system
-                and machine in machines
-                and str(entry.get("python") or "") == python):
-            return True
-    return False
+    return _platform_entry_or_none(found) is not None
 
 
 def runtime_closure_id() -> str:
@@ -866,8 +950,10 @@ def status() -> Status:
     wanted_closure = runtime_closure_id()
     record = runtime_installed()
 
-    if not is_pinned:
-        runtime_state, runtime_message = "not_installed", unpinned_reason()
+    if not runtime_installable():
+        runtime_state = "not_installed"
+        runtime_message = ("Not available — this build has not pinned a Voice Pipeline "
+                           "runtime closure for this operating system and Python version.")
     elif not supported:
         runtime_state = "not_installed"
         runtime_message = ("Not available — this build has no pinned Voice Pipeline "
@@ -888,12 +974,19 @@ def status() -> Status:
         entry = found["stages"][spec.id]
         wanted = stage_closure_id(spec.id)
         held = stage_installed(spec.id)
-        if not is_pinned:
-            state, message = "not_installed", "Not available in this build yet."
+        blocked = stage_unavailable_reason(spec.id)
+        if blocked and not held:
+            state, message = "not_installed", blocked
         elif not held:
             state, message = "not_installed", "Not installed."
         elif str(held.get("closure") or "") != wanted:
             state, message = "stale", "Installed by an older build and needs installing again."
+        elif entry["provisional"]:
+            # Said on the row rather than only in the manifest. Somebody testing
+            # a stage whose model identity is a branch should be able to see
+            # that from the page they installed it on.
+            state, message = "installed", ("Installed — from the publisher's current "
+                                           "branch rather than a pinned release.")
         else:
             state, message = "installed", "Installed."
         stages.append(StageStatus(
@@ -1093,10 +1186,23 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
     wanted = str(component or "")
     if wanted not in COMPONENTS:
         raise PipelineError(f"There is no Voice Pipeline component called {wanted!r}.")
-    if not pinned():
-        raise PipelineError(unpinned_reason())
-    if not supported_platform():
-        raise PipelineError(status().runtime_message)
+    # The component's own reason first, and the machine's second. A stage this
+    # build cannot ship at all would fail the same way on every platform, so
+    # answering "not on this operating system" would send somebody looking for a
+    # different computer to solve a problem that is not about computers.
+    if wanted == "runtime":
+        if not supported_platform():
+            raise PipelineError(
+                "This build has no pinned Voice Pipeline runtime for this operating system "
+                "and Python version.")
+        if not runtime_installable():
+            raise PipelineError(
+                "This build has not pinned a Voice Pipeline runtime closure for this "
+                "machine.")
+    else:
+        blocked = stage_unavailable_reason(wanted)
+        if blocked:
+            raise PipelineError(blocked)
 
     say = models._narrator(KIND, on_status)
     tick = models._ticker(KIND, on_progress)
@@ -1109,17 +1215,12 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
 
 
 def _platform_entry() -> dict:
-    import mc_voice_models as models
-
-    system, machine, python = models.current_platform()
-    for entry in manifest()["runtime"]["platforms"]:
-        if not isinstance(entry, dict):
-            continue
-        machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
-        if (str(entry.get("system") or "").casefold() == system
-                and machine in machines and str(entry.get("python") or "") == python):
-            return entry
-    raise PipelineError("This build has no pinned Voice Pipeline runtime for this machine.")
+    entry = _platform_entry_or_none(manifest())
+    if entry is None:
+        raise PipelineError(
+            "This build has no pinned Voice Pipeline runtime for this operating system and "
+            "Python version.")
+    return entry
 
 
 def _artifacts(entries) -> list:
@@ -1155,13 +1256,15 @@ def _install_runtime(say, tick) -> None:
         digests = models._fetch_all(artifacts, staging, say, tick, 0.7, expectations)
 
         say("Building the isolated enhancement runtime…")
+        found = manifest()["runtime"]
         chosen = models.RuntimePlatform(
             identifier=str(entry.get("id") or ""),
             system=str(entry.get("system") or "").casefold(),
             machines=tuple(str(name).casefold() for name in (entry.get("machines") or ())),
             python=str(entry.get("python") or ""),
             artifacts=tuple(artifacts))
-        models._build_environment(staging, staging, chosen)
+        models._build_environment(staging, staging, chosen,
+                                  import_name=found["import_name"] or "onnxruntime")
         for item in artifacts:
             # The wheels are inputs, not part of the installation. Left in the
             # staging tree they would be promoted along with it and sit in the
@@ -1174,7 +1277,6 @@ def _install_runtime(say, tick) -> None:
         tick(0.9)
 
         say("Checking that the enhancement runtime starts…")
-        found = manifest()["runtime"]
         _run_staged(_staged_python(staging),
                     ["-c", f"import {found['import_name']}; print('ok')"],
                     "the Voice Pipeline runtime")
@@ -1283,6 +1385,10 @@ def _install_stage(stage_id: str, say, tick) -> None:
             "license": entry["license"],
             "attribution": entry["attribution"],
             "contract": entry["contract"],
+            "provisional": entry["provisional"],
+            "model_file": (entry["required_paths"][0] if entry["required_paths"]
+                           else (entry["artifacts"][0]["local_name"]
+                                 if entry["artifacts"] else "")),
             "artifacts": dict(digests),
         })
         models._promote(staging, paths.pipeline_stage_root(stage_id))
@@ -1443,4 +1549,13 @@ def stage_config(stage_id: str) -> dict:
     contract = dict(entry["contract"])
     contract["model_id"] = entry["model_id"]
     contract["revision"] = entry["revision"]
+    # The file the worker opens, by the name it was installed under. Named here
+    # rather than guessed there: the worker is handed a directory and must not
+    # have to decide which file in it is the model (section 20.2).
+    installed = stage_installed(stage_id)
+    names = [str(name) for name in (entry["required_paths"] or ())]
+    if not names:
+        names = [item["local_name"] for item in entry["artifacts"]]
+    contract["model_file"] = str((installed.get("model_file") or "")
+                                 or (names[0] if names else ""))
     return contract

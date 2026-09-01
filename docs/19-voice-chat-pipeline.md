@@ -126,56 +126,83 @@ must not be normalised away.
 
 ---
 
-## Why LavaSR is the whole reason this build cannot install anything
+## The rate question, answered
 
-Upstream's README advertises 8–48 kHz input and a 24→48 kHz evaluation. The
-reviewed upstream Python `enhance()` path performs a **16 kHz → 48 kHz resample
-inside its inference**.
+Upstream's README advertises 8–48 kHz input and a 24→48 kHz evaluation. Its
+code says something else. `LavaSR/model.py`:
 
-Those are two different claims about the same model, and only one of them can be
-true of the backend we actually ship. Getting it wrong is not a crash:
+```python
+if denoise:
+    wav = self.denoiser_model.infer(wav)
+    wav = torchaudio.functional.resample(wav, 16000, 48000)
+else:
+    wav = torchaudio.functional.resample(wav, 16000, 48000)
+```
 
-- assume 16 kHz when it is really 24 kHz → speech plays a third too slowly;
-- assume 24 kHz when it is really 16 kHz → speech plays half again too fast.
+**Unconditional, in both branches.** Whatever `enhance()` is handed is
+interpreted as 16 kHz. `load_audio()` will load a file at some other
+`input_sr`, which is what makes the README plausible, but the inference path
+does not care what you loaded — hand it Pocket's 24 kHz and the reply comes back
+half again too long, sounding like speech, with nothing raising anything.
 
-Both load. Both return perfectly finite numbers. Neither says anything.
+So the contract is settled and recorded in the manifest: **`backend_input_rate:
+16000`**. The adapter resamples the real source rate to 16 kHz deterministically,
+runs the model, and takes 48 kHz out — which is exactly what `LavaStage` already
+does with `Resampler(rate_in, backend_rate)`.
 
-So `voice/managed-pipeline-models.json` ships **unpinned**, `mc_voice_pipeline.pinned()`
-answers `False`, and `install()` refuses before it touches the network:
+That was the blocking unknown. What still blocks *LavaSR* is something else
+entirely, and it is not about audio.
 
-> Not installable — the LavaSR rate and window contract has not been measured
-> yet, so this build will not download a model it cannot prove it would play at
-> the right speed.
+### What each stage's state actually is
 
-`tests/test_voice_pipeline.py::TestTheManifestIsATrustRoot::test_this_build_is_deliberately_not_installable`
-asserts that refusal. The day somebody runs the sweep below and pins the
-manifest, that test starts failing and is deleted along with the sentence it is
-testing.
+| | DPDFNet | LavaSR |
+| --- | --- | --- |
+| Rate contract | measured (caller's rate, both ways) | measured (16 kHz in, 48 kHz out) |
+| Package | `dpdfnet` 0.6.0 on PyPI | none published |
+| Dependencies | pinnable: onnxruntime, librosa, numpy | Torch, torchaudio, and a `vocos` **fork on a git branch** |
+| Model | HF `Ceva-IP/DPDFNet`, resolved at install | HF `YatharthS/LavaSR` |
+| **Installable** | **yes** | no |
 
-### Phase 0, the blocking work
+DPDFNet installs and runs. Its closure is pinned byte for byte — 32 wheels
+resolved from PyPI for `windows-x86_64-cp313`, each one hashed and checked
+against the digest pypi.org publishes for it — and the streaming path is
+upstream's own `StreamEnhancer`, handed an explicit `onnx_path` so that
+`resolve_model()` short-circuits every search and every download.
 
-1. Capture real PocketTTS post-DSP PCM (after Shaper/Trim/Seam/pause).
-2. Pin a DPDFNet revision and the `dpdfnet8_48khz_hr` artifact.
-3. Pin a LavaSR v2 revision.
-4. **Measure** the selected backend's real input-rate contract at 24 kHz.
-5. Sweep 250 / 500 / 750 / 1000 ms analysis windows with 40–120 ms context and
-   choose the **smallest** whose quality is acceptable — Voice Chat spent two
-   PRs taking latency out and this feature does not get to put it back by
-   default.
-6. Run the partition-invariance and unit-join checks against real speech.
-7. Benchmark DPDF + Lava + Pocket Maximum concurrently for sustained RTF.
+LavaSR does not, and the reason is a dependency closure rather than a doubt
+about the audio: there is no wheel, and `vocos @ git+https://…@matcha` is a
+branch of a fork, which is not something this repository can pin the way it pins
+everything else. Its adapter is written and tested against stand-in backends;
+what is missing is something a release could stand behind.
 
-Then:
+### Provisional pins, and why they are not a loophole
+
+The DPDFNet **model** is declared but not hashed: the machine that wrote the
+manifest could not reach huggingface.co, so its revision is the publisher's
+branch and its digest is whatever the publisher reports at download time — which
+the installed record then keeps.
+
+That is weaker than a committed hash and the difference is worth stating: both
+refuse a file that arrives wrong, only one refuses a publisher who changed their
+mind. So a stage in that state carries `"provisional": true`, and everything
+downstream says so — the settings row, the status line, the installed record.
+`_read_stage` refuses a branch revision on any stage that does *not* declare it.
+
+To turn it into a real pin, from a machine that can reach the hub:
 
 ```
-python tools/pin_pipeline_models.py --runtime
 python tools/pin_pipeline_models.py --stage dpdfnet --revision <sha>
-python tools/pin_pipeline_models.py --stage lavasr  --revision <sha> \
-    --lava-contract backend=onnx,rate=24000,analysis_ms=500,context_ms=60
 ```
 
-The pinner refuses a revision of `main` and refuses to mark the manifest pinned
-while any of the four contract numbers is missing.
+### Still outstanding for a release
+
+1. Sweep 250 / 500 / 750 / 1000 ms Lava analysis windows with 40–120 ms context
+   and choose the **smallest** acceptable — Voice Chat spent two PRs taking
+   latency out and this feature does not get to put it back by default.
+2. Benchmark DPDFNet + Pocket Maximum concurrently for sustained RTF on
+   reference hardware.
+3. Replace the provisional DPDFNet model pin with an immutable revision.
+4. A pinnable LavaSR closure, or a decision to vendor its inference.
 
 ---
 
