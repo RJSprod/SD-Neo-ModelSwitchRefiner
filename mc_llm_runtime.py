@@ -2527,8 +2527,33 @@ def without_gpu_selection(command):
         device = argv[argv.index("--device") + 1].strip().casefold()
     except (ValueError, IndexError):
         return list(argv)
+
+    # Two different contradictions, and only the second one costs a probe.
+    #
+    # ``none`` is the settled case above: the placement says CPU and the
+    # vendored line still selects device 0.
+    #
+    # A *named* card is the case this second branch is for. The state file can
+    # name one that this build cannot enumerate -- a CUDA token recorded while
+    # a CPU-only runtime was on disk, a CUDA_VISIBLE_DEVICES in the
+    # environment, a card that has gone -- and llama.cpp does not degrade for
+    # it. It refuses the argument outright::
+    #
+    #     error while handling argument "--device": invalid device: CUDA0
+    #
+    # which happens before the model is opened, so every start dies, on every
+    # model and every engine, and the retry loop's extra headroom cannot help
+    # because nothing was ever short of memory. Dropping the selection here
+    # turns that into the CPU start the machine can actually do, and leaves
+    # :data:`_DEVICE_GONE` to mean what its docstring says it means -- a card
+    # that *can* be enumerated and could not be this time.
+    selecting = ""
     if device != CPU_DEVICE_TOKEN:
-        return list(argv)
+        if not _NAMED_DEVICE.match(device):
+            return list(argv)
+        if _runtime_enumerates_a_device(argv[0] if argv else "") is not False:
+            return list(argv)
+        selecting = "--device"
 
     kept, dropped, skip = [], [], False
     for position, part in enumerate(argv):
@@ -2536,17 +2561,48 @@ def without_gpu_selection(command):
             skip = False
             dropped.append(part)
             continue
-        if part in ("--split-mode", "--main-gpu"):
+        if part in ("--split-mode", "--main-gpu") or (selecting and part == selecting):
             skip = position + 1 < len(argv)
             dropped.append(part)
             continue
         kept.append(part)
 
-    if dropped:
+    if dropped and selecting:
+        logger.warning("Model Chain: this llama-server build enumerates no offload device, "
+                       "so %s was left off its command line and the model is starting on "
+                       "the processor — llama.cpp refuses to select a device it does not "
+                       "have. Install the runtime build for this card, or choose the "
+                       "processor in LLM Studio, to stop this happening on every start.",
+                       " ".join(dropped))
+    elif dropped:
         logger.info("Model Chain: this llama-server is starting with no GPU visible, so "
                     "%s was left off its command line — llama.cpp refuses to select a "
                     "device it does not have", " ".join(dropped))
     return kept
+
+
+_NAMED_DEVICE = re.compile(r"^(?:cuda|gpu|rocm|hip|sycl|vulkan|metal)\d+$")
+"""A command that names one card, in llama.cpp's own device spelling."""
+
+
+def _runtime_enumerates_a_device(executable) -> "bool | None":
+    """Whether this build can see any offload device. See :mod:`mc_llm_setup`.
+
+    One implementation, in the module that owns the question of which
+    llama-server is installed and what device it was recorded against, so that
+    the launcher and the recorder cannot disagree about the same build. Wrapped
+    rather than imported at module scope because this module is imported to
+    describe a machine long before anything starts a server on it.
+
+    ``None`` means the question could not be answered and the caller must leave
+    the command exactly as it found it.
+    """
+    try:
+        import mc_llm_setup
+    except Exception:
+        logger.debug("Model Chain: could not import the device probe", exc_info=True)
+        return None
+    return mc_llm_setup.enumerates_a_device(executable)
 
 
 _pending_flags: list[str] = []

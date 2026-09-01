@@ -937,6 +937,54 @@ class TestTheCommandThatStartsIt:
 
         assert runtime.without_gpu_selection(probe) == probe
 
+    def test_a_card_this_build_cannot_enumerate_comes_off_the_command(self, monkeypatch):
+        """The start that used to die at argument parsing, on every model.
+
+        llama.cpp refuses ``--device CUDA0`` outright when it can see no such
+        device, before the model is opened -- so this is not a slow LLM, it is
+        no LLM, and no amount of retrying with more headroom reaches it.
+        """
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime, "_runtime_enumerates_a_device",
+                            lambda executable: False)
+        found = runtime.without_gpu_selection(
+            ["llama-server", "-m", "model.gguf", "--device", "CUDA0",
+             "--split-mode", "none", "--main-gpu", "0"])
+        assert found == ["llama-server", "-m", "model.gguf"], found
+
+    def test_a_build_that_can_see_the_card_is_left_alone(self, monkeypatch):
+        """The ordinary GPU start, which must keep the line it has always had."""
+        import mc_llm_runtime
+
+        command = ["llama-server", "--device", "CUDA0", "--split-mode", "none",
+                   "--main-gpu", "0"]
+        monkeypatch.setattr(mc_llm_runtime, "_runtime_enumerates_a_device",
+                            lambda executable: True)
+        assert runtime.without_gpu_selection(command) == command
+
+    def test_a_probe_that_could_not_be_asked_changes_nothing(self, monkeypatch):
+        """``None`` is not evidence. A card is not dropped on a failed question."""
+        import mc_llm_runtime
+
+        command = ["llama-server", "--device", "CUDA0", "--main-gpu", "0"]
+        monkeypatch.setattr(mc_llm_runtime, "_runtime_enumerates_a_device",
+                            lambda executable: None)
+        assert runtime.without_gpu_selection(command) == command
+
+    def test_a_cpu_start_is_never_made_to_pay_for_a_probe(self, monkeypatch):
+        """CPU placement is settled without asking the build anything."""
+        import mc_llm_runtime
+
+        asked = []
+        monkeypatch.setattr(mc_llm_runtime, "_runtime_enumerates_a_device",
+                            lambda executable: asked.append(1))
+        found = runtime.without_gpu_selection(
+            ["llama-server", "--device", "none", "--split-mode", "none",
+             "--main-gpu", "0"])
+        assert found == ["llama-server", "--device", "none"]
+        assert asked == [], "a CPU start spawned a device probe it does not need"
+
     def test_the_failure_it_prevented_is_explained_if_it_happens_anyway(self):
         """An old state file, a CUDA_VISIBLE_DEVICES in the environment, or a
         runtime build with no CUDA backend beside it can still produce this, and

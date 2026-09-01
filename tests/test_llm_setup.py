@@ -580,3 +580,104 @@ class TestDownload:
 
         assert requested
         assert not any(key.startswith("model-") or key == "mmproj" for key in requested)
+
+
+class TestADisprovedCardIsNotRecordedAnyway:
+    """A build that reports an empty device list must not be recorded as CUDA0.
+
+    The regression this covers took a working installation to a state where
+    nothing could generate at all. A CUDA token was recorded while a runtime
+    with no CUDA backend was on disk, and from then on every start passed
+    ``--device CUDA0`` to a build that refuses it during argument parsing --
+    before the model is opened, so the failure was identical on every model,
+    every engine and every restart, and the retry loop's extra headroom could
+    not touch it because nothing was ever short of memory.
+    """
+
+    LISTING_EMPTY = "Available devices:\n  (none)\n"
+    LISTING_CARD = ("Available devices:\n  CUDA0: NVIDIA GeForce RTX 5090 "
+                    "(32607 MiB, 31400 MiB free)\n")
+
+    def _answers(self, monkeypatch, output, code=0):
+        import subprocess
+
+        class Result:
+            returncode, stdout, stderr = code, output, ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
+        setup.forget_devices()
+
+    def test_an_empty_listing_is_a_no(self, monkeypatch, root):
+        server = make_build(root / "runtime")
+        self._answers(monkeypatch, self.LISTING_EMPTY)
+
+        assert setup.enumerates_a_device(server) is False
+
+    def test_a_listed_card_is_a_yes(self, monkeypatch, root):
+        server = make_build(root / "runtime")
+        self._answers(monkeypatch, self.LISTING_CARD)
+
+        assert setup.enumerates_a_device(server) is True
+
+    def test_output_it_does_not_recognise_is_not_a_no(self, monkeypatch, root):
+        """The important one. A probe that says nothing useful is not evidence
+        that a machine has no GPU, and treating it as one would refuse every
+        card the day llama.cpp rewords its listing."""
+        server = make_build(root / "runtime")
+        for output in ("", "ggml_backend_load_all: loading\n", "?"):
+            self._answers(monkeypatch, output)
+            assert setup.enumerates_a_device(server) is None, output
+
+    def test_a_build_that_refused_the_flag_is_not_a_no(self, monkeypatch, root):
+        server = make_build(root / "runtime")
+        self._answers(monkeypatch, self.LISTING_EMPTY, code=1)
+
+        assert setup.enumerates_a_device(server) is None
+
+    def test_a_missing_build_is_not_a_no(self, root):
+        assert setup.enumerates_a_device(root / "runtime" / "nothing-here") is None
+
+    def test_it_is_asked_once_per_build(self, monkeypatch, root):
+        import subprocess
+
+        server = make_build(root / "runtime")
+        asked = []
+
+        class Result:
+            returncode, stdout, stderr = 0, self.LISTING_CARD, ""
+
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: (asked.append(1), Result())[1])
+        setup.forget_devices()
+        for _ in range(4):
+            assert setup.enumerates_a_device(server) is True
+        assert len(asked) == 1, f"probed {len(asked)} times"
+
+        # Replacing the build is what somebody does to fix this, so the answer
+        # must not come out of the old build's cache.
+        server.write_bytes(b"#!/bin/sh\nexit 0\n# rebuilt\n")
+        assert setup.enumerates_a_device(server) is True
+        assert len(asked) == 2
+
+    def test_recording_a_card_this_build_cannot_see_is_refused(self, monkeypatch, root,
+                                                               a_card):
+        """Refused, so the working placement survives and the person is told why.
+
+        Recording it anyway is what produced a machine that could not generate
+        on any model or any engine.
+        """
+        server = make_build(root / "runtime")
+        self._answers(monkeypatch, self.LISTING_EMPTY)
+
+        with pytest.raises(setup.SetupError, match="no device to offload to"):
+            setup.record(server, setup.device_for_token("gpu:0"))
+
+    def test_a_probe_that_could_not_answer_still_falls_back(self, monkeypatch, root,
+                                                            a_card):
+        """The long-standing behaviour, kept: an unanswerable probe is not a no."""
+        self._answers(monkeypatch, "nothing recognisable")
+        server = make_build(root / "runtime")
+
+        state = setup.record(server, setup.device_for_token("gpu:0"))
+
+        assert state["gpu_device"] == "CUDA0"
