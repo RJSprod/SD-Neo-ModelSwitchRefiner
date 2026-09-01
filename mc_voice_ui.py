@@ -1711,6 +1711,16 @@ def _pipeline_device_row(stage_id: str) -> str:
     import mc_voice_pipeline as pipeline
 
     try:
+        # Nothing at all for a stage this build does not ship. LavaSR is that
+        # stage today: it publishes no wheel, its Install button is disabled,
+        # and a dropdown asking where to run it would be offering to place
+        # something that cannot exist here -- which is the same control-that-
+        # lies problem as a disabled select, wearing a different costume. The
+        # question is availability rather than installability, because a stage
+        # that is merely not installable on *this* machine is still a stage
+        # whose settings mean something.
+        if not pipeline.stage_available(stage_id):
+            return ""
         found = pipeline.devices_for(stage_id)
     except Exception:
         logger.debug("Model Chain: could not describe the devices for %s", stage_id,

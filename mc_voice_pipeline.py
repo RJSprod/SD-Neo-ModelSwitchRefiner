@@ -754,6 +754,25 @@ def runtime_installable() -> bool:
     return all(item["sha256"] and item["bytes"] > 0 for item in entry["artifacts"])
 
 
+def stage_available(stage_id: str) -> bool:
+    """Whether this build ships the stage at all, ignoring the machine.
+
+    A narrower question than :func:`stage_installable`, and they are worth
+    keeping apart because their answers mean different things to a surface. A
+    stage that is merely not installable *here* -- no pinned runtime for this
+    operating system, files not pinned yet -- is still a stage this build has,
+    and its settings are still settings. A stage that is not available is one
+    the repository does not ship: there is nothing to configure, and every
+    control on its panel would be a control with nothing behind it.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    entry = found["stages"].get(str(stage_id or ""))
+    return bool(entry is not None and entry["available"])
+
+
 def stage_installable(stage_id: str) -> bool:
     """Whether one stage could be installed on this machine right now.
 

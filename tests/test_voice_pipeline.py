@@ -2568,6 +2568,32 @@ class TestThePlacementControlSaysWhatItCanAndCannotDo:
         assert "does not do is push anything out" in drawn
         assert "spoken unenhanced" in drawn
 
+    def test_a_stage_this_build_does_not_ship_is_offered_no_device(self, monkeypatch):
+        """LavaSR, today. Its Install button is disabled because the build has
+        no dependency closure for it, and a dropdown asking where to run it
+        would be offering to place something that cannot exist here -- the same
+        control-that-lies problem as a disabled select, in a different costume.
+        """
+        import mc_voice_ui as ui_module
+
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+
+        assert pipeline.stage_available("lavasr") is False, "so this proves nothing"
+        assert ui_module._pipeline_device_row("lavasr") == ""
+        assert ui_module._pipeline_device_row("dpdfnet") != ""
+
+    def test_availability_and_installability_are_different_questions(self):
+        """A stage not installable *here* is still a stage this build has.
+
+        Collapsing the two would take the device control off DPDFNet on any
+        machine with no pinned runtime, which is a stage whose settings still
+        mean something.
+        """
+        assert pipeline.stage_available("dpdfnet") is True
+        assert pipeline.stage_available("nosuch") is False
+
     @pytest.mark.parametrize("component", ["tts-pocket", "tts-sopro", "tts-kokoro",
                                            "recording-cleanup"])
     def test_an_engine_that_cannot_move_gets_a_sentence_and_no_control(self, component):

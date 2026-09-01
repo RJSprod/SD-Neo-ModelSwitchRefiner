@@ -4311,10 +4311,17 @@
 
 .mc-voice-pipeline-device select {
     max-width: 100%;
+    min-width: 0;
 }
 
 .mc-voice-pipeline-device .mc-voice-pipeline-what {
     flex-basis: 100%;
+    /* A flex item's default min-width is its content, so a long sentence with
+       no break opportunity pushes the row wider than the panel instead of
+       wrapping inside it. Both of these are needed: the first lets the item be
+       narrower than its text, the second gives the text somewhere to break. */
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .mc-voice-component-status.mc-voice-failed {
