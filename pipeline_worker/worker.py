@@ -82,6 +82,18 @@ with a plausible excuse."""
 
 LAVA_OUTPUT_RATE = 48000
 
+PROVIDER_CPU = "CPUExecutionProvider"
+PROVIDER_DIRECTML = "DmlExecutionProvider"
+"""The two execution providers the pinned ONNX Runtime wheel carries.
+
+The closure installs the DirectML build rather than the CPU-only one, and that
+build carries both -- so a stage running on the processor and the same stage
+running on a graphics card are one installation and two session options, not two
+runtimes. The names are spelled here as well as in :mod:`mc_voice_device`
+because this file runs inside the isolated runtime and cannot import that one;
+they are checked against each other by a test rather than by an import.
+"""
+
 CROSSFADE_MS = 20
 """How long the join between two Lava analysis windows is ramped over.
 
@@ -1014,8 +1026,89 @@ class Turn:
 # --------------------------------------------------------------------------- #
 
 
+def _wanted_provider(config: dict) -> tuple:
+    """The execution provider and adapter number this stage was told to use.
+
+    Defaults to the processor for anything the parent did not say, which is
+    every load message written before this existed and every stage whose
+    placement has never been touched. A load message that names an unknown
+    provider is refused rather than quietly run on the CPU: the parent had a
+    reason to send it, and running somewhere else while reporting success is how
+    a placement setting becomes a placement setting nobody can trust.
+    """
+    provider = str(config.get("provider") or PROVIDER_CPU)
+    if provider not in (PROVIDER_CPU, PROVIDER_DIRECTML):
+        raise Refusal("the parent asked for an execution provider this runtime does "
+                      "not carry")
+    try:
+        adapter = max(0, int(config.get("adapter", 0)))
+    except (TypeError, ValueError):
+        adapter = 0
+    return provider, adapter
+
+
+def _session_options(onnxruntime, threads, inter, provider: str):
+    """Session options for one stage, on the provider it was told to use.
+
+    The two DirectML lines are not tuning. ONNX Runtime's own documentation
+    requires the memory pattern optimiser off and sequential execution for the
+    DirectML execution provider, because that provider allocates through
+    Direct3D and the pattern optimiser assumes it owns the arena; a session
+    built without them is a session that either fails to create or produces
+    wrong output, and neither is something to discover mid-sentence.
+
+    The thread counts are still set for DirectML even though the work is on the
+    card. They cost nothing there and they are what the CPU fallback nodes --
+    the operators the provider does not implement -- run on.
+    """
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = max(1, int(threads))
+    options.inter_op_num_threads = max(1, int(inter))
+    options.log_severity_level = 3
+    if provider == PROVIDER_DIRECTML:
+        options.enable_mem_pattern = False
+        options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    return options
+
+
+def _provider_argument(provider: str, adapter: int) -> list:
+    """The ``providers=`` list for one placement.
+
+    The CPU entry stays on the end of the DirectML list on purpose: DirectML
+    does not implement every operator, and without a fallback a model with one
+    unsupported node fails to load rather than running that node on the
+    processor. What must not be silent is the *whole* session landing there,
+    and that is what :func:`_check_provider` refuses.
+    """
+    if provider == PROVIDER_DIRECTML:
+        return [(PROVIDER_DIRECTML, {"device_id": int(adapter)}), PROVIDER_CPU]
+    return [PROVIDER_CPU]
+
+
+def _check_provider(session, provider: str) -> tuple:
+    """Refuse a session that did not come back on the provider that was asked for.
+
+    ONNX Runtime does not raise when an execution provider is unavailable. It
+    drops it and builds on the next one in the list, and the session it returns
+    works -- so a machine with no usable Direct3D 12 card would have run every
+    stage on the processor while the settings panel said "graphics card", which
+    is the failure this whole check exists to make impossible.
+
+    The test is on the *first* provider rather than on the set. A DirectML
+    session legitimately reports the CPU provider as well, as the fallback for
+    operators DirectML does not implement; a session that has fallen back
+    entirely reports the CPU provider first, and alone.
+    """
+    got = tuple(session.get_providers())
+    if not got or got[0] != provider:
+        raise Refusal(f"the enhancement runtime built this stage on "
+                      f"{got[0] if got else 'no provider'} rather than the "
+                      f"{provider} it was asked for")
+    return got
+
+
 class _Session:
-    """One ONNX Runtime session over a local file, with the threads pinned.
+    """One ONNX Runtime session over a local file, on the provider it was given.
 
     Constructed from a path this process was handed, never from a model name.
     Upstream's convenience loaders take a name and will fetch it; none of them
@@ -1023,18 +1116,15 @@ class _Session:
     were (I-VP-22, section 9.6).
     """
 
-    def __init__(self, path, threads: int, inter: int):
+    def __init__(self, path, threads: int, inter: int,
+                 provider: str = PROVIDER_CPU, adapter: int = 0):
         import onnxruntime
 
-        options = onnxruntime.SessionOptions()
-        options.intra_op_num_threads = int(threads)
-        options.inter_op_num_threads = int(inter)
-        options.log_severity_level = 3
+        options = _session_options(onnxruntime, threads, inter, provider)
         self.session = onnxruntime.InferenceSession(
-            str(path), sess_options=options, providers=["CPUExecutionProvider"])
-        self.providers = tuple(self.session.get_providers())
-        if any(name != "CPUExecutionProvider" for name in self.providers):
-            raise Refusal("the enhancement runtime offered a provider other than the CPU")
+            str(path), sess_options=options,
+            providers=_provider_argument(provider, adapter))
+        self.providers = _check_provider(self.session, provider)
 
 
 def _stage_backend(stage_id: str, root, config: dict, numpy_module):
@@ -1052,7 +1142,7 @@ def _stage_backend(stage_id: str, root, config: dict, numpy_module):
 
 
 @contextlib.contextmanager
-def _dpdf_session_budget(threads, inter):
+def _dpdf_session_budget(threads, inter, provider=PROVIDER_CPU, adapter=0):
     """Build DPDFNet's session with a thread budget instead of upstream's one.
 
     ``dpdfnet.onnx_backend.create_cpu_session`` hardcodes::
@@ -1074,9 +1164,13 @@ def _dpdf_session_budget(threads, inter):
     stage, and a patch left in place would be this stage's budget silently
     applied to somebody else's session.
 
-    Still CPU-only, and still refused if it is not: the provider is a separate
-    decision from the thread count, made in the manifest, and widening one here
-    must not quietly widen the other.
+    The same seam carries the execution provider, and it has to: the function
+    being replaced is named ``create_cpu_session`` and builds a CPU session
+    unconditionally, so a stage placed on a graphics card would otherwise run on
+    the processor no matter what the panel said. Both arguments arrive from the
+    parent's load message and both are refused rather than adjusted -- a session
+    that came back on a provider nobody asked for is not a slower session, it is
+    a different answer to "where is this running".
     """
     from dpdfnet import onnx_backend
 
@@ -1085,19 +1179,20 @@ def _dpdf_session_budget(threads, inter):
     original = onnx_backend.create_cpu_session
 
     def opened(onnx_path):
-        options = onnxruntime.SessionOptions()
-        options.intra_op_num_threads = max(1, int(threads))
-        options.inter_op_num_threads = max(1, int(inter))
-        options.log_severity_level = 3
+        options = _session_options(onnxruntime, threads, inter, provider)
         session = onnxruntime.InferenceSession(
-            str(onnx_path), sess_options=options, providers=["CPUExecutionProvider"])
-        if any(name != "CPUExecutionProvider" for name in session.get_providers()):
-            raise Refusal("the enhancement runtime offered a provider other than the CPU")
+            str(onnx_path), sess_options=options,
+            providers=_provider_argument(provider, adapter))
+        built.extend(_check_provider(session, provider))
         return session
 
+    built = []
     onnx_backend.create_cpu_session = opened
     try:
-        yield
+        # Yielded so the caller can record what the session came back on rather
+        # than what it asked for. Those are the same thing when nothing is
+        # wrong, and the only interesting case is the one where they are not.
+        yield built
     finally:
         onnx_backend.create_cpu_session = original
 
@@ -1109,8 +1204,10 @@ class _DpdfBackend:
     why that is safe here: given an explicit path, ``resolve_model`` short-
     circuits every search and every download, so the convenience API that would
     otherwise fetch a model by name cannot reach the network at all (I-VP-22).
-    The session it builds is CPU-only and single-threaded by upstream's own
-    construction, which is the same thing this feature would have insisted on.
+    The session upstream builds is CPU-only and single-threaded by its own
+    construction. Both of those are replaced here -- see
+    :func:`_dpdf_session_budget` for the thread budget and for the execution
+    provider, neither of which upstream's constructor has a parameter for.
 
     The rate handed to :meth:`process` is the caller's real one -- 24000 from
     Pocket today -- and upstream resamples to the network's native rate and back
@@ -1141,9 +1238,19 @@ class _DpdfBackend:
         path = Path(root) / wanted
         if not path.is_file():
             raise Refusal("the DPDFNet model file is not where it was said to be")
-        with _dpdf_session_budget(config.get("intraop", 2), config.get("interop", 1)):
+        provider, adapter = _wanted_provider(config)
+        with _dpdf_session_budget(config.get("intraop", 2), config.get("interop", 1),
+                                  provider, adapter) as built:
             self._enhancer = StreamEnhancer(model=str(config.get("model_id") or "dpdfnet2"),
                                             onnx_path=path, verbose=False)
+        # What it came back on, not what it was asked for. StreamEnhancer builds
+        # exactly one session, so an empty list here would mean upstream stopped
+        # going through the constructor this seam replaces -- which is worth
+        # refusing rather than reporting the CPU by default.
+        if not built:
+            raise Refusal("the enhancement runtime built this stage without a session "
+                          "this worker could see")
+        self.providers = tuple(built)
         self._model_rate = int(config.get("model_sample_rate") or 0) or None
         self._up = None
         self._down = None
@@ -1204,8 +1311,10 @@ class _LavaBackend:
 
         self._np = numpy_module
         wanted = str(config.get("model_file") or "model.onnx")
+        provider, adapter = _wanted_provider(config)
         self._session = _Session(Path(root) / wanted, config.get("intraop", 2),
-                                 config.get("interop", 1))
+                                 config.get("interop", 1), provider, adapter)
+        self.providers = self._session.providers
 
     def reset(self, rate: int) -> None:
         return None
@@ -1303,9 +1412,31 @@ class Worker:
             "output_rate_policy": {"dpdfnet": "preserve", "lavasr": str(LAVA_OUTPUT_RATE)},
             "lavasr_backend_rate": int((configs.get("lavasr") or {}).get(
                 "backend_input_rate") or 0),
-            "device": "cpu",
+            "device": self._device_word(),
+            "providers": {name: list(getattr(backend, "providers", ()) or ())
+                          for name, backend in self.stages.items()},
             "parent_death": self.parent_death,
         }
+
+    def _device_word(self) -> str:
+        """One word for where the loaded stages ended up, for the parent's log.
+
+        ``cpu`` only when every stage is on the processor, which is what this
+        field has always meant and what the parent's existing check reads. A
+        mixture is reported as ``mixed`` rather than as either half, because a
+        field that named one stage's device while another was somewhere else
+        would be a field that is wrong in exactly the configuration somebody
+        would be looking at it to understand. The per-stage truth is in
+        ``providers`` beside it, which is the answer for anyone who needs more
+        than a word.
+        """
+        seen = set()
+        for backend in self.stages.values():
+            found = tuple(getattr(backend, "providers", ()) or ())
+            seen.add("cpu" if not found or found[0] == PROVIDER_CPU else "gpu")
+        if not seen or seen == {"cpu"}:
+            return "cpu"
+        return "gpu" if seen == {"gpu"} else "mixed"
 
     # -- turns ------------------------------------------------------------ #
 
@@ -1494,7 +1625,7 @@ class Worker:
             self.parent_death = containment(int(header.get("parent_pid") or 0))
             self.send({"op": "hello", "id": header.get("id"), "ok": True,
                        "protocol_version": PROTOCOL_VERSION,
-                       "device": "cpu",
+                       "device": self._device_word(),
                        "backend": FEATURE,
                        "parent_death": self.parent_death,
                        "python": f"{sys.version_info[0]}.{sys.version_info[1]}",

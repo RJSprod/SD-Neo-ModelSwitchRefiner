@@ -88,6 +88,22 @@ cannot run at once under the same name.
 
 SCHEMA = 1
 
+RUNTIME_PROVIDERS = ("cpu", "cpu+directml")
+"""Which runtime closures this build knows how to execute on.
+
+Checked rather than assumed, and it used to be a check for the single string
+``cpu`` with a refusal that said this feature would never take a graphics device
+from an image being made. That claim is no longer the one being made, and the
+sentence went with it: a stage may now be placed on a card, deliberately, by
+somebody who asked for it on its own panel.
+
+What the check still does is the useful half. A manifest naming a closure this
+code cannot execute on -- a CUDA build, say, whose wheels this installer would
+happily unpack and whose sessions nothing here knows how to construct -- is a
+broken extension rather than a broken installation, and it is refused before a
+download starts rather than after one finishes.
+"""
+
 MAX_INTRAOP_THREADS = 16
 """The most this stage may be given, whatever is typed at it.
 
@@ -117,6 +133,53 @@ def threads() -> int:
     except Exception:
         return INTRAOP_THREADS
     return max(1, min(MAX_INTRAOP_THREADS, found))
+
+
+def component_of(stage_id: str) -> str:
+    """The component id one stage is known by outside this module.
+
+    The settings surface, the install progress map and :mod:`mc_voice_device`
+    all name a stage ``voice-pipeline-<id>``; this module names it ``<id>``.
+    Written once here rather than formatted at each of the four call sites,
+    because the two vocabularies meeting in four places is how they drift.
+    """
+    return f"voice-pipeline-{str(stage_id or '')}"
+
+
+def placement(stage_id: str) -> tuple:
+    """The execution provider and adapter number one stage should be built on.
+
+    Delegated whole to :mod:`mc_voice_device` rather than read out of an option
+    here, because "where does this run" is a question the speech engines and the
+    cleanup ask too, and answering it in each feature's own module is how three
+    features end up with three device vocabularies.
+
+    Falls back to the processor on any failure at all, including this build not
+    having that module. A stage that cannot find out where it was asked to run
+    still runs, in the place it has always run.
+    """
+    try:
+        import mc_voice_device as devices
+
+        return devices.provider_for(component_of(stage_id))
+    except Exception:
+        logger.debug("Model Chain: could not resolve the device for the stage %s",
+                     stage_id, exc_info=True)
+        return ("CPUExecutionProvider", 0)
+
+
+def devices_for(stage_id: str) -> dict:
+    """What a settings surface needs to draw one stage's placement control."""
+    try:
+        import mc_voice_device as devices
+
+        return devices.describe(component_of(stage_id))
+    except Exception:
+        logger.debug("Model Chain: could not describe the devices for the stage %s",
+                     stage_id, exc_info=True)
+        return {"component": component_of(stage_id), "placeable": False, "reason": "",
+                "device": "cpu", "devices": [], "provider": "CPUExecutionProvider",
+                "adapter": 0}
 
 
 INTRAOP_THREADS = 2
@@ -286,13 +349,14 @@ def desired_stages() -> tuple:
 def settings() -> dict:
     """The three switches, as the settings surface and the status route see them."""
     found = {"enabled": enabled(), "threads": threads(),
-             "max_threads": MAX_INTRAOP_THREADS}
+             "max_threads": MAX_INTRAOP_THREADS, "devices": {}}
     for spec in STAGES:
         found[spec.id] = stage_enabled(spec.id)
+        found["devices"][spec.id] = devices_for(spec.id)
     return found
 
 
-def remember(enabled_value=None, stages=None, threads_value=None) -> dict:
+def remember(enabled_value=None, stages=None, threads_value=None, devices=None) -> dict:
     """Write the switches through to the host's options store, and save once.
 
     One write for all three rather than one route per switch, because the three
@@ -328,7 +392,70 @@ def remember(enabled_value=None, stages=None, threads_value=None) -> dict:
         except Exception:
             logger.debug("Model Chain: could not persist a Voice Pipeline switch",
                          exc_info=True)
+    # After the switches, and the order is the point. This is the one setting
+    # here that can be *refused* -- a token naming a card this machine does not
+    # have is not a value to clamp, it is a request to decline -- and a refusal
+    # raises out of this function. Done first, it would take the switches in the
+    # same request down with it, so a browser posting a tick alongside a stale
+    # card list would lose the tick as well. Done last, the tick is already
+    # stored and only the device is declined, which is the half that was wrong.
+    moved = False
+    for stage_id, token in (devices or {}).items():
+        if token is None:
+            continue
+        moved = _remember_device(stage_id, token) or moved
+    if moved or OPT_THREADS in wanted:
+        _restart_for_execution()
     return settings()
+
+
+def _restart_for_execution() -> None:
+    """Drop the worker when a setting it only reads at load time has changed.
+
+    The thread budget and the placement are both read once, in ``_send_load``,
+    and ``ensure_started`` returns early when the loaded stage set already
+    matches -- so before this, turning either dial changed nothing until
+    something else happened to stop the worker. A control whose label says
+    "takes effect on the next reply" has to be one that does.
+
+    Only for those two. The master switch and the stage ticks are read fresh by
+    :func:`snapshot` at the top of every turn and need no restart, and stopping
+    a worker for them would be a stop nobody asked for.
+
+    Never fatal. A worker that would not stop is a worker still running at the
+    old setting, and the surface says as much: ``applied`` already reports
+    whether a change is in force now or waiting for the reply in flight to
+    finish.
+    """
+    try:
+        import mc_voice_pipeline_runtime as runtime
+
+        runtime.reconfigure("the Voice Pipeline execution settings changed")
+    except Exception:
+        logger.debug("Model Chain: could not restart the Voice Pipeline for a new "
+                     "execution setting", exc_info=True)
+
+
+def _remember_device(stage_id: str, token) -> bool:
+    """Persist one stage's device, and say whether it actually moved.
+
+    :class:`ValueError` reaches the caller intact -- this is the one place in
+    :func:`remember` that is allowed to fail the request rather than absorb it,
+    and the sentence is the module's own rather than one composed here, so the
+    reason a device was declined is written where the decision was made.
+
+    The boolean is what keeps a redundant restart from happening. A browser
+    posts the select's value on every change, and a value that is already the
+    one in force is a request that stores the same string -- which is not a
+    reason to stop a worker mid-conversation.
+    """
+    if stage(stage_id) is None:
+        raise ValueError(f"{stage_id} is not a stage in this build.")
+    import mc_voice_device as devices
+
+    component = component_of(stage_id)
+    before = devices.stored_placement(component)
+    return devices.remember(component, token) != before
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -412,11 +539,10 @@ def _read_manifest(found) -> dict:
     runtime = found.get("runtime")
     if not isinstance(runtime, dict):
         raise PipelineError("The Voice Pipeline manifest names no runtime.")
-    if str(runtime.get("provider") or "") != "cpu":
+    if str(runtime.get("provider") or "") not in RUNTIME_PROVIDERS:
         raise PipelineError(
-            "The Voice Pipeline manifest names a provider other than the CPU. This "
-            "feature runs on the CPU only and will not take a graphics device from an "
-            "image being made.")
+            "The Voice Pipeline manifest names a runtime this build does not know how to "
+            "execute on. Nothing was installed.")
     entries = found.get("stages")
     if not isinstance(entries, list) or not entries:
         raise PipelineError("The Voice Pipeline manifest names no stages.")
@@ -483,7 +609,12 @@ def _read_manifest(found) -> dict:
         "notes": str(found.get("notes") or ""),
         "runtime": {
             "python": str(runtime.get("python") or ""),
-            "provider": "cpu",
+            # The validated value rather than the constant it used to be. It was
+            # a constant while there was one closure and one answer; now it is
+            # what the installed record is stamped with, and a record claiming
+            # "cpu" for a DirectML closure would make every stale-install check
+            # compare the wrong thing.
+            "provider": str(runtime.get("provider") or ""),
             "build": int(runtime.get("build") or 0),
             "import_name": str(runtime.get("import_name") or ""),
             "license": str(runtime.get("license") or ""),
@@ -1380,7 +1511,7 @@ def _install_runtime(say, tick) -> None:
             "closure": runtime_closure_id(),
             "platform": chosen.identifier,
             "python": chosen.python,
-            "provider": "cpu",
+            "provider": found["provider"],
             "build": found["build"],
             "license": found["license"],
             "artifacts": {name: digest for name, digest in digests.items()},
@@ -1511,6 +1642,14 @@ def _self_test(stage_id: str, staging: Path) -> dict:
     config = dict(stage_config(stage_id))
     config["intraop"] = threads()
     config["interop"] = INTEROP_THREADS
+    # On the processor, whatever the placement setting says, and deliberately.
+    # What this proves is that the downloaded model loads and returns finite
+    # numbers -- a claim about the file, not about the machine's graphics card.
+    # Running it on a card would let a driver that is busy with an image
+    # generation fail an install of a model that is perfectly good, and the
+    # message somebody got would be about the model.
+    config["provider"] = "CPUExecutionProvider"
+    config["adapter"] = 0
     interpreter = runtime_python()
     if interpreter is None:
         raise PipelineError("The Voice Pipeline runtime is not installed.")
@@ -1586,18 +1725,37 @@ def worker_environment() -> dict:
     worker is handed verified local directories and could not fetch a missing
     file if it wanted to.
 
-    The visible-device blanking is the same one every voice process gets: this
-    runs while an image may be generating, and an optional polish that took VRAM
-    from it would be an optional polish nobody would keep switched on.
+    The visible-device blanking stays, and it is worth being precise about what
+    it now means. CUDA, HIP and ROCm are still blanked unconditionally: nothing
+    here executes through any of them, and a library that would have found a
+    card through one of those variables has no business finding one. The
+    placement setting reaches a card through DirectML, which enumerates DXGI
+    adapters and does not read these -- so the two are not in tension, and the
+    blanking keeps meaning what it always did.
+
+    ``ONNXRUNTIME_FORCE_CPU`` is the one that had to become conditional. It is
+    set while every stage is on the processor and dropped as soon as one is not,
+    because a variable that says "run on the CPU" sitting in the environment of
+    a worker that has been asked for a graphics card is either a contradiction
+    ONNX Runtime ignores today or one it honours tomorrow. Neither is something
+    to leave in place: the second would make the placement setting silently do
+    nothing, which is the exact failure the session check exists to prevent.
+
+    The thread caps track the *setting* rather than the constant, and that is
+    the same correction :func:`threads` was written for. OpenMP sizes its pool
+    from this environment before any of this feature's code runs, so a cap
+    pinned at the released two while the session is asked for sixteen is a pool
+    that belongs to neither number.
     """
-    return {
+    budget = threads()
+    on_a_card = any(placement(spec.id)[0] != "CPUExecutionProvider" for spec in STAGES)
+    found = {
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
-        "ONNXRUNTIME_FORCE_CPU": "1",
-        "OMP_NUM_THREADS": str(INTRAOP_THREADS),
-        "MKL_NUM_THREADS": str(INTRAOP_THREADS),
-        "OPENBLAS_NUM_THREADS": str(INTRAOP_THREADS),
+        "OMP_NUM_THREADS": str(budget),
+        "MKL_NUM_THREADS": str(budget),
+        "OPENBLAS_NUM_THREADS": str(budget),
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
         "HF_HUB_OFFLINE": "1",
@@ -1605,6 +1763,9 @@ def worker_environment() -> dict:
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "NO_PROXY": "*",
     }
+    if not on_a_card:
+        found["ONNXRUNTIME_FORCE_CPU"] = "1"
+    return found
 
 
 def stage_paths() -> dict:

@@ -5,27 +5,32 @@
   "notes": "PARTIALLY PINNED. The runtime closure is pinned byte for byte: every wheel below is named, sized and hashed from pypi.org, resolved for windows-x86_64-cp313 -- the platform this was first tested on. The DPDFNet model is DECLARED BUT NOT HASHED: the machine that wrote this manifest could not reach huggingface.co, so the model's size and digest are recorded at install time from what the publisher actually serves, and its revision is the publisher's branch rather than an immutable commit. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher who changed their mind. A stage in that state carries \"provisional\": true, the settings row says so in words, and `python tools/pin_pipeline_models.py --stage dpdfnet --revision <sha>` on a machine that can reach the hub turns the first claim into the second. LavaSR is not installable in this build at all -- see its own entry.",
   "runtime": {
     "python": "3.13",
-    "provider": "cpu",
-    "build": 2,
+    "provider": "cpu+directml",
+    "build": 3,
     "import_name": "onnxruntime",
-    "license": "MIT (ONNX Runtime); BSD-3-Clause (NumPy, SciPy, scikit-learn, joblib); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (DPDFNet); MIT (soxr, soundfile, tqdm, filelock)",
-    "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 with pip's own resolver, then hashed and checked against the digests pypi.org publishes for each file.",
-    "closure_notes": "The enhancement runtime is deliberately NOT PocketTTS's interpreter (section 14.6). Lifecycle coupling does not imply dependency coupling: Pocket's closure stays reproducible, the pipeline can later serve Kokoro and Sopro, and a pipeline update cannot mutate the environment a working voice depends on. The closure below is the ONNX path -- Path A of section 10.4 -- which is the one to validate first because it shares a runtime with DPDFNet and gives explicit thread control. If Phase 0 rejects it, section 14.5 says to use the official PyTorch/Vocos LavaSR in this same isolated runtime with a project-owned rate adapter, which is a different closure and a different 'build' number here, not a different design.",
+    "license": "MIT (ONNX Runtime, including its DirectML execution provider); BSD-3-Clause (NumPy, SciPy, scikit-learn, joblib, sympy, mpmath); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (DPDFNet); MIT (soxr, soundfile, tqdm, filelock)",
+    "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 with pip's own resolver, then hashed and checked against the digests pypi.org publishes for each file. The three wheels the DirectML build brought in over the CPU one -- onnxruntime-directml itself, sympy and mpmath -- were resolved from the same publisher metadata and hashed the same way; the other thirty-one are unchanged from that pip resolution.",
+    "closure_notes": "The enhancement runtime is deliberately NOT PocketTTS's interpreter (section 14.6). Lifecycle coupling does not imply dependency coupling: Pocket's closure stays reproducible, the pipeline can later serve Kokoro and Sopro, and a pipeline update cannot mutate the environment a working voice depends on. The closure below is the ONNX path -- Path A of section 10.4 -- which is the one to validate first because it shares a runtime with DPDFNet and gives explicit thread control. If Phase 0 rejects it, section 14.5 says to use the official PyTorch/Vocos LavaSR in this same isolated runtime with a project-owned rate adapter, which is a different closure and a different 'build' number here, not a different design. The ONNX Runtime wheel is the DirectML build rather than the plain CPU one, and that is a deliberate choice of ONE closure over two. The DirectML wheel carries the CPU execution provider as well as the DirectML one, so the placement setting picks a provider inside an installed runtime instead of picking between two installed runtimes -- no second interpreter, no second download, and a machine with no usable graphics card still runs every stage exactly as it did. The cost is honest and small: the DirectML build's newest release is 1.24.4 where the CPU-only build is at 1.29.0, and it declares sympy, which the CPU build no longer does. DirectML rather than CUDA because one wheel and no CUDA toolkit covers every Direct3D 12 card, where the CUDA build would need a toolkit matched per card generation -- the same wheel serves a 30-series and a 50-series card, which the CUDA builds do not.",
     "wanted": [
       [
         "dpdfnet",
         "0.6.0",
-        "upstream's own CPU ONNX inference package and its StreamEnhancer"
+        "upstream's own ONNX inference package and its StreamEnhancer"
       ],
       [
-        "onnxruntime",
-        "1.29.0",
-        "the inference session"
+        "onnxruntime-directml",
+        "1.24.4",
+        "the inference session. This build carries the CPU execution provider and the DirectML one in a single wheel, so one closure serves a stage running on the processor and the same stage running on a graphics card"
       ],
       [
         "librosa",
         "1.0.0",
         "dpdfnet imports it for resampling; it brings numba and scipy with it"
+      ],
+      [
+        "sympy",
+        "1.14.0",
+        "onnxruntime-directml declares it; it brings mpmath with it"
       ]
     ],
     "platforms": [
@@ -130,6 +135,13 @@
             "sha256": "a1b414dc6b164738ec39dd8987cea73829057b7dd92fc6d91b52838385fc1dd2"
           },
           {
+            "filename": "mpmath-1.4.1-py3-none-any.whl",
+            "local_name": "mpmath-1.4.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/13/f2/abeec3db71d221ccd3cd89d206be1fabf5a3ee7178862f5fba23a59607e0/mpmath-1.4.1-py3-none-any.whl",
+            "bytes": 567787,
+            "sha256": "dc4f0ea2304480d4a9a48a94c1020571558ade522b44a6912efac63a586e140f"
+          },
+          {
             "filename": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
             "local_name": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
             "url": "https://files.pythonhosted.org/packages/3c/f8/593f5caf0dacab41cde1564c5f0419e61af55ec9628006205e8fd5eb5e03/msgpack-1.2.2-cp313-cp313-win_amd64.whl",
@@ -158,11 +170,11 @@
             "sha256": "85aaccb24182c25df891ad0ec333585967e115269d5f1b17f2c9ae005bc96657"
           },
           {
-            "filename": "onnxruntime-1.29.0-cp313-cp313-win_amd64.whl",
-            "local_name": "onnxruntime-1.29.0-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/e1/3b/66b424c63fa92dfaa48d1719efaae66fc8c256b9426a832eda51d8dfe1e9/onnxruntime-1.29.0-cp313-cp313-win_amd64.whl",
-            "bytes": 14001310,
-            "sha256": "2945e1f82f81f27e88decea88c7861f45baea23818950d467bf3909aa303119e"
+            "filename": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+            "local_name": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/60/53/2bd2696fac19cf8ca55496a0bcfe431f3aff9579eabbb0e231dc238acf6f/onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+            "bytes": 25112253,
+            "sha256": "2f1031cb2281e5b27cca9efe0b9399317c7286e4d226f7a79d4ab79bbd94d19e"
           },
           {
             "filename": "packaging-26.3-py3-none-any.whl",
@@ -235,6 +247,13 @@
             "sha256": "6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4"
           },
           {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
             "filename": "threadpoolctl-3.6.0-py3-none-any.whl",
             "local_name": "threadpoolctl-3.6.0-py3-none-any.whl",
             "url": "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl",
@@ -265,7 +284,7 @@
         ]
       }
     ],
-    "about_bytes": 120100000
+    "about_bytes": 138100000
   },
   "stages": [
     {

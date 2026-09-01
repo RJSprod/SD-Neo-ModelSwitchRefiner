@@ -2225,14 +2225,17 @@ def _source_rate() -> int:
         return 0
 
 
-def pipeline_settings(enabled, stages, threads=None) -> dict:
-    """The three switches, written together, validated to booleans and known ids.
+def pipeline_settings(enabled, stages, threads=None, devices=None) -> dict:
+    """The switches, the thread budget and the placements, written together.
 
     No order field is accepted and there is nothing to accept one into: the
     chain's order is structural and lives in :data:`mc_voice_pipeline.STAGES`
     (I-VP-01, section 18.3). A request naming a stage this build does not have
     is refused rather than ignored, because silently accepting it would report
-    success for a setting that was never stored.
+    success for a setting that was never stored. A request naming a device this
+    machine does not have is refused for the same reason, and that one can
+    happen honestly: a card list is drawn once, and a card can be taken out of
+    the machine before anybody presses the button beside it.
     """
     import mc_voice_pipeline as pipeline
 
@@ -2256,7 +2259,21 @@ def pipeline_settings(enabled, stages, threads=None) -> dict:
             raise Refused(400, f"The enhancement thread count is between 1 and "
                                f"{pipeline.MAX_INTRAOP_THREADS}.")
         threads = asked
-    pipeline.remember(enabled, wanted, threads_value=threads)
+    placements = {}
+    for name, token in dict(devices or {}).items():
+        if pipeline.stage(str(name)) is None:
+            raise Refused(400, f"There is no Voice Pipeline stage called {name!r}.")
+        if token is not None and not isinstance(token, str):
+            raise Refused(400, "A device is named by its identifier.")
+        placements[str(name)] = token
+    try:
+        pipeline.remember(enabled, wanted, threads_value=threads, devices=placements)
+    except ValueError as exc:
+        # The one refusal that comes from inside the write rather than from the
+        # validation before it, because only the device list knows whether a
+        # card is in this machine -- and it can stop being in this machine
+        # between the page being drawn and a button on it being pressed.
+        raise Refused(400, str(exc)) from None
     found = pipeline_payload()
     import mc_voice_turn as turns
 
@@ -3209,7 +3226,8 @@ def install(_demo=None, app=None) -> bool:
         PIPELINE_SETTINGS_ROUTE,
         lambda payload: pipeline_settings(payload.get("enabled"),
                                           payload.get("stages") or {},
-                                          payload.get("threads")),
+                                          payload.get("threads"),
+                                          payload.get("devices") or {}),
         "That Voice Pipeline switch could not be changed.")
     components_route = _json_route(
         COMPONENTS_ROUTE, lambda _payload: components_payload(),

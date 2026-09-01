@@ -469,6 +469,73 @@ contract the rest of the feature is built on.
 
 ---
 
+## Where a stage runs
+
+Every voice component ran on the processor and said so, and for the enhancement
+that turned out to be the wrong default on a fast machine with a fast card. The
+placement is now a setting on each stage's own panel, and four decisions hold it
+up.
+
+**One closure, not two.** The pinned ONNX Runtime wheel is the DirectML build
+rather than the CPU-only one. That build carries `CPUExecutionProvider` as well
+as `DmlExecutionProvider`, so choosing where a stage runs picks a provider
+inside an installed runtime instead of picking between two installed runtimes —
+no second interpreter, no second download, and a machine with no usable card
+runs every stage exactly as it did. The cost is stated rather than hidden: the
+DirectML build's newest release is 1.24.4 where the CPU-only build is at 1.29.0,
+and it declares `sympy`, which the CPU build no longer does.
+
+**DirectML, not CUDA.** One wheel and no toolkit covers every Direct3D 12 card.
+The same installation serves a 30-series and a 50-series card in the same
+machine, which the CUDA builds — pinned per toolkit version — do not.
+
+**A silent fallback is a refusal.** ONNX Runtime does not raise when an
+execution provider is unavailable; it drops it, builds on the next entry, and
+returns a working session. Without a check, a machine with no usable card would
+have run every stage on the processor while the panel said "graphics card", and
+the only symptom would have been that it was no faster. So the session is
+refused unless the *first* provider it reports is the one that was asked for.
+The CPU entry stays behind DirectML in the list on purpose — that is the
+fallback for individual operators DirectML does not implement, which is a
+different thing from the whole session landing on the processor.
+
+**The adapter number is an assumption, and it says so.** A machine numbers its
+cards at least three ways: nvidia-smi orders by PCI bus, CUDA orders by
+`CUDA_DEVICE_ORDER`, and DirectML enumerates DXGI adapters. The stored token is
+the card's **UUID**, which none of those orderings can move and which is the
+same string the language model's own setup records. What no API supplies is a
+mapping from that UUID to a DXGI adapter index, so the number handed to
+DirectML is the card's nvidia-smi index and nothing pretends otherwise: the
+panel says the numbering may not agree and that choosing the other entry is the
+fix, and the worker reports the provider each stage actually loaded on. An
+assumption somebody can see and correct in one click is a different thing from a
+mapping presented as fact.
+
+**A placement is not negotiable, and it is not a claim on somebody else's
+VRAM.** The enhancement runs in its own process, so what it takes is invisible
+to Forge's own bookkeeping and visible to the driver — and `free_vram_bytes` is
+a `mem_get_info` query about the whole card, which is why co-residency with
+llama-server works at all. The consequence is that a stage on a card is a tenant
+nothing can evict and everything else sizes itself around: image generation and
+the language model read what is actually free, not what they think they left
+behind. The converse is equally true and is said on the panel rather than
+discovered: this cannot push anything out. A card already full when the stage
+tries to load is a stage that fails to load, and that reply is spoken unenhanced
+with the reason in the log. Closing that ordering gap — a reservation the
+language model's planner subtracts *before* it sizes an offload, rather than
+discovering it in a live reading afterwards — is a separate change.
+
+The speech engines and the recording cleanup stay on the processor, and they get
+a sentence rather than a disabled dropdown. PocketTTS, Sopro and DeepFilterNet
+run on PyTorch and their closures pin the CPU build; moving one is a different
+closure of roughly two and a half gigabytes, pinned per card generation. Kokoro
+runs on sherpa-onnx, whose GPU wheels are CUDA-only and per toolkit version, so
+there is no single wheel that serves both cards. A control whose value the
+engine ignores is a control that lies about what it did, so what those panels
+carry is the reason.
+
+---
+
 ## What this change deliberately does not do
 
 - change the LLM, the segmenter, or text-generation timing;

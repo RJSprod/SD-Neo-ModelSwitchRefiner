@@ -388,6 +388,15 @@ def _handshake_with(started) -> dict:
     containment evidence where the parent could not arrange it itself. What the
     worker is *not* asked about here is its models: it has not been told to load
     any yet, and ``load`` is where that is checked.
+
+    The device refusal survives the enhancement stages becoming placeable, and
+    it means something narrower than it used to. It is not "this feature never
+    touches a graphics card" any more -- a stage may be placed on one. It is
+    "the worker process has not taken a device before being told to load
+    anything", which at this point in the exchange is still exactly the claim
+    worth checking: no stage has been named, so a worker reporting a device here
+    has acquired one on its own initiative. Where the stages actually landed is
+    reported by ``load``, which is the reply that knows.
     """
     protocol = _protocol()
     reply = _exchange(started, {"op": "start", "parent_pid": os.getpid()}, b"",
@@ -432,6 +441,12 @@ def _send_load(stages) -> None:
         found = dict(pipeline.stage_config(name))
         found["intraop"] = pipeline.threads()
         found["interop"] = pipeline.INTEROP_THREADS
+        # Resolved here rather than in the worker, because deciding where a
+        # stage runs needs the machine's card list and the user's setting, and
+        # the worker has neither: it is a separate interpreter with no host
+        # options and ``CUDA_VISIBLE_DEVICES`` emptied. It is told a provider
+        # name and an adapter number and refuses anything else.
+        found["provider"], found["adapter"] = pipeline.placement(name)
         config[name] = found
     with _lock:
         started = _process
@@ -447,6 +462,31 @@ def _send_load(stages) -> None:
         raise PipelineRuntimeError(str(reply.get("error")
                                        or "The Voice Pipeline could not load its models."))
     globals()["_loaded"] = tuple(reply.get("loaded") or stages)
+    _log_placement(reply)
+
+
+def _log_placement(reply: dict) -> None:
+    """Say where each stage actually landed, once per load. Never fatal.
+
+    The recovery :mod:`mc_voice_device` promises rather than a diagnostic
+    nicety. Nothing in the ONNX Runtime Python API enumerates DirectML adapters,
+    so the adapter number a card is given is an assumption -- and an assumption
+    is only safe to make when the machine says out loud what it did with it.
+    This line is that sentence, and it names the provider the session came back
+    on rather than the one the panel asked for, which are the same string until
+    the interesting moment.
+    """
+    try:
+        found = dict(reply.get("providers") or {})
+        if not found:
+            return
+        for name in sorted(found):
+            offered = [str(item) for item in (found.get(name) or ())]
+            logger.info("Model Chain: the Voice Pipeline loaded %s on %s", name,
+                        ", ".join(offered) or "an unnamed provider")
+    except Exception:
+        logger.debug("Model Chain: could not report where the Voice Pipeline stages loaded",
+                     exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1262,6 +1302,42 @@ def stop(reason: str = "") -> None:
     if not running_now:
         return
     _discard(reason or "the Voice Pipeline stopped")
+
+
+def reconfigure(reason: str) -> bool:
+    """Drop the worker so the next reply builds its sessions from new settings.
+
+    The thread budget and the placement are both read once, in
+    :func:`_send_load`, and ``ensure_started`` returns early when the loaded
+    stage set already matches -- so changing either of them changed nothing at
+    all until something else happened to stop the worker. A control whose label
+    says "takes effect on the next reply" has to be one that does.
+
+    Refused while a reply is being spoken, and that is the whole reason this
+    returns a boolean rather than raising: the caller is a settings route, the
+    setting has already been stored, and the honest answer to "when does this
+    apply" is *not now* rather than an error about a write that succeeded. The
+    surface says which of the two happened, the same way the switches already
+    do.
+
+    Never raises. A worker that could not be stopped is a worker still running
+    at the old setting, which is exactly what this function failing means and is
+    not worth failing a settings write over.
+    """
+    try:
+        with _lock:
+            running_now = _process is not None
+            speaking = bool(_turns)
+        if not running_now:
+            return True
+        if speaking:
+            return False
+        _discard(reason or "the Voice Pipeline settings changed")
+        return True
+    except Exception:
+        logger.debug("Model Chain: the Voice Pipeline could not be reconfigured",
+                     exc_info=True)
+        return False
 
 
 def shutdown() -> None:

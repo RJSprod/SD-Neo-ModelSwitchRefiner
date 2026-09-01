@@ -18,8 +18,10 @@ import io
 import json
 import math
 import struct
+import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -1243,7 +1245,12 @@ class TestTheManifestIsATrustRoot:
     def test_the_manifest_reads_and_describes_both_stages(self):
         found = pipeline.manifest()
         assert set(found["stages"]) == {"dpdfnet", "lavasr"}
-        assert found["runtime"]["provider"] == "cpu"
+        # Carried through from the file rather than answered with a constant.
+        # It was a constant while there was one closure and one answer; the
+        # installed record is stamped from this, so a normaliser that always
+        # said "cpu" would stamp every installation with a claim about a
+        # runtime it did not install.
+        assert found["runtime"]["provider"] == "cpu+directml"
 
     def test_a_branch_is_not_a_release_identity(self):
         """Section 13.4, enforced where it can be: 'main' means something else
@@ -1327,10 +1334,35 @@ class TestTheManifestIsATrustRoot:
         with pytest.raises(pipeline.PipelineError, match="newer schema"):
             pipeline._read_manifest({"schema": 99})
 
-    def test_a_provider_other_than_the_cpu_is_refused(self):
-        with pytest.raises(pipeline.PipelineError, match="CPU only"):
+    def test_a_runtime_this_build_cannot_execute_on_is_refused(self):
+        """A closure whose sessions nothing here knows how to construct.
+
+        This check used to insist on the single string ``cpu`` and refuse
+        anything else as a graphics device this feature would never take. That
+        is no longer the claim -- a stage can be placed on a card by somebody
+        who asked for it -- but the useful half stands: an installer that
+        happily unpacks a CUDA closure and then cannot build a session on it is
+        a broken extension, and it is better refused before the download than
+        after it.
+        """
+        with pytest.raises(pipeline.PipelineError, match="does not know how to execute"):
             pipeline._read_manifest({"schema": 1, "runtime": {"provider": "cuda"},
                                      "stages": [{"id": "dpdfnet"}]})
+
+    def test_the_pinned_closure_is_one_this_build_can_execute_on(self):
+        """The committed manifest passes its own check, which is the point.
+
+        A list of accepted providers that did not contain the one actually
+        shipped would refuse every install on every machine, and would do it
+        with a message about a broken extension -- which would, at that point,
+        be accurate.
+        """
+        found = pipeline.manifest()["runtime"]
+
+        assert found["provider"] in pipeline.RUNTIME_PROVIDERS
+        assert found["provider"] == "cpu+directml", (
+            "the closure is the DirectML ONNX Runtime build, which carries the CPU "
+            "execution provider as well -- one installation, two placements")
 
     def test_the_closure_follows_the_artifacts_rather_than_a_number(self):
         """A-14. A version somebody types is a version somebody forgets."""
@@ -1472,11 +1504,51 @@ class TestNoCredentialAndNoNetworkInTheWorker:
         assert found["TRANSFORMERS_OFFLINE"] == "1"
         assert found["HF_HUB_DISABLE_TELEMETRY"] == "1"
 
-    def test_the_worker_environment_hides_every_graphics_device(self):
+    def test_the_worker_environment_hides_every_cuda_style_device(self):
+        """Still unconditional, and still meaning what it always did.
+
+        Nothing here executes through CUDA, HIP or ROCm, so a library that
+        would have found a card through one of those variables has no business
+        finding one. The placement setting reaches a card through DirectML,
+        which enumerates DXGI adapters and reads none of these -- so the two
+        are not in tension.
+        """
         found = pipeline.worker_environment()
         assert found["CUDA_VISIBLE_DEVICES"] == ""
         assert found["HIP_VISIBLE_DEVICES"] == ""
         assert found["ROCR_VISIBLE_DEVICES"] == ""
+
+    def test_the_cpu_is_forced_while_every_stage_is_on_it(self, monkeypatch):
+        monkeypatch.setattr(pipeline, "placement",
+                            lambda stage_id: ("CPUExecutionProvider", 0))
+
+        assert pipeline.worker_environment()["ONNXRUNTIME_FORCE_CPU"] == "1"
+
+    def test_the_cpu_is_not_forced_on_a_worker_asked_for_a_card(self, monkeypatch):
+        """A contradiction ONNX Runtime ignores today is one it may honour
+        tomorrow, and honouring it would make the placement setting silently do
+        nothing -- the exact failure the session check exists to prevent."""
+        monkeypatch.setattr(pipeline, "placement",
+                            lambda stage_id: ("DmlExecutionProvider", 1)
+                            if stage_id == "dpdfnet" else ("CPUExecutionProvider", 0))
+
+        assert "ONNXRUNTIME_FORCE_CPU" not in pipeline.worker_environment()
+
+    def test_the_thread_caps_follow_the_setting_rather_than_the_constant(
+            self, monkeypatch):
+        """OpenMP sizes its pool from this before any of our code runs.
+
+        A cap pinned at the released two while the session is asked for sixteen
+        is a pool that belongs to neither number.
+        """
+        monkeypatch.setattr(pipeline, "threads", lambda: 12)
+
+        found = pipeline.worker_environment()
+
+        assert found["OMP_NUM_THREADS"] == "12"
+        assert found["MKL_NUM_THREADS"] == "12"
+        assert found["OPENBLAS_NUM_THREADS"] == "12"
+        assert str(pipeline.INTRAOP_THREADS) != "12", "so this proves nothing"
 
     def test_an_inherited_token_is_removed_rather_than_merely_not_added(self):
         """The parent's environment may hold one; the child inherits."""
@@ -1918,6 +1990,610 @@ def mc_voice_api_unprepared(entry):
     import mc_voice_api
 
     return mc_voice_api.unprepared_reason(entry)
+
+
+class FakeOrtSession:
+    """An ONNX Runtime session that reports the providers it was handed.
+
+    Faithful in the one behaviour these tests turn on: ONNX Runtime does not
+    raise when an execution provider is unavailable. It drops it, builds on the
+    next entry, and returns a working session. So the list this reports back is
+    the *accepted* one, which is what makes a silent fallback expressible.
+    """
+
+    def __init__(self, path, sess_options=None, providers=None):
+        self.path = path
+        self.options = sess_options
+        self.asked = list(providers or [])
+        self.accepted = list(FakeOnnxRuntime.accepts)
+
+    def get_providers(self):
+        return list(self.accepted)
+
+
+class FakeSessionOptions:
+    def __init__(self):
+        self.intra_op_num_threads = 0
+        self.inter_op_num_threads = 0
+        self.log_severity_level = 0
+        self.enable_mem_pattern = True
+        self.execution_mode = None
+
+
+class FakeOnnxRuntime:
+    """Stands in for the module the worker imports inside its own runtime."""
+
+    accepts = [worker.PROVIDER_CPU]
+
+    SessionOptions = FakeSessionOptions
+    InferenceSession = FakeOrtSession
+
+    class ExecutionMode:
+        ORT_SEQUENTIAL = "sequential"
+        ORT_PARALLEL = "parallel"
+
+
+class TestAStageRunsWhereItWasToldTo:
+    """A placement setting is only a setting if the session honours it.
+
+    ONNX Runtime's own behaviour is what makes this worth a class of its own:
+    an unavailable execution provider is dropped rather than refused, and the
+    session that comes back works. Without a check, a machine with no usable
+    Direct3D 12 card would have run every stage on the processor while the
+    settings panel said "graphics card" -- and the only symptom would have been
+    that it was no faster.
+    """
+
+    def test_nothing_said_means_the_processor(self):
+        assert worker._wanted_provider({}) == (worker.PROVIDER_CPU, 0)
+
+    def test_an_old_load_message_still_loads(self):
+        """Every message written before this existed named no provider."""
+        assert worker._wanted_provider({"intraop": 8, "interop": 1}) == (
+            worker.PROVIDER_CPU, 0)
+
+    def test_a_card_is_carried_with_its_adapter(self):
+        assert worker._wanted_provider(
+            {"provider": worker.PROVIDER_DIRECTML, "adapter": 1}) == (
+                worker.PROVIDER_DIRECTML, 1)
+
+    def test_a_provider_this_runtime_does_not_carry_is_refused(self):
+        """Refused rather than run on the CPU.
+
+        The parent had a reason to send it. Running somewhere else and
+        reporting success is how a placement setting becomes one nobody can
+        trust.
+        """
+        with pytest.raises(worker.Refusal):
+            worker._wanted_provider({"provider": "CUDAExecutionProvider"})
+
+    def test_a_nonsense_adapter_is_a_zero_rather_than_a_crash(self):
+        for held in (None, "", "left", -4, [1]):
+            provider, adapter = worker._wanted_provider(
+                {"provider": worker.PROVIDER_DIRECTML, "adapter": held})
+            assert (provider, adapter) == (worker.PROVIDER_DIRECTML, 0), held
+
+    def test_the_cpu_asks_for_the_cpu_and_nothing_else(self):
+        assert worker._provider_argument(worker.PROVIDER_CPU, 3) == [
+            worker.PROVIDER_CPU]
+
+    def test_directml_keeps_the_cpu_behind_it(self):
+        """A fallback for operators, not a fallback for the whole session.
+
+        DirectML does not implement every operator, and without the CPU entry a
+        model with one unsupported node fails to load rather than running that
+        node on the processor. What must not be silent is the whole session
+        landing there, which is :func:`_check_provider`'s job.
+        """
+        assert worker._provider_argument(worker.PROVIDER_DIRECTML, 1) == [
+            (worker.PROVIDER_DIRECTML, {"device_id": 1}), worker.PROVIDER_CPU]
+
+    def test_directml_gets_the_two_session_options_it_requires(self):
+        """Not tuning. ONNX Runtime requires both for this provider."""
+        options = worker._session_options(FakeOnnxRuntime, 8, 1,
+                                          worker.PROVIDER_DIRECTML)
+
+        assert options.enable_mem_pattern is False
+        assert options.execution_mode == FakeOnnxRuntime.ExecutionMode.ORT_SEQUENTIAL
+        assert options.intra_op_num_threads == 8, (
+            "the thread budget still applies -- the CPU fallback nodes run on it")
+
+    def test_the_cpu_keeps_the_defaults_those_two_options_had(self):
+        options = worker._session_options(FakeOnnxRuntime, 8, 1, worker.PROVIDER_CPU)
+
+        assert options.enable_mem_pattern is True
+        assert options.execution_mode is None
+
+    def test_a_session_on_the_provider_that_was_asked_for_is_accepted(self):
+        session = FakeOrtSession("m.onnx")
+        session.accepted = [worker.PROVIDER_CPU]
+
+        assert worker._check_provider(session, worker.PROVIDER_CPU) == (
+            worker.PROVIDER_CPU,)
+
+    def test_directml_with_the_cpu_behind_it_is_accepted(self):
+        session = FakeOrtSession("m.onnx")
+        session.accepted = [worker.PROVIDER_DIRECTML, worker.PROVIDER_CPU]
+
+        assert worker._check_provider(session, worker.PROVIDER_DIRECTML) == (
+            worker.PROVIDER_DIRECTML, worker.PROVIDER_CPU)
+
+    def test_a_silent_fallback_to_the_processor_is_refused(self):
+        """The failure this whole class exists for."""
+        session = FakeOrtSession("m.onnx")
+        session.accepted = [worker.PROVIDER_CPU]
+
+        with pytest.raises(worker.Refusal, match="rather than the"):
+            worker._check_provider(session, worker.PROVIDER_DIRECTML)
+
+    def test_a_session_that_reports_no_provider_at_all_is_refused(self):
+        session = FakeOrtSession("m.onnx")
+        session.accepted = []
+
+        with pytest.raises(worker.Refusal):
+            worker._check_provider(session, worker.PROVIDER_CPU)
+
+    def test_the_refusal_names_both_devices(self):
+        """A message naming only one of them is a message nobody can act on."""
+        session = FakeOrtSession("m.onnx")
+        session.accepted = [worker.PROVIDER_CPU]
+
+        with pytest.raises(worker.Refusal) as raised:
+            worker._check_provider(session, worker.PROVIDER_DIRECTML)
+
+        said = str(raised.value)
+        assert worker.PROVIDER_CPU in said and worker.PROVIDER_DIRECTML in said
+
+
+class TestTheWorkerSaysWhereTheStagesLanded:
+    """The recovery for an adapter number that is an assumption.
+
+    Nothing in the ONNX Runtime Python API enumerates DirectML adapters, so the
+    number a card is given is the card's nvidia-smi index and no lookup makes it
+    more than that. The correction is that the machine says out loud what it
+    did, so somebody who sees the wrong card light up can pick the other entry.
+    """
+
+    def test_every_stage_on_the_processor_is_reported_as_the_cpu(self):
+        held = worker.Worker(output=io.BytesIO())
+        held.stages = {"dpdfnet": types.SimpleNamespace(
+            providers=(worker.PROVIDER_CPU,))}
+
+        assert held._device_word() == "cpu"
+
+    def test_a_stage_on_a_card_is_not_reported_as_the_cpu(self):
+        held = worker.Worker(output=io.BytesIO())
+        held.stages = {"dpdfnet": types.SimpleNamespace(
+            providers=(worker.PROVIDER_DIRECTML, worker.PROVIDER_CPU))}
+
+        assert held._device_word() == "gpu"
+
+    def test_a_split_load_is_reported_as_neither_half(self):
+        """``mixed`` rather than either, because either would be wrong.
+
+        A field naming one stage's device while the other is somewhere else is
+        wrong in exactly the configuration somebody would be reading it to
+        understand.
+        """
+        held = worker.Worker(output=io.BytesIO())
+        held.stages = {
+            "dpdfnet": types.SimpleNamespace(
+                providers=(worker.PROVIDER_DIRECTML, worker.PROVIDER_CPU)),
+            "lavasr": types.SimpleNamespace(providers=(worker.PROVIDER_CPU,)),
+        }
+
+        assert held._device_word() == "mixed"
+
+    def test_a_worker_with_nothing_loaded_reports_the_cpu(self):
+        """What the handshake checks, and it still has to pass it.
+
+        At ``start`` no stage has been named, so a worker reporting a device
+        there has acquired one on its own initiative -- which is the narrow
+        claim that refusal is still worth making.
+        """
+        assert worker.Worker(output=io.BytesIO())._device_word() == "cpu"
+
+
+class TestThePlacementReachesTheStage:
+    def test_the_load_message_carries_a_provider_and_an_adapter(self):
+        """Asserted on the source, because building a real one needs a worker.
+
+        The same shape the thread budget's own test takes: what is being proved
+        is that the parent puts the value in the message at all, and the two
+        places that build a stage config are the two places it could be
+        forgotten.
+        """
+        import inspect
+
+        import mc_voice_pipeline_runtime as runtime_module
+
+        sending = inspect.getsource(runtime_module._send_load)
+
+        assert 'found["provider"], found["adapter"] = pipeline.placement(name)' in sending
+
+    def test_the_self_test_stays_on_the_processor_whatever_is_chosen(self):
+        """A claim about the downloaded file, not about the graphics card.
+
+        Running it on a card would let a driver busy with an image generation
+        fail the install of a model that is perfectly good, and the sentence
+        somebody got would be about the model.
+        """
+        import inspect
+
+        source = inspect.getsource(pipeline._self_test)
+
+        assert 'config["provider"] = "CPUExecutionProvider"' in source
+
+    def test_the_stage_id_becomes_the_component_id_once(self):
+        assert pipeline.component_of("dpdfnet") == "voice-pipeline-dpdfnet"
+        assert pipeline.component_of("lavasr") == "voice-pipeline-lavasr"
+
+    def test_a_build_without_the_device_module_still_speaks(self, monkeypatch):
+        """Falling back to the processor is not the same as failing a reply."""
+        import builtins
+
+        real = builtins.__import__
+
+        def refuse(name, *args, **kwargs):
+            if name == "mc_voice_device":
+                raise ImportError("no such module")
+            return real(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", refuse)
+
+        assert pipeline.placement("dpdfnet") == ("CPUExecutionProvider", 0)
+        assert pipeline.devices_for("dpdfnet")["placeable"] is False
+
+    def test_settings_carry_a_placement_for_every_stage(self):
+        found = pipeline.settings()
+
+        assert set(found["devices"]) == set(pipeline.STAGE_IDS)
+        for stage_id in pipeline.STAGE_IDS:
+            assert found["devices"][stage_id]["component"] == \
+                pipeline.component_of(stage_id)
+
+
+@pytest.fixture
+def kept_settings():
+    """Put the host's option store back the way it was found.
+
+    Needed from the moment the options fake became faithful. Upstream's
+    ``Options.set`` assigns through ``__setattr__``, which writes ``self.data``,
+    so a setting written through ``set`` is readable afterwards through
+    ``opts.data.get`` -- and the fake only did the attribute half, which made
+    every ``opts.data`` reader answer its default no matter what had been
+    stored. Fixing that made these tests able to observe their own writes, and
+    made those writes everybody else's problem.
+
+    Concretely: the thread budget has a test asserting the untouched default,
+    and a stray 6 left behind by a test three classes above is a failure over
+    there with nothing in its traceback to say where it came from.
+    """
+    from modules import shared
+
+    before = dict(shared.opts.data)
+    yield
+    shared.opts.data.clear()
+    shared.opts.data.update(before)
+
+
+class TestASettingReadAtLoadTimeStopsTheWorker:
+    """The defect the two labels would otherwise have been lying about.
+
+    The thread budget and the placement are both read once, in ``_send_load``,
+    and ``ensure_started`` returns early when the loaded stage set already
+    matches. So turning either dial changed nothing at all until something else
+    happened to stop the worker -- which, on a machine where PocketTTS stays
+    resident, could be hours. A control whose label says "takes effect on the
+    next reply" has to be one that does.
+    """
+
+    def _machine(self, monkeypatch, cards):
+        import mc_voice_device as devices
+
+        detection = types.ModuleType("prompt_master.inference.device_detection")
+        detection.detect_gpus = lambda *a, **k: list(cards)
+        detection.detect_cpu = lambda: types.SimpleNamespace(
+            name="A Processor", memory_total_mb=65413)
+        monkeypatch.setitem(sys.modules,
+                            "prompt_master.inference.device_detection", detection)
+        devices.forget_cards()
+
+    def _watched(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(runtime, "reconfigure",
+                            lambda reason: asked.append(reason) or True)
+        return asked
+
+    def test_changing_the_thread_budget_drops_the_worker(self, kept_settings, monkeypatch):
+        asked = self._watched(monkeypatch)
+
+        pipeline.remember(threads_value=9)
+
+        assert len(asked) == 1, asked
+
+    def test_flipping_a_switch_does_not(self, kept_settings, monkeypatch):
+        """Read fresh by ``snapshot`` at the top of every turn.
+
+        Stopping a worker for one would be a stop nobody asked for, and the
+        stage it was holding open would be reloaded for the next sentence.
+        """
+        asked = self._watched(monkeypatch)
+
+        pipeline.remember(enabled_value=True, stages={"dpdfnet": True})
+
+        assert asked == []
+
+    def test_moving_a_stage_drops_the_worker(self, kept_settings, monkeypatch):
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+        asked = self._watched(monkeypatch)
+
+        pipeline.remember(devices={"dpdfnet": "gpu:GPU-aaaa"})
+
+        assert len(asked) == 1, asked
+
+    def test_choosing_the_device_it_is_already_on_does_not(
+            self, kept_settings, monkeypatch):
+        """A browser posts the select's value on every change.
+
+        A request that stores the string already in force is not a reason to
+        stop a worker in the middle of somebody's conversation.
+        """
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+        pipeline.remember(devices={"dpdfnet": "gpu:GPU-aaaa"})
+        asked = self._watched(monkeypatch)
+
+        pipeline.remember(devices={"dpdfnet": "gpu:GPU-aaaa"})
+
+        assert asked == []
+
+    def test_a_runtime_that_will_not_stop_does_not_fail_the_write(
+            self, kept_settings, monkeypatch):
+        """A worker still running at the old setting is what this failing means."""
+        def refuse(reason):
+            raise RuntimeError("the worker would not stop")
+
+        monkeypatch.setattr(runtime, "reconfigure", refuse)
+
+        found = pipeline.remember(threads_value=6)
+
+        assert found["threads"] == 6
+
+    def test_a_reply_in_flight_keeps_its_worker(self, kept_settings, monkeypatch):
+        """``reconfigure`` answers False rather than raising, and that is why.
+
+        The caller is a settings route, the setting has already been stored,
+        and the honest answer to "when does this apply" is *not now* rather
+        than an error about a write that succeeded.
+        """
+        monkeypatch.setattr(runtime, "_process", object())
+        monkeypatch.setattr(runtime, "_turns", {"a-turn": object()})
+
+        assert runtime.reconfigure("a test") is False
+
+    def test_an_idle_worker_is_dropped(self, kept_settings, monkeypatch):
+        dropped = []
+        monkeypatch.setattr(runtime, "_process", object())
+        monkeypatch.setattr(runtime, "_turns", {})
+        monkeypatch.setattr(runtime, "_discard", lambda reason: dropped.append(reason))
+
+        assert runtime.reconfigure("a test") is True
+        assert dropped == ["a test"]
+
+    def test_nothing_running_is_already_reconfigured(self, kept_settings, monkeypatch):
+        monkeypatch.setattr(runtime, "_process", None)
+
+        assert runtime.reconfigure("a test") is True
+
+
+class TestTheRouteAcceptsAndRefusesAPlacement:
+    """One request writes the switches, the budget and the placements.
+
+    Together rather than one route each, for the reason the switches were
+    written together: they are read at the top of every turn, and a browser
+    interrupted between two separate posts would leave a configuration nobody
+    chose.
+    """
+
+    def _machine(self, monkeypatch, cards):
+        import mc_voice_device as devices
+
+        detection = types.ModuleType("prompt_master.inference.device_detection")
+        detection.detect_gpus = lambda *a, **k: list(cards)
+        detection.detect_cpu = lambda: types.SimpleNamespace(
+            name="A Processor", memory_total_mb=65413)
+        monkeypatch.setitem(sys.modules,
+                            "prompt_master.inference.device_detection", detection)
+        devices.forget_cards()
+
+    def test_a_card_this_machine_does_not_have_is_refused_by_the_route(
+            self, kept_settings, monkeypatch):
+        """Refused with the reason, rather than absorbed.
+
+        This is the one refusal that comes from inside the write rather than
+        from validation before it, because only the device list knows whether a
+        card is present -- and it can stop being present between the page being
+        drawn and a button on it being pressed.
+        """
+        import mc_voice_api
+
+        self._machine(monkeypatch, [])
+
+        with pytest.raises(Exception) as caught:
+            mc_voice_api.pipeline_settings(None, {}, devices={"dpdfnet": "gpu:nope"})
+        assert "not in this machine" in str(caught.value)
+
+    def test_a_stage_this_build_does_not_have_is_refused(self, kept_settings):
+        import mc_voice_api
+
+        with pytest.raises(Exception) as caught:
+            mc_voice_api.pipeline_settings(None, {}, devices={"nosuch": "cpu"})
+        assert "no Voice Pipeline stage" in str(caught.value)
+
+    def test_a_refused_device_does_not_take_the_switches_with_it(
+            self, kept_settings, monkeypatch):
+        """Order, and why it is the one it is.
+
+        The device write can raise; the switch write cannot. Done first, a
+        refusal would take a tick posted in the same request down with it, so a
+        browser holding a stale card list would lose both. Done last, only the
+        half that was wrong is declined.
+        """
+        import mc_voice_api
+
+        self._machine(monkeypatch, [])
+        before = pipeline.stage_enabled("dpdfnet")
+
+        with pytest.raises(Exception):
+            mc_voice_api.pipeline_settings(None, {"dpdfnet": not before},
+                                           devices={"dpdfnet": "gpu:nope"})
+
+        assert pipeline.stage_enabled("dpdfnet") is (not before)
+        pipeline.remember(stages={"dpdfnet": before})
+
+    def test_a_device_that_is_not_a_string_is_refused(self, kept_settings):
+        import mc_voice_api
+
+        with pytest.raises(Exception) as caught:
+            mc_voice_api.pipeline_settings(None, {}, devices={"dpdfnet": 1})
+        assert "identifier" in str(caught.value)
+
+    def test_the_processor_is_always_an_acceptable_answer(self, kept_settings, monkeypatch):
+        import mc_voice_api
+
+        self._machine(monkeypatch, [])
+
+        found = mc_voice_api.pipeline_settings(None, {}, devices={"dpdfnet": "cpu"})
+
+        # The route answers with the pipeline's own status payload, which is
+        # what the row repaints from; the placement itself is read back from the
+        # module that stores it, because the panel carrying that control is
+        # fetched separately and redrawn from the server after a change.
+        assert found["ok"] is not False
+        assert pipeline.settings()["devices"]["dpdfnet"]["device"] == "cpu"
+
+    def test_the_route_hands_the_devices_through(self, kept_settings):
+        """The wiring, asserted where a typo would otherwise be silent."""
+        import inspect
+
+        import mc_voice_api
+
+        source = inspect.getsource(mc_voice_api)
+        body = source.split("pipeline_settings(payload.get(\"enabled\")")[1][:400]
+
+        assert 'payload.get("devices")' in body
+
+
+class TestThePlacementControlSaysWhatItCanAndCannotDo:
+    """The panel, and the two shapes it takes.
+
+    A component that can move gets a dropdown. One that cannot gets a sentence
+    naming the wheel that would have to change -- not a disabled dropdown,
+    because a control whose value the engine ignores is a control that lies
+    about what it did, which is the same rule that kept a thread slider off the
+    PocketTTS panel.
+    """
+
+    def _machine(self, monkeypatch, cards):
+        import mc_voice_device as devices
+
+        detection = types.ModuleType("prompt_master.inference.device_detection")
+        detection.detect_gpus = lambda *a, **k: list(cards)
+        detection.detect_cpu = lambda: types.SimpleNamespace(
+            name="A Processor", memory_total_mb=65413)
+        monkeypatch.setitem(sys.modules,
+                            "prompt_master.inference.device_detection", detection)
+        devices.forget_cards()
+
+    def test_a_machine_with_no_card_is_offered_no_dropdown(self, monkeypatch):
+        """A select whose only option is the one in force cannot do anything."""
+        import mc_voice_ui as ui_module
+
+        self._machine(monkeypatch, [])
+
+        assert ui_module._pipeline_device_row("dpdfnet") == ""
+
+    def test_a_machine_with_a_card_gets_one_option_per_device(self, monkeypatch):
+        import mc_voice_ui as ui_module
+
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090"),
+            types.SimpleNamespace(physical_index=1, uuid="GPU-bbbb", memory_total_mb=32607,
+                                  name="NVIDIA GeForce RTX 5090")])
+
+        drawn = ui_module._pipeline_device_row("dpdfnet")
+
+        assert 'data-mc-voice-pipeline-device="dpdfnet"' in drawn
+        assert drawn.count("<option") == 3
+        assert "RTX 3090" in drawn and "RTX 5090" in drawn
+
+    def test_the_note_says_the_numbering_may_not_agree(self, monkeypatch):
+        """The honest half, and the reason it is here.
+
+        The adapter number handed to DirectML is the card's nvidia-smi index and
+        no API makes it more than an assumption. An assumption somebody can see
+        and correct in one click is a different thing from a mapping presented
+        as fact.
+        """
+        import mc_voice_ui as ui_module
+
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+
+        drawn = ui_module._pipeline_device_row("dpdfnet")
+
+        assert "numbered differently" in drawn
+        assert "choose the other entry" in drawn
+
+    def test_the_note_promises_the_choice_will_not_be_taken_back(self, monkeypatch):
+        import mc_voice_ui as ui_module
+
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+
+        drawn = ui_module._pipeline_device_row("dpdfnet")
+
+        assert "keeps its place" in drawn
+        # And says what it does not do, in the same breath. The stage cannot
+        # push anything off a full card -- it fails to load and the reply is
+        # spoken unenhanced -- and a note that promised only the first half
+        # would be read as promising both.
+        assert "does not do is push anything out" in drawn
+        assert "spoken unenhanced" in drawn
+
+    @pytest.mark.parametrize("component", ["tts-pocket", "tts-sopro", "tts-kokoro",
+                                           "recording-cleanup"])
+    def test_an_engine_that_cannot_move_gets_a_sentence_and_no_control(self, component):
+        import mc_voice_ui as ui_module
+
+        drawn = ui_module._engine_device_note(component)
+
+        assert "<select" not in drawn
+        assert "The processor." in drawn
+        assert len(drawn) > 200, drawn
+
+    def test_a_component_that_can_move_gets_no_such_note(self):
+        import mc_voice_ui as ui_module
+
+        assert ui_module._engine_device_note("voice-pipeline-dpdfnet") == ""
+
+    def test_the_page_no_longer_claims_voice_chat_never_uses_a_card(self):
+        """A sentence that stopped being true had to stop being printed.
+
+        Three panels carried "Voice Chat runs on the CPU and never uses the
+        graphics card". It is still true of every speech engine and it is no
+        longer true of the feature, so each one now says which it means.
+        """
+        source = (paths.extension_root() / "mc_voice_ui.py").read_text(encoding="utf-8")
+
+        assert "Voice Chat runs on the CPU and never uses" not in source
 
 
 class TestTheEnhancementThreadBudgetIsATurnableDial:

@@ -3714,6 +3714,58 @@
                     }).catch(function () { button.disabled = false; });
                 });
             });
+        // Where an enhancement stage runs. The one other interactive thing in a
+        // detail surface, and it is here rather than in `wirePipeline` for a
+        // plain reason: this markup is fetched from `/component` and injected
+        // after that function has already run, so a listener attached there
+        // would be attached to nothing.
+        //
+        // The rule the comment below states still holds -- this adds a control
+        // that exists nowhere else on the page, not a second copy of one the
+        // settings row already carries, so no selector above gains a second
+        // candidate.
+        host.querySelectorAll("[data-mc-voice-pipeline-device]").forEach(
+            function (select) {
+                // Captured now, while it still holds what the server rendered.
+                // Inside the handler `select.value` is already the new choice,
+                // so there would be nothing left to put back.
+                let inForce = select.value;
+                select.addEventListener("change", function () {
+                    const stage = select.getAttribute("data-mc-voice-pipeline-device");
+                    if (!stage) return;
+                    const asked = select.value;
+                    const body = {stages: {}, devices: {}};
+                    body.devices[stage] = asked;
+                    select.disabled = true;
+                    post(ROUTES.pipelineSettings, body, holder).then(function (payload) {
+                        select.disabled = false;
+                        if (payload && payload.ok) {
+                            inForce = asked;
+                            // Redrawn from the server rather than left as it
+                            // looks, because the panel carries a sentence about
+                            // a card that is no longer in the machine, and that
+                            // sentence is the server's to write.
+                            showComponent(holder, row, host, componentOpen);
+                            return;
+                        }
+                        // Put the selection back. The server refused it, so the
+                        // stage is still where it was, and a select left showing
+                        // the refused choice would be the only thing on the page
+                        // claiming otherwise.
+                        select.value = inForce;
+                        showComponentStatus(
+                            row, stage,
+                            (payload && payload.error)
+                                || "That device could not be chosen.");
+                    }).catch(function () {
+                        select.disabled = false;
+                        select.value = inForce;
+                        showComponentStatus(row, stage,
+                                            "That device could not be chosen.");
+                    });
+                });
+            });
+
         // Nothing else in a detail surface is interactive, and that is a
         // decision rather than an omission. A detail panel that re-rendered an
         // engine's own installer would put a second copy of markup the settings
