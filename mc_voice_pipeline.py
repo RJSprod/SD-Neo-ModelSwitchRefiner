@@ -869,6 +869,17 @@ def runtime_pinned(flavour: str = "onnx", accelerator: str = "cpu") -> bool:
     return all(item["sha256"] and item["bytes"] > 0 for item in entry["artifacts"])
 
 
+def stage_flavour(stage_id: str) -> str:
+    """Which runtime closure a stage runs inside.
+
+    Structural rather than configurable. DPDFNet is an ONNX graph and runs in
+    the light closure; LavaSR upstream is a PyTorch model and needs the one that
+    carries Torch. A future ONNX export of LavaSR moves it to "onnx" here and
+    nowhere else, which is the point of asking the question in one place.
+    """
+    return "torch" if str(stage_id or "") == "lavasr" else "onnx"
+
+
 def stage_available(stage_id: str) -> bool:
     """Whether this build ships the stage at all, ignoring the machine.
 
