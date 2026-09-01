@@ -70,6 +70,10 @@ and that is :data:`STATE_FIELDS` and :data:`PREFS_FIELDS`.
 STATE_FIELDS = (
     "runtime", "runtime_id", "model", "mmproj", "mode", "gpu_index", "gpu_uuid",
     "gpu_name", "gpu_device", "gpu_device_name", "gpu_layers", "quantization",
+    # Mixed Minimum shares Aggressive's ``mode``, so this is the only field that
+    # distinguishes them. A role that did not carry it would inherit the
+    # installation's placement and silently start from every layer.
+    "expert_minimum",
     # Spelled exactly as mc_llm_managed_models writes them, because the managed
     # selection is read straight out of the layered state by that module's own
     # ``selection()`` -- a role that renamed these would be a role whose managed

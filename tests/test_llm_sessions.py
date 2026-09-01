@@ -12,6 +12,8 @@ from __future__ import annotations
 import ast
 import gc
 import pathlib
+import threading
+import time
 
 import pytest
 
@@ -339,4 +341,78 @@ class TestTheCardIsPinnedByNameNotBySlot:
         after = mc_llm_runtime.with_pinned_card(self._start(),
                                                 {"CUDA_VISIBLE_DEVICES": "0"})
         assert after["CUDA_VISIBLE_DEVICES"] == "0", "the pin outlived its start"
+
+
+class TestTheCardComesBackWhenNobodyIsReading:
+    """The failure that survived two fixes, reproduced from a user's log.
+
+    Stop is the moment Gradio cancels the handler and stops consuming. The
+    reply is then suspended at a ``yield Event(CHUNK, ...)`` nothing will ever
+    resume, so neither the ``finally`` nor the release placed ahead of the
+    terminal event runs -- there is no terminal event. In that log llama.cpp
+    logged ``cancel task`` and released its slot, this module logged no ending
+    at all, and the next reply reported the card held by a conversation that
+    had finished 94 seconds earlier.
+    """
+
+    def test_the_worker_gives_the_card_back_though_the_reader_walked_away(self):
+        """The whole fix: the release rides the thread that always finishes."""
+        given = []
+        started = threading.Event()
+
+        def work(on_text):
+            on_text("half a repl")
+            started.set()
+            return "half a reply"
+
+        stream = sessions._streamed(work, when_done=lambda: given.append("back"))
+        first = next(stream)
+        assert first == ("half a repl", None), first
+
+        # And here the reader stops, exactly as a cancelled handler does.
+        del stream, first
+        assert started.wait(5), "the worker never ran, so this proves nothing"
+        for _ in range(200):
+            if given:
+                break
+            time.sleep(0.01)
+        assert given == ["back"], "the card was still held after the model finished"
+
+    def test_it_is_handed_back_when_the_model_raises_too(self):
+        def work(on_text):
+            raise RuntimeError("[WinError 10054] connection forcibly closed")
+
+        given = []
+        stream = sessions._streamed(work, when_done=lambda: given.append("back"))
+        with pytest.raises(RuntimeError):
+            list(stream)
+
+        assert given == ["back"]
+
+    def test_a_failing_hook_does_not_strand_the_reader(self):
+        """The sentinel matters more than the release. Losing it hangs a turn."""
+        def boom():
+            raise RuntimeError("no")
+
+        found = list(sessions._streamed(lambda on_text: "done", when_done=boom))
+
+        assert found[-1] == (None, "done")
+
+    def test_releasing_twice_is_safe_because_two_threads_now_do(self):
+        """The worker releases, then the generator's finally releases again."""
+        cancel = Stoppable()
+        gpu = sessions._Gpu("a conversation reply", cancel)
+        assert list(gpu.acquire()) == []
+        assert mc_broker.active() is not None, "nothing was taken, so this proves nothing"
+
+        done = []
+        threads = [threading.Thread(target=lambda: (gpu.release(), done.append(1)))
+                   for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+
+        assert len(done) == 4
+        assert mc_broker.active() is None
 

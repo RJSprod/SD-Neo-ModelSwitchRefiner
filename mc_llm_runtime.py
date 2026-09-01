@@ -126,6 +126,15 @@ class Config:
     them as though they were is how a 5090's language model came to be judged
     against a 3090's image plan. See :func:`shares_the_image_card`.
     """
+    expert_minimum: bool = False
+    """Whether this card was chosen for Mixed Minimum rather than Aggressive.
+
+    The two share ``mode`` deliberately -- see ``mc_llm_setup.minimum_device``
+    -- so this is the only thing that tells them apart, and all it changes is
+    where the placement ladder starts: Aggressive from every layer, Minimum
+    from every expert already in system RAM.
+    """
+
     gpu_name: str = ""
     """``nvidia-smi``'s name for the card, e.g. "NVIDIA GeForce RTX 5090".
 
@@ -324,6 +333,7 @@ def config(role: str = "") -> Config:
         quantization=str(state.get("quantization", "")),
         device_name=str(state.get("gpu_device_name", state.get("gpu_name", ""))),
         gpu_uuid=str(state.get("gpu_uuid", "")),
+        expert_minimum=bool(state.get("expert_minimum", False)),
         gpu_name=str(state.get("gpu_name", "")),
         mode=str(state.get("mode", "gpu")),
         source=source,
@@ -793,6 +803,39 @@ def is_conservative(configuration: Config | None = None) -> bool:
     return _mode_is(configuration, MIXED_CONSERVATIVE_MODE)
 
 
+def is_minimum(configuration: Config | None = None) -> bool:
+    """Whether this placement keeps only what the card needs to compute.
+
+    Mixed Minimum asks the opposite question from Aggressive. Aggressive asks
+    how much of the model fits in what the image side has left; this asks how
+    little is enough to keep real work on the card, and answers it with the
+    experts in system RAM and nothing else moved.
+
+    It is not a fourth mode as far as anything else is concerned, and that is
+    the point rather than a shortcut: residency accounting, the broker's pool,
+    eviction when an image generation wants the card, and the shortfall ladder
+    all see Aggressive and behave exactly as they always have. A Minimum
+    placement is displaced by an image model by the same path an Aggressive one
+    is -- through blocks and into system RAM -- because there is nothing here
+    for that path to treat differently.
+    """
+    found = configuration if configuration is not None else config()
+    return bool(getattr(found, "expert_minimum", False)) and bool(
+        getattr(found, "uses_cuda_compute", False))
+
+
+def _starting_expert_floor(configuration: Config) -> int:
+    """Where the placement ladder begins for this configuration.
+
+    ``ALL_EXPERTS`` for Mixed Minimum, which is what makes it minimum: the
+    ladder's second rung is where it starts rather than somewhere it descends
+    to under pressure. ``NO_EXPERTS`` for everything else, unchanged.
+    """
+    if not is_minimum(configuration):
+        return mc_llm_context.NO_EXPERTS
+    return mc_llm_context.ALL_EXPERTS
+
+
 def _capped(placement: mc_llm_context.Placement,
             gguf: mc_gguf.Gguf | None) -> mc_llm_context.Placement:
     """Never ask for more context than the model itself declares (section 12)."""
@@ -1131,6 +1174,7 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
     free = _spendable(already_ours, card_of(configuration), configuration=configuration)
     notes: list[str] = []
 
+    _say_if_minimum_has_no_experts(configuration, gguf)
     placement, estimate, spilled = _spill_experts(configuration, placement, gguf, reserve,
                                                   free, expert_floor)
     if spilled:
@@ -1240,6 +1284,42 @@ def _spill_experts(configuration: Config, placement, gguf, reserve: int, free: i
         return placement, estimate, ""
     trial = mc_llm_context.estimate(configuration.model, candidate, gguf)
     return candidate, trial, _expert_note(gguf, mc_llm_context.ALL_EXPERTS, total)
+
+
+_said_no_experts: set = set()
+"""Models already reported as dense under Mixed Minimum, so it is said once."""
+
+
+def _say_if_minimum_has_no_experts(configuration: Config, gguf) -> None:
+    """Say plainly when Mixed Minimum has nothing to be minimum about.
+
+    The mode divides a model into the experts, which are most of the weights and
+    are read a few per token, and everything else, which is not. A dense model
+    has no such division: there is no set of weights it can give up cheaply, so
+    there is no small resident placement to ask for, and the ladder below simply
+    behaves as Aggressive would.
+
+    That is a fine outcome and a bad surprise. Somebody who chose this mode
+    chose it for a reason, and a card quietly filling up is exactly what they
+    were trying to avoid -- so it is said, once per model, rather than left to
+    be inferred from a VRAM figure.
+    """
+    if not is_minimum(configuration) or gguf is None or not getattr(gguf, "usable", False):
+        return
+    try:
+        if int(gguf.expert_count) > 0:
+            return
+    except (AttributeError, TypeError, ValueError):
+        return
+    name = str(configuration.model or "")
+    if name in _said_no_experts:
+        return
+    _said_no_experts.add(name)
+    logger.info("Model Chain: Mixed Minimum has nothing to move on this backbone — it is "
+                "dense, not a mixture of experts, so there is no set of weights it can "
+                "give up cheaply and the placement is the one Aggressive would have "
+                "chosen. Pick a mixture-of-experts backbone to get the small resident "
+                "placement this mode is for.")
 
 
 def _expert_note(gguf: mc_gguf.Gguf, layers: int, total: int) -> str:
@@ -3871,7 +3951,8 @@ class Runtime:
             _make_room_for_the_llm(configuration, ours, vision, reserve)
 
             negotiated = negotiate(configuration, already_ours=ours, vision=vision,
-                                   extra_reserve=reserve)
+                                   extra_reserve=reserve,
+                                   expert_floor=_starting_expert_floor(configuration))
             placement = negotiated.placement
             signature = _signature_of(configuration, projector, placement, plan)
 
@@ -3892,7 +3973,7 @@ class Runtime:
             # asking for less and trying again. Two extra attempts, each with
             # more headroom than the last, and every one of them says so.
             penalty = 0
-            expert_floor = mc_llm_context.NO_EXPERTS
+            expert_floor = _starting_expert_floor(configuration)
             dropped_accelerator = False
             for attempt in range(START_ATTEMPTS):
                 if penalty or expert_floor:

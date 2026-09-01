@@ -2738,3 +2738,109 @@ class TestAZeroResidencyIsNotBelievedStraightAway:
 
         assert runtime.Runtime()._observed_residency(0, placement, None) == 0
         assert not waited
+
+
+class TestMixedMinimumStartsWhereAggressiveEndsUp:
+    """What the mode actually changes, which is one number.
+
+    Aggressive starts from every layer and lets the ladder take it apart under
+    pressure. Minimum starts at the ladder's expert rung -- every expert in
+    system RAM, everything else resident -- and is otherwise the same placement
+    travelling the same path, which is what keeps eviction, pooling and the
+    shortfall rules identical.
+    """
+
+    def _config(self, **overrides):
+        import inspect
+
+        import mc_llm_runtime
+
+        fields = {}
+        for field in mc_llm_runtime.Config.__dataclass_fields__.values():
+            if field.default is not inspect.Parameter.empty and not callable(field.default):
+                fields[field.name] = field.default
+        fields.update(model="m.gguf", runtime="llama-server", mmproj="", gpu_index=1,
+                      device="CUDA0", gpu_layers="all", context_size=8192,
+                      context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16",
+                      kv_type_v="f16", mode="mixed_aggressive")
+        fields.update(overrides)
+        return mc_llm_runtime.Config(**fields)
+
+    def test_minimum_begins_with_every_expert_in_system_ram(self):
+        import mc_llm_context
+        import mc_llm_runtime
+
+        chosen = self._config(expert_minimum=True)
+
+        assert mc_llm_runtime.is_minimum(chosen) is True
+        assert (mc_llm_runtime._starting_expert_floor(chosen)
+                == mc_llm_context.ALL_EXPERTS)
+
+    def test_aggressive_is_left_exactly_as_it_was(self):
+        """The existing modes keep their meanings. That was the requirement."""
+        import mc_llm_context
+        import mc_llm_runtime
+
+        chosen = self._config()
+
+        assert mc_llm_runtime.is_minimum(chosen) is False
+        assert (mc_llm_runtime._starting_expert_floor(chosen)
+                == mc_llm_context.NO_EXPERTS)
+
+    def test_the_processor_is_never_minimum(self):
+        """The flag means nothing without a card to keep the minimum on."""
+        import mc_llm_runtime
+
+        chosen = self._config(expert_minimum=True, device="none", mode="cpu")
+
+        assert mc_llm_runtime.is_minimum(chosen) is False
+
+    def test_a_dense_backbone_is_reported_rather_than_silently_filling_the_card(self):
+        """Somebody chose this mode to keep the card nearly empty.
+
+        A dense model has no experts to give up, so the placement is the one
+        Aggressive would have chosen -- a fine outcome and a bad surprise.
+        """
+        import mc_llm_runtime
+
+        said = []
+        mc_llm_runtime._said_no_experts.clear()
+
+        class Dense:
+            usable, expert_count, block_count = True, 0, 48
+
+        original = mc_llm_runtime.logger.info
+        mc_llm_runtime.logger.info = lambda message, *args: said.append(message % args)
+        try:
+            chosen = self._config(expert_minimum=True)
+            mc_llm_runtime._say_if_minimum_has_no_experts(chosen, Dense())
+            # Said once per model, not once per start.
+            mc_llm_runtime._say_if_minimum_has_no_experts(chosen, Dense())
+        finally:
+            mc_llm_runtime.logger.info = original
+            mc_llm_runtime._said_no_experts.clear()
+
+        assert len(said) == 1, said
+        assert "dense" in said[0] and "mixture of experts" in said[0]
+
+    def test_a_mixture_of_experts_backbone_says_nothing(self):
+        """Guard: the notice must not fire on the models the mode is for."""
+        import mc_llm_runtime
+
+        said = []
+
+        class Sparse:
+            usable, expert_count, block_count = True, 128, 48
+
+        original = mc_llm_runtime.logger.info
+        mc_llm_runtime.logger.info = lambda message, *args: said.append(message % args)
+        try:
+            mc_llm_runtime._said_no_experts.clear()
+            mc_llm_runtime._say_if_minimum_has_no_experts(
+                self._config(expert_minimum=True), Sparse())
+        finally:
+            mc_llm_runtime.logger.info = original
+            mc_llm_runtime._said_no_experts.clear()
+
+        assert said == []
+
