@@ -35,6 +35,16 @@ Usage
 
 ``--check`` returns 1 when the file on disk would change, which is what a
 release check runs.
+
+Provisional stages
+------------------
+A stage may ship pinned to a branch rather than to a commit, with
+``"provisional": true`` in its entry, when the machine that wrote the manifest
+could not reach the publisher. That is a real weakening and it is a visible one:
+the settings row says so, the installed record keeps it, and ``releasable()``
+below refuses to mark the manifest pinned while any stage is in that state.
+Running ``--stage <id> --revision <sha>`` from a machine that *can* reach the hub
+measures the files, records their digests and clears the flag.
 """
 
 from __future__ import annotations
@@ -170,11 +180,11 @@ def pin_stage(found: dict, stage_id: str, revision: str, contract: dict) -> None
         raise PinError(f"The manifest has no stage called {stage_id!r}.")
     if revision:
         entry["revision"] = revision
-    if not entry.get("revision") or entry["revision"] == "main":
+    if not _immutable(entry.get("revision") or ""):
         raise PinError(
-            f"{stage_id} needs an immutable revision. 'main' is not a release identity: it "
-            f"means something different next week and cannot be reproduced from this "
-            f"repository.")
+            f"{stage_id} needs an immutable revision -- a 40-character commit. "
+            f"{entry.get('revision')!r} is not one: a branch means something different next "
+            f"week and cannot be reproduced from this repository. Pass --revision <sha>.")
     if not entry.get("artifacts"):
         raise PinError(
             f"{stage_id} names no artifacts. Add the filenames this build needs before "
@@ -189,6 +199,9 @@ def pin_stage(found: dict, stage_id: str, revision: str, contract: dict) -> None
         item.update(measure(item["url"]))
         total += item["bytes"]
     entry["about_bytes"] = total
+    # A stage that has just been measured against an immutable revision is no
+    # longer provisional, and saying so is the whole point of running this.
+    entry["provisional"] = False
     if contract:
         entry.setdefault("contract", {}).update(contract)
 
@@ -225,6 +238,12 @@ def parse_contract(text: str) -> dict:
     return found
 
 
+def _immutable(revision: str) -> bool:
+    """Whether a revision names one thing forever. A 40-hex commit does."""
+    text = str(revision or "")
+    return len(text) == 40 and all(c in "0123456789abcdef" for c in text.casefold())
+
+
 def releasable(found: dict) -> bool:
     runtime = found.get("runtime") or {}
     if not runtime.get("platforms"):
@@ -236,7 +255,9 @@ def releasable(found: dict) -> bool:
     for stage_id in STAGE_IDS:
         entry = next((row for row in found.get("stages") or ()
                       if str(row.get("id")) == stage_id), None)
-        if entry is None or not entry.get("revision") or entry["revision"] == "main":
+        if entry is None or not _immutable(entry.get("revision") or ""):
+            return False
+        if entry.get("provisional") or not entry.get("available", True):
             return False
         if not entry.get("artifacts"):
             return False

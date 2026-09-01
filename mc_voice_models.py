@@ -2138,7 +2138,8 @@ def _unpack_wheel(wheel: Path, destination: Path) -> list[str]:
     return added
 
 
-def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> None:
+def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform,
+                       import_name: str = "") -> None:
     """An interpreter of its own, and the verified wheels unpacked into it.
 
     Two deliberate simplifications, both of them removing a failure this feature
@@ -2185,7 +2186,12 @@ def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> 
 
     # Checked rather than assumed, because "the installer said it worked" is
     # precisely the claim that turned out to be worthless.
-    engine = manifest()["runtime_import"]
+    #
+    # ``import_name`` is a parameter rather than always the speech manifest's,
+    # because this function has more than one caller now: a second component
+    # building a closure of its own would otherwise be checked for *sherpa-onnx*
+    # and told nothing was installed, having installed everything.
+    engine = import_name or manifest()["runtime_import"]
     if not (target / engine).exists() and not list(target.glob(engine + "*")):
         raise VoiceError(f"The Voice Chat wheels were unpacked but {engine} is not in "
                          f"{target}. Nothing was installed.")

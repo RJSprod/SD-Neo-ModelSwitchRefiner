@@ -398,6 +398,104 @@ def _blackman_array(np, values, half: int):
     return np.where(np.abs(values) >= half, 0.0, window)
 
 
+class StreamResampler:
+    """Band-limited resampling with the read position carried between chunks.
+
+    :class:`Resampler` is stateless because its only caller hands it a whole
+    analysis window with real context on both sides. This one is for a
+    *continuous* stream, where there is no window and no context -- only what has
+    arrived so far -- and so it has to keep three things across calls: the input
+    samples a future output will still read, where in that buffer the next
+    output sits, and how many outputs have been produced.
+
+    That state is the whole point. Restarting a resampler at every chunk
+    boundary makes the audio depend on how the audio was packetised, which is
+    the one thing this feature says it never does (I-VP-10) -- and it is exactly
+    what upstream's own per-call resampling does, which is why this exists
+    rather than that.
+
+    Positions are computed from the cumulative output index in integer
+    arithmetic, so the sample at output index *k* is the same sample whatever
+    order the input arrived in.
+    """
+
+    def __init__(self, rate_in: int, rate_out: int, numpy_module=None):
+        self.rate_in = int(rate_in)
+        self.rate_out = int(rate_out)
+        if self.rate_in <= 0 or self.rate_out <= 0:
+            raise Refusal("a resampler needs two real sample rates")
+        self._np = numpy_module
+        self._cutoff = min(1.0, self.rate_out / float(self.rate_in))
+        self._half = max(1, int(RESAMPLE_ZEROS / self._cutoff))
+        self._held = []
+        self._base = 0          # absolute input index of ``_held[0]``
+        self._received = 0
+        self._emitted = 0
+
+    @property
+    def transparent(self) -> bool:
+        return self.rate_in == self.rate_out
+
+    def feed(self, samples) -> list:
+        """Every output sample this input now fully supports, and no more."""
+        if self.transparent:
+            self._received += len(samples)
+            self._emitted += len(samples)
+            return list(samples)
+        self._held.extend(samples)
+        self._received += len(samples)
+        found = self._emit(self._received - self._half - 1)
+        keep = self._read_from(self._emitted)
+        if keep > self._base:
+            self._held = self._held[keep - self._base:]
+            self._base = keep
+        return found
+
+    def flush(self) -> list:
+        """The tail, read against the end of the stream rather than against more
+        input that is never coming."""
+        if self.transparent:
+            self._held = []
+            return []
+        found = self._emit(self._received)
+        self._held = []
+        return found
+
+    def pending(self) -> int:
+        """How many output samples the input received could still become."""
+        return max(0, deterministic_target(self._received, self.rate_in, self.rate_out)
+                   - self._emitted)
+
+    def _read_from(self, index: int) -> int:
+        """The earliest input sample output ``index`` will read."""
+        return max(0, (index * self.rate_in) // self.rate_out - self._half)
+
+    def _emit(self, supported: int) -> list:
+        wanted = deterministic_target(min(supported, self._received),
+                                      self.rate_in, self.rate_out)
+        if wanted <= self._emitted:
+            return []
+        found = []
+        last = self._received - 1
+        for index in range(self._emitted, wanted):
+            number = index * self.rate_in
+            centre = number // self.rate_out
+            position = centre + (number % self.rate_out) / float(self.rate_out)
+            total = 0.0
+            weight = 0.0
+            for offset in range(centre - self._half + 1, centre + self._half + 1):
+                distance = (position - offset) * self._cutoff
+                tap = _sinc(distance) * _blackman(distance, self._half)
+                if tap == 0.0:
+                    continue
+                taken = 0 if offset < 0 else (last if offset > last else offset)
+                total += self._held[taken - self._base] * tap
+                weight += tap
+            found.append(total / weight if weight else 0.0)
+        self._emitted = wanted
+        return found
+
+
 def crossfade_ramp(count: int) -> list:
     """A raised cosine from 0 to 1, ``count`` samples long.
 
@@ -450,7 +548,14 @@ class DpdfStage:
         tells anybody what to switch off (section 17.2)."""
 
         self.rate = int(rate)
-        self.block = max(1, int(getattr(backend, "block_samples", 0)) or self.rate // 100)
+        self.block = int(getattr(backend, "block_samples", 0) or 0)
+        """How much this backend wants at a time, or zero for "anything".
+
+        Zero is the real DPDFNet's answer: upstream's StreamEnhancer keeps its
+        own input buffer and takes arbitrary chunk sizes, so blocking here would
+        be a second buffer in front of a buffer, adding latency to make a
+        library's own job easier. A stand-in that wants fixed blocks says so and
+        gets them."""
         self._held = []
         self.taken = 0
         self.given = 0
@@ -478,14 +583,14 @@ class DpdfStage:
         """
         started = time.monotonic()
         self.taken += len(samples)
-        self._held.extend(samples)
         found = []
-        while len(self._held) >= self.block:
-            piece, self._held = self._held[:self.block], self._held[self.block:]
-            heard = list(self.backend.enhance(piece))
-            self.backend_taken += len(piece)
-            self.backend_given += len(heard)
-            found.extend(heard)
+        if self.block <= 0:
+            found = self._prime(list(samples))
+        else:
+            self._held.extend(samples)
+            while len(self._held) >= self.block:
+                piece, self._held = self._held[:self.block], self._held[self.block:]
+                found.extend(self._prime(piece))
         self.given += len(found)
         self.compute += time.monotonic() - started
         return found
@@ -515,20 +620,37 @@ class DpdfStage:
         if owed <= 0:
             self._held = []
             return []
-        tail = list(self._held)
-        self._held = []
+        tail, self._held = list(self._held), []
         found = []
-        if tail:
-            padding = (-len(tail)) % self.block
-            found.extend(self._prime(tail + [0.0] * padding))
-        # Bounded by what is owed rather than by a constant: a model cannot be
-        # holding more blocks than it has been given, so this cannot run away
-        # even against a backend that has stopped answering. The margin is for
-        # a backend whose first flush call returns nothing at all.
-        for _ in range((owed // self.block) + 4):
-            if len(found) >= owed:
-                break
-            found.extend(self._prime([0.0] * self.block))
+        drain = getattr(self.backend, "flush", None)
+        if drain is not None:
+            # The backend knows how to end its own stream, which is better than
+            # being fed silence until it lets go: upstream's flush zero-pads to
+            # one window and then trims the result back to the samples that came
+            # from real input, which is exactly the distinction section 8.8
+            # draws between padding inside an inference and padding inside a
+            # duration.
+            if tail:
+                found.extend(self._prime(tail))
+            heard = list(drain())
+            self.backend_given += len(heard)
+            found.extend(heard)
+        else:
+            block = self.block or max(1, self.rate // 100)
+            if tail:
+                found.extend(self._prime(tail + [0.0] * ((-len(tail)) % block)))
+            # Bounded by what is owed rather than by a constant: a model cannot
+            # be holding more blocks than it has been given, so this cannot run
+            # away even against a backend that has stopped answering. The margin
+            # is for one whose first flush call returns nothing at all.
+            # Twice what the arithmetic needs plus a margin: a backend that
+            # resamples internally gives back its debt at *its* rate, not the
+            # caller's, so the number of primes needed is the ratio between them
+            # and not a constant this loop can know.
+            for _ in range((owed // block) * 2 + 8):
+                if len(found) >= owed:
+                    break
+                found.extend(self._prime([0.0] * block))
         if len(found) < owed:
             self.correction += owed - len(found)
             found = found + [0.0] * (owed - len(found))
@@ -929,29 +1051,96 @@ def _stage_backend(stage_id: str, root, config: dict, numpy_module):
 
 
 class _DpdfBackend:
-    """DPDFNet's ONNX session, driven as a stream.
+    """Upstream DPDFNet's own StreamEnhancer, over a file this parent verified.
 
-    Its recurrent state is per turn and lives in :meth:`reset`; the session is
-    the worker's and outlives every turn.
+    Upstream's rather than a reimplementation, and the ``onnx_path`` argument is
+    why that is safe here: given an explicit path, ``resolve_model`` short-
+    circuits every search and every download, so the convenience API that would
+    otherwise fetch a model by name cannot reach the network at all (I-VP-22).
+    The session it builds is CPU-only and single-threaded by upstream's own
+    construction, which is the same thing this feature would have insisted on.
+
+    The rate handed to :meth:`process` is the caller's real one -- 24000 from
+    Pocket today -- and upstream resamples to the network's native rate and back
+    internally, returning output at the rate it was given. That is the contract
+    section 9.4 describes, read out of upstream 0.6.0's source rather than its
+    README.
+
+    ``block_samples`` is zero because StreamEnhancer keeps its own input buffer
+    and accepts any chunk size; the recurrent state is per turn and lives in
+    :meth:`reset`, while the session and the weights are the worker's and
+    outlive every turn (I-VP-13, I-VP-14).
     """
+
+    block_samples = 0
 
     def __init__(self, root, config: dict, numpy_module):
         from pathlib import Path
 
+        from dpdfnet.stream import StreamEnhancer
+
+        if numpy_module is None:
+            raise Refusal("the enhancement runtime has no NumPy")
         self._np = numpy_module
         self.rate = 0
-        wanted = str(config.get("model_file") or "model.onnx")
-        self._session = _Session(Path(root) / wanted, config.get("intraop", 2),
-                                 config.get("interop", 1))
-        self.block_samples = int(config.get("block_samples") or 0)
-        self._state = None
+        wanted = str(config.get("model_file") or "")
+        if not wanted:
+            raise Refusal("no DPDFNet model file was named")
+        path = Path(root) / wanted
+        if not path.is_file():
+            raise Refusal("the DPDFNet model file is not where it was said to be")
+        self._enhancer = StreamEnhancer(model=str(config.get("model_id") or "dpdfnet2"),
+                                        onnx_path=path, verbose=False)
+        self._model_rate = int(config.get("model_sample_rate") or 0) or None
+        self._up = None
+        self._down = None
 
     def reset(self, rate: int) -> None:
         self.rate = int(rate)
-        self._state = None
+        self._enhancer.reset()
+        native = self._model_rate
+        if native and native != self.rate:
+            # Resampled here, continuously, rather than by ``process`` per call.
+            # Upstream resamples each chunk on its own, so the same audio cut
+            # into 10 ms packets and into one packet comes back measurably
+            # different -- about a fifth of full scale at the joins, which is a
+            # packet boundary you can hear. Doing it once, with the read
+            # position carried across calls, is what makes the stream depend on
+            # the audio rather than on how it was delivered (I-VP-10).
+            self._up = StreamResampler(self.rate, native, self._np)
+            self._down = StreamResampler(native, self.rate, self._np)
+        else:
+            self._up = self._down = None
 
     def enhance(self, samples):
-        raise Refusal("this build has not pinned a DPDFNet inference contract")
+        if self._up is None:
+            found = self._enhancer.process(
+                self._np.asarray(samples, dtype=self._np.float32),
+                sample_rate=self.rate or None)
+            return found.tolist()
+        native = self._up.feed(samples)
+        if not native:
+            return []
+        # ``sample_rate=None`` means "the model's own rate", so upstream does no
+        # resampling of its own and its per-call boundary behaviour never
+        # arises.
+        heard = self._enhancer.process(
+            self._np.asarray(native, dtype=self._np.float32), sample_rate=None)
+        return self._down.feed(heard.tolist())
+
+    # No ``flush``, deliberately, and upstream 0.6.0 is the reason. Its
+    # StreamEnhancer.flush() drains by calling
+    # ``self.process(pad, sample_rate=self._model_sr)`` -- the *model's* rate --
+    # while process() refuses a rate that differs from the one the stream was
+    # opened at. So on any caller rate that is not the model's native one, and
+    # 24 kHz into a 48 kHz network is exactly that, flush() raises
+    # "Sample rate changed from 24000 to 48000" instead of draining.
+    #
+    # Without this method :class:`DpdfStage` drains the stage itself, by feeding
+    # silence at the caller's own rate until the model has given back what it is
+    # holding. That is the same thing flush() was doing -- zero-pad to a window,
+    # keep what came from real input -- done at a rate the library will accept,
+    # and the stage's own ledger is what trims it to the exact count either way.
 
 
 class _LavaBackend:
@@ -969,7 +1158,7 @@ class _LavaBackend:
         return None
 
     def enhance(self, samples, rate: int):
-        raise Refusal("this build has not pinned a LavaSR inference contract")
+        raise Refusal("LavaSR is not installable in this build")
 
 
 # --------------------------------------------------------------------------- #
