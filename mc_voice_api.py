@@ -1086,9 +1086,16 @@ def _resolve_target(found: dict, engine: str):
     import mc_voice_engines as engines
 
     try:
-        return engines.resolve(found.get("voice") or "", engine)
+        resolved, entry = engines.resolve(found.get("voice") or "", engine)
     except Exception as exc:
         raise Refused(503, str(exc) or "No voice is installed.") from None
+    # The same sentence a Test gets, for the same reason: a reply that cannot be
+    # spoken because the precision changed is not a broken engine, and saying so
+    # here is the difference between one button and an afternoon.
+    unprepared = unprepared_reason(entry)
+    if unprepared:
+        raise Refused(409, unprepared)
+    return resolved, entry
 
 
 # --------------------------------------------------------------------------- #
@@ -1409,6 +1416,43 @@ def delete_voice(voice_id: str, engine: str = "") -> dict:
     return voices_payload(engine=active)
 
 
+def unprepared_reason(entry) -> str:
+    """Why this voice cannot be spoken right now, or "" when it can.
+
+    A voice's prepared state is keyed by the model *and the precision* it was
+    derived under -- ``mc_voice_pocket._fingerprint`` puts precision in it
+    deliberately, because nobody has established that a state prepared at full
+    precision means the same thing at int8 (GATE P-VOICE-1). Change the
+    precision and every custom voice is stale until it is rebuilt.
+
+    The engine handles that correctly and said so unhelpfully. ``catalog()``
+    hands the worker only the voices with a state for the fingerprint in force,
+    so a stale one is not merely unusable, it is *absent* -- and asking for it
+    got "That voice is not one PocketTTS has been given", which the audition
+    route then turned into "That voice could not be played". Both are true.
+    Neither says the precision was changed, that the recording is still there,
+    or that one button fixes it.
+
+    The panel has known all along: every voice record carries ``compatible``,
+    and the list draws the sentence beside each stale one. This is the same
+    fact, applied where the voice is actually asked for, so a Test and a reply
+    say what the list says instead of failing like a broken installation.
+    """
+    if not isinstance(entry, dict) or entry.get("compatible", True):
+        return ""
+    name = str(entry.get("display_name") or "That voice")
+    if entry.get("official"):
+        return (f"{name} is not installed for the speech model now selected. Install the "
+                f"official voices again from Settings \u2192 Voice Chat.")
+    if not entry.get("has_source"):
+        return (f"{name} has no prepared data for the model and precision now selected, "
+                f"and its recording is no longer here \u2014 so it has to be made again "
+                f"from a new one.")
+    return (f"{name} has no prepared data for the model and precision now selected. "
+            f"Rebuild it in Settings \u2192 Voice Chat, or put the precision back to "
+            f"what it was; its recording is still here either way.")
+
+
 def test_voice(voice_id: str, text: str = "", profile=None, engine: str = "") -> bytes:
     """Audition one voice through the ordinary production runtime.
 
@@ -1431,6 +1475,12 @@ def test_voice(voice_id: str, text: str = "", profile=None, engine: str = "") ->
         resolved, entry = engines.resolve(str(voice_id or ""), active)
     except Exception as exc:
         raise Refused(404, str(exc) or "No voice is installed.") from None
+    # Refused here rather than by the worker, which was never given this voice
+    # and can only say so as though it had never existed. See
+    # :func:`unprepared_reason`.
+    unprepared = unprepared_reason(entry)
+    if unprepared:
+        raise Refused(409, unprepared)
     # An audition of a voice whose delivery is being edited has to *be* that
     # delivery, or the sliders are being adjusted against a sound they do not
     # produce. A body with no profile in it means the default voice's own.
