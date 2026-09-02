@@ -155,6 +155,25 @@ be. Feeding a bandwidth-extension model its own aliasing is how you get a
 confident, detailed, wrong high band.
 """
 
+MAX_RESAMPLE_PHASES = 8192
+"""How many distinct tap kernels a stream resampler will keep.
+
+A band-limited resampler evaluates the same kernel over and over: the weights
+for output sample *k* depend only on where *k* falls between two input samples,
+and that phase repeats with period ``rate_out // gcd(rate_in, rate_out)``.
+Between 24 kHz and 48 kHz there are two phases going up and one coming down --
+three kernels for a whole reply, against the three million ``sin`` and ``cos``
+calls per second of audio that recomputing them cost.
+
+This is the bound on keeping them rather than a tuning knob. The period is
+exact, so the cache can never hold more entries than there are phases, and any
+rate pair a speech engine actually produces is orders of magnitude under this:
+24 kHz to 48 kHz is 2, 16 kHz to 48 kHz is 3, 44.1 kHz to 48 kHz is 160. A pair
+with no common factor -- 44101 to 48000 -- has as many phases as the stream has
+samples, where caching would be a memory leak dressed as an optimisation, so
+past this bound the kernel is rebuilt each time and nothing is kept.
+"""
+
 _LENGTH = struct.Struct(">I")
 
 
@@ -470,6 +489,12 @@ class StreamResampler:
         self._base = 0          # absolute input index of ``_held[0]``
         self._received = 0
         self._emitted = 0
+        self._kernels = {}
+        self._phases = self.rate_out // math.gcd(self.rate_in, self.rate_out)
+        """How many distinct tap kernels this pair of rates can produce.
+
+        Exact rather than estimated, which is what makes :attr:`_kernels` a
+        cache with a ceiling instead of one that grows with the reply."""
 
     @property
     def transparent(self) -> bool:
@@ -509,28 +534,76 @@ class StreamResampler:
         """The earliest input sample output ``index`` will read."""
         return max(0, (index * self.rate_in) // self.rate_out - self._half)
 
+    def _kernel(self, phase: int):
+        """The tap weights for one output phase, built once and kept.
+
+        The weights depend on where an output sample falls between two input
+        samples and on nothing else: ``distance`` in the sum below is
+        ``(fraction - step) * cutoff``, and the absolute position cancels. So
+        the ``sin`` and ``cos`` behind every tap were being recomputed for
+        identical arguments -- three million times per second of audio on the
+        24 kHz to 48 kHz pair around DPDFNet, measured, which was the whole of
+        that stage's cost and the reason moving it to a graphics card changed
+        nothing. An execution provider cannot accelerate arithmetic that is not
+        in the graph.
+
+        Normalised here rather than per output sample. The old sum divided by
+        the tap total it had just accumulated, and that total is the same for
+        every output at a given phase, so folding it into the kernel is the
+        same number -- confirmed against the previous implementation to within
+        4e-16, which is float addition order rather than a different filter.
+        """
+        found = self._kernels.get(phase)
+        if found is not None:
+            return found
+        fraction = phase / float(self.rate_out)
+        taps = []
+        weight = 0.0
+        for step in range(-self._half + 1, self._half + 1):
+            distance = (fraction - step) * self._cutoff
+            tap = _sinc(distance) * _blackman(distance, self._half)
+            taps.append(tap)
+            weight += tap
+        found = [tap / weight for tap in taps] if weight else [0.0] * len(taps)
+        if self._np is not None:
+            found = self._np.asarray(found, dtype=self._np.float64)
+        if self._phases <= MAX_RESAMPLE_PHASES:
+            self._kernels[phase] = found
+        return found
+
     def _emit(self, supported: int) -> list:
         wanted = deterministic_target(min(supported, self._received),
                                       self.rate_in, self.rate_out)
         if wanted <= self._emitted:
             return []
+        np = self._np
+        # Converted once per call rather than per output sample, and the buffer
+        # is short: it holds one kernel width plus whatever last arrived.
+        held = self._held if np is None else np.asarray(self._held,
+                                                        dtype=np.float64)
         found = []
         last = self._received - 1
+        half, base = self._half, self._base
         for index in range(self._emitted, wanted):
             number = index * self.rate_in
             centre = number // self.rate_out
-            position = centre + (number % self.rate_out) / float(self.rate_out)
+            kernel = self._kernel(number % self.rate_out)
+            first, final = centre - half + 1, centre + half
+            if np is not None and first >= 0 and final <= last:
+                # The interior, which is every output sample but the first and
+                # last few of a turn: one contiguous slice, one dot product.
+                found.append(float(held[first - base:final - base + 1] @ kernel))
+                continue
+            # The two ends, where the kernel reaches past the audio that exists
+            # and the edge sample is repeated. A few dozen samples per turn, so
+            # they are read one at a time rather than given their own path.
             total = 0.0
-            weight = 0.0
-            for offset in range(centre - self._half + 1, centre + self._half + 1):
-                distance = (position - offset) * self._cutoff
-                tap = _sinc(distance) * _blackman(distance, self._half)
-                if tap == 0.0:
-                    continue
+            offset = first
+            for tap in kernel:
                 taken = 0 if offset < 0 else (last if offset > last else offset)
-                total += self._held[taken - self._base] * tap
-                weight += tap
-            found.append(total / weight if weight else 0.0)
+                total += held[taken - base] * tap
+                offset += 1
+            found.append(float(total))
         self._emitted = wanted
         return found
 
