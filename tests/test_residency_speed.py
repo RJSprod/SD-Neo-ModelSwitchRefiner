@@ -686,6 +686,104 @@ class TestARoundingDifferenceIsNotAShortfall:
         assert 0 < mc_memory.FIT_TOLERANCE_BYTES <= GB // 4
 
 
+class TestTheHostTakingWeightsBackIsAMeasurement:
+    """From a user's log, on a 24 GB card with the LLM on the processor::
+
+        23:21:39  18.4 GB resident, 4.3 GB free   preloaded, whole
+        23:22:18  17.6 GB resident, 5.0 GB free   the pass took 0.8 GB back
+        23:22:19  0.8 GB moved (1.1s)             the next preload put it back
+        23:23:05  17.6 GB resident, 5.0 GB free   and the one after took it again
+
+    Nothing here asked for that: make_vram_room said "no eviction needed" on
+    both sides of it. The host frees against driver-reported free VRAM, which
+    counts the CUDA context and fragmentation, while the reserve was estimated
+    from torch's allocator alone -- so the preload refilled the same 0.8 GB
+    before every generation for as long as the session lasted.
+
+    The difference between the two residency readings is the one figure
+    measured in the units the host's own eviction is decided in.
+    """
+
+    def setup_method(self):
+        mc_memory._reclaimed_bytes = 0
+        mc_memory._preload_resident = 0
+        mc_memory._preload_target = "A"
+
+    teardown_method = setup_method
+
+    def test_weights_taken_back_become_a_floor_under_the_reserve(self):
+        mc_memory._preload_resident = 18 * GB
+        before = mc_memory.vram_headroom_bytes(1024, 1024)
+
+        mc_memory._observe_reclaim("A", 17 * GB)
+
+        assert mc_memory.reclaimed_headroom_bytes() == GB
+        assert mc_memory.vram_headroom_bytes(1024, 1024) >= before + 0, (
+            "the reserve may not go down when the host has proved it needs more")
+        assert mc_memory.vram_headroom_bytes(1024, 1024) >= GB
+
+    def test_a_preload_that_kept_everything_teaches_nothing(self):
+        mc_memory._preload_resident = 18 * GB
+        mc_memory._observe_reclaim("A", 18 * GB)
+        assert mc_memory.reclaimed_headroom_bytes() == 0
+
+    def test_a_model_that_grew_is_not_a_reclaim(self):
+        """Resident going *up* is the preload finishing, not the host taking."""
+        mc_memory._preload_resident = 17 * GB
+        mc_memory._observe_reclaim("A", 18 * GB)
+        assert mc_memory.reclaimed_headroom_bytes() == 0
+
+    def test_it_only_ever_rises(self):
+        """A pass that happened to need less is not evidence the next will."""
+        mc_memory._preload_resident = 18 * GB
+        mc_memory._observe_reclaim("A", 17 * GB)
+        mc_memory._observe_reclaim("A", int(17.9 * GB))
+        assert mc_memory.reclaimed_headroom_bytes() == GB
+
+    def test_nothing_is_learned_before_a_preload_has_run(self):
+        mc_memory._observe_reclaim("A", 17 * GB)
+        assert mc_memory.reclaimed_headroom_bytes() == 0
+
+    def test_it_cannot_grow_until_it_squeezes_out_the_model_it_protects(self):
+        """A difference has more than one cause; an unbounded reserve has one."""
+        mc_memory._preload_resident = 100 * GB
+        mc_memory._observe_reclaim("A", 1 * GB)
+
+        total = mc_memory.total_vram_bytes()
+        if total <= 0:
+            pytest.skip("no card to size the cap against")
+        assert mc_memory.reclaimed_headroom_bytes() <= total * mc_memory.MAX_RESERVE_FRACTION
+
+    def test_a_second_stage_is_not_measured_against_the_first_s_preload(self):
+        """The coincidence this must not read as a measurement.
+
+        The preload warms Stage 1. A Stage 2 pass reaches the same function with
+        a different and usually smaller model resident, and subtracting one from
+        the other would read the swap itself as the host reclaiming gigabytes.
+        """
+        mc_memory._preload_resident = 18 * GB
+
+        mc_memory._observe_reclaim("B", 6 * GB)
+
+        assert mc_memory.reclaimed_headroom_bytes() == 0, (
+            "a different checkpoint being resident is a swap, not a reclaim")
+
+    def test_nothing_is_learned_before_any_preload_names_a_model(self):
+        mc_memory._preload_target = ""
+        mc_memory._preload_resident = 18 * GB
+        mc_memory._observe_reclaim("A", 17 * GB)
+        assert mc_memory.reclaimed_headroom_bytes() == 0
+
+    def test_a_warm_up_does_not_read_it_as_a_pass_would(self):
+        """reclaim_foreign=False is a warm-up, and no pass has run in front of it."""
+        import inspect
+
+        source = inspect.getsource(mc_memory.make_vram_room)
+        assert "if reclaim_foreign:\n        # A generation, not a warm-up" in source, (
+            "the reclaim reading belongs to a real pass, where the residency in "
+            "front of it is what a generation left behind")
+
+
 class TestAWarmUpNeverTakesTheLlmsVram:
     """The user's rule, stated in their words:
 
