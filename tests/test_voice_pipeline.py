@@ -2135,6 +2135,43 @@ class TestTheLogSaysWhetherTheEnhancementRan:
 
         assert "did NOT run" in said[0], said[0]
 
+    def test_the_real_time_factor_is_split_per_stage(self, monkeypatch):
+        """From a user's log, the line that said the problem but not the cause::
+
+            Voice pipeline ran — dpdfnet,lavasr, 48000 Hz out, ... RTF 3.02,
+            source held back 35780 ms
+
+        Three times too slow across two stages, with nothing to say which. The
+        two figures had been measured in the worker and carried all the way to
+        this dictionary since the feature was written; only this line summed
+        them. Which stage to move to a card, or switch off, is the decision an
+        RTF above 1.0 actually poses.
+        """
+        said = self._lines({
+            "pipeline_stages": "dpdfnet,lavasr", "pipeline_output_rate": 48000,
+            "pipeline_input_sample_count": 339888,
+            "pipeline_output_sample_count": 679776,
+            "pipeline_first_output_ms": 1583, "pipeline_compute_ms": 42836,
+            "pipeline_rtf_milli": 3020, "pipeline_backpressure_ms": 35780,
+            "dpdfnet_rtf_milli": 300, "lavasr_rtf_milli": 2720,
+        }, monkeypatch)
+
+        assert "RTF 3.02" in said[0]
+        assert "dpdfnet 0.30" in said[0], said[0]
+        assert "lavasr 2.72" in said[0], said[0]
+
+    def test_one_stage_alone_is_not_given_a_pointless_breakdown(self, monkeypatch):
+        """A split of one is the same number twice."""
+        said = self._lines({
+            "pipeline_stages": "DPDFNet", "pipeline_output_rate": 24000,
+            "pipeline_input_sample_count": 240000, "pipeline_output_sample_count": 240000,
+            "pipeline_first_output_ms": 45, "pipeline_compute_ms": 3100,
+            "pipeline_rtf_milli": 310, "dpdfnet_rtf_milli": 310,
+        }, monkeypatch)
+
+        assert "RTF 0.31" in said[0]
+        assert "lavasr" not in said[0], "a stage that did not run is not in the split"
+
     def test_backpressure_is_named_because_it_is_the_failure(self, monkeypatch):
         """A source held back is the enhancement failing to keep up (11.7)."""
         said = self._lines({

@@ -908,14 +908,25 @@ def _log_pipeline(found: dict) -> None:
             stages, "was" if "," not in str(stages) else "were")
         return
     rtf = found.get("pipeline_rtf_milli")
+    # Split per stage, because "the pipeline is three times too slow" is not
+    # something anybody can act on and "LavaSR is three times too slow and
+    # DPDFNet is a tenth of real time" is. Both numbers have been measured and
+    # carried this far since the feature was written; only this line was
+    # summing them. Which of two stages to move to a card, or switch off, is
+    # the decision a real-time factor above 1.0 actually poses.
+    each = ", ".join(
+        f"{name} {found[f'{name}_rtf_milli'] / 1000:.2f}"
+        for name in ("dpdfnet", "lavasr")
+        if found.get(f"{name}_rtf_milli"))
     logger.info(
         "Model Chain: Voice pipeline ran — %s, %s Hz out, %s samples in / %s out, "
-        "first output %s ms, compute %s ms%s%s",
+        "first output %s ms, compute %s ms%s%s%s",
         stages, found.get("pipeline_output_rate"),
         found.get("pipeline_input_sample_count"),
         found.get("pipeline_output_sample_count"),
         found.get("pipeline_first_output_ms"), found.get("pipeline_compute_ms"),
         "" if rtf is None else f", RTF {rtf / 1000:.2f}",
+        f" ({each})" if each else "",
         # Backpressure is the number that says the enhancement could not keep
         # up: the bounded ingress filled and the source had to wait. Section
         # 11.7 calls a sustained RTF above 1.0 a performance failure rather
