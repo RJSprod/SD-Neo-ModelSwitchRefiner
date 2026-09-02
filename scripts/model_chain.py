@@ -402,7 +402,10 @@ shared.options_templates.update(
                 "alone when a generation starts, or stopped so the pass has every last "
                 "byte. Keeping it costs the generation nothing measurable and saves a "
                 "model load — which on a slow placement is twenty seconds before the "
-                "first word of the next prompt"
+                "first word of the next prompt. On \"Free the LLM for every image\", the "
+                "warm-up below leaves llama-server alone as well: it would only be "
+                "starting one for the generation to stop, so it starts on the first "
+                "request that actually needs it"
             ),
             mc_plan.OPT_CAP_MODE: shared.OptionInfo(
                 mc_plan.CAP_AUTO,
@@ -457,7 +460,9 @@ shared.options_templates.update(
                 "4.1s and 5.1s. This decides when that is paid for — halfway through a "
                 "generation somebody is watching, or before it starts. The image model is "
                 "warmed first, because that is what Generate waits on; it loads off the "
-                "generation thread, which is the caveat on the experimental setting above"
+                "generation thread, which is the caveat on the experimental setting above. "
+                "With VRAM residency set to free the LLM for every image, llama-server is "
+                "not warmed at all — a generation would stop it moments later"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,

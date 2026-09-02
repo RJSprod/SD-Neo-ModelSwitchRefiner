@@ -2887,7 +2887,7 @@ starts:
 | Setting | Behaviour |
 | --- | --- |
 | **Keep the LLM loaded** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt starts warm. |
-| **Free the LLM for every image** | llama-server is stopped and the generation gets every last byte, at the cost of a model load per image. |
+| **Free the LLM for every image** | llama-server is stopped and the generation gets every last byte, at the cost of a model load per image. It comes back on the first request that needs it, and no sooner: **Warm up before generating** skips it on this setting, since the generation behind that warm-up would only stop it again. |
 
 The default's rule is stated as a sentence and implemented as one:
 

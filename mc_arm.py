@@ -185,11 +185,20 @@ def _llm_part() -> Part | None:
     calibrated yet, and in that log it put thirty-seven of sixty-five layers on
     a card that turned out to hold all of them. A server running degraded is
     not cold, and it is not ready either.
+
+    None where the language model is not something a generation waits for: an
+    install with none configured, and -- see :func:`_swept_by_generating` -- one
+    set to free the LLM for every image, where a stopped llama-server is not a
+    pipeline half loaded but the state the next generation is *asking* for.
+    Reporting that as permanently cold would make this readout unable to ever
+    say "armed", which is the answer the whole fast path is built on.
     """
     try:
         import mc_llm_runtime
 
         if not mc_llm_runtime.config().configured:
+            return None
+        if _swept_by_generating():
             return None
         running = mc_llm_runtime.registry.running()
     except Exception:
@@ -204,6 +213,43 @@ def _llm_part() -> Part | None:
                     "running, with part of the model in system RAM")
     return Part("Language model", ARMED,
                 f"{len(running)} llama-server{'' if len(running) == 1 else 's'} running")
+
+
+def _swept_by_generating() -> bool:
+    """Whether a generation starting would stop the server a warm-up would start.
+
+    Exclusive mode's promise is that an image generation owns the card: on
+    ``request_vram(FAMILY_IMAGE, ...)`` the broker sweeps llama-server off the
+    image card before anything else happens. That call is a handful of lines
+    below the warm-up in ``before_process``.
+
+    So on that setting the warm-up was starting a language model in order for
+    the next statement to stop it. In a user's log that was twenty of the
+    twenty-and-a-bit seconds a Generate click waited for, spent on a process
+    that did not survive to the first sampling step -- every press, with the
+    image model still in system RAM at the end of it.
+
+    Scoped to the image card, because that is what the sweep is scoped to. A
+    role pinned to a second card is not swept by anything, competes with no
+    image pass, and is warmed exactly as it always was. An unanswerable card
+    question is answered "yes, the image card" by
+    ``shares_the_image_card`` -- conservative in the right direction here too,
+    since the cost of being wrong is a language model that starts on its first
+    request instead of before one.
+    """
+    try:
+        import mc_broker
+        import mc_llm_runtime
+
+        if mc_broker.mode() != mc_broker.MODE_EXCLUSIVE:
+            return False
+        configuration = mc_llm_runtime.config()
+        return mc_llm_runtime.shares_the_image_card(
+            mc_llm_runtime.card_of(configuration), configuration)
+    except Exception:
+        logger.debug("Model Chain: could not tell whether a generation would stop the "
+                     "language model", exc_info=True)
+        return False
 
 
 def _degraded(found) -> bool:
@@ -286,6 +332,12 @@ def _arm_llm() -> None:
 
         configuration = mc_llm_runtime.config()
         if not configuration.configured:
+            return
+        if _swept_by_generating():
+            logger.info("Model Chain: llama-server is not being started here — VRAM "
+                        "residency is set to free the LLM for every image, so a "
+                        "generation would stop it again. It starts on the first request "
+                        "that needs it, in the VRAM the image plan leaves over")
             return
         mc_llm_runtime.registry.for_role().client()
     except Exception:

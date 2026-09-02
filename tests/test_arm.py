@@ -358,6 +358,98 @@ class TestTheImageModelComesFirst:
                    for record in caplog.records)
 
 
+class TestFreeingTheLlmForEveryImage:
+    """On that setting, warming llama-server is warming it to be stopped.
+
+    ``request_vram(FAMILY_IMAGE, ...)`` sweeps the image card before anything
+    else in ``before_process`` happens, and it sits a handful of lines below the
+    warm-up. So the warm-up was starting a language model for the next statement
+    to stop -- twenty of the twenty-and-a-bit seconds a Generate click waited
+    for in a user's log, on a process that never reached a sampling step, every
+    press.
+    """
+
+    @pytest.fixture
+    def exclusive(self, pipeline, monkeypatch):
+        import mc_broker
+        import mc_llm_runtime
+        import mc_memory
+
+        monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_EXCLUSIVE)
+        monkeypatch.setattr(mc_llm_runtime, "card_of", lambda configuration: 0)
+        monkeypatch.setattr(mc_llm_runtime, "shares_the_image_card",
+                            lambda card, configuration=None: True)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
+        return pipeline
+
+    def test_the_language_model_is_not_started(self, exclusive):
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert exclusive.clients == 0
+
+    def test_the_image_model_is_still_warmed(self, exclusive, monkeypatch):
+        """It is the half a generation is actually waiting on."""
+        import mc_memory
+
+        warmed: list = []
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: warmed.append((w, h)) or False)
+
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert warmed == [(1024, 1024)]
+
+    def test_a_stopped_server_is_not_reported_as_a_cold_half_of_the_pipeline(
+            self, exclusive, monkeypatch):
+        """It is the state the next generation is asking for, not a shortfall.
+
+        Reported cold, it would also make readiness() unable to ever say armed,
+        so the fast path every warm-up after the first one takes would never
+        fire again.
+        """
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "stage_1_readiness",
+                            lambda: ("warm", "Stage 1 is warm."))
+
+        found = mc_arm.readiness()
+
+        assert [part.name for part in found.parts] == ["Image model"]
+        assert found.armed
+
+    def test_it_says_why_it_did_not_start_one(self, exclusive, caplog):
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_arm.arm(1024, 1024, reason="a test")
+
+        assert any("free the LLM for every image" in record.getMessage()
+                   for record in caplog.records)
+
+    def test_a_role_on_another_card_is_warmed_as_it_always_was(self, exclusive,
+                                                               monkeypatch):
+        """The sweep is scoped to the image card, so this is scoped to it too."""
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime, "shares_the_image_card",
+                            lambda card, configuration=None: False)
+
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert exclusive.clients == 1
+
+    def test_keeping_the_llm_loaded_still_warms_it(self, pipeline, monkeypatch):
+        import mc_broker
+        import mc_memory
+
+        monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_HYBRID)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
+
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert pipeline.clients == 1
+
+
 class TestTheSetting:
     def test_off_is_the_default(self, host):
         assert mc_arm.mode() == mc_arm.WARM_OFF
