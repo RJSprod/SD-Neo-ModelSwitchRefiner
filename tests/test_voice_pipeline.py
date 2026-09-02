@@ -479,6 +479,60 @@ class TestTheRateContract:
         assert stage.correction > worker.TOLERATED_CORRECTION * 10, (
             "a backend half again out should need a correction nobody could call tiny")
 
+    def test_a_model_that_cannot_emit_a_partial_frame_is_not_a_wrong_clock(self):
+        """The fourth refusal LavaSR hit, and the first with no defect under it.
+
+        LavaSR's BWE is a Vocos ISTFT, which emits whole frames: a window whose
+        length is not a multiple of the hop comes back a partial frame short.
+        On the machine this was found on that was 528 samples of a 16800-sample
+        window, every window, and four windows in one second summed to 2112 --
+        which tripped a tolerance meant for drift and reported "the rate it
+        works at is not the rate it was told" about a stage whose audio was
+        exact. Exact because the shortfall lands inside the trailing context
+        this stage discards: not one sample of it ever reaches the reply.
+        """
+        class WholeFramesOnly:
+            """Returns 48 kHz, correct in rate, one partial frame short."""
+
+            def reset(self, rate):
+                return None
+
+            def enhance(self, samples, rate):
+                found = worker.Resampler(rate, 48000)(samples)
+                return found[:len(found) - 528]
+
+        stage = worker.LavaStage(WholeFramesOnly(), RATE, analysis_ms=250,
+                                 context_ms=50, backend_rate=RATE)
+        total = RATE
+        found = through(chain(stage), speech(total), blocks(total, 1024))
+
+        assert len(found) == 2 * total, "the duration is exact either way"
+        assert stage.framing == 528, (
+            "a bounded, constant shortfall is the model's own frame")
+        assert stage.correction == 0, (
+            "and it is not drift, so it must not be counted as any")
+
+    def test_a_wrong_clock_is_still_caught_once_framing_is_forgiven(self):
+        """The guard on the test above, so forgiveness cannot become blindness.
+
+        The rates here are 16000, 24000 and 48000, so the smallest confusion a
+        backend can have about its own returns a third more than was asked for.
+        That is nowhere near a frame and must still be refused.
+        """
+        class WrongClock:
+            def reset(self, rate):
+                return None
+
+            def enhance(self, samples, rate):
+                return worker.Resampler(16000, 48000)(samples)
+
+        stage = worker.LavaStage(WrongClock(), RATE, analysis_ms=250, context_ms=50,
+                                 backend_rate=RATE)
+        through(chain(stage), speech(RATE), blocks(RATE, 1024))
+
+        assert stage.correction > worker.TOLERATED_CORRECTION * 10
+        assert stage.framing == 0, "half again out is not a frame by any reading"
+
     def test_a_well_behaved_backend_needs_no_correction_at_all(self):
         """The other half of the check above, so it cannot pass vacuously."""
         stage = lava(PerfectLava(RATE), backend_rate=RATE)
