@@ -3775,6 +3775,59 @@ class TestTheRuntimeRowUpdatesTheRuntimesYouHave:
         pipeline.install("runtime")  # must not raise
 
 
+class TestTheThreadBudgetReachesBothStages:
+    """A dial whose help says "the enhancement stages" reaching one of them.
+
+    ``intraop`` was handed to DPDFNet's ONNX session and to nothing else.
+    LavaSR ran on whatever OMP_NUM_THREADS gave it -- which the parent does
+    set, but only in the environment of a worker started at that moment, and
+    which does not size Torch's inter-op pool at all. So a user turning the
+    setting against a measured real-time factor was turning it against half the
+    pipeline and reading the whole pipeline's number back.
+    """
+
+    class _Torch:
+        def __init__(self):
+            self.intraop = self.interop = None
+
+        def set_num_threads(self, count):
+            self.intraop = count
+
+        def set_num_interop_threads(self, count):
+            self.interop = count
+
+    def test_torch_is_given_the_number_the_setting_names(self):
+        found = self._Torch()
+        worker._apply_torch_budget(found, {"intraop": 8, "interop": 2})
+        assert (found.intraop, found.interop) == (8, 2)
+
+    def test_a_config_with_no_budget_leaves_torch_alone(self):
+        """Clamping an absent setting to one thread is worse than doing nothing."""
+        for config in ({}, {"intraop": 0}, {"intraop": None}, {"intraop": "eight"}):
+            found = self._Torch()
+            worker._apply_torch_budget(found, config)
+            assert found.intraop is None, config
+
+    def test_a_runtime_that_refuses_is_not_a_refused_reply(self):
+        """set_num_interop_threads raises once parallel work has started."""
+        class Stubborn(self._Torch):
+            def set_num_interop_threads(self, count):
+                raise RuntimeError("cannot set after parallel work has started")
+
+        found = Stubborn()
+        worker._apply_torch_budget(found, {"intraop": 8, "interop": 1})
+        assert found.intraop == 8, "the intra-op budget still landed"
+
+    def test_the_lava_backend_applies_it_before_it_builds_the_model(self):
+        import inspect
+
+        source = inspect.getsource(worker._LavaBackend.__init__)
+        assert "_apply_torch_budget(torch, config)" in source
+        assert source.index("_apply_torch_budget") < source.index("LavaEnhance2("), (
+            "a budget set after the model is built is a budget the build did "
+            "not get")
+
+
 class TestTheThreadBudgetIsSizedFromTheMachine:
     """Two threads, measured, on the machine the feature is for.
 
