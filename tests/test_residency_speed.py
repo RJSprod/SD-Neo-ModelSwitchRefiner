@@ -17,6 +17,7 @@ import types
 
 import pytest
 
+import mc_arm
 import mc_memory
 
 GB = 1024**3
@@ -413,7 +414,8 @@ def preload(memory, monkeypatch, host):
     monkeypatch.setattr(mc_memory, "reinstate_pending", reinstate_pending)
     monkeypatch.setattr(
         mc_memory, "make_vram_room",
-        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2: calls.rooms.append((name, w, h, stage)),
+        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2, **kwargs:
+            calls.rooms.append((name, w, h, stage, kwargs)),
     )
     monkeypatch.setattr(
         mc_memory, "_load_current_to_gpu",
@@ -585,6 +587,223 @@ class TestPreloadIsGenerationReady:
         mc_memory.join_preload(timeout=5)
 
         assert mc_memory.preload_result().key == "key-A"
+
+
+class TestASingleStagePlanIsWarmedToo:
+    """The preload's original trigger only ever fires on a chain.
+
+    ``restore_selection`` is the last thing a Stage 2 pass does, and setting
+    ``_pending_restore`` is what it leaves behind. A plan with no Stage 2 never
+    swaps anything out, so it never had anything to swap back -- and "nothing to
+    swap back" was read as "nothing to do". From a user's log, on a Stage-1-only
+    plan with the warm-up on:
+
+        warming up for this generation — cold — image model is cold
+        warm-up finished in 0.0s — cold — image model is cold
+
+    Twice. The model sat in system RAM between generations, every generation
+    paid to move it back, and every LoRA was applied by walking weights across
+    the bus first.
+    """
+
+    @pytest.fixture
+    def single_stage(self, preload, memory, monkeypatch):
+        """No pending restore, and the loaded model only partly on the card."""
+        monkeypatch.setattr(mc_memory, "_pending_restore", None, raising=False)
+        memory.mm.current_loaded_models[:] = [
+            entry for entry in memory.mm.current_loaded_models
+            if entry.model is not memory.model.patchers.unet
+        ]
+        return preload
+
+    def test_the_task_is_to_finish_moving_what_is_already_selected(self, single_stage):
+        assert mc_memory._preload_task() == mc_memory.RESIDENT
+
+    def test_a_model_already_on_the_card_is_left_alone(self, single_stage, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loaded_residency", lambda: (13 * GB, 13 * GB))
+        assert mc_memory._preload_task() is None
+
+    def test_it_starts_without_anything_having_been_swapped_out(self, single_stage):
+        assert mc_memory.preload_async(1024, 1024) is True
+
+    def test_it_moves_the_weights_without_swapping_the_pointer(self, single_stage):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert single_stage.gpu_loads == 1
+        assert single_stage.reinstated == 0, "there was nothing to reinstate"
+
+    def test_it_makes_room_as_stage_1(self, single_stage):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert [room[3] for room in single_stage.rooms] == [mc_memory.STAGE_1]
+
+    def test_the_next_generation_budgets_against_its_own_size(self, single_stage):
+        """Weights moved, so the budget the last generation worked out is stale."""
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.consume_preload() is True
+
+
+class TestAWarmUpNeverTakesTheLlmsVram:
+    """The user's rule, stated in their words:
+
+        free VRAM for the image model when the image model needs it; the moment
+        there is not enough VRAM to make an image, that is when the LLM goes
+
+    A background warm-up is not making an image. Nobody has pressed anything,
+    and stopping llama-server there costs a model load, a thrown-away prompt
+    cache and possibly a conversation for a generation that may never be
+    requested. It also buys nothing: the generation that does arrive runs
+    _make_room_for_stage_1, asks the same question, and reclaims then -- when
+    the need is real.
+    """
+
+    def test_the_warm_up_asks_for_no_foreign_reclaim(self, preload):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert [room[4]["reclaim_foreign"] for room in preload.rooms] == [False]
+
+    def test_a_shortfall_leaves_the_language_model_alone(self, memory, monkeypatch):
+        reclaimed: list = []
+        monkeypatch.setattr(mc_memory, "_reclaim_foreign",
+                            lambda needed, reason="": reclaimed.append(needed) or 0)
+        monkeypatch.setattr(mc_memory, "_llm_residency_bytes", lambda: 6 * GB)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                 reclaim_foreign=False)
+
+        assert reclaimed == []
+
+    def test_a_real_pass_still_takes_it(self, memory, monkeypatch):
+        reclaimed: list = []
+        monkeypatch.setattr(mc_memory, "_reclaim_foreign",
+                            lambda needed, reason="": reclaimed.append(needed) or 0)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1)
+
+        assert reclaimed, "a generation that does not fit is exactly when the LLM goes"
+
+    def test_a_warm_up_shortfall_is_not_filed_as_a_reserve_miss(self, memory, monkeypatch):
+        """No pass ran, so the plan has not been shown to be wrong about
+        anything. Auto's learned cap is taught by generations, not warm-ups."""
+        missed: list = []
+        monkeypatch.setattr(mc_memory, "_record_reserve_miss",
+                            lambda *a, **k: missed.append(a))
+        monkeypatch.setattr(mc_memory, "_llm_residency_bytes", lambda: 6 * GB)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                 reclaim_foreign=False)
+
+        assert missed == []
+
+    def test_it_says_it_stood_down(self, memory, monkeypatch, caplog):
+        monkeypatch.setattr(mc_memory, "_llm_residency_bytes", lambda: 6 * GB)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                     reclaim_foreign=False)
+
+        assert any("nothing is being generated yet" in record.getMessage()
+                   for record in caplog.records)
+
+    def test_image_side_eviction_is_untouched(self, memory, monkeypatch):
+        """The rule is about the LLM. Moving our own weights to system RAM is
+        cheap, keeps them cached, and is what a warm swap has always done."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                 reclaim_foreign=False)
+
+        assert memory.mm.freed, "Forge's own eviction still runs"
+
+
+class TestWarmingFromDisk:
+    """The coldest run of a session is its first, and nothing was loaded then.
+
+    Offered only to a caller that asks for it: reading a checkpoint off disk is
+    the one job here that is expensive whether or not anybody is waiting for
+    it, which makes it right for an explicit warm-up and wrong for the
+    background pass that follows every generation.
+    """
+
+    @pytest.fixture
+    def nothing_loaded(self, preload, host, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_pending_restore", None, raising=False)
+        host.sd_models.model_data.sd_model = None
+        return preload
+
+    def test_the_background_pass_does_not_read_from_disk(self, nothing_loaded):
+        assert mc_memory._preload_task() is None
+
+    def test_an_explicit_warm_up_does(self, nothing_loaded):
+        assert mc_memory._preload_task(allow_disk_load=True) == mc_memory.FROM_DISK
+
+    def test_it_asks_the_host_to_load_and_then_moves_the_weights(self, nothing_loaded, host,
+                                                                 memory, monkeypatch):
+        reloads = []
+
+        def forge_model_reload():
+            reloads.append(True)
+            host.sd_models.model_data.sd_model = memory.model
+            return None, True
+
+        monkeypatch.setattr(host.sd_models, "forge_model_reload", forge_model_reload)
+
+        mc_memory.preload_async(1024, 1024, allow_disk_load=True)
+        mc_memory.join_preload(timeout=5)
+
+        assert reloads == [True]
+        assert nothing_loaded.gpu_loads == 1
+
+    def test_nothing_selected_is_not_a_failure(self, nothing_loaded, monkeypatch):
+        monkeypatch.setattr(mc_memory, "checkpoint_info", lambda name: None)
+
+        mc_memory.preload_async(1024, 1024, allow_disk_load=True)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().state == "nothing"
+        assert mc_memory.preload_disabled_reason() is None
+
+
+class TestTheWarmUpDoesNotNeedTwoSettings:
+    """Turning the warm-up on is an answer about warmth.
+
+    The preload setting permits a background thread after every generation.
+    The warm-up setting asks for the pipeline to be loaded before somebody
+    waits on it. Making the second depend on the first -- off by default, and
+    named after the other half of the extension -- is how a user got a
+    twenty-second llama-server start and an image model still in system RAM.
+    """
+
+    def test_an_explicit_warm_up_runs_with_the_preload_setting_off(self, preload, host):
+        host.shared.opts.model_chain_preload_stage1 = False
+
+        assert mc_memory.preload_async(1024, 1024) is False
+        assert mc_memory.preload_async(1024, 1024, force=True) is True
+
+    def test_forcing_does_not_overrule_the_circuit_breaker(self, preload, host, monkeypatch):
+        """A machine where this does not work is one where it does not work."""
+        host.shared.opts.model_chain_preload_stage1 = False
+        monkeypatch.setattr(mc_memory, "_preload_disabled_reason", "it failed twice")
+
+        assert mc_memory.preload_async(1024, 1024, force=True) is False
+
+    def test_stage_2_is_still_captured_for_a_warm_up_that_will_consume_it(
+            self, preload, host, monkeypatch):
+        host.shared.opts.model_chain_preload_stage1 = False
+        host.shared.opts.model_chain_warm_up = mc_arm.WARM_BEFORE
+        monkeypatch.setattr(mc_memory, "model_data_sd_model", lambda: object())
+        monkeypatch.setattr(mc_memory, "model_patchers", lambda model, attrs=None: ["a", "b"])
+
+        assert mc_memory.capture_stage_2_components() == 2
 
 
 class TestPreloadFailureIsNotALoop:
@@ -780,8 +999,8 @@ class TestReadiness:
 
         assert "off for this session" in mc_memory.stage_1_readiness()[1]
 
-    def test_it_says_when_the_preload_is_simply_off(self, memory):
-        assert "preload off" in mc_memory.stage_1_readiness()[1]
+    def test_it_says_when_no_warm_up_is_enabled_at_all(self, memory):
+        assert "no warm-up is enabled" in mc_memory.stage_1_readiness()[1]
 
     def test_it_says_nothing_on_a_generation_that_has_nothing_to_do_with_us(
         self, chain, host, image_factory, monkeypatch
@@ -861,7 +1080,7 @@ def wired(chain, host, monkeypatch, image_factory):
     )
     monkeypatch.setattr(
         mc_memory, "preload_async",
-        lambda w=0, h=0: calls.preloads.append((w, h)) or True,
+        lambda w=0, h=0, **kwargs: calls.preloads.append((w, h)) or True,
     )
     monkeypatch.setattr(
         mc_memory, "join_preload",
@@ -869,7 +1088,8 @@ def wired(chain, host, monkeypatch, image_factory):
     )
     monkeypatch.setattr(
         mc_memory, "make_vram_room",
-        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2: calls.rooms.append((w, h, stage)),
+        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2, **kwargs:
+            calls.rooms.append((w, h, stage)),
     )
     monkeypatch.setattr(mc_memory, "current_modules", lambda: [])
 
@@ -918,8 +1138,53 @@ class TestOrchestrationWiring:
 
         assert not [room for room in wired.calls.rooms if room[2] == mc_memory.STAGE_1]
 
+    def test_a_generation_with_no_stage_2_warms_the_model_as_well(self, wired):
+        """The whole of the user-visible bug, at the level it was missed.
+
+        Everything above this drives a chain, and a chain is the only shape the
+        preload was ever wired into. A plan with one stage ran the same models
+        on the same card and got nothing.
+        """
+        wired.run(enabled=False)
+
+        assert wired.calls.preloads == [(1024, 1024)]
+
+    def test_the_chained_path_still_warms_exactly_once(self, wired):
+        """Warming Stage 1 at the top of postprocess would move its weights onto
+        the card in the moment Stage 2 is about to need the room."""
+        wired.run()
+
+        assert wired.calls.preloads == [(1024, 1024)]
+
+    def test_a_language_model_on_the_card_gets_stage_1_a_budget(self, wired, monkeypatch):
+        """The only route Stage 1 has to the cross-workload reclaim.
+
+        make_vram_room is where _reclaim_foreign lives, and Stage 1 reached it
+        only after a swap -- so on a plan that never swaps, llama-server was
+        never asked to give ground for a pass that did not fit. Forge cannot
+        ask on its own: those bytes are in another process.
+        """
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+        monkeypatch.setattr(mc_memory, "consume_preload", lambda: False)
+        monkeypatch.setattr(mc_memory, "llm_vram_on_the_image_card", lambda: 6 * GB)
+
+        wired.run(enabled=False)
+
+        assert (1024, 1024, mc_memory.STAGE_1) in wired.calls.rooms
+
+    def test_a_card_with_no_language_model_on_it_is_left_alone(self, wired, monkeypatch):
+        """Nothing to reclaim, so the host's own management is the whole answer
+        -- and somebody who does not run a language model sees no line."""
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+        monkeypatch.setattr(mc_memory, "consume_preload", lambda: False)
+        monkeypatch.setattr(mc_memory, "llm_vram_on_the_image_card", lambda: 0)
+
+        wired.run(enabled=False)
+
+        assert not [room for room in wired.calls.rooms if room[2] == mc_memory.STAGE_1]
+
     def test_a_failing_preload_does_not_break_the_generation(self, wired, monkeypatch):
-        def boom(w=0, h=0):
+        def boom(w=0, h=0, **kwargs):
             raise RuntimeError("thread refused to start")
 
         monkeypatch.setattr(mc_memory, "preload_async", boom)

@@ -2051,6 +2051,44 @@ class TestSayingWhatIsWrongWithTheMachine:
         assert not any("PCIe" in record.getMessage() for record in caplog.records)
 
 
+class TestAnUnmeasuredResidencySaysSo:
+    """"0.0 GB VRAM" reads as a server holding nothing, not as a missing reading.
+
+    From a user's log, on the one card an image plan was protecting -- so the
+    figure every budget question is answered from was a guess, and the ready
+    line said that nowhere. The shortfall warning above sits a zero out too, so
+    there is nothing else in the console that would have mentioned it.
+    """
+
+    def test_a_zero_on_the_card_is_shown_as_an_estimate(self, placed, tmp_path,
+                                                        monkeypatch, caplog):
+        configuration = configure(monkeypatch, tmp_path, size_mb=64)
+        set_free(monkeypatch, 20)
+        negotiated = runtime.negotiate(configuration)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            runtime.Runtime()._record(configuration, negotiated, 0)
+
+        line = next(record.getMessage() for record in caplog.records
+                    if "llama-server ready" in record.getMessage())
+        assert "estimated" in line
+        assert "0.0 GB VRAM" not in line
+
+    def test_a_measured_residency_is_reported_plainly(self, placed, tmp_path,
+                                                      monkeypatch, caplog):
+        configuration = configure(monkeypatch, tmp_path, size_mb=64)
+        set_free(monkeypatch, 20)
+        negotiated = runtime.negotiate(configuration)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            runtime.Runtime()._record(configuration, negotiated,
+                                      negotiated.estimate.weights_bytes)
+
+        line = next(record.getMessage() for record in caplog.records
+                    if "llama-server ready" in record.getMessage())
+        assert "estimated" not in line
+
+
 class TestTheProjectorIsNotFree:
     """A gigabyte and a third of a card the model is already filling, paid on
     every text-only turn — and where llama.cpp finds a gigabyte and a third it

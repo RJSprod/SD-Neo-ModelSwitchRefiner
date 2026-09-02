@@ -4742,12 +4742,25 @@ class Runtime:
             # placement that was asked for rather than the one that happened.
             said.append("on the processor after all — this build enumerates no "
                         "offload device")
+        # A resident placement whose residency could not be measured prints
+        # "0.0 GB VRAM", which reads as a server holding nothing rather than as
+        # a reading that did not come. From a user's log, on the one card an
+        # image plan was protecting -- so the figure the whole budget is
+        # answered from was a guess, and the line said so nowhere. Every check
+        # downstream of here, this class's own shortfall warning included, sits
+        # out a zero; saying which number is on the line is the least it can do.
+        estimated = (observed <= 0 and negotiated.placement.on_gpu
+                     and negotiated.estimate is not None)
+        shown = negotiated.estimate.resident_bytes if estimated else observed
         logger.info(
-            "Model Chain: %sllama-server ready — %s, %s token context, %.1f GB VRAM%s",
+            "Model Chain: %sllama-server ready — %s, %s token context, %.1f GB VRAM%s%s",
             self._said_for(),
             negotiated.placement.describe(),
             f"{negotiated.placement.context:,}",
-            observed / _GB,
+            max(shown, 0) / _GB,
+            " (estimated — the card reported no change in free VRAM after the server "
+            "started, so nothing here has measured what it actually took)"
+            if estimated else "",
             "" if not said else f" ({'; '.join(said)})",
         )
         self._report_offload(negotiated)

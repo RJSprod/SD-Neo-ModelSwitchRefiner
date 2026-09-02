@@ -82,6 +82,24 @@ def _megapixels(width, height) -> float:
     """Pixel count in megapixels, the unit sampling rates are normalised by."""
     return max(int(width or 0) * int(height or 0), 0) / 1_000_000
 
+
+def _warm_up_wanted() -> bool:
+    """Whether the user has asked for models to be kept warm at all.
+
+    The preload setting says whether a background thread may run after a
+    generation; the warm-up setting says whether the pipeline should be loaded
+    before somebody waits on it. They are different questions with different
+    defaults, and a user who has answered yes to the second has said what they
+    want about the first -- so keeping the image model on the card between
+    generations follows from either, and needs both only if the aim is a
+    warm-up that does nothing.
+    """
+    try:
+        return mc_arm.mode() != mc_arm.WARM_OFF
+    except Exception:
+        return False
+
+
 _NO_MODEL = "None"
 
 _REFINED_MARKER = "_model_chain_refined"
@@ -217,15 +235,17 @@ shared.options_templates.update(
             # strategy says nothing useful about the hardware that reads it.
             mc_memory.OPT_PRELOAD: shared.OptionInfo(
                 mc_memory.PRELOAD_DEFAULT,
-                "Preload Stage 1 after Stage 2 finishes (experimental)",
+                "Keep the image model in VRAM between generations (experimental)",
             ).info(
-                "moves Stage 1's weights back into VRAM in the background while you look "
-                "at the result, so the next Generate starts sampling immediately. Off by "
-                "default: it is the only part of this extension that touches models off "
-                "the generation thread, and on some setups — on-the-fly LoRA patching in "
-                "particular — that has broken the following generation outright. It saves "
-                "no work, it only moves it earlier, so leave it off unless you have "
-                "confirmed it is safe on your machine"
+                "moves the image model's weights back into VRAM in the background while "
+                "you look at the result, so the next Generate starts sampling immediately "
+                "— and so a LoRA is applied to weights already on the card rather than "
+                "walked across the bus first. Off by default: it is the only part of this "
+                "extension that touches models off the generation thread, and on some "
+                "setups — on-the-fly LoRA patching in particular — that has broken the "
+                "following generation outright. \"Warm up before generating\" does the same "
+                "work at the moments it names, so turning that on turns this on for those "
+                "moments too"
             ),
             mc_memory.OPT_PIN_ENCODERS: shared.OptionInfo(
                 True,
@@ -241,8 +261,9 @@ shared.options_templates.update(
                 "after Stage 1 is back and the reserve below is honoured, anything still "
                 "spare is spent on Stage 2's components so the next refine starts sooner. "
                 "Never at Stage 1's expense, and the first thing released under pressure. "
-                "Requires the preload above: filling VRAM is only safe on that thread, so "
-                "with the preload off this does nothing"
+                "Requires a warm-up — the setting above, or \"Warm up before generating\": "
+                "filling VRAM is only safe on that thread, so with neither asked for this "
+                "does nothing"
             ),
             mc_memory.OPT_VRAM_RESERVE: shared.OptionInfo(
                 0.0,
@@ -381,7 +402,10 @@ shared.options_templates.update(
                 "alone when a generation starts, or stopped so the pass has every last "
                 "byte. Keeping it costs the generation nothing measurable and saves a "
                 "model load — which on a slow placement is twenty seconds before the "
-                "first word of the next prompt"
+                "first word of the next prompt. On \"Free the LLM for every image\", the "
+                "warm-up below leaves llama-server alone as well: it would only be "
+                "starting one for the generation to stop, so it starts on the first "
+                "request that actually needs it"
             ),
             mc_plan.OPT_CAP_MODE: shared.OptionInfo(
                 mc_plan.CAP_AUTO,
@@ -434,7 +458,11 @@ shared.options_templates.update(
                 "model load, the placement and the prompt cache all happen once and then "
                 "stop happening. From one log, five identical jobs ran in 82s, 27s, 3.6s, "
                 "4.1s and 5.1s. This decides when that is paid for — halfway through a "
-                "generation somebody is watching, or before it starts"
+                "generation somebody is watching, or before it starts. The image model is "
+                "warmed first, because that is what Generate waits on; it loads off the "
+                "generation thread, which is the caveat on the experimental setting above. "
+                "With VRAM residency set to free the LLM for every image, llama-server is "
+                "not warmed at all — a generation would stop it moments later"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,
@@ -2431,7 +2459,16 @@ class ScriptModelChain(scripts.Script):
             # preload sized its VRAM budget from the *previous* generation, so
             # re-check it here against the size actually about to be sampled.
             swapped = mc_memory.reinstate_pending() or mc_memory.consume_preload()
-            if swapped:
+            # Or whenever a language model is holding VRAM on this card. That
+            # second reason is the only route Stage 1 has to the cross-workload
+            # reclaim, and without it a plan with no Stage 2 had none: nothing
+            # swaps, so nothing called make_vram_room, so llama-server was
+            # never asked to give ground for a pass that did not fit. Forge's
+            # own eviction cannot ask -- those bytes are in another process.
+            # Silent and free when there is no language model on the card,
+            # which is what keeps this off the console of somebody who does not
+            # use that half of the extension.
+            if swapped or mc_memory.llm_vram_on_the_image_card() > 0:
                 freed = self._make_room_for_stage_1(p)
             if swapped or enabled:
                 self._report_readiness()
@@ -2521,18 +2558,26 @@ class ScriptModelChain(scripts.Script):
 
     @staticmethod
     def _make_room_for_stage_1(p) -> int:
-        """Give Stage 1 a clean VRAM budget after swapping its model back in.
+        """Give Stage 1 a clean VRAM budget before it loads.
 
-        The previous generation ended with Stage 2's model in VRAM, and a warm
-        swap does not evict it -- so Stage 1 would load into whatever is left.
-        The host then makes room the hard way, partially unloading in small
-        chunks while it loads, and that path is dramatically slower than a
-        clean load: measured on a Krea 2 -> Flux.2 chain, the same ~8 GB UNet
-        took 11.5s squeezed into 900 MB of spare VRAM against 0.8s with 7 GB
-        spare.
+        Two situations reach here. In the first the previous generation ended
+        with Stage 2's model in VRAM, and a warm swap does not evict it -- so
+        Stage 1 would load into whatever is left. The host then makes room the
+        hard way, partially unloading in small chunks while it loads, and that
+        path is dramatically slower than a clean load: measured on a Krea 2 ->
+        Flux.2 chain, the same ~8 GB UNet took 11.5s squeezed into 900 MB of
+        spare VRAM against 0.8s with 7 GB spare.
+
+        In the second a language model is holding VRAM on this card. That one
+        is not about which of our models is loaded at all -- it is the only
+        path Stage 1 has to the cross-workload reclaim, and the host cannot
+        take that route itself because llama-server's bytes are in another
+        process. "An image generation always outranks an idle LLM" is stated in
+        the README as a rule rather than a setting, and on a plan that never
+        swapped, nothing was in a position to enforce it.
 
         Stage 2 has had this since the pass-size fix; Stage 1 needs it for the
-        same reason. When both models genuinely fit, make_vram_room() checks
+        same reasons. When everything genuinely fits, make_vram_room() checks
         first and does nothing.
 
         Freeing is all that happens here, and that boundary is deliberate.
@@ -2768,6 +2813,14 @@ class ScriptModelChain(scripts.Script):
         **kwargs,
     ):
         if not self._armed or self._in_stage_2:
+            # No Stage 2 on this generation, so nothing after this point is
+            # going to put the image model back on the card. The chained path
+            # has done it since the preload existed -- it is the last thing
+            # _run_stage_2 does -- and a single-stage plan never reached it,
+            # which is why the model that had just finished sampling was found
+            # cold again on the next click.
+            if not self._in_stage_2:
+                self._keep_stage_1_warm(p)
             return
 
         # Refine each result set once. postprocess() is normally called once per
@@ -3191,9 +3244,33 @@ class ScriptModelChain(scripts.Script):
         """
         try:
             width, height = mc_arch.stage1_size(p)
-            mc_memory.preload_async(width, height)
+            mc_memory.preload_async(width, height, force=_warm_up_wanted())
         except Exception:
             errors.report("Model Chain: failed to start the Stage 1 preload", exc_info=True)
+
+    @staticmethod
+    def _keep_stage_1_warm(p) -> None:
+        """Put the image model back on the card while the result is being looked at.
+
+        A generation ends with its weights wherever the host's own eviction
+        left them, which on a card sized for a checkpoint and a language model
+        at once is "not all of them". Nothing moved them back until the next
+        Generate click, so every generation paid the move -- and so did every
+        LoRA, which is applied by walking the weights it patches and is
+        therefore as slow as the bus when they are not on the card. A slow
+        LoRA and a cold model were never two problems.
+
+        Background and never waited on, for the same reason the chained
+        preload is: this exists to overlap the time somebody spends looking at
+        the images they just got. If it fails, is still running, or never
+        starts, the next generation does exactly what it does today --
+        before_process() joins the thread and then does the work itself.
+        """
+        try:
+            width, height = mc_arch.stage1_size(p)
+            mc_memory.preload_async(width, height, force=_warm_up_wanted())
+        except Exception:
+            errors.report("Model Chain: failed to start the Stage 1 warm-up", exc_info=True)
 
     @staticmethod
     def _extend_progress_total(extra_steps: int) -> None:
