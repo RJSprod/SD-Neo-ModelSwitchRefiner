@@ -110,6 +110,31 @@ WINDOW_SLACK = 2
 right. Converting a rate in two steps rather than one can disagree in the last
 place, which is arithmetic; anything larger is a backend."""
 
+FRAMING_LIMIT = 10
+"""One over the share of a window a backend may withhold and still be framing.
+
+A tenth, and both sides of that are measured rather than chosen.
+
+*Below* it is what a model's own analysis frame costs. LavaSR's BWE is a Vocos
+ISTFT: it emits whole frames, so a window whose length is not a multiple of the
+hop comes back a partial frame short -- 528 samples of a 16800-sample window on
+the machine this was found on, or 3.1%. It is constant, it is bounded by one
+frame, and it lands inside the trailing context this stage discards anyway, so
+not one sample of it ever reaches the audio.
+
+*Above* it is what a clock error costs. The rates in play are 16000, 24000 and
+48000, so the smallest confusion any backend here can have about its own rate
+returns half again or two thirds of what was asked for -- 33% at the very
+least, and 50% for the 24-as-16 case the adapter exists to catch.
+
+Three times the largest framing loss and a third of the smallest clock error is
+a gap wide enough that neither has to be judged finely. What made this worth
+separating is that counting them together refused a working installation: four
+windows of a perfectly good model summed to 2112 samples of "correction" in one
+second, tripped a tolerance meant for drift, and reported it as "the rate it
+works at is not the rate it was told" -- about a stage whose audio was exact.
+"""
+
 TOLERATED_CORRECTION = 64
 """How many samples of reconciliation a well-behaved backend may need.
 
@@ -750,6 +775,14 @@ class LavaStage:
         self.emitted = 0           # output samples committed
         self.windows = 0
         self.correction = 0
+        self.framing = 0
+        """The largest bounded shortfall the backend has withheld per window.
+
+        Its own analysis frame, kept apart from :attr:`correction` because the
+        two mean opposite things about an installation. See
+        :data:`FRAMING_LIMIT`. Reported rather than merely tolerated: a model
+        that grows a frame between builds should be visible, not silent.
+        """
 
     @property
     def first_output_samples(self) -> int:
@@ -931,7 +964,15 @@ class LavaStage:
         found = list(heard)
         drift = abs(len(found) - whole)
         if drift > WINDOW_SLACK:
-            self.correction += drift
+            # Which of the two things a short window is. A frame the model
+            # cannot emit is bounded by one frame and is discarded with the
+            # trailing context; a clock that disagrees is a third of the window
+            # or more and is audible as speech at the wrong speed. Summing them
+            # together is what refused a stage whose audio was exact.
+            if drift * FRAMING_LIMIT <= whole:
+                self.framing = max(self.framing, drift)
+            else:
+                self.correction += drift
         wanted = head + length
         if len(found) < wanted:
             found = found + [found[-1] if found else 0.0] * (wanted - len(found))
@@ -1844,7 +1885,13 @@ def selftest(roots: dict, configs: dict) -> dict:
         if any(value != value or value in (float("inf"), float("-inf")) for value in heard):
             raise Refusal(f"{stage_id} returned values that are not numbers")
         found["stages"][stage_id] = {"samples": len(heard),
-                                     "correction": stage.correction}
+                                     "correction": stage.correction,
+                                     # Reported so the installer can say what a
+                                     # model's own frame costs. Silence here
+                                     # would make a frame that grew between
+                                     # upstream builds indistinguishable from
+                                     # one that never existed.
+                                     "framing": getattr(stage, "framing", 0)}
 
     found["ok"] = True
     found["elapsed_ms"] = int((time.monotonic() - started) * 1000)

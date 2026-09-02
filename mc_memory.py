@@ -285,7 +285,9 @@ def vram_headroom_bytes(width: int = 0, height: int = 0, batch: int = 1) -> int:
     * the static estimate below, which scales with pixel count,
     * the largest activation peak actually observed this session, plus a margin,
     * the user's manual reserve, if they set one,
-    * whatever Forge has already reserved for its own inference.
+    * whatever Forge has already reserved for its own inference,
+    * what the host took back from the last preload, which is the only one of
+      the five measured in the units the host's own eviction is decided in.
 
     Taking the maximum rather than a sum is the point. Each is an answer to the
     same question -- how much has to stay free for this pass to run without the
@@ -295,7 +297,8 @@ def vram_headroom_bytes(width: int = 0, height: int = 0, batch: int = 1) -> int:
     return int(max(_static_headroom_bytes(width, height, batch),
                    _observed_headroom_bytes(width, height, batch),
                    manual_reserve_bytes(),
-                   host_reserved_bytes()))
+                   host_reserved_bytes(),
+                   reclaimed_headroom_bytes()))
 
 
 def _batched_megapixels(width: int, height: int, batch: int = 1) -> float:
@@ -481,6 +484,95 @@ def _observed_headroom_bytes(width: int, height: int, batch: int = 1) -> int:
 def observed_peaks() -> tuple[int, int]:
     """Bytes-per-megapixel currently in force, and how many passes fed it."""
     return int(_peak_bytes_per_megapixel), _peak_observations
+
+
+_reclaimed_bytes = 0
+"""How much of a finished preload the host took back during the pass that followed.
+
+The one activation figure that is measured in the units the eviction is actually
+decided in. :func:`observe_activation_peak` reads
+``torch.cuda.max_memory_allocated``, which counts PyTorch's own allocator and
+nothing else -- not the CUDA context, not cuBLAS workspaces, not fragmentation.
+The host's ``load_models_gpu`` frees against *driver-reported* free VRAM, which
+counts all of them, so the estimate can be honest about tensors and still be
+short of what the host will insist on having free.
+
+From a user's log, on a 24 GB card with the language model on the processor and
+nothing else running::
+
+    23:21:39  18.4 GB resident, 4.3 GB free   preloaded, whole
+    23:22:18  17.6 GB resident, 5.0 GB free   the pass took 0.8 GB back
+    23:22:19  0.8 GB moved (1.1s)             the next preload put it back
+    23:23:05  17.6 GB resident, 5.0 GB free   and the one after took it again
+
+Nothing in this module asked for that eviction -- ``make_vram_room`` said "no
+eviction needed" on both sides of it -- and nothing here could see it either,
+because the reserve it was working from said 1.5 GB and the host wanted rather
+more than 4.3. So the preload refilled the same 0.8 GB before every generation,
+for as long as the session lasted.
+
+What closes the loop is the difference itself: weights that were resident when a
+preload finished and are not resident when the next pass starts were taken by
+the host, and that is a direct reading of how much more it needed free. Kept as
+a floor under the reserve, the next preload stops short of the level the host
+will claw back to, and the round trip does not happen again.
+
+Monotonic within a session, for the reason the peak observation is: a pass that
+happened to need less is not evidence the next one will."""
+
+
+def reclaimed_headroom_bytes() -> int:
+    """What the host has taken back from a finished preload, as a reserve floor.
+
+    Capped at the same share of the card the observed peak is, and for the same
+    reason. This reads a difference between two residency measurements, and a
+    difference has more than one possible cause: another application taking
+    VRAM, a driver reset, a second card's worth of bookkeeping. None of those
+    should be able to grow the image reserve without limit, because a reserve
+    large enough squeezes out the very model it is protecting.
+    """
+    total = total_vram_bytes()
+    if total > 0:
+        return int(min(_reclaimed_bytes, total * MAX_RESERVE_FRACTION))
+    return int(_reclaimed_bytes)
+
+
+def _observe_reclaim(target_name: str, resident: int) -> None:
+    """Fold "the host took weights back" into the reserve, if it did.
+
+    Called where the answer is knowable and nowhere else: at the top of a pass's
+    own :func:`make_vram_room`, which is the first moment after a generation
+    that the residency can be compared with what the preload before it left.
+
+    ``target_name`` is checked rather than assumed, and it is the whole
+    difference between a measurement and a coincidence. The preload warms Stage
+    1; a Stage 2 pass arrives at this same function with a different and usually
+    smaller model resident, and subtracting one from the other would read the
+    swap itself as the host reclaiming several gigabytes -- teaching the reserve
+    a number with no relationship to activations at all.
+    """
+    global _reclaimed_bytes
+
+    if not _preload_target or target_name != _preload_target:
+        return
+    if _preload_resident <= 0 or resident <= 0 or resident >= _preload_resident:
+        return
+    taken = _preload_resident - resident
+    if taken <= _reclaimed_bytes:
+        return
+    _reclaimed_bytes = taken
+    logger.info(
+        "Model Chain: the host took %.1f GB of image weights back during the last pass, "
+        "so the reserve now allows for it — the preload will stop that much short "
+        "instead of refilling it before every generation",
+        taken / _GB)
+
+
+_preload_resident = 0
+"""What the last finished preload left resident, for :func:`_observe_reclaim`."""
+
+_preload_target = ""
+"""Which checkpoint that residency belongs to. See :func:`_observe_reclaim`."""
 
 
 def vram_required_bytes(name: str, modules=None, width: int = 0, height: int = 0,
@@ -2356,6 +2448,7 @@ def _host_torch_context():
 
 def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
     global _preload_reinstated, _preload_result, _preload_failures
+    global _preload_resident, _preload_target
 
     started = time.perf_counter()
     try:
@@ -2395,6 +2488,12 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
             moved = _load_current_to_gpu(width, height)
 
             resident, total = _loaded_residency()
+            # What the next pass will be compared against. Measured through the
+            # same patchers make_vram_room reads, so "the host took some back"
+            # is a difference between two readings of one thing rather than
+            # between two ways of asking.
+            _preload_resident = _resident_bytes(_loaded_target_patchers(name))
+            _preload_target = name
             ready = total > 0 and resident >= total * READY_FRACTION
             _preload_result = PreloadResult(
                 state="ready" if ready else "partial",
@@ -2937,8 +3036,14 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     Returns the number of bytes freed (0 when nothing needed doing).
     """
     own = _loaded_target_patchers(target_name)
-    required = _pass_requirement(target_name, modules, width, height, own, batch)
     resident = _resident_bytes(own)
+    if reclaim_foreign:
+        # A generation, not a warm-up, so the residency in front of us is what a
+        # real pass left behind and the comparison means something. Done before
+        # the requirement is computed, so this pass is budgeted with what the
+        # last one taught rather than one generation later.
+        _observe_reclaim(target_name, resident)
+    required = _pass_requirement(target_name, modules, width, height, own, batch)
     needed = max(required - resident, 0)
     free = free_vram_bytes()
 
