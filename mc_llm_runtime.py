@@ -3165,6 +3165,35 @@ PRIME_LABEL = "priming the prompt cache"
 _priming: threading.Thread | None = None
 
 
+def _writer_is_in_use() -> bool:
+    """Whether anything is going to ask for the Krea writer's instruction.
+
+    The prime warms one specific prompt -- Creative Mode's standing instruction,
+    which the Composer shares the prefix of. With both switched off there is no
+    roll to make cheaper, and the work is pure loss on the card the image model
+    wants.
+
+    Read from the stored preferences rather than from a generation's arguments,
+    because this is asked from a server start and a start has no generation
+    behind it. The checkbox writes through to those preferences every time it
+    moves, so the answer is the same one the next roll would give.
+
+    Unanswerable is answered *yes*: priming when it was not needed costs a few
+    seconds of background work that stands down for anything else, and not
+    priming when it was needed costs the first roll its whole prefix.
+    """
+    try:
+        import mc_creative_krea
+        import mc_spatial
+
+        return bool(mc_creative_krea.settings().get("enabled")
+                    or mc_spatial.settings().get("enabled"))
+    except Exception:
+        logger.debug("Model Chain: could not tell whether the writer is in use",
+                     exc_info=True)
+        return True
+
+
 def _stands_down_for_the_image_job(configuration: Config | None) -> bool:
     """Whether background priming should give way to a running image job.
 
@@ -3209,9 +3238,21 @@ def _prime_prompt_cache(client) -> None:
     background work and does not wait, so a start that some job is holding the
     GPU for finds it taken and does nothing at all. The roll it would have
     queued in front of is exactly the roll it was meant to help.
+
+    Only when a roll can actually happen, though. That paragraph above says
+    "llama-server is started at WebUI boot with nothing else to do", and it is
+    not true any more: nothing starts one speculatively, so every start is a
+    start somebody asked for and the server always has something else to do.
+    Priming the *writer's* instruction after a conversation reply, on an
+    installation with Creative Mode and the Composer both switched off, is
+    twelve seconds of the image card's compute spent on a prompt that will
+    never be sent -- from a user's log, twelve seconds of it running alongside
+    the generation it was supposed to be helping.
     """
     global _priming
 
+    if not _writer_is_in_use():
+        return
     if _priming is not None and _priming.is_alive():
         return
     thread = threading.Thread(target=_prime, args=(client, config()), name="mc-llm-prime",

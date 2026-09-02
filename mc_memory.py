@@ -2863,6 +2863,33 @@ def _pinned_keep(required: int, stage: str) -> tuple[list, int]:
     return entries, pinned
 
 
+FIT_TOLERANCE_BYTES = int(0.15 * _GB)
+"""Shortfall small enough that acting on it costs more than it could save.
+
+From a user's log, on a card holding an 18.4 GB checkpoint and a llama-server:
+
+    freed 2.8 GB for the Stage 1 pass (2.2 GB -> 4.9 GB free): demoted the LLM
+    reserve miss — Stage 1 exceeded the protected image budget by 0.0 GB;
+        llama-server was emergency-evicted
+
+A whole language model stopped -- its process, its prompt cache, a twenty-second
+restart -- because a pass wanted very slightly more than was free. Not 2.8 GB
+more. Not 0.1 GB more. *Zero point zero*, which is what a requirement estimated
+to the byte and a driver reading taken a moment later will differ by roughly
+half the time.
+
+"Demote only because the incoming workload actually needs the memory" cannot be
+evaluated at infinite precision against a number that was never that precise:
+``required`` is a file size plus an overhead fraction plus the largest of four
+activation floors, and none of those is exact. A pass that ends up a hundred
+megabytes into the driver's spill path has lost something too small to measure;
+the eviction that avoids it has not.
+
+So a deficit inside this is treated as a fit. It is deliberately larger than any
+plausible rounding difference and far smaller than anything worth evicting for.
+"""
+
+
 def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0,
                    stage: str = STAGE_2, batch: int = 1, *,
                    reclaim_foreign: bool = True) -> int:
@@ -2918,7 +2945,7 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     if free <= 0:
         return 0  # cannot query VRAM; leave the host's own management alone
 
-    if free >= needed:
+    if free + FIT_TOLERANCE_BYTES >= needed:
         logger.info(
             "Model Chain: %s needs %.1f GB, has %.1f GB free%s — no eviction needed",
             stage,

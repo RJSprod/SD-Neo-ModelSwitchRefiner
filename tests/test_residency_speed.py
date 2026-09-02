@@ -647,6 +647,45 @@ class TestASingleStagePlanIsWarmedToo:
         assert mc_memory.consume_preload() is True
 
 
+class TestARoundingDifferenceIsNotAShortfall:
+    """From a user's log, the whole of what an emergency eviction was for:
+
+        freed 2.8 GB for the Stage 1 pass (2.2 GB -> 4.9 GB free): demoted the LLM
+        reserve miss — Stage 1 exceeded the protected image budget by 0.0 GB;
+            llama-server was emergency-evicted
+
+    Zero point zero. A language-model process stopped, its prompt cache thrown
+    away and a twenty-second restart bought, because a requirement estimated
+    from a file size, an overhead fraction and the largest of four activation
+    floors came out a hair above a driver reading taken a moment later.
+    """
+
+    def test_a_hairs_breadth_counts_as_fitting(self, memory, monkeypatch):
+        reclaimed: list = []
+        monkeypatch.setattr(mc_memory, "_reclaim_foreign",
+                            lambda needed, reason="": reclaimed.append(needed) or 0)
+        required = mc_memory.vram_required_bytes("B", None, 1024, 1024)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: required - 1)
+
+        assert mc_memory.make_vram_room("B", None, 1024, 1024) == 0
+        assert not memory.mm.freed, "nothing should have been evicted"
+        assert reclaimed == [], "and certainly not a language model"
+
+    def test_a_real_shortfall_is_still_one(self, memory, monkeypatch):
+        required = mc_memory.vram_required_bytes("B", None, 1024, 1024)
+        short = required - mc_memory.FIT_TOLERANCE_BYTES * 4
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: short)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024)
+
+        assert memory.mm.freed, "a genuine deficit still evicts"
+
+    def test_the_tolerance_is_far_below_anything_worth_evicting_for(self):
+        """Large enough to swallow any rounding difference, small enough that
+        spilling it into the driver's fallback path costs nothing measurable."""
+        assert 0 < mc_memory.FIT_TOLERANCE_BYTES <= GB // 4
+
+
 class TestAWarmUpNeverTakesTheLlmsVram:
     """The user's rule, stated in their words:
 

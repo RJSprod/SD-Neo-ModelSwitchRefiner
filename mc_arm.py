@@ -18,9 +18,30 @@ What this module is
 -------------------
 Two functions over machinery that already exists. :func:`readiness` measures --
 it starts nothing and moves nothing, so a status panel may call it freely.
-:func:`arm` does the loading, by asking the same entry points a generation
-would have asked a moment later: ``mc_memory``'s preload for the image side,
-``Runtime.client`` for the language model.
+:func:`arm` does the loading, by asking the same entry point a generation would
+have asked a moment later: ``mc_memory``'s preload.
+
+The image model, and only the image model
+-----------------------------------------
+This used to start llama-server too, and the reason it no longer does is a rule
+about who may take VRAM speculatively:
+
+    the language model comes back into VRAM when a language-model request is
+    made, and not before
+
+A warm-up is not a request. Nobody has asked the model anything, and on a card
+sized for a checkpoint the size of the image plan there is no room to be wrong
+about it -- from a user's log, warming llama-server before a generation left
+17.7 GB of an 18.4 GB checkpoint resident where 18.4 had been a minute earlier,
+so the next Generate reported the image model not ready, and the pass that
+followed stopped llama-server anyway to get the room back.
+
+Nothing is lost by waiting. A generation that is going to consult the language
+model -- a Krea roll, a Spatial layout -- makes that request itself, a second
+into the job, and starting the server there is not later than the work needs.
+What is gained is a placement made against a truthful reading: the checkpoint
+is already resident by then, so llama-server is sized to what is genuinely
+spare rather than to a card that merely looks empty.
 
 It is deliberately not a scheduler and not a cache. Nothing here decides where
 a model goes, how large it may be, or what has to move for it -- those are
@@ -186,19 +207,19 @@ def _llm_part() -> Part | None:
     a card that turned out to hold all of them. A server running degraded is
     not cold, and it is not ready either.
 
-    None where the language model is not something a generation waits for: an
-    install with none configured, and -- see :func:`_swept_by_generating` -- one
-    set to free the LLM for every image, where a stopped llama-server is not a
-    pipeline half loaded but the state the next generation is *asking* for.
-    Reporting that as permanently cold would make this readout unable to ever
-    say "armed", which is the answer the whole fast path is built on.
+    A server that is *not* up reports nothing at all, rather than cold. Nothing
+    warms one speculatively any more -- see :func:`arm` -- so "no llama-server
+    is running" is no longer a pipeline half loaded waiting for somebody to
+    finish the job. It is the ordinary resting state of an installation where
+    nobody has asked the language model anything yet, and the first request
+    that does will start it. Calling that cold would also leave this readout
+    unable to ever answer "armed", which is what the fast path every warm-up
+    after the first one takes is built on.
     """
     try:
         import mc_llm_runtime
 
         if not mc_llm_runtime.config().configured:
-            return None
-        if _swept_by_generating():
             return None
         running = mc_llm_runtime.registry.running()
     except Exception:
@@ -206,50 +227,13 @@ def _llm_part() -> Part | None:
                      exc_info=True)
         return None
     if not running:
-        return Part("Language model", COLD, "no llama-server is running")
+        return None
     degraded = [found for found in running if _degraded(found)]
     if degraded:
         return Part("Language model", PARTIAL,
                     "running, with part of the model in system RAM")
     return Part("Language model", ARMED,
                 f"{len(running)} llama-server{'' if len(running) == 1 else 's'} running")
-
-
-def _swept_by_generating() -> bool:
-    """Whether a generation starting would stop the server a warm-up would start.
-
-    Exclusive mode's promise is that an image generation owns the card: on
-    ``request_vram(FAMILY_IMAGE, ...)`` the broker sweeps llama-server off the
-    image card before anything else happens. That call is a handful of lines
-    below the warm-up in ``before_process``.
-
-    So on that setting the warm-up was starting a language model in order for
-    the next statement to stop it. In a user's log that was twenty of the
-    twenty-and-a-bit seconds a Generate click waited for, spent on a process
-    that did not survive to the first sampling step -- every press, with the
-    image model still in system RAM at the end of it.
-
-    Scoped to the image card, because that is what the sweep is scoped to. A
-    role pinned to a second card is not swept by anything, competes with no
-    image pass, and is warmed exactly as it always was. An unanswerable card
-    question is answered "yes, the image card" by
-    ``shares_the_image_card`` -- conservative in the right direction here too,
-    since the cost of being wrong is a language model that starts on its first
-    request instead of before one.
-    """
-    try:
-        import mc_broker
-        import mc_llm_runtime
-
-        if mc_broker.mode() != mc_broker.MODE_EXCLUSIVE:
-            return False
-        configuration = mc_llm_runtime.config()
-        return mc_llm_runtime.shares_the_image_card(
-            mc_llm_runtime.card_of(configuration), configuration)
-    except Exception:
-        logger.debug("Model Chain: could not tell whether a generation would stop the "
-                     "language model", exc_info=True)
-        return False
 
 
 def _degraded(found) -> bool:
@@ -298,51 +282,13 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "") -> Readiness:
             return before
         logger.info("Model Chain: warming up%s — %s",
                     f" for {reason}" if reason else "", before.describe())
-        # Image first. The order is not arbitrary and it is not free: a
-        # warm-up that starts llama-server, spends twenty seconds on it and
-        # then reports the image model cold has spent the user's whole wait on
-        # the half they were not waiting for. Generate is what somebody is
-        # sitting in front of.
-        #
-        # Nothing is lost on the language side by going second. Its VRAM
-        # allowance is the plan's remainder, and ``mc_plan.usable_vram_bytes``
-        # adds the image family's own residency back before dividing -- so
-        # llama-server is placed at exactly the same size whether the
-        # checkpoint has reached the card yet or not.
         _arm_image(width, height)
-        _arm_llm()
         after = readiness()
     finally:
         _arming.release()
     logger.info("Model Chain: warm-up finished in %.1fs — %s",
                 time.monotonic() - started, after.explain())
     return after
-
-
-def _arm_llm() -> None:
-    """Start the language model, so a generation does not have to.
-
-    Asking for a client is what starts a server, which is the same entry point
-    every mode uses and is deliberately not a second way in: a warm-up that
-    started llama-server by some private path would be a placement nothing else
-    had negotiated.
-    """
-    try:
-        import mc_llm_runtime
-
-        configuration = mc_llm_runtime.config()
-        if not configuration.configured:
-            return
-        if _swept_by_generating():
-            logger.info("Model Chain: llama-server is not being started here — VRAM "
-                        "residency is set to free the LLM for every image, so a "
-                        "generation would stop it again. It starts on the first request "
-                        "that needs it, in the VRAM the image plan leaves over")
-            return
-        mc_llm_runtime.registry.for_role().client()
-    except Exception:
-        logger.info("Model Chain: the language model could not be warmed up; the next "
-                    "request will start it", exc_info=True)
 
 
 def _arm_image(width: int = 0, height: int = 0) -> None:
