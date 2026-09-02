@@ -459,7 +459,18 @@ class TestMetrics:
                               "pipeline_output_sample_count",
                               "pipeline_first_output_ms", "pipeline_ingress_peak_ms",
                               "pipeline_backpressure_ms", "pipeline_compute_ms",
-                              "pipeline_rtf_milli"}
+                              "pipeline_rtf_milli",
+                              # And the same factor per stage. Named here for
+                              # the reason everything else is, and added late
+                              # for the reason this rule exists: the worker had
+                              # measured the split all along and the log line
+                              # was written to print it, but it was not in this
+                              # list, so it was dropped on the way and every
+                              # "Voice pipeline ran" line reported the total
+                              # alone. "The pipeline is 1.4" is not a decision
+                              # anybody can act on; "DPDFNet is 0.8 and LavaSR
+                              # is 0.6" is.
+                              "dpdfnet_rtf_milli", "lavasr_rtf_milli"}
 
     def test_a_clone_is_categorised_without_naming_itself(self):
         turn = turns.create(voice_id="clone:1234", sid=53, speaker=Speaker())

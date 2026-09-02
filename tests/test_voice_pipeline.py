@@ -3000,6 +3000,117 @@ class TestTheRouteSaysWhenTheChangeTakesEffect:
         assert mc_voice_api.pipeline_settings(None, {}, threads=4)["applied"] == "now"
 
 
+class TestTheLogLineAndTheTurnAgreeOnWhatExists:
+    """The seam between what is measured and what is reported.
+
+    Every "Voice pipeline ran" line this feature has ever written said
+    ``RTF 3.16`` where it could have said ``RTF 3.16 (dpdfnet 2.6, lavasr 0.5)``
+    -- the difference between "the pipeline is too slow" and "here is the stage
+    to switch off". The worker measured the split, the handle forwarded it, and
+    the log line was written to print it. ``VoiceTurn._pipeline_metrics`` threw
+    it away, because that dictionary copies only the keys it already lists and
+    nobody added the new ones to it.
+
+    Every test of that log line built its own dictionary and handed it straight
+    to the logger, so the whole chain was covered except the one link that was
+    broken.
+
+    The invariant is not "the turn reports everything the handle measures" --
+    section 36 says the opposite, that a field is absent from telemetry until
+    somebody put it there deliberately. It is that a field the log line *reads*
+    is a field the turn *reports*, which is exactly what stopped being true.
+    """
+
+    def _read_by_the_log_line(self):
+        """The pipeline fields ``_log_pipeline`` gets out of a turn's metrics.
+
+        Two shapes, and the second is why this is not one regex. Most fields are
+        read by name -- ``found.get("pipeline_rtf_milli")``. The per-stage split
+        is read by building the name from the stage -- ``found[f"{name}_rtf_milli"]``
+        over ``("dpdfnet", "lavasr")`` -- so a reader that only saw literals
+        would miss exactly the pair that went missing.
+        """
+        import inspect
+        import re
+
+        import mc_voice_api
+
+        body = inspect.getsource(mc_voice_api._log_pipeline)
+        found = set(re.findall(r"""found(?:\.get\(|\[)["']([a-z0-9_]+)["']""", body))
+        for suffix in re.findall(r"""found(?:\.get\(|\[)f["']\{name\}([a-z0-9_]+)["']""",
+                                 body):
+            found.update(spec.id + suffix for spec in pipeline.STAGES)
+        return found
+
+    def test_every_field_the_log_line_reads_is_one_the_turn_reports(self):
+        import mc_voice_turn as turn_module
+
+        reported = set(turn_module.VoiceTurn._pipeline_metrics(
+            types.SimpleNamespace(pipeline_snapshot=None, pipeline=None,
+                                  pipeline_metrics=None)))
+        wanted = self._read_by_the_log_line()
+
+        assert wanted, "the log line reads no pipeline fields at all"
+        missing = wanted - reported
+        assert not missing, f"read by the log line, never reported: {sorted(missing)}"
+
+    def test_the_per_stage_split_is_among_them(self):
+        """Named rather than inferred, because that pair is the reason this
+        class exists and a regex that stopped matching would otherwise make the
+        test above pass by finding nothing."""
+        wanted = self._read_by_the_log_line()
+
+        assert {"dpdfnet_rtf_milli", "lavasr_rtf_milli"} <= wanted
+
+    def test_an_unenhanced_turn_reports_the_same_names_as_an_enhanced_one(self):
+        """Absent rather than missing. A log comparing two turns must not be
+        able to read "no pipeline" as "a pipeline that cost nothing", which is
+        the whole reason this is a template and not a pass-through."""
+        import mc_voice_turn as turn_module
+
+        found = turn_module.VoiceTurn._pipeline_metrics(
+            types.SimpleNamespace(pipeline_snapshot=None, pipeline=None,
+                                  pipeline_metrics=None))
+
+        assert found, "an unenhanced turn reported no pipeline fields at all"
+        assert set(found.values()) == {None}
+
+    def test_the_split_survives_the_trip(self):
+        """Over the seam that was broken: measured in the worker, carried by the
+        handle, read back off the turn."""
+        import mc_voice_turn as turn_module
+
+        measured = {"pipeline_stages": "dpdfnet,lavasr", "pipeline_rtf_milli": 1410,
+                    "dpdfnet_rtf_milli": 810, "lavasr_rtf_milli": 600}
+        found = turn_module.VoiceTurn._pipeline_metrics(
+            types.SimpleNamespace(
+                pipeline_snapshot=types.SimpleNamespace(
+                    active=True, stage_ids=("dpdfnet", "lavasr"), output_rate=48000),
+                pipeline=None, pipeline_metrics=measured))
+
+        assert found["dpdfnet_rtf_milli"] == 810
+        assert found["lavasr_rtf_milli"] == 600
+
+    def test_the_handle_really_does_measure_it(self):
+        """The other end. A split the turn forwards and nothing produces would
+        be a passing test above and an empty parenthesis in every log."""
+        import mc_voice_pipeline_runtime as enhancement
+
+        handle = enhancement.Handle.__new__(enhancement.Handle)
+        handle.snapshot = types.SimpleNamespace(
+            stage_ids=("dpdfnet", "lavasr"), input_rate=24000, output_rate=48000)
+        handle.input_samples = handle.output_samples = 0
+        handle.input_packets = handle.output_packets = 0
+        handle.first_output = handle.first_input = 0
+        handle.peak_queue = handle.backpressure = 0
+        handle.measured = {"dpdfnet_rtf_milli": 810, "lavasr_rtf_milli": 600}
+
+        found = handle.metrics()
+
+        assert found["dpdfnet_rtf_milli"] == 810
+        assert found["lavasr_rtf_milli"] == 600
+
+
 class TestThePanelHasSomewhereToPutTheAnswer:
     """The other half of the same defect, and the half that was actually
     missing from the shipped build.
