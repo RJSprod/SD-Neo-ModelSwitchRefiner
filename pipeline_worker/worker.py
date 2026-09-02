@@ -758,6 +758,16 @@ class LavaStage:
         self.compute = 0.0
         """Wall time inside this stage alone, for the reason DPDFNet's is."""
 
+        # A frame is a property of the model, not of the window it was handed.
+        # So the bound is taken once, from a *full* window, and applied to every
+        # window including the short one a flush ends on. Judging each window
+        # against its own length would forgive a constant loss on the full ones
+        # and refuse the identical loss on the last one, which is how a machine
+        # whose model has a larger hop than this one would fail an install for a
+        # reason that has nothing to do with its clock.
+        self._framing_bound = deterministic_target(
+            self.analysis + 2 * self.context, self.rate_in, self.rate_out) // FRAMING_LIMIT
+
         self._down = Resampler(self.rate_in, self.backend_rate, numpy_module)
         self._ramp = crossfade_ramp(deterministic_target(self.overlap, self.rate_in,
                                                          self.rate_out))
@@ -969,7 +979,11 @@ class LavaStage:
             # trailing context; a clock that disagrees is a third of the window
             # or more and is audible as speech at the wrong speed. Summing them
             # together is what refused a stage whose audio was exact.
-            if drift * FRAMING_LIMIT <= whole:
+            #
+            # Against the stage's own full window rather than this one's, so a
+            # flush's short final window forgives the same absolute frame the
+            # full windows before it did.
+            if drift <= self._framing_bound:
                 self.framing = max(self.framing, drift)
             else:
                 self.correction += drift
