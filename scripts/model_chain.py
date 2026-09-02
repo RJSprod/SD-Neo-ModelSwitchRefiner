@@ -710,6 +710,22 @@ _VOICE_OPTIONS.update({
         "stage, so it says which of the two is spending the time. Takes effect on the "
         "next reply"
     ),
+    mc_voice_pipeline.OPT_DPDFNET_MODEL: shared.OptionInfo(
+        "",
+        "Voice Pipeline: DPDFNet network",
+        gr.Textbox,
+    ).info(
+        "which of the publisher's DPDFNet networks this stage loads. Set from the Voice "
+        "Chat panel rather than typed here — the value is a model identifier and an "
+        "unrecognised one falls back to this build's default. The networks differ in "
+        "DPRNN block count, which is both what they cost and what they buy: the "
+        "publisher prices the two 48 kHz ones at 2.41 and 7.17 GMACs for the same sample "
+        "rate and the same streaming contract. This is the dial that matters when the "
+        "\"Voice pipeline ran\" line reports a real-time factor above 1.0 for DPDFNet — "
+        "a network too heavy for a machine is too heavy on its graphics card too, "
+        "because the work is larger rather than misplaced. Empty means this build's "
+        "default. Takes effect on the next reply"
+    ),
     mc_voice_device.OPT_DEVICE_DPDFNET: shared.OptionInfo(
         mc_voice_device.CPU,
         "Voice Pipeline: DPDFNet device",

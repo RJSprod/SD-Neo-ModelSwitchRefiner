@@ -3177,6 +3177,148 @@ class TestThePanelHasSomewhereToPutTheAnswer:
         assert "paintPipelineApplied(" in handler
 
 
+class TestChoosingHowMuchDenoiserToRun:
+    """The dial that turned out to matter, and the two that did not.
+
+    A device dropdown and a thread budget were both measured on a machine with a
+    3090 and a 5090, and neither moved the number: DPDFNet ran at a real-time
+    factor of 1.27 on DirectML and 1.03 to 1.06 on the processor, so the card
+    lost. It could not have won. DPDFNet is a streaming recurrent denoiser run
+    in ~10 ms hops, which is a thousand inferences of a few hundred samples for
+    a ten second reply, each depending on the state the last one left -- nothing
+    batches, nothing overlaps, and every call pays a copy in, kernel launches, a
+    copy out and a synchronisation.
+
+    What did move it was the publisher's own model card. DPDFNet's cost is its
+    DPRNN block count, and the two 48 kHz fullband networks are 2.41 and 7.17
+    GMACs for the same sample rate and the same streaming contract. This feature
+    shipped pinned to the heavier one: a stage that could not keep up with
+    playback wherever it was placed, because the work was three times larger
+    than it needed to be rather than in the wrong place.
+    """
+
+    def test_both_48_khz_networks_are_offered(self):
+        found = pipeline.dpdfnet_models()
+
+        assert [item["id"] for item in found["choices"]] == [
+            "dpdfnet2_48khz_hr", "dpdfnet8_48khz_hr"]
+
+    def test_the_light_one_is_the_default(self, host):
+        """A default that cannot keep up is not a default. The heavy network is
+        a choice for a machine with the headroom rather than the thing everyone
+        gets before anybody has measured anything."""
+        found = pipeline.dpdfnet_models()
+
+        assert found["default"] == "dpdfnet2_48khz_hr"
+        assert found["chosen"] == "dpdfnet2_48khz_hr"
+
+    def test_the_choice_carries_what_it_costs(self):
+        """Blocks and GMACs, from the publisher rather than from this file, so
+        the panel can say what the trade is instead of naming two files."""
+        light, heavy = pipeline.dpdfnet_models()["choices"]
+
+        assert light["dprnn_blocks"] == 2 and heavy["dprnn_blocks"] == 8
+        assert heavy["macs_g"] > 2.9 * light["macs_g"]
+
+    def test_choosing_one_stores_it(self, host):
+        pipeline.remember(model="dpdfnet8_48khz_hr")
+
+        assert pipeline.dpdfnet_model() == "dpdfnet8_48khz_hr"
+        assert pipeline.dpdfnet_models()["chosen"] == "dpdfnet8_48khz_hr"
+
+    def test_a_network_this_build_does_not_have_is_refused(self, host):
+        """Refused rather than stored. A stored id nothing offers is a setting
+        that silently does nothing: the reader falls back, the panel redraws
+        showing the fallback, and the only account of what happened would be the
+        two disagreeing."""
+        with pytest.raises(ValueError) as caught:
+            pipeline.remember(model="dpdfnet64_1mhz_ludicrous")
+        assert "not a DPDFNet model" in str(caught.value)
+
+    def test_a_stored_network_that_vanished_falls_back(self, host):
+        """A build that dropped a variant must not ask the worker for a file
+        that is not there. A stage that will not load is a worse answer than a
+        stage running the network this build actually ships."""
+        host.shared.opts.set(pipeline.OPT_DPDFNET_MODEL, "dpdfnet99_from_the_future")
+
+        assert pipeline.dpdfnet_model() == "dpdfnet2_48khz_hr"
+
+    def test_changing_it_drops_the_worker(self, kept_settings, monkeypatch):
+        """The file is opened once, when the worker loads its stages, so a
+        network changed while a worker holds the old one changes nothing until
+        that worker stops -- the same reason the thread budget and the placement
+        stop it."""
+        asked = []
+        monkeypatch.setattr(runtime, "reconfigure",
+                            lambda reason: asked.append(reason) or True)
+
+        pipeline.remember(model="dpdfnet8_48khz_hr")
+
+        assert len(asked) == 1, asked
+
+    def test_the_worker_is_told_the_file_rather_than_the_name(self, host, monkeypatch):
+        """The worker is handed a directory and must not have to decide which
+        file in it is the model. With two networks installed side by side that
+        stopped being a formality."""
+        root = paths.pipeline_stage_root("dpdfnet")
+        root.mkdir(parents=True, exist_ok=True)
+        for name in ("dpdfnet2_48khz_hr.onnx", "dpdfnet8_48khz_hr.onnx"):
+            (root / name).write_bytes(b"not really a network")
+
+        pipeline.remember(model="dpdfnet8_48khz_hr")
+        assert pipeline.stage_config("dpdfnet")["model_file"] == \
+            "dpdfnet8_48khz_hr.onnx"
+
+        pipeline.remember(model="dpdfnet2_48khz_hr")
+        assert pipeline.stage_config("dpdfnet")["model_file"] == \
+            "dpdfnet2_48khz_hr.onnx"
+
+    def test_a_network_that_is_not_on_disk_is_not_asked_for(self, host):
+        """An installation made before a variant existed has the setting but not
+        the file. Asking for it anyway is a stage that will not load at all."""
+        root = paths.pipeline_stage_root("dpdfnet")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "dpdfnet2_48khz_hr.onnx").write_bytes(b"not really a network")
+        # Only the light one, whatever an earlier test left behind.
+        (root / "dpdfnet8_48khz_hr.onnx").unlink(missing_ok=True)
+
+        pipeline.remember(model="dpdfnet8_48khz_hr")
+
+        assert pipeline.stage_config("dpdfnet")["model_file"] == \
+            "dpdfnet2_48khz_hr.onnx"
+
+    def test_the_route_accepts_and_refuses_one(self, kept_settings, monkeypatch):
+        import mc_voice_api
+        import mc_voice_turn as turns
+
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: True)
+        monkeypatch.setattr(turns, "busy", lambda: False)
+
+        found = mc_voice_api.pipeline_settings(None, {}, model="dpdfnet8_48khz_hr")
+        assert found["models"]["chosen"] == "dpdfnet8_48khz_hr"
+
+        with pytest.raises(Exception) as caught:
+            mc_voice_api.pipeline_settings(None, {}, model="   ")
+        assert "identifier" in str(caught.value)
+
+    def test_the_panel_offers_it(self, host):
+        drawn = mc_voice_ui.pipeline_stage_detail("dpdfnet")
+
+        assert 'data-mc-voice-pipeline-model="dpdfnet"' in drawn
+        assert "2.41 GMACs" in drawn and "7.17 GMACs" in drawn
+
+    def test_the_browser_posts_it(self):
+        """Asserted against the source, because that control lives in a panel
+        fetched from ``/component`` and injected after the script has run."""
+        script = (paths.extension_root() / "javascript" / "voice_chat.js").read_text(
+            encoding="utf-8")
+
+        assert "data-mc-voice-pipeline-model" in script
+        handler = script.split("data-mc-voice-pipeline-model]")[1].split(
+            "// Where an enhancement stage runs")[0]
+        assert "model: asked" in handler
+
+
 class TestThePlacementControlSaysWhatItCanAndCannotDo:
     """The panel, and the two shapes it takes.
 

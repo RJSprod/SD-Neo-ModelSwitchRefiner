@@ -3787,6 +3787,47 @@
                     }).catch(function () { button.disabled = false; });
                 });
             });
+        // Which network an enhancement stage loads, where the publisher ships
+        // more than one. Here rather than in `wirePipeline` for the same reason
+        // the device select below is: this markup arrives from `/component`
+        // after that function has run.
+        host.querySelectorAll("[data-mc-voice-pipeline-model]").forEach(
+            function (select) {
+                // Captured while it still holds what the server rendered; inside
+                // the handler `select.value` is already the new choice.
+                let inForce = select.value;
+                select.addEventListener("change", function () {
+                    const stage = select.getAttribute("data-mc-voice-pipeline-model");
+                    if (!stage) return;
+                    const asked = select.value;
+                    select.disabled = true;
+                    post(ROUTES.pipelineSettings, {stages: {}, model: asked},
+                         holder).then(function (payload) {
+                        select.disabled = false;
+                        if (payload && payload.ok) {
+                            inForce = asked;
+                            const settingsRow = holder.querySelector(
+                                '[data-mc-voice-kind="pipeline"]');
+                            if (settingsRow) paintPipelineApplied(settingsRow, payload);
+                            showComponent(holder, row, host, componentOpen);
+                            return;
+                        }
+                        // Put it back. The server refused, so the stage still
+                        // loads what it loaded, and a select showing the refused
+                        // choice would be the only thing claiming otherwise.
+                        select.value = inForce;
+                        showComponentStatus(
+                            row, stage,
+                            (payload && payload.error)
+                                || "That network could not be chosen.");
+                    }).catch(function () {
+                        select.disabled = false;
+                        select.value = inForce;
+                        showComponentStatus(row, stage,
+                                            "That network could not be chosen.");
+                    });
+                });
+            });
         // Where an enhancement stage runs. The one other interactive thing in a
         // detail surface, and it is here rather than in `wirePipeline` for a
         // plain reason: this markup is fetched from `/component` and injected

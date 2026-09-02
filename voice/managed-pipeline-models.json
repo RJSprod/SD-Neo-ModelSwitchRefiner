@@ -299,10 +299,17 @@
    "upstream": "https://github.com/ceva-ip/DPDFNet",
    "repo": "Ceva-IP/DPDFNet",
    "revision": "main",
-   "model_id": "dpdfnet8_48khz_hr",
-   "attribution": "DPDFNet by Ceva. Model dpdfnet8_48khz_hr from the publisher's own repository.",
+   "model_id": "dpdfnet2_48khz_hr",
+   "attribution": "DPDFNet by Ceva. Models dpdfnet2_48khz_hr and dpdfnet8_48khz_hr from the publisher's own repository.",
    "about_bytes": 0,
    "artifacts": [
+    {
+     "filename": "dpdfnet2_48khz_hr.onnx",
+     "local_name": "dpdfnet2_48khz_hr.onnx",
+     "url": "https://huggingface.co/Ceva-IP/DPDFNet/resolve/main/onnx/dpdfnet2_48khz_hr.onnx",
+     "bytes": 0,
+     "sha256": ""
+    },
     {
      "filename": "dpdfnet8_48khz_hr.onnx",
      "local_name": "dpdfnet8_48khz_hr.onnx",
@@ -312,15 +319,33 @@
     }
    ],
    "required_paths": [
+    "dpdfnet2_48khz_hr.onnx",
     "dpdfnet8_48khz_hr.onnx"
    ],
    "contract": {
     "package": "dpdfnet",
-    "model_id": "dpdfnet8_48khz_hr",
+    "model_id": "dpdfnet2_48khz_hr",
     "model_sample_rate": 48000,
     "accepts_any_input_rate": true,
     "output_rate": null,
-    "notes": "Measured from upstream 0.6.0's own source rather than from its README. StreamEnhancer.process(chunk, sample_rate=N) resamples N to the model's native rate internally and returns output back at N, so the stage is handed Pocket's real 24000 Hz and gives back 24000 Hz -- output_rate is null because this stage's output rate is its caller's, and the 48 kHz in the model name is the network's own working rate. The streaming path is a causal STFT that upstream documents as deliberately NOT bit-identical to its offline enhance(); that is the correct path for real time and is the one this feature uses. onnx_path is passed explicitly so resolve_model() never reaches the network (I-VP-22)."
+    "notes": "Measured from upstream 0.6.0's own source rather than from its README. StreamEnhancer.process(chunk, sample_rate=N) resamples N to the model's native rate internally and returns output back at N, so the stage is handed Pocket's real 24000 Hz and gives back 24000 Hz -- output_rate is null because this stage's output rate is its caller's, and the 48 kHz in the model name is the network's own working rate. The streaming path is a causal STFT that upstream documents as deliberately NOT bit-identical to its offline enhance(); that is the correct path for real time and is the one this feature uses. onnx_path is passed explicitly so resolve_model() never reaches the network (I-VP-22). Two 48 kHz fullband variants are offered because the heavier one cannot keep up on every machine. They differ in DPRNN block count and in nothing else that matters to this chain -- same sample rate, same streaming contract, same output policy -- and the publisher's own model card puts them at 2.41 and 7.17 GMACs, a factor of three. A machine measured dpdfnet8_48khz_hr at a real-time factor of 1.04 on its processor and 1.27 on DirectML, which is a stage that cannot keep up with playback wherever it is placed; the light variant is the default for that reason and the heavy one is a choice for machines with the headroom. Both are downloaded so the choice costs a worker restart rather than an install.",
+    "default_model": "dpdfnet2_48khz_hr",
+    "models": [
+     {
+      "id": "dpdfnet2_48khz_hr",
+      "file": "dpdfnet2_48khz_hr.onnx",
+      "dprnn_blocks": 2,
+      "params_m": 2.58,
+      "macs_g": 2.41
+     },
+     {
+      "id": "dpdfnet8_48khz_hr",
+      "file": "dpdfnet8_48khz_hr.onnx",
+      "dprnn_blocks": 8,
+      "params_m": 5.63,
+      "macs_g": 7.17
+     }
+    ]
    },
    "provisional": true
   },

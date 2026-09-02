@@ -439,6 +439,13 @@ class TestTheSettingsSection:
             mc_voice_pipeline.OPT_THREADS,
             mc_voice_device.OPT_DEVICE_DPDFNET,
             mc_voice_device.OPT_DEVICE_LAVASR,
+            # And which network DPDFNet loads, which is a third execution
+            # setting rather than a switch and belongs beside those two for the
+            # same reason. It was added last and matters most: the device and
+            # the thread budget were both measured and neither moved the
+            # number, because the network shipped three times heavier than it
+            # needed to be and no placement fixes that.
+            mc_voice_pipeline.OPT_DPDFNET_MODEL,
         } | set(mc_voice_sopro_profile.OPTIONS.values()) | {
             mc_voice_sopro_profile.OPT_LANGUAGE,
         }
