@@ -1385,6 +1385,7 @@ class _LavaBackend:
             raise Refusal(f"the enhancement runtime has no PyTorch LavaSR in it ({exc})")
 
         self._torch = torch
+        _apply_torch_budget(torch, config)
         # A real directory, so upstream's snapshot_download() branch is never
         # taken: I-VP-21 says this process gets verified local paths and no
         # network, at load time as much as at inference time.
@@ -1436,6 +1437,50 @@ class _LavaBackend:
             heard = self._model.enhance(wav, enhance=True, denoise=self._denoise,
                                         batch=False)
             return heard.detach().to("cpu").float().reshape(-1).numpy().tolist()
+
+
+def _apply_torch_budget(torch, config: dict) -> None:
+    """Give PyTorch the thread budget the setting names, not just OMP's copy.
+
+    ``intraop`` reached exactly one stage before this. It is handed to
+    DPDFNet's ONNX session by ``_dpdf_session_budget`` and nothing passed it to
+    Torch, so LavaSR ran on whatever ``OMP_NUM_THREADS`` happened to give it --
+    which the parent does set, but only in the environment of a worker that was
+    started at the time, and which does not size Torch's inter-op pool at all.
+
+    That is a setting whose own help says "the enhancement stages", plural,
+    controlling one of the two. Whichever way the number wants to go, it should
+    go there for both, and a user turning the dial against a measured real-time
+    factor should be turning it against the whole pipeline.
+
+    Never raised above what was asked for and never below one. Failure is
+    logged and swallowed: a build that will not take a thread count is a slower
+    stage, not a reason to refuse the reply this backend was built for.
+    """
+    # A config that names no budget leaves Torch exactly as it found it. The
+    # floor below is for a nonsense value, not for a missing one: clamping an
+    # absent setting to one thread would be this function making the stage
+    # slower than doing nothing at all.
+    try:
+        intraop = int(config.get("intraop") or 0)
+    except (TypeError, ValueError):
+        return
+    if intraop <= 0:
+        return
+    try:
+        torch.set_num_threads(intraop)
+        # Torch keeps a second pool for running independent ops side by side.
+        # It is sized from the same setting as the ONNX session's, for the
+        # reason the ONNX one is: one dial, one meaning.
+        interop = max(1, int(config.get("interop") or 1))
+        torch.set_num_interop_threads(interop)
+    except Exception as exc:
+        # set_num_interop_threads refuses once parallel work has started, which
+        # is ordinary on a worker that has already served a turn. Said once to
+        # stderr, which the parent drains into the log, because a stage running
+        # on a budget nobody asked for is exactly the kind of thing that makes
+        # a measured real-time factor impossible to reason about.
+        _note(f"torch would not take the thread budget ({_safe(exc)})")
 
 
 def _torch_device(config: dict) -> str:
