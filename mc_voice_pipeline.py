@@ -172,11 +172,48 @@ def placement(stage_id: str) -> tuple:
     try:
         import mc_voice_device as devices
 
-        return devices.provider_for(component_of(stage_id))
+        found = devices.provider_for(component_of(stage_id))
+        if found[0] != devices.PROVIDER_CUDA or _cuda_closure_installed(
+                stage_flavour(stage_id)):
+            return found
+        # Asked for a card, and the closure on disk has no CUDA in it. Answered
+        # with the processor rather than with the card, because the alternative
+        # is a stage that refuses to load and a reply spoken unenhanced -- for a
+        # setting somebody changed on a panel that is, at this same moment,
+        # telling them the runtime needs updating. The choice is not lost and
+        # not overwritten: install the CUDA closure and this starts answering
+        # with the card, which is the order the two steps actually happen in.
+        # Debug, not info, and the reason is how often this runs: a settings page
+        # polls status() on a timer and every poll reaches here. The line
+        # somebody actually needs is already in two better places -- the panel
+        # says what would honour the choice, and ``_log_placement`` names the
+        # provider each stage really came back on, once per load.
+        logger.debug("Model Chain: the Voice Pipeline stage %s is set to a graphics card "
+                     "and the installed %s closure is the processor build, so it runs on "
+                     "the processor until that closure is installed", stage_id,
+                     stage_flavour(stage_id))
+        return (devices.PROVIDER_CPU, 0)
     except Exception:
         logger.debug("Model Chain: could not resolve the device for the stage %s",
                      stage_id, exc_info=True)
         return ("CPUExecutionProvider", 0)
+
+
+def _cuda_closure_installed(flavour: str) -> bool:
+    """Whether the closure on disk for one flavour is a CUDA build.
+
+    Reads the installed record directly rather than going through
+    :func:`runtime_current`, and the reason is a loop rather than a preference:
+    freshness asks :func:`required_accelerator`, which asks where the stages are
+    placed, which is the question this answer is part of. What is wanted here is
+    narrower anyway -- not "is this closure current" but "could it reach a card
+    at all" -- and a stale CUDA closure can still do that.
+    """
+    try:
+        record = _record(paths.pipeline_runtime_manifest(flavour))
+    except ValueError:
+        return False
+    return bool(record) and str(record.get("accelerator") or "cpu") == "cuda"
 
 
 def devices_for(stage_id: str) -> dict:
@@ -184,13 +221,32 @@ def devices_for(stage_id: str) -> dict:
     try:
         import mc_voice_device as devices
 
-        return devices.describe(component_of(stage_id))
+        found = dict(devices.describe(component_of(stage_id)))
+        # What the stage will *actually* be built on, which is not always what
+        # was chosen: a CUDA placement whose closure is not installed is
+        # answered with the processor until it is. The surface needs both -- the
+        # choice to show in the control, and the effect to explain underneath
+        # it -- and deriving the second in the surface would be a second copy of
+        # the rule.
+        effective = placement(stage_id)[0]
+        found["effective_provider"] = effective
+        found["accelerator"] = required_accelerator(stage_flavour(stage_id))
+        # Two facts rather than a provider name, because what the surface has to
+        # say depends on these and not on which library's vocabulary the choice
+        # is spelled in. A card reached by UUID has no adapter number that could
+        # be wrong; a choice that is not being honoured needs a sentence saying
+        # what would honour it.
+        found["pinned_by_uuid"] = bool(
+            str(found.get("provider") or "") == devices.PROVIDER_CUDA)
+        found["honoured"] = bool(str(found.get("provider") or "") == effective)
+        return found
     except Exception:
         logger.debug("Model Chain: could not describe the devices for the stage %s",
                      stage_id, exc_info=True)
         return {"component": component_of(stage_id), "placeable": False, "reason": "",
                 "device": "cpu", "devices": [], "provider": "CPUExecutionProvider",
-                "adapter": 0}
+                "adapter": 0, "effective_provider": "CPUExecutionProvider",
+                "accelerator": "cpu", "pinned_by_uuid": False, "honoured": True}
 
 
 INTRAOP_THREADS = 2
@@ -934,6 +990,31 @@ def stage_flavour(stage_id: str) -> str:
     return "torch" if str(stage_id or "") == "lavasr" else "onnx"
 
 
+def runtime_label(flavour: str = "onnx") -> str:
+    """One closure's name, in the words the settings page uses for it.
+
+    Here rather than in the surface because a refusal raised from this module
+    ends up in front of somebody too, and "the onnx runtime is not installed" is
+    a sentence about a directory name they have never seen.
+    """
+    return ("Voice Pipeline runtime" if str(flavour or "") == "onnx"
+            else "Voice Pipeline runtime, PyTorch build")
+
+
+def stages_flavour(stage_ids) -> str:
+    """The one closure a worker serving all of these stages has to run inside.
+
+    Torch as soon as any one of them needs it, because the torch closure
+    carries ONNX Runtime as well and the ONNX one carries no Torch. That
+    asymmetry is the whole reason there is still one worker rather than two: the
+    flavour is a property of the *set* loaded together, never of each stage on
+    its own, and asking it in one place is what stops a start path from choosing
+    an interpreter that one of the stages it is about to load cannot import.
+    """
+    return ("torch" if any(stage_flavour(name) == "torch" for name in stage_ids)
+            else "onnx")
+
+
 def stage_available(stage_id: str) -> bool:
     """Whether this build ships the stage at all, ignoring the machine.
 
@@ -1160,6 +1241,33 @@ def supported_platform() -> bool:
     return _platform_entry_or_none(found) is not None
 
 
+def runtime_bytes(flavour: str = "onnx", accelerator: str = "cpu") -> int:
+    """About how large one closure is, or ``0`` when nobody here knows yet.
+
+    Zero for a closure whose wheels are resolved from the publisher's index at
+    install time rather than pinned here, and that is the honest answer rather
+    than a missing one: the CUDA closure's torch is fetched from a host the
+    manifest-writing machine could not reach, so this repository has never seen
+    its size. Quoting the CPU closure's figure would have told somebody they
+    were 257 MB from a download of roughly ten times that.
+
+    The surface already draws zero as "It will be installed first" with no
+    number, which is the sentence that is true.
+    """
+    try:
+        found = manifest()
+        block = runtime_entry(found, flavour)
+    except (PipelineError, ValueError):
+        return 0
+    entry = _platform_entry_or_none(found, flavour, accelerator)
+    if entry is None:
+        return 0
+    if any(item.get("resolve") for item in (entry.get("artifacts") or ())
+           if isinstance(item, dict)):
+        return 0
+    return int(block.get("about_bytes") or 0)
+
+
 def runtime_closure_id(flavour: str = "onnx", accelerator: str = "cpu") -> str:
     """The freshness fingerprint of the enhancement runtime.
 
@@ -1267,6 +1375,87 @@ def runtime_python(flavour: str = "onnx") -> "Path | None":
     return None
 
 
+def required_accelerator(flavour: str = "onnx") -> str:
+    """Which build of one closure this machine's settings need: cpu or cuda.
+
+    Derived from where the stages have been *asked* to run, never declared, and
+    that is what makes a card one setting rather than a setting plus a download
+    somebody has to know to start. Placing LavaSR on a card makes the CUDA
+    closure the one this build wants for the torch flavour; the panel then reads
+    "needs updating" against the closure on disk and the next install builds the
+    right one.
+
+    Two guards, both of them refusals to promise something:
+
+    * only a CUDA placement counts. DirectML reaches its adapter through the
+      ONNX Runtime wheel that every closure already carries, so it never needs a
+      different one.
+    * only where this build has actually pinned a CUDA closure for this machine.
+      Otherwise the answer is cpu, the stage runs on the processor, and
+      :func:`mc_voice_device` is what says the card could not be honoured --
+      rather than an install that fails looking for a platform entry that was
+      never written.
+    """
+    name = str(flavour or "onnx")
+    if not runtime_installable(name, "cuda"):
+        return "cpu"
+    try:
+        import mc_voice_device as devices
+    except Exception:
+        logger.debug("Model Chain: could not resolve the Voice Pipeline's accelerator",
+                     exc_info=True)
+        return "cpu"
+    for spec in STAGES:
+        if stage_flavour(spec.id) != name:
+            continue
+        try:
+            if devices.provider_for(component_of(spec.id))[0] == devices.PROVIDER_CUDA:
+                return "cuda"
+        except Exception:
+            logger.debug("Model Chain: could not resolve the device for the stage %s",
+                         spec.id, exc_info=True)
+    return "cpu"
+
+
+def runtime_current(flavour: str = "onnx") -> bool:
+    """Whether the closure on disk for one flavour is the one this build pins.
+
+    A different question from :func:`runtime_python`, which answers only "is
+    there an interpreter here" -- what a promoted directory looks like from the
+    outside, and no claim at all about what was unpacked into it. Freshness is
+    the installed record's closure id against this build's, which is how
+    :func:`status` has always decided the word "Installed".
+
+    The two answers came apart once and cost somebody every install they tried.
+    A torch closure built before LavaSR's own package was added to it still had
+    an interpreter, so each install path's ``runtime_python(...) is None`` check
+    read "already there" and never rebuilt it -- and the self-test then died
+    importing a module that closure had never carried. Existence is not
+    freshness, and only one of the two is what a stage is about to be run in.
+
+    The accelerator is part of the question rather than a default, because a
+    CUDA closure is a different set of wheels under the same flavour. Both
+    directions matter and they are different failures: checking a CUDA
+    installation against the CPU fingerprint would call a current runtime stale
+    and rebuild 2.5 GB underneath every install, and checking a CPU installation
+    against whichever accelerator it happens to record would leave somebody who
+    has just moved a stage onto a card running in the closure that has no CUDA
+    in it -- a placement setting that silently did nothing, which is the exact
+    thing :mod:`mc_voice_device` refuses to ship.
+    """
+    try:
+        record = _record(paths.pipeline_runtime_manifest(flavour))
+    except ValueError:
+        return False
+    if not record or runtime_python(flavour) is None:
+        return False
+    accelerator = required_accelerator(flavour)
+    if str(record.get("accelerator") or "cpu") != accelerator:
+        return False
+    wanted = runtime_closure_id(flavour, accelerator)
+    return bool(wanted) and str(record.get("closure") or "") == wanted
+
+
 def runtime_installed() -> dict:
     return _record(paths.pipeline_runtime_manifest())
 
@@ -1330,10 +1519,31 @@ class Status:
     master_enabled: bool
     message: str
     download_bytes: int
+    runtime_flavours: tuple = ()
+    """Every closure this build knows, as ``(flavour, state, message)``.
+
+    The four fields above describe the ONNX closure and are left saying exactly
+    what they always said, because a surface that asks "is the Voice Pipeline
+    runtime installed" without naming a flavour is asking about that one. What
+    they could not express is a second closure, so a stage that runs in the
+    other one was drawn -- and started -- against the wrong answer.
+    """
 
     @property
     def runtime_ready(self) -> bool:
         return self.runtime_install_state == "installed"
+
+    def runtime_for(self, flavour: str) -> tuple:
+        """One closure's ``(state, message)``, by flavour.
+
+        Falls back to the ONNX fields for a snapshot assembled before this
+        existed, so a caller reading the flavour it has always read gets the
+        answer it has always got.
+        """
+        for name, state, message in self.runtime_flavours:
+            if name == flavour:
+                return (state, message)
+        return (self.runtime_install_state, self.runtime_message)
 
     def stage(self, stage_id: str) -> "StageStatus | None":
         for found in self.stages:
@@ -1363,31 +1573,16 @@ def status() -> Status:
     except PipelineError as exc:
         return Status(supported=False, pinned=False, runtime_install_state="error",
                       runtime_message=str(exc), runtime_closure_id="", stages=(),
-                      master_enabled=enabled(), message=str(exc), download_bytes=0)
+                      master_enabled=enabled(), message=str(exc), download_bytes=0,
+                      runtime_flavours=tuple((name, "error", str(exc))
+                                             for name in RUNTIME_FLAVOURS))
 
     is_pinned = pinned()
     supported = supported_platform()
     wanted_closure = runtime_closure_id()
-    record = runtime_installed()
-
-    if not runtime_installable():
-        runtime_state = "not_installed"
-        runtime_message = ("Not available — this build has not pinned a Voice Pipeline "
-                           "runtime closure for this operating system and Python version.")
-    elif not supported:
-        runtime_state = "not_installed"
-        runtime_message = ("Not available — this build has no pinned Voice Pipeline "
-                           "runtime for this operating system and Python version.")
-    elif not record:
-        runtime_state, runtime_message = "not_installed", "Not installed."
-    elif str(record.get("closure") or "") != wanted_closure:
-        runtime_state = "stale"
-        runtime_message = ("Installed by an older build and needs installing again.")
-    elif runtime_python() is None:
-        runtime_state = "corrupt"
-        runtime_message = "Installed, but its interpreter is missing. Reinstall it."
-    else:
-        runtime_state, runtime_message = "installed", "Installed."
+    runtime_state, runtime_message = _runtime_state("onnx", supported)
+    flavours = tuple((name,) + _runtime_state(name, supported)
+                     for name in RUNTIME_FLAVOURS)
 
     stages = []
     for spec in STAGES:
@@ -1433,7 +1628,53 @@ def status() -> Status:
         master_enabled=enabled(),
         message=runtime_message if runtime_state != "installed" else "Installed.",
         download_bytes=total,
+        runtime_flavours=flavours,
     )
+
+
+def _runtime_state(flavour: str, supported: bool) -> tuple:
+    """One closure's install state and the sentence that goes with it.
+
+    Lifted out of :func:`status` when the second flavour stopped being
+    hypothetical. It was written inline against the ONNX closure and read as
+    though there were only one runtime, so LavaSR -- which runs in the other one
+    -- was drawn against an answer that was never about it: a panel saying "not
+    installed yet" over a torch closure sitting installed on disk, and a worker
+    starting in the ONNX interpreter to load a PyTorch model.
+
+    Raises nothing, for the reason :func:`status` gives: a settings page that
+    could not be drawn because one optional closure's manifest was unreadable is
+    a settings page nobody can use to uninstall it.
+    """
+    try:
+        record = _record(paths.pipeline_runtime_manifest(flavour))
+    except ValueError:
+        return ("error", f"{flavour!r} is not a Voice Pipeline runtime flavour.")
+    accelerator = required_accelerator(flavour)
+    if not runtime_installable(flavour, accelerator):
+        return ("not_installed",
+                "Not available — this build has not pinned a Voice Pipeline runtime "
+                "closure for this operating system and Python version.")
+    if not supported:
+        return ("not_installed",
+                "Not available — this build has no pinned Voice Pipeline runtime for "
+                "this operating system and Python version.")
+    if not record:
+        return ("not_installed", "Not installed.")
+    # Against the accelerator this machine's settings need, so that moving a
+    # stage onto a card reads as "needs updating" on the row rather than as a
+    # placement that quietly did nothing.
+    if str(record.get("accelerator") or "cpu") != accelerator:
+        return ("stale", "Installed for a different processor and needs installing again."
+                if accelerator == "cpu" else
+                "This stage has been put on a graphics card, which needs the CUDA build "
+                "of this runtime.")
+    wanted = runtime_closure_id(flavour, accelerator)
+    if str(record.get("closure") or "") != wanted:
+        return ("stale", "Installed by an older build and needs installing again.")
+    if runtime_python(flavour) is None:
+        return ("corrupt", "Installed, but its interpreter is missing. Reinstall it.")
+    return ("installed", "Installed.")
 
 
 def pipeline_state(found: "Status | None" = None) -> str:
@@ -1628,8 +1869,16 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
     tick = models._ticker(KIND, on_progress)
     with models._claim(KIND, say, wanted):
         if wanted == "runtime":
-            _install_runtime(say, tick)
-        elif runtime_python(stage_flavour(wanted)) is None:
+            _install_runtime(say, tick, "onnx", required_accelerator("onnx"))
+        elif not runtime_current(stage_flavour(wanted)):
+            # Stale counts as missing here, and that is the correction rather
+            # than a nicety. This used to ask whether the interpreter file
+            # existed, which a closure built by an older build also answers yes
+            # to -- so a torch runtime pinned before LavaSR's own package was
+            # added to it was left exactly as it was, under every install of the
+            # stage that needs it. The freshness question is the one the panel
+            # was already asking and the one the self-test was already failing.
+            #
             # The runtime is not a second thing to install, it is the thing this
             # stage is proved inside: ``_install_stage`` ends by running the
             # model through a second of speech in the staged interpreter, and
@@ -1650,12 +1899,13 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
                     "This build has no pinned Voice Pipeline runtime for this operating "
                     "system and Python version, and the enhancement stages cannot run "
                     "without one.")
-            if not runtime_installable(flavour):
+            if not runtime_installable(flavour, required_accelerator(flavour)):
                 raise PipelineError(
                     "This build has not pinned a Voice Pipeline runtime closure for this "
                     "machine, and the enhancement stages cannot run without one.")
             say("The Voice Pipeline runtime has to be installed first \u2014 doing that now\u2026")
-            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE), flavour)
+            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE), flavour,
+                             required_accelerator(flavour))
             _install_stage(wanted, say, _span(tick, RUNTIME_SHARE, 1.0))
         else:
             _install_stage(wanted, say, tick)
@@ -1791,7 +2041,15 @@ def _artifacts(entries) -> list:
 def _install_runtime(say, tick, flavour: str = "onnx",
                      accelerator: str = "cpu") -> None:
     import mc_voice_models as models
+    import mc_voice_pipeline_runtime as runtime
 
+    # The same courtesy uninstall() pays, and now for the same reason. This is
+    # the function that replaces a closure directory, and since a *stale* one is
+    # rebuilt rather than skipped, that directory can be the one a worker is
+    # running inside. On Windows the rename then fails, ``_promote`` puts the
+    # old closure back and says so -- correct, and a refusal nobody needed. The
+    # worker is reloaded by the next turn that wants it.
+    runtime.stop("the Voice Pipeline runtime is being installed")
     entry = _platform_entry(flavour, accelerator)
     staging = paths.pipeline_staging_for(f"runtime-{flavour}-{accelerator}",
                                          uuid.uuid4().hex[:8])
@@ -1909,7 +2167,7 @@ def _staged_python(staging: Path) -> Path:
 def _install_stage(stage_id: str, say, tick) -> None:
     import mc_voice_models as models
 
-    if runtime_python() is None:
+    if not runtime_current(stage_flavour(stage_id)):
         raise PipelineError(
             "The Voice Pipeline runtime is not installed yet, and a model that cannot be "
             "run cannot be proved. Install the runtime first.")
@@ -1979,7 +2237,11 @@ def stage_local_installable(stage_id: str) -> bool:
     entry = found["stages"].get(str(stage_id or ""))
     if entry is None or not entry["required_paths"]:
         return False
-    return runtime_installable(stage_flavour(stage_id))
+    flavour = stage_flavour(stage_id)
+    # For the accelerator this stage's placement needs, not for the processor
+    # unconditionally: the button has to be enabled for the closure the install
+    # would actually go and build.
+    return runtime_installable(flavour, required_accelerator(flavour))
 
 
 def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> None:
@@ -2032,7 +2294,12 @@ def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> Non
 
     flavour = stage_flavour(stage_id)
     with models._claim(KIND, say, stage_id):
-        if runtime_python(flavour) is None:
+        if not runtime_current(flavour):
+            # Freshness rather than existence, for the reason install() gives:
+            # a closure this build has since added wheels to is a closure the
+            # stage cannot be proved in, and an interpreter sitting in the
+            # directory says nothing about which wheels are beside it.
+            #
             # Installed rather than described, for the reason install() gives at
             # length: telling somebody who pressed the only button on their
             # panel to go and press a different one is not an answer, and here
@@ -2040,13 +2307,14 @@ def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> Non
             # PyTorch closure -- the Runtime row builds the ONNX one -- so this
             # refusal named a button that does not exist and left the folder
             # path unreachable for the one stage that has no other way in.
-            if not runtime_installable(flavour):
+            if not runtime_installable(flavour, required_accelerator(flavour)):
                 raise PipelineError(
                     "This build has no Voice Pipeline runtime for this machine, and a "
                     "model that cannot be run cannot be proved.")
             say("The Voice Pipeline runtime has to be installed first \u2014 doing that "
                 "now\u2026")
-            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE), flavour)
+            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE), flavour,
+                             required_accelerator(flavour))
             tick = _span(tick, RUNTIME_SHARE, 1.0)
         logger.info("Model Chain: the Voice Pipeline is installing %s from %s",
                     stage_id, source)
@@ -2147,9 +2415,21 @@ def _self_test(stage_id: str, staging: Path) -> dict:
     # message somebody got would be about the model.
     config["provider"] = "CPUExecutionProvider"
     config["adapter"] = 0
-    interpreter = runtime_python()
+    # The stage's own closure, and this is the line the whole feature turned on.
+    # It used to take the default -- the ONNX one -- for every stage, so proving
+    # LavaSR meant starting an interpreter that has no Torch in it and reading
+    # "No module named 'torch'" back from a machine that had just downloaded
+    # 257 MB of it. The runtime a stage is proved in has to be the runtime it
+    # will be run in; there is no version of this check worth doing in the other
+    # one.
+    flavour = stage_flavour(stage_id)
+    interpreter = runtime_python(flavour)
     if interpreter is None:
-        raise PipelineError("The Voice Pipeline runtime is not installed.")
+        # Named the way the panel names it. "onnx" and "torch" are this module's
+        # words for two directories; the closure somebody is being told to
+        # install is a row they can see.
+        raise PipelineError(
+            f"The {runtime_label(flavour)} is not installed.")
     report = _run_staged(
         interpreter,
         [str(paths.pipeline_worker_script()), "--selftest",
@@ -2222,13 +2502,23 @@ def worker_environment() -> dict:
     worker is handed verified local directories and could not fetch a missing
     file if it wanted to.
 
-    The visible-device blanking stays, and it is worth being precise about what
-    it now means. CUDA, HIP and ROCm are still blanked unconditionally: nothing
-    here executes through any of them, and a library that would have found a
-    card through one of those variables has no business finding one. The
-    placement setting reaches a card through DirectML, which enumerates DXGI
-    adapters and does not read these -- so the two are not in tension, and the
-    blanking keeps meaning what it always did.
+    The visible-device blanking is where this stopped being unconditional, and
+    the reason it could be unconditional before was that nothing here executed
+    through CUDA. That was true while the only placement reached a card through
+    DirectML, which enumerates DXGI adapters and does not read these variables.
+    It stopped being true when LavaSR got a PyTorch backend: an empty
+    ``CUDA_VISIBLE_DEVICES`` is why ``torch.cuda.is_available()`` answered False
+    inside this worker no matter which closure was installed, so a CUDA closure
+    could have been built and the stage would still have refused the card.
+
+    So it is now a *mask* rather than a blank, and a mask is the stronger
+    statement of the two. On the processor it is still the empty string and the
+    worker can see no card at all. On a card it is that one card's UUID and
+    nothing else -- so the process cannot reach a second card even by accident,
+    and the ordinal inside it is always zero, which is what lets
+    :func:`mc_voice_device.provider_for` hand over a number it does not have to
+    guess. HIP and ROCm stay blanked outright: nothing here has ever executed
+    through either, and that has not changed.
 
     ``ONNXRUNTIME_FORCE_CPU`` is the one that had to become conditional. It is
     set while every stage is on the processor and dropped as soon as one is not,
@@ -2247,7 +2537,7 @@ def worker_environment() -> dict:
     budget = threads()
     on_a_card = any(placement(spec.id)[0] != "CPUExecutionProvider" for spec in STAGES)
     found = {
-        "CUDA_VISIBLE_DEVICES": "",
+        "CUDA_VISIBLE_DEVICES": cuda_mask(),
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "OMP_NUM_THREADS": str(budget),
@@ -2263,6 +2553,49 @@ def worker_environment() -> dict:
     if not on_a_card:
         found["ONNXRUNTIME_FORCE_CPU"] = "1"
     return found
+
+
+def cuda_mask() -> str:
+    """What ``CUDA_VISIBLE_DEVICES`` is set to for the enhancement worker.
+
+    The empty string whenever no stage is on a CUDA card, which is every machine
+    that has not changed the default and is the behaviour this worker has always
+    had. Otherwise the UUID of the one card that was chosen -- not an index, and
+    not a list.
+
+    A UUID because it is the only one of this machine's three device orderings
+    that cannot move underneath a stored setting (:mod:`mc_voice_device` opens
+    with why). One entry because a worker that can see one card is a worker that
+    cannot land on another one, and because it makes the ordinal inside the
+    process zero by construction rather than by a mapping somebody had to trust.
+
+    Only a CUDA placement counts. A DirectML placement reaches its adapter
+    through DXGI and reads none of this, so letting it un-blank the variable
+    would hand a card to a process that was never asked to have one.
+    """
+    try:
+        import mc_voice_device as devices
+    except Exception:
+        logger.debug("Model Chain: could not resolve the Voice Pipeline's CUDA mask",
+                     exc_info=True)
+        return ""
+    for spec in STAGES:
+        try:
+            # Through :func:`placement` rather than straight to the device
+            # module, so the mask and the provider the stage is built on cannot
+            # disagree. A stage placed on a card whose closure is not installed
+            # is answered there with the processor, and this must not then hand
+            # that process a card it was told it does not have.
+            if placement(spec.id)[0] != devices.PROVIDER_CUDA:
+                continue
+            found = devices.uuid_for(devices.placement(component_of(spec.id)))
+        except Exception:
+            logger.debug("Model Chain: could not resolve the card for the stage %s",
+                         spec.id, exc_info=True)
+            continue
+        if found:
+            return found
+    return ""
 
 
 def stage_paths() -> dict:

@@ -233,8 +233,16 @@ def ensure_started(stages=()) -> None:
         if not wanted:
             raise PipelineRuntimeError("No Voice Pipeline stage was selected.")
         state = pipeline.status()
-        if not state.runtime_ready:
-            raise PipelineRuntimeError(state.runtime_message)
+        # The closure these stages need, which is not always the one the plain
+        # "is the runtime ready" question answers: that one is about the ONNX
+        # closure, and LavaSR runs in the PyTorch one. Asking it of the ONNX
+        # runtime and then starting the ONNX interpreter is how a stage that
+        # installed cleanly still failed to load, with an ImportError for the
+        # library its own closure carries.
+        flavour = pipeline.stages_flavour(wanted)
+        runtime_state, runtime_message = state.runtime_for(flavour)
+        if runtime_state != "installed":
+            raise PipelineRuntimeError(runtime_message)
         for name in wanted:
             held = state.stage(name)
             if held is None or held.install_state != "installed":
@@ -245,7 +253,7 @@ def ensure_started(stages=()) -> None:
             raise PipelineRuntimeError(
                 "The Voice Pipeline has no tested process-containment mechanism on this "
                 "platform, so it will not start a process here.")
-        interpreter = pipeline.runtime_python()
+        interpreter = pipeline.runtime_python(flavour)
         if interpreter is None:
             raise PipelineRuntimeError("The Voice Pipeline runtime is not installed.")
 

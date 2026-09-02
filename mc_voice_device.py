@@ -1,13 +1,19 @@
 """Where a voice component runs, and the truth about where it can.
 
 Voice Chat has six things that execute: three speech engines, the recording
-cleanup, and the two enhancement stages. Until now every one of them ran on the
-processor and said so -- each closure pins a CPU wheel, and each worker's
-environment sets ``CUDA_VISIBLE_DEVICES`` to the empty string so that a library
-which would have found a card finds nothing. That was a deliberate Model Chain
-V1 decision and it is still the default, because a voice engine that quietly
-took VRAM would be a voice engine competing with the image generation nobody
-asked it to compete with.
+cleanup, and the two enhancement stages. Every one of them runs on the processor
+unless somebody says otherwise -- the speech closures pin CPU wheels, and the
+enhancement worker's environment sets ``CUDA_VISIBLE_DEVICES`` to the empty
+string so that a library which would have found a card finds nothing. That was a
+deliberate Model Chain V1 decision and it is still the *default*, because a
+voice engine that quietly took VRAM would be a voice engine competing with the
+image generation nobody asked it to compete with.
+
+What changed is that the blanking became a mask. An enhancement stage that has
+been put on a card is handed that one card's UUID rather than an empty string,
+because an environment that hides every card also hides the one that was asked
+for -- which is how a CUDA closure could be installed and the stage would still
+report that PyTorch could not see a card.
 
 This module is where that stops being a constant and becomes a choice, for the
 components whose runtime can actually honour one. It answers three questions
@@ -50,6 +56,20 @@ ONNX Runtime does not expose one; what is reported is enough to tell a card from
 the processor, and choosing the other entry is what tells one card from the
 other.) An assumption somebody can see and correct in one click is a different
 thing from a mapping presented as fact.
+
+CUDA is the one that *is* solved, and the difference is worth being clear about
+because the two look alike from the panel. ``CUDA_VISIBLE_DEVICES`` accepts a
+UUID, so a PyTorch stage is pinned to a card by the same identifier that is
+stored for it -- no index is translated, nothing is assumed, and the ordinal
+inside the masked process is zero because it is the only device there. That is
+why :func:`provider_for` answers a CUDA placement with adapter zero and why
+:func:`uuid_for` exists at all, and it is why the panel's "if the wrong card
+lights up" advice is printed under the DirectML stage and not under this one:
+there is no wrong card for it to light up.
+
+LavaSR used to carry :data:`PROVIDER_DIRECTML` despite running on PyTorch, which
+put a DXGI number where a CUDA ordinal was read. That is the defect this
+distinction exists to close.
 
 Placement is not memory management
 ----------------------------------
@@ -111,6 +131,21 @@ Named here rather than in the worker because the settings surface has to be able
 to say which one a choice means without importing anything from the isolated
 runtime -- which it could not do anyway, that being the point of the runtime
 being isolated.
+"""
+
+PROVIDER_CUDA = "CUDAExecutionProvider"
+"""Where a *PyTorch* stage runs, and it is here for a correctness reason.
+
+LavaSR is not an ONNX graph. Giving it :data:`PROVIDER_DIRECTML` said it was
+one, and the damage was not cosmetic: the number that goes with DirectML is a
+DXGI adapter index, the number PyTorch wants is a CUDA ordinal, and this
+module's own docstring is about how those two orderings do not agree. A stage
+told "card 1" in one vocabulary and asked to honour it in the other is a stage
+that runs on whichever card happens to be there.
+
+Separating the two also lets :func:`mc_voice_pipeline.worker_environment` tell a
+DirectML placement from a CUDA one, which is what decides whether the worker is
+allowed to see a card through ``CUDA_VISIBLE_DEVICES`` at all.
 """
 
 
@@ -175,7 +210,7 @@ PLACEMENTS = (
     Placement("voice-pipeline-dpdfnet", "DPDFNet",
               option=OPT_DEVICE_DPDFNET, provider=PROVIDER_DIRECTML),
     Placement("voice-pipeline-lavasr", "LavaSR",
-              option=OPT_DEVICE_LAVASR, provider=PROVIDER_DIRECTML),
+              option=OPT_DEVICE_LAVASR, provider=PROVIDER_CUDA),
     Placement("tts-pocket", "PocketTTS", reason=_TORCH_REASON),
     Placement("tts-sopro", "Sopro V2", reason=_TORCH_REASON),
     Placement("tts-kokoro", "Kokoro", reason=_SHERPA_REASON),
@@ -356,6 +391,23 @@ def adapter_for(token: str) -> int:
     return max(0, int(found.get("adapter", 0)))
 
 
+def uuid_for(token: str) -> str:
+    """The card's UUID for a token, or ``""`` for the processor and the unknown.
+
+    What :func:`adapter_for` could not be. A DXGI adapter number has to be
+    guessed from an nvidia-smi index because nothing enumerates the mapping; a
+    *CUDA* device does not, because ``CUDA_VISIBLE_DEVICES`` accepts the UUID
+    itself. So a PyTorch stage is pinned to a card by name rather than by
+    position, and the three-namespace problem this module opens with simply does
+    not arise for it -- the same trick :mod:`mc_llm_setup` already plays when it
+    pins llama-server to ``GPU-...`` rather than to a slot.
+    """
+    found = card(token)
+    if found is None or found["kind"] != "gpu":
+        return ""
+    return str(found.get("uuid") or "")
+
+
 # --------------------------------------------------------------------------- #
 # What the user chose
 # --------------------------------------------------------------------------- #
@@ -444,6 +496,15 @@ def provider_for(component: str) -> tuple:
     token = placement(component)
     if token == CPU:
         return (PROVIDER_CPU, 0)
+    if spec.provider == PROVIDER_CUDA:
+        # Zero, and not as a fallback. The worker's environment is masked to
+        # this one card by UUID (see :func:`uuid_for` and
+        # :func:`mc_voice_pipeline.worker_environment`), so inside that process
+        # there is exactly one CUDA device and it is always ordinal zero.
+        # Passing the nvidia-smi index instead would be passing a number from
+        # the unmasked namespace into a masked one -- right only on the card
+        # that happens to be first, which is the bug this pair exists to avoid.
+        return (PROVIDER_CUDA, 0)
     return (spec.provider, adapter_for(token))
 
 

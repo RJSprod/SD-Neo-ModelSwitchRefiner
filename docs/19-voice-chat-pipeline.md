@@ -161,7 +161,7 @@ entirely, and it is not about audio.
 | Package | `dpdfnet` 0.6.0 on PyPI | none published |
 | Dependencies | pinnable: onnxruntime, librosa, numpy | Torch, torchaudio, and a `vocos` **fork on a git branch** |
 | Model | HF `Ceva-IP/DPDFNet`, resolved at install | HF `YatharthS/LavaSR` |
-| **Installable** | **yes** | no |
+| **Installable** | **yes**, managed download | **yes**, from a folder you fill |
 
 DPDFNet installs and runs. Its closure is pinned byte for byte — 32 wheels
 resolved from PyPI for `windows-x86_64-cp313`, each one hashed and checked
@@ -169,11 +169,29 @@ against the digest pypi.org publishes for it — and the streaming path is
 upstream's own `StreamEnhancer`, handed an explicit `onnx_path` so that
 `resolve_model()` short-circuits every search and every download.
 
-LavaSR does not, and the reason is a dependency closure rather than a doubt
-about the audio: there is no wheel, and `vocos @ git+https://…@matcha` is a
-branch of a fork, which is not something this repository can pin the way it pins
-everything else. Its adapter is written and tested against stand-in backends;
-what is missing is something a release could stand behind.
+LavaSR gets there by a different route, and the difference is worth keeping in
+view. Its **code** is now in the closure: LavaSR, the `vocos` fork and the
+`encodec` that fork imports publish source and no wheel, so all three are
+installed by lifting one named package directory out of an archive — no build
+step, no `setup.py` executed. `encodec` is pinned by digest because it is on
+PyPI; the two GitHub tarballs are pinned to immutable commits and arrive against
+the digest codeload serves.
+
+Its **weights** are still not something this repository can offer as a managed
+download, so the way in is the folder install: three files named on the panel,
+copied, hashed, and proved by the same self-test every other model passes. The
+panel says plainly that this extension has never seen those bytes and makes no
+claim about them.
+
+What that leaves is one rule with teeth, and it is the rule this feature learned
+the hard way: **a stage is proved in the closure it will be run in.** LavaSR
+lives in the PyTorch closure and DPDFNet in the ONNX one, and for a while every
+install path took the ONNX interpreter by default — so proving LavaSR meant
+starting a Python that had no Torch in it, and the sentence somebody got named
+the model rather than the interpreter. Existence is not freshness either: an
+interpreter sitting in a directory says nothing about which wheels are beside
+it, which is why the installers ask whether the closure on disk is the one this
+build pins rather than whether a file is there.
 
 ### Provisional pins, and why they are not a loophole
 
@@ -510,6 +528,28 @@ panel says the numbering may not agree and that choosing the other entry is the
 fix, and the worker reports the provider each stage actually loaded on. An
 assumption somebody can see and correct in one click is a different thing from a
 mapping presented as fact.
+
+**CUDA is the case where there is no assumption to make.** That paragraph is
+about DirectML, and LavaSR is not a DirectML stage — it runs on PyTorch, and
+`CUDA_VISIBLE_DEVICES` accepts a UUID. So the card is pinned by the same
+identifier that is stored for it, the worker is masked to that one card, and the
+ordinal inside it is zero because it is the only device there. No number is
+translated and there is no wrong card to light up, which is why the panel prints
+the numbering caveat under DPDFNet and a different sentence under LavaSR.
+Carrying `DmlExecutionProvider` on a PyTorch stage — putting a DXGI index where
+a CUDA ordinal was read — is the defect that made the distinction necessary.
+
+**A card is a closure, and the panel says which one.** Placing LavaSR on a card
+does not change a flag inside the runtime it already has: the CPU closure pins
+`torch` from PyPI, which for Windows is the CPU build. The card needs the cu128
+closure, whose `torch` and `torchaudio` are resolved from
+`download.pytorch.org` at install time because the machine that wrote this
+manifest could not reach that host. One closure serves both an Ampere card and a
+Blackwell one — cu128 carries `sm_86` and `sm_120` — so unlike llama.cpp there
+is no per-generation split here. Until it is installed the stage runs on the
+processor and the panel says so rather than letting the dropdown appear to do
+nothing; the size is not quoted, because a closure whose wheels are resolved
+from a publisher's index is one whose size this repository has never seen.
 
 **A placement is not negotiable, and it is not a claim on somebody else's
 VRAM.** The enhancement runs in its own process, so what it takes is invisible

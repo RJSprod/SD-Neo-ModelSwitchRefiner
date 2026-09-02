@@ -1208,3 +1208,71 @@ class TestAFailedInstallSaysSoWhereItHappened:
         drawn = mc_voice_ui.pipeline_stage_detail("dpdfnet")
         assert "Requires" in drawn and "Voice Pipeline runtime" in drawn
 
+    def test_a_stage_panel_names_the_closure_that_stage_actually_needs(self):
+        """LavaSR's row is about the PyTorch closure, not the ONNX one."""
+        drawn = mc_voice_ui.pipeline_stage_detail("lavasr")
+        assert "Voice Pipeline runtime, PyTorch build" in drawn
+
+
+class TestTheCardRowSaysWhatIsTrueOfTheStageItIsUnder:
+    """One note was printed for both stages and was true of only one.
+
+    The card-numbering caveat is DirectML's: its adapter number is a DXGI index
+    nothing enumerates, so the honest advice is "if the wrong card lights up,
+    choose the other entry". LavaSR is pinned to its card by UUID and has no
+    adapter number at all, so printing that under it would send somebody
+    switching cards to fix a problem they do not have.
+    """
+
+    @staticmethod
+    def _describe(monkeypatch, **overrides):
+        import mc_voice_pipeline as pipeline
+        found = {"component": "voice-pipeline-lavasr", "placeable": True, "reason": "",
+                 "device": "gpu:GPU-1234", "provider": "CUDAExecutionProvider",
+                 "adapter": 0, "effective_provider": "CUDAExecutionProvider",
+                 "accelerator": "cuda", "pinned_by_uuid": True, "honoured": True,
+                 "devices": [{"token": "cpu", "label": "Processor"},
+                             {"token": "gpu:GPU-1234", "label": "GPU 1 — RTX 3090"}]}
+        found.update(overrides)
+        monkeypatch.setattr(pipeline, "devices_for", lambda stage_id: dict(found))
+        monkeypatch.setattr(pipeline, "stage_available", lambda stage_id: True)
+        return found
+
+    def test_a_uuid_pinned_card_is_not_told_it_might_be_the_wrong_one(self, monkeypatch):
+        self._describe(monkeypatch)
+        drawn = mc_voice_ui.pipeline_stage_detail("lavasr")
+        assert "pinned by its own identifier" in drawn
+        assert "choose the other entry" not in drawn
+
+    def test_a_directml_card_keeps_the_caveat_that_is_true_of_it(self, monkeypatch):
+        self._describe(monkeypatch, provider="DmlExecutionProvider",
+                       effective_provider="DmlExecutionProvider",
+                       accelerator="cpu", pinned_by_uuid=False)
+        drawn = mc_voice_ui.pipeline_stage_detail("lavasr")
+        assert "choose the other entry" in drawn
+        assert "pinned by its own identifier" not in drawn
+
+    def test_a_choice_that_is_not_being_honoured_says_what_would_honour_it(
+            self, monkeypatch):
+        """The dropdown must not look like a control that did nothing."""
+        self._describe(monkeypatch, effective_provider="CPUExecutionProvider",
+                       honoured=False)
+        drawn = mc_voice_ui.pipeline_stage_detail("lavasr")
+        assert "until the CUDA one is installed" in drawn
+        assert "the setting is already saved" in drawn
+
+    def test_a_machine_with_no_cuda_closure_is_told_that_rather_than_to_wait(
+            self, monkeypatch):
+        self._describe(monkeypatch, effective_provider="CPUExecutionProvider",
+                       accelerator="cpu", honoured=False)
+        drawn = mc_voice_ui.pipeline_stage_detail("lavasr")
+        assert "no CUDA runtime" in drawn
+        assert "until the CUDA one is installed" not in drawn
+
+    def test_an_honoured_choice_says_nothing_extra(self, monkeypatch):
+        """Guard, so the three above are not passing on a note always printed."""
+        self._describe(monkeypatch)
+        drawn = mc_voice_ui.pipeline_stage_detail("lavasr")
+        assert "no CUDA runtime" not in drawn
+        assert "until the CUDA one is installed" not in drawn
+

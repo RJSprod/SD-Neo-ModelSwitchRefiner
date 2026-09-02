@@ -1759,7 +1759,7 @@ def _pipeline_device_row(stage_id: str) -> str:
         f'<span class="mc-voice-pipeline-name">Runs on</span>'
         f'<select data-mc-voice-pipeline-device="{ui.escape(stage_id)}" '
         f'aria-label="Where this stage runs">{options}</select>'
-        f'{missing}'
+        f'{missing}{_stage_card_note(stage_id, found)}'
         f'<span class="mc-voice-pipeline-what">Which device this stage runs on. A card '
         f'chosen here keeps its place: nothing gives it back once the stage has loaded, '
         f'and image generation and the language model size themselves against whatever '
@@ -1767,12 +1767,55 @@ def _pipeline_device_row(stage_id: str) -> str:
         f'small tenant they cannot evict is one they simply work around. What it does '
         f'not do is push anything out: if the card is already full when the stage tries '
         f'to load, that reply is spoken unenhanced and the log says why. Graphics cards '
-        f'are numbered differently by different parts of Windows, so if '
-        f'the wrong one lights up, choose the other entry — the log’s '
-        f'"loaded {ui.escape(stage_id)} on" line says which provider actually answered. '
+        f'{_numbering_note(stage_id, found)} '
         f'Takes effect on the next reply \u2014 a reply already being spoken finishes '
         f'where it started.</span>'
         f'</label>')
+
+
+def _numbering_note(stage_id: str, found: dict) -> str:
+    """The card-numbering caveat, for the stage it is actually true of.
+
+    It was written for DirectML and printed for both stages, and it stopped
+    being true of one of them. LavaSR runs on PyTorch and is pinned to its card
+    by UUID through ``CUDA_VISIBLE_DEVICES``, so there is no adapter number to
+    be wrong and nothing to correct by choosing the other entry -- telling
+    somebody otherwise would send them switching cards to fix a problem they do
+    not have.
+    """
+    if found.get("pinned_by_uuid"):
+        return ("The card is pinned by its own identifier rather than by a number, so "
+                "the one that lights up is the one chosen here whatever Windows calls "
+                "it — the log’s "
+                f"“loaded {ui.escape(stage_id)} on” line says where it landed.")
+    return ("Graphics cards are numbered differently by different parts of Windows, so "
+            "if the wrong one lights up, choose the other entry — the log’s "
+            f"“loaded {ui.escape(stage_id)} on” line says which provider "
+            "actually answered.")
+
+
+def _stage_card_note(stage_id: str, found: dict) -> str:
+    """What is standing between a chosen card and the stage running on it.
+
+    Only ever printed when the two disagree, which is a real state and a
+    temporary one: a PyTorch stage moved onto a card needs a closure with CUDA
+    in it, that closure is 2.5 GB, and it is fetched by the same Install button
+    that is already on this panel. Saying so here means the dropdown is not a
+    control that appeared to do nothing.
+    """
+    if not found.get("pinned_by_uuid") or found.get("honoured", True):
+        return ""
+    if str(found.get("accelerator") or "cpu") != "cuda":
+        # Chosen, and this build has no CUDA closure pinned for this machine at
+        # all -- so it is not a download away, it is not available.
+        return ('<span class="mc-voice-pipeline-what">This build has no CUDA runtime '
+                'pinned for this operating system and Python version, so this stage '
+                'runs on the processor. The setting is kept.</span>')
+    return ('<span class="mc-voice-pipeline-what">This stage runs on PyTorch, and the '
+            'runtime installed for it is the processor build — so it is on the '
+            'processor until the CUDA one is installed. Press Install on this panel to '
+            'fetch it; the setting is already saved and takes effect as soon as it '
+            'is.</span>')
 
 
 def _engine_device_note(component: str) -> str:
@@ -1837,12 +1880,19 @@ def pipeline_runtime_detail() -> str:
         installed=found.runtime_ready)
 
 
-def _runtime_bytes(flavour: str = "onnx") -> int:
+def _runtime_bytes(flavour: str = "onnx", accelerator: str = "cpu") -> int:
+    """How large the closure this stage needs is, or zero when nobody knows.
+
+    Per accelerator, because the CUDA closure is roughly ten times the CPU one
+    and its wheels come from a host this repository could not reach to pin. See
+    :func:`mc_voice_pipeline.runtime_bytes`: zero there means "not known in
+    advance", and the caller draws that as a sentence with no number in it
+    rather than as the other closure's figure.
+    """
     import mc_voice_pipeline as pipeline
 
     try:
-        return int(pipeline.runtime_entry(pipeline.manifest(), flavour)
-                   .get("about_bytes") or 0)
+        return int(pipeline.runtime_bytes(flavour, accelerator))
     except Exception:
         return 0
 
@@ -1937,18 +1987,33 @@ def pipeline_stage_detail(stage_id: str) -> str:
     # there were one. LavaSR needs the PyTorch one; quoting it the ONNX one's
     # size told the user they were 132 MB from a stage that actually needs 264
     # and a different interpreter.
+    #
+    # Its *state* has to come from that closure too, which is the half that was
+    # still missing. ``found.runtime_ready`` answers for the ONNX closure, so
+    # pairing it with ``flavour == "onnx"`` left the PyTorch row hardcoded to
+    # "not installed yet" -- it said that over a torch closure sitting installed
+    # on disk, telling somebody to download 257 MB they already had while the
+    # real fault was somewhere this row could not see.
     flavour = pipeline.stage_flavour(stage_id)
-    runtime_ready = found.runtime_ready and flavour == "onnx"
-    size = _runtime_bytes(flavour)
-    runtime_label = ("Voice Pipeline runtime" if flavour == "onnx"
-                     else "Voice Pipeline runtime, PyTorch build")
+    runtime_state = found.runtime_for(flavour)[0]
+    runtime_ready = runtime_state == "installed"
+    # Per accelerator, because moving this stage onto a card changes both which
+    # closure the row is talking about and how large it is.
+    size = _runtime_bytes(flavour, pipeline.required_accelerator(flavour))
+    runtime_label = pipeline.runtime_label(flavour)
     requires = ("Installed." if runtime_ready
                 else (f"It will be installed first \u2014 about "
                       f"{models._bytes_label(size)} more."
                       if size else "It will be installed first."))
+    # "Stale" and "never installed" both mean the same thing to this button --
+    # it installs the closure either way -- but they do not mean the same thing
+    # to somebody reading the row, and only one of them explains why a stage
+    # that used to work stopped.
+    runtime_note = (" \u2014 not installed yet" if runtime_state == "not_installed"
+                    else "" if runtime_ready
+                    else f" \u2014 {_state_label(runtime_state).casefold()}")
     rows = [("Purpose", purpose.get(stage_id, spec.summary), ""),
-            ("Requires", runtime_label
-             + ("" if runtime_ready else " \u2014 not installed yet"), requires),
+            ("Requires", runtime_label + runtime_note, requires),
             ("Installation", _state_label(held.install_state if held else "not_installed"),
              held.message if held else ""),
             ("Runtime", _state_label("loaded" if stage_id in live["loaded_stages"]
