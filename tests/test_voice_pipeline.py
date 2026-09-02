@@ -1148,6 +1148,94 @@ class TestTheStreamResampler:
         assert found.transparent
         assert found.feed([0.1, 0.2]) == [0.1, 0.2]
 
+    # -- the taps, which were being recomputed three million times a second -- #
+    #
+    # The measurement that produced these: the 24 kHz to 48 kHz pair around
+    # DPDFNet cost a real-time factor of 2.0 in this class alone, before a
+    # single inference ran, and 63% of that was `sin` and `cos` inside the tap
+    # kernel. The weights depend only on where an output sample falls between
+    # two input samples, and at 24 kHz to 48 kHz there are two such places, so
+    # every one of those calls after the first two was recomputing a number the
+    # process already had. That is also why moving the stage to a graphics card
+    # measured no difference: none of this arithmetic is in the ONNX graph.
+
+    def test_the_taps_are_the_ones_it_replaced(self):
+        """The kernel written out longhand, per output sample, as it used to be.
+
+        This is the test that matters. A resampler that is fast and subtly
+        different is worse than a slow one -- it would change every reply this
+        feature has ever produced, quietly, and no other test here compares
+        against the arithmetic itself rather than against another run of it.
+        """
+        source = speech(1200)
+        found = worker.StreamResampler(24000, 48000)
+        got = list(found.feed(source)) + list(found.flush())
+
+        half, cutoff = found._half, found._cutoff
+        last = len(source) - 1
+        wanted = []
+        for index in range(len(got)):
+            number = index * 24000
+            centre = number // 48000
+            position = centre + (number % 48000) / 48000.0
+            total = weight = 0.0
+            for offset in range(centre - half + 1, centre + half + 1):
+                distance = (position - offset) * cutoff
+                tap = worker._sinc(distance) * worker._blackman(distance, half)
+                if tap == 0.0:
+                    continue
+                taken = 0 if offset < 0 else (last if offset > last else offset)
+                total += source[taken] * tap
+                weight += tap
+            wanted.append(total / weight if weight else 0.0)
+
+        assert len(got) == len(wanted) == 2400
+        assert max(abs(a - b) for a, b in zip(got, wanted)) < 1e-12
+
+    def test_a_kernel_is_built_once_for_each_place_a_sample_can_land(self):
+        """Two phases going up, one coming down, for a whole reply."""
+        up = worker.StreamResampler(24000, 48000)
+        down = worker.StreamResampler(48000, 24000)
+        native = up.feed(speech(24000))
+        down.feed(native)
+
+        assert up._phases == 2 and len(up._kernels) == 2
+        assert down._phases == 1 and len(down._kernels) == 1
+
+    def test_an_awkward_pair_is_still_a_handful(self):
+        """44.1 kHz to 48 kHz shares a factor of 300, so it repeats every 160
+        output samples rather than never."""
+        found = worker.StreamResampler(44100, 48000)
+        found.feed(speech(44100, rate=44100))
+
+        assert found._phases == 160
+        assert len(found._kernels) <= 160
+
+    def test_a_pair_with_no_common_factor_keeps_nothing(self):
+        """Where every output sample lands somewhere new, a cache is a memory
+        leak wearing an optimisation's clothes. The bound is the phase count
+        itself, so this is a fact about the rates rather than a guess."""
+        found = worker.StreamResampler(44101, 48000)
+        found.feed(speech(4410, rate=44101))
+
+        assert found._phases > worker.MAX_RESAMPLE_PHASES
+        assert found._kernels == {}
+
+    def test_the_two_arithmetics_agree(self):
+        """NumPy carries the interior of a turn and plain Python carries its two
+        ends, where the kernel reaches past audio that does not exist. Both are
+        live in one reply, so they have to be the same filter."""
+        numpy_module = pytest.importorskip("numpy")
+        source = speech(2400)
+
+        plain = worker.StreamResampler(24000, 48000)
+        fast = worker.StreamResampler(24000, 48000, numpy_module)
+        was = list(plain.feed(source)) + list(plain.flush())
+        now = list(fast.feed(source)) + list(fast.flush())
+
+        assert len(was) == len(now) == 4800
+        assert max(abs(a - b) for a, b in zip(was, now)) < 1e-12
+
 
 class TestTheEngineSpelling:
     def test_the_pocket_runtime_and_the_registry_agree_on_the_name(self):
