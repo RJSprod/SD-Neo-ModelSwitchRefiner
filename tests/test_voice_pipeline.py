@@ -1290,8 +1290,12 @@ class TestTheManifestIsATrustRoot:
         assert contract["backend_input_rate"] == 16000
         assert contract["output_rate"] == 48000
         assert contract["denoise"] is False
-        # Still unmeasured, and still what a release would wait for.
-        assert not contract.get("analysis_ms")
+        # The window is here now, and it was not a release waiting on taste: it
+        # is the length upstream's own merge needs. See
+        # TestTheAnalysisWindowIsAMeasurementAndNotABlank for the arithmetic --
+        # a block too short moves the crossover instead of just softening it.
+        assert contract["analysis_ms"] == 250
+        assert contract["context_ms"] == 50
         assert pipeline.pinned() is False
 
     def test_the_manifest_reads_and_describes_both_stages(self):
@@ -3552,6 +3556,103 @@ class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
 
         assert pipeline.placement("lavasr") == (devices.PROVIDER_CUDA, 0)
         assert pipeline.cuda_mask() == self._card().uuid
+
+
+class TestTheAnalysisWindowIsAMeasurementAndNotABlank:
+    """Two nulls in a manifest were the last thing standing in front of LavaSR.
+
+    ``LavaStage.__init__`` refuses ``analysis_ms <= 0`` rather than defaulting,
+    which is right -- a window guessed in the worker would be a number nobody
+    re-measured surviving into a release. What was wrong is that nothing ever
+    supplied one, so the stage loaded its model, spent seven seconds doing it,
+    and then refused on a value read before any of that.
+
+    The window is not a free parameter either, and that is why it can be filled
+    in here rather than only by ear. Upstream's FastLRMerge rffts the *whole*
+    block and fades over a fixed bin count, so the crossover's width in Hz falls
+    out of the window length: too short and the fade clips at DC, which is a
+    merge doing something other than what it says.
+    """
+
+    @staticmethod
+    def _contract():
+        return dict(pipeline.stage_config("lavasr"))
+
+    def test_the_worker_is_given_a_window_rather_than_a_null(self):
+        found = self._contract()
+        assert int(found["analysis_ms"]) > 0, (
+            "a null here is what the stage refuses, after loading the model to find out")
+        assert int(found["context_ms"]) > 0
+
+    def test_the_window_clears_the_floor_its_own_merge_imposes(self):
+        """Below this the fade starts at DC and the low band is not preserved.
+
+        cutoff_bin is ``(8000 / 24000) * n_bins`` and the fade is 1024 bins
+        wide, so the transition only sits *around* the cutoff while
+        ``cutoff_bin >= 512`` -- which is n_bins >= 1536, a block of 3070
+        samples at 48 kHz, about 64 ms.
+        """
+        found = self._contract()
+        block_ms = int(found["analysis_ms"]) + 2 * int(found["context_ms"])
+        n_bins = (block_ms * 48) // 2 + 1
+        cutoff_bin = int((8000 / 24000) * n_bins)
+
+        assert cutoff_bin >= 512, (
+            f"a {block_ms} ms block gives {n_bins} bins, so the 1024-bin fade clips at "
+            f"DC and the merge is not the crossover it claims to be")
+
+    def test_the_crossover_lands_around_the_cutoff_and_not_over_the_speech(self):
+        """The floor is not an operating point. This is the quality claim."""
+        found = self._contract()
+        block_ms = int(found["analysis_ms"]) + 2 * int(found["context_ms"])
+        n_bins = (block_ms * 48) // 2 + 1
+        hz = 24000 / n_bins
+        cutoff_bin = int((8000 / 24000) * n_bins)
+        low = max(0, cutoff_bin - 512) * hz
+
+        assert low > 4000, (
+            f"the transition starts at {low:.0f} Hz, which blends the original into the "
+            f"upsampled band well below the 8 kHz cutoff it is supposed to sit on")
+
+    def test_the_latency_it_buys_fits_inside_the_browser_s_start_buffer(self):
+        """first_output_samples is analysis + context, and it is paid once."""
+        found = self._contract()
+        latency_ms = int(found["analysis_ms"]) + int(found["context_ms"])
+        assert latency_ms <= 700, (
+            f"{latency_ms} ms of intrinsic latency is more than the 0.7 s the browser "
+            f"already buffers before it starts, so it would be heard as a slower reply")
+
+
+class TestTheInternalDenoiserIsOffBecauseThePanelSaysItIs:
+    """The panel stated a fact the worker contradicted.
+
+    "Internal denoise: off — DPDFNet is the cleanup stage" is printed on the
+    LavaSR row and ``"denoise": false`` is in the manifest contract, while
+    ``enhance()`` was called with ``denoise=True`` regardless. So LavaSR's own
+    denoiser ran on every window over audio DPDFNet had already cleaned, at the
+    cost of a second inference per window, and nothing on screen said so.
+    """
+
+    def test_the_contract_says_off(self):
+        assert pipeline.stage_config("lavasr")["denoise"] is False
+
+    def test_the_backend_reads_the_flag_rather_than_hardcoding_it(self):
+        import inspect
+
+        from pipeline_worker import worker
+
+        source = inspect.getsource(worker._LavaBackend)
+
+        assert 'self._denoise = bool(config.get("denoise"))' in source
+        # Code lines only. The comment above the call names the old spelling to
+        # explain why it is gone, and a test that could not tell those apart
+        # would be a test nobody can leave that comment in front of.
+        called = [line.strip() for line in source.splitlines()
+                  if not line.strip().startswith("#")
+                  and ("self._model.enhance(" in line or "denoise=" in line)]
+        assert any("denoise=self._denoise" in line for line in called), called
+        assert not any("denoise=True" in line for line in called), (
+            f"a hardcoded True is what made the panel's sentence untrue: {called}")
 
 
 class TestTheResolverIsActuallyReached:

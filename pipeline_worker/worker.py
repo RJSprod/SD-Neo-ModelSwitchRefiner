@@ -1349,6 +1349,15 @@ class _LavaBackend:
         backend_rate = int(config.get("backend_input_rate") or 0)
         if backend_rate <= 0:
             raise Refusal("LavaSR was given no measured input rate to work at")
+
+        # Read rather than assumed, and it used to be assumed the other way.
+        # enhance() was called with denoise=True while the manifest contract
+        # said false and the settings panel printed "Internal denoise: off --
+        # DPDFNet is the cleanup stage" as a fact. So the panel described a
+        # pipeline nobody was running: LavaSR's own denoiser ran on every
+        # window, after DPDFNet had already cleaned the same audio, and cost a
+        # second inference per window to do it.
+        self._denoise = bool(config.get("denoise"))
         self._model.bwe_model.lr_refiner = FastLRMerge(
             device=self._device, cutoff=backend_rate // 2, transition_bins=1024)
         self.providers = (self._device,)
@@ -1369,7 +1378,8 @@ class _LavaBackend:
             return []
         with torch.no_grad():
             wav = torch.from_numpy(block).to(self._device)
-            heard = self._model.enhance(wav, enhance=True, denoise=True, batch=False)
+            heard = self._model.enhance(wav, enhance=True, denoise=self._denoise,
+                                        batch=False)
             return heard.detach().to("cpu").float().reshape(-1).numpy().tolist()
 
 
