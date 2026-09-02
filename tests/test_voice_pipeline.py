@@ -3612,6 +3612,95 @@ class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
         assert pipeline.cuda_mask() == self._card().uuid
 
 
+class TestTheInstallerSelfTestSurvivesARealVocosHead:
+    """The install path itself, driven the way mc_voice_pipeline drives it.
+
+    Everything else in this file exercises a stage. This exercises ``selftest``
+    -- the function whose non-zero exit is the whole of "did not run on this
+    machine" -- because that is where four attempts died and a stage-level test
+    would not have caught any of them.
+
+    The backend here is not a stand-in for a rate fault. It is a Vocos ISTFT
+    head: it emits whole hops of whatever it is handed and drops the remainder,
+    which is what LavaSR's BWE actually does. Driven through the real self-test
+    at hop 512, 1024 or 2048 it reproduces a user's refusal to the sample --
+
+        lavasr had to be corrected by 2112 samples in one second of audio
+
+    -- and the audio it was refusing over was exact the whole time.
+    """
+
+    CONFIG = {"lavasr": {"backend_input_rate": 16000, "analysis_ms": 250,
+                         "context_ms": 50, "denoise": False,
+                         "provider": "CPUExecutionProvider", "adapter": 0},
+              "test_rate": 24000}
+
+    class _Istft:
+        """Whole hops out, remainder dropped. Correct in rate, short in length."""
+
+        providers = ("cpu",)
+
+        def __init__(self, hop):
+            self.hop = hop
+
+        def reset(self, rate):
+            return None
+
+        def enhance(self, samples, rate):
+            found = worker.Resampler(rate, 48000)(samples)
+            return found[:(len(found) // self.hop) * self.hop]
+
+    def _run(self, monkeypatch, backend):
+        monkeypatch.setattr(worker, "_stage_backend",
+                            lambda stage_id, root, config, numpy_module: backend)
+        return worker.selftest({"lavasr": "/nonexistent"}, dict(self.CONFIG))
+
+    @pytest.mark.parametrize("hop", [128, 256, 320, 512, 640, 1024, 1280, 2048])
+    def test_every_hop_a_vocos_config_uses_installs(self, hop, monkeypatch):
+        found = self._run(monkeypatch, self._Istft(hop))
+
+        assert found["ok"] is True
+        stage = found["stages"]["lavasr"]
+        assert stage["samples"] == 48000, "one second in, one second out at 48 kHz"
+        assert stage["correction"] == 0, "a whole-hop head is not a wrong clock"
+
+    def test_the_hops_that_produced_the_users_refusal(self, monkeypatch):
+        """512, 1024 and 2048 each summed to exactly 2112 before this."""
+        for hop in (512, 1024, 2048):
+            found = self._run(monkeypatch, self._Istft(hop))
+            assert found["ok"] is True, hop
+            assert found["stages"]["lavasr"]["framing"] == 448, hop
+
+    def test_a_backend_that_misreads_its_rate_is_still_refused(self, monkeypatch):
+        """The guard. Handed 16 kHz and believing it 24 kHz returns two thirds
+        of what was asked for, and plays the reply a third too fast."""
+        class MisreadsItsRate:
+            providers = ("cpu",)
+
+            def reset(self, rate):
+                return None
+
+            def enhance(self, samples, rate):
+                return worker.Resampler(24000, 48000)(samples)
+
+        with pytest.raises(worker.Refusal, match="not the rate it was told"):
+            self._run(monkeypatch, MisreadsItsRate())
+
+    def test_a_backend_that_returns_far_too_much_is_still_refused(self, monkeypatch):
+        class HalfAgainOut:
+            providers = ("cpu",)
+
+            def reset(self, rate):
+                return None
+
+            def enhance(self, samples, rate):
+                found = worker.Resampler(rate, 48000)(samples)
+                return found + found[:len(found) // 2]
+
+        with pytest.raises(worker.Refusal, match="not the rate it was told"):
+            self._run(monkeypatch, HalfAgainOut())
+
+
 class TestTheAnalysisWindowIsAMeasurementAndNotABlank:
     """Two nulls in a manifest were the last thing standing in front of LavaSR.
 
