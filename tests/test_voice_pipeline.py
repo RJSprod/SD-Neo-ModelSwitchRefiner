@@ -3649,6 +3649,95 @@ class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
         assert pipeline.cuda_mask() == self._card().uuid
 
 
+class TestTheRuntimeRowUpdatesTheRuntimesYouHave:
+    """The trap a manifest change sets, and the row that should have sprung it.
+
+    Adding a wheel to a closure makes every installed copy of it stale, by
+    arithmetic and on purpose. For the ONNX closure the Runtime row rebuilds it.
+    For the torch one nothing did: this branch built ONNX only, installing a
+    stage checks that stage's own flavour, and so the single route back was
+    LavaSR's from-a-folder install -- with nothing on the page saying so, and a
+    pipeline that had simply gone quiet, which is what a stale closure correctly
+    does to a turn and is indistinguishable from having switched it off.
+    """
+
+    def _stub(self, monkeypatch, current, record):
+        import mc_voice_models as models
+
+        built = []
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        monkeypatch.setattr(
+            pipeline, "_install_runtime",
+            lambda say, tick, flavour="onnx", accelerator="cpu": (
+                built.append(f"{flavour}:{accelerator}"), tick(1.0)))
+        monkeypatch.setattr(pipeline, "runtime_current",
+                            lambda flavour="onnx": flavour in current)
+        monkeypatch.setattr(pipeline, "_record",
+                            lambda path: dict(record) if record else {})
+        monkeypatch.setattr(pipeline, "status", lambda: "status")
+        return built
+
+    def test_a_stale_torch_closure_is_rebuilt_by_the_runtime_row(self, monkeypatch):
+        built = self._stub(monkeypatch, current={"onnx"},
+                           record={"accelerator": "cpu", "closure": "old"})
+
+        pipeline.install("runtime")
+
+        assert built == ["onnx:cpu", "torch:cpu"], (
+            "the row says runtime, and a user pressing it after being told "
+            "theirs needs updating expects theirs to be updated")
+
+    def test_a_current_torch_closure_is_left_alone(self, monkeypatch):
+        built = self._stub(monkeypatch, current={"onnx", "torch"},
+                           record={"accelerator": "cpu", "closure": "fresh"})
+
+        pipeline.install("runtime")
+
+        assert built == ["onnx:cpu"], "nothing to do is nothing to download"
+
+    def test_a_machine_that_never_had_the_torch_closure_is_not_given_one(
+            self, monkeypatch):
+        """257 MB is not what the light closure's row has ever meant."""
+        built = self._stub(monkeypatch, current={"onnx"}, record=None)
+
+        pipeline.install("runtime")
+
+        assert built == ["onnx:cpu"]
+
+    def test_a_cuda_closure_is_refreshed_as_cuda(self, monkeypatch):
+        """The record names the accelerator, so a card's closure stays a card's."""
+        built = self._stub(monkeypatch, current={"onnx"},
+                           record={"accelerator": "cuda", "closure": "old"})
+
+        pipeline.install("runtime")
+
+        assert built == ["onnx:cpu", "torch:cuda"], (
+            "rebuilding a CUDA closure as the CPU one would silently take a "
+            "card away from the stage that was placed on it")
+
+    def test_the_row_still_succeeds_when_the_extra_rebuild_fails(self, monkeypatch):
+        """The component the user pressed is installed by then."""
+        import mc_voice_models as models
+
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        monkeypatch.setattr(pipeline, "runtime_current",
+                            lambda flavour="onnx": flavour == "onnx")
+        monkeypatch.setattr(pipeline, "_record",
+                            lambda path: {"accelerator": "cpu", "closure": "old"})
+        monkeypatch.setattr(pipeline, "status", lambda: "status")
+
+        def build(say, tick, flavour="onnx", accelerator="cpu"):
+            tick(1.0)
+            if flavour != "onnx":
+                raise pipeline.PipelineError("the publisher could not be reached")
+
+        monkeypatch.setattr(pipeline, "_install_runtime", build)
+
+        pipeline.install("runtime")  # must not raise
+
+
 class TestAClosureCarriesEveryStageItHasToRun:
     """Carrying a runtime is not the same as carrying the stage that uses it.
 

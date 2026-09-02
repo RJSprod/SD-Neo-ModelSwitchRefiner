@@ -1878,7 +1878,24 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
     tick = models._ticker(KIND, on_progress)
     with models._claim(KIND, say, wanted):
         if wanted == "runtime":
+            # Every closure this machine already has, not only the ONNX one.
+            #
+            # The Runtime row says "runtime", and a user who presses it after
+            # being told theirs needs updating has every reason to expect it to
+            # update theirs. It did not: this branch built the ONNX closure and
+            # nothing else, installing a stage checks only that stage's own
+            # flavour, and so a torch closure that went stale -- which is what
+            # adding a wheel to it does, by arithmetic and on purpose -- had
+            # exactly one route back, through LavaSR's from-a-folder install.
+            # Nothing on the page said so. The pipeline simply went quiet, which
+            # is what a stale closure correctly does to a turn and is
+            # indistinguishable from having switched it off.
+            #
+            # Only closures that are already installed are refreshed. A machine
+            # that has never had the PyTorch one is not given 257 MB of it for
+            # pressing the row that has always meant the light closure.
             _install_runtime(say, tick, "onnx", required_accelerator("onnx"))
+            _refresh_stale_runtimes(say)
         elif not runtime_current(stage_flavour(wanted)):
             # Stale counts as missing here, and that is the correction rather
             # than a nicety. This used to ask whether the interpreter file
@@ -1919,6 +1936,39 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
         else:
             _install_stage(wanted, say, tick)
     return status()
+
+
+def _refresh_stale_runtimes(say) -> None:
+    """Rebuild any *other* closure this machine holds that has gone stale.
+
+    Called after the ONNX closure is installed, and deliberately not before: the
+    row's own meaning is unchanged, and this adds to it rather than replacing
+    it. Failure is reported and not raised -- the component the user pressed is
+    installed by then, and refusing to say so because a second closure could not
+    be rebuilt would report a success as a failure.
+    """
+    for flavour in RUNTIME_FLAVOURS:
+        if flavour == "onnx":
+            continue
+        try:
+            record = _record(paths.pipeline_runtime_manifest(flavour))
+        except ValueError:
+            continue
+        # Installed here means "there is a record", which is what makes this a
+        # refresh rather than a new download.
+        if not record or runtime_current(flavour):
+            continue
+        accelerator = str(record.get("accelerator") or "cpu")
+        if not runtime_installable(flavour, accelerator):
+            continue
+        say(f"The {runtime_label(flavour)} is out of date \u2014 rebuilding it too\u2026")
+        try:
+            _install_runtime(lambda text: None, lambda value: None,
+                             flavour, accelerator)
+        except Exception:
+            logger.warning("Model Chain: the Voice Pipeline could not rebuild its %s "
+                           "closure; the stage that runs in it will say so",
+                           flavour, exc_info=True)
 
 
 RUNTIME_SHARE = 0.75
