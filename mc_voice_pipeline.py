@@ -2611,7 +2611,10 @@ def _self_test(stage_id: str, staging: Path) -> dict:
     """
     import mc_voice_models as models
 
-    config = dict(stage_config(stage_id))
+    # Against the staging directory, which is where the files being proved are:
+    # this runs before ``_promote``, so a model resolved against the installed
+    # root would be the one already there rather than the one just downloaded.
+    config = dict(stage_config(stage_id, staging))
     config["intraop"] = threads()
     config["interop"] = INTEROP_THREADS
     # On the processor, whatever the placement setting says, and deliberately.
@@ -2825,7 +2828,7 @@ def stage_paths() -> dict:
     return found
 
 
-def stage_config(stage_id: str) -> dict:
+def stage_config(stage_id: str, root=None) -> dict:
     """The release contract the worker enforces for one stage.
 
     Read out of the manifest rather than defaulted in the worker, because these
@@ -2852,22 +2855,32 @@ def stage_config(stage_id: str) -> dict:
     contract["model_file"] = str((installed.get("model_file") or "")
                                  or (names[0] if names else ""))
     # And then the chosen one, where the stage offers a choice and the file for
-    # it is actually on disk. Checked rather than assumed: an installation made
-    # before a variant was added has the record but not the file, and asking the
-    # worker for a model that is not there is a stage that will not load at all
-    # -- which is worse than a stage running the network already installed.
+    # it is actually in the directory the worker will be handed. Checked rather
+    # than assumed: an installation made before a variant was added has the
+    # record but not the file, and asking the worker for a model that is not
+    # there is a stage that will not load at all -- which is worse than a stage
+    # running the network already installed.
+    #
+    # ``root`` is that directory, and it is a parameter because the install
+    # path asks this question about a *staging* directory: the self-test runs
+    # before ``_promote``, so the file it is proving is not where an installed
+    # one lives yet. Resolving against the installed root there proved the
+    # wrong network and logged a fallback that had not happened -- "checking
+    # that DPDFNet runs on this machine" while running a different one is the
+    # exact shape of silent-wrong-thing this check exists to prevent.
     if stage_id == "dpdfnet":
         wanted = dpdfnet_model()
+        where = Path(root) if root is not None else paths.pipeline_stage_root(stage_id)
         for item in (contract.get("models") or ()):
             if str(item.get("id") or "") != wanted:
                 continue
             named = str(item.get("file") or "")
-            if named and (paths.pipeline_stage_root(stage_id) / named).is_file():
+            if named and (where / named).is_file():
                 contract["model_file"] = named
                 contract["model_id"] = wanted
             elif named:
-                logger.info("Model Chain: DPDFNet is set to %s but %s is not "
-                            "installed, so %s is being used instead", wanted,
-                            named, contract["model_file"])
+                logger.info("Model Chain: DPDFNet is set to %s but %s is not in %s, "
+                            "so %s is being used instead", wanted, named, where,
+                            contract["model_file"])
             break
     return contract

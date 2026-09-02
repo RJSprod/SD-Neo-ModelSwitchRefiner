@@ -2576,7 +2576,8 @@ class TestThePlacementReachesTheStage:
         monkeypatch.setattr(pipeline, "_run_staged",
                             lambda interpreter, arguments, what, timeout=300: (
                                 chosen.append(interpreter), '{"ok": true}')[1])
-        monkeypatch.setattr(pipeline, "stage_config", lambda stage_id: {})
+        monkeypatch.setattr(pipeline, "stage_config",
+                            lambda stage_id, root=None: {})
 
         pipeline._self_test("lavasr", tmp_path)
         pipeline._self_test("dpdfnet", tmp_path)
@@ -3286,6 +3287,42 @@ class TestChoosingHowMuchDenoiserToRun:
 
         assert pipeline.stage_config("dpdfnet")["model_file"] == \
             "dpdfnet2_48khz_hr.onnx"
+
+    def test_the_staged_files_are_what_the_install_proves(self, host, tmp_path):
+        """The bug this shipped with, and the reason it mattered.
+
+        ``_self_test`` runs before ``_promote``, so the files it is proving are
+        in a staging directory rather than where an installed model lives. The
+        first version resolved the chosen network against the installed root,
+        which had two effects on a real install: a log line announcing a
+        fallback that had not happened, and -- worse -- "Checking that DPDFNet
+        runs on this machine" running a *different* network from the one that
+        would run afterwards. A check that proves the wrong file is not a check.
+        """
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        for name in ("dpdfnet2_48khz_hr.onnx", "dpdfnet8_48khz_hr.onnx"):
+            (staging / name).write_bytes(b"not really a network")
+        # Nothing installed yet, which is what a first install looks like.
+        root = paths.pipeline_stage_root("dpdfnet")
+        root.mkdir(parents=True, exist_ok=True)
+        for name in ("dpdfnet2_48khz_hr.onnx", "dpdfnet8_48khz_hr.onnx"):
+            (root / name).unlink(missing_ok=True)
+
+        pipeline.remember(model="dpdfnet2_48khz_hr")
+
+        assert pipeline.stage_config("dpdfnet", staging)["model_file"] == \
+            "dpdfnet2_48khz_hr.onnx"
+
+    def test_the_self_test_asks_about_the_directory_it_is_given(self):
+        """Asserted against the source, because the alternative is an install
+        that has to be run for real to notice it proved the wrong thing."""
+        import inspect
+
+        body = inspect.getsource(pipeline._self_test)
+
+        assert "stage_config(stage_id, staging)" in body, \
+            "the self-test resolves the model somewhere other than where it staged it"
 
     def test_the_route_accepts_and_refuses_one(self, kept_settings, monkeypatch):
         import mc_voice_api
