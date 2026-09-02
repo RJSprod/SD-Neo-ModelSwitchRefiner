@@ -187,6 +187,27 @@ class VoiceTurn:
         "nothing has been spoken yet" from "speech is under way" -- which is the
         difference between a cancel that can be silent and one that cannot."""
 
+        self.rate_known = threading.Event()
+        """Set once :attr:`sample_rate` is the rate this turn will really send.
+
+        Raw PCM carries no header, so the rate travels beside it in
+        ``X-Model-Chain-Voice-Rate`` -- and that header is built the moment a
+        browser attaches, which is *before* this turn has asked its engine
+        anything. Until ``begin_turn`` answers, :attr:`sample_rate` is zero and
+        the header falls back to 24000.
+
+        With the Voice Pipeline off that fallback is accidentally right, because
+        24000 is what PocketTTS speaks. With LavaSR in the chain the body is
+        48 kHz and the browser was told 24 kHz, so it lays 494016 samples out
+        over 20.6 seconds instead of 10.3 -- half speed, an octave down, and no
+        underrun reported because it is consuming at half rate. That is the
+        "slow sounding audio" this exists to stop (I-VP-07).
+
+        Set in the ``finally`` of :meth:`_run` as well as beside the assignment,
+        so a turn that ends before it ever had a rate releases whoever is
+        waiting rather than holding them for the timeout.
+        """
+
         self.attached = threading.Event()
         """Set when a browser has opened the stream for this turn.
 
@@ -561,6 +582,10 @@ class VoiceTurn:
             # to release its lane afterwards.
             self._stopped_at = time.monotonic()
         self.cancelled.set()
+        # Nothing will be spoken now, so nobody should still be waiting to be
+        # told at what rate. This also covers a turn cancelled before it was
+        # ever started, where :meth:`_run` -- and its ``finally`` -- never ran.
+        self.rate_known.set()
         self._wake()
         return first
 
@@ -676,6 +701,10 @@ class VoiceTurn:
                 return
             self.sample_rate = int(
                 speaker.begin_turn(self, self.voice_handle, self.profile) or 0)
+            # The rate is now what it will be for the whole turn -- the engine's
+            # own, or the Voice Pipeline's output where a stage changes it. The
+            # response headers are waiting on this.
+            self.rate_known.set()
             began = True
             self.synthesis_started = True
             self._compute_started = time.monotonic()
@@ -723,6 +752,11 @@ class VoiceTurn:
                 except Exception:
                     logger.debug("Model Chain: could not tell the worker to stop speaking",
                                  exc_info=True)
+            # Before ``finished``, and unconditionally: a turn that died in
+            # warm-up or was cancelled before its first segment never reached
+            # the line above, and a browser waiting for a rate that is never
+            # coming should be let go now rather than at the timeout.
+            self.rate_known.set()
             self.finished.set()
             self._audio.put(("end", b""))
 
