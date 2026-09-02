@@ -315,6 +315,59 @@ class TestTheWorkerAndThisModuleAgreeOnTheProviderNames:
 
         assert worker.PROVIDER_CPU == devices.PROVIDER_CPU
         assert worker.PROVIDER_DIRECTML == devices.PROVIDER_DIRECTML
+        assert worker.PROVIDER_CUDA == devices.PROVIDER_CUDA
+
+
+class TestAPyTorchStageIsOfferedACudaCardAndNotADxgiOne:
+    """LavaSR is not an ONNX graph, and it used to be told it was.
+
+    The provider it carried was DirectML, whose number is a DXGI adapter index,
+    while the backend behind it is PyTorch, whose number is a CUDA ordinal. This
+    module's own docstring is about those two orderings not agreeing, so the
+    pair was a placement setting that could land on either card.
+    """
+
+    def test_the_provider_is_cuda_rather_than_directml(self, machine, stored):
+        machine([THREE_NINETY, FIFTY_NINETY])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{FIFTY_NINETY.uuid}")
+
+        provider, _adapter = devices.provider_for("voice-pipeline-lavasr")
+
+        assert provider == devices.PROVIDER_CUDA
+
+    def test_the_ordinal_is_zero_because_the_worker_sees_one_card(self, machine,
+                                                                 stored):
+        """Not a fallback. The parent masks the environment to this one card.
+
+        Handing over the nvidia-smi index would be handing a number from the
+        unmasked namespace into a masked process, which is right only when the
+        chosen card happens to be the first one.
+        """
+        machine([THREE_NINETY, FIFTY_NINETY])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{FIFTY_NINETY.uuid}")
+        assert FIFTY_NINETY.physical_index != 0, "this test needs a card that is not first"
+
+        assert devices.provider_for("voice-pipeline-lavasr") == (devices.PROVIDER_CUDA, 0)
+
+    def test_the_card_is_identified_by_uuid_and_not_by_position(self, machine, stored):
+        machine([THREE_NINETY, FIFTY_NINETY])
+        token = f"{devices.GPU_PREFIX}{FIFTY_NINETY.uuid}"
+        devices.remember("voice-pipeline-lavasr", token)
+
+        assert devices.uuid_for(token) == FIFTY_NINETY.uuid
+        assert devices.uuid_for(devices.CPU) == "", "the processor has no UUID to give"
+
+    def test_a_card_that_left_the_machine_gives_no_mask(self, machine, stored):
+        """An empty mask is "no card", which is what the worker then sees."""
+        machine([THREE_NINETY, FIFTY_NINETY])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{FIFTY_NINETY.uuid}")
+        machine([THREE_NINETY])
+
+        assert devices.provider_for("voice-pipeline-lavasr") == (devices.PROVIDER_CPU, 0)
+        assert devices.uuid_for(f"{devices.GPU_PREFIX}{FIFTY_NINETY.uuid}") == ""
 
 
 class TestVoiceVramIsNotTheBrokerSToTake:

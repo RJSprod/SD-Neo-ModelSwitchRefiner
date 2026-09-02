@@ -84,6 +84,7 @@ LAVA_OUTPUT_RATE = 48000
 
 PROVIDER_CPU = "CPUExecutionProvider"
 PROVIDER_DIRECTML = "DmlExecutionProvider"
+PROVIDER_CUDA = "CUDAExecutionProvider"
 """The two execution providers the pinned ONNX Runtime wheel carries.
 
 The closure installs the DirectML build rather than the CPU-only one, and that
@@ -1376,9 +1377,19 @@ def _torch_device(config: dict) -> str:
     """Where a PyTorch stage runs, as a device string torch understands.
 
     The same placement the ONNX stages take as an execution provider, said in
-    the other library's vocabulary. ``adapter`` is the card the user picked on
-    the panel; on the CUDA closure that is a CUDA ordinal, and the parent is
-    what decides which physical card that is -- this end does not re-guess it.
+    the other library's vocabulary. ``adapter`` is a CUDA ordinal here and it is
+    zero, which is a fact rather than a default: the parent masks
+    ``CUDA_VISIBLE_DEVICES`` to the one card that was chosen, by UUID, so this
+    process sees exactly one CUDA device however many the machine holds. Which
+    physical card that is was decided at the other end, in the only namespace
+    where it could be decided without guessing -- see
+    :func:`mc_voice_pipeline.cuda_mask`.
+
+    The bounds check below therefore guards a real condition rather than a
+    theoretical one. It fires when the mask named a card the driver will not
+    give this process -- a card that has been removed, or one another tenant has
+    locked to a compute mode that excludes us -- and saying so beats running
+    somewhere nobody asked for.
 
     A card that was asked for and is not there is refused rather than quietly
     swapped for the processor, for the reason the ONNX path gives: running

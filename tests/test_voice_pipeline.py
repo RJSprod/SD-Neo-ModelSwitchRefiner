@@ -3375,6 +3375,185 @@ class TestInstallingAStageFromAFolderYouFilled:
             pipeline.install_from("lavasr", folder)
 
 
+class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
+    """The CUDA closure existed and nothing in the product could ask for it.
+
+    Every ``_install_runtime`` call site took the ``accelerator="cpu"`` default,
+    so the cu128 platform entry, its resolver and its tests were all correct and
+    all unreachable: the only way to build that closure was to call the private
+    function by hand, which is what the class below does and why it passed while
+    a card could not be installed for.
+    """
+
+    @staticmethod
+    def _machine(monkeypatch, cards):
+        import mc_voice_device as devices
+        detection = types.ModuleType("prompt_master.inference.device_detection")
+        detection.detect_gpus = lambda *a, **k: list(cards)
+        detection.detect_cpu = lambda: types.SimpleNamespace(
+            name="Intel Core Ultra 9 185H", memory_total_mb=97809)
+        monkeypatch.setitem(sys.modules,
+                            "prompt_master.inference.device_detection", detection)
+        devices.forget_cards()
+        return devices
+
+    @staticmethod
+    def _card(index=1, uuid="GPU-be876bce-cc46-b562-7192-333c2c1d3f44"):
+        return types.SimpleNamespace(physical_index=index, uuid=uuid,
+                                     name="NVIDIA GeForce RTX 3090",
+                                     memory_total_mb=24576)
+
+    @pytest.fixture
+    def windows(self, monkeypatch):
+        """The machine the CUDA closure is pinned for."""
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+
+    def test_the_processor_is_still_what_an_unplaced_stage_needs(self, windows,
+                                                                 monkeypatch):
+        self._machine(monkeypatch, [self._card()])
+        assert pipeline.required_accelerator("torch") == "cpu"
+        assert pipeline.required_accelerator("onnx") == "cpu"
+
+    def test_placing_a_torch_stage_on_a_card_asks_for_the_cuda_closure(
+            self, windows, monkeypatch, host):
+        devices = self._machine(monkeypatch, [self._card()])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+
+        assert pipeline.required_accelerator("torch") == "cuda"
+        # DPDFNet did not move, and the ONNX closure has one build anyway.
+        assert pipeline.required_accelerator("onnx") == "cpu"
+
+    def test_a_directml_stage_never_asks_for_a_different_closure(
+            self, windows, monkeypatch, host):
+        """DirectML rides the ONNX Runtime wheel every closure already has."""
+        devices = self._machine(monkeypatch, [self._card()])
+        devices.remember("voice-pipeline-dpdfnet",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+
+        assert pipeline.required_accelerator("onnx") == "cpu"
+        assert pipeline.required_accelerator("torch") == "cpu"
+
+    def test_a_machine_with_no_pinned_cuda_closure_stays_on_the_processor(
+            self, monkeypatch, host):
+        """Refused where it could not be honoured, rather than failed later."""
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform", lambda: ("linux", "x86_64", "3.11"))
+        devices = self._machine(monkeypatch, [self._card()])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+
+        assert pipeline.required_accelerator("torch") == "cpu"
+
+    def test_a_cpu_closure_under_a_placed_stage_reads_as_needing_an_update(
+            self, windows, monkeypatch, host, voice_root):
+        """The half that would have made the dropdown do nothing at all.
+
+        Comparing an installation against whichever accelerator its own record
+        happens to name means a CPU closure always agrees with itself. Somebody
+        moves LavaSR onto a card, nothing is rebuilt, and the stage keeps
+        running on the processor while the panel says "Installed".
+        """
+        devices = self._machine(monkeypatch, [self._card()])
+        root = paths.pipeline_runtime_root("torch")
+        (root / "env" / "Scripts").mkdir(parents=True, exist_ok=True)
+        (root / "env" / "Scripts" / "python.exe").write_bytes(b"")
+        (root / paths.INSTALLED_FILENAME).write_text(json.dumps({
+            "closure": pipeline.runtime_closure_id("torch", "cpu"),
+            "accelerator": "cpu"}), encoding="utf-8")
+        assert pipeline.runtime_current("torch") is True
+
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+
+        assert pipeline.runtime_current("torch") is False
+        state, message = pipeline._runtime_state("torch", True)
+        assert state == "stale"
+        assert "graphics card" in message, message
+
+    def test_the_installer_builds_the_closure_the_placement_asked_for(
+            self, windows, monkeypatch, host, tmp_path):
+        """The end-to-end version of this class's complaint."""
+        devices = self._machine(monkeypatch, [self._card()])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+        built = []
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(
+            pipeline, "_install_runtime",
+            lambda say, tick, flavour="onnx", accelerator="cpu": (
+                built.append((flavour, accelerator)), tick(1.0)))
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        folder = tmp_path / "src"
+        for name, blob in (("enhancer_v2/pytorch_model.bin", b"x" * 32),
+                           ("enhancer_v2/config.yaml", b"sample_rate: 24000\n"),
+                           ("denoiser/denoiser.bin", b"y" * 32)):
+            target = folder / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
+
+        pipeline.install_from("lavasr", folder)
+
+        assert built == [("torch", "cuda")], (
+            "a stage placed on a card needs the closure that can reach one")
+
+    def test_the_worker_is_masked_to_the_one_chosen_card(self, windows, monkeypatch,
+                                                         host, voice_root):
+        """A UUID, not an index, and one card, not a list.
+
+        The empty string was unconditional here, which is why
+        torch.cuda.is_available() was False inside this worker whatever closure
+        was installed.
+        """
+        devices = self._machine(monkeypatch, [self._card()])
+        root = paths.pipeline_runtime_root("torch")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"closure": "whatever", "accelerator": "cuda"}), encoding="utf-8")
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+
+        assert pipeline.cuda_mask() == self._card().uuid
+        assert pipeline.worker_environment()["CUDA_VISIBLE_DEVICES"] == self._card().uuid
+        # The other two are still blanked outright: nothing here has ever
+        # executed through either.
+        assert pipeline.worker_environment()["HIP_VISIBLE_DEVICES"] == ""
+
+    def test_nothing_placed_means_the_worker_still_sees_no_card_at_all(
+            self, windows, monkeypatch, host):
+        self._machine(monkeypatch, [self._card()])
+        assert pipeline.cuda_mask() == ""
+        assert pipeline.worker_environment()["CUDA_VISIBLE_DEVICES"] == ""
+
+    def test_a_card_is_not_honoured_until_its_closure_is_installed(
+            self, windows, monkeypatch, host, voice_root):
+        """Otherwise the stage refuses to load over a setting, not a fault.
+
+        The panel is already saying the runtime needs updating at this moment.
+        Running on the processor until it is, and saying so in the log, keeps
+        the voice working and keeps the choice.
+        """
+        devices = self._machine(monkeypatch, [self._card()])
+        devices.remember("voice-pipeline-lavasr",
+                         f"{devices.GPU_PREFIX}{self._card().uuid}")
+        root = paths.pipeline_runtime_root("torch")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"closure": "whatever", "accelerator": "cpu"}), encoding="utf-8")
+
+        assert pipeline.placement("lavasr") == (devices.PROVIDER_CPU, 0)
+        assert pipeline.cuda_mask() == "", (
+            "a stage answered with the processor must not be handed a card anyway")
+
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"closure": "whatever", "accelerator": "cuda"}), encoding="utf-8")
+
+        assert pipeline.placement("lavasr") == (devices.PROVIDER_CUDA, 0)
+        assert pipeline.cuda_mask() == self._card().uuid
+
+
 class TestTheResolverIsActuallyReached:
     """A guard on a defect I shipped: correct code nothing ever called.
 
