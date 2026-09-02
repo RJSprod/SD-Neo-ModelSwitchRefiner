@@ -893,6 +893,16 @@ class VoiceTurn:
         """
         snapshot = self.pipeline_snapshot
         handle = self.pipeline
+        # A named list rather than a pass-through, and deliberately narrower than
+        # what the handle measures: section 36's rule is that a field is absent
+        # from a log until somebody put it there on purpose, so a measurement
+        # the handle happens to carry does not become telemetry by arriving.
+        #
+        # The cost is that a field wanted here has to be added in two places,
+        # and the per-stage split is what happens when it is added in one. The
+        # worker measured it, the handle forwarded it, the log line was written
+        # to print it -- and this dictionary dropped it, so every "Voice
+        # pipeline ran" line ever written reported the total alone.
         found = {"pipeline_stages": None, "pipeline_output_rate": None,
                  "pipeline_input_sample_count": None,
                  "pipeline_output_sample_count": None,
@@ -903,7 +913,11 @@ class VoiceTurn:
                  # enhancement took 0.7 s per second of audio, and section 11.7
                  # says a sustained number above 1000 is a performance failure
                  # rather than something a buffer can absorb.
-                 "pipeline_rtf_milli": None}
+                 "pipeline_rtf_milli": None,
+                 # And that number per stage, which is the one that says what to
+                 # do about it. "The pipeline is 1.4" is not a decision anybody
+                 # can take; "DPDFNet is 0.8 and LavaSR is 0.6" is.
+                 "dpdfnet_rtf_milli": None, "lavasr_rtf_milli": None}
         if snapshot is None or not getattr(snapshot, "active", False):
             return found
         found["pipeline_stages"] = ",".join(snapshot.stage_ids)
