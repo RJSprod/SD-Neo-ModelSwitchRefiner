@@ -1779,10 +1779,6 @@ def snapshot(input_rate: int, engine: str = "", found: "Status | None" = None) -
     if not state.master_enabled:
         return Snapshot(enabled=False, stage_ids=(), input_rate=rate, output_rate=rate,
                         reason="")
-    if not state.runtime_ready:
-        return Snapshot(enabled=True, stage_ids=(), input_rate=rate, output_rate=rate,
-                        reason=state.runtime_message)
-
     wanted, missing = [], []
     for spec in STAGES:
         held = state.stage(spec.id)
@@ -1792,6 +1788,19 @@ def snapshot(input_rate: int, engine: str = "", found: "Status | None" = None) -
             missing.append(held.label)
             continue
         wanted.append(spec)
+
+    # The closure these stages need, asked after they are known rather than
+    # before. ``state.runtime_ready`` answers for the ONNX one, and asking it
+    # here turned a stale or missing ONNX closure into silence for LavaSR --
+    # which does not run in it, needs nothing from it, and would have run
+    # perfectly. The same conflation as the self-test's and the worker's, in the
+    # one place left that still decides whether a turn is enhanced at all.
+    if wanted:
+        flavour = stages_flavour(spec.id for spec in wanted)
+        runtime_state, runtime_message = state.runtime_for(flavour)
+        if runtime_state != "installed":
+            return Snapshot(enabled=True, stage_ids=(), input_rate=rate,
+                            output_rate=rate, reason=runtime_message)
 
     rate_out = rate
     for spec in wanted:
