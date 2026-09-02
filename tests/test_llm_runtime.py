@@ -2133,6 +2133,64 @@ class TestTheProjectorIsNotFree:
         assert started[1][0][2] == configuration.mmproj
 
 
+class TestPrimingOnlyWhereARollCanUseIt:
+    """The prime warms one specific prompt: Creative Mode's instruction.
+
+    Its own docstring used to justify itself with "llama-server is started at
+    WebUI boot with nothing else to do". Nothing starts one speculatively any
+    more, so every start is one somebody asked for and the server always has
+    something else to do -- and priming the writer's instruction after a
+    conversation reply, on an install with Creative Mode and the Composer both
+    off, is twelve seconds of the image card's compute on a prompt that will
+    never be sent.
+    """
+
+    def test_creative_mode_is_reason_enough(self, host, monkeypatch):
+        import mc_creative_krea
+        import mc_spatial
+
+        monkeypatch.setattr(mc_creative_krea, "settings", lambda: {"enabled": True})
+        monkeypatch.setattr(mc_spatial, "settings", lambda: {"enabled": False})
+
+        assert runtime._writer_is_in_use() is True
+
+    def test_the_composer_alone_is_reason_enough(self, host, monkeypatch):
+        """It shares the writer's prefix, so it gets the same benefit."""
+        import mc_creative_krea
+        import mc_spatial
+
+        monkeypatch.setattr(mc_creative_krea, "settings", lambda: {"enabled": False})
+        monkeypatch.setattr(mc_spatial, "settings", lambda: {"enabled": True})
+
+        assert runtime._writer_is_in_use() is True
+
+    def test_both_switched_off_means_no_roll_to_make_cheaper(self, host, monkeypatch):
+        import mc_creative_krea
+        import mc_spatial
+
+        monkeypatch.setattr(mc_creative_krea, "settings", lambda: {"enabled": False})
+        monkeypatch.setattr(mc_spatial, "settings", lambda: {"enabled": False})
+
+        assert runtime._writer_is_in_use() is False
+
+    def test_both_are_off_on_a_fresh_install(self, host):
+        """The default this whole question rests on."""
+        assert runtime._writer_is_in_use() is False
+
+    def test_an_unanswerable_question_still_primes(self, host, monkeypatch):
+        """Priming when it was not needed costs background work that stands
+        down for anything else; not priming when it was costs the first roll
+        its whole prefix."""
+        import mc_creative_krea
+
+        def explode():
+            raise RuntimeError("preferences unreadable")
+
+        monkeypatch.setattr(mc_creative_krea, "settings", explode)
+
+        assert runtime._writer_is_in_use() is True
+
+
 class TestPrimingThePromptCache:
     """The instruction above a Krea brief is the same every roll.
 
@@ -2148,12 +2206,31 @@ class TestPrimingThePromptCache:
     """
 
     @pytest.fixture(autouse=True)
-    def idle(self):
+    def idle(self, monkeypatch):
         mc_broker.clear()
         runtime._priming = None
+        # Creative Mode on: the prime warms the writer's instruction, so it
+        # only runs where a roll can actually use it. Its own gate has tests
+        # below; everything else here is about the priming itself.
+        monkeypatch.setattr(runtime, "_writer_is_in_use", lambda: True)
         yield
         runtime._priming = None
         mc_broker.clear()
+
+    def test_it_does_nothing_when_the_writer_is_switched_off(self, host, monkeypatch):
+        """Twelve seconds of the image card's compute on a prompt that will
+        never be sent. From a user's log, running alongside the very
+        generation it was supposed to be helping."""
+        monkeypatch.setattr(runtime, "_writer_is_in_use", lambda: False)
+        ran: list = []
+        monkeypatch.setattr(runtime, "_prime",
+                            lambda client, configuration=None: ran.append(client))
+
+        runtime._prime_prompt_cache(object())
+
+        assert ran == []
+        assert runtime._priming is None
+
 
     class Client:
         def __init__(self):
