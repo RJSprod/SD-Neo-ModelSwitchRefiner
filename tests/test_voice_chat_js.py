@@ -293,6 +293,66 @@ settingsParts.pocketRow.querySelector = function (selector) {
     return null;
 };
 
+// The Voice Pipeline row. Modelled because of a specific complaint: setting the
+// thread budget "wasn't having an immediate impact". It was -- the value reached
+// the store and the worker was dropped so the next reply would read it -- and
+// the panel said nothing either way, so a change that worked and a change that
+// was still waiting on a reply in flight looked identical. The server has always
+// answered `applied`; the browser threw it away. What is modelled here is that
+// one line.
+const pipelineParts = {
+    master: element("pipeline-master", "INPUT"),
+    threads: element("pipeline-threads", "INPUT"),
+    status: element("pipeline-status"),
+    path: element("pipeline-path"),
+    applied: element("pipeline-applied"),
+    toggles: {
+        dpdfnet: element("pipeline-toggle-dpdfnet", "INPUT"),
+        lavasr: element("pipeline-toggle-lavasr", "INPUT"),
+    },
+    notes: {
+        dpdfnet: element("pipeline-note-dpdfnet"),
+        lavasr: element("pipeline-note-lavasr"),
+    },
+};
+pipelineParts.master.type = "checkbox";
+pipelineParts.threads.value = "2";
+Object.keys(pipelineParts.toggles).forEach(function (id) {
+    pipelineParts.toggles[id].type = "checkbox";
+    pipelineParts.toggles[id].setAttribute("data-mc-voice-pipeline-toggle", id);
+});
+settingsParts.pipelineRow = element("pipeline-row");
+settingsParts.pipelineRow["data-mc-voice-kind"] = "pipeline";
+settingsParts.pipelineRow.querySelector = function (selector) {
+    // Most specific first. `[data-mc-voice-pipeline-state="lavasr"]` and
+    // `[data-mc-voice-pipeline-toggle="lavasr"]` differ by one word, and a map
+    // that tested the stage name before the attribute would hand back whichever
+    // was written first.
+    if (selector.indexOf("pipeline-master") !== -1) return pipelineParts.master;
+    if (selector.indexOf("pipeline-threads") !== -1) return pipelineParts.threads;
+    if (selector.indexOf("pipeline-applied") !== -1) return pipelineParts.applied;
+    if (selector.indexOf("pipeline-path") !== -1) return pipelineParts.path;
+    if (selector.indexOf("pipeline-toggle=") !== -1) {
+        const id = Object.keys(pipelineParts.toggles).filter(
+            (name) => selector.indexOf('"' + name + '"') !== -1)[0];
+        return id ? pipelineParts.toggles[id] : null;
+    }
+    if (selector.indexOf("pipeline-state=") !== -1) {
+        const id = Object.keys(pipelineParts.notes).filter(
+            (name) => selector.indexOf('"' + name + '"') !== -1)[0];
+        return id ? pipelineParts.notes[id] : null;
+    }
+    if (selector.indexOf("mc-voice-status") !== -1) return pipelineParts.status;
+    return null;
+};
+settingsParts.pipelineRow.querySelectorAll = function (selector) {
+    if (selector.indexOf("pipeline-toggle") !== -1) {
+        return Object.keys(pipelineParts.toggles).map(
+            (id) => pipelineParts.toggles[id]);
+    }
+    return [];
+};
+
 // The Sopro validation row. One button, a status line and a table -- and it is
 // the one control in that panel that must change nothing at all, so what is
 // modelled here is the polling and the painting rather than any effect.
@@ -350,6 +410,12 @@ settingsRow.querySelector = function (selector) {
     if (selector.indexOf("sopro-validate-row") !== -1) return settingsParts.validateRow;
     if (selector === '[data-mc-voice-kind="sopro"]') return null;
     if (selector === '[data-mc-voice-kind="pocket"]') return settingsParts.pocketRow;
+    // Absent unless a test asks for it. The row polls the moment it is wired,
+    // so a row present by default would put a request into every settings test
+    // that has nothing to do with the pipeline.
+    if (selector === '[data-mc-voice-kind="pipeline"]') {
+        return PIPELINE_PRESENT ? settingsParts.pipelineRow : null;
+    }
     if (selector === '[data-mc-voice-tiers="stt"]') return settingsParts.tierList;
     if (selector === '[data-mc-voice-chosen="stt"]') return settingsParts.chosenLabel;
     if (selector.indexOf("data-mc-voice-tier=") !== -1) {
@@ -1068,6 +1134,14 @@ function report(extra) {
         validateTableHidden: settingsParts.validateTable.hidden,
         cleanupInstallDisabled: settingsParts.cleanupInstall.disabled,
         cleanupStatus: settingsParts.cleanupStatus.textContent,
+        pipelineApplied: pipelineParts.applied.textContent,
+        pipelineStatus: pipelineParts.status.textContent,
+        pipelinePath: pipelineParts.path.textContent,
+        pipelineThreads: pipelineParts.threads.value,
+        pipelineMaster: !!pipelineParts.master.checked,
+        pipelineStages: Object.keys(pipelineParts.toggles).map(
+            (id) => ({id, on: !!pipelineParts.toggles[id].checked,
+                      note: pipelineParts.notes[id].textContent})),
         painted: painted.length,
         uploaded: lastUploadedWav(),
         requests: requests.map((r) => ({url: r.url, kind: r.kind,
@@ -1168,6 +1242,7 @@ SCENARIO
 
 DEFAULTS = {
     "SETTINGS_PRESENT": "false",
+    "PIPELINE_PRESENT": "false",
     "HIDDEN": "false",
     "SECURE": "true",
     "MICROPHONE": "true",
@@ -1220,6 +1295,24 @@ DEFAULTS = {
                                                 "display_name": "Ada"}}},
         "voice/sopro/discard": {"json": {"ok": True, "discarded": True}},
         "voice/cleanup/install": {"json": {"ok": True, "already": False}},
+        # The Voice Pipeline's two routes. The status poll carries no
+        # ``applied`` -- only a settings write can answer "what did that do" --
+        # and that difference is what stops a poll from wiping the answer off
+        # a panel somebody is still reading.
+        "voice/pipeline": {"json": {"ok": True, "master_enabled": True,
+                                    "supported_for_engine": True,
+                                    "path": "PocketTTS \u2192 DPDFNet "
+                                            "\u2192 48 kHz output",
+                                    "runtime": {"message": "Installed"},
+                                    "stages": [{"id": "dpdfnet", "enabled": True,
+                                                "install_state": "installed",
+                                                "runtime_state": "loaded",
+                                                "message": ""},
+                                               {"id": "lavasr", "enabled": False,
+                                                "install_state": "not_installed",
+                                                "runtime_state": "",
+                                                "message": "Not installed"}],
+                                    "progress": {"pipeline": {}}}},
         "voice/cleanup": {"json": {"ok": True, "installed": False,
                                    "platform_supported": True,
                                    "runtime_message": "Not installed",
@@ -3215,6 +3308,178 @@ class TestTheEngineRow:
                     SETTINGS_PRESENT="true")
         assert found["settings"]["runtimeButton"] == "Installed"
         assert found["settings"]["runtimeDisabled"] is True
+
+
+def pipeline_answers(applied=None, **changes):
+    """The two pipeline routes, with the settings reply's ``applied`` chosen.
+
+    ``applied=None`` is the settings route answering without the field at all,
+    which is what a build older than this one does -- and the panel has to stay
+    silent rather than guess.
+    """
+    answers = json.loads(DEFAULTS["ANSWERS"])
+    # ``changes`` reaches both routes; ``applied`` only the write, because that
+    # asymmetry is the thing under test.
+    answers["voice/pipeline"]["json"].update(changes)
+    written = dict(answers["voice/pipeline"]["json"])
+    if applied is not None:
+        written["applied"] = applied
+    answers["voice/pipeline/settings"] = {"json": written}
+    return answers
+
+
+class TestTheVoicePipelinePanelSaysWhatTheChangeDid:
+    """The reported complaint: setting the thread budget "wasn't having an
+    immediate impact".
+
+    It was. The value reached the options store, and because the worker only
+    reads a thread budget when it loads its stages, the store write is followed
+    by a worker restart so the next reply builds its sessions from the new
+    number. What was missing was the sentence saying so -- the server has always
+    worked out whether a change is in force now or waiting on a reply already
+    being spoken, and this panel was the one surface that could have shown it
+    and did not. A change that worked and a change still waiting looked exactly
+    alike, which is indistinguishable from a control wired to nothing.
+    """
+
+    def test_a_panel_nobody_has_touched_acknowledges_nothing(self):
+        """There is no change to report yet, and an empty line is how the
+        stylesheet knows to draw no line at all."""
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", PIPELINE_PRESENT="true")
+        assert found["pipelineApplied"] == ""
+
+    def test_a_change_that_is_in_force_now_says_so(self):
+        found = run("""
+            await tick();
+            pipelineParts.threads.value = "6";
+            pipelineParts.threads.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(pipeline_answers("now")))
+
+        assert "in force now" in found["pipelineApplied"]
+        assert "next reply" not in found["pipelineApplied"]
+
+    def test_a_change_the_worker_could_not_take_yet_says_which_reply_gets_it(self):
+        """The honest half. A worker cannot be stopped in the middle of a reply,
+        so a budget changed while one is being spoken is stored and not yet
+        running -- and the panel that stayed silent about it was the reason
+        somebody turned the dial twice."""
+        found = run("""
+            await tick();
+            pipelineParts.threads.value = "6";
+            pipelineParts.threads.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(pipeline_answers("pending_next_turn")))
+
+        assert "next reply" in found["pipelineApplied"]
+        assert "in force now" not in found["pipelineApplied"]
+
+    def test_the_value_that_was_typed_is_what_leaves_the_page(self):
+        """The wiring underneath the complaint, asserted rather than assumed.
+        A box that posted the old number would look exactly like a panel that
+        said nothing."""
+        found = run("""
+            await tick();
+            pipelineParts.threads.value = "6";
+            pipelineParts.threads.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(pipeline_answers("now")))
+
+        written = [json.loads(request["bodyText"])
+                   for request in found["requests"]
+                   if "pipeline/settings" in (request["url"] or "")]
+        assert written and written[0]["threads"] == 6
+
+    def test_ticking_a_stage_is_acknowledged_too(self):
+        """Not only the thread box. Every switch on this panel goes through the
+        same route and the same answer."""
+        found = run("""
+            await tick();
+            pipelineParts.toggles.lavasr.checked = true;
+            pipelineParts.toggles.lavasr.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(pipeline_answers("now")))
+
+        written = [json.loads(request["bodyText"])
+                   for request in found["requests"]
+                   if "pipeline/settings" in (request["url"] or "")]
+        assert written and written[0]["stages"]["lavasr"] is True
+        assert "in force now" in found["pipelineApplied"]
+
+    def test_a_write_that_never_arrived_takes_the_acknowledgement_with_it(self):
+        """The one wrong thing this line could say. A "Saved" left standing over
+        a change that never reached the WebUI is worse than the silence it
+        replaced."""
+        answers = pipeline_answers("now")
+        found = run("""
+            await tick();
+            pipelineParts.threads.value = "6";
+            pipelineParts.threads.fire("change");
+            await tick();
+            replies["voice/pipeline/settings"] = {reject: true};
+            pipelineParts.threads.value = "7";
+            pipelineParts.threads.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(answers))
+
+        assert found["pipelineApplied"] == ""
+        assert "could not be changed" in found["pipelineStatus"]
+
+    def test_the_status_poll_does_not_wipe_the_answer(self):
+        """During an install this panel polls every 1.2 seconds. A poll carries
+        no ``applied`` -- only a write can answer "what did that do" -- and a
+        repaint that blanked the line on the way past would take the answer away
+        from somebody still reading it."""
+        found = run("""
+            await tick();
+            pipelineParts.threads.value = "6";
+            pipelineParts.threads.fire("change");
+            await tick();
+            const beforePoll = pipelineParts.applied.textContent;
+            const pollsBefore = requests.filter(
+                (r) => r.url.indexOf("voice/pipeline") !== -1
+                       && r.url.indexOf("settings") === -1).length;
+            NOW += 2000;
+            await tick();
+            const pollsAfter = requests.filter(
+                (r) => r.url.indexOf("voice/pipeline") !== -1
+                       && r.url.indexOf("settings") === -1).length;
+            console.log(JSON.stringify(report({beforePoll, pollsBefore, pollsAfter})));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(pipeline_answers(
+                 "now", progress={"pipeline": {"running": True,
+                                               "text": "Installing\u2026"}})))
+
+        # The poll actually happened, so the line surviving means something.
+        assert found["pollsAfter"] > found["pollsBefore"]
+        assert "in force now" in found["beforePoll"]
+        assert found["pipelineApplied"] == found["beforePoll"]
+
+    def test_a_reply_without_the_field_leaves_the_panel_silent(self):
+        """A page talking to a WebUI that does not send ``applied`` says nothing
+        rather than inventing an answer, because the two outcomes it would be
+        choosing between are exactly the thing it cannot know."""
+        found = run("""
+            await tick();
+            pipelineParts.threads.value = "6";
+            pipelineParts.threads.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", PIPELINE_PRESENT="true",
+             ANSWERS=json.dumps(pipeline_answers()))
+
+        assert found["pipelineApplied"] == ""
 
 
 class TestTheRecordingCleanupRow:

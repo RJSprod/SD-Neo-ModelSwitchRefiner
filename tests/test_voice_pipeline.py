@@ -28,6 +28,7 @@ import pytest
 
 import mc_voice_paths as paths
 import mc_voice_pipeline as pipeline
+import mc_voice_ui
 import mc_voice_pipeline_runtime as runtime
 from pipeline_worker import worker
 
@@ -2673,6 +2674,71 @@ class TestASettingReadAtLoadTimeStopsTheWorker:
 
         assert runtime.reconfigure("a test") is True
 
+    # -- and whether it happened, said out loud ---------------------------- #
+    #
+    # ``reconfigure`` has always answered a boolean, and its docstring has
+    # always said why: the caller is a settings route, the setting is already
+    # stored, and "not now" is the honest answer rather than an error about a
+    # write that succeeded. The one caller threw that answer away, so a budget
+    # changed mid-reply and a budget in force right now came back identical --
+    # which is what "setting the threads had no immediate impact" looked like
+    # from the panel.
+
+    def test_a_dropped_worker_is_reported_as_in_force_now(self, kept_settings,
+                                                          monkeypatch):
+        self._watched(monkeypatch)
+
+        found = pipeline.remember(threads_value=9)
+
+        assert found["applied"] == "now"
+
+    def test_a_worker_that_would_not_stop_is_reported_as_waiting(self, kept_settings,
+                                                                 monkeypatch):
+        """A reply being spoken keeps its worker, so the budget stored here is
+        the *next* reply's. The surface has to be able to say which."""
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: False)
+
+        found = pipeline.remember(threads_value=9)
+
+        assert found["applied"] == "pending_next_turn"
+        assert found["threads"] == 9
+
+    def test_a_restart_that_raised_is_reported_as_waiting_too(self, kept_settings,
+                                                              monkeypatch):
+        """The failure and the refusal mean the same thing to somebody reading
+        the panel -- a worker still running at the old setting -- so they are
+        reported the same way rather than one of them silently claiming "now"."""
+        def refuse(reason):
+            raise RuntimeError("the worker would not stop")
+
+        monkeypatch.setattr(runtime, "reconfigure", refuse)
+
+        found = pipeline.remember(threads_value=6)
+
+        assert found["applied"] == "pending_next_turn"
+
+    def test_a_moved_stage_is_reported_the_same_way(self, kept_settings, monkeypatch):
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa",
+                                  memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: False)
+
+        found = pipeline.remember(devices={"dpdfnet": "gpu:GPU-aaaa"})
+
+        assert found["applied"] == "pending_next_turn"
+
+    def test_a_switch_that_needs_no_restart_claims_nothing(self, kept_settings,
+                                                           monkeypatch):
+        """Read fresh by ``snapshot`` at the top of every turn, so there is no
+        worker to stop and nothing here to answer. The route above adds the
+        answer, because only it knows whether a reply is in flight."""
+        self._watched(monkeypatch)
+
+        found = pipeline.remember(enabled_value=True, stages={"dpdfnet": True})
+
+        assert "applied" not in found
+
 
 class TestTheRouteAcceptsAndRefusesAPlacement:
     """One request writes the switches, the budget and the placements.
@@ -2770,6 +2836,146 @@ class TestTheRouteAcceptsAndRefusesAPlacement:
         body = source.split("pipeline_settings(payload.get(\"enabled\")")[1][:400]
 
         assert 'payload.get("devices")' in body
+
+
+class TestTheRouteSaysWhenTheChangeTakesEffect:
+    """Two ways a stored change can still not be running, and the panel gets the
+    pessimistic one.
+
+    The write knows the first: a thread budget and a placement are read once,
+    when the worker loads its stages, so changing one has to stop the worker --
+    and a worker cannot be stopped in the middle of a reply.
+
+    This route knows the second: a turn already in flight is frozen onto the
+    snapshot it started with, so a switch ticked mid-reply has changed the next
+    one. Either alone is enough to make "now" a lie, so ``applied`` is the OR of
+    them rather than whichever the last line happened to compute.
+    """
+
+    def test_a_change_nothing_is_in_the_way_of_is_in_force_now(self, kept_settings,
+                                                               monkeypatch):
+        import mc_voice_api
+        import mc_voice_turn as turns
+
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: True)
+        monkeypatch.setattr(turns, "busy", lambda: False)
+
+        found = mc_voice_api.pipeline_settings(None, {}, threads=6)
+
+        assert found["applied"] == "now"
+
+    def test_a_worker_that_would_not_stop_is_carried_through_to_the_panel(
+            self, kept_settings, monkeypatch):
+        """The half that was being dropped. Nothing else on this route can see
+        that the restart was refused, so a route that recomputed ``applied``
+        from the turn state alone reported "now" over a worker still running at
+        the old budget."""
+        import mc_voice_api
+        import mc_voice_turn as turns
+
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: False)
+        monkeypatch.setattr(turns, "busy", lambda: False)
+
+        found = mc_voice_api.pipeline_settings(None, {}, threads=6)
+
+        assert found["applied"] == "pending_next_turn"
+
+    def test_a_reply_in_flight_is_still_enough_on_its_own(self, kept_settings,
+                                                          monkeypatch):
+        """A stage tick needs no restart at all, so the write answers nothing --
+        and this route still has to say that the reply being spoken keeps the
+        switches it started with."""
+        import mc_voice_api
+        import mc_voice_turn as turns
+
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: True)
+        monkeypatch.setattr(turns, "busy", lambda: True)
+
+        found = mc_voice_api.pipeline_settings(None, {"dpdfnet": True})
+
+        assert found["applied"] == "pending_next_turn"
+
+    def test_the_answer_reaches_the_browser_on_every_write(self, kept_settings,
+                                                           monkeypatch):
+        """Every control on that panel posts this route, so every one of them
+        gets an answer -- a master switch that acknowledged nothing while the
+        thread box did would read as the switch being the broken one."""
+        import mc_voice_api
+        import mc_voice_turn as turns
+
+        monkeypatch.setattr(runtime, "reconfigure", lambda reason: True)
+        monkeypatch.setattr(turns, "busy", lambda: False)
+
+        assert mc_voice_api.pipeline_settings(True, {})["applied"] == "now"
+        ticked = mc_voice_api.pipeline_settings(None, {"dpdfnet": True})
+        assert ticked["applied"] == "now"
+        assert mc_voice_api.pipeline_settings(None, {}, threads=4)["applied"] == "now"
+
+
+class TestThePanelHasSomewhereToPutTheAnswer:
+    """The other half of the same defect, and the half that was actually
+    missing from the shipped build.
+
+    The route has always answered ``applied``. The panel had no element to write
+    it into and no line of script that read it, so the answer went out over the
+    wire and stopped there -- which is why turning the thread dial looked like
+    turning a dial wired to nothing.
+    """
+
+    def test_the_row_carries_an_element_for_it(self, host):
+        drawn = mc_voice_ui.pipeline_html()
+
+        assert "data-mc-voice-pipeline-applied" in drawn
+
+    def test_it_starts_empty_so_a_fresh_panel_claims_nothing(self, host):
+        """Nothing has been changed yet. An element rendered with a sentence in
+        it would be a panel answering a question nobody asked."""
+        import re
+
+        drawn = mc_voice_ui.pipeline_html()
+        held = re.search(r"data-mc-voice-pipeline-applied[^>]*>(.*?)</p>", drawn)
+
+        assert held is not None, drawn
+        assert held.group(1) == ""
+
+    def test_the_stylesheet_draws_no_line_while_it_is_empty(self):
+        """Otherwise the panel gains a blank row and a gap before anybody has
+        touched anything, which is a worse surface than the one this fixes."""
+        style = (paths.extension_root() / "style.css").read_text(encoding="utf-8")
+
+        assert ".mc-voice-pipeline-applied:empty" in style
+
+    def test_the_browser_reads_the_field(self, host):
+        """The line that was missing. Asserted against the script rather than
+        assumed, because a panel that silently ignores a field it is sent is
+        exactly what this was."""
+        script = (paths.extension_root() / "javascript" / "voice_chat.js").read_text(
+            encoding="utf-8")
+
+        assert "function paintPipelineApplied(" in script, \
+            "the panel has nothing that reads the field"
+        body = script.split("function paintPipelineApplied(")[1]
+        body = body.split("\n    function ")[0]
+
+        assert '"applied"' in body
+        assert "pending_next_turn" in body
+        assert "data-mc-voice-pipeline-applied" in body
+
+    def test_moving_a_stage_is_acknowledged_too(self):
+        """The device select posts the same route and gets the same answer, and
+        it is the change most likely to come back "not yet" -- a card chosen
+        while a reply is being spoken is the next reply's, because a worker
+        cannot be stopped mid-sentence.
+
+        Asserted against the source rather than driven, because that control is
+        in a panel fetched from ``/component`` and injected after the script has
+        already run, which is not a shape the browser harness models.
+        """
+        script = (paths.extension_root() / "javascript" / "voice_chat.js").read_text(
+            encoding="utf-8")
+        handler = script.split("body.devices[stage] = asked;")[1].split("}).catch(")[0]
+
+        assert "paintPipelineApplied(" in handler
 
 
 class TestThePlacementControlSaysWhatItCanAndCannotDo:

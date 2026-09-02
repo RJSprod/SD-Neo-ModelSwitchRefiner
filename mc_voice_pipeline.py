@@ -481,6 +481,11 @@ def remember(enabled_value=None, stages=None, threads_value=None, devices=None) 
     says *afterwards* rather than what it was asked to write, so a surface
     redraws from the truth. A host that refuses the write keeps the switches it
     had and the pipeline keeps working at that setting.
+
+    One key in the answer is not a setting: ``applied``, present only when the
+    change was one the worker had to be restarted for, saying whether that
+    restart actually happened. It is a fact about this call rather than about
+    the store, and the route above folds it into the answer it sends the panel.
     """
     wanted = {}
     if enabled_value is not None:
@@ -516,13 +521,21 @@ def remember(enabled_value=None, stages=None, threads_value=None, devices=None) 
         if token is None:
             continue
         moved = _remember_device(stage_id, token) or moved
+    found = settings()
     if moved or OPT_THREADS in wanted:
-        _restart_for_execution()
-    return settings()
+        # What the restart actually did, not what it was asked to do. A worker
+        # that would not stop is a worker still running at the old budget, and
+        # the surface has to be able to say so.
+        found["applied"] = "now" if _restart_for_execution() else "pending_next_turn"
+    return found
 
 
-def _restart_for_execution() -> None:
+def _restart_for_execution() -> bool:
     """Drop the worker when a setting it only reads at load time has changed.
+
+    Answers whether the drop happened. It usually does; it does not while a
+    reply is being spoken, and the difference is the whole of what somebody
+    watching the panel wants to know after turning a dial.
 
     The thread budget and the placement are both read once, in ``_send_load``,
     and ``ensure_started`` returns early when the loaded stage set already
@@ -542,10 +555,12 @@ def _restart_for_execution() -> None:
     try:
         import mc_voice_pipeline_runtime as runtime
 
-        runtime.reconfigure("the Voice Pipeline execution settings changed")
+        return bool(runtime.reconfigure(
+            "the Voice Pipeline execution settings changed"))
     except Exception:
         logger.debug("Model Chain: could not restart the Voice Pipeline for a new "
                      "execution setting", exc_info=True)
+        return False
 
 
 def _remember_device(stage_id: str, token) -> bool:

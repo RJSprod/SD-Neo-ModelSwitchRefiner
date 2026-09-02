@@ -3565,6 +3565,10 @@
             }).catch(function () {
                 setText(row, "[data-mc-voice-status]",
                         "That switch could not be changed.");
+                // And take the last acknowledgement down with it. A line still
+                // reading "Saved" over a change that did not reach the server
+                // is the one wrong thing this panel could say.
+                setText(row, "[data-mc-voice-pipeline-applied]", "");
             });
         }
 
@@ -3588,6 +3592,35 @@
         }, Math.max(0, delay || 0));
     }
 
+    // What the change that was just posted actually did, in the panel that was
+    // used to make it.
+    //
+    // The server has always worked this out -- a thread budget and a placement
+    // are read once when the worker loads its stages, so changing one has to
+    // stop the worker, and a worker cannot be stopped in the middle of a reply
+    // -- and until now the browser dropped the answer. That is the whole of the
+    // "I set a value and nothing happened" complaint this fixes: the value did
+    // reach the store, and the only surface that could have said so said
+    // nothing, so the two outcomes looked identical.
+    //
+    // Written as a record of the write rather than as a claim about the present:
+    // "your next reply uses it" is still true after that reply has been spoken,
+    // where "waiting for the current reply" would quietly rot into a lie the
+    // moment the reply ended. Nothing repaints this panel when a turn finishes,
+    // so a sentence that has to stay true unattended is the only safe kind.
+    function paintPipelineApplied(row, payload) {
+        // Only when the payload carries the field. The settings route answers
+        // with it; the status poll does not, and a poll that blanked the line
+        // would take the answer away from somebody still reading it -- which
+        // during an install is a poll every 1.2 seconds.
+        if (!Object.prototype.hasOwnProperty.call(payload, "applied")) return;
+        setText(row, "[data-mc-voice-pipeline-applied]",
+                payload.applied === "pending_next_turn"
+                    ? "Saved \u2014 your next reply uses it. A reply already being "
+                      + "spoken finishes at the settings it started with."
+                    : "Saved \u2014 in force now.");
+    }
+
     function paintPipeline(row, payload) {
         if (!row || !payload || !payload.ok) return;
         const progress = (payload.progress && payload.progress.pipeline) || {};
@@ -3605,6 +3638,7 @@
             master.checked = !!payload.master_enabled;
             master.disabled = !payload.supported_for_engine;
         }
+        paintPipelineApplied(row, payload);
         (payload.stages || []).forEach(function (stage) {
             const box = row.querySelector(
                 '[data-mc-voice-pipeline-toggle="' + stage.id + '"]');
@@ -3780,6 +3814,17 @@
                         select.disabled = false;
                         if (payload && payload.ok) {
                             inForce = asked;
+                            // Same route, same answer, and moving a stage is
+                            // the change most likely to be refused: a worker
+                            // cannot be stopped mid-reply, so a card chosen
+                            // while one is being spoken is the *next* reply's.
+                            // The sentence goes on the settings row rather than
+                            // here because that row owns this feature's state
+                            // and this panel is about to be redrawn from the
+                            // server, which would take it away again.
+                            const settingsRow = holder.querySelector(
+                                '[data-mc-voice-kind="pipeline"]');
+                            if (settingsRow) paintPipelineApplied(settingsRow, payload);
                             // Redrawn from the server rather than left as it
                             // looks, because the panel carries a sentence about
                             // a card that is no longer in the machine, and that

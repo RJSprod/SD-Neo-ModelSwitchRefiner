@@ -1639,6 +1639,12 @@ def pipeline_html() -> str:
         f'</div>'
         f'<div class="mc-voice-pipeline-stages">{"".join(rows)}</div>'
         f'{_pipeline_threads_row(found)}'
+        # Empty, and empty is the point: nothing has been changed yet, so there
+        # is nothing to acknowledge. The browser writes one sentence into it
+        # after every stored change and style.css hides it while it holds
+        # nothing, so a panel nobody has touched carries no blank line.
+        f'<p class="mc-voice-note mc-voice-pipeline-applied" '
+        f'data-mc-voice-pipeline-applied></p>'
         f'<p class="mc-voice-note" data-mc-voice-pipeline-path>{line}</p>'
         f'<p class="mc-voice-note">Two optional models that run on this PC\u2019s '
         f'processor, after the speech engine has finished with a reply and before it is '
