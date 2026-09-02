@@ -1937,18 +1937,31 @@ def pipeline_stage_detail(stage_id: str) -> str:
     # there were one. LavaSR needs the PyTorch one; quoting it the ONNX one's
     # size told the user they were 132 MB from a stage that actually needs 264
     # and a different interpreter.
+    #
+    # Its *state* has to come from that closure too, which is the half that was
+    # still missing. ``found.runtime_ready`` answers for the ONNX closure, so
+    # pairing it with ``flavour == "onnx"`` left the PyTorch row hardcoded to
+    # "not installed yet" -- it said that over a torch closure sitting installed
+    # on disk, telling somebody to download 257 MB they already had while the
+    # real fault was somewhere this row could not see.
     flavour = pipeline.stage_flavour(stage_id)
-    runtime_ready = found.runtime_ready and flavour == "onnx"
+    runtime_state = found.runtime_for(flavour)[0]
+    runtime_ready = runtime_state == "installed"
     size = _runtime_bytes(flavour)
-    runtime_label = ("Voice Pipeline runtime" if flavour == "onnx"
-                     else "Voice Pipeline runtime, PyTorch build")
+    runtime_label = pipeline.runtime_label(flavour)
     requires = ("Installed." if runtime_ready
                 else (f"It will be installed first \u2014 about "
                       f"{models._bytes_label(size)} more."
                       if size else "It will be installed first."))
+    # "Stale" and "never installed" both mean the same thing to this button --
+    # it installs the closure either way -- but they do not mean the same thing
+    # to somebody reading the row, and only one of them explains why a stage
+    # that used to work stopped.
+    runtime_note = (" \u2014 not installed yet" if runtime_state == "not_installed"
+                    else "" if runtime_ready
+                    else f" \u2014 {_state_label(runtime_state).casefold()}")
     rows = [("Purpose", purpose.get(stage_id, spec.summary), ""),
-            ("Requires", runtime_label
-             + ("" if runtime_ready else " \u2014 not installed yet"), requires),
+            ("Requires", runtime_label + runtime_note, requires),
             ("Installation", _state_label(held.install_state if held else "not_installed"),
              held.message if held else ""),
             ("Runtime", _state_label("loaded" if stage_id in live["loaded_stages"]

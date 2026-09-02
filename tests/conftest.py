@@ -1990,7 +1990,8 @@ def fake_pipeline_worker(request, tmp_path, monkeypatch, voice_root):
         roots[stage] = str(where)
 
     monkeypatch.setattr(mc_voice_paths, "pipeline_worker_script", lambda: script)
-    monkeypatch.setattr(mc_voice_pipeline, "runtime_python", lambda: sys.executable)
+    monkeypatch.setattr(mc_voice_pipeline, "runtime_python",
+                        lambda flavour="onnx": sys.executable)
     monkeypatch.setattr(mc_voice_pipeline, "stage_paths", lambda: dict(roots))
     monkeypatch.setattr(mc_voice_pipeline, "worker_environment",
                         lambda: {"MC_FAKE_PIPELINE": json.dumps(plan),

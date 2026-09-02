@@ -1484,6 +1484,11 @@ class TestAStageInstallsTheRuntimeItNeeds:
                             lambda: ("windows", "amd64", "3.13"))
         monkeypatch.setattr(pipeline, "runtime_python",
                             lambda flavour="onnx": ("python" if runtime_present else None))
+        # Freshness, which is what the install paths actually ask. "There" and
+        # "the one this build pins" are different questions and the gap between
+        # them is a bug this class now owns: see the stale test below.
+        monkeypatch.setattr(pipeline, "runtime_current",
+                            lambda flavour="onnx": bool(runtime_present))
         monkeypatch.setattr(
             pipeline, "_install_runtime",
             lambda say, tick, flavour="onnx", accelerator="cpu": (
@@ -1506,6 +1511,61 @@ class TestAStageInstallsTheRuntimeItNeeds:
         pipeline.install("dpdfnet", on_status=said.append, on_progress=bar.append)
         assert done == ["dpdfnet"], (
             "an installed runtime must not be rebuilt underneath every stage")
+
+    def test_a_closure_an_older_build_pinned_is_rebuilt_rather_than_reused(
+            self, monkeypatch, voice_root):
+        """The second half of the LavaSR install failure, and the subtler half.
+
+        Both install paths asked ``runtime_python(flavour) is None`` -- whether
+        an interpreter file is sitting there. A closure built before this build
+        added three packages to it answers that with a yes, so the runtime was
+        left exactly as it was under every attempt, and the self-test then died
+        importing a module that closure had never carried. The panel had been
+        saying "needs updating" the whole time; the installer was asking a
+        different question and getting a different answer.
+        """
+        done, said, bar = self._stub(monkeypatch, runtime_present=True)
+        # There, and not what this build pins: exactly the state a user is left
+        # in by pulling a build that added a wheel to a closure they already had.
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": False)
+
+        pipeline.install("dpdfnet", on_status=said.append, on_progress=bar.append)
+
+        assert done == ["runtime:onnx", "dpdfnet"], (
+            "a stale closure is a closure the stage cannot be proved in, so it "
+            "is rebuilt rather than reused")
+
+    def test_the_freshness_question_reads_the_record_and_not_the_directory(
+            self, monkeypatch, voice_root):
+        """``runtime_current`` is the panel's question, asked by the installer.
+
+        Written against the files rather than a stub, because the whole defect
+        was two functions disagreeing about what "installed" meant while each
+        looked right on its own.
+        """
+        import mc_voice_models as models
+
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        root = paths.pipeline_runtime_root("torch")
+        (root / "env" / "Scripts").mkdir(parents=True, exist_ok=True)
+        (root / "env" / "Scripts" / "python.exe").write_bytes(b"")
+
+        # An interpreter and no record at all: present, and not installed.
+        assert pipeline.runtime_python("torch") is not None
+        assert pipeline.runtime_current("torch") is False
+
+        fresh = pipeline.runtime_closure_id("torch", "cpu")
+        assert fresh, "this test needs a closure this build actually pins"
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"closure": "206635c550af7cc9", "accelerator": "cpu"}),
+            encoding="utf-8")
+        assert pipeline.runtime_current("torch") is False, (
+            "a closure id from an older build is not this build's closure")
+
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"closure": fresh, "accelerator": "cpu"}), encoding="utf-8")
+        assert pipeline.runtime_current("torch") is True
 
     def test_the_bar_crosses_the_join_without_going_backwards(self, monkeypatch):
         """Two components, one bar. Neither of them owns the whole of it.
@@ -2278,9 +2338,47 @@ class TestThePlacementReachesTheStage:
 
         assert 'config["provider"] = "CPUExecutionProvider"' in source
 
+    def test_a_stage_is_proved_in_its_own_closure_and_not_the_default_one(
+            self, monkeypatch, tmp_path):
+        """The regression that made LavaSR uninstallable on every machine.
+
+        ``_self_test`` took ``runtime_python()`` -- the ONNX closure, by default
+        -- for every stage. So proving LavaSR started an interpreter with no
+        Torch in it, and the answer somebody got after downloading 257 MB of
+        PyTorch was ``No module named 'torch'``. Both halves are asserted: the
+        torch stage gets the torch interpreter, and the onnx stage still gets
+        the onnx one.
+        """
+        chosen = []
+        monkeypatch.setattr(pipeline, "runtime_python",
+                            lambda flavour="onnx": tmp_path / f"{flavour}-python")
+        monkeypatch.setattr(pipeline, "_run_staged",
+                            lambda interpreter, arguments, what, timeout=300: (
+                                chosen.append(interpreter), '{"ok": true}')[1])
+        monkeypatch.setattr(pipeline, "stage_config", lambda stage_id: {})
+
+        pipeline._self_test("lavasr", tmp_path)
+        pipeline._self_test("dpdfnet", tmp_path)
+
+        assert chosen == [tmp_path / "torch-python", tmp_path / "onnx-python"], (
+            "a stage has to be proved in the interpreter it will be run in")
+
     def test_the_stage_id_becomes_the_component_id_once(self):
         assert pipeline.component_of("dpdfnet") == "voice-pipeline-dpdfnet"
         assert pipeline.component_of("lavasr") == "voice-pipeline-lavasr"
+
+    def test_one_worker_runs_the_closure_every_loaded_stage_can_import(self):
+        """Torch as soon as any stage needs it, because only it carries both.
+
+        The torch closure carries ONNX Runtime as well; the ONNX one carries no
+        Torch. So a pair loaded together has exactly one interpreter that can
+        import both of them, and picking the other is how a stage that installed
+        cleanly still failed to load.
+        """
+        assert pipeline.stages_flavour(()) == "onnx"
+        assert pipeline.stages_flavour(("dpdfnet",)) == "onnx"
+        assert pipeline.stages_flavour(("lavasr",)) == "torch"
+        assert pipeline.stages_flavour(("dpdfnet", "lavasr")) == "torch"
 
     def test_a_build_without_the_device_module_still_speaks(self, monkeypatch):
         """Falling back to the processor is not the same as failing a reply."""
@@ -3070,6 +3168,7 @@ class TestInstallingAStageFromAFolderYouFilled:
 
     def test_a_missing_file_names_it_and_installs_nothing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         folder = self._folder(tmp_path / "src", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
             "enhancer_v2/config.yaml": b"sample_rate: 24000\n"})
@@ -3080,6 +3179,7 @@ class TestInstallingAStageFromAFolderYouFilled:
     def test_an_empty_file_is_refused_rather_than_copied(self, tmp_path, monkeypatch):
         """A browser that failed halfway leaves a zero-byte file, not no file."""
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         folder = self._folder(tmp_path / "src", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
             "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
@@ -3096,6 +3196,7 @@ class TestInstallingAStageFromAFolderYouFilled:
         panel's links invite them to do.
         """
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
         folder = self._folder(tmp_path / "loose", {
             "pytorch_model.bin": b"w" * 64,
@@ -3113,6 +3214,7 @@ class TestInstallingAStageFromAFolderYouFilled:
                                                                       monkeypatch):
         """This repository has never seen these bytes and must not imply it has."""
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
         folder = self._folder(tmp_path / "src", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
@@ -3133,6 +3235,7 @@ class TestInstallingAStageFromAFolderYouFilled:
             self, tmp_path, monkeypatch):
         """Staged, proved, promoted -- in that order, so a bad folder is inert."""
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
         good = self._folder(tmp_path / "good", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
@@ -3162,6 +3265,7 @@ class TestInstallingAStageFromAFolderYouFilled:
         more use than silently climbing until something matches.
         """
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
         folder = self._folder(tmp_path / "loose", {
             "pytorch_model.bin": b"x" * 32,
@@ -3173,6 +3277,7 @@ class TestInstallingAStageFromAFolderYouFilled:
     def test_a_nested_paste_says_where_it_looked(self, tmp_path, monkeypatch):
         """The consequence of the rule above, made explicit rather than found."""
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         folder = self._folder(tmp_path / "src", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
             "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
@@ -3183,6 +3288,7 @@ class TestInstallingAStageFromAFolderYouFilled:
 
     def test_nothing_at_that_path_says_so_plainly(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": True)
         with pytest.raises(pipeline.PipelineError, match="There is nothing at"):
             pipeline.install_from("lavasr", tmp_path / "nope")
         with pytest.raises(pipeline.PipelineError, match="Give the folder"):
@@ -3204,6 +3310,7 @@ class TestInstallingAStageFromAFolderYouFilled:
                             lambda: ("windows", "amd64", "3.13"))
         built = []
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": None)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": False)
         monkeypatch.setattr(
             pipeline, "_install_runtime",
             lambda say, tick, flavour="onnx", accelerator="cpu": (
@@ -3217,12 +3324,49 @@ class TestInstallingAStageFromAFolderYouFilled:
         assert built == ["torch"], "LavaSR is proved inside the PyTorch closure"
         assert paths.pipeline_stage_manifest("lavasr").exists()
 
+    def test_a_stale_closure_is_rebuilt_before_the_stage_is_proved_in_it(
+            self, tmp_path, monkeypatch):
+        """The exact path a user hit, and the reason "reinstall" never helped.
+
+        Their torch closure was on disk and had an interpreter, so this guard --
+        ``runtime_python(flavour) is None`` at the time -- said "already there"
+        and skipped straight to the self-test. But it had been built before this
+        build added LavaSR, vocos and encodec to the closure, so the model's own
+        code was not in it, and every attempt died in the same place with the
+        same sentence. The panel already knew: it had been drawing "needs
+        updating" over that runtime the whole time.
+        """
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        built = []
+        # There, with an interpreter, and not what this build pins.
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": False)
+        monkeypatch.setattr(
+            pipeline, "_install_runtime",
+            lambda say, tick, flavour="onnx", accelerator="cpu": (
+                built.append(flavour), tick(1.0)))
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b"y" * 32})
+
+        pipeline.install_from("lavasr", folder)
+
+        assert built == ["torch"], (
+            "an interpreter sitting in the directory says nothing about which "
+            "wheels are beside it")
+        assert paths.pipeline_stage_manifest("lavasr").exists()
+
     def test_a_build_with_no_closure_at_all_still_says_so(self, tmp_path, monkeypatch):
         """Installing the prerequisite is only possible where one is pinned."""
         import mc_voice_models as models
         monkeypatch.setattr(models, "current_platform",
                             lambda: ("linux", "x86_64", "3.11"))
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": None)
+        monkeypatch.setattr(pipeline, "runtime_current", lambda flavour="onnx": False)
         folder = self._folder(tmp_path / "src", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
             "enhancer_v2/config.yaml": b"sample_rate: 24000\n",

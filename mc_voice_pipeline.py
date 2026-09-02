@@ -934,6 +934,31 @@ def stage_flavour(stage_id: str) -> str:
     return "torch" if str(stage_id or "") == "lavasr" else "onnx"
 
 
+def runtime_label(flavour: str = "onnx") -> str:
+    """One closure's name, in the words the settings page uses for it.
+
+    Here rather than in the surface because a refusal raised from this module
+    ends up in front of somebody too, and "the onnx runtime is not installed" is
+    a sentence about a directory name they have never seen.
+    """
+    return ("Voice Pipeline runtime" if str(flavour or "") == "onnx"
+            else "Voice Pipeline runtime, PyTorch build")
+
+
+def stages_flavour(stage_ids) -> str:
+    """The one closure a worker serving all of these stages has to run inside.
+
+    Torch as soon as any one of them needs it, because the torch closure
+    carries ONNX Runtime as well and the ONNX one carries no Torch. That
+    asymmetry is the whole reason there is still one worker rather than two: the
+    flavour is a property of the *set* loaded together, never of each stage on
+    its own, and asking it in one place is what stops a start path from choosing
+    an interpreter that one of the stages it is about to load cannot import.
+    """
+    return ("torch" if any(stage_flavour(name) == "torch" for name in stage_ids)
+            else "onnx")
+
+
 def stage_available(stage_id: str) -> bool:
     """Whether this build ships the stage at all, ignoring the machine.
 
@@ -1267,6 +1292,37 @@ def runtime_python(flavour: str = "onnx") -> "Path | None":
     return None
 
 
+def runtime_current(flavour: str = "onnx") -> bool:
+    """Whether the closure on disk for one flavour is the one this build pins.
+
+    A different question from :func:`runtime_python`, which answers only "is
+    there an interpreter here" -- what a promoted directory looks like from the
+    outside, and no claim at all about what was unpacked into it. Freshness is
+    the installed record's closure id against this build's, which is how
+    :func:`status` has always decided the word "Installed".
+
+    The two answers came apart once and cost somebody every install they tried.
+    A torch closure built before LavaSR's own package was added to it still had
+    an interpreter, so each install path's ``runtime_python(...) is None`` check
+    read "already there" and never rebuilt it -- and the self-test then died
+    importing a module that closure had never carried. Existence is not
+    freshness, and only one of the two is what a stage is about to be run in.
+
+    The accelerator comes out of the record rather than a default, because a
+    CUDA closure is a different set of wheels under the same flavour: checking
+    one against the CPU fingerprint would call a current runtime stale and
+    rebuild it underneath every install.
+    """
+    try:
+        record = _record(paths.pipeline_runtime_manifest(flavour))
+    except ValueError:
+        return False
+    if not record or runtime_python(flavour) is None:
+        return False
+    wanted = runtime_closure_id(flavour, str(record.get("accelerator") or "cpu"))
+    return bool(wanted) and str(record.get("closure") or "") == wanted
+
+
 def runtime_installed() -> dict:
     return _record(paths.pipeline_runtime_manifest())
 
@@ -1330,10 +1386,31 @@ class Status:
     master_enabled: bool
     message: str
     download_bytes: int
+    runtime_flavours: tuple = ()
+    """Every closure this build knows, as ``(flavour, state, message)``.
+
+    The four fields above describe the ONNX closure and are left saying exactly
+    what they always said, because a surface that asks "is the Voice Pipeline
+    runtime installed" without naming a flavour is asking about that one. What
+    they could not express is a second closure, so a stage that runs in the
+    other one was drawn -- and started -- against the wrong answer.
+    """
 
     @property
     def runtime_ready(self) -> bool:
         return self.runtime_install_state == "installed"
+
+    def runtime_for(self, flavour: str) -> tuple:
+        """One closure's ``(state, message)``, by flavour.
+
+        Falls back to the ONNX fields for a snapshot assembled before this
+        existed, so a caller reading the flavour it has always read gets the
+        answer it has always got.
+        """
+        for name, state, message in self.runtime_flavours:
+            if name == flavour:
+                return (state, message)
+        return (self.runtime_install_state, self.runtime_message)
 
     def stage(self, stage_id: str) -> "StageStatus | None":
         for found in self.stages:
@@ -1363,31 +1440,16 @@ def status() -> Status:
     except PipelineError as exc:
         return Status(supported=False, pinned=False, runtime_install_state="error",
                       runtime_message=str(exc), runtime_closure_id="", stages=(),
-                      master_enabled=enabled(), message=str(exc), download_bytes=0)
+                      master_enabled=enabled(), message=str(exc), download_bytes=0,
+                      runtime_flavours=tuple((name, "error", str(exc))
+                                             for name in RUNTIME_FLAVOURS))
 
     is_pinned = pinned()
     supported = supported_platform()
     wanted_closure = runtime_closure_id()
-    record = runtime_installed()
-
-    if not runtime_installable():
-        runtime_state = "not_installed"
-        runtime_message = ("Not available — this build has not pinned a Voice Pipeline "
-                           "runtime closure for this operating system and Python version.")
-    elif not supported:
-        runtime_state = "not_installed"
-        runtime_message = ("Not available — this build has no pinned Voice Pipeline "
-                           "runtime for this operating system and Python version.")
-    elif not record:
-        runtime_state, runtime_message = "not_installed", "Not installed."
-    elif str(record.get("closure") or "") != wanted_closure:
-        runtime_state = "stale"
-        runtime_message = ("Installed by an older build and needs installing again.")
-    elif runtime_python() is None:
-        runtime_state = "corrupt"
-        runtime_message = "Installed, but its interpreter is missing. Reinstall it."
-    else:
-        runtime_state, runtime_message = "installed", "Installed."
+    runtime_state, runtime_message = _runtime_state("onnx", supported)
+    flavours = tuple((name,) + _runtime_state(name, supported)
+                     for name in RUNTIME_FLAVOURS)
 
     stages = []
     for spec in STAGES:
@@ -1433,7 +1495,47 @@ def status() -> Status:
         master_enabled=enabled(),
         message=runtime_message if runtime_state != "installed" else "Installed.",
         download_bytes=total,
+        runtime_flavours=flavours,
     )
+
+
+def _runtime_state(flavour: str, supported: bool) -> tuple:
+    """One closure's install state and the sentence that goes with it.
+
+    Lifted out of :func:`status` when the second flavour stopped being
+    hypothetical. It was written inline against the ONNX closure and read as
+    though there were only one runtime, so LavaSR -- which runs in the other one
+    -- was drawn against an answer that was never about it: a panel saying "not
+    installed yet" over a torch closure sitting installed on disk, and a worker
+    starting in the ONNX interpreter to load a PyTorch model.
+
+    Raises nothing, for the reason :func:`status` gives: a settings page that
+    could not be drawn because one optional closure's manifest was unreadable is
+    a settings page nobody can use to uninstall it.
+    """
+    try:
+        record = _record(paths.pipeline_runtime_manifest(flavour))
+    except ValueError:
+        return ("error", f"{flavour!r} is not a Voice Pipeline runtime flavour.")
+    if not runtime_installable(flavour):
+        return ("not_installed",
+                "Not available — this build has not pinned a Voice Pipeline runtime "
+                "closure for this operating system and Python version.")
+    if not supported:
+        return ("not_installed",
+                "Not available — this build has no pinned Voice Pipeline runtime for "
+                "this operating system and Python version.")
+    if not record:
+        return ("not_installed", "Not installed.")
+    # Against the accelerator the record itself names, so a CUDA closure is
+    # compared with the CUDA fingerprint rather than declared stale for not
+    # being the CPU one.
+    wanted = runtime_closure_id(flavour, str(record.get("accelerator") or "cpu"))
+    if str(record.get("closure") or "") != wanted:
+        return ("stale", "Installed by an older build and needs installing again.")
+    if runtime_python(flavour) is None:
+        return ("corrupt", "Installed, but its interpreter is missing. Reinstall it.")
+    return ("installed", "Installed.")
 
 
 def pipeline_state(found: "Status | None" = None) -> str:
@@ -1629,7 +1731,15 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
     with models._claim(KIND, say, wanted):
         if wanted == "runtime":
             _install_runtime(say, tick)
-        elif runtime_python(stage_flavour(wanted)) is None:
+        elif not runtime_current(stage_flavour(wanted)):
+            # Stale counts as missing here, and that is the correction rather
+            # than a nicety. This used to ask whether the interpreter file
+            # existed, which a closure built by an older build also answers yes
+            # to -- so a torch runtime pinned before LavaSR's own package was
+            # added to it was left exactly as it was, under every install of the
+            # stage that needs it. The freshness question is the one the panel
+            # was already asking and the one the self-test was already failing.
+            #
             # The runtime is not a second thing to install, it is the thing this
             # stage is proved inside: ``_install_stage`` ends by running the
             # model through a second of speech in the staged interpreter, and
@@ -1791,7 +1901,15 @@ def _artifacts(entries) -> list:
 def _install_runtime(say, tick, flavour: str = "onnx",
                      accelerator: str = "cpu") -> None:
     import mc_voice_models as models
+    import mc_voice_pipeline_runtime as runtime
 
+    # The same courtesy uninstall() pays, and now for the same reason. This is
+    # the function that replaces a closure directory, and since a *stale* one is
+    # rebuilt rather than skipped, that directory can be the one a worker is
+    # running inside. On Windows the rename then fails, ``_promote`` puts the
+    # old closure back and says so -- correct, and a refusal nobody needed. The
+    # worker is reloaded by the next turn that wants it.
+    runtime.stop("the Voice Pipeline runtime is being installed")
     entry = _platform_entry(flavour, accelerator)
     staging = paths.pipeline_staging_for(f"runtime-{flavour}-{accelerator}",
                                          uuid.uuid4().hex[:8])
@@ -1909,7 +2027,7 @@ def _staged_python(staging: Path) -> Path:
 def _install_stage(stage_id: str, say, tick) -> None:
     import mc_voice_models as models
 
-    if runtime_python() is None:
+    if not runtime_current(stage_flavour(stage_id)):
         raise PipelineError(
             "The Voice Pipeline runtime is not installed yet, and a model that cannot be "
             "run cannot be proved. Install the runtime first.")
@@ -2032,7 +2150,12 @@ def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> Non
 
     flavour = stage_flavour(stage_id)
     with models._claim(KIND, say, stage_id):
-        if runtime_python(flavour) is None:
+        if not runtime_current(flavour):
+            # Freshness rather than existence, for the reason install() gives:
+            # a closure this build has since added wheels to is a closure the
+            # stage cannot be proved in, and an interpreter sitting in the
+            # directory says nothing about which wheels are beside it.
+            #
             # Installed rather than described, for the reason install() gives at
             # length: telling somebody who pressed the only button on their
             # panel to go and press a different one is not an answer, and here
@@ -2147,9 +2270,21 @@ def _self_test(stage_id: str, staging: Path) -> dict:
     # message somebody got would be about the model.
     config["provider"] = "CPUExecutionProvider"
     config["adapter"] = 0
-    interpreter = runtime_python()
+    # The stage's own closure, and this is the line the whole feature turned on.
+    # It used to take the default -- the ONNX one -- for every stage, so proving
+    # LavaSR meant starting an interpreter that has no Torch in it and reading
+    # "No module named 'torch'" back from a machine that had just downloaded
+    # 257 MB of it. The runtime a stage is proved in has to be the runtime it
+    # will be run in; there is no version of this check worth doing in the other
+    # one.
+    flavour = stage_flavour(stage_id)
+    interpreter = runtime_python(flavour)
     if interpreter is None:
-        raise PipelineError("The Voice Pipeline runtime is not installed.")
+        # Named the way the panel names it. "onnx" and "torch" are this module's
+        # words for two directories; the closure somebody is being told to
+        # install is a row they can see.
+        raise PipelineError(
+            f"The {runtime_label(flavour)} is not installed.")
     report = _run_staged(
         interpreter,
         [str(paths.pipeline_worker_script()), "--selftest",
