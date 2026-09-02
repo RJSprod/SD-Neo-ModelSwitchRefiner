@@ -385,7 +385,7 @@
    "import_name": "torch",
    "license": "BSD-3-Clause (PyTorch, NumPy, SciPy, scikit-learn, joblib, sympy, mpmath, torchaudio, networkx); MIT (ONNX Runtime including its DirectML execution provider, einops, soxr, soundfile, tqdm, filelock, PyYAML); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (huggingface_hub, LavaSR)",
    "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 and hashed against the digests pypi.org publishes for each file. pip's own resolver could not be used for this closure the way it was for the ONNX one: --platform steers wheel-tag selection but does not set the marker environment, so a Linux machine resolving torch for Windows tries to satisfy the nvidia-* pins that torch gates behind platform_system == \"Linux\" and fails outright. The dependency graph was walked against PyPI's own metadata with a Windows/cp313 marker environment instead, which is the same information pip would have used had it been able to.",
-   "closure_notes": "THE PYTORCH FLAVOUR, AND IT CARRIES ONNX RUNTIME TOO -- deliberately, because that is what keeps this to ONE PROCESS. LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one; running them in two runtimes would mean two workers, two job objects and two ways to leak a process that outlives the voice it belongs to. Carrying both wheel sets in one interpreter costs 126 MB over the ONNX closure and buys back every containment guarantee unchanged -- the same start and stop path, the same Windows job object, the same pdeathsig, the same coupling to PocketTTS's residency. A stage's backend chooses which interpreter the single contained worker runs, never how many workers there are.\n\nCPU ONLY, AND THAT IS NOT A DESIGN CHOICE. torch on PyPI for Windows is the CPU build; every CUDA dependency in its metadata is gated behind platform_system == \"Linux\", and the Windows CUDA wheels live on download.pytorch.org, which the machine that wrote this manifest could not reach. A CUDA closure is a second platform entry here, resolved and hashed the same way, from a machine that can reach that host. Until then a card cannot be offered for the torch backend, and the settings row says so rather than showing a control that would do nothing.\n\nTHREE PACKAGES ARRIVE AS SOURCE, NOT WHEELS. LavaSR publishes no wheel, its vocos dependency is a fork pinned to a git branch, and encodec ships an sdist only -- and vocos imports encodec unconditionally, so all three are needed to import any of them. All three are pure Python, so installing them is lifting one named package directory onto the path: no build step runs and no setup.py is executed. Only the named directory is taken, because a GitHub tarball is a repository rather than a distribution and carries tests, training scripts and, in encodec's case, four megabytes of sample audio. encodec is pinned by digest here; the two GitHub tarballs are pinned to immutable commits but arrive against the digest codeload serves, because the machine that wrote this manifest cannot reach that host.",
+   "closure_notes": "THE PYTORCH FLAVOUR, AND IT CARRIES ONNX RUNTIME TOO -- deliberately, because that is what keeps this to ONE PROCESS. LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one; running them in two runtimes would mean two workers, two job objects and two ways to leak a process that outlives the voice it belongs to. Carrying both wheel sets in one interpreter costs 126 MB over the ONNX closure and buys back every containment guarantee unchanged -- the same start and stop path, the same Windows job object, the same pdeathsig, the same coupling to PocketTTS's residency. A stage's backend chooses which interpreter the single contained worker runs, never how many workers there are.\n\nSO IT CARRIES DPDFNET'S OWN PACKAGE TOO, AND THAT IS THE POINT OF THE PARAGRAPH ABOVE RATHER THAN AN EXTRA. Carrying ONNX Runtime is not the same as carrying the stage that uses it: DPDFNet imports `dpdfnet`, and this closure had the runtime and not the package. The effect was that enabling BOTH stages was worse than enabling either -- one worker serves the pair, the pair means this closure, and the worker died on `import dpdfnet` before a sample reached either model. Every reply came out unenhanced, with a ModuleNotFoundError in the log and both stages showing Installed and Enabled on the panel. soxr comes with it, because librosa resamples through it, and soundfile is the win_amd64 wheel the ONNX closure pins rather than the pure one, because only that build carries libsndfile beside it. Whatever the ONNX closure needs to run DPDFNet, this one needs too.\n\nCPU ONLY, AND THAT IS NOT A DESIGN CHOICE. torch on PyPI for Windows is the CPU build; every CUDA dependency in its metadata is gated behind platform_system == \"Linux\", and the Windows CUDA wheels live on download.pytorch.org, which the machine that wrote this manifest could not reach. A CUDA closure is a second platform entry here, resolved and hashed the same way, from a machine that can reach that host. Until then a card cannot be offered for the torch backend, and the settings row says so rather than showing a control that would do nothing.\n\nTHREE PACKAGES ARRIVE AS SOURCE, NOT WHEELS. LavaSR publishes no wheel, its vocos dependency is a fork pinned to a git branch, and encodec ships an sdist only -- and vocos imports encodec unconditionally, so all three are needed to import any of them. All three are pure Python, so installing them is lifting one named package directory onto the path: no build step runs and no setup.py is executed. Only the named directory is taken, because a GitHub tarball is a repository rather than a distribution and carries tests, training scripts and, in encodec's case, four megabytes of sample audio. encodec is pinned by digest here; the two GitHub tarballs are pinned to immutable commits but arrive against the digest codeload serves, because the machine that wrote this manifest cannot reach that host.",
    "about_bytes": 268966744,
    "platforms": [
     {
@@ -398,14 +398,6 @@
      "python": "3.13",
      "accelerator": "cpu",
      "artifacts": [
-      {
-       "filename": "LavaSR-33ac04089251.tar.gz",
-       "local_name": "LavaSR-33ac04089251.tar.gz",
-       "url": "https://codeload.github.com/ysharma3501/LavaSR/tar.gz/33ac040892519c1bb4aed7eb32e79af51cc29e2a",
-       "source_package": "LavaSR",
-       "bytes": 0,
-       "sha256": ""
-      },
       {
        "filename": "anyio-4.14.2-py3-none-any.whl",
        "local_name": "anyio-4.14.2-py3-none-any.whl",
@@ -461,6 +453,13 @@
        "url": "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl",
        "bytes": 10365,
        "sha256": "f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c"
+      },
+      {
+       "filename": "dpdfnet-0.6.0-py3-none-any.whl",
+       "local_name": "dpdfnet-0.6.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/f3/57/3eb73faf0aefde25701f5e01315e77bbcbaf4e165651dba3efb936e11c55/dpdfnet-0.6.0-py3-none-any.whl",
+       "bytes": 25898,
+       "sha256": "457b10879808d7b259312f2128a26b5defb16aa3095536b4af0d55a263e3fd06"
       },
       {
        "filename": "einops-0.8.2-py3-none-any.whl",
@@ -546,6 +545,14 @@
        "url": "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl",
        "bytes": 306115,
        "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
+      },
+      {
+       "filename": "LavaSR-33ac04089251.tar.gz",
+       "local_name": "LavaSR-33ac04089251.tar.gz",
+       "url": "https://codeload.github.com/ysharma3501/LavaSR/tar.gz/33ac040892519c1bb4aed7eb32e79af51cc29e2a",
+       "source_package": "LavaSR",
+       "bytes": 0,
+       "sha256": ""
       },
       {
        "filename": "lazy_loader-0.5-py3-none-any.whl",
@@ -695,11 +702,18 @@
        "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
       },
       {
-       "filename": "soundfile-0.14.0-py2.py3-none-any.whl",
-       "local_name": "soundfile-0.14.0-py2.py3-none-any.whl",
-       "url": "https://files.pythonhosted.org/packages/b1/d1/5e338af9ca6ed0786cd5bb03f6d60de1c325728c1189014f3b59aae7403c/soundfile-0.14.0-py2.py3-none-any.whl",
-       "bytes": 26799,
-       "sha256": "8ba81ae3a89fd5ab3bef8a8eb481fbbe794e806309675a89b4df48b8d31908a8"
+       "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+       "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+       "bytes": 1021480,
+       "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+      },
+      {
+       "filename": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+       "local_name": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/b0/4d/621e4150e4815246ad552d215a8a294a90143fedd19ee442cf82d3b3abc8/soxr-1.1.0-cp312-abi3-win_amd64.whl",
+       "bytes": 174357,
+       "sha256": "6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4"
       },
       {
        "filename": "sympy-1.14.0-py3-none-any.whl",
@@ -771,14 +785,6 @@
      "accelerator": "cuda",
      "artifacts": [
       {
-       "filename": "LavaSR-33ac04089251.tar.gz",
-       "local_name": "LavaSR-33ac04089251.tar.gz",
-       "url": "https://codeload.github.com/ysharma3501/LavaSR/tar.gz/33ac040892519c1bb4aed7eb32e79af51cc29e2a",
-       "source_package": "LavaSR",
-       "bytes": 0,
-       "sha256": ""
-      },
-      {
        "filename": "anyio-4.14.2-py3-none-any.whl",
        "local_name": "anyio-4.14.2-py3-none-any.whl",
        "url": "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl",
@@ -833,6 +839,13 @@
        "url": "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl",
        "bytes": 10365,
        "sha256": "f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c"
+      },
+      {
+       "filename": "dpdfnet-0.6.0-py3-none-any.whl",
+       "local_name": "dpdfnet-0.6.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/f3/57/3eb73faf0aefde25701f5e01315e77bbcbaf4e165651dba3efb936e11c55/dpdfnet-0.6.0-py3-none-any.whl",
+       "bytes": 25898,
+       "sha256": "457b10879808d7b259312f2128a26b5defb16aa3095536b4af0d55a263e3fd06"
       },
       {
        "filename": "einops-0.8.2-py3-none-any.whl",
@@ -918,6 +931,14 @@
        "url": "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl",
        "bytes": 306115,
        "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
+      },
+      {
+       "filename": "LavaSR-33ac04089251.tar.gz",
+       "local_name": "LavaSR-33ac04089251.tar.gz",
+       "url": "https://codeload.github.com/ysharma3501/LavaSR/tar.gz/33ac040892519c1bb4aed7eb32e79af51cc29e2a",
+       "source_package": "LavaSR",
+       "bytes": 0,
+       "sha256": ""
       },
       {
        "filename": "lazy_loader-0.5-py3-none-any.whl",
@@ -1067,11 +1088,18 @@
        "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
       },
       {
-       "filename": "soundfile-0.14.0-py2.py3-none-any.whl",
-       "local_name": "soundfile-0.14.0-py2.py3-none-any.whl",
-       "url": "https://files.pythonhosted.org/packages/b1/d1/5e338af9ca6ed0786cd5bb03f6d60de1c325728c1189014f3b59aae7403c/soundfile-0.14.0-py2.py3-none-any.whl",
-       "bytes": 26799,
-       "sha256": "8ba81ae3a89fd5ab3bef8a8eb481fbbe794e806309675a89b4df48b8d31908a8"
+       "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+       "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+       "bytes": 1021480,
+       "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+      },
+      {
+       "filename": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+       "local_name": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/b0/4d/621e4150e4815246ad552d215a8a294a90143fedd19ee442cf82d3b3abc8/soxr-1.1.0-cp312-abi3-win_amd64.whl",
+       "bytes": 174357,
+       "sha256": "6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4"
       },
       {
        "filename": "sympy-1.14.0-py3-none-any.whl",

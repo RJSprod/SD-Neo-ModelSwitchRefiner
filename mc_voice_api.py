@@ -883,9 +883,29 @@ def _log_pipeline(found: dict) -> None:
     Silent when the pipeline did not run at all, which is the ordinary case for
     an installation that has never enabled it -- a line saying "no enhancement"
     on every reply forever would be noise, and its absence already means that.
+
+    Not silent, though, when stages were *selected* and produced nothing. That
+    is a different thing and it used to read as success:
+
+        Voice pipeline ran — dpdfnet,lavasr, 48000 Hz out, None samples in /
+        None out, first output None ms, compute None ms
+
+    on a reply whose worker had died on an import seconds earlier and which was
+    spoken unenhanced. ``pipeline_stages`` is what the turn *planned* -- the
+    snapshot's answer, fixed before the first sample moves -- and every measured
+    field beside it was None, which is what nothing having happened looks like.
+    Somebody reading that line has been told the opposite of what happened, on
+    the one line they went looking for to find out.
     """
     stages = found.get("pipeline_stages")
     if not stages:
+        return
+    if not found.get("pipeline_output_sample_count"):
+        logger.info(
+            "Model Chain: Voice pipeline did NOT run on this reply — %s %s selected and "
+            "produced no audio, so the reply was spoken unenhanced. The reason is on an "
+            "earlier line: a worker that could not start says so when it fails",
+            stages, "was" if "," not in str(stages) else "were")
         return
     rtf = found.get("pipeline_rtf_milli")
     logger.info(

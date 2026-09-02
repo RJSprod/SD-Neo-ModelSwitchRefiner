@@ -2099,6 +2099,42 @@ class TestTheLogSaysWhetherTheEnhancementRan:
         assert self._lines({"pipeline_stages": None}, monkeypatch) == []
         assert self._lines({}, monkeypatch) == []
 
+    def test_stages_that_produced_nothing_are_not_reported_as_having_run(
+            self, monkeypatch):
+        """The line a user went to for the answer and was told the opposite.
+
+        Straight from a log, on a reply whose worker had died on an import
+        seconds earlier and which was spoken unenhanced::
+
+            Voice pipeline ran — dpdfnet,lavasr, 48000 Hz out, None samples in
+            / None out, first output None ms, compute None ms
+
+        ``pipeline_stages`` is what the turn *planned*, fixed before the first
+        sample moves. Every measured field beside it was None, which is what
+        nothing having happened looks like.
+        """
+        said = self._lines({
+            "pipeline_stages": "dpdfnet,lavasr", "pipeline_output_rate": 48000,
+            "pipeline_input_sample_count": None, "pipeline_output_sample_count": None,
+            "pipeline_first_output_ms": None, "pipeline_compute_ms": None,
+            "pipeline_rtf_milli": None, "pipeline_backpressure_ms": 0,
+        }, monkeypatch)
+
+        assert len(said) == 1, said
+        assert "did NOT run" in said[0], said[0]
+        assert "unenhanced" in said[0], said[0]
+        assert "dpdfnet,lavasr" in said[0], "and it still names what was selected"
+
+    def test_a_stage_that_produced_no_samples_is_the_same_answer(self, monkeypatch):
+        """Zero is not a small amount of enhancement, it is none."""
+        said = self._lines({
+            "pipeline_stages": "DPDFNet", "pipeline_output_rate": 24000,
+            "pipeline_input_sample_count": 0, "pipeline_output_sample_count": 0,
+            "pipeline_first_output_ms": None, "pipeline_compute_ms": None,
+        }, monkeypatch)
+
+        assert "did NOT run" in said[0], said[0]
+
     def test_backpressure_is_named_because_it_is_the_failure(self, monkeypatch):
         """A source held back is the enhancement failing to keep up (11.7)."""
         said = self._lines({
@@ -3611,6 +3647,83 @@ class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
 
         assert pipeline.placement("lavasr") == (devices.PROVIDER_CUDA, 0)
         assert pipeline.cuda_mask() == self._card().uuid
+
+
+class TestAClosureCarriesEveryStageItHasToRun:
+    """Carrying a runtime is not the same as carrying the stage that uses it.
+
+    The torch closure had ONNX Runtime in it and no ``dpdfnet``. One worker
+    serves every enabled stage and the pair runs in this closure, so switching
+    BOTH stages on was worse than switching on either: the worker died on
+    ``import dpdfnet`` before a sample reached either model, every reply came
+    out unenhanced, and the panel showed both stages Installed and Enabled the
+    whole time. The only sign was ModuleNotFoundError in a log line.
+
+    The same omission as the one that left LavaSR, vocos and encodec out of this
+    closure when it was first built. Declaring wheels is not the same as being
+    able to import what runs.
+    """
+
+    @staticmethod
+    def _packages(block):
+        import re
+
+        found = set()
+        for item in block["platforms"][0]["artifacts"]:
+            if item.get("source_package"):
+                found.add(item["source_package"].casefold())
+                continue
+            name = str(item.get("local_name") or item.get("filename") or "")
+            found.add(re.split(r"-\d", name, 1)[0].casefold().replace("_", "-"))
+        return found
+
+    def test_the_torch_closure_can_import_dpdfnet(self):
+        found = pipeline.manifest()
+        torch = self._packages(pipeline.runtime_entry(found, "torch"))
+        assert "dpdfnet" in torch, (
+            "both stages enabled means one worker in the torch closure, and it "
+            "opens DPDFNet's model with dpdfnet")
+
+    def test_the_torch_closure_can_import_lavasr(self):
+        torch = self._packages(pipeline.runtime_entry(pipeline.manifest(), "torch"))
+        assert {"lavasr", "vocos", "encodec"} <= torch
+
+    def test_the_torch_closure_holds_everything_the_onnx_one_runs_dpdfnet_with(self):
+        """The general rule, so the next addition to one is not missed in the other.
+
+        Anything the ONNX closure needs to run its stage, the torch closure
+        needs too -- it runs that same stage whenever both are on. Version
+        differences are fine; a missing name is not.
+        """
+        found = pipeline.manifest()
+        onnx = self._packages(pipeline.runtime_entry(found, "onnx"))
+        torch = self._packages(pipeline.runtime_entry(found, "torch"))
+
+        assert not (onnx - torch), (
+            f"the torch closure runs DPDFNet too and is missing {sorted(onnx - torch)}")
+
+    def test_every_torch_platform_carries_the_same_packages(self):
+        """The CUDA closure is the same closure on different wheels."""
+        block = pipeline.runtime_entry(pipeline.manifest(), "torch")
+        if len(block["platforms"]) < 2:
+            pytest.skip("only one torch platform is pinned")
+
+        import re
+
+        def named(entry):
+            found = set()
+            for item in entry["artifacts"]:
+                if item.get("source_package"):
+                    found.add(item["source_package"].casefold())
+                    continue
+                name = str(item.get("local_name") or item.get("filename") or "")
+                found.add(re.split(r"-\d", name, 1)[0].casefold().replace("_", "-"))
+            return found
+
+        sets = [named(entry) for entry in block["platforms"]]
+        for other in sets[1:]:
+            assert other == sets[0], (
+                f"the CUDA closure differs by {sorted(other ^ sets[0])}")
 
 
 class TestATurnAsksTheClosureItsOwnStagesNeed:
