@@ -2298,7 +2298,8 @@ def pipeline_settings(enabled, stages, threads=None, devices=None) -> dict:
             raise Refused(400, "A device is named by its identifier.")
         placements[str(name)] = token
     try:
-        pipeline.remember(enabled, wanted, threads_value=threads, devices=placements)
+        stored = pipeline.remember(enabled, wanted, threads_value=threads,
+                                   devices=placements)
     except ValueError as exc:
         # The one refusal that comes from inside the write rather than from the
         # validation before it, because only the device list knows whether a
@@ -2308,11 +2309,20 @@ def pipeline_settings(enabled, stages, threads=None, devices=None) -> dict:
     found = pipeline_payload()
     import mc_voice_turn as turns
 
-    # Said rather than implied. A turn in flight is frozen onto the snapshot it
-    # started with, so somebody who changes a switch mid-reply has changed the
-    # next one, and a surface that did not say so would be a surface that looked
-    # broken for the length of a sentence (I-VP-06, section 12.5).
-    found["applied"] = "pending_next_turn" if turns.busy() else "now"
+    # Two reasons a change can be stored and not yet in force, and the answer is
+    # the pessimistic one.
+    #
+    # remember() knows the first: a thread budget or a placement is only read
+    # when the worker loads its stages, so changing one has to stop the worker,
+    # and a worker cannot be stopped in the middle of a reply. It says whether
+    # the stop actually happened rather than whether it was attempted.
+    #
+    # This line knows the second: a turn in flight is frozen onto the snapshot
+    # it started with, so somebody who ticks a switch mid-reply has changed the
+    # next one. Without saying so the surface looks broken for the length of a
+    # sentence (I-VP-06, section 12.5).
+    waiting = (stored or {}).get("applied") == "pending_next_turn" or turns.busy()
+    found["applied"] = "pending_next_turn" if waiting else "now"
     return found
 
 

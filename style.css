@@ -5336,6 +5336,19 @@
     flex: 0 0 auto;
 }
 
+/* What the last change did, written by the browser after the server answers.
+   Not subdued like the two notes it sits between: it is the panel's reply to
+   something the user just did, and a reply in the same grey as the standing
+   explanation beside it is a reply nobody notices. Hidden while empty, so a
+   panel nobody has touched shows no gap where an answer will go. */
+.mc-voice-pipeline-applied {
+    color: var(--body-text-color, inherit);
+}
+
+.mc-voice-pipeline-applied:empty {
+    display: none;
+}
+
 /* The overview: several rows visible at once, which is the whole point of it.
    A grid rather than a column of cards, because "what do I have" is a question
    somebody answers by scanning rather than by scrolling. */
