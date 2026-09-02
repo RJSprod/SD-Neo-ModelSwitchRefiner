@@ -153,6 +153,138 @@ class TestOneReply:
         assert turn.sample_rate == 22050
 
 
+class TestTheBrowserIsToldTheRateOfWhatItIsSent:
+    """The defect behind "no choppiness but still slow".
+
+    Raw PCM has no header, so the rate travels beside it in
+    ``X-Model-Chain-Voice-Rate`` -- and that header is built the moment a
+    browser attaches. A browser attaches as soon as Conversation tells it a
+    turn exists, which is long before the turn has asked its engine anything:
+    on the run that found this, "Voice is streaming turn to a browser" was
+    logged 21.3 seconds ahead of the pipeline reporting its output rate,
+    because a cold llama-server had to start and write a sentence first.
+
+    For all of that ``sample_rate`` is zero and the header falls back to 24000.
+    With the Voice Pipeline off that is accidentally correct -- PocketTTS
+    speaks at 24000. With LavaSR in the chain the body is 48 kHz, so the
+    browser laid 494016 samples over 20.6 seconds instead of 10.3: half speed,
+    an octave down, and *no underrun reported*, because consuming at half rate
+    is exactly what stops a buffer running dry.
+
+    That last part is why fixing the throughput did not fix this. The two
+    complaints were one bug each.
+    """
+
+    class Late:
+        """An engine that only knows its rate once it has been asked.
+
+        Which is every engine: ``begin_turn`` is what opens the Voice Pipeline
+        and freezes this turn's output rate, and it does not run until the
+        model's first sentence is whole.
+        """
+
+        def __init__(self, rate, delay=0.4):
+            self.rate, self.delay = rate, delay
+
+        def begin_turn(self, turn, sid, speed=1.0):
+            time.sleep(self.delay)
+            return self.rate
+
+        def send_segment(self, turn, text):
+            turn.offer_audio(b"\x01\x00" * 1200, self.rate)
+
+        def finish_turn(self, turn):
+            turn.audio_finished()
+
+        def cancel_turn(self, turn):
+            pass
+
+    def _attached(self, turn):
+        import mc_voice_api as api
+
+        return api.stream_headers(api.open_stream(turn.id))
+
+    def test_a_pipeline_that_doubles_the_rate_is_advertised_at_the_doubled_rate(self):
+        """The bug, as a test. Told 24000 for a 48 kHz body, a browser plays it
+        at half speed -- and this is the only place that can be caught."""
+        turn = turns.create(sid=0, speaker=self.Late(48000))
+        turn.start()
+        turn.add_text("Hello there, this is a sentence long enough to be a segment. ")
+        try:
+            assert self._attached(turn)["X-Model-Chain-Voice-Rate"] == "48000"
+        finally:
+            turn.cancel("test")
+
+    def test_a_turn_with_no_pipeline_is_the_turn_it_always_was(self):
+        turn = turns.create(sid=0, speaker=self.Late(24000))
+        turn.start()
+        turn.add_text("Hello there, this is a sentence long enough to be a segment. ")
+        try:
+            assert self._attached(turn)["X-Model-Chain-Voice-Rate"] == "24000"
+        finally:
+            turn.cancel("test")
+
+    def test_the_wait_ends_when_the_rate_does_rather_than_on_a_timer(self):
+        """It is a handshake, not a sleep. The header goes out the moment the
+        engine answers, which on a warm worker is no wait at all."""
+        turn = turns.create(sid=0, speaker=self.Late(48000, delay=0.3))
+        turn.start()
+        turn.add_text("Hello there, this is a sentence long enough to be a segment. ")
+        began = time.monotonic()
+        try:
+            found = self._attached(turn)
+        finally:
+            turn.cancel("test")
+        waited = time.monotonic() - began
+
+        assert found["X-Model-Chain-Voice-Rate"] == "48000"
+        assert waited < 5.0, f"waited {waited:.1f}s for a 0.3s handshake"
+
+    def test_a_turn_that_will_never_speak_does_not_hold_the_stream(self):
+        """The failsafe has to be unreachable in practice. A cancelled turn
+        releases the wait itself rather than leaving a browser -- and a worker
+        thread -- parked on the timeout."""
+        import mc_voice_api as api
+
+        turn = turns.create(sid=0, speaker=self.Late(48000, delay=30.0))
+        turn.start()
+        turn.add_text("Hello there, this is a sentence long enough to be a segment. ")
+        threading.Timer(0.2, lambda: turn.cancel("user")).start()
+
+        began = time.monotonic()
+        try:
+            api.stream_headers(api.open_stream(turn.id))
+        except Exception:
+            pass
+        waited = time.monotonic() - began
+
+        assert waited < 5.0, f"a cancelled turn held the stream for {waited:.1f}s"
+
+    def test_a_turn_that_ended_before_it_had_a_rate_releases_the_wait(self):
+        """Nothing was spoken, so nothing is waiting to be told at what rate.
+        The ``finally`` in the run loop covers every way that can happen."""
+        turn = turns.create(sid=0, speaker=self.Late(48000))
+        turn.start()
+        turn.complete("")
+        turn.finished.wait(3.0)
+
+        assert turn.rate_known.is_set()
+
+    def test_the_headers_are_built_without_blocking(self):
+        """``stream_headers`` runs on the event loop; the wait belongs in
+        ``open_stream``, which the route offloads to a worker thread. A wait
+        that migrated into the header builder would stall every other request
+        this WebUI serves for as long as a cold model takes to load."""
+        import inspect
+
+        import mc_voice_api as api
+
+        body = inspect.getsource(api.stream_headers)
+
+        assert "rate_known" not in body
+        assert "wait" not in body.split('"""')[2]
+
+
 class TestStopping:
     def test_cancel_is_idempotent_and_reports_which_call_did_it(self):
         turn = turns.create(sid=0, speaker=Speaker())

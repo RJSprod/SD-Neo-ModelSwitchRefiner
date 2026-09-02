@@ -307,6 +307,19 @@ STREAM_IDLE = 0.1
 """How long one queue read waits before the stream checks whether its client is
 still there. Short enough to notice a disconnect, long enough not to spin."""
 
+RATE_WAIT = 150.0
+"""How long a stream will wait to be told what rate its body is in.
+
+Longer than :data:`mc_voice_turn.FIRST_SEGMENT_WAIT`, deliberately, because the
+rate is settled one line after that wait ends: a bound shorter than it would
+time out on exactly the slow first reply this matters most for -- a cold
+llama-server took twenty seconds on the run that found the defect, and the
+model's first sentence is what gates the rest.
+
+It is a failsafe rather than a policy. A turn cancelled, failed, or finished
+releases the wait immediately, so the only way to reach this number is a turn
+that is never going to speak."""
+
 _lock = threading.Lock()
 _targets: dict[str, dict] = {}
 _token = secrets.token_urlsafe(24)
@@ -1153,6 +1166,24 @@ def open_stream(token: str):
         raise Refused(409, turn.error or "That reply is no longer being read aloud.")
     turn.attached.set()
     logger.info("Model Chain: Voice is streaming turn %s to a browser", turn.id[:8])
+    # And then wait, here, for the one thing the headers cannot be built without.
+    #
+    # This function runs on a worker thread rather than the event loop -- the
+    # route offloads it -- which is what makes the wait affordable, and the
+    # stream that follows holds a thread the same way for far longer.
+    #
+    # A browser attaches the moment Conversation tells it a turn exists, which
+    # is before this turn has asked its engine anything: on the run that found
+    # this, the attach was logged 21.3 seconds ahead of the pipeline reporting
+    # its output rate. ``sample_rate`` is zero for all of that, and the header
+    # built from it says 24000.
+    if not turn.rate_known.wait(RATE_WAIT):
+        # Not fatal, and not silent. A turn that has not named a rate in two
+        # minutes has not produced a sample either, so what goes out is a
+        # header for a body that is never coming.
+        logger.warning("Model Chain: Voice turn %s never said what rate it speaks at, so "
+                       "the browser was told %d Hz — if anything is heard at all it may "
+                       "be at the wrong speed", turn.id[:8], int(turn.sample_rate or 24000))
     return turn
 
 
@@ -1163,6 +1194,12 @@ def stream_headers(turn) -> dict:
     id travels with it too, so a response that arrives late cannot be mistaken
     for the current one (section 24). Deliberately no ``Content-Length``:
     the length is not known, and an intermediary given one would wait for it.
+
+    Called on the event loop, and it must not block there. :func:`open_stream`
+    has already waited for the rate on a worker thread, so by the time this runs
+    ``sample_rate`` is settled and this is a dictionary literal again. That
+    ordering is the whole of I-VP-07 and it is not an accident of scheduling:
+    without it this reads a zero and writes 24000 over a 48 kHz body.
     """
     return {
         "Cache-Control": "no-store, no-transform, max-age=0",
