@@ -1779,6 +1779,77 @@ def _pipeline_device_row(stage_id: str) -> str:
         f'</label>')
 
 
+def _pipeline_model_row(stage_id: str) -> str:
+    """Which network this stage loads, where the publisher ships more than one.
+
+    The control this feature turned out to need, added after a device dropdown
+    and a thread budget had both been measured and neither moved the number.
+    DPDFNet's cost is its DPRNN block count: the publisher's own model card
+    prices the two 48 kHz fullband networks at 2.41 and 7.17 GMACs, for the same
+    sample rate and the same streaming contract, and this feature shipped pinned
+    to the heavier one. On a measured machine that ran at a real-time factor of
+    1.04 on the processor and 1.27 on DirectML -- a stage that cannot keep up
+    with playback wherever it is put, because the work is three times larger
+    than it needs to be rather than in the wrong place.
+
+    Nothing at all for a stage with one network, on the same rule the device row
+    follows: a select whose only option is the one already in force is a control
+    that cannot do anything.
+    """
+    import mc_voice_pipeline as pipeline
+
+    try:
+        if not pipeline.stage_available(stage_id) or stage_id != "dpdfnet":
+            return ""
+        found = pipeline.dpdfnet_models()
+    except Exception:
+        logger.debug("Model Chain: could not describe the models for %s", stage_id,
+                     exc_info=True)
+        return ""
+    offered = list(found.get("choices") or ())
+    if len(offered) < 2:
+        return ""
+    current = str(found.get("chosen") or "")
+    options = "".join(
+        f'<option value="{ui.escape(str(item.get("id") or ""))}"'
+        f'{" selected" if str(item.get("id") or "") == current else ""}>'
+        f'{ui.escape(_model_label(item))}</option>'
+        for item in offered)
+    return (
+        f'<label class="mc-voice-pipeline-model">'
+        f'<span class="mc-voice-pipeline-name">Network</span>'
+        f'<select data-mc-voice-pipeline-model="{ui.escape(stage_id)}" '
+        f'aria-label="Which DPDFNet network to load">{options}</select>'
+        f'<span class="mc-voice-pipeline-what">How much denoiser to run. The blocks '
+        f'are what it costs and what it buys — more of them clean up more, and '
+        f'the compute goes up with them. This is the dial to reach for when the '
+        f'log’s "Voice pipeline ran" line reports a real-time factor above 1.0 '
+        f'for this stage: a network too heavy for this machine is too heavy on the '
+        f'graphics card as well, because the work is larger rather than misplaced. '
+        f'Judge the difference by ear rather than by the numbers — they say what '
+        f'it costs, not what it sounds like. Takes effect on the next reply — a '
+        f'reply already being spoken finishes on the network it started with.</span>'
+        f'</label>')
+
+
+def _model_label(item: dict) -> str:
+    """One network, named by what distinguishes it from the others.
+
+    Built from the manifest's numbers rather than from a label stored beside
+    them, so a variant added there needs no second edit here and cannot arrive
+    with a name that stopped matching its own figures.
+    """
+    blocks = item.get("dprnn_blocks")
+    macs = item.get("macs_g")
+    name = str(item.get("id") or "")
+    parts = []
+    if blocks is not None:
+        parts.append(f"{int(blocks)} block{'' if int(blocks) == 1 else 's'}")
+    if macs is not None:
+        parts.append(f"{float(macs):.2f} GMACs")
+    return f"{name} — {', '.join(parts)}" if parts else name
+
+
 def _numbering_note(stage_id: str, found: dict) -> str:
     """The card-numbering caveat, for the stage it is actually true of.
 
@@ -2051,7 +2122,8 @@ def pipeline_stage_detail(stage_id: str) -> str:
         installable=pipeline.stage_installable(stage_id),
         installed=bool(held and held.install_state == "installed"),
         note=pipeline.stage_unavailable_reason(stage_id),
-        extra=_pipeline_device_row(stage_id) + _stage_manual_section(stage_id))
+        extra=_pipeline_model_row(stage_id) + _pipeline_device_row(stage_id)
+              + _stage_manual_section(stage_id))
 
 
 def _component_shell(title: str, blurb: str, rows, component: str,

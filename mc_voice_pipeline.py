@@ -365,6 +365,21 @@ OPT_ENABLED = "model_chain_voice_pipeline"
 OPT_DPDFNET = "model_chain_voice_pipeline_dpdfnet"
 OPT_LAVASR = "model_chain_voice_pipeline_lavasr"
 OPT_THREADS = "model_chain_voice_pipeline_threads"
+OPT_DPDFNET_MODEL = "model_chain_voice_pipeline_dpdfnet_model"
+"""Which DPDFNet network to load, where the publisher ships more than one.
+
+The dial that turned out to matter, after a device dropdown and a thread budget
+had both been measured and neither moved the number. DPDFNet's cost is its
+DPRNN block count, and the publisher's own model card prices the two 48 kHz
+fullband variants at 2.41 and 7.17 GMACs -- a factor of three, for the same
+sample rate, the same streaming contract and the same output policy.
+
+This feature shipped pinned to the heavier one, which on a measured machine ran
+at a real-time factor of 1.04 on the processor and 1.27 on DirectML: a stage
+that cannot keep up with playback wherever it is put. No placement fixes that
+and no thread budget fixes it, because the work is simply three times larger
+than it needs to be.
+"""
 
 STAGES = (
     StageSpec(
@@ -459,16 +474,76 @@ def desired_stages() -> tuple:
 
 
 def settings() -> dict:
-    """The three switches, as the settings surface and the status route see them."""
+    """The switches, as the settings surface and the status route see them."""
     found = {"enabled": enabled(), "threads": threads(),
-             "max_threads": MAX_INTRAOP_THREADS, "devices": {}}
+             "max_threads": MAX_INTRAOP_THREADS, "devices": {},
+             "models": {"dpdfnet": dpdfnet_models()}}
     for spec in STAGES:
         found[spec.id] = stage_enabled(spec.id)
         found["devices"][spec.id] = devices_for(spec.id)
     return found
 
 
-def remember(enabled_value=None, stages=None, threads_value=None, devices=None) -> dict:
+def dpdfnet_models() -> dict:
+    """The DPDFNet networks this build offers, and which one is in force.
+
+    Read off the manifest rather than listed here, so adding a variant is a
+    manifest edit. Empty ``choices`` for a manifest that names none, which is
+    what every build before this one had and what a stage with a single network
+    still looks like -- the surface draws no control rather than a control with
+    one option in it.
+    """
+    found = {"chosen": "", "default": "", "choices": []}
+    try:
+        entry = manifest()["stages"].get("dpdfnet")
+    except PipelineError:
+        return found
+    if entry is None:
+        return found
+    offered = list((entry["contract"] or {}).get("models") or ())
+    if not offered:
+        return found
+    fallback = str((entry["contract"] or {}).get("default_model")
+                   or offered[0].get("id") or "")
+    found["default"] = fallback
+    found["choices"] = [dict(item) for item in offered]
+    found["chosen"] = dpdfnet_model()
+    return found
+
+
+def dpdfnet_model() -> str:
+    """The chosen DPDFNet network id, or the manifest's default.
+
+    A stored id the manifest no longer offers falls back rather than being
+    honoured: a build that dropped a variant would otherwise ask the worker for
+    a file that is not there, and a stage that will not load is a worse answer
+    than a stage running the network this build actually ships.
+    """
+    try:
+        entry = manifest()["stages"].get("dpdfnet")
+    except PipelineError:
+        return ""
+    if entry is None:
+        return ""
+    offered = list((entry["contract"] or {}).get("models") or ())
+    if not offered:
+        return ""
+    known = {str(item.get("id") or "") for item in offered}
+    fallback = str((entry["contract"] or {}).get("default_model")
+                   or offered[0].get("id") or "")
+    wanted = ""
+    try:
+        from modules import shared
+
+        wanted = str(shared.opts.data.get(OPT_DPDFNET_MODEL) or "")
+    except Exception:
+        logger.debug("Model Chain: could not read the DPDFNet model setting",
+                     exc_info=True)
+    return wanted if wanted in known else fallback
+
+
+def remember(enabled_value=None, stages=None, threads_value=None, devices=None,
+             model=None) -> dict:
     """Write the switches through to the host's options store, and save once.
 
     One write for all three rather than one route per switch, because the three
@@ -499,6 +574,16 @@ def remember(enabled_value=None, stages=None, threads_value=None, devices=None) 
             wanted[OPT_THREADS] = max(1, min(MAX_INTRAOP_THREADS, int(threads_value)))
         except (TypeError, ValueError):
             pass
+    if model is not None:
+        # Refused rather than stored, because a stored id the manifest does not
+        # offer is a setting that silently does nothing: the reader falls back,
+        # the panel redraws showing the fallback, and the only account of what
+        # happened would be the two disagreeing.
+        offered = {str(item.get("id") or "")
+                   for item in dpdfnet_models()["choices"]}
+        if str(model) not in offered:
+            raise ValueError(f"{model!r} is not a DPDFNet model this build offers.")
+        wanted[OPT_DPDFNET_MODEL] = str(model)
     if wanted:
         try:
             from modules import shared
@@ -522,7 +607,10 @@ def remember(enabled_value=None, stages=None, threads_value=None, devices=None) 
             continue
         moved = _remember_device(stage_id, token) or moved
     found = settings()
-    if moved or OPT_THREADS in wanted:
+    # The model joins the two settings a worker only reads when it loads its
+    # stages: the file is opened once, in ``_send_load``, so changing it while a
+    # worker holds the old one changes nothing until that worker stops.
+    if moved or OPT_THREADS in wanted or OPT_DPDFNET_MODEL in wanted:
         # What the restart actually did, not what it was asked to do. A worker
         # that would not stop is a worker still running at the old budget, and
         # the surface has to be able to say so.
@@ -2763,4 +2851,23 @@ def stage_config(stage_id: str) -> dict:
         names = [item["local_name"] for item in entry["artifacts"]]
     contract["model_file"] = str((installed.get("model_file") or "")
                                  or (names[0] if names else ""))
+    # And then the chosen one, where the stage offers a choice and the file for
+    # it is actually on disk. Checked rather than assumed: an installation made
+    # before a variant was added has the record but not the file, and asking the
+    # worker for a model that is not there is a stage that will not load at all
+    # -- which is worse than a stage running the network already installed.
+    if stage_id == "dpdfnet":
+        wanted = dpdfnet_model()
+        for item in (contract.get("models") or ()):
+            if str(item.get("id") or "") != wanted:
+                continue
+            named = str(item.get("file") or "")
+            if named and (paths.pipeline_stage_root(stage_id) / named).is_file():
+                contract["model_file"] = named
+                contract["model_id"] = wanted
+            elif named:
+                logger.info("Model Chain: DPDFNet is set to %s but %s is not "
+                            "installed, so %s is being used instead", wanted,
+                            named, contract["model_file"])
+            break
     return contract

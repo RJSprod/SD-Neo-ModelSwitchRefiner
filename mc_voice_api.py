@@ -2226,6 +2226,12 @@ def pipeline_payload() -> dict:
         "pinned": found.pinned,
         "runtime_installable": pipeline.runtime_installable(),
         "download_bytes": found.download_bytes,
+        # Which DPDFNet network is loaded, and what else this build offers.
+        # Beside the placement rather than instead of it: the two answer
+        # different questions, and on the machine that produced this control it
+        # was the network rather than the placement that decided whether the
+        # stage could keep up at all.
+        "models": pipeline.dpdfnet_models(),
         "runtime": {
             "install_state": found.runtime_install_state,
             "runtime_state": live["runtime_state"],
@@ -2293,7 +2299,7 @@ def _source_rate() -> int:
         return 0
 
 
-def pipeline_settings(enabled, stages, threads=None, devices=None) -> dict:
+def pipeline_settings(enabled, stages, threads=None, devices=None, model=None) -> dict:
     """The switches, the thread budget and the placements, written together.
 
     No order field is accepted and there is nothing to accept one into: the
@@ -2334,9 +2340,17 @@ def pipeline_settings(enabled, stages, threads=None, devices=None) -> dict:
         if token is not None and not isinstance(token, str):
             raise Refused(400, "A device is named by its identifier.")
         placements[str(name)] = token
+    # Refused here for shape and inside the write for membership, which is the
+    # same split the devices above use: this route knows what a model id looks
+    # like, and only the manifest knows which ones exist.
+    chosen = None
+    if model is not None:
+        if not isinstance(model, str) or not model.strip():
+            raise Refused(400, "A DPDFNet model is named by its identifier.")
+        chosen = model.strip()
     try:
         stored = pipeline.remember(enabled, wanted, threads_value=threads,
-                                   devices=placements)
+                                   devices=placements, model=chosen)
     except ValueError as exc:
         # The one refusal that comes from inside the write rather than from the
         # validation before it, because only the device list knows whether a
@@ -3305,7 +3319,8 @@ def install(_demo=None, app=None) -> bool:
         lambda payload: pipeline_settings(payload.get("enabled"),
                                           payload.get("stages") or {},
                                           payload.get("threads"),
-                                          payload.get("devices") or {}),
+                                          payload.get("devices") or {},
+                                          payload.get("model")),
         "That Voice Pipeline switch could not be changed.")
     components_route = _json_route(
         COMPONENTS_ROUTE, lambda _payload: components_payload(),
