@@ -659,6 +659,46 @@ class TestADisprovedCardIsNotRecordedAnyway:
         assert setup.enumerates_a_device(server) is True
         assert len(asked) == 2
 
+    def test_a_no_is_asked_again_rather_than_remembered(self, monkeypatch, root):
+        """The asymmetry that matters, and it cost a user an hour of CPU inference.
+
+        "This build lists a device" is a fact about the build and stays true
+        while the file does not change. "It listed none" is not that kind of
+        fact: this probe inherits the environment on purpose, so the answer
+        depends on what the driver would show at that moment as well -- a
+        transient driver state, a card held elsewhere, a CUDA_VISIBLE_DEVICES in
+        the shell the WebUI was started from.
+
+        Cached, one unlucky probe takes the card off every llama-server command
+        line for the rest of the session, and a machine that was doing ninety
+        tokens a second does fourteen with nothing to say it could recover.
+        """
+        import subprocess
+
+        server = make_build(root / "runtime")
+        asked, answer = [], [self.LISTING_EMPTY]
+
+        class Result:
+            returncode, stderr = 0, ""
+
+            @property
+            def stdout(self):
+                return answer[0]
+
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: (asked.append(1), Result())[1])
+        setup.forget_devices()
+
+        assert setup.enumerates_a_device(server) is False
+        assert setup.enumerates_a_device(server) is False
+        assert len(asked) == 2, "a no is re-asked, not remembered"
+
+        # And the moment the card is visible again, it is used again -- without
+        # anybody restarting anything.
+        answer[0] = self.LISTING_CARD
+        assert setup.enumerates_a_device(server) is True
+        assert len(asked) == 3
+
     def test_recording_a_card_this_build_cannot_see_is_refused(self, monkeypatch, root,
                                                                a_card):
         """Refused, so the working placement survives and the person is told why.

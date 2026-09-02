@@ -917,6 +917,19 @@ _enumerated: dict[tuple, "bool | None"] = {}
 Keyed on size and modification time as well as path, so that adopting or
 re-downloading a runtime -- which is exactly what somebody does to fix a build
 with no CUDA backend in it -- is not answered out of the old build's cache.
+
+**Only affirmative answers are kept.** "This build lists a device" is a fact
+about the build and cannot stop being true while the file is unchanged. "It
+listed none" is not the same kind of fact: this probe inherits the environment
+on purpose, so the answer also depends on what the driver was willing to show
+at that moment -- a card held by another process, a transient driver state, a
+``CUDA_VISIBLE_DEVICES`` in whatever shell started the WebUI. Caching that
+turns one unlucky probe into every language-model start for the rest of the
+session running on the processor, which is a machine going from ninety tokens
+a second to fourteen with nothing in the log to say why it did not recover.
+
+The probe costs one short subprocess per server start, which is nothing beside
+the model load that follows it, so re-asking is cheap and being wrong is not.
 """
 
 
@@ -962,13 +975,19 @@ def enumerates_a_device(executable) -> "bool | None":
         return None
     text = "\n".join((found.stdout or "", found.stderr or ""))
     if _ANY_DEVICE.search(text):
-        answer = True
-    elif _DEVICE_LISTING.search(text):
-        answer = False
-    else:
+        _enumerated[key] = True
+        return True
+    if not _DEVICE_LISTING.search(text):
         return None
-    _enumerated[key] = answer
-    return answer
+    # Said out loud rather than returned quietly. This answer is what takes a
+    # card off the command line, and somebody whose language model has just
+    # dropped to processor speed is owed the reason where they are looking.
+    logger.info(
+        "Model Chain: %s listed no offload device this time. That is asked again on the "
+        "next start rather than remembered, because it depends on what the driver would "
+        "show at that moment as much as on the build",
+        executable)
+    return False
 
 
 def _runtime_for_device(paths, path: Path, chosen) -> Path:
