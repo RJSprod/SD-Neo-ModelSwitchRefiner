@@ -115,6 +115,16 @@ broken extension rather than a broken installation, and it is refused before a
 download starts rather than after one finishes.
 """
 
+DEFAULT_THREAD_CEILING = 8
+"""The most :func:`default_threads` will size itself to without being asked.
+
+A ceiling on the *default*, not on the setting -- MAX_INTRAOP_THREADS is that,
+and it is twice this. Beyond eight the stage is competing with the speech engine
+it exists to serve for cores that engine may want back, and a default that
+cannot be wrong in the quiet direction is worth more than the last few percent.
+Somebody who has measured their own machine can type sixteen.
+"""
+
 MAX_INTRAOP_THREADS = 16
 """The most this stage may be given, whatever is typed at it.
 
@@ -140,10 +150,45 @@ def threads() -> int:
     try:
         from modules import shared
 
-        found = int(shared.opts.data.get(OPT_THREADS, INTRAOP_THREADS))
+        found = int(shared.opts.data.get(OPT_THREADS, default_threads()))
     except Exception:
-        return INTRAOP_THREADS
+        return default_threads()
     return max(1, min(MAX_INTRAOP_THREADS, found))
+
+
+def default_threads() -> int:
+    """The budget to start from, sized from the machine rather than declared.
+
+    ``INTRAOP_THREADS`` is two, and two is right on a four-thread laptop and
+    indefensible on a sixteen-thread desktop -- where it produced a measured
+    real-time factor of 3.0 across three replies, with the browser running dry
+    four times in one of them. A constant cannot be right for both, and the one
+    that was chosen is wrong on exactly the machines people run this on.
+
+    The reason it was two is worth restating, because it was a good reason and
+    it turned out not to apply. The enhancement runs *beside* a PocketTTS
+    generation on the same cores, and four threads there would be four
+    contending with the model whose output this is polishing. What that
+    reasoning did not know is what Pocket actually asks for: it calls
+    ``torch.set_num_threads(1)`` and says so in its own readiness line. One
+    thread. So on sixteen the old default left thirteen idle while the audio
+    broke up.
+
+    Half the machine, capped, and never below the old constant: enough to stop
+    being the bottleneck, and still half the cores left for the speech engine,
+    the language model and whatever else is running. It remains a starting
+    point rather than an answer -- the setting overrides it, and the
+    ``Voice pipeline ran`` line reports the factor to turn that dial against.
+    """
+    import os
+
+    try:
+        cores = int(os.cpu_count() or 0)
+    except Exception:
+        cores = 0
+    if cores <= 0:
+        return INTRAOP_THREADS
+    return max(INTRAOP_THREADS, min(DEFAULT_THREAD_CEILING, cores // 2))
 
 
 def component_of(stage_id: str) -> str:

@@ -3775,6 +3775,76 @@ class TestTheRuntimeRowUpdatesTheRuntimesYouHave:
         pipeline.install("runtime")  # must not raise
 
 
+class TestTheThreadBudgetIsSizedFromTheMachine:
+    """Two threads, measured, on the machine the feature is for.
+
+    From a user's log, three consecutive replies with both stages running::
+
+        RTF 3.02, source held back 35780 ms
+        RTF 3.167, about 20.4 s of silence owed across 9.4 s of audio
+        RTF 3.05, source held back 21520 ms
+
+    Sixteen threads on that machine and the enhancement was given two. The
+    reason it was two was a good one -- the stage runs beside a PocketTTS
+    generation on the same cores, and crowding the model whose output it is
+    polishing is exactly the wrong trade. What that reasoning did not know is
+    what Pocket asks for. It calls torch.set_num_threads(1) and says so in its
+    own readiness line: one thread. So thirteen sat idle while the audio broke
+    up into nine-second gaps.
+    """
+
+    def test_a_big_machine_is_not_given_the_small_machine_s_budget(self, monkeypatch):
+        import os
+
+        monkeypatch.setattr(os, "cpu_count", lambda: 16)
+        assert pipeline.default_threads() == 8
+
+    def test_a_small_machine_keeps_the_careful_default(self, monkeypatch):
+        """Two is right on four cores and always was."""
+        import os
+
+        monkeypatch.setattr(os, "cpu_count", lambda: 4)
+        assert pipeline.default_threads() == pipeline.INTRAOP_THREADS
+
+    def test_it_never_goes_below_the_constant_it_replaced(self, monkeypatch):
+        import os
+
+        for cores in (1, 2, 3):
+            monkeypatch.setattr(os, "cpu_count", lambda cores=cores: cores)
+            assert pipeline.default_threads() >= pipeline.INTRAOP_THREADS, cores
+
+    def test_it_leaves_half_the_machine_for_everything_else(self, monkeypatch):
+        """The old reasoning still holds; only its arithmetic was fixed."""
+        import os
+
+        for cores in (8, 12, 16, 32, 64):
+            monkeypatch.setattr(os, "cpu_count", lambda cores=cores: cores)
+            assert pipeline.default_threads() <= max(cores // 2, pipeline.INTRAOP_THREADS)
+
+    def test_it_is_capped_below_what_a_person_may_type(self, monkeypatch):
+        """A default that cannot be wrong quietly is worth the last few percent."""
+        import os
+
+        monkeypatch.setattr(os, "cpu_count", lambda: 128)
+        assert pipeline.default_threads() == pipeline.DEFAULT_THREAD_CEILING
+        assert pipeline.DEFAULT_THREAD_CEILING < pipeline.MAX_INTRAOP_THREADS
+
+    def test_a_machine_that_will_not_say_how_big_it_is_gets_the_constant(
+            self, monkeypatch):
+        import os
+
+        for answer in (None, 0):
+            monkeypatch.setattr(os, "cpu_count", lambda answer=answer: answer)
+            assert pipeline.default_threads() == pipeline.INTRAOP_THREADS
+
+    def test_the_setting_still_wins(self, host, monkeypatch):
+        import os
+
+        monkeypatch.setattr(os, "cpu_count", lambda: 16)
+        host.shared.opts.set(pipeline.OPT_THREADS, 3)
+        assert pipeline.threads() == 3
+
+
 class TestAClosureCarriesEveryStageItHasToRun:
     """Carrying a runtime is not the same as carrying the stage that uses it.
 

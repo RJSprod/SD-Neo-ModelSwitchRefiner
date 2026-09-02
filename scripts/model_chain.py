@@ -696,16 +696,19 @@ _VOICE_OPTIONS.update({
         "rebuild the hiss. Ticked by default, like the stage above"
     ),
     mc_voice_pipeline.OPT_THREADS: shared.OptionInfo(
-        mc_voice_pipeline.INTRAOP_THREADS,
+        mc_voice_pipeline.default_threads(),
         "Voice Pipeline: enhancement threads",
         gr.Number,
         {"precision": 0, "minimum": 1, "maximum": mc_voice_pipeline.MAX_INTRAOP_THREADS},
     ).info(
-        "how many processor cores the enhancement stages may use. The default of two was "
-        "chosen not to crowd the speech engine sharing those cores, and on a machine with "
-        "many of them that default is what makes long replies break up: raise it while "
-        "the \"Voice pipeline ran\" line in model_chain.log reports a real-time factor "
-        "above 1.0, and stop when it is comfortably below. Takes effect on the next reply"
+        "how many processor cores the enhancement stages may use. The default is half of "
+        "them, capped at eight, which leaves the other half for the speech engine sharing "
+        "those cores — PocketTTS asks for one thread and says so in its own readiness "
+        "line. It is a starting point and not an answer: raise it while the "
+        "\"Voice pipeline ran\" line in model_chain.log reports a real-time factor above "
+        "1.0, and stop when it is comfortably below. That line also splits the factor per "
+        "stage, so it says which of the two is spending the time. Takes effect on the "
+        "next reply"
     ),
     mc_voice_device.OPT_DEVICE_DPDFNET: shared.OptionInfo(
         mc_voice_device.CPU,
