@@ -402,10 +402,9 @@ shared.options_templates.update(
                 "alone when a generation starts, or stopped so the pass has every last "
                 "byte. Keeping it costs the generation nothing measurable and saves a "
                 "model load — which on a slow placement is twenty seconds before the "
-                "first word of the next prompt. On \"Free the LLM for every image\", the "
-                "warm-up below leaves llama-server alone as well: it would only be "
-                "starting one for the generation to stop, so it starts on the first "
-                "request that actually needs it"
+                "first word of the next prompt. Neither setting ever starts one: "
+                "llama-server comes up on the first request that needs it, and this "
+                "decides only what happens to one that is already up"
             ),
             mc_plan.OPT_CAP_MODE: shared.OptionInfo(
                 mc_plan.CAP_AUTO,
@@ -458,11 +457,12 @@ shared.options_templates.update(
                 "model load, the placement and the prompt cache all happen once and then "
                 "stop happening. From one log, five identical jobs ran in 82s, 27s, 3.6s, "
                 "4.1s and 5.1s. This decides when that is paid for — halfway through a "
-                "generation somebody is watching, or before it starts. The image model is "
-                "warmed first, because that is what Generate waits on; it loads off the "
-                "generation thread, which is the caveat on the experimental setting above. "
-                "With VRAM residency set to free the LLM for every image, llama-server is "
-                "not warmed at all — a generation would stop it moments later"
+                "generation somebody is watching, or before it starts. This warms the "
+                "image model and nothing else: llama-server starts on the first request "
+                "that needs it, because a warm-up is not a request and a language model "
+                "started on spec takes VRAM the image plan may be about to want. It loads "
+                "off the generation thread, which is the caveat on the experimental "
+                "setting above"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,

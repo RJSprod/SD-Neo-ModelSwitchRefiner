@@ -2887,7 +2887,19 @@ starts:
 | Setting | Behaviour |
 | --- | --- |
 | **Keep the LLM loaded** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt starts warm. |
-| **Free the LLM for every image** | llama-server is stopped and the generation gets every last byte, at the cost of a model load per image. It comes back on the first request that needs it, and no sooner: **Warm up before generating** skips it on this setting, since the generation behind that warm-up would only stop it again. |
+| **Free the LLM for every image** | llama-server is stopped and the generation gets every last byte, at the cost of a model load per image. |
+
+Neither setting ever *starts* one. **llama-server comes up on the first request
+that needs it and not before** — a warm-up is not a request, and a language
+model started on spec takes VRAM the image plan may be about to want. From a
+user's log, warming it ahead of a generation left 17.7 GB of an 18.4 GB
+checkpoint resident where 18.4 had been a minute earlier, so the next Generate
+found the image model not ready and the pass that followed stopped llama-server
+anyway to get the room back. A generation that consults the language model — a
+Krea roll, a Spatial layout — makes that request itself a second into the job,
+which is not later than the work needs, and the placement is then sized against
+a card whose checkpoint is already resident rather than one that merely looks
+empty.
 
 The default's rule is stated as a sentence and implemented as one:
 

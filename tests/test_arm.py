@@ -88,8 +88,24 @@ class TestReadingTheState:
         assert found.cold == ()
 
     def test_the_worst_part_decides(self, pipeline, monkeypatch):
-        """A resident checkpoint and no llama-server is warm in one place and
-        cold in the other, and what matters is when the next Generate ends."""
+        """A resident checkpoint and a half-placed llama-server is warm in one
+        place and not in the other, and what matters is when Generate ends."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "stage_1_readiness",
+                            lambda: ("warm", "Stage 1 is warm — 13.9 GB already in VRAM."))
+        pipeline._running = (Server(layers=37),)
+
+        found = mc_arm.readiness()
+
+        assert found.state == mc_arm.PARTIAL
+        assert [part.name for part in found.cold] == ["Language model"]
+
+    def test_a_server_nobody_has_started_is_not_a_cold_half_of_the_pipeline(
+            self, pipeline, monkeypatch):
+        """Nothing warms one speculatively, so "not running" is the resting
+        state of an install where nobody has asked it anything -- not a
+        pipeline waiting for somebody to finish loading it."""
         import mc_memory
 
         monkeypatch.setattr(mc_memory, "stage_1_readiness",
@@ -97,8 +113,8 @@ class TestReadingTheState:
 
         found = mc_arm.readiness()
 
-        assert found.state == mc_arm.COLD
-        assert [part.name for part in found.cold] == ["Language model"]
+        assert [part.name for part in found.parts] == ["Image model"]
+        assert found.armed
 
     def test_a_degraded_server_is_not_ready_and_is_not_cold(self, pipeline, monkeypatch):
         """The first start of a session is placed conservatively, because the
@@ -155,12 +171,15 @@ class TestReadingTheState:
             raise RuntimeError("no")
 
         monkeypatch.setattr(mc_memory, "stage_1_readiness", explode)
+        pipeline._running = (Server(),)
 
         found = mc_arm.readiness()
 
         assert [part.name for part in found.parts] == ["Language model"]
 
     def test_it_says_which_parts_are_cold(self, pipeline):
+        pipeline._running = (Server(layers=37),)
+
         said = mc_arm.readiness().describe()
 
         assert "language model" in said
@@ -193,7 +212,9 @@ class TestReadingTheState:
 
 
 class TestArming:
-    def test_it_starts_the_language_model(self, pipeline, monkeypatch):
+    def test_it_does_not_start_the_language_model(self, pipeline, monkeypatch):
+        """The rule, in the user's words: the language model comes back into
+        VRAM when a language-model request is made, and not before."""
         import mc_memory
 
         monkeypatch.setattr(mc_memory, "preload_async",
@@ -201,7 +222,7 @@ class TestArming:
 
         mc_arm.arm(reason="a test")
 
-        assert pipeline.clients == 1
+        assert pipeline.clients == 0
 
     def test_it_waits_for_the_image_preload(self, pipeline, monkeypatch):
         """An asynchronous warm-up is not a warm-up as far as the generation
@@ -247,19 +268,16 @@ class TestArming:
 
         assert pipeline.clients == 0
 
-    def test_a_start_that_fails_leaves_the_pipeline_as_it_was(self, pipeline,
-                                                              monkeypatch):
+    def test_a_load_that_fails_leaves_the_pipeline_as_it_was(self, pipeline,
+                                                             monkeypatch):
         """The generation behind it already knows how to load its own models;
         that is what it did before this existed."""
         import mc_memory
 
-        monkeypatch.setattr(mc_memory, "preload_async",
-                            lambda w=0, h=0, **kwargs: False)
-
         def explode(*args, **kwargs):
-            raise RuntimeError("llama-server would not start")
+            raise RuntimeError("the checkpoint would not load")
 
-        monkeypatch.setattr(pipeline, "client", explode)
+        monkeypatch.setattr(mc_memory, "preload_async", explode)
 
         found = mc_arm.arm(reason="a test")  # must not raise
 
@@ -269,18 +287,17 @@ class TestArming:
         """A startup warm-up and a Generate pressed two seconds later."""
         import mc_memory
 
-        monkeypatch.setattr(mc_memory, "preload_async",
-                            lambda w=0, h=0, **kwargs: False)
+        loads = []
         started = threading.Event()
         release = threading.Event()
 
-        def slow(*args, **kwargs):
-            pipeline.clients += 1
+        def slow(w=0, h=0, **kwargs):
+            loads.append((w, h))
             started.set()
             release.wait(5)
-            return object()
+            return False
 
-        monkeypatch.setattr(pipeline, "client", slow)
+        monkeypatch.setattr(mc_memory, "preload_async", slow)
         first = threading.Thread(target=mc_arm.arm, kwargs={"reason": "startup"})
         first.start()
         assert started.wait(5)
@@ -289,58 +306,72 @@ class TestArming:
         release.set()
         first.join(timeout=5)
 
-        assert pipeline.clients == 1
+        assert len(loads) == 1
 
 
-class TestTheImageModelComesFirst:
-    """Generate is what somebody is sitting in front of.
+class TestOnlyTheImageModelIsWarmed:
+    """The rule, in the user's words:
 
-    From a user's log, a warm-up that ran llama-server first:
+        the language model comes back into VRAM when a language-model request
+        is made, and not before
 
-        warming up for this generation — cold — image model is cold; language
-            model is cold
-        llama-server ready — all layers on the GPU, 8,192 token context
-        warm-up finished in 20.3s — cold — image model is cold
+    A warm-up is not a request. From their log, the version that warmed both:
 
-    Twenty seconds of somebody's wait, spent entirely on the half they were not
-    waiting for, and the half they were still in system RAM at the end of it.
+        warm-up finished in 55.5s — armed — image model; language model
+        ...
+        warmed 17.7 GB of 18.4 GB of kroma-...safetensors
+        warming up for this generation — partly armed — image model is partly armed
+        llama-server stopped — the Stage 1 pass
+        reserve miss — Stage 1 exceeded the protected image budget by 0.0 GB;
+            llama-server was emergency-evicted
 
-    Nothing is lost on the language side by going second: its VRAM allowance is
-    the plan's remainder, and ``mc_plan.usable_vram_bytes`` adds the image
-    family's own residency back before dividing, so llama-server is placed at
-    the same size either way.
+    Thirty-one of those fifty-five seconds were llama-server. It cost the
+    checkpoint the last 0.7 GB of its residency, so the next Generate found the
+    image model not ready -- and then the pass stopped llama-server anyway to
+    take the room back. Nobody had asked it anything at any point.
     """
 
     @pytest.fixture
-    def order(self, pipeline, monkeypatch):
+    def warmed(self, pipeline, monkeypatch):
         import mc_memory
 
         seen: list = []
         monkeypatch.setattr(
             mc_memory, "preload_async",
-            lambda w=0, h=0, **kwargs: seen.append(("image", kwargs)) or False)
-        monkeypatch.setattr(pipeline, "client",
-                            lambda *a, **k: seen.append(("llm", {})) or object())
+            lambda w=0, h=0, **kwargs: seen.append((w, h, kwargs)) or False)
         return seen
 
-    def test_the_image_model_is_warmed_before_the_language_model(self, order):
+    def test_no_llama_server_is_started(self, warmed, pipeline):
         mc_arm.arm(1024, 1024, reason="a test")
 
-        assert [step for step, _ in order] == ["image", "llm"]
+        assert pipeline.clients == 0
 
-    def test_it_asks_for_the_load_the_background_pass_will_not_do(self, order):
+    def test_the_image_model_is_warmed(self, warmed):
+        """It is the half a generation is actually waiting on."""
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert [(w, h) for w, h, _ in warmed] == [(1024, 1024)]
+
+    def test_it_asks_for_the_load_the_background_pass_will_not_do(self, warmed):
         """"Never a cold run" has to include the first run of a session."""
         mc_arm.arm(1024, 1024, reason="a test")
 
-        _, kwargs = order[0]
-        assert kwargs["allow_disk_load"] is True
+        assert warmed[0][2]["allow_disk_load"] is True
 
-    def test_it_does_not_need_the_preload_setting_turned_on_as_well(self, order):
+    def test_it_does_not_need_the_preload_setting_turned_on_as_well(self, warmed):
         """Turning the warm-up on is already an answer about warmth."""
         mc_arm.arm(1024, 1024, reason="a test")
 
-        _, kwargs = order[0]
-        assert kwargs["force"] is True
+        assert warmed[0][2]["force"] is True
+
+    def test_a_running_server_is_left_running(self, warmed, pipeline):
+        """The other half of the rule: it is not unloaded either, until an
+        image pass genuinely needs the room."""
+        pipeline._running = (Server(),)
+
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert pipeline.running() == pipeline._running
 
     def test_a_retired_preload_is_said_out_loud(self, pipeline, monkeypatch, caplog):
         """Otherwise an image model that is never warmed is an unexplained 0.0s."""
@@ -356,98 +387,6 @@ class TestTheImageModelComesFirst:
 
         assert any("failed 2 times in a row" in record.getMessage()
                    for record in caplog.records)
-
-
-class TestFreeingTheLlmForEveryImage:
-    """On that setting, warming llama-server is warming it to be stopped.
-
-    ``request_vram(FAMILY_IMAGE, ...)`` sweeps the image card before anything
-    else in ``before_process`` happens, and it sits a handful of lines below the
-    warm-up. So the warm-up was starting a language model for the next statement
-    to stop -- twenty of the twenty-and-a-bit seconds a Generate click waited
-    for in a user's log, on a process that never reached a sampling step, every
-    press.
-    """
-
-    @pytest.fixture
-    def exclusive(self, pipeline, monkeypatch):
-        import mc_broker
-        import mc_llm_runtime
-        import mc_memory
-
-        monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_EXCLUSIVE)
-        monkeypatch.setattr(mc_llm_runtime, "card_of", lambda configuration: 0)
-        monkeypatch.setattr(mc_llm_runtime, "shares_the_image_card",
-                            lambda card, configuration=None: True)
-        monkeypatch.setattr(mc_memory, "preload_async",
-                            lambda w=0, h=0, **kwargs: False)
-        return pipeline
-
-    def test_the_language_model_is_not_started(self, exclusive):
-        mc_arm.arm(1024, 1024, reason="a test")
-
-        assert exclusive.clients == 0
-
-    def test_the_image_model_is_still_warmed(self, exclusive, monkeypatch):
-        """It is the half a generation is actually waiting on."""
-        import mc_memory
-
-        warmed: list = []
-        monkeypatch.setattr(mc_memory, "preload_async",
-                            lambda w=0, h=0, **kwargs: warmed.append((w, h)) or False)
-
-        mc_arm.arm(1024, 1024, reason="a test")
-
-        assert warmed == [(1024, 1024)]
-
-    def test_a_stopped_server_is_not_reported_as_a_cold_half_of_the_pipeline(
-            self, exclusive, monkeypatch):
-        """It is the state the next generation is asking for, not a shortfall.
-
-        Reported cold, it would also make readiness() unable to ever say armed,
-        so the fast path every warm-up after the first one takes would never
-        fire again.
-        """
-        import mc_memory
-
-        monkeypatch.setattr(mc_memory, "stage_1_readiness",
-                            lambda: ("warm", "Stage 1 is warm."))
-
-        found = mc_arm.readiness()
-
-        assert [part.name for part in found.parts] == ["Image model"]
-        assert found.armed
-
-    def test_it_says_why_it_did_not_start_one(self, exclusive, caplog):
-        with caplog.at_level("INFO", logger="model_chain"):
-            mc_arm.arm(1024, 1024, reason="a test")
-
-        assert any("free the LLM for every image" in record.getMessage()
-                   for record in caplog.records)
-
-    def test_a_role_on_another_card_is_warmed_as_it_always_was(self, exclusive,
-                                                               monkeypatch):
-        """The sweep is scoped to the image card, so this is scoped to it too."""
-        import mc_llm_runtime
-
-        monkeypatch.setattr(mc_llm_runtime, "shares_the_image_card",
-                            lambda card, configuration=None: False)
-
-        mc_arm.arm(1024, 1024, reason="a test")
-
-        assert exclusive.clients == 1
-
-    def test_keeping_the_llm_loaded_still_warms_it(self, pipeline, monkeypatch):
-        import mc_broker
-        import mc_memory
-
-        monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_HYBRID)
-        monkeypatch.setattr(mc_memory, "preload_async",
-                            lambda w=0, h=0, **kwargs: False)
-
-        mc_arm.arm(1024, 1024, reason="a test")
-
-        assert pipeline.clients == 1
 
 
 class TestTheSetting:
