@@ -1076,6 +1076,33 @@ class TestOrchestrationWiring:
 
         assert wired.calls.preloads == [(1024, 1024)]
 
+    def test_a_language_model_on_the_card_gets_stage_1_a_budget(self, wired, monkeypatch):
+        """The only route Stage 1 has to the cross-workload reclaim.
+
+        make_vram_room is where _reclaim_foreign lives, and Stage 1 reached it
+        only after a swap -- so on a plan that never swaps, llama-server was
+        never asked to give ground for a pass that did not fit. Forge cannot
+        ask on its own: those bytes are in another process.
+        """
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+        monkeypatch.setattr(mc_memory, "consume_preload", lambda: False)
+        monkeypatch.setattr(mc_memory, "llm_vram_on_the_image_card", lambda: 6 * GB)
+
+        wired.run(enabled=False)
+
+        assert (1024, 1024, mc_memory.STAGE_1) in wired.calls.rooms
+
+    def test_a_card_with_no_language_model_on_it_is_left_alone(self, wired, monkeypatch):
+        """Nothing to reclaim, so the host's own management is the whole answer
+        -- and somebody who does not run a language model sees no line."""
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+        monkeypatch.setattr(mc_memory, "consume_preload", lambda: False)
+        monkeypatch.setattr(mc_memory, "llm_vram_on_the_image_card", lambda: 0)
+
+        wired.run(enabled=False)
+
+        assert not [room for room in wired.calls.rooms if room[2] == mc_memory.STAGE_1]
+
     def test_a_failing_preload_does_not_break_the_generation(self, wired, monkeypatch):
         def boom(w=0, h=0, **kwargs):
             raise RuntimeError("thread refused to start")

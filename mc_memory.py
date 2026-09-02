@@ -3047,6 +3047,28 @@ def _llm_residency_bytes() -> int:
         return 0
 
 
+def llm_vram_on_the_image_card() -> int:
+    """Bytes of language model held on the card an image pass would run on.
+
+    Public because the orchestration has to ask something this module had only
+    ever answered privately: whether there is anything on the far side of the
+    reclaim hook worth reaching for.
+
+    That hook is reached from :func:`make_vram_room` and from nowhere else, and
+    ``make_vram_room`` was reached for Stage 1 only after a swap -- so a plan
+    with no Stage 2 had no path to it at all. llama-server could sit in the
+    VRAM Stage 1 was about to fail to fit into, and nothing in the extension
+    was in a position to ask for it back. Forge's own eviction cannot: those
+    bytes belong to another process, and ``free_memory`` has never been able to
+    see them.
+
+    Zero is the ordinary answer and the cheap one -- no language model on this
+    card, nothing to reclaim, and the host's own management is the whole of the
+    right behaviour.
+    """
+    return _llm_residency_bytes()
+
+
 def _record_reserve_miss(stage: str, shortfall: int, llm_bytes: int,
                          evicted: bool = False) -> None:
     """File the miss with the plan, so the panel can show it and Auto can learn.

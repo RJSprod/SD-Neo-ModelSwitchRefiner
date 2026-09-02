@@ -2894,6 +2894,14 @@ The default's rule is stated as a sentence and implemented as one:
 > Never unload merely because another workload started. Demote only because the
 > incoming workload actually needs the memory.
 
+"Actually needs the memory" is decided in `make_vram_room`, which is where the
+cross-workload reclaim hook lives — so a generation only reaches it by asking
+that function for a budget. Stage 1 asks whenever a checkpoint was swapped in
+**or** whenever a language model is holding VRAM on the image card, the second
+being the case a plan with no Stage 2 would otherwise never produce. With no
+language model on the card the question is free and nothing is said, which is
+what keeps this off the console of anybody who does not run one.
+
 That rule is why the default is the fast one. A stopped server is not only a
 reload: it is llama.cpp's prompt cache thrown away, so the standing instruction
 above your prompt — several hundred tokens that have not changed — is processed

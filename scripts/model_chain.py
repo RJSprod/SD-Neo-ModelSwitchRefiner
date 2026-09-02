@@ -2459,7 +2459,16 @@ class ScriptModelChain(scripts.Script):
             # preload sized its VRAM budget from the *previous* generation, so
             # re-check it here against the size actually about to be sampled.
             swapped = mc_memory.reinstate_pending() or mc_memory.consume_preload()
-            if swapped:
+            # Or whenever a language model is holding VRAM on this card. That
+            # second reason is the only route Stage 1 has to the cross-workload
+            # reclaim, and without it a plan with no Stage 2 had none: nothing
+            # swaps, so nothing called make_vram_room, so llama-server was
+            # never asked to give ground for a pass that did not fit. Forge's
+            # own eviction cannot ask -- those bytes are in another process.
+            # Silent and free when there is no language model on the card,
+            # which is what keeps this off the console of somebody who does not
+            # use that half of the extension.
+            if swapped or mc_memory.llm_vram_on_the_image_card() > 0:
                 freed = self._make_room_for_stage_1(p)
             if swapped or enabled:
                 self._report_readiness()
@@ -2549,18 +2558,26 @@ class ScriptModelChain(scripts.Script):
 
     @staticmethod
     def _make_room_for_stage_1(p) -> int:
-        """Give Stage 1 a clean VRAM budget after swapping its model back in.
+        """Give Stage 1 a clean VRAM budget before it loads.
 
-        The previous generation ended with Stage 2's model in VRAM, and a warm
-        swap does not evict it -- so Stage 1 would load into whatever is left.
-        The host then makes room the hard way, partially unloading in small
-        chunks while it loads, and that path is dramatically slower than a
-        clean load: measured on a Krea 2 -> Flux.2 chain, the same ~8 GB UNet
-        took 11.5s squeezed into 900 MB of spare VRAM against 0.8s with 7 GB
-        spare.
+        Two situations reach here. In the first the previous generation ended
+        with Stage 2's model in VRAM, and a warm swap does not evict it -- so
+        Stage 1 would load into whatever is left. The host then makes room the
+        hard way, partially unloading in small chunks while it loads, and that
+        path is dramatically slower than a clean load: measured on a Krea 2 ->
+        Flux.2 chain, the same ~8 GB UNet took 11.5s squeezed into 900 MB of
+        spare VRAM against 0.8s with 7 GB spare.
+
+        In the second a language model is holding VRAM on this card. That one
+        is not about which of our models is loaded at all -- it is the only
+        path Stage 1 has to the cross-workload reclaim, and the host cannot
+        take that route itself because llama-server's bytes are in another
+        process. "An image generation always outranks an idle LLM" is stated in
+        the README as a rule rather than a setting, and on a plan that never
+        swapped, nothing was in a position to enforce it.
 
         Stage 2 has had this since the pass-size fix; Stage 1 needs it for the
-        same reason. When both models genuinely fit, make_vram_room() checks
+        same reasons. When everything genuinely fits, make_vram_room() checks
         first and does nothing.
 
         Freeing is all that happens here, and that boundary is deliberate.
