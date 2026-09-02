@@ -2902,6 +2902,16 @@ being the case a plan with no Stage 2 would otherwise never produce. With no
 language model on the card the question is free and nothing is said, which is
 what keeps this off the console of anybody who does not run one.
 
+**A warm-up is not a generation, and never spends the LLM's VRAM.** Warming the
+image model between generations goes through the same `make_vram_room`, but asks
+it not to reach the reclaim hook: it takes what is genuinely free, moves what
+fits, and reports the model partially warm if that is all it managed. Nobody has
+pressed anything at that point, so stopping llama-server would cost a model load,
+a discarded prompt cache and possibly a conversation for an image that may never
+be asked for — and it would buy nothing, because the generation that does arrive
+asks the same question for itself and reclaims then. Image-side eviction is
+unaffected: moving our own weights to system RAM is cheap and keeps them cached.
+
 That rule is why the default is the fast one. A stopped server is not only a
 reload: it is llama.cpp's prompt cache thrown away, so the standing instruction
 above your prompt — several hundred tokens that have not changed — is processed

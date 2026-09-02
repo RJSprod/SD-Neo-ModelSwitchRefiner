@@ -414,7 +414,8 @@ def preload(memory, monkeypatch, host):
     monkeypatch.setattr(mc_memory, "reinstate_pending", reinstate_pending)
     monkeypatch.setattr(
         mc_memory, "make_vram_room",
-        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2: calls.rooms.append((name, w, h, stage)),
+        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2, **kwargs:
+            calls.rooms.append((name, w, h, stage, kwargs)),
     )
     monkeypatch.setattr(
         mc_memory, "_load_current_to_gpu",
@@ -644,6 +645,84 @@ class TestASingleStagePlanIsWarmedToo:
         mc_memory.join_preload(timeout=5)
 
         assert mc_memory.consume_preload() is True
+
+
+class TestAWarmUpNeverTakesTheLlmsVram:
+    """The user's rule, stated in their words:
+
+        free VRAM for the image model when the image model needs it; the moment
+        there is not enough VRAM to make an image, that is when the LLM goes
+
+    A background warm-up is not making an image. Nobody has pressed anything,
+    and stopping llama-server there costs a model load, a thrown-away prompt
+    cache and possibly a conversation for a generation that may never be
+    requested. It also buys nothing: the generation that does arrive runs
+    _make_room_for_stage_1, asks the same question, and reclaims then -- when
+    the need is real.
+    """
+
+    def test_the_warm_up_asks_for_no_foreign_reclaim(self, preload):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert [room[4]["reclaim_foreign"] for room in preload.rooms] == [False]
+
+    def test_a_shortfall_leaves_the_language_model_alone(self, memory, monkeypatch):
+        reclaimed: list = []
+        monkeypatch.setattr(mc_memory, "_reclaim_foreign",
+                            lambda needed, reason="": reclaimed.append(needed) or 0)
+        monkeypatch.setattr(mc_memory, "_llm_residency_bytes", lambda: 6 * GB)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                 reclaim_foreign=False)
+
+        assert reclaimed == []
+
+    def test_a_real_pass_still_takes_it(self, memory, monkeypatch):
+        reclaimed: list = []
+        monkeypatch.setattr(mc_memory, "_reclaim_foreign",
+                            lambda needed, reason="": reclaimed.append(needed) or 0)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1)
+
+        assert reclaimed, "a generation that does not fit is exactly when the LLM goes"
+
+    def test_a_warm_up_shortfall_is_not_filed_as_a_reserve_miss(self, memory, monkeypatch):
+        """No pass ran, so the plan has not been shown to be wrong about
+        anything. Auto's learned cap is taught by generations, not warm-ups."""
+        missed: list = []
+        monkeypatch.setattr(mc_memory, "_record_reserve_miss",
+                            lambda *a, **k: missed.append(a))
+        monkeypatch.setattr(mc_memory, "_llm_residency_bytes", lambda: 6 * GB)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                 reclaim_foreign=False)
+
+        assert missed == []
+
+    def test_it_says_it_stood_down(self, memory, monkeypatch, caplog):
+        monkeypatch.setattr(mc_memory, "_llm_residency_bytes", lambda: 6 * GB)
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                     reclaim_foreign=False)
+
+        assert any("nothing is being generated yet" in record.getMessage()
+                   for record in caplog.records)
+
+    def test_image_side_eviction_is_untouched(self, memory, monkeypatch):
+        """The rule is about the LLM. Moving our own weights to system RAM is
+        cheap, keeps them cached, and is what a warm swap has always done."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_1,
+                                 reclaim_foreign=False)
+
+        assert memory.mm.freed, "Forge's own eviction still runs"
 
 
 class TestWarmingFromDisk:
@@ -1009,7 +1088,8 @@ def wired(chain, host, monkeypatch, image_factory):
     )
     monkeypatch.setattr(
         mc_memory, "make_vram_room",
-        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2: calls.rooms.append((w, h, stage)),
+        lambda name, mods=None, w=0, h=0, stage=mc_memory.STAGE_2, **kwargs:
+            calls.rooms.append((w, h, stage)),
     )
     monkeypatch.setattr(mc_memory, "current_modules", lambda: [])
 

@@ -2387,7 +2387,11 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
             from modules import shared
 
             name = shared.opts.sd_model_checkpoint
-            make_vram_room(name, current_modules(), width, height, stage=STAGE_1)
+            # Never at a language model's expense. See make_vram_room: a
+            # warm-up is not a generation, and the generation that does arrive
+            # asks this same question for itself.
+            make_vram_room(name, current_modules(), width, height, stage=STAGE_1,
+                           reclaim_foreign=False)
             moved = _load_current_to_gpu(width, height)
 
             resident, total = _loaded_residency()
@@ -2860,8 +2864,28 @@ def _pinned_keep(required: int, stage: str) -> tuple[list, int]:
 
 
 def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0,
-                   stage: str = STAGE_2, batch: int = 1) -> int:
+                   stage: str = STAGE_2, batch: int = 1, *,
+                   reclaim_foreign: bool = True) -> int:
     """Evict other models from VRAM if the Stage 2 pass will not otherwise fit.
+
+    ``reclaim_foreign=False`` keeps the eviction inside the image family: this
+    call may move image weights around, and may not take VRAM from a language
+    model. It is what a *warm-up* asks for, and the distinction is the user's
+    rule rather than an implementation detail --
+
+        free VRAM for the image model when the image model needs it; the moment
+        there is not enough VRAM to make an image, that is when the LLM goes
+
+    -- and a background warm-up is not making an image. Nobody has pressed
+    anything. Stopping llama-server there would be paying a model load, a
+    thrown-away prompt cache and possibly a whole conversation for a generation
+    that may never be requested, and the warm-up gains nothing a real pass
+    would not have gained for itself moments later: ``_make_room_for_stage_1``
+    runs on the generation that actually arrives, asks this same question, and
+    reclaims then, when the need is real.
+
+    So the warm-up takes what is genuinely free, and stops. A model it could
+    not finish moving is reported partially warm, which is exactly what it is.
 
     This is the "demote only under pressure" half of the residency policy, and
     the warm-swap path is where it has to be applied explicitly. A warm swap
@@ -2929,7 +2953,7 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
 
     after = free_vram_bytes()
 
-    if after < needed:
+    if after < needed and reclaim_foreign:
         # Forge's own eviction has done what it can and the pass still does not
         # fit. Only now is another workload's residency worth taking: moving an
         # image model to RAM is cheap and keeps it warm, and ending a
@@ -2947,6 +2971,16 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         if foreign:
             after = free_vram_bytes()
         _record_reserve_miss(stage, shortfall, held, evicted=bool(foreign))
+    elif after < needed and _llm_residency_bytes() > 0:
+        # Not a miss, and deliberately not filed as one: no pass ran, so the
+        # plan has not been shown to be wrong about anything. Auto's learned
+        # cap is taught by generations, never by warm-ups.
+        logger.info(
+            "Model Chain: %s is %.1f GB short of fully warm and a language model is "
+            "holding VRAM on this card — leaving it alone, because nothing is being "
+            "generated yet. The generation that asks for this model will take the room "
+            "then, if it turns out to need it",
+            stage, (needed - after) / _GB)
 
     freed = max(after - free, 0)
     names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
@@ -2964,7 +2998,12 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         f"; kept {pinned / _GB:.1f} GB of Stage 1 encoders resident" if pinned_keep else "",
     )
 
-    if after < needed:
+    if after < needed and reclaim_foreign:
+        # Only for a real pass. Everything below describes what a *generation*
+        # is about to run into, and a warm-up that came up short has not run
+        # into anything: it leaves the model partially warm, says so through
+        # the preload's own result line, and the pass that follows makes its
+        # own room and its own diagnosis.
         total = total_vram_bytes()
         if 0 < total < required:
             # Not a shortfall to act on -- the pass is larger than the card. The
