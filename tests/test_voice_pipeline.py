@@ -15,6 +15,7 @@ offsets, the cancellation and the containment are the ones that ship.
 from __future__ import annotations
 
 import io
+import dataclasses
 import json
 import math
 import struct
@@ -3610,6 +3611,76 @@ class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
 
         assert pipeline.placement("lavasr") == (devices.PROVIDER_CUDA, 0)
         assert pipeline.cuda_mask() == self._card().uuid
+
+
+class TestATurnAsksTheClosureItsOwnStagesNeed:
+    """The last place the two closures were still being confused.
+
+    snapshot() decides whether a turn is enhanced at all, and it gated the whole
+    pipeline on ``state.runtime_ready`` -- the ONNX closure. LavaSR does not run
+    in that one and needs nothing from it, so a machine whose ONNX closure was
+    stale or absent got a silently unenhanced reply from a LavaSR that was
+    installed, current and ready.
+    """
+
+    @staticmethod
+    def _status(**flavours):
+        found = _installed_status()
+        return dataclasses.replace(
+            found,
+            runtime_install_state=flavours.get("onnx", "installed"),
+            runtime_message="Not installed." if flavours.get("onnx") else "Installed.",
+            runtime_flavours=tuple(
+                (name, flavours.get(name, "installed"),
+                 "Not installed." if flavours.get(name) else "Installed.")
+                for name in pipeline.RUNTIME_FLAVOURS))
+
+    def test_lavasr_alone_runs_without_the_onnx_closure(self, host):
+        host.shared.opts.set(pipeline.OPT_ENABLED, True)
+        host.shared.opts.set(pipeline.OPT_DPDFNET, False)
+        host.shared.opts.set(pipeline.OPT_LAVASR, True)
+
+        found = pipeline.snapshot(RATE, "pocket", self._status(onnx="not_installed"))
+
+        assert found.stage_ids == ("lavasr",), (
+            "LavaSR runs in the PyTorch closure and is owed nothing by the ONNX one")
+        assert found.output_rate == 48000
+
+    def test_dpdfnet_still_needs_the_closure_it_does_run_in(self, host):
+        host.shared.opts.set(pipeline.OPT_ENABLED, True)
+        host.shared.opts.set(pipeline.OPT_DPDFNET, True)
+        host.shared.opts.set(pipeline.OPT_LAVASR, False)
+
+        found = pipeline.snapshot(RATE, "pocket", self._status(onnx="not_installed"))
+
+        assert found.stage_ids == (), "the ONNX stage is the one that needs it"
+        assert found.reason, "and the turn says why rather than going quiet"
+
+    def test_both_together_ask_for_the_torch_closure(self, host):
+        """One worker serves both, and only the torch closure carries both."""
+        host.shared.opts.set(pipeline.OPT_ENABLED, True)
+        host.shared.opts.set(pipeline.OPT_DPDFNET, True)
+        host.shared.opts.set(pipeline.OPT_LAVASR, True)
+
+        held = pipeline.snapshot(RATE, "pocket", self._status(torch="not_installed"))
+        assert held.stage_ids == (), "no torch closure, no pair"
+
+        ready = pipeline.snapshot(RATE, "pocket", self._status(onnx="stale"))
+        assert ready.stage_ids == ("dpdfnet", "lavasr"), (
+            "the torch closure carries ONNX Runtime too, so a stale ONNX one "
+            "does not stop the pair that is about to run inside the other")
+
+    def test_nothing_enabled_asks_for_no_closure_at_all(self, host):
+        host.shared.opts.set(pipeline.OPT_ENABLED, True)
+        host.shared.opts.set(pipeline.OPT_DPDFNET, False)
+        host.shared.opts.set(pipeline.OPT_LAVASR, False)
+
+        found = pipeline.snapshot(RATE, "pocket",
+                                  self._status(onnx="not_installed",
+                                               torch="not_installed"))
+
+        assert found.stage_ids == ()
+        assert "no stages enabled" in found.reason.casefold(), found.reason
 
 
 class TestTheInstallerSelfTestSurvivesARealVocosHead:
