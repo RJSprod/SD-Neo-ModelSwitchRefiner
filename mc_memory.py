@@ -2572,8 +2572,47 @@ def _load_selected_from_disk() -> bool:
     Returns False when there is nothing to load. An installation with no
     checkpoint selected is a legitimate state, not a failure, and the warm-up
     simply has no work in it.
+
+    The flag, and why a load that does not clear it is a load thrown away
+    ------------------------------------------------------------------------
+    Forge Neo's ``process_images`` runs ``manage_model_and_prompt_cache``
+    between every script's ``before_process`` and every script's ``process``::
+
+        p.sd_model, just_reloaded = forge_model_reload()
+        if need_global_unload and not just_reloaded:
+            memory_management.unload_all_models()
+        need_global_unload = False
+
+    ``need_global_unload`` is set by ``refresh_model_loading_parameters`` --
+    at startup, and whenever the checkpoint, VAE, text encoder or storage dtype
+    selection changes -- and it means "flush everything before the next pass".
+    The host's own first generation satisfies it by *being* the reload: its
+    ``forge_model_reload`` loads the model, ``just_reloaded`` is true, nothing
+    is unloaded, and the flag is consumed.
+
+    A warm-up that ran ``forge_model_reload`` here, earlier, did that work and
+    consumed nothing. So the host's call returned early, ``just_reloaded`` was
+    false, the flag was still up, and ``unload_all_models`` moved every weight
+    the warm-up had just placed straight back off the card. From a user's log
+    with the warm-up on::
+
+        12:53:11  warm-up finished in 31.6s — armed             (18.4 GB on the card)
+        12:53:55  Stage 1 has 18.4 GB of weights in system RAM   (fourteen seconds later)
+        Moving model(s) has taken 5.54 seconds
+        Moving model(s) has taken 11.62 seconds                 (all of it, again)
+
+    and with it off, one load of 26 seconds and nothing after. The warm-up was
+    making the first generation slower.
+
+    So the flag is cleared here exactly when the host would have cleared it:
+    after a ``forge_model_reload`` that actually reloaded. The two warm-swap
+    paths in this module already do the same (see ``ensure_resident`` and
+    ``reinstate_pending``), for the same reason and with the same test
+    ("otherwise manage_model_and_prompt_cache would undo the swap's benefit").
+    A call that returned early is left alone: the flag was raised for a flush
+    that has not happened, and it is not this function's to cancel.
     """
-    from modules import sd_models, shared
+    from modules import processing, sd_models, shared
     from modules.sd_models import model_data
 
     name = getattr(shared.opts, "sd_model_checkpoint", "")
@@ -2585,7 +2624,14 @@ def _load_selected_from_disk() -> bool:
     # the difference between a warm-up that loads the model and one that
     # cheerfully reports having loaded a null.
     ensure_model_loadable()
-    sd_models.forge_model_reload()
+    result = sd_models.forge_model_reload()
+    # The host answers (model, just_reloaded). Anything else is a host this was
+    # not written against, and the conservative reading of it is "not reloaded":
+    # leaving Forge's flag up costs one avoidable reload, clearing it wrongly
+    # would skip a flush the host asked for.
+    just_reloaded = isinstance(result, tuple) and len(result) == 2 and bool(result[1])
+    if just_reloaded and hasattr(processing, "need_global_unload"):
+        processing.need_global_unload = False
     return _is_real_model(model_data.sd_model)
 
 

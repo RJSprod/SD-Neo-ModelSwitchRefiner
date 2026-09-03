@@ -900,6 +900,45 @@ class TestWarmingFromDisk:
         assert reloads == [True]
         assert nothing_loaded.gpu_loads == 1
 
+    def test_a_disk_load_cancels_the_pending_global_unload(self, nothing_loaded, host,
+                                                          memory, monkeypatch):
+        """The warm-swap paths' test, for the path the warm-up takes.
+
+        Forge's ``manage_model_and_prompt_cache`` runs ``unload_all_models``
+        when its flag is up and its own ``forge_model_reload`` did not just
+        reload. A warm-up that reloaded earlier did the work the flag asked for
+        and consumed nothing, so the host then threw the warm-up's 18.4 GB
+        straight back off the card -- a first generation slower with the
+        warm-up than without it.
+        """
+        def forge_model_reload():
+            host.sd_models.model_data.sd_model = memory.model
+            return None, True
+
+        monkeypatch.setattr(host.sd_models, "forge_model_reload", forge_model_reload)
+        host.processing.need_global_unload = True
+
+        mc_memory.preload_async(1024, 1024, allow_disk_load=True)
+        mc_memory.join_preload(timeout=5)
+
+        assert host.processing.need_global_unload is False
+
+    def test_a_reload_that_returned_early_leaves_the_flag_up(self, nothing_loaded, host,
+                                                             memory, monkeypatch):
+        """The flag was raised for a flush that has not happened, and cancelling
+        it on the strength of a call that did nothing would skip that flush."""
+        def forge_model_reload():
+            host.sd_models.model_data.sd_model = memory.model
+            return None, False
+
+        monkeypatch.setattr(host.sd_models, "forge_model_reload", forge_model_reload)
+        host.processing.need_global_unload = True
+
+        mc_memory.preload_async(1024, 1024, allow_disk_load=True)
+        mc_memory.join_preload(timeout=5)
+
+        assert host.processing.need_global_unload is True
+
     def test_nothing_selected_is_not_a_failure(self, nothing_loaded, monkeypatch):
         monkeypatch.setattr(mc_memory, "checkpoint_info", lambda name: None)
 
