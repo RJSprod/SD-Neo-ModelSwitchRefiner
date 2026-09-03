@@ -457,3 +457,88 @@ class TestAReserveMissIsRecordedNotJustSurvived:
         monkeypatch.setattr(mc_plan, "record_miss", explode)
 
         mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+
+class TestHostRamIsAskedForTheWeightsNotOnTheCard:
+    """The demand is the model minus what VRAM already holds, never the model.
+
+    From a user's log, four generations on an unchanged checkpoint with a
+    CPU-placed llama-server idle in system RAM::
+
+        Stage 1 wanted 18.4 GB of system RAM and had 17.7 GB — stopped idle
+            language models holding 12.5 GB
+        Stage 1 needs 19.9 GB, has 4.2 GB free and 18.4 GB already resident
+
+    Eighteen gigabytes asked for on behalf of weights the next line says were
+    entirely on the card, and a server ended for it on every press of Generate.
+    A weight that is in VRAM will not be read from system RAM and is not a
+    demand on it. These tests are that subtraction, and they are the difference
+    between "the image model outranks an idle LLM" and "the image model kills
+    the LLM every time".
+    """
+
+    @pytest.fixture
+    def sized(self, monkeypatch):
+        """A 18.4 GB checkpoint whose residency the test sets, and a broker
+        that records what it was asked for."""
+        state = {"resident": 0, "asked": []}
+        monkeypatch.setattr(mc_memory, "_loaded_target_patchers", lambda name: ["unet"])
+        monkeypatch.setattr(mc_memory, "_weights_bytes",
+                            lambda name, modules, patchers: int(18.4 * _GB))
+        monkeypatch.setattr(mc_memory, "_resident_bytes",
+                            lambda patchers: state["resident"])
+        monkeypatch.setattr(mc_broker, "host_ram_fits", lambda wanted: False)
+
+        def admit(wanted, *, reason="", reserve=None):
+            state["asked"].append(wanted)
+            return mc_broker.Admission(wanted, 2 * _GB, 4 * _GB, 4 * _GB)
+
+        monkeypatch.setattr(mc_broker, "admit_image_host_ram", admit)
+        return state
+
+    def test_a_model_entirely_on_the_card_asks_for_nothing(self, sized):
+        """The user's case. Nothing is competing, so nothing may be stopped,
+        however short of system RAM the machine happens to be."""
+        sized["resident"] = int(18.4 * _GB)
+
+        assert mc_memory.make_host_ram_room("Model A.safetensors") == 0
+        assert sized["asked"] == [], "the broker was asked on behalf of weights in VRAM"
+
+    def test_a_partly_warm_model_asks_for_exactly_the_part_that_is_not(self, sized):
+        """The crash log's case: 15.0 of 18.4 GB warmed, the rest to move on
+        demand. The 3.4 GB that will be read from system RAM is the demand;
+        the 15.0 GB that will not is not."""
+        sized["resident"] = int(15.0 * _GB)
+
+        mc_memory.make_host_ram_room("Model A.safetensors")
+
+        assert len(sized["asked"]) == 1
+        assert abs(sized["asked"][0] - int(3.4 * _GB)) < 1024
+
+    def test_a_cold_model_asks_for_all_of_it(self, sized):
+        """A checkpoint about to come off the disk goes through system RAM in
+        its entirety, and that is exactly what the arithmetic says."""
+        sized["resident"] = 0
+
+        mc_memory.make_host_ram_room("Model A.safetensors")
+
+        assert sized["asked"] == [int(18.4 * _GB)]
+
+    def test_a_demand_that_fits_never_reaches_the_broker(self, sized, monkeypatch):
+        """Invariant I-5 at this layer too: the cheap question first, and the
+        reclaimer is not consulted about memory that is already there."""
+        sized["resident"] = int(15.0 * _GB)
+        monkeypatch.setattr(mc_broker, "host_ram_fits", lambda wanted: True)
+
+        assert mc_memory.make_host_ram_room("Model A.safetensors") == 0
+        assert sized["asked"] == []
+
+    def test_a_broker_that_raises_costs_ram_not_the_generation(self, sized, monkeypatch):
+        sized["resident"] = 0
+
+        def broken(wanted, *, reason="", reserve=None):
+            raise RuntimeError("the runtime is wedged")
+
+        monkeypatch.setattr(mc_broker, "admit_image_host_ram", broken)
+
+        assert mc_memory.make_host_ram_room("Model A.safetensors") == 0

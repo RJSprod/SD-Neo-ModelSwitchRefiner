@@ -2521,3 +2521,48 @@ class TestTheRegistryStopsTheFewestServersItCan:
 
         assert registry.release_host_ram(0, "Stage 1") == 0
         assert server.calls == []
+
+
+class TestReadingHostRamNeverWaitsForAModelLoad:
+    """:meth:`Runtime.host_ram_bytes` is a timed read, and the reason is a cycle.
+
+    The image side asks it from inside ``mc_memory``'s model lock -- a Stage 2
+    switch stashing the outgoing model, a preload recording system RAM beside
+    its result -- while a server start holds the runtime lock and may ask
+    ``mc_memory`` for VRAM under that same model lock. Two blocking acquires in
+    opposite orders is a hang that lasts until the process is killed. A reading
+    that gives up is a number that is briefly zero, and zero is the direction
+    every caller is safe in: nothing is reclaimed on it.
+    """
+
+    def test_a_held_lock_answers_zero_within_the_timeout(self, host, monkeypatch):
+        import threading
+        import time
+
+        monkeypatch.setattr(runtime, "HOST_RAM_READ_TIMEOUT", 0.2)
+        held = runtime.Runtime()
+        taken, let_go = threading.Event(), threading.Event()
+
+        def hog():
+            with held._lock:
+                taken.set()
+                let_go.wait(5.0)
+
+        thread = threading.Thread(target=hog, name="a-model-load", daemon=True)
+        thread.start()
+        assert taken.wait(2.0)
+        try:
+            started = time.perf_counter()
+            answer = held.host_ram_bytes()
+            waited = time.perf_counter() - started
+        finally:
+            let_go.set()
+            thread.join(2.0)
+
+        assert answer == 0
+        assert waited < 2.0, f"the read blocked for {waited:.1f}s behind a held lock"
+
+    def test_a_free_lock_answers_as_before(self, host):
+        held = runtime.Runtime()
+
+        assert held.host_ram_bytes() == 0, "not running, so it holds nothing"

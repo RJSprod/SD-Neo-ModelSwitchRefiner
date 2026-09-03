@@ -156,11 +156,27 @@ Moving model(s) has taken 83.30 seconds     12.5 GB llama-server in it   154 MB/
 ```
 
 So `mc_memory.make_host_ram_room` asks before the weights move rather than after
-a shortfall, on the weights alone — activations are a VRAM cost and have no
-business inflating a host-RAM demand. It runs on the same `reclaim_foreign` flag
-`make_vram_room` already carries, which means a warm-up does not ask for exactly
-the reason it does not ask for VRAM: nobody has pressed anything yet, and the
-generation that does arrive asks for itself.
+a shortfall. Two things about how it asks were got wrong the first time and are
+worth stating as rules:
+
+- **The demand is the weights that are not on the card.** Not the model's size —
+  the model's size minus what is already resident in VRAM, which after a good
+  preload is zero. A weight in VRAM is not going to be read from system RAM and
+  is not a demand on it. The first version asked for the whole model and ended
+  an idle llama-server on every press of Generate while the next log line said
+  all 18.4 GB was on the card. Activations do not count either; they are a VRAM
+  cost.
+- **It runs after every language-model phase and before the first weight moves.**
+  The model-chain `process` hook for Stage 1 — after every script's
+  `before_process`, where the Creative Writer runs, and before conditioning loads
+  the text encoder — and the switch for Stage 2. Not `make_vram_room`, which
+  `before_process` reaches *before* the writer: a reclaim there stopped a server
+  the same generation restarted twenty milliseconds later. On a machine that is
+  genuinely short, the order is the language model runs, *then* it goes, then
+  the weights move.
+
+A warm-up never asks, for exactly the reason it does not ask for VRAM: nobody has
+pressed anything yet, and the generation that does arrive asks for itself.
 
 "Idle" means the same thing in both domains — no `FAMILY_LLM` workload holding
 the lock — and is checked twice, at the fan-out and again inside each runtime,

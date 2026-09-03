@@ -2510,14 +2510,14 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
             # asks this same question for itself.
             make_vram_room(name, current_modules(), width, height, stage=STAGE_1,
                            reclaim_foreign=False)
-            # Timed on its own, and the host-RAM reading taken next to it, so
-            # the rate on the line below is a rate for the move rather than for
-            # the whole warm-up -- and so a preload that stopped short has the
-            # measurement that explains it beside it rather than nowhere.
+            # Timed on its own, so the rate on the line below is a rate for the
+            # move rather than for the whole warm-up. The host-RAM reading that
+            # goes beside it is taken *after* this block releases _model_lock --
+            # see the note past the ``with`` -- which is a few milliseconds
+            # later than the move and no less true for it.
             moving = time.perf_counter()
             moved = _load_current_to_gpu(width, height)
             moved_seconds = time.perf_counter() - moving
-            host_ram = _describe_host_ram()
 
             resident, total = _loaded_residency()
             # What the next pass will be compared against. Measured through the
@@ -2537,7 +2537,6 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
                 seconds=time.perf_counter() - started,
                 detail=mc_lora.describe(mc_lora.state_of(model_data_sd_model())),
                 moved_seconds=moved_seconds,
-                host_ram=host_ram,
             )
 
             # Whatever is left over after Stage 1 is safely warm belongs to
@@ -2547,6 +2546,15 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
         _record_preload_failure(exc)
         return
 
+    # Outside _model_lock, deliberately, and it is not a nicety. The reading
+    # asks the LLM runtime what it holds, which takes the runtime lock; a server
+    # start holds that lock and may ask this module for VRAM, which takes
+    # _model_lock. Asking from inside the lock is the cycle Runtime.release
+    # documents -- two blocking acquires in opposite orders -- and it hangs the
+    # whole WebUI on the one occasion a start and a preload overlap.
+    import dataclasses
+
+    _preload_result = dataclasses.replace(_preload_result, host_ram=_describe_host_ram())
     _preload_failures = 0
     _log_preload_result(_preload_result)
 
@@ -3123,13 +3131,6 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         # the requirement is computed, so this pass is budgeted with what the
         # last one taught rather than one generation later.
         _observe_reclaim(target_name, resident)
-        # And the same rule in the other memory domain, on the same flag. The
-        # weights about to move come from system RAM and go back to it, so an
-        # idle llama-server sitting in that RAM is paid for on every move --
-        # see make_host_ram_room. A warm-up does not ask, for exactly the reason
-        # it does not ask for VRAM: nobody has pressed anything yet, and the
-        # generation that does arrive asks this question for itself.
-        make_host_ram_room(target_name, modules, own, stage)
     required = _pass_requirement(target_name, modules, width, height, own, batch)
     needed = max(required - resident, 0)
     free = free_vram_bytes()
@@ -3618,8 +3619,7 @@ def set_foreign_reclaim(callback) -> None:
     _foreign_reclaim = callback
 
 
-def make_host_ram_room(target_name: str, modules=None, patchers=None,
-                       stage: str = STAGE_1) -> int:
+def make_host_ram_room(target_name: str, modules=None, *, stage: str = STAGE_1) -> int:
     """Get system RAM back from idle language models before image weights move.
 
     The host-RAM half of :func:`make_vram_room`, and the same rule as section
@@ -3627,31 +3627,61 @@ def make_host_ram_room(target_name: str, modules=None, patchers=None,
 
         an image generation always outranks an idle LLM
 
-    Why it has to happen *before* the move rather than after a shortfall, which
-    is where the VRAM half acts: a VRAM shortage announces itself -- the pass
-    does not fit, ``free_memory`` runs, and what is left over is measurable. A
-    host-RAM shortage never announces anything. Forge asks the offload device
-    for the weights, the operating system serves whichever of those pages it
-    still has and reads the rest off the pagefile, and the only evidence is that
-    the move took four times as long. There is no error, no exception and no
-    number afterwards that says why. From one user's log: 12866.82 MB moved in
-    11.35 s with the RAM free, and 83.30 s for the identical module with a
-    12.5 GB llama-server in it -- 1134 MB/s against 154.
+    **The demand is the weights that are not on the card.** Not the model's
+    size: the model's size minus what is already resident in VRAM, which after
+    a good preload is nothing at all. This is the same subtraction
+    :func:`make_vram_room` makes for its own domain and warns about in as many
+    words -- "what the pass needs and what has to be freed are different numbers
+    whenever the target is already partly on the GPU" -- and the first version
+    of this function did not make it. From a user's log, four generations in a
+    row on an unchanged model::
 
-    So the arithmetic is done first, on the weights alone. Activations are a
-    VRAM cost and have no business inflating a host-RAM demand.
+        Stage 1 wanted 18.4 GB of system RAM and had 17.7 GB — stopped idle
+            language models holding 12.5 GB
+        Stage 1 needs 19.9 GB, has 4.2 GB free and 18.4 GB already resident
 
-    Returns the bytes system RAM actually gained, which is a fresh reading and
-    not the reclaimer's own arithmetic (invariant I-15). Never raises: an image
-    pass that could not get RAM back is slow, and a slow pass is not a reason to
-    fail the generation that asked for it.
+    Eighteen gigabytes asked for on behalf of weights the very next line says
+    were entirely on the card, and an idle llama-server ended for it on every
+    press of Generate. A weight that is in VRAM is not going to be read from
+    system RAM, so it is not a demand on system RAM. With the subtraction the
+    demand there is zero and nothing happens, which is what "not competing"
+    has to mean.
+
+    **When it is asked matters as much as what it asks for.** This runs after
+    every language-model phase of the generation and before the first weight
+    moves -- the model-chain ``process`` hook for Stage 1, the switch for Stage
+    2 -- and not from ``make_vram_room``, where the first version put it. That
+    function is reached from ``before_process``, which is *before* the Creative
+    Writer runs, so a reclaim there stops a server the same generation starts
+    again twenty milliseconds later: the log above shows exactly that, a stop at
+    11:45:34.416 and "LLM run started" at 11:45:34.436. On a machine short of
+    RAM the right order is the language model runs, *then* it goes, then the
+    weights move -- never the other way round.
+
+    Why before the move rather than after a shortfall, which is where the VRAM
+    half acts: a VRAM shortage announces itself -- the pass does not fit,
+    ``free_memory`` runs, and what is left over is measurable. A host-RAM
+    shortage never announces anything. The operating system serves whichever
+    pages it still has, reads the rest off the pagefile, and the only evidence
+    is the clock: 12866.82 MB in 11.35 s with the RAM free, 83.30 s for the
+    identical module with a 12.5 GB llama-server in it.
+
+    Must be called outside ``_model_lock``. It asks the LLM runtime what it
+    holds, which takes the runtime lock, and a server start holding that lock
+    may ask this module for VRAM under ``_model_lock`` -- the cycle
+    ``Runtime.release`` documents. Both call sites are hooks that hold nothing.
+
+    Returns the bytes system RAM actually gained, a fresh reading rather than
+    the reclaimer's arithmetic (invariant I-15). Never raises: a pass that could
+    not get RAM back is slow, and slow is not a reason to fail the generation.
     """
     try:
         import mc_broker
 
-        wanted = _weights_bytes(target_name, modules,
-                                patchers if patchers is not None
-                                else _loaded_target_patchers(target_name))
+        own = _loaded_target_patchers(target_name)
+        weights = _weights_bytes(target_name, modules, own)
+        resident = _resident_bytes(own)
+        wanted = max(weights - resident, 0)
         if wanted <= 0 or mc_broker.host_ram_fits(wanted):
             return 0
 
@@ -3661,8 +3691,8 @@ def make_host_ram_room(target_name: str, modules=None, patchers=None,
             return 0
         gained = max(admission.available - admission.available_before, 0)
         logger.info(
-            "Model Chain: %s wanted %.1f GB of system RAM and had %.1f GB — %s, "
-            "and %.1f GB is available now",
+            "Model Chain: %s has %.1f GB of weights still in system RAM and had %.1f GB "
+            "free — %s, and %.1f GB is available now",
             stage, wanted / _GB, admission.available_before / _GB,
             "; ".join(admission.actions), admission.available / _GB)
         return gained
