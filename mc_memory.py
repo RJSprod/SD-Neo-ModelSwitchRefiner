@@ -2194,6 +2194,31 @@ class PreloadResult:
     model_bytes: int = 0
     seconds: float = 0.0
     detail: str = ""
+    moved_seconds: float = 0.0
+    """Seconds spent moving weights alone, with the swap and the bookkeeping out.
+
+    Kept separately from :attr:`seconds` so the rate below it means something.
+    A preload that spent thirty seconds reinstating a cached checkpoint and four
+    moving 12 GB is not a 400 MB/s move, and the whole point of recording a rate
+    is to be able to tell a RAM-speed move from a pagefile-speed one at a glance.
+    """
+    host_ram: str = ""
+    """What system RAM looked like when the move finished. See
+    :func:`mc_broker.describe_host_ram`."""
+
+    @property
+    def megabytes_per_second(self) -> float:
+        """How fast the weights actually moved, or 0.0 when it cannot be said.
+
+        The number this whole record exists for. Host-RAM pressure has no error
+        and no exception to announce it -- the operating system simply serves
+        the pages it kept and reads the rest off the pagefile -- so the rate is
+        the only place it is visible at all. On one user's machine the same
+        module moved at 1134 MB/s with RAM free and 154 MB/s without.
+        """
+        if self.moved_seconds <= 0 or self.moved_bytes <= 0:
+            return 0.0
+        return self.moved_bytes / self.moved_seconds / (1024 * 1024)
 
 
 _preload_result: PreloadResult | None = None
@@ -2485,7 +2510,14 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
             # asks this same question for itself.
             make_vram_room(name, current_modules(), width, height, stage=STAGE_1,
                            reclaim_foreign=False)
+            # Timed on its own, and the host-RAM reading taken next to it, so
+            # the rate on the line below is a rate for the move rather than for
+            # the whole warm-up -- and so a preload that stopped short has the
+            # measurement that explains it beside it rather than nowhere.
+            moving = time.perf_counter()
             moved = _load_current_to_gpu(width, height)
+            moved_seconds = time.perf_counter() - moving
+            host_ram = _describe_host_ram()
 
             resident, total = _loaded_residency()
             # What the next pass will be compared against. Measured through the
@@ -2504,6 +2536,8 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
                 model_bytes=total,
                 seconds=time.perf_counter() - started,
                 detail=mc_lora.describe(mc_lora.state_of(model_data_sd_model())),
+                moved_seconds=moved_seconds,
+                host_ram=host_ram,
             )
 
             # Whatever is left over after Stage 1 is safely warm belongs to
@@ -2598,6 +2632,28 @@ def _record_preload_failure(exc: BaseException) -> None:
         )
 
 
+def _describe_host_ram(label: str = "") -> str:
+    """:func:`mc_broker.describe_host_ram`, and never a reason to fail a preload."""
+    try:
+        import mc_broker
+
+        return mc_broker.describe_host_ram(label)
+    except Exception:
+        return ""
+
+
+def _moved_at(result: PreloadResult) -> str:
+    """", moved at N MB/s" when the rate is knowable, and "" when it is not.
+
+    Appended to both preload lines rather than only to the partial one. A rate
+    is only readable as slow if the fast ones are on the record too, and the
+    line that says a model warmed perfectly in four seconds is where the number
+    to compare against comes from.
+    """
+    rate = result.megabytes_per_second
+    return f", moved at {rate:,.0f} MB/s" if rate > 0 else ""
+
+
 def _log_preload_result(result: PreloadResult | None) -> None:
     if result is None:
         return
@@ -2608,25 +2664,39 @@ def _log_preload_result(result: PreloadResult | None) -> None:
 
     if result.state == "ready":
         logger.info(
-            "Model Chain: %s is in VRAM — %.1f GB resident after %.1fs (%.1f GB moved, %s). "
+            "Model Chain: %s is in VRAM — %.1f GB resident after %.1fs (%.1f GB moved%s, %s). "
             "It stays there until something needs the room, so the next generation starts "
             "sampling immediately and its LoRA is applied to weights already on the card",
             result.checkpoint,
             result.resident_bytes / _GB,
             result.seconds,
             result.moved_bytes / _GB,
+            _moved_at(result),
             result.detail,
         )
+        if result.host_ram:
+            logger.info("Model Chain: system RAM as Stage 1 finished warming — %s",
+                        result.host_ram)
         return
 
     logger.info(
-        "Model Chain: warmed %.1f GB of %.1f GB of %s in %.1fs — the next generation "
+        "Model Chain: warmed %.1f GB of %.1f GB of %s in %.1fs%s — the next generation "
         "will move the rest on demand",
         result.resident_bytes / _GB,
         result.model_bytes / _GB,
         result.checkpoint,
         result.seconds,
+        _moved_at(result),
     )
+    # Said on this branch above all others. A preload that stopped short is the
+    # symptom whose cause is never in the log next to it: the card had room --
+    # it says so two lines up -- so what it ran out of was somewhere else, and
+    # this is the reading that says where.
+    if result.host_ram:
+        logger.info(
+            "Model Chain: Stage 1 stopped %.1f GB short of fully warm — system RAM at that "
+            "moment: %s",
+            max(result.model_bytes - result.resident_bytes, 0) / _GB, result.host_ram)
 
 
 def _load_current_to_gpu(width: int = 0, height: int = 0) -> int:
@@ -2809,15 +2879,19 @@ def _loaded_target_patchers(target_name: str) -> list:
         return []
 
 
-def _pass_requirement(target_name: str, modules, width: int, height: int, patchers: list,
-                      batch: int = 1) -> int:
-    """VRAM the pass needs in total: the model, resident, plus its activations.
+def _weights_bytes(target_name: str, modules, patchers: list) -> int:
+    """How big this checkpoint's weights are, activations excluded.
 
     When the target is the loaded model its patchers report their real size, so
     use that in preference to the disk estimate. The file size is a proxy that
     can be wrong in either direction -- quantised formats read larger than they
     land, mixed-precision builds land larger than they read -- and being wrong
     here either wastes an eviction or leaves the pass short.
+
+    Split out of :func:`_pass_requirement` because two questions want this
+    number and only one of them wants the headroom on top of it. Activations
+    are a VRAM cost; the *host* RAM the image side needs is the weights alone,
+    because that is what Forge parks on the offload device and reads back.
     """
     size = 0
     for patcher in patchers:
@@ -2833,9 +2907,15 @@ def _pass_requirement(target_name: str, modules, width: int, height: int, patche
         # *plan* -- built long before either is loaded -- stops having to guess
         # from a file size. See :func:`mc_plan.remember_weights`.
         _remember_measured_weights(target_name, modules, size)
-    else:
-        size = int(file_size_bytes(target_name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
+        return size
 
+    return int(file_size_bytes(target_name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
+
+
+def _pass_requirement(target_name: str, modules, width: int, height: int, patchers: list,
+                      batch: int = 1) -> int:
+    """VRAM the pass needs in total: the model, resident, plus its activations."""
+    size = _weights_bytes(target_name, modules, patchers)
     return size + _attainable_headroom(size, width, height, batch)
 
 
@@ -3043,6 +3123,13 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         # the requirement is computed, so this pass is budgeted with what the
         # last one taught rather than one generation later.
         _observe_reclaim(target_name, resident)
+        # And the same rule in the other memory domain, on the same flag. The
+        # weights about to move come from system RAM and go back to it, so an
+        # idle llama-server sitting in that RAM is paid for on every move --
+        # see make_host_ram_room. A warm-up does not ask, for exactly the reason
+        # it does not ask for VRAM: nobody has pressed anything yet, and the
+        # generation that does arrive asks this question for itself.
+        make_host_ram_room(target_name, modules, own, stage)
     required = _pass_requirement(target_name, modules, width, height, own, batch)
     needed = max(required - resident, 0)
     free = free_vram_bytes()
@@ -3529,6 +3616,60 @@ def set_foreign_reclaim(callback) -> None:
     global _foreign_reclaim
 
     _foreign_reclaim = callback
+
+
+def make_host_ram_room(target_name: str, modules=None, patchers=None,
+                       stage: str = STAGE_1) -> int:
+    """Get system RAM back from idle language models before image weights move.
+
+    The host-RAM half of :func:`make_vram_room`, and the same rule as section
+    3.3 of the LLM Studio intent states for the card::
+
+        an image generation always outranks an idle LLM
+
+    Why it has to happen *before* the move rather than after a shortfall, which
+    is where the VRAM half acts: a VRAM shortage announces itself -- the pass
+    does not fit, ``free_memory`` runs, and what is left over is measurable. A
+    host-RAM shortage never announces anything. Forge asks the offload device
+    for the weights, the operating system serves whichever of those pages it
+    still has and reads the rest off the pagefile, and the only evidence is that
+    the move took four times as long. There is no error, no exception and no
+    number afterwards that says why. From one user's log: 12866.82 MB moved in
+    11.35 s with the RAM free, and 83.30 s for the identical module with a
+    12.5 GB llama-server in it -- 1134 MB/s against 154.
+
+    So the arithmetic is done first, on the weights alone. Activations are a
+    VRAM cost and have no business inflating a host-RAM demand.
+
+    Returns the bytes system RAM actually gained, which is a fresh reading and
+    not the reclaimer's own arithmetic (invariant I-15). Never raises: an image
+    pass that could not get RAM back is slow, and a slow pass is not a reason to
+    fail the generation that asked for it.
+    """
+    try:
+        import mc_broker
+
+        wanted = _weights_bytes(target_name, modules,
+                                patchers if patchers is not None
+                                else _loaded_target_patchers(target_name))
+        if wanted <= 0 or mc_broker.host_ram_fits(wanted):
+            return 0
+
+        admission = mc_broker.admit_image_host_ram(
+            wanted, reason=f"the {stage} weights in system RAM")
+        if not admission.moved_anything:
+            return 0
+        gained = max(admission.available - admission.available_before, 0)
+        logger.info(
+            "Model Chain: %s wanted %.1f GB of system RAM and had %.1f GB — %s, "
+            "and %.1f GB is available now",
+            stage, wanted / _GB, admission.available_before / _GB,
+            "; ".join(admission.actions), admission.available / _GB)
+        return gained
+    except Exception:
+        logger.debug("Model Chain: could not reclaim system RAM for the image model",
+                     exc_info=True)
+        return 0
 
 
 def _reclaim_foreign(needed: int, reason: str) -> int:

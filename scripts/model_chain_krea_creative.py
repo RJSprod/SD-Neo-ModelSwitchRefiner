@@ -246,6 +246,34 @@ def _literals_for(values) -> tuple[str, str]:
     return str(positive or ""), str(negative or "")
 
 
+def _protected_prompt(p) -> str:
+    """This generation's positive prompt, with its LoRA tags bracketed for it.
+
+    The one call site of :func:`extra_networks.protect` on the global prompt,
+    placed here rather than inside :func:`literals.parse` because that module may
+    not learn what a LoRA tag is. What comes back is an ordinary source string
+    that happens to have brackets in it, and the parse below cannot tell it from
+    one somebody typed.
+
+    Said in the log when it fires. A prompt this hook has quietly taken text out
+    of before handing it to a writer is exactly the invisible active state this
+    extension keeps warning itself about, and the count is enough to see it
+    without recording what the tags were.
+    """
+    from prompt_master.krea import extra_networks
+
+    source = str(getattr(p, "prompt", "") or "")
+    guarded = extra_networks.protect(source)
+    if guarded == source:
+        return source
+    found = extra_networks.count(source)
+    logger.info("Model Chain: %s extra-network tag%s in the prompt %s protected "
+                "from the language models and will reach Stage 1 as typed",
+                found, "" if found == 1 else "s",
+                "was" if found == 1 else "were")
+    return guarded
+
+
 def _settings_for(values) -> dict:
     """This generation's Creative settings, from the panel when it sent them.
 
@@ -2381,9 +2409,15 @@ class ScriptKreaCreative(scripts.Script):
         # only worked while Creative or Spatial was running would be a field
         # whose row is hidden exactly when it stops working, which is the
         # opposite of section 3.3.
+        # ``_protected_prompt`` puts the brackets a LoRA tag needs around it
+        # before the parser runs, so a tag the user typed bare is lifted out on
+        # the same path as one they bracketed themselves. It has to happen here,
+        # above the merge, because everything below reads this parse -- the
+        # Writer's source, the Composer's source, and the single restore that
+        # puts the payloads back for Stage 1.
         before, after = _literals_for(args)
         parsed = literals.merge(
-            literals.parse(getattr(p, "prompt", "") or ""), before, after)
+            literals.parse(_protected_prompt(p)), before, after)
         self._record_literal_fields(p, before, after)
         layout = self._layout(p, args)
         creative = bool(enabled)

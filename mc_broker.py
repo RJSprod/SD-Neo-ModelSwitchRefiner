@@ -1357,6 +1357,96 @@ def llm_host_ram_bytes() -> int:
         return 0
 
 
+def llm_busy() -> bool:
+    """Whether a language model is materially executing right now.
+
+    Read off the workload lock rather than off any runtime's own state, because
+    that lock is what an LLM turn actually takes -- :mod:`mc_llm_sessions` holds
+    one for the length of a reply -- and a server that is merely *loaded* is not
+    a server anybody is waiting on. That distinction is the whole of "idle" in
+    section 3.3's sense, and it has to be the same distinction the VRAM half
+    already uses or the two halves would disagree about the same server.
+    """
+    return any(found.family == FAMILY_LLM for found in active_workloads())
+
+
+def reclaimable_llm_host_ram_bytes() -> int:
+    """Of :func:`llm_host_ram_bytes`, what could be given back right now.
+
+    All of it while nothing is generating, none of it while something is. There
+    is no partial answer available: a llama-server holds its allocation or it
+    does not exist, so "how much would stopping the idle ones return" is the
+    only question with a number behind it.
+
+    The mirror of :func:`reclaimable_image_ram_bytes`, and deliberately the same
+    shape: each side reports what it would give up, the caller decides whether
+    to ask, and neither side reaches into the other's bookkeeping to find out.
+    """
+    if llm_busy():
+        return 0
+    return llm_host_ram_bytes()
+
+
+def release_llm_host_ram(needed_bytes: int, reason: str = "") -> int:
+    """Stop idle language models until ``needed_bytes`` of system RAM is back.
+
+    Section 3.3 of the LLM Studio intent, in the other memory domain: *an image
+    generation always outranks an idle LLM*. That rule was implemented for VRAM
+    and stated for the card, but the reason behind it is not about cards at all
+    -- the image model is the workload the user is waiting on, the language
+    model wrote a prompt and then had nothing to do -- and it reads exactly the
+    same way about system RAM, where the image side keeps every weight that is
+    not currently on the card.
+
+    Stopping is the cheap reclaim here for the reason section 3.4 gives about
+    VRAM: the GGUF's pages stay in the OS page cache after the process ends, so
+    the next start re-reads at memory bandwidth rather than from disk. What
+    actually comes back is the server's anonymous memory -- its KV cache and
+    compute buffers -- plus the file pages ceasing to be mapped by a live
+    process, which is what lets the image side's weights stay resident instead
+    of going to the pagefile.
+
+    Asked of the LLM family's reclaimer, which is the only thing that knows how
+    each of its servers was placed and which of them is worth stopping. Returns
+    bytes the reclaimer reports giving up; the caller re-reads what the OS
+    actually made available and believes that instead (invariant I-15).
+    """
+    if needed_bytes <= 0:
+        return 0
+    reclaimer = _reclaimer(FAMILY_LLM)
+    if reclaimer is None:
+        return 0
+    releasing = getattr(reclaimer, "release_host_ram", None)
+    if not callable(releasing):
+        return 0
+    try:
+        return max(int(releasing(int(needed_bytes), reason) or 0), 0)
+    except Exception:
+        logger.debug("Model Chain: could not release the LLM's host RAM", exc_info=True)
+        return 0
+
+
+def describe_host_ram(label: str = "") -> str:
+    """One line saying where system RAM stands and who of ours is in it.
+
+    Exists because the question this answers was, for a long time, unanswerable
+    after the fact. A log that records free RAM only *before* a llama-server
+    starts says what the decision was made on and nothing about what it cost, so
+    a later image move that ran at pagefile speed has no measurement anywhere
+    near it to explain itself. Cheap enough to call on both sides of anything
+    that moves gigabytes.
+    """
+    free = free_ram_bytes()
+    if free <= 0:
+        return f"{label + ': ' if label else ''}system RAM could not be read"
+    held = llm_host_ram_bytes()
+    parts = [f"{free / _GB:.1f} GB free", f"{ram_reserve_bytes() / _GB:.1f} GB reserved"]
+    if held > 0:
+        parts.append(f"{held / _GB:.1f} GB in our language models"
+                     f"{' (generating)' if llm_busy() else ' (idle)'}")
+    return f"{label + ': ' if label else ''}{', '.join(parts)}"
+
+
 @dataclass(frozen=True)
 class Admission:
     """Whether a new host-RAM demand can be met, and what it cost to say yes."""
@@ -1483,6 +1573,57 @@ def _reason_for(family: str) -> str:
     short 2 GB", "freed 2 GB for X" -- so the fallback has to be one too.
     """
     return f"the {_named(family)} workload"
+
+
+def admit_image_host_ram(needed_bytes: int, *, reason: str = "",
+                         reserve: int | None = None) -> Admission:
+    """Make room in system RAM for the image side, stopping idle LLMs if it must.
+
+    The mirror of :func:`admit_host_ram`, and it keeps that function's first and
+    most important step: **if it already fits, nothing moves.** Two workloads
+    sharing a memory domain is not a conflict (invariant I-5), and a scheduler
+    that stopped a warm llama-server merely because an image model also uses RAM
+    would have turned a capacity-aware design into evict-on-switch -- the exact
+    thing section 3.3 warns about in the other direction.
+
+    When it does not fit, the lowest-priority residency yields, and between an
+    image pass somebody is waiting on and a language model with nothing to do,
+    section 3.3 has already said which that is.
+
+    What comes back is measured afterwards rather than assumed, for the reason
+    :func:`admit_host_ram` gives: a reclaimer reports what it stopped
+    referencing, and the number that decides whether the image side is safe is
+    what the operating system says is available.
+    """
+    needed = max(int(needed_bytes), 0)
+    floor = ram_reserve_bytes() if reserve is None else max(int(reserve), 0)
+    before = free_ram_bytes()
+    if before <= 0:
+        logger.debug("Model Chain: available system RAM could not be read, so no host "
+                     "RAM was reclaimed for %s", reason or "the image model")
+        return Admission(needed, floor, 0, 0, known=False)
+
+    if before >= needed + floor:
+        return Admission(needed, floor, before, before)
+
+    deficit = needed + floor - before
+    reclaimable = reclaimable_llm_host_ram_bytes()
+    if reclaimable <= 0:
+        note(FAMILY_IMAGE,
+             f"system RAM is {deficit / _GB:.1f} GB short for {reason or 'the image model'} "
+             f"({before / _GB:.1f} GB available, {floor / _GB:.1f} GB reserved) and "
+             f"{'a language model is generating, so it was left alone' if llm_busy() else 'no language model of ours is holding any'}")
+        return Admission(needed, floor, before, before)
+
+    freed = release_llm_host_ram(deficit, reason or "the image model")
+    after = free_ram_bytes()
+    if after <= 0:
+        after = before
+    actions: list[str] = []
+    if freed > 0:
+        actions.append(f"stopped idle language models holding {freed / _GB:.1f} GB")
+    return Admission(needed, floor, before, after, freed=freed,
+                     actions=tuple(actions))
 
 
 def _reclaim_scope(family: str, card) -> tuple[object, bool]:

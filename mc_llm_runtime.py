@@ -4804,7 +4804,33 @@ class Runtime:
             if estimated else "",
             "" if not said else f" ({'; '.join(said)})",
         )
+        self._report_host_ram(negotiated)
         self._report_offload(negotiated)
+
+    def _report_host_ram(self, negotiated: Negotiation) -> None:
+        """What this server actually cost in system RAM, measured after the load.
+
+        The gap this closes, and it was a real one. Everything about host RAM was
+        logged on the way *in* -- the admission arithmetic, the shortfall
+        warning, the reserve -- and nothing at all on the way out. So a log could
+        say "12.5 GB wanted, 14.5 GB available" and then, thirty seconds later,
+        show an image module moving at a quarter of its usual rate with no
+        measurement anywhere near it to explain why. The decision was recorded
+        and its consequence was not.
+
+        Only for a placement that materially uses host RAM. A server whose
+        weights went to the card has an mmap the operating system is free to
+        drop, and reporting that as a cost would be inventing pressure -- which
+        is the same distinction :func:`host_ram_demand` already draws.
+        """
+        try:
+            if negotiated.placement.on_gpu:
+                return
+            logger.info("Model Chain: %ssystem RAM after this server loaded — %s",
+                        self._said_for(), mc_broker.describe_host_ram())
+        except Exception:
+            logger.debug("Model Chain: could not report system RAM after the load",
+                         exc_info=True)
 
     def _report_offload(self, negotiated: Negotiation) -> None:
         """Say what llama.cpp reported, and say plainly when it is not the plan.
@@ -4999,6 +5025,58 @@ class Runtime:
                 f"in the system page cache, so restarting it re-reads from RAM, not disk"
             )
             return freed or self.report.observed_bytes
+        finally:
+            self._lock.release()
+
+    def release_host_ram(self, needed_bytes: int, reason: str = "") -> int:
+        """Stop this server when its weights are in system RAM and it is idle.
+
+        The host-RAM twin of :meth:`release`, and it keeps that method's two
+        important properties. It is *timed* rather than blocking, for the same
+        deadlock reason spelled out there -- an image pass holding nothing asks
+        this for room while an LLM load holds this and asks ``mc_memory`` for
+        room -- and it releases the whole of an allocation or none of it,
+        because a process has no partial surrender to offer.
+
+        What it does not do is restart anywhere. :meth:`release` has
+        ``_restart_in_system_ram`` as a gentler answer to a VRAM shortage
+        because system RAM is somewhere else to go; a *system RAM* shortage has
+        no such place, and moving the model onto a card the image plan is
+        already protecting would be solving this at the image side's expense
+        twice over. So the answer here is stop, and section 3.4's consolation
+        applies unchanged: the GGUF's pages stay in the OS cache, so the next
+        start re-reads at memory bandwidth rather than from disk.
+
+        A server whose weights are on the card is left alone and answers zero.
+        Stopping it would free nothing where the memory is wanted, which is the
+        same reasoning :meth:`release` applies to a server on the wrong GPU.
+        """
+        if needed_bytes <= 0:
+            return 0
+        if mc_broker.llm_busy():
+            # Checked again here and not only in the broker: the caller's read
+            # and this stop are not one atomic act, and the one thing this must
+            # never do is end a reply somebody is watching arrive.
+            return 0
+        if not self._lock.acquire(timeout=RELEASE_LOCK_TIMEOUT):
+            logger.warning("Model Chain: the LLM runtime was busy and could not release "
+                           "system RAM for %s", reason or "the image model")
+            return 0
+        try:
+            if not self._running:
+                return 0
+            held = self.host_ram_bytes()
+            if held <= 0:
+                # On the card, or unsizeable. Either way stopping it returns no
+                # system RAM, and an eviction that frees nothing is pure cost.
+                return 0
+            self._stop_locked(reason or "the image model needed the system RAM")
+            mc_broker.note(
+                mc_broker.FAMILY_LLM,
+                f"stopped an idle llama-server holding {held / _GB:.1f} GB of system RAM "
+                f"for {reason or 'the image model'}; its weights stay warm in the page "
+                f"cache, so the next start re-reads them from RAM rather than from disk")
+            return held
         finally:
             self._lock.release()
 
@@ -5754,6 +5832,57 @@ class RuntimeRegistry:
 
     def resident_bytes(self, *, card=mc_broker.ANY_CARD) -> int:
         return sum(_held_by(found, card) for found in self.all())
+
+    def release_host_ram(self, needed_bytes: int, reason: str = "") -> int:
+        """Stop idle servers until ``needed_bytes`` of system RAM is covered.
+
+        Registered with the broker as the LLM family's host-RAM reclaimer, and
+        ordered exactly as :meth:`release` orders its VRAM twin: largest holder
+        first, so the fewest servers are stopped for the memory asked for, and
+        stopping as soon as the request is covered rather than emptying the
+        machine because one pass was short.
+
+        The whole fan-out is skipped while any language model is generating.
+        That is section 3.3's word "idle" doing its work: the rule is that an
+        image generation outranks an LLM *with nothing to do*, and a reply
+        somebody is waiting on is not that.
+        """
+        if needed_bytes <= 0 or mc_broker.llm_busy():
+            return 0
+
+        def held(found) -> int:
+            asking = getattr(found, "host_ram_bytes", None)
+            if not callable(asking):
+                return 0
+            try:
+                return max(int(asking() or 0), 0)
+            except Exception:
+                return 0
+
+        candidates = sorted(((held(found), found) for found in self.running()),
+                            key=lambda pair: pair[0], reverse=True)
+        freed = 0
+        stopped = 0
+        for size, found in candidates:
+            if size <= 0 or freed >= needed_bytes:
+                break
+            releasing = getattr(found, "release_host_ram", None)
+            if not callable(releasing):
+                continue
+            try:
+                given = int(releasing(needed_bytes - freed, reason) or 0)
+            except Exception:
+                logger.debug("Model Chain: could not stop a runtime for system RAM",
+                             exc_info=True)
+                continue
+            if given > 0:
+                freed += given
+                stopped += 1
+        if stopped:
+            logger.info("Model Chain: stopped %d idle llama-server(s) — %.1f GB of system "
+                        "RAM given back to %s", stopped, freed / _GB,
+                        reason or "the image model")
+        return freed
 
     def host_ram_bytes(self) -> int:
         """System RAM the running servers materially need. See :func:`host_ram_demand`."""

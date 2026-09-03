@@ -419,7 +419,7 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     user copies from already has them in it.
     """
     from prompt_master.core.models import RANDOM_SEED, draw_seed
-    from prompt_master.krea import literals
+    from prompt_master.krea import extra_networks, literals
     from prompt_master.krea.variation import clamp
 
     busy = (gr.update(interactive=False), gr.update(interactive=True))
@@ -434,7 +434,11 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
                ui.notice("Describe the image you want first.", "warn"), *idle)
         return
 
-    parsed = literals.parse(prompt)
+    # Bracketed before the parse, so the panel protects a bare LoRA tag exactly
+    # as the generation hook does. A preview that handed the writer a tag the
+    # real run would have lifted out would be showing the user a prompt their
+    # own pipeline cannot produce.
+    parsed = literals.parse(extra_networks.protect(prompt))
     written_source = parsed.clean_text.strip()
     if not written_source:
         # Nothing transformable, and nothing to write from. The commands are
