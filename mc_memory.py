@@ -3647,6 +3647,31 @@ def make_host_ram_room(target_name: str, modules=None, *, stage: str = STAGE_1) 
     demand there is zero and nothing happens, which is what "not competing"
     has to mean.
 
+    **And the weights that are in system RAM are a stake, not a demand.** The
+    second version got this wrong in the other direction: it asked for free RAM
+    equal to the unresident weights plus the reserve, and stopped an idle server
+    when there was not that much. But by the time this hook runs, those weights
+    are already *committed in this process* -- Forge's offload copy after an
+    unload, this module's RAM cache before a Stage 2 switch, the loader's state
+    dict after a cold load. Reading them back onto the card allocates nothing
+    of any size. So "is there room for them" is a question about memory that is
+    already spent, and the answer it gives is always no on a full machine. From
+    a user's log, the first generation after a load, with 18.4 GB of weights in
+    RAM and 3.2 GB free::
+
+        stopped an idle llama-server holding 12.5 GB ...
+        Moving model(s) has taken 5.54 seconds      (1037 MB/s)
+        Moving model(s) has taken 11.62 seconds     (1107 MB/s)
+
+    Full RAM speed. The stop bought nothing and cost the next generation a
+    server start and a cold prompt cache, thirty seconds together. The only
+    thing that can go wrong with weights that are already in RAM is that the
+    machine is so far below its floor it pages them out, and that is the one
+    question asked: ``needed=0``, the reserve alone. Above the floor the server
+    stays. Below it -- the crash log's shape, free RAM at nothing with a
+    12.5 GB llama-server in it and weights already trimmed to the pagefile --
+    it goes, and what comes back is room for the pages to land in.
+
     **When it is asked matters as much as what it asks for.** This runs after
     every language-model phase of the generation and before the first weight
     moves -- the model-chain ``process`` hook for Stage 1, the switch for Stage
@@ -3682,19 +3707,33 @@ def make_host_ram_room(target_name: str, modules=None, *, stage: str = STAGE_1) 
         weights = _weights_bytes(target_name, modules, own)
         resident = _resident_bytes(own)
         wanted = max(weights - resident, 0)
-        if wanted <= 0 or mc_broker.host_ram_fits(wanted):
-            return 0
+        if wanted <= 0:
+            return 0  # on the card: nothing of the image side's is in system RAM
 
+        # needed=0, and it is the precise statement rather than a shortcut. By
+        # the time this runs the weights are already committed in this process
+        # (see the docstring), so the image side needs no *new* memory. What it
+        # needs is for the machine not to be below its floor while they are
+        # read back, and the reserve on its own is exactly that question.
         admission = mc_broker.admit_image_host_ram(
-            wanted, reason=f"the {stage} weights in system RAM")
+            0, reason=f"the {stage} weights ({wanted / _GB:.1f} GB) in system RAM")
         if not admission.moved_anything:
+            if admission.known and admission.fits:
+                logger.info(
+                    "Model Chain: %s has %.1f GB of weights in system RAM and %.1f GB free "
+                    "above the %.1f GB floor — the language model was left where it is",
+                    stage, wanted / _GB,
+                    max(admission.available - admission.reserve, 0) / _GB,
+                    admission.reserve / _GB)
             return 0
         gained = max(admission.available - admission.available_before, 0)
         logger.info(
-            "Model Chain: %s has %.1f GB of weights still in system RAM and had %.1f GB "
-            "free — %s, and %.1f GB is available now",
-            stage, wanted / _GB, admission.available_before / _GB,
-            "; ".join(admission.actions), admission.available / _GB)
+            "Model Chain: %s has %.1f GB of weights in system RAM and the machine was "
+            "%.1f GB below its %.1f GB floor — %s, and %.1f GB is available now",
+            stage, wanted / _GB,
+            max(admission.reserve - admission.available_before, 0) / _GB,
+            admission.reserve / _GB, "; ".join(admission.actions),
+            admission.available / _GB)
         return gained
     except Exception:
         logger.debug("Model Chain: could not reclaim system RAM for the image model",
