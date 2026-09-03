@@ -67,7 +67,7 @@ import json
 from dataclasses import dataclass, field
 from math import gcd
 
-from . import literals
+from . import extra_networks, literals
 
 VERSION = 1
 """The editable-state version this module reads and writes.
@@ -688,7 +688,13 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
         kind = OBJECT
 
     raw_prompt = str(entry.get("prompt") or "").strip()
-    parsed = literals.parse(raw_prompt, scope=literals.REGION, region_id=identifier)
+    # A LoRA tag in a region's own prompt is no more rewritable than one in the
+    # global scene, and the Composer is handed this text exactly as the Writer is
+    # handed that one. Bracketed before the parse so a region carries it out on
+    # the path a typed ``[[...]]`` already takes, with the same scope and the
+    # same restore -- see :mod:`~prompt_master.krea.extra_networks`.
+    parsed = literals.parse(extra_networks.protect(raw_prompt),
+                            scope=literals.REGION, region_id=identifier)
     prompt = parsed.clean_text.strip()
     for warning in parsed.warnings:
         notes.append(f"{label}: {warning}")

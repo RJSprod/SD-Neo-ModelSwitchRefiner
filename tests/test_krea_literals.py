@@ -38,7 +38,7 @@ import mc_infotext
 import mc_llm_paths
 import mc_llm_sessions as sessions
 import mc_lora
-from prompt_master.krea import director, literals, spatial
+from prompt_master.krea import director, extra_networks, literals, spatial
 from prompt_master.krea import library as library_module
 
 
@@ -1480,3 +1480,160 @@ class TestTheRowFitsItsColumn:
         assert selectors
         for selector in selectors:
             assert "mc-literal" in selector, selector
+
+
+# --------------------------------------------------------------------------- #
+# Commands nobody typed brackets for, and nobody typed a field for either
+# --------------------------------------------------------------------------- #
+
+
+class TestExtraNetworkTagsProtectThemselves:
+    """A bare ``<lora:...>`` is protected without the user knowing to ask.
+
+    The failure this exists for is silent and expensive, and it happened. From a
+    real log: Creative Mode was switched on for one generation, the writer was
+    handed a prompt with a LoRA tag in it, and the paragraph that came back did
+    not have one. Forge had baked that LoRA into the weights with
+    ``on_the_fly = False``, so the next pass unpatched them -- and on a 24 GB
+    card holding an 18.4 GB checkpoint there is nowhere to swap a 12.8 GB module
+    in place. Everything left VRAM and came back, and it cost 83 seconds.
+
+    ``literals`` cannot be the thing that notices, because it must not know what
+    a LoRA tag is. So :mod:`~prompt_master.krea.extra_networks` puts the brackets
+    on before the parser runs, and every test below is a way of asking whether
+    anything downstream can tell that from a bracket somebody typed.
+    """
+
+    def test_a_bare_tag_becomes_a_prefix_command(self):
+        source = "portrait of a woman <lora:krea2_nickiminaj_v1:0.6> in a cafe"
+        parsed = literals.parse(extra_networks.protect(source))
+
+        assert parsed.prefixes == ("<lora:krea2_nickiminaj_v1:0.6>",)
+        assert parsed.clean_text == "portrait of a woman in a cafe"
+
+    def test_a_prompt_with_no_tag_is_the_same_bytes(self):
+        """"Off is off" has to include "costs nothing", exactly as it does for
+        :func:`literals.present`."""
+        source = "portrait of a woman in a cafe, 2 + 2, <not a tag>"
+
+        assert extra_networks.protect(source) == source
+        assert extra_networks.present(source) is False
+        assert extra_networks.count(source) == 0
+
+    def test_a_tag_already_bracketed_is_not_wrapped_twice(self):
+        """Version 1 closes on the first ``]]`` and has no escape syntax, so a
+        second wrap would not nest -- it would corrupt the payload."""
+        source = "[[<lora:krea2_edit:1>]] a portrait"
+
+        assert extra_networks.protect(source) == source
+        assert extra_networks.count(source) == 0
+        assert literals.parse(extra_networks.protect(source)).prefixes == (
+            "<lora:krea2_edit:1>",)
+
+    def test_a_tag_inside_a_larger_command_is_left_alone(self):
+        """Acceptance test C's payload, reached by the automatic path. One
+        command in, one command out, and the tag is still part of it."""
+        source = "[[the woman in image 1 is smiling, <lora:test:1>, __face__]]"
+        parsed = literals.parse(extra_networks.protect(source))
+
+        assert len(parsed.commands) == 1
+        assert parsed.commands[0].payload == (
+            "the woman in image 1 is smiling, <lora:test:1>, __face__")
+
+    def test_several_tags_keep_the_order_they_were_written_in(self):
+        source = "<lora:a:1> a street <lora:b:0.5> at night <lora:c:0.25>"
+        parsed = literals.parse(extra_networks.protect(source))
+
+        assert parsed.prefixes == ("<lora:a:1>", "<lora:b:0.5>", "<lora:c:0.25>")
+        assert parsed.clean_text == "a street at night"
+        assert extra_networks.count(source) == 3
+
+    def test_every_kind_forge_registers_is_protected(self):
+        """They break identically because Forge strips them identically, so
+        treating one of the three differently would only be a surprise."""
+        for kind in extra_networks.KINDS:
+            source = f"a street <{kind}:thing:1>"
+
+            assert literals.parse(extra_networks.protect(source)).prefixes == (
+                f"<{kind}:thing:1>",), kind
+
+    def test_the_case_of_the_prefix_does_not_matter(self):
+        """``<LoRA:...>`` is the same request to Forge and would be a baffling
+        way to lose one here."""
+        parsed = literals.parse(extra_networks.protect("a street <LoRA:Thing:1>"))
+
+        assert parsed.prefixes == ("<LoRA:Thing:1>",)
+
+    def test_the_payload_is_still_opaque(self):
+        """Two weights and an extension's own suffix. This module finds where a
+        tag starts and stops and puts brackets round it; what is inside is not
+        its business any more than it is ``literals``'."""
+        source = "a street <lora:name:0.6:0.8:lbw=IN01>"
+        parsed = literals.parse(extra_networks.protect(source))
+
+        assert parsed.prefixes == ("<lora:name:0.6:0.8:lbw=IN01>",)
+
+    def test_an_unterminated_command_protects_what_follows_it(self):
+        """The parser stops at an unterminated ``[[`` and hands the rest back
+        exactly as typed with a warning. Wrapping a tag inside that remainder
+        would be editing text it has already promised not to touch."""
+        source = "a street [[<lora:x:1> and more"
+
+        assert extra_networks.protect(source) == source
+        assert extra_networks.count(source) == 0
+
+
+class TestABareTagReachesTheGeneration:
+    """The same claim as :class:`TestTheFieldsReachTheGeneration`, driven through
+    ``before_process`` -- because the merge being right about text is not the
+    same as the hook performing it on every path out."""
+
+    def test_the_writer_is_never_shown_a_bare_tag(self, script, client, store, host):
+        """The acceptance test for the bug this feature exists for.
+
+        ``client.everything`` is every byte every pass was sent, not the last
+        turn alone: a tag that leaked into the system prompt would be as lost as
+        one that leaked into the user turn.
+        """
+        generate(script, "portrait of a woman <lora:krea2_nickiminaj_v1:0.6> in a cafe")
+
+        assert "krea2_nickiminaj_v1" not in client.everything
+        assert "lora" not in client.everything.casefold()
+
+    def test_the_tag_wraps_what_the_writer_wrote(self, script, client, store, host):
+        p = generate(script, "portrait of a woman <lora:realfilter:1> in a cafe")
+
+        assert p.prompt.startswith("<lora:realfilter:1> ")
+        assert p.prompt.count("realfilter") == 1
+
+    def test_a_bare_tag_reaches_stage_one_with_neither_feature_on(self, script, store,
+                                                                  host):
+        """Protection is about delivery, not about anything having been
+        protected from: no language model runs on this path at all."""
+        p = generate(script, "portrait of a woman <lora:realfilter:1>", enabled=False)
+
+        assert p.prompt == "<lora:realfilter:1> portrait of a woman"
+
+    def test_a_bare_tag_and_a_typed_one_do_not_duplicate(self, script, store, host):
+        """Both arrive once, and the typed one keeps the outward position its
+        syntax asks for."""
+        p = generate(script, "[[<lora:typed:1>]] a street <lora:bare:1>",
+                     enabled=False)
+
+        assert p.prompt == "<lora:typed:1> <lora:bare:1> a street"
+
+    def test_a_bare_tag_survives_a_field_on_the_same_prompt(self, script, store, host):
+        """Typed syntax outranks a field outwards, and an automatic bracket is
+        typed syntax by the time the merge sees it."""
+        p = generate(script, "a street <lora:bare:1>", enabled=False,
+                     literal_positive="<lora:field:1>", literal_negative="grain")
+
+        assert p.prompt == "<lora:bare:1> <lora:field:1> a street grain"
+
+    def test_stage_two_does_not_inherit_the_tag(self, script, client, store, host):
+        """The clean text and not the restored one, for the reason
+        ``_literals_only`` gives: a Stage 2 inheriting a Stage 1 LoRA is applying
+        an edit to a model that has never seen what it edits against."""
+        p = generate(script, "a quiet street <lora:krea2_edit:1>", enabled=False)
+
+        assert "krea2_edit" not in mc_lora.stage1_inheritable(p)[0]
