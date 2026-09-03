@@ -135,6 +135,38 @@ seconds added to every press of Generate to undo an eviction that had bought
 the writer a few seconds. `_victim_order` now answers `()` for the LLM in both
 residency modes, and `negotiate` shrinks instead of asking.
 
+The rule holds in **system RAM** as well, and for the same reason rather than by
+analogy. The card was only ever where it was first noticed; what the rule is
+actually about is which of two workloads somebody is waiting on. The image side
+keeps every weight that is not currently on the card in host RAM — Forge's
+`unload_all_models()` moves them to the offload device and does not free them —
+so a RAM-resident llama-server is charged to every move the image model makes,
+not just to the one generation that wanted a prompt.
+
+What made this worth implementing rather than leaving as a preference is that
+the cost is **silent**. A VRAM shortage announces itself: the pass does not fit,
+`free_memory` runs, and what is left over is a number. A host-RAM shortage
+produces no error at all. The operating system serves whichever pages it still
+has, reads the rest off the pagefile, and the only evidence is the clock. From
+one user's console, the same 12866.82 MB module:
+
+```
+Moving model(s) has taken 11.35 seconds     RAM free            1134 MB/s
+Moving model(s) has taken 83.30 seconds     12.5 GB llama-server in it   154 MB/s
+```
+
+So `mc_memory.make_host_ram_room` asks before the weights move rather than after
+a shortfall, on the weights alone — activations are a VRAM cost and have no
+business inflating a host-RAM demand. It runs on the same `reclaim_foreign` flag
+`make_vram_room` already carries, which means a warm-up does not ask for exactly
+the reason it does not ask for VRAM: nobody has pressed anything yet, and the
+generation that does arrive asks for itself.
+
+"Idle" means the same thing in both domains — no `FAMILY_LLM` workload holding
+the lock — and is checked twice, at the fan-out and again inside each runtime,
+because a read and a stop are not one atomic act and the one thing this must
+never do is end a reply somebody is watching arrive.
+
 ### 3.4 The warm tier for the LLM is the OS page cache
 
 §7.2 asks that the intent of a warm layer survive where the mechanism differs,

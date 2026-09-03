@@ -113,6 +113,20 @@ class Server:
         self.up, self.stopped = False, True
         return freed
 
+    def release_host_ram(self, needed_bytes, reason=""):
+        """Stop, when this server's weights are in system RAM to begin with.
+
+        A server on the card answers zero for the same reason the real one does:
+        stopping it returns nothing where the memory is wanted, and an eviction
+        that frees nothing is pure cost.
+        """
+        self.calls.append((int(needed_bytes), reason, "host-ram"))
+        if not self.up or self.host_ram <= 0:
+            return 0
+        freed, self.host_ram = self.host_ram, 0
+        self.up, self.stopped = False, True
+        return freed
+
     def describe(self):
         return f"llama-server on {'the processor' if self.cpu else f'GPU {self.card}'}"
 
@@ -2241,3 +2255,269 @@ class TestWhoFilledTheCard:
         assert runtime._unsatisfied(
             settings, ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True),
             mc_gguf.describe(settings.model)) == []
+
+
+# --------------------------------------------------------------------------- #
+# 19.7 Host RAM, the other way round
+# --------------------------------------------------------------------------- #
+
+
+class TestAnImageGenerationOutranksAnIdleLlmInRamToo:
+    """LLM Studio intent section 3.3, moved into the other memory domain.
+
+    The rule was written about the card -- *an image generation always outranks
+    an idle LLM* -- but the reason behind it was never about cards. The image
+    model is the workload somebody is waiting on; the language model wrote a
+    prompt and then had nothing to do. That reads the same way about system RAM,
+    where the image side keeps every weight that is not currently on the card.
+
+    What made this worth implementing rather than arguing about: host-RAM
+    pressure is *silent*. A VRAM shortage announces itself and can be measured
+    afterwards; a RAM shortage produces no error at all, only the same weights
+    moving at a quarter of their usual rate, which is how it went unnoticed long
+    enough to be diagnosed from a stopwatch.
+    """
+
+    @pytest.fixture
+    def servers(self, scoped, monkeypatch):
+        """An LLM family reclaimer holding host RAM, and a record of the asking."""
+        state = {"held": 12 * _GB, "released": [], "busy": False}
+
+        class Reclaimer:
+            def host_ram_bytes(self):
+                return state["held"]
+
+            def release_host_ram(self, needed, reason=""):
+                state["released"].append((needed, reason))
+                freed, state["held"] = state["held"], 0
+                return freed
+
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: state["busy"])
+        mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, Reclaimer())
+        return state
+
+    def test_a_demand_that_fits_stops_nothing(self, servers, monkeypatch):
+        """Invariant I-5 in this direction as well. Two workloads sharing a
+        memory domain is not a conflict, and a warm llama-server stopped because
+        an image model also uses RAM would be evict-on-switch with the arrow
+        turned round -- the exact thing 3.3 warns about."""
+        ram(monkeypatch, available_gb=40)
+
+        admission = mc_broker.admit_image_host_ram(20 * _GB, reason="Stage 1")
+
+        assert admission.fits
+        assert servers["released"] == []
+        assert servers["held"] == 12 * _GB
+
+    def test_an_idle_server_is_stopped_when_the_image_model_is_short(
+            self, servers, monkeypatch):
+        readings = {"available": 8 * _GB}
+        monkeypatch.setattr(mc_broker, "free_ram_bytes", lambda: readings["available"])
+        monkeypatch.setattr(mc_broker, "ram_reserve_bytes", lambda: 2 * _GB)
+        asked = mc_broker.release_llm_host_ram
+
+        def release(needed, reason=""):
+            freed = asked(needed, reason)
+            readings["available"] += freed
+            return freed
+
+        monkeypatch.setattr(mc_broker, "release_llm_host_ram", release)
+
+        admission = mc_broker.admit_image_host_ram(18 * _GB, reason="Stage 1")
+
+        assert servers["released"], "the language model was never asked"
+        assert admission.fits
+        assert admission.freed == 12 * _GB
+
+    def test_a_generating_server_is_never_stopped(self, servers, monkeypatch):
+        """The word "idle" in 3.3 doing its work. A reply somebody is watching
+        arrive is not spare memory, however much the image side wants it."""
+        ram(monkeypatch, available_gb=8)
+        servers["busy"] = True
+
+        admission = mc_broker.admit_image_host_ram(18 * _GB, reason="Stage 1")
+
+        assert servers["released"] == []
+        assert not admission.fits
+        assert mc_broker.reclaimable_llm_host_ram_bytes() == 0
+
+    def test_a_busy_family_reports_nothing_reclaimable_rather_than_nothing_held(
+            self, servers, monkeypatch):
+        """Two different questions, and conflating them would make the panel
+        say a generating server is holding no RAM."""
+        ram(monkeypatch, available_gb=8)
+
+        assert mc_broker.llm_host_ram_bytes() == 12 * _GB
+        assert mc_broker.reclaimable_llm_host_ram_bytes() == 12 * _GB
+        servers["busy"] = True
+        assert mc_broker.llm_host_ram_bytes() == 12 * _GB
+        assert mc_broker.reclaimable_llm_host_ram_bytes() == 0
+
+    def test_the_re_reading_is_what_decides_here_too(self, servers, monkeypatch):
+        """Invariant I-15, unchanged by the direction of travel: a reclaimer
+        reports what it stopped, and the operating system reports what that
+        actually returned."""
+        ram(monkeypatch, available_gb=8)
+
+        admission = mc_broker.admit_image_host_ram(18 * _GB, reason="Stage 1")
+
+        assert admission.freed == 12 * _GB
+        assert not admission.fits, "available RAM never moved, so the answer is no"
+
+    def test_unreadable_memory_stops_nothing(self, servers, monkeypatch):
+        """Section 16.3's rule, and the asymmetry it turns on: an unanswerable
+        question may proceed, but it may never *reclaim*."""
+        monkeypatch.setattr(mc_broker, "free_ram_bytes", lambda: 0)
+
+        admission = mc_broker.admit_image_host_ram(18 * _GB, reason="Stage 1")
+
+        assert not admission.known
+        assert servers["released"] == []
+
+    def test_a_family_with_no_reclaimer_is_not_an_error(self, scoped, monkeypatch):
+        """An installation that has never opened LLM Studio registers no LLM
+        controller at all, and section 18 requires ordinary txt2img to be
+        unaffected by a feature that was never used."""
+        ram(monkeypatch, available_gb=8)
+
+        assert mc_broker.release_llm_host_ram(18 * _GB, "Stage 1") == 0
+
+    def test_the_reserve_is_part_of_what_has_to_fit(self, servers, monkeypatch):
+        """Both sides of the boundary, because the reserve is the whole
+        difference between them: 6 GB fits in 8 with 2 held back and 7 does
+        not, and a demand that merely fits must stop nothing."""
+        ram(monkeypatch, available_gb=8, reserve_gb=2.0)
+
+        assert mc_broker.admit_image_host_ram(6 * _GB, reason="Stage 1").fits
+        assert servers["released"] == []
+
+        mc_broker.admit_image_host_ram(7 * _GB, reason="Stage 1")
+
+        assert servers["released"], "7 GB + a 2 GB reserve does not fit in 8 GB free"
+
+
+class TestTheLogCanExplainASlowMove:
+    """The measurements that were missing when this was diagnosed by stopwatch.
+
+    Everything about host RAM was recorded on the way *in* -- the admission
+    arithmetic, the shortfall, the reserve -- and nothing on the way out. So a
+    log could say "12.5 GB wanted, 14.5 GB available", and then show an image
+    module moving at a quarter of its usual rate with no reading anywhere near
+    it to say why. These are the two numbers that close that gap.
+    """
+
+    def test_the_rate_is_reported_when_it_can_be_known(self):
+        import mc_memory
+
+        result = mc_memory.PreloadResult("ready", moved_bytes=12 * _GB,
+                                         moved_seconds=12.0)
+
+        assert round(result.megabytes_per_second) == 1024
+
+    def test_a_move_nobody_timed_claims_no_rate(self):
+        import mc_memory
+
+        assert mc_memory.PreloadResult("ready", moved_bytes=12 * _GB
+                                       ).megabytes_per_second == 0.0
+        assert mc_memory.PreloadResult("ready", moved_seconds=4.0
+                                       ).megabytes_per_second == 0.0
+
+    def test_the_rate_is_the_move_and_not_the_whole_warm_up(self):
+        """A preload that spent thirty seconds reinstating a checkpoint and four
+        moving weights is not a 400 MB/s move, and a rate that said so would be
+        useless for the one comparison it exists to support."""
+        import mc_memory
+
+        result = mc_memory.PreloadResult("ready", moved_bytes=4 * _GB,
+                                         seconds=34.0, moved_seconds=4.0)
+
+        assert round(result.megabytes_per_second) == 1024
+
+    def test_the_host_ram_line_names_who_of_ours_is_in_it(self, scoped, monkeypatch):
+        ram(monkeypatch, available_gb=6, reserve_gb=2.0)
+        monkeypatch.setattr(mc_broker, "llm_host_ram_bytes", lambda: 12 * _GB)
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: False)
+
+        said = mc_broker.describe_host_ram("after the load")
+
+        assert "after the load" in said
+        assert "6.0 GB free" in said
+        assert "12.0 GB in our language models (idle)" in said
+
+    def test_it_says_when_a_language_model_is_generating(self, scoped, monkeypatch):
+        """The difference between "that RAM is reclaimable" and "that RAM is in
+        use", which is the whole of whether the next line should worry."""
+        ram(monkeypatch, available_gb=6)
+        monkeypatch.setattr(mc_broker, "llm_host_ram_bytes", lambda: 12 * _GB)
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: True)
+
+        assert "(generating)" in mc_broker.describe_host_ram()
+
+    def test_unreadable_memory_says_so_rather_than_printing_a_zero(
+            self, scoped, monkeypatch):
+        monkeypatch.setattr(mc_broker, "free_ram_bytes", lambda: 0)
+
+        assert "could not be read" in mc_broker.describe_host_ram()
+
+
+class TestTheRegistryStopsTheFewestServersItCan:
+    """The fan-out, ordered the way the VRAM half is ordered and for the same
+    reason: largest holder first, so the fewest processes are ended for the
+    memory asked for, and stopping the moment the request is covered rather than
+    emptying the machine because one pass was short."""
+
+    def test_the_largest_holder_answers_first(self, scoped, registry, monkeypatch):
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: False)
+        small = Server(cpu=True, host_ram=3 * _GB)
+        large = Server(cpu=True, host_ram=12 * _GB)
+        hold(registry, small, "small")
+        hold(registry, large, "large")
+
+        freed = registry.release_host_ram(10 * _GB, "Stage 1")
+
+        assert freed == 12 * _GB
+        assert large.stopped
+        assert not small.stopped, "one server covered the request; the other was spared"
+
+    def test_it_keeps_going_until_the_request_is_covered(self, scoped, registry,
+                                                         monkeypatch):
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: False)
+        first = Server(cpu=True, host_ram=6 * _GB)
+        second = Server(cpu=True, host_ram=5 * _GB)
+        hold(registry, first, "first")
+        hold(registry, second, "second")
+
+        assert registry.release_host_ram(10 * _GB, "Stage 1") == 11 * _GB
+        assert first.stopped and second.stopped
+
+    def test_nothing_is_stopped_while_anything_is_generating(self, scoped, registry,
+                                                             monkeypatch):
+        """Checked at the fan-out and again inside each runtime, because a read
+        and a stop are not one atomic act and the one thing this must never do
+        is end a reply somebody is watching arrive."""
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: True)
+        server = Server(cpu=True, host_ram=12 * _GB)
+        hold(registry, server, "one")
+
+        assert registry.release_host_ram(10 * _GB, "Stage 1") == 0
+        assert not server.stopped
+
+    def test_a_server_holding_no_host_ram_is_left_alone(self, scoped, registry,
+                                                        monkeypatch):
+        """Its weights are on the card. Stopping it frees nothing where the
+        memory is wanted, which is the same reasoning the VRAM half applies to a
+        server on the wrong GPU."""
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: False)
+        server = Server(card=IMAGE_CARD, holds=12 * _GB, host_ram=0)
+        hold(registry, server, "on-the-card")
+
+        assert registry.release_host_ram(10 * _GB, "Stage 1") == 0
+        assert not server.stopped
+
+    def test_a_request_for_nothing_asks_nobody(self, scoped, registry, monkeypatch):
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: False)
+        server = Server(cpu=True, host_ram=12 * _GB)
+        hold(registry, server, "one")
+
+        assert registry.release_host_ram(0, "Stage 1") == 0
+        assert server.calls == []
