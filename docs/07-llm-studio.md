@@ -159,13 +159,25 @@ So `mc_memory.make_host_ram_room` asks before the weights move rather than after
 a shortfall. Two things about how it asks were got wrong the first time and are
 worth stating as rules:
 
-- **The demand is the weights that are not on the card.** Not the model's size —
-  the model's size minus what is already resident in VRAM, which after a good
-  preload is zero. A weight in VRAM is not going to be read from system RAM and
-  is not a demand on it. The first version asked for the whole model and ended
-  an idle llama-server on every press of Generate while the next log line said
-  all 18.4 GB was on the card. Activations do not count either; they are a VRAM
-  cost.
+- **The weights not on the card decide whether the image side has a stake.** Not
+  the model's size — the model's size minus what is already resident in VRAM,
+  which after a good preload is zero. A weight in VRAM is not going to be read
+  from system RAM and is not a demand on it. The first version asked for the
+  whole model and ended an idle llama-server on every press of Generate while the
+  next log line said all 18.4 GB was on the card. Activations do not count
+  either; they are a VRAM cost.
+- **The floor decides whether to act.** By the time this hook runs, the weights
+  that are not on the card are already committed in this process — Forge's
+  offload copy after an unload, the RAM cache before a Stage 2 switch, the
+  loader's state dict after a cold load — and reading them back onto the card
+  allocates nothing of any size. So the question is not "is there room for
+  them" (memory already spent; always no on a full machine) but "is the machine
+  below its floor" (paging risk). The second version stacked the weights on top
+  of the reserve and stopped a server with 3.2 GB free, for a read-back that
+  then ran at 1037 MB/s — full speed, thirty seconds of restart bought for
+  nothing. Now the demand is zero and the reserve alone is asked: above the
+  floor the server stays; below it — free RAM at nothing with a 12.5 GB
+  llama-server in it, the crash log's shape — it goes.
 - **It runs after every language-model phase and before the first weight moves.**
   The model-chain `process` hook for Stage 1 — after every script's
   `before_process`, where the Creative Writer runs, and before conditioning loads

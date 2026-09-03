@@ -460,81 +460,104 @@ class TestAReserveMissIsRecordedNotJustSurvived:
 
 
 class TestHostRamIsAskedForTheWeightsNotOnTheCard:
-    """The demand is the model minus what VRAM already holds, never the model.
+    """Two numbers decide this, and each was got wrong once.
 
-    From a user's log, four generations on an unchanged checkpoint with a
-    CPU-placed llama-server idle in system RAM::
+    The weights *not on the card* decide whether the image side has any stake
+    at all. A weight in VRAM will not be read from system RAM; when they are all
+    there the answer is nothing, whatever the machine looks like. The first
+    version asked for the whole model and stopped an idle llama-server on every
+    press of Generate while the next log line said all 18.4 GB was resident.
 
-        Stage 1 wanted 18.4 GB of system RAM and had 17.7 GB — stopped idle
-            language models holding 12.5 GB
-        Stage 1 needs 19.9 GB, has 4.2 GB free and 18.4 GB already resident
-
-    Eighteen gigabytes asked for on behalf of weights the next line says were
-    entirely on the card, and a server ended for it on every press of Generate.
-    A weight that is in VRAM will not be read from system RAM and is not a
-    demand on it. These tests are that subtraction, and they are the difference
-    between "the image model outranks an idle LLM" and "the image model kills
-    the LLM every time".
+    The *floor* decides whether to act. By the time this hook runs the weights
+    that are not on the card are already committed in this process -- Forge's
+    offload copy, the RAM cache, the loader's state dict -- and reading them
+    back allocates nothing of any size. The second version stacked their size on
+    top of the reserve and stopped a server with 3.2 GB free, for a read-back
+    that then ran at 1037 MB/s: full speed, thirty seconds of restart bought for
+    nothing. So the demand is zero and the reserve alone is the question.
     """
 
     @pytest.fixture
-    def sized(self, monkeypatch):
-        """A 18.4 GB checkpoint whose residency the test sets, and a broker
-        that records what it was asked for."""
-        state = {"resident": 0, "asked": []}
+    def machine(self, monkeypatch):
+        """An 18.4 GB checkpoint, a 2 GB floor, and an idle 12 GB llama-server."""
+        state = {"resident": 0, "free": 8 * _GB, "held": 12 * _GB, "busy": False,
+                 "released": []}
         monkeypatch.setattr(mc_memory, "_loaded_target_patchers", lambda name: ["unet"])
         monkeypatch.setattr(mc_memory, "_weights_bytes",
                             lambda name, modules, patchers: int(18.4 * _GB))
         monkeypatch.setattr(mc_memory, "_resident_bytes",
                             lambda patchers: state["resident"])
-        monkeypatch.setattr(mc_broker, "host_ram_fits", lambda wanted: False)
+        monkeypatch.setattr(mc_broker, "free_ram_bytes", lambda: state["free"])
+        monkeypatch.setattr(mc_broker, "ram_reserve_bytes", lambda: 2 * _GB)
+        monkeypatch.setattr(mc_broker, "llm_busy", lambda: state["busy"])
+        monkeypatch.setattr(mc_broker, "llm_host_ram_bytes", lambda: state["held"])
 
-        def admit(wanted, *, reason="", reserve=None):
-            state["asked"].append(wanted)
-            return mc_broker.Admission(wanted, 2 * _GB, 4 * _GB, 4 * _GB)
+        def release(needed, reason=""):
+            state["released"].append((needed, reason))
+            freed, state["held"] = state["held"], 0
+            state["free"] += freed
+            return freed
 
-        monkeypatch.setattr(mc_broker, "admit_image_host_ram", admit)
+        monkeypatch.setattr(mc_broker, "release_llm_host_ram", release)
         return state
 
-    def test_a_model_entirely_on_the_card_asks_for_nothing(self, sized):
-        """The user's case. Nothing is competing, so nothing may be stopped,
-        however short of system RAM the machine happens to be."""
-        sized["resident"] = int(18.4 * _GB)
+    def test_a_model_entirely_on_the_card_has_no_stake(self, machine):
+        """Even below the floor. Nothing of the image side's is in system RAM,
+        so there is no image-side reason to stop anything."""
+        machine["resident"] = int(18.4 * _GB)
+        machine["free"] = int(0.5 * _GB)
 
         assert mc_memory.make_host_ram_room("Model A.safetensors") == 0
-        assert sized["asked"] == [], "the broker was asked on behalf of weights in VRAM"
+        assert machine["released"] == []
 
-    def test_a_partly_warm_model_asks_for_exactly_the_part_that_is_not(self, sized):
-        """The crash log's case: 15.0 of 18.4 GB warmed, the rest to move on
-        demand. The 3.4 GB that will be read from system RAM is the demand;
-        the 15.0 GB that will not is not."""
-        sized["resident"] = int(15.0 * _GB)
+    def test_weights_in_ram_above_the_floor_leave_the_server_alone(self, machine, caplog):
+        """The user's case: the whole model in system RAM, 3.2 GB free, an idle
+        server. Reading the weights back needs no new memory, so the server
+        stays and the log says so."""
+        machine["resident"] = 0
+        machine["free"] = int(3.2 * _GB)
 
-        mc_memory.make_host_ram_room("Model A.safetensors")
+        with caplog.at_level("INFO"):
+            assert mc_memory.make_host_ram_room("Model A.safetensors") == 0
 
-        assert len(sized["asked"]) == 1
-        assert abs(sized["asked"][0] - int(3.4 * _GB)) < 1024
+        assert machine["released"] == []
+        assert any("left where it is" in line for line in caplog.messages)
 
-    def test_a_cold_model_asks_for_all_of_it(self, sized):
-        """A checkpoint about to come off the disk goes through system RAM in
-        its entirety, and that is exactly what the arithmetic says."""
-        sized["resident"] = 0
-
-        mc_memory.make_host_ram_room("Model A.safetensors")
-
-        assert sized["asked"] == [int(18.4 * _GB)]
-
-    def test_a_demand_that_fits_never_reaches_the_broker(self, sized, monkeypatch):
-        """Invariant I-5 at this layer too: the cheap question first, and the
-        reclaimer is not consulted about memory that is already there."""
-        sized["resident"] = int(15.0 * _GB)
-        monkeypatch.setattr(mc_broker, "host_ram_fits", lambda wanted: True)
+    def test_exactly_at_the_floor_is_not_below_it(self, machine):
+        machine["resident"] = int(15.0 * _GB)
+        machine["free"] = 2 * _GB
 
         assert mc_memory.make_host_ram_room("Model A.safetensors") == 0
-        assert sized["asked"] == []
+        assert machine["released"] == []
 
-    def test_a_broker_that_raises_costs_ram_not_the_generation(self, sized, monkeypatch):
-        sized["resident"] = 0
+    def test_below_the_floor_the_idle_server_goes(self, machine, caplog):
+        """The crash log's shape: 3.4 GB of weights left in RAM, free RAM at
+        almost nothing, a 12 GB idle server. What is asked for is the way back
+        to the floor, and what comes back is the whole server, because a
+        process has no partial surrender to offer."""
+        machine["resident"] = int(15.0 * _GB)
+        machine["free"] = int(0.5 * _GB)
+
+        with caplog.at_level("INFO"):
+            gained = mc_memory.make_host_ram_room("Model A.safetensors")
+
+        assert len(machine["released"]) == 1
+        assert abs(machine["released"][0][0] - int(1.5 * _GB)) < 1024, \
+            "the deficit is the distance to the floor, not the size of the weights"
+        assert gained == 12 * _GB
+        assert any("below its 2.0 GB floor" in line for line in caplog.messages)
+
+    def test_a_generating_server_is_never_stopped_for_this(self, machine):
+        machine["resident"] = 0
+        machine["free"] = int(0.5 * _GB)
+        machine["busy"] = True
+
+        assert mc_memory.make_host_ram_room("Model A.safetensors") == 0
+        assert machine["released"] == []
+
+    def test_a_broker_that_raises_costs_ram_not_the_generation(self, machine, monkeypatch):
+        machine["resident"] = 0
+        machine["free"] = int(0.5 * _GB)
 
         def broken(wanted, *, reason="", reserve=None):
             raise RuntimeError("the runtime is wedged")
