@@ -2652,6 +2652,22 @@ class ScriptModelChain(scripts.Script):
         reference_max_dim=mc_references.DEFAULT_MAX_DIM,
         **kwargs,
     ):
+        # Before the armed check, because it is not about the chain. Every
+        # language-model phase of this generation has run by now -- they live
+        # in before_process, and the host runs every script's before_process
+        # before any script's process -- and no weight has moved yet: the text
+        # encoder is loaded for conditioning after this hook returns. That is
+        # the one moment a reclaim of system RAM from an idle llama-server can
+        # neither end a server the generation is about to use nor come too late
+        # to matter. Silent and free when the model is on the card, which is
+        # every generation that is going well.
+        try:
+            mc_memory.make_host_ram_room(shared.opts.sd_model_checkpoint,
+                                         mc_memory.current_modules(), stage="Stage 1")
+        except Exception:
+            errors.report("Model Chain: failed to reclaim system RAM for Stage 1",
+                          exc_info=True)
+
         if not self._armed:
             return
 
@@ -3082,6 +3098,11 @@ class ScriptModelChain(scripts.Script):
             arch.label,
         )
         mc_progress.enter(mc_progress.PHASE_STAGE2_PREPARE)
+        # Stage 2's weights come out of the RAM cache, so this is a move from
+        # system RAM by construction, and every language-model phase is long
+        # finished. Asked here, outside any lock, for the reason the function
+        # gives.
+        mc_memory.make_host_ram_room(target, modules, stage="Stage 2")
         mc_memory.make_vram_room(target, modules, stage_2_width, stage_2_height)
         mc_memory.begin_pass_observation()
 

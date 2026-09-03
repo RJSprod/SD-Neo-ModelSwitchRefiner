@@ -82,6 +82,18 @@ Long enough to outlast anything but a model load, short enough that a wedged
 one delays a generation rather than joining it. See the note in ``release``.
 """
 
+HOST_RAM_READ_TIMEOUT = 1.0
+"""Seconds :meth:`Runtime.host_ram_bytes` waits for the runtime lock before
+answering zero.
+
+Much shorter than :data:`RELEASE_LOCK_TIMEOUT`, because this is a *reading* and
+not a reclaim. A release that gives up costs an eviction that did not happen; a
+reading that gives up costs a log line one clause and a reclaim decision that
+errs towards stopping nothing. Neither is worth an image generation standing
+still for the length of a model load, and the reason it cannot simply block is
+in the method itself.
+"""
+
 MINIMUM_CONTEXT = 2048
 """The floor placement negotiation will shrink context to.
 
@@ -4956,11 +4968,28 @@ class Runtime:
         return int(mine) == int(card)
 
     def host_ram_bytes(self) -> int:
-        """Host RAM this server materially needs, or 0. See :func:`host_ram_demand`."""
-        with self._lock:
+        """Host RAM this server materially needs, or 0. See :func:`host_ram_demand`.
+
+        A *timed* read, and the reason is the cycle :meth:`release` describes.
+        The image side asks this from inside ``mc_memory``'s model lock -- a
+        Stage 2 switch stashing the outgoing model notes what the LLM holds, a
+        preload records system RAM beside its result -- while a server start
+        holds this lock and may ask ``mc_memory`` for VRAM, which takes that
+        same model lock. Two blocking acquires in opposite orders is a hang
+        that survives until the process is killed; a reading that gives up is a
+        number that is briefly zero. Zero is the safe direction for every
+        caller: the image side reclaims nothing on it, and a note omits a clause.
+        """
+        if not self._lock.acquire(timeout=HOST_RAM_READ_TIMEOUT):
+            logger.debug("Model Chain: the runtime was busy, so its host-RAM demand reads "
+                         "as zero for now")
+            return 0
+        try:
             if not self._running:
                 return 0
             return host_ram_demand(self.configuration(), self._placement)
+        finally:
+            self._lock.release()
 
     def release(self, needed_bytes: int, reason: str = "", *,
                 card=mc_broker.ANY_CARD) -> int:
