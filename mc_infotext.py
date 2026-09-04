@@ -204,6 +204,27 @@ what lets its paste switch Spatial Layout off without a Creative key being
 present to switch anything.
 """
 
+NEUTRALIZE_MODE = "Krea Neutralize Prompt"
+NEUTRALIZE_SOURCE = "Krea Neutralize Source"
+"""What a generation records when the Neutralizer actually ran.
+
+Written only when the pass completed and its answer was used, and written then
+whether or not the answer differed from the source: "ran" is a fact about the
+stage, not about the diff. A switched-on toggle whose pass failed records
+nothing, because the picture was made from the prompt as typed.
+
+The source is the prompt exactly as typed, brackets and all, for the same
+reason :data:`CREATIVE_SOURCE` is: the ordinary paste restores the image's own
+``Prompt:`` line -- neutralized, then expanded, then composed, whatever ran --
+and an explicit "Restore Creative setup" needs the text somebody wrote in
+order to continue from it. A Creative image records that text twice, under
+this key and the Creative one, and the repetition is a short line bought for
+a reader who never has to know which stage a source belongs to.
+"""
+
+NEUTRALIZE_KEYS = (NEUTRALIZE_MODE, NEUTRALIZE_SOURCE)
+"""Every key a neutralized generation may write, for forwarding and for tests."""
+
 LITERAL_VERSION = "Krea Literal Syntax Version"
 LITERAL_COUNT = "Krea Literal Command Count"
 LITERAL_POSITIVE = "Model Chain Literal Positive"
@@ -227,7 +248,8 @@ insert them twice.
 
 LITERAL_KEYS = (LITERAL_VERSION, LITERAL_COUNT, LITERAL_POSITIVE, LITERAL_NEGATIVE)
 
-RESTORED_BY_PASTE = (CREATIVE_MODE, SPATIAL_MODE, LITERAL_VERSION, LITERAL_COUNT,
+RESTORED_BY_PASTE = (NEUTRALIZE_MODE, CREATIVE_MODE, SPATIAL_MODE, LITERAL_VERSION,
+                     LITERAL_COUNT,
                      LITERAL_POSITIVE, LITERAL_NEGATIVE)
 """The keys that mark an image as one this extension transformed the prompt of.
 
@@ -694,6 +716,8 @@ def creative_setup(params: dict):
         spatial_layout=str(params.get(SPATIAL_LAYOUT) or ""),
         spatial_compose_mode=str(params.get(SPATIAL_COMPOSE_MODE) or ""),
         spatial_version=_number(params.get(SPATIAL_VERSION)),
+        neutralize=bool(_flag(params.get(NEUTRALIZE_MODE))),
+        neutralize_source=str(params.get(NEUTRALIZE_SOURCE) or ""),
     )
 
 
@@ -815,6 +839,23 @@ def build_creative_paste_fields(components: dict, notice=None, view=None,
                 "Continue from a pasted image.")
         return notice(said) if notice else said
 
+    def neutralize_off(params):
+        """Switch Neutralize Prompt off, for the reason Creative Mode goes off.
+
+        The recorded prompt has already been through the Neutralizer: it is
+        the neutralized text, expanded and composed if those stages ran. Left
+        on, the stage would neutralize an already-neutralized prompt -- which
+        usually changes nothing and sometimes takes one word more -- and the
+        reproduction would be less faithful for a pass nobody asked for. The
+        explicit restore re-arms it, from the source it recorded.
+        """
+        if NEUTRALIZE_MODE not in params:
+            return None
+        logger.info("Model Chain: this image was made with Neutralize Prompt. Its final "
+                    "prompt has been restored and Neutralize Prompt was disabled so the "
+                    "prompt is not neutralized a second time.")
+        return False
+
     def literals_cleared(params):
         """Empty both Literal Prompt boxes, for the reason Creative Mode goes off.
 
@@ -844,6 +885,9 @@ def build_creative_paste_fields(components: dict, notice=None, view=None,
         return ""
 
     fields = [PasteField(components["enabled"], creative_off, api="krea_creative_enabled")]
+    if "neutralize" in components:
+        fields.append(PasteField(components["neutralize"], neutralize_off,
+                                 api="krea_neutralize_enabled"))
     for name, api in (("literal_positive", "krea_literal_positive"),
                       ("literal_negative", "krea_literal_negative")):
         if name in components:
@@ -873,7 +917,8 @@ def creative_paste_field_names() -> list[str]:
     forward by exact name, so a key that is not listed here simply does not
     arrive, and "restore the setup" would find half a record.
     """
-    return list(CREATIVE_KEYS) + list(SPATIAL_KEYS) + list(LITERAL_KEYS)
+    return (list(NEUTRALIZE_KEYS) + list(CREATIVE_KEYS) + list(SPATIAL_KEYS)
+            + list(LITERAL_KEYS))
 
 
 def paste_field_names() -> list[str]:

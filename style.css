@@ -3038,7 +3038,7 @@
    The Image Pipeline
    ==========================================================================
 
-   One path, six rows, three of them ours. Everything below is colour, spacing
+   One path, four rows, all of them ours. Everything below is colour, spacing
    and one thin animation over stock Gradio components -- there is not a single
    control in this section, because there is not a single control in the panel
    that this extension drew itself. That is what lets a theme extension restyle
@@ -3062,9 +3062,10 @@
 */
 
 /* ---------------------------------------------------------------------------
-   The Image Pipeline: three rows, and nothing else.
+   The Image Pipeline: four rows, and nothing else.
 
-   A stage is a name, a description, a switch and a way in. That list is
+   A stage is a name, a description, a switch and a way in -- or, for the one
+   stage with nothing to open, the first three of those. That list is
    exhaustive on purpose, and it is the fourth attempt at it -- everything this
    card grew that was not one of those four things read as structure under one
    theme and as debris under another:
@@ -3531,6 +3532,51 @@
     margin: 0;
     accent-color: var(--mc-pipe-accent);
     cursor: pointer;
+}
+
+/* -- a toggle-only stage -------------------------------------------------- */
+/*
+   Neutralize Prompt has one control and no settings, so its row is the first
+   three of the four things a stage is and not the fourth: a name, a
+   description and a switch, with no way in -- no disclosure, no caret, and no
+   drawer that would open onto nothing.
+
+   Its two lines are not a label for the browser file to split. Python writes
+   them as two elements of this extension's own at build time, inside a header
+   that carries the class the browser file gives a dressed card's header, and
+   the stage column carries `mc-pipeline-carded` from the server -- so the
+   switch is painted into the same lane the cards reserve, and the name and
+   the description take their voice from the rules above. Nothing here depends
+   on JavaScript having run; if every script on the page fails, this row looks
+   exactly as it does when none of them does. What is left for this block is
+   the band's own geometry, and the one difference from a card: nothing draws
+   a caret, because there is nothing a caret would open.
+*/
+
+.mc-pipeline-stage-plain > .mc-pipeline-plain {
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: none;
+}
+
+.mc-pipeline-stage-plain > .mc-pipeline-plain .mc-pipeline-card-head {
+    position: relative;
+    box-sizing: border-box;
+    display: block;
+    width: 100%;
+    height: var(--mc-pipe-head);
+    padding: 0.35em calc(var(--mc-pipe-lane) + var(--mc-pipe-caret)) 0.35em 0.7em;
+    overflow: hidden;
+    cursor: default;
+}
+
+.mc-pipeline-stage-plain > .mc-pipeline-plain .mc-pipeline-card-head > .mc-pipeline-label {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    max-width: none;
 }
 
 /* -- the stage body ------------------------------------------------------ */

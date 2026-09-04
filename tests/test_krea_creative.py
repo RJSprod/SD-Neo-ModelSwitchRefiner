@@ -2245,13 +2245,16 @@ class TestTheCompactPanel:
         assert built.arguments[:2] == [built.components["enabled"],
                                        built.components["creativity"]]
         assert built.arguments[2:4] == list(panel.settings_controls)
-        assert built.arguments[4:-5] == list(panel.axis_controls)
+        assert built.arguments[4:-6] == list(panel.axis_controls)
         # The Spatial block goes last and stays last, and that is load-bearing
         # rather than tidy: mc_plan reads it off the *end* of this tuple,
         # because the axis block in the middle is a variable length and the two
         # ends are the two that can be found without counting. The Literal
-        # Prompt boxes therefore go in the middle, immediately before it.
-        assert built.arguments[-5:-3] == literal
+        # Prompt boxes therefore go in the middle, immediately before it -- and
+        # the Neutralize switch between the two, the one control mc_plan reads
+        # from the middle by counting back from the tail.
+        assert built.arguments[-6:-4] == literal
+        assert built.arguments[-4] is built.components["neutralize"]
         assert built.arguments[-3:] == spatial
 
     def test_it_says_what_the_directions_cost_before_the_image_starts(self, built,
@@ -2438,6 +2441,7 @@ class TestTheCompactPanel:
         # never going to run. A library that will not load takes Creative Mode
         # down and leaves both standing.
         assert len(returned) == (2 + creative_script.LITERAL_CONTROLS
+                                 + creative_script.NEUTRALIZE_CONTROLS
                                  + creative_script.SPATIAL_CONTROLS)
 
     def test_both_surfaces_build_the_same_panel(self, built):

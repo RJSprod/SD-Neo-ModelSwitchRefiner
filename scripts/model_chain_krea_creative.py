@@ -82,6 +82,7 @@ import mc_llm_sessions as sessions
 import mc_literal_prompts
 import mc_lora
 import mc_memory
+import mc_neutralize
 import mc_pipeline_panel
 import mc_plan
 import mc_krea_pipeline
@@ -163,12 +164,31 @@ only thing that reads it is :func:`_split`, which knows how long the axis block
 is because it asks the library.
 """
 
-def _split(values) -> tuple[tuple, tuple, tuple, tuple]:
-    """``before_process``'s tuple, cut into its four parts.
+NEUTRALIZE_CONTROLS = 1
+"""How many controls the Neutralize Prompt block contributes: its switch.
+
+Placed after the Literal Prompt boxes and before the Spatial tail, for the
+reason the boxes were: the two ends of this tuple are spoken for. The one
+thing that reads it from outside this file is :func:`mc_plan.neutralize_from`,
+which counts back from the tail and takes the control there only when it is a
+boolean -- an older caller has a Literal Prompt box in that slot, which
+arrives as a string, and a caller that sent only the creativity has a number.
+
+A missing control is a stage that is off. Never a saved preference: the switch
+is session state on purpose (see :func:`_neutralize_toggled`), so there is no
+file for an API caller to inherit an armed stage from, and a request that does
+not send the field gets ``False`` rather than whatever somebody left on in a
+browser last week.
+"""
+
+
+def _split(values) -> tuple[tuple, tuple, tuple, tuple, tuple]:
+    """``before_process``'s tuple, cut into its five parts.
 
     ``ui()`` returns, after the enabled flag: three scalars, then three controls
-    per axis, then the three Spatial controls. Two of those three lengths are
-    fixed and the middle one is the library's, so the cut is made by *asking the
+    per axis, then the two Literal Prompt boxes, then the Neutralize switch,
+    then the three Spatial controls. Every length but the axis block's is
+    fixed and that one is the library's, so the cut is made by *asking the
     library* rather than by pattern-matching a length -- both a layout with
     spatial and one without are multiples of three long, and a tuple cannot say
     which it is.
@@ -190,6 +210,10 @@ def _split(values) -> tuple[tuple, tuple, tuple, tuple]:
     Anything else means there is no panel behind this call -- an API request
     that sent only the flag. The saved settings answer for it, which is what
     those callers already got.
+
+    Every shape this has ever emitted is still recognised, each by its exact
+    length, and each older one contributes nothing for the controls it
+    predates -- no fields, and a Neutralize switch that is off.
     """
     values = tuple(values or ())
     try:
@@ -201,29 +225,42 @@ def _split(values) -> tuple[tuple, tuple, tuple, tuple]:
 
     if axes is not None:
         expected = 3 + axes
-        if len(values) >= expected + LITERAL_CONTROLS + SPATIAL_CONTROLS:
-            after = expected + LITERAL_CONTROLS
+        fields = expected + LITERAL_CONTROLS
+        switch = fields + NEUTRALIZE_CONTROLS
+        if len(values) >= switch + SPATIAL_CONTROLS:
             return (values[:3], values[3:expected],
-                    values[after:after + SPATIAL_CONTROLS],
-                    values[expected:after])
+                    values[switch:switch + SPATIAL_CONTROLS],
+                    values[expected:fields],
+                    values[fields:switch])
+        if len(values) >= fields + SPATIAL_CONTROLS:
+            # The shape sent before the Neutralize switch existed. Cut exactly
+            # where it always was, and contributing no switch.
+            return (values[:3], values[3:expected],
+                    values[fields:fields + SPATIAL_CONTROLS],
+                    values[expected:fields], ())
         if len(values) >= expected + SPATIAL_CONTROLS:
             # The shape sent before the Literal Prompt boxes existed. Cut
             # exactly where it always was, and contributing no fields.
             return (values[:3], values[3:expected],
-                    values[expected:expected + SPATIAL_CONTROLS], ())
+                    values[expected:expected + SPATIAL_CONTROLS], (), ())
         if len(values) >= expected:
-            return values[:3], values[3:expected], (), ()
+            return values[:3], values[3:expected], (), (), ()
 
     # The no-panel shapes: creativity, then -- for a caller new enough to send
-    # them -- the two Literal Prompt boxes, then the Spatial tail.
+    # them -- the two Literal Prompt boxes, the Neutralize switch, and the
+    # Spatial tail.
+    if len(values) == 1 + LITERAL_CONTROLS + NEUTRALIZE_CONTROLS + SPATIAL_CONTROLS:
+        return ((), (), values[-SPATIAL_CONTROLS:],
+                values[1:1 + LITERAL_CONTROLS],
+                values[1 + LITERAL_CONTROLS:1 + LITERAL_CONTROLS + NEUTRALIZE_CONTROLS])
     if len(values) == 1 + LITERAL_CONTROLS + SPATIAL_CONTROLS:
         return ((), (), values[-SPATIAL_CONTROLS:],
-                values[1:1 + LITERAL_CONTROLS])
+                values[1:1 + LITERAL_CONTROLS], ())
     if len(values) == 1 + SPATIAL_CONTROLS:
-        return (), (), values[-SPATIAL_CONTROLS:], ()
+        return (), (), values[-SPATIAL_CONTROLS:], (), ()
     if len(values) >= 3:
-        return values[:3], (), (), ()
-    return (), (), (), ()
+        return values[:3], (), (), (), ()
+    return (), (), (), (), ()
 
 
 def _literals_for(values) -> tuple[str, str]:
@@ -238,7 +275,7 @@ def _literals_for(values) -> tuple[str, str]:
     work: the fields keep affecting generations while their row is off screen,
     and they are off screen precisely when this extension's features are off.
     """
-    _, _, _, fields = _split(values)
+    _, _, _, fields, _ = _split(values)
     stored = mc_literal_prompts.settings()
     if len(fields) < LITERAL_CONTROLS:
         return stored["positive"], stored["negative"]
@@ -283,7 +320,7 @@ def _settings_for(values) -> dict:
     checked rather than assumed and the saved preferences answer for anything
     absent.
     """
-    scalars, axes, _, _ = _split(values)
+    scalars, axes, _, _, _ = _split(values)
     if not scalars:
         return mc_creative_krea.settings()
     creativity, seed, anti_repetition = scalars
@@ -300,7 +337,7 @@ def _spatial_for(values) -> dict:
     gets a layout at all: the serialized canvas is persisted, so a script that
     sends only the Creative flag still composes the boxes the user last drew.
     """
-    _, _, spatial, _ = _split(values)
+    _, _, spatial, _, _ = _split(values)
     stored = mc_spatial.settings()
     if len(spatial) < SPATIAL_CONTROLS:
         return stored
@@ -313,6 +350,21 @@ def _spatial_for(values) -> dict:
         else stored["compose_mode"]
     stored["layout"] = str(layout or "")
     return stored
+
+
+def _neutralize_for(values) -> bool:
+    """Whether this generation neutralizes its prompt, from the panel only.
+
+    Read off the switch when the panel sent it, and ``False`` otherwise. Not
+    the saved settings, which is where every other control on this hook falls
+    back to, because there are none: the Neutralize switch is deliberately
+    session state, off on every fresh page and never written to a preferences
+    file, so that a stage that starts a language model cannot be re-armed for
+    somebody by a value they last touched days ago. An API caller that wants
+    the stage sends the field.
+    """
+    _, _, _, _, switch = _split(values)
+    return bool(switch[0]) if switch else False
 
 
 def _stored(creativity, seed, anti_repetition, axis_values) -> dict:
@@ -1122,6 +1174,30 @@ def _literal_row(creative, spatial, other=None):
     return gr.update(visible=bool(creative) or bool(spatial))
 
 
+def _neutralize_line(enabled=False) -> str:
+    """Neutralize Prompt's second line: what the next press will do to the prompt.
+
+    Two answers, and no third. The stage has no settings to summarise, so the
+    line is the whole of what the row can say: bypassed, or pose and placement
+    neutralized. Runtime failure belongs on the result and in the console, not
+    in a description of the next generation.
+    """
+    return "Pose + placement neutralized" if enabled else "Bypassed — prompt as-is"
+
+
+def _neutralize_toggled(enabled):
+    """Arm or bypass the Neutralizer for this session, and re-describe its row.
+
+    Nothing is written anywhere. The other two switches write through to a
+    preferences file on every move and are then forced off at page build --
+    the file is what their drawers' settings live beside. This stage has no
+    such settings and no reason for a file to know it was ever on: the switch
+    is the generation's gate, the row is its description, and both are decided
+    by the press somebody just made while looking at them.
+    """
+    return mc_pipeline_panel.card_summary("neutralize", _neutralize_line(bool(enabled)))
+
+
 def _creative_line(enabled=None, stored=None) -> str:
     """Creative's second line on the pipeline: ``C7 · 2 directions · Editorial``.
 
@@ -1331,6 +1407,15 @@ def _pasted_view() -> str:
     else:
         lines = [f"Source prompt: {setup.source}" if setup.source else
                  "Source prompt: (not recorded)"]
+    if setup.neutralized:
+        # Ran, and on what. The paste switched the stage off so the picture
+        # reproduces; this is where somebody sees what it was handed, and the
+        # restore below is what puts that back and turns it on again.
+        lines.append("Neutralize Prompt: ran"
+                     + (f" on: {setup.neutralize_source}" if setup.neutralize_source
+                        else ""))
+        lines.append("Neutralize Prompt was switched off by the paste so this picture "
+                     "reproduces exactly. Restore Creative setup turns it back on.")
     if setup.creativity is not None:
         lines.append(f"Creativity: {setup.creativity}")
     if setup.seed is not None:
@@ -1392,7 +1477,7 @@ def _restore_setup(replay_exactly):
         return (gr.update(), gr.update(),
                 notice("There is no Creative setup from a pasted image to restore.",
                        "warn"),
-                gr.update(), gr.update(), gr.update())
+                gr.update(), gr.update(), gr.update(), gr.update())
 
     # Two Literal Prompt boxes and nothing else is a whole restorable setup, so
     # it is handled before the Creative half rather than as a footnote to it.
@@ -1401,14 +1486,32 @@ def _restore_setup(replay_exactly):
     fields = (gr.update(value=setup.literal_positive),
               gr.update(value=setup.literal_negative)) if setup.literals \
         else (gr.update(), gr.update())
+    # Neutralize Prompt goes back on when the image recorded that it ran, and
+    # the typed source goes back with it. The paste switched the stage off so
+    # the neutralized prompt would not be neutralized twice; continuing from
+    # the source is the opposite request, exactly as it is for the writer. An
+    # image that recorded no such run leaves the switch as it is.
+    neutralized = gr.update(value=True) if setup.neutralized else gr.update()
     if not setup.present:
-        mc_literal_prompts.remember(**{
-            mc_literal_prompts.POSITIVE: setup.literal_positive,
-            mc_literal_prompts.NEGATIVE: setup.literal_negative})
-        return (gr.update(), gr.update(),
-                notice("The Literal Prompt boxes are back as this image had them. "
-                       "It recorded no Creative Mode setup, so nothing else changed."),
-                gr.update(value=_pasted_view()), *fields)
+        # No writer to switch back on. A Neutralize-only image, a pair of
+        # literal boxes, or both -- each is a whole setup, and each is said.
+        said = []
+        prompt = gr.update()
+        if setup.neutralized:
+            if setup.neutralize_source:
+                prompt = gr.update(value=setup.neutralize_source)
+                said.append("Neutralize Prompt is on again and the prompt it was handed "
+                            "is back in the prompt box.")
+            else:
+                said.append("Neutralize Prompt is on again.")
+        if setup.literals:
+            mc_literal_prompts.remember(**{
+                mc_literal_prompts.POSITIVE: setup.literal_positive,
+                mc_literal_prompts.NEGATIVE: setup.literal_negative})
+            said.append("The Literal Prompt boxes are back as this image had them.")
+        said.append("It recorded no Creative Mode setup, so nothing else changed.")
+        return (prompt, gr.update(), notice(" ".join(said)),
+                gr.update(value=_pasted_view()), *fields, neutralized)
 
     stored = mc_creative_krea.settings()
     remembered = {}
@@ -1468,11 +1571,16 @@ def _restore_setup(replay_exactly):
             mc_literal_prompts.NEGATIVE: setup.literal_negative})
         said.append("The Literal Prompt boxes are back as this image had them.")
 
+    if setup.neutralized:
+        said.append("Neutralize Prompt is on again, as it was for this image.")
+
     kind = "warn" if setup.warnings() or (replay_exactly and not setup.replayable) \
         else "info"
     told = notice(" ".join(said), kind)
-    return (gr.update(value=setup.source) if setup.source else gr.update(),
-            gr.update(value=True), told, gr.update(value=_pasted_view()), *fields)
+    source = setup.source or setup.neutralize_source
+    return (gr.update(value=source) if source else gr.update(),
+            gr.update(value=True), told, gr.update(value=_pasted_view()), *fields,
+            neutralized)
 
 
 def _spatial_pasted_view() -> str:
@@ -1655,6 +1763,11 @@ class ScriptKreaCreative(scripts.Script):
         # out, for Stage 2 to inherit instead of the restored one. Set at the
         # top of before_process, before anything can fail.
         self._inheritable_negative = ""
+        # Why this generation's prompt was not neutralized, if it was asked to
+        # be and was not. Its own sentence, for the reason the Spatial note is:
+        # a prompt that was written perfectly well by a writer whose
+        # neutralizer was unavailable is not a Creative Mode failure.
+        self._neutralize_note = ""
 
     def title(self):
         return "Krea Creative Mode"
@@ -1713,6 +1826,18 @@ class ScriptKreaCreative(scripts.Script):
         # first creates it; this one fills the two stages it owns, wherever it
         # came in the order. See mc_pipeline_panel.
         pipeline = mc_pipeline_panel.host()
+
+        # -- Neutralize Prompt ---------------------------------------------- #
+        #
+        # One switch, and nothing behind it. The stage has no settings of its
+        # own to draw: which model neutralizes, on which card, is decided where
+        # every other role's model is -- LLM Studio's Setup, under "Configure
+        # for: Pose Neutralizer" -- and the txt2img row answers one question.
+        # Built through the same switch helper as the other stages, so it
+        # comes up off on every page and is never restored from ui-config.json.
+
+        with pipeline.head("neutralize"):
+            neutralize = mc_pipeline_panel.switch(elem_id=ident("neutralize"))
 
         # -- Creative ------------------------------------------------------- #
 
@@ -2054,6 +2179,8 @@ class ScriptKreaCreative(scripts.Script):
             "spatial_undo": spatial_undo, "spatial_commit": spatial_commit,
             "creative_line": pipeline.summary("creative"),
             "spatial_line": pipeline.summary("spatial"),
+            "neutralize": neutralize,
+            "neutralize_line": pipeline.summary("neutralize"),
             "literal_row": literal_row,
             "literal_positive": literal_positive,
             "literal_negative": literal_negative}
@@ -2066,6 +2193,7 @@ class ScriptKreaCreative(scripts.Script):
                            spatial_state, record_scenes, restore_spatial,
                            enabled)
         self._wire_literals(literal_positive, literal_negative)
+        self._wire_neutralize(neutralize)
         self._wire_layouts(spatial_profile, spatial_profile_refresh,
                            spatial_profile_state, spatial_profile_name,
                            spatial_profile_save, spatial_profile_delete,
@@ -2079,6 +2207,9 @@ class ScriptKreaCreative(scripts.Script):
         # into the components themselves, which works because the config the
         # browser is built from is generated after every ui() has run.
         try:
+            if pipeline.summary("neutralize") is not None:
+                pipeline.summary("neutralize").value = mc_pipeline_panel.plain_label(
+                    "neutralize", _neutralize_line(False))
             if pipeline.summary("creative") is not None:
                 pipeline.summary("creative").label = mc_pipeline_panel.card_label(
                     "creative", _creative_line(bool(stored["enabled"]), stored))
@@ -2109,16 +2240,31 @@ class ScriptKreaCreative(scripts.Script):
         # would have moved the end out from under it. The two ends stay the two
         # ends, and the new block joins the variable middle that only _split()
         # reads -- which knows how long the axis block is because it asks.
+        # The Neutralize switch follows the boxes for the same reason, and is
+        # the one control mc_plan reads from the middle: the last thing before
+        # the tail, and only when it is a boolean. See NEUTRALIZE_CONTROLS.
         spatial_controls = [spatial_enabled, spatial_compose, spatial_state]
         literal_controls = [literal_positive, literal_negative]
+        neutralize_controls = [neutralize]
         if panel is None:
             self.arguments = ([enabled, creativity] + literal_controls
-                              + spatial_controls)
+                              + neutralize_controls + spatial_controls)
         else:
             self.arguments = ([enabled, creativity] + list(panel.settings_controls)
                               + list(panel.axis_controls) + literal_controls
-                              + spatial_controls)
+                              + neutralize_controls + spatial_controls)
         return list(self.arguments)
+
+    def _wire_neutralize(self, neutralize) -> None:
+        """The Neutralize switch's one handler: repaint its own row.
+
+        ``queue=False`` like every handler on this tab, and no preference
+        written -- see :func:`_neutralize_toggled`. The switch reaches the
+        generation as an argument, which is the only place it is read.
+        """
+        neutralize.change(fn=_neutralize_toggled, inputs=[neutralize],
+                          outputs=[self.components["neutralize_line"]],
+                          queue=False, show_progress=False)
 
     def _wire_literals(self, positive, negative) -> None:
         """Keep what the two Literal Prompt boxes hold. Two handlers, no more.
@@ -2237,17 +2383,18 @@ class ScriptKreaCreative(scripts.Script):
         # is in the record above for copying.
         literal_boxes = [self.components["literal_positive"],
                          self.components["literal_negative"]]
+        neutralize = self.components["neutralize"]
         if self.prompt_box is not None:
             restore.click(fn=_restore_setup, inputs=[exactly],
                           outputs=[self.prompt_box, enabled, status, pasted,
-                                   *literal_boxes],
+                                   *literal_boxes, neutralize],
                           queue=False, show_progress=False)
         else:
             logger.debug("Model Chain: the txt2img prompt box was not offered to "
                          "Creative Mode; Restore Creative setup will not fill it in")
             restore.click(fn=lambda exactly: _restore_setup(exactly)[1:],
                           inputs=[exactly],
-                          outputs=[enabled, status, pasted, *literal_boxes],
+                          outputs=[enabled, status, pasted, *literal_boxes, neutralize],
                           queue=False, show_progress=False)
         disarm.click(fn=_disarm_replay, outputs=[status], queue=False, show_progress=False)
 
@@ -2387,6 +2534,7 @@ class ScriptKreaCreative(scripts.Script):
 
         self._complaint = ""
         self._spatial_note = ""
+        self._neutralize_note = ""
         self._composed_without_creative = False
 
         # The negative prompt first, and on its own. No language model in this
@@ -2421,15 +2569,18 @@ class ScriptKreaCreative(scripts.Script):
         self._record_literal_fields(p, before, after)
         layout = self._layout(p, args)
         creative = bool(enabled)
-        if not creative and not getattr(layout, "regions", ()):
-            # Neither feature is on. If the prompt carries literal commands they
+        neutralize = _neutralize_for(args)
+        if not creative and not neutralize and not getattr(layout, "regions", ()):
+            # No feature is on. If the prompt carries literal commands they
             # still have to come off it; if it does not, this is the ordinary
             # generation that leaves here having done nothing at all.
             self._literals_only(p, parsed)
             return
 
+        from prompt_master.krea import spatial as spatial_module
+
         settings = _settings_for(args)
-        self._publish_plan(p, layout, creative)
+        self._publish_plan(p, layout, creative, neutralize)
 
         # The Krea 2 checkpoint guard, asked once for the whole pipeline rather
         # than by whichever feature happened to own it. Creative Mode's roll
@@ -2442,19 +2593,25 @@ class ScriptKreaCreative(scripts.Script):
         if objection:
             logger.warning("Model Chain: Spatial Layout was not applied — %s", objection)
             self._spatial_note = objection
-            # The layout is refused and the literals are not. They are ordinary
-            # Forge prompt syntax that the user typed into a prompt box, and a
-            # checkpoint this feature will not build a structured prompt for is
-            # still a checkpoint that can be sent a LoRA tag.
-            self._literals_only(p, parsed)
-            return
-
-        from prompt_master.krea import spatial as spatial_module
+            if not neutralize:
+                # The layout is refused and the literals are not. They are
+                # ordinary Forge prompt syntax that the user typed into a
+                # prompt box, and a checkpoint this feature will not build a
+                # structured prompt for is still a checkpoint that can be sent
+                # a LoRA tag.
+                self._literals_only(p, parsed)
+                return
+            # The layout is refused and the Neutralizer is not. Its answer is
+            # a subset of the prompt as typed -- plain text any checkpoint can
+            # read, with nothing structured about it -- so the stage runs on,
+            # with no boxes to compose after it.
+            layout = spatial_module.Layout()
 
         request = mc_krea_pipeline.Request(
             source=parsed.clean_text.strip(),
             raw_source=str(getattr(p, "prompt", "") or ""),
             literals=parsed,
+            neutralize=neutralize,
             creative=creative,
             creative_settings=settings,
             layout=layout,
@@ -2472,17 +2629,25 @@ class ScriptKreaCreative(scripts.Script):
         # generation waiting on them, and one started outside this block would
         # wait for the job that is waiting for it. It is re-entrant and
         # thread-local, so declaring it once here is the whole of it.
+        # The Neutralizer's reserve is the writer's and the Composer's: what
+        # the image plan says to leave alone. A placement constraint and never
+        # authority -- nothing on that path can reclaim a byte from the image
+        # side, and a pass that cannot be placed without doing so fails and
+        # the source answers.
         self._rolling = True
         try:
             with mc_broker.host_job():
                 outcome = mc_krea_pipeline.run(
                     request,
+                    neutralize=lambda source: mc_neutralize.neutralize(
+                        source, reserve=mc_creative_krea.image_reserve_bytes()),
                     write=lambda source: (self._roll(source, settings, layout,
                                                      request.raw_source),
                                           self._complaint))
         finally:
             self._rolling = False
 
+        self._neutralize_note = outcome.neutralize_note
         if outcome.spatial_note and not self._spatial_note:
             self._spatial_note = outcome.spatial_note
         self._composed_without_creative = bool(
@@ -2503,9 +2668,16 @@ class ScriptKreaCreative(scripts.Script):
         except Exception:
             logger.debug("Model Chain: could not record the Krea metadata",
                          exc_info=True)
+        if outcome.cancelled:
+            # Stopped during a language-model phase. Nothing after it ran and
+            # the host is about to stop the generation itself; the one thing
+            # substituted was a prompt with its literals put back, which is
+            # not a pipeline that ran and is not announced as one.
+            return
         _say_what_ran(outcome, written)
 
-    def _publish_plan(self, p, layout, creative: bool = True) -> None:
+    def _publish_plan(self, p, layout, creative: bool = True,
+                      neutralize: bool = False) -> None:
         """Work out what this generation will actually do, before any of it happens.
 
         This is the whole point of running here. ``before_process`` is earlier
@@ -2537,7 +2709,8 @@ class ScriptKreaCreative(scripts.Script):
             # describing a request nobody is going to make, and the VRAM
             # arithmetic reserving room for it.
             mc_plan.publish(mc_plan.build_for(p, creative=bool(creative),
-                                              spatial_compose=compose))
+                                              spatial_compose=compose,
+                                              neutralize=bool(neutralize)))
         except Exception:
             logger.debug("Model Chain: could not build this generation's plan",
                          exc_info=True)
@@ -2564,13 +2737,23 @@ class ScriptKreaCreative(scripts.Script):
         """
         complaint = self._complaint
         spatial_note = self._spatial_note
+        neutralize_note = self._neutralize_note
         composed_raw = self._composed_without_creative
         self._complaint = ""
         self._spatial_note = ""
+        self._neutralize_note = ""
         self._composed_without_creative = False
         if processed is None:
             return
         try:
+            if neutralize_note:
+                # First, because it is the first stage: the sentence about the
+                # writer below describes a prompt that this failure decided
+                # the shape of.
+                processed.comments += (
+                    f"\nModel Chain: Neutralize Prompt did not run — {neutralize_note}. "
+                    "The stages after it worked from the prompt as typed. The console "
+                    "and LLM Studio → Setup say more.")
             if complaint:
                 # "The prompt exactly as typed" is only true when nothing else
                 # ran. With Spatial Layout on, a writer that failed no longer

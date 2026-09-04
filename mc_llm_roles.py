@@ -1,9 +1,9 @@
-"""Creative and Spatial as two independently configurable LLM roles.
+"""The three LLM roles, each configurable apart: Neutralizer, Creative and Spatial.
 
-The design intent asks for two first-class configurations where there was one,
-and asks for the upgrade to be invisible: an installation that has never heard
-of roles must keep behaving exactly as it did, with one llama-server and the
-same handoff between the writer and the Composer.
+The design intent asks for first-class configurations where there was one, and
+asks for the upgrade to be invisible: an installation that has never heard of
+roles must keep behaving exactly as it did, with one llama-server and the same
+handoff from one pass to the next.
 
 This module gets that by *inheritance* rather than by copying.
 
@@ -19,13 +19,26 @@ is what section 15 of the intent describes and is worse in one specific way.
 Copies go stale. Somebody who changes the model in Setup after such a migration
 changes the shared configuration and neither role, and the change appears to do
 nothing at all. With inheritance there is nothing to go stale: a role that has
-not been split follows the installation, so the first upgraded run resolves both
-roles to the same identity, coalesces them onto one runtime, and reproduces the
+not been split follows the installation, so the first upgraded run resolves every
+role to the same identity, coalesces them onto one runtime, and reproduces the
 old behaviour without a migration step having to run correctly to get there.
 
 Splitting a role is then the only event that creates a second runtime, which is
 section 15's actual requirement -- "only a user action creates the new dual-
 runtime arrangement" -- reached by a road that cannot half-fail.
+
+Three roles, and a rule about counting them
+-------------------------------------------
+The Pose Neutralizer arrived third, and arrived under the same inheritance: an
+installation upgraded across it has no ``roles.neutralizer`` entry, so the
+Neutralize Prompt stage runs on whatever the installation runs, on the same
+server the writer is about to use. What the third role changed is not this
+module but every helper *around* it that had been written for two -- "both
+roles", "the other role", a sentence that named Creative and Spatial by hand.
+Those are generalised to :data:`ROLES` now, and the rule for anything added
+later is the one the Neutralizer was held to: nothing may reason about a
+role by naming its partner. :func:`describe` and :func:`others` exist so that
+nothing has to.
 """
 
 from __future__ import annotations
@@ -36,14 +49,34 @@ import threading
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
 
+NEUTRALIZER = "neutralizer"
 CREATIVE = "creative"
 SPATIAL = "spatial"
 
-ROLES = (CREATIVE, SPATIAL)
-"""The two roles that may be configured apart. Order is display order."""
+ROLES = (NEUTRALIZER, CREATIVE, SPATIAL)
+"""The roles that may be configured apart. Order is display order.
 
-LABELS = {CREATIVE: "Creative Writer", SPATIAL: "Spatial Composer"}
-"""What each role is called in a status line, a log prefix and a menu."""
+It is also pipeline order -- the Neutralizer runs before the writer, which runs
+before the Composer -- so a menu, a register line and the Image Pipeline all
+list the same three things the same way round.
+"""
+
+LABELS = {NEUTRALIZER: "Pose Neutralizer", CREATIVE: "Creative Writer",
+          SPATIAL: "Spatial Composer"}
+"""What each role is called in a status line, a register line and a menu.
+
+The Neutralizer's label names what the *model* does; the txt2img stage that
+asks it is called "Neutralize Prompt", which names what the *pipeline* does.
+The two differ on purpose, the way "Creative Writer" and "Creative" do.
+"""
+
+SHORT = {NEUTRALIZER: "Neutralizer", CREATIVE: "Creative", SPATIAL: "Spatial"}
+"""One word per role, for the front of a console line.
+
+Spelled out rather than derived from :data:`LABELS`, because the first word of
+"Pose Neutralizer" is the wrong one: a line prefixed ``[Pose]`` names nothing
+anybody configured.
+"""
 
 SHARED = ""
 """The installation's own configuration: every mode that is not one of the roles.
@@ -127,7 +160,39 @@ def prefix(role: str) -> str:
     about one role announces one.
     """
     chosen = named(role)
-    return f"[{LABELS[chosen].split()[0]}] " if chosen else ""
+    return f"[{SHORT[chosen]}] " if chosen else ""
+
+
+def others(role: str) -> tuple:
+    """Every role that is not ``role``, in display order.
+
+    "The other role" stopped being a phrase with a referent when the third one
+    arrived. Anything that used to reason about a role's partner asks this
+    instead and gets however many there are.
+    """
+    chosen = named(role)
+    return tuple(found for found in ROLES if found != chosen)
+
+
+def describe(roles) -> str:
+    """The roles named in a sentence: ``"Creative Writer and Spatial Composer"``.
+
+    One name on its own, two joined by "and", three or more with commas before
+    the last -- the register line, the Setup notice and the log all read these,
+    and a sentence that said "A and B and C" would read as a list nobody
+    finished. Unknown names are dropped and duplicates collapsed, so a caller
+    can hand this whatever a runtime says it serves.
+    """
+    names: list[str] = []
+    for found in roles or ():
+        chosen = named(found)
+        if chosen and LABELS[chosen] not in names:
+            names.append(LABELS[chosen])
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 # --------------------------------------------------------------------------- #

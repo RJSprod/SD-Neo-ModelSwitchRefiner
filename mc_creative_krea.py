@@ -209,6 +209,14 @@ class Prepared:
     one generation writes its infotext in one place and a spatial image cannot
     end up carrying half a record.
     """
+    neutralize: dict = field(default_factory=dict)
+    """The Neutralize keys for this generation, or nothing at all.
+
+    Present only when the Neutralizer ran and its answer was used, and merged
+    on every path a roll or a layout is merged on -- a neutralized prompt that
+    was then expanded, composed, or neither, records the stage the same way.
+    See :func:`mc_neutralize.metadata`.
+    """
     """The configuration this roll ran with, for the metadata to record.
 
     Read off the panel at press time rather than out of the preferences file,
@@ -241,7 +249,8 @@ class Prepared:
         # There is no roll to describe, and describing one anyway is how a paste
         # ends up switching off a feature that never ran.
         if self.roll is None:
-            found = dict(self.spatial or {})
+            found = dict(self.neutralize or {})
+            found.update(self.spatial or {})
             found.update(self.literal_metadata)
             return found
 
@@ -276,6 +285,7 @@ class Prepared:
         writer = writer_identity()
         if writer:
             recorded[mc_infotext.CREATIVE_WRITER] = writer
+        recorded.update(self.neutralize or {})
         recorded.update(self.spatial or {})
         recorded.update(self.literal_metadata)
         return recorded
@@ -306,7 +316,7 @@ class Prepared:
 
 
 def prepare(roll: Roll | None, stored=None, prompt=None, spatial=None,
-            inheritable=None, literals=None) -> Prepared:
+            inheritable=None, literals=None, neutralize=None) -> Prepared:
     """One finished prompt, packaged for the processing hook.
 
     ``prompt`` is what Stage 1 generates from, with the literal commands already
@@ -322,7 +332,11 @@ def prepare(roll: Roll | None, stored=None, prompt=None, spatial=None,
 
     ``roll`` is ``None`` for a Spatial-only generation and for a generation
     whose only change was its literals, where no writer ran and ``prompt`` is
-    the whole of what is being substituted.
+    the whole of what is being substituted -- and for a Neutralize-only one,
+    where the Neutralizer's subtraction is.
+
+    ``neutralize`` is the Neutralize record when that stage ran, and nothing
+    when it did not; it travels beside ``spatial`` and is merged the same way.
     """
     body = prompt
     if body is None:
@@ -335,7 +349,8 @@ def prepare(roll: Roll | None, stored=None, prompt=None, spatial=None,
                     inheritable=str(inheritable or "").strip(),
                     literals=literals,
                     settings=dict(stored or {}),
-                    spatial=dict(spatial or {}))
+                    spatial=dict(spatial or {}),
+                    neutralize=dict(neutralize or {}))
 
 
 def writer_identity() -> str:
@@ -703,6 +718,17 @@ class Setup:
 
     writer: str = ""
 
+    neutralize: bool = False
+    neutralize_source: str = ""
+    """Whether the Neutralizer ran for this image, and what it was handed.
+
+    Read and restorable, like the Literal Prompt fields: the ordinary paste
+    switches Neutralize Prompt *off* so the recorded prompt is not neutralized
+    a second time, and "Restore Creative setup" puts the typed source back and
+    switches the stage on again -- which is the whole workflow a Neutralize-only
+    image has to offer, and enough of one to be worth a restore of its own.
+    """
+
     spatial_layout: str = ""
     spatial_compose_mode: str = ""
     spatial_version: int | None = None
@@ -738,6 +764,17 @@ class Setup:
         return bool(self.literal_positive or self.literal_negative)
 
     @property
+    def neutralized(self) -> bool:
+        """Whether this image recorded a Neutralizer run worth restoring.
+
+        Not folded into :attr:`present` for the reason the literal fields are
+        not: a Neutralize-only image is not a Creative image, and restoring it
+        must put the source back and re-arm one stage without switching the
+        writer on for a picture it never wrote.
+        """
+        return bool(self.neutralize)
+
+    @property
     def recorded(self) -> bool:
         """Whether this image recorded anything worth offering to restore.
 
@@ -746,10 +783,10 @@ class Setup:
         paste says so and whether restoring turns the writer back on. This
         answers "is there anything here at all", which is what decides whether
         the record is kept -- and a pair of Literal Prompt boxes with both
-        features switched off is a whole restorable setup that is not a
-        Creative one.
+        features switched off, or a Neutralizer run over a prompt nothing else
+        touched, is a whole restorable setup that is not a Creative one.
         """
-        return bool(self.present or self.literals)
+        return bool(self.present or self.literals or self.neutralized)
 
     @property
     def replayable(self) -> bool:

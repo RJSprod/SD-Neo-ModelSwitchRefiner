@@ -2134,12 +2134,22 @@ def _without_accelerator(plan: mc_llm_accel.Plan, because: str) -> mc_llm_accel.
 
 
 def _make_room_for_the_llm(configuration: Config, already_ours: int = 0,
-                           needs_vision: bool = False, extra_reserve: int = 0) -> int:
+                           needs_vision: bool = False, extra_reserve: int = 0,
+                           allowed: bool = True) -> int:
     """Ask the image side for this card's deficit, when LLM priority is set.
 
     Nothing at all under cooperative memory, which is the default and is what
     every version of this extension has done: the language model lives in the
     VRAM the image side is not using and shrinks itself when there is little.
+
+    Nothing either when ``allowed`` is false, whatever the priority says. The
+    priority is a *configuration*, and a role that inherits it inherits it;
+    the Neutralize Prompt stage is defined never to displace the image
+    checkpoint, and it may share a server with a writer that has been given
+    exactly that authority. So the authority is declined per *request* rather
+    than per role: the Neutralizer's request starts the same server the
+    writer's would, from the same settings, and asks for nothing from the
+    image side on the way. See :meth:`Runtime.client`.
 
     Under LLM priority it is the *whole* of what that setting does, so it is
     worth being plain about how narrow it is. It asks for the placement the
@@ -2152,7 +2162,7 @@ def _make_room_for_the_llm(configuration: Config, already_ours: int = 0,
     expectation: the negotiation that follows reads the card again, so a
     request that freed nothing simply places against what was already there.
     """
-    if configuration.memory_priority != mc_llm_accel.PRIORITY_LLM:
+    if not allowed or configuration.memory_priority != mc_llm_accel.PRIORITY_LLM:
         return 0
     card = card_of(configuration)
     if card is None:
@@ -3786,7 +3796,7 @@ class Runtime:
         keys must be runtime-specific rather than one global LLM key."
         """
         self.roles: tuple = tuple(roles)
-        """Which roles resolved to this runtime. Both when they are sharing it."""
+        """Which roles resolved to this runtime. Every one of them, when they share it."""
         self._role: str = ""
         """Whose configuration to start from. See :meth:`configuration`."""
         self._key: tuple | None = None
@@ -3861,7 +3871,8 @@ class Runtime:
 
     # -- lifecycle -------------------------------------------------------- #
 
-    def client(self, needs_vision: bool = False, reserve: int = 0, cancel=None):
+    def client(self, needs_vision: bool = False, reserve: int = 0, cancel=None,
+               image_reclaim: bool = True):
         """A client for a ready server, started or restarted as placement requires.
 
         ``reserve`` is VRAM this request promises not to take: room for a
@@ -3871,6 +3882,16 @@ class Runtime:
         gigabytes. Without the reserve llama.cpp sizes itself to an empty card
         and the checkpoint gets the remainder, which on a 24 GB card is the
         difference between "both fit" and "the image model does not".
+
+        ``image_reclaim`` is whether this request may use the one authority a
+        configuration can carry to release image residency for the language
+        model -- LLM priority, in :func:`_make_room_for_the_llm`. True for
+        every caller that existed before the Neutralize Prompt stage, which
+        is to say the old behaviour; false for that stage's request, which is
+        defined never to displace the image checkpoint and may nonetheless
+        share this server, and this configuration, with a writer that may.
+        Everything else about the start is identical, so a server the
+        Neutralizer starts is exactly the server the writer would have.
 
         Leaving the room is very much cheaper than reclaiming it afterwards.
         :meth:`release` can only give VRAM back by stopping the server, so a
@@ -4001,7 +4022,8 @@ class Runtime:
             # promises to move nothing and is relied on for that by the
             # estimator -- what it does here is find more free VRAM than it
             # would have found a moment ago, and place against that.
-            _make_room_for_the_llm(configuration, ours, vision, reserve)
+            _make_room_for_the_llm(configuration, ours, vision, reserve,
+                                   allowed=image_reclaim)
 
             negotiated = negotiate(configuration, already_ours=ours, vision=vision,
                                    extra_reserve=reserve,
@@ -4928,8 +4950,9 @@ class Runtime:
         # Named roles rather than "the LLM", because with two servers up a
         # register that calls both of them the same thing is a register nobody
         # can read -- and because which one the broker is about to stop is
-        # exactly what somebody reading that line needs to know.
-        who = " and ".join(mc_llm_roles.label(role) for role in _roles_of(self))
+        # exactly what somebody reading that line needs to know. However many
+        # roles share this server, the sentence names them all.
+        who = mc_llm_roles.describe(_roles_of(self))
         return f"the {who} LLM ({name})"
 
     # -- the broker's reclaimer ------------------------------------------- #
@@ -5433,17 +5456,18 @@ SHARE_COEXIST = "coexist"
 
 SHARING_MODES = (
     (SHARE_AUTO, "Automatic — take turns on one card, coexist in system RAM"),
-    (SHARE_TAKE_TURNS, "Take turns — stop one role's server before starting the other's"),
-    (SHARE_COEXIST, "Coexist — leave both running and let them compete"),
+    (SHARE_TAKE_TURNS, "Take turns — stop one role's server before starting another's"),
+    (SHARE_COEXIST, "Coexist — leave every server running and let them compete"),
 )
-"""What to do when Creative and Spatial land in the same memory.
+"""What to do when two roles land in the same memory.
 
-Only reached when the two roles are configured *differently* and still point at
-the same pool: identical configurations share one server outright and have
-nothing to decide. Two servers cannot share a process, so "one" here means one
-at a time -- the second start stops the first through the release path that
-already exists, which is the same mechanism the image side uses and obeys the
-same rules.
+Only reached when roles are configured *differently* and still point at the
+same pool: identical configurations share one server outright and have nothing
+to decide. Two servers cannot share a process, so "one" here means one at a
+time -- the next start stops the others through the release path that already
+exists, which is the same mechanism the image side uses and obeys the same
+rules. Three roles change nothing about this: whichever of them is about to
+start asks the same question of every other server in its pool.
 
 Automatic is not a fourth policy, it is the two above chosen per pool. Two
 servers in system RAM coexist happily on a machine with the RAM for them, and
@@ -5582,9 +5606,9 @@ class RuntimeRegistry:
 
         The singleton is not a legacy wart to route around: it is the server
         every mode that is not a role already uses, and an installation with no
-        role split resolves both roles to exactly its identity. Adopting it
+        role split resolves every role to exactly its identity. Adopting it
         there is what makes "nothing is configured differently" mean *one*
-        llama-server rather than three -- the shared one, plus one per role
+        llama-server rather than four -- the shared one, plus one per role
         pointing at the same model with the same settings.
         """
         try:
@@ -5606,9 +5630,9 @@ class RuntimeRegistry:
         A role that has just been reconfigured leaves its old identity behind.
         Keeping the entry would keep a stopped server's residency key in the
         register and would make ``all()`` report a runtime nothing can reach.
-        A runtime still claimed by the other role is left exactly as it is --
-        that is the un-sharing case, and the role that stayed put must not have
-        its server taken away because the other one moved.
+        A runtime still claimed by another role is left exactly as it is --
+        that is the un-sharing case, and the roles that stayed put must not have
+        their server taken away because one of them moved.
         """
         if not role:
             return
@@ -5635,7 +5659,7 @@ class RuntimeRegistry:
         return key
 
     def shared(self) -> bool:
-        """Whether both roles currently resolve to one server."""
+        """Whether every role currently resolves to one server."""
         import mc_llm_roles
 
         try:
@@ -5645,23 +5669,59 @@ class RuntimeRegistry:
             return True
         return len(keys) == 1
 
-    def contending(self) -> str:
-        """The pool both roles are spending, or ``""`` when they are not sharing one.
+    def partners(self, role: str) -> tuple:
+        """The other roles that resolve to the same server as ``role``.
 
-        Empty when the roles coalesce -- one server is not two servers competing
-        -- and empty when they are in different pools, which is the arrangement
-        the scenarios companion recommends and which needs no policy at all.
+        Empty for a role with a server of its own, and for the installation
+        itself. With three roles "shared" stopped being one yes-or-no answer --
+        a Neutralizer sharing the writer's server while the Composer runs on
+        the processor is neither all-shared nor all-separate -- and this is
+        the question the Setup notice actually needs answered about the role
+        somebody is looking at.
         """
         import mc_llm_roles
 
-        if self.shared():
-            return ""
+        chosen = mc_llm_roles.named(role)
+        if not chosen:
+            return ()
         try:
-            pools = {pool(config(role)) for role in mc_llm_roles.ROLES}
+            mine = self.key_for(chosen, config(chosen))
+            return tuple(other for other in mc_llm_roles.others(chosen)
+                         if self.key_for(other, config(other)) == mine)
+        except Exception:
+            logger.debug("Model Chain: could not compare the role runtimes", exc_info=True)
+            return ()
+
+    def contending(self) -> str:
+        """A pool two roles' servers are both spending, or ``""`` when there is none.
+
+        Empty when the roles coalesce -- one server is not two servers competing
+        -- and empty when every server is in a pool of its own, which is the
+        arrangement the scenarios companion recommends and which needs no
+        policy at all. Counted per *identity* rather than per role: two roles
+        sharing one server in system RAM are one server there, and only a
+        second distinct server in the same pool makes it a contention. With
+        three roles that is the difference between "two pools in use" and
+        "nobody is competing" -- a Neutralizer and a writer on one card with
+        the Composer on the processor is still two servers fighting for that
+        card, and the old answer, which asked whether every role was in the
+        same pool, would have said nothing was.
+        """
+        import mc_llm_roles
+
+        try:
+            filed: dict[str, set] = {}
+            for role in mc_llm_roles.ROLES:
+                configuration = config(role)
+                filed.setdefault(pool(configuration), set()).add(
+                    self.key_for(role, configuration))
         except Exception:
             logger.debug("Model Chain: could not compare the role pools", exc_info=True)
             return ""
-        return pools.pop() if len(pools) == 1 else ""
+        for where, keys in filed.items():
+            if len(keys) > 1:
+                return where
+        return ""
 
     def all(self) -> tuple:
         """Every runtime this registry knows about, the shared one included.
@@ -5696,7 +5756,7 @@ class RuntimeRegistry:
     # -- taking turns ----------------------------------------------------- #
 
     def make_room_for(self, role: str, configuration: Config) -> int:
-        """Stop the other role's server when the two may not coexist.
+        """Stop the other roles' servers when they may not coexist with this one.
 
         Called on the way into a start rather than after one, because the point
         is that the memory is free *before* the next placement is negotiated
@@ -5725,14 +5785,16 @@ class RuntimeRegistry:
                 # when that is not enough does this become a contention at all.
                 if _sharing_mode() == SHARE_COEXIST:
                     logger.warning(
-                        "Model Chain: %sboth roles are configured for system RAM and asked to "
-                        "coexist, but there is not enough of it left above the safety reserve "
-                        "after releasing what warm image cache could be released. The other "
-                        "server is being left up; this one may load slowly or not at all.",
+                        "Model Chain: %sanother role's server is in system RAM and the roles "
+                        "were asked to coexist, but there is not enough of it left above the "
+                        "safety reserve after releasing what warm image cache could be "
+                        "released. The other server is being left up; this one may load "
+                        "slowly or not at all.",
                         mc_llm_roles.prefix(chosen))
                     return 0
-                logger.info("Model Chain: %ssystem RAM cannot safely hold both roles' models, "
-                            "so they take turns", mc_llm_roles.prefix(chosen))
+                logger.info("Model Chain: %ssystem RAM cannot safely hold this role's model "
+                            "beside the others already there, so they take turns",
+                            mc_llm_roles.prefix(chosen))
             else:
                 return 0
         mine = self.key_for(chosen, configuration)
@@ -5936,7 +5998,7 @@ class RuntimeRegistry:
         if len(live) == 1 and not live[0].roles:
             return live[0].describe()
         return " and ".join(
-            f"{mc_llm_roles.label(_roles_of(found)[0]) if _roles_of(found) else 'the'} LLM"
+            f"{mc_llm_roles.describe(_roles_of(found)) if _roles_of(found) else 'the'} LLM"
             for found in live)
 
 

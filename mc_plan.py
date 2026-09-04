@@ -91,6 +91,7 @@ KIND_TRANSITION = "transition"
 KIND_WARMUP = "warm-up"
 """Speculative, after the last image phase. Yields rather than forces."""
 
+PROMPT_NEUTRALIZER = "prompt_neutralizer"
 CREATIVE_WRITER = "creative_writer"
 SPATIAL_COMPOSER = "spatial_composer"
 DIRECT_MERGE = "direct_merge"
@@ -99,7 +100,7 @@ HANDOFF = "handoff"
 STAGE_2 = "stage_2"
 WARM_UP = "warm_up"
 
-LLM_PHASES = (CREATIVE_WRITER, SPATIAL_COMPOSER)
+LLM_PHASES = (PROMPT_NEUTRALIZER, CREATIVE_WRITER, SPATIAL_COMPOSER)
 """Phases that need llama-server. Direct BBOX merge is deliberately not one.
 
 A plan containing only :data:`DIRECT_MERGE` reserves nothing for a Spatial
@@ -646,7 +647,7 @@ def _stage_2_size(width: int, height: int, multiplier: float) -> tuple[int, int]
 def build(*, width: int = 0, height: int = 0, batch: int = 1,
           stage_1: Stage | None = None, stage_2: Stage | None = None,
           creative: bool = False, spatial_compose: str = "",
-          warm_up: bool = True) -> Plan:
+          warm_up: bool = True, neutralize: bool = False) -> Plan:
     """Assemble the plan for one generation from the features that are switched on.
 
     ``spatial_compose`` is ``"smart"`` for a Spatial Composer call, ``"direct"``
@@ -656,12 +657,20 @@ def build(*, width: int = 0, height: int = 0, batch: int = 1,
     layout is being applied, and a plan that showed nothing between the writer
     and Stage 1 would read as though it had been dropped.
 
+    ``neutralize`` is the Neutralize Prompt stage, and it is the first phase
+    when it is on: a language-model call before the writer's, on the same
+    server when the two roles share one, and a phase the bar has to be able to
+    name before Creative lights.
+
     Every phase is optional and none of them has a policy of its own. Turning
     Stage 2 off removes a phase and a transition; turning Creative Mode off
     removes a preparation phase; the arithmetic underneath is untouched.
     """
     stage_1 = stage_1 or Stage()
     phases: list[Phase] = []
+
+    if neutralize:
+        phases.append(Phase(PROMPT_NEUTRALIZER, KIND_PREPARATION, "Prompt Neutralizer"))
 
     if creative:
         phases.append(Phase(CREATIVE_WRITER, KIND_PREPARATION, "Creative Writer"))
@@ -851,8 +860,45 @@ def creative_from(p) -> tuple[bool, str]:
     return creative, mode if mode in ("smart", "direct") else "smart"
 
 
+def neutralize_from(p) -> bool:
+    """Whether the Neutralize Prompt switch is on, as the Krea panel has it set.
+
+    The third thing Model Chain reads off the other script's arguments, and
+    the one that cannot be read off either end: the switch sits *immediately
+    before* the Spatial tail, after the Literal Prompt boxes, because the two
+    ends of that list are spoken for -- :func:`creative_from` reads the flag
+    off the front and the layout off the back -- and the middle is a variable
+    number of axis controls only the Krea script can count.
+
+    So the position is fixed relative to the tail, and the *type* is what
+    says whether the control is there at all. A build that predates the switch
+    has a Literal Prompt box in that slot, which arrives as a string; an API
+    request that sent only the creativity has a number there. Only a boolean
+    is the switch, and only ``True`` is a switch that is on -- an absent
+    control is a stage that is off, never a stage somebody armed last week,
+    because the switch is session state and is not saved anywhere this could
+    read it from.
+    """
+    script = _script(p, CREATIVE_TITLE)
+    if script is None:
+        return False
+
+    start, end = getattr(script, "args_from", None), getattr(script, "args_to", None)
+    if start is None or end is None:
+        return False
+    try:
+        args = list((getattr(p, "script_args", None) or [])[start:end])
+    except (TypeError, KeyError):
+        return False
+    if len(args) < CREATIVE_ENABLED + 1 + 1 + SPATIAL_TAIL:
+        return False
+    found = args[-(SPATIAL_TAIL + 1)]
+    return isinstance(found, bool) and found
+
+
 def build_for(p, *, creative: bool | None = None,
-              spatial_compose: str | None = None) -> Plan:
+              spatial_compose: str | None = None,
+              neutralize: bool | None = None) -> Plan:
     """The plan for the generation ``p`` describes, assembled from every source.
 
     Stage 1 is the loaded checkpoint and the modules selected for it; Stage 2 is
@@ -876,6 +922,8 @@ def build_for(p, *, creative: bool | None = None,
         found, mode = creative_from(p)
         creative = found if creative is None else creative
         spatial_compose = mode if spatial_compose is None else spatial_compose
+    if neutralize is None:
+        neutralize = neutralize_from(p)
 
     width = height = 0
     try:
@@ -906,7 +954,7 @@ def build_for(p, *, creative: bool | None = None,
 
     return build(width=width, height=height, batch=batch, stage_1=stage_1,
                  stage_2=stage_2_from(p), creative=creative,
-                 spatial_compose=spatial_compose)
+                 spatial_compose=spatial_compose, neutralize=neutralize)
 
 
 # --------------------------------------------------------------------------- #

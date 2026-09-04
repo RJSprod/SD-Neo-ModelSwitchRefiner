@@ -370,7 +370,8 @@ class _Gpu:
             workload.__exit__(None, None, None)
 
 
-def _client(needs_vision: bool, reserve: int = 0, role: str = "", cancel=None):
+def _client(needs_vision: bool, reserve: int = 0, role: str = "", cancel=None,
+            image_reclaim: bool = True):
     """A ready client, optionally promising to leave ``reserve`` bytes of VRAM.
 
     Only Krea's Creative Mode passes anything: it is the one caller that knows
@@ -389,14 +390,23 @@ def _client(needs_vision: bool, reserve: int = 0, role: str = "", cancel=None):
     missing repairs it first, and a repair is a download. Without this the Stop
     button would appear to do nothing until the transfer finished. What arrives
     is kept either way, so a cancelled repair resumes rather than restarts.
+
+    ``image_reclaim`` is whether the request may use LLM priority's authority
+    to release image residency for itself. Only the Neutralizer turns it off,
+    and it is passed on only then -- a runtime that never heard of it, which
+    is what a test double is, keeps working for every caller that leaves the
+    default alone.
     """
     chosen = _runtime_for(role)
     if role:
         try:
             chosen.registry.make_room_for(role, chosen.configuration)
         except Exception:
-            logger.debug("Model Chain: could not check the other role's runtime",
+            logger.debug("Model Chain: could not check the other roles' runtimes",
                          exc_info=True)
+    if not image_reclaim:
+        return chosen.runtime.client(needs_vision, reserve=reserve, cancel=cancel,
+                                     image_reclaim=False)
     return chosen.runtime.client(needs_vision, reserve=reserve, cancel=cancel)
 
 
@@ -958,6 +968,113 @@ COMPOSING = "Reconciling the scene with the layout"
 """What the Composer pass is doing, for the status line and the progress bar."""
 
 
+def _neutralize(source: str, seed: int, cancel: Cancellation, reserve: int = 0):
+    """One Neutralizer pass: the source with its pose and placement taken out.
+
+    The third language-model request the Krea pipeline can make and the first
+    to run: before the Director reads the prompt and before the writer expands
+    it, this pass may delete two kinds of thing from it and may add nothing.
+    Three properties, and each is the same decision the Composer made:
+
+    *Text-only, always.* It edits one line of prose. It asks for a text-only
+    client, so it can run on any backbone that can hold a conversation and
+    never pulls a vision projector onto the card for a job with no picture in
+    it.
+
+    *Its own instruction, not Krea's.* Krea's expansion instruction says
+    expand, and this pass may not. See :mod:`prompt_master.krea.neutralizer`
+    for the instruction and for the guard that checks the reply against it.
+
+    *Failure is not fatal.* Every exit that is not a validated subtraction of
+    the source is a ``FAILED`` event, and the caller's answer to that is the
+    source as typed. A validated reply that happens to equal the source is a
+    ``DONE`` like any other: the stage ran and its answer was accepted, and
+    "ran" has never meant "changed something".
+
+    What is *not* the same as a failure is a stop. A ``CANCELLED`` here is the
+    user's Interrupt arriving through the shared :class:`Cancellation`, and the
+    caller must not read it as "the neutralizer was unavailable, generate
+    anyway" -- the generation is being cancelled, and this pass is the first
+    part of it to hear.
+
+    ``reserve`` is the same promise :func:`_krea` makes: VRAM this pass will
+    leave alone because an image generation follows it. It is a placement
+    constraint and nothing more. Nothing in this generator, and nothing it
+    calls, may ask the image side for room: the checkpoint always wins that
+    contest, and a pass that cannot be placed without disturbing it fails here
+    and the source answers.
+    """
+    from prompt_master.krea import neutralizer
+
+    gpu = _Gpu("the prompt neutralizer", cancel, mc_llm_roles.NEUTRALIZER)
+    try:
+        acquired = yield from gpu.acquire()
+        if not acquired:
+            gpu.release()
+            yield Event(CANCELLED, "Cancelled")
+            return
+
+        yield Event(STATUS, _preparing(mc_llm_roles.NEUTRALIZER))
+        # Text-only, with the image plan's reserve, and without the one
+        # authority a configuration can carry to evict the checkpoint. The
+        # stage invariant is enforced here, at the request, so that a shared
+        # server started by this pass is placed exactly as the writer's would
+        # be -- minus the eviction a writer set to LLM priority is allowed.
+        client = _client(False, reserve, mc_llm_roles.NEUTRALIZER, cancel=cancel.event,
+                         image_reclaim=False)
+        for event in _placement_notes(mc_llm_roles.NEUTRALIZER):
+            yield event
+
+        yield Event(STATUS, NEUTRALIZING)
+        written = ""
+        for chunk, result in _streamed(
+                lambda on_text: client.stream_chat(
+                    neutralizer.messages(source), neutralizer.MAX_TOKENS, seed, on_text,
+                    cancel.event, temperature=neutralizer.TEMPERATURE,
+                    top_p=neutralizer.TOP_P),
+                when_done=gpu.release):
+            if chunk is not None:
+                yield Event(CHUNK, chunk)
+            else:
+                written = result or ""
+
+        if cancel.is_set():
+            gpu.release()
+            yield Event(CANCELLED, "Cancelled")
+            return
+
+        # The guard, before the reply is offered to anybody. A reply that added
+        # or moved a word is refused whole rather than repaired -- repairing it
+        # would be a second editor nobody can see -- and the console says which
+        # kind of failure it was, without saying what the word was in.
+        cleaned = neutralizer.clean(written)
+        refused = neutralizer.subtraction_error(source, cleaned)
+        if refused:
+            raise RuntimeError(refused)
+        taken = neutralizer.removed(source, cleaned)
+        logger.info("Model Chain: %sthe neutralizer removed %d of %d words",
+                    mc_llm_roles.prefix(mc_llm_roles.NEUTRALIZER), taken,
+                    len(neutralizer.tokens(source)))
+        gpu.release()
+        yield Event(DONE, cleaned, data={"removed": taken})
+    except Exception as exc:
+        logger.debug("Model Chain: the prompt neutralizer failed", exc_info=True)
+        gpu.release()
+        yield Event(FAILED, str(exc))
+    finally:
+        gpu.release()
+
+
+NEUTRALIZING = "Neutralizing pose and placement"
+"""What the Neutralizer pass is doing, for the status line and the progress bar.
+
+The same words :data:`prompt_master.krea.neutralizer.WRITING` and
+:data:`mc_llm_progress.NEUTRALIZING_WRITE` use, because the browser file lights
+the Neutralize Prompt row by matching them, and three spellings of one phase
+would be three chances to light nothing.
+"""
+
+
 # --------------------------------------------------------------------------- #
 # What the console is told
 # --------------------------------------------------------------------------- #
@@ -1109,6 +1226,23 @@ def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=No
                        f"creativity {resolve(creativity)}{directed}",
                        _krea(prompt, references, seed, cancel, creativity, direction,
                              reserve))
+
+
+def krea_neutralize(source: str, seed: int, cancel: Cancellation, reserve: int = 0):
+    """One Neutralizer pass. See :func:`_neutralize`.
+
+    The source's length reaches the console line, as a count of words, because
+    a pass that took three times longer than its neighbour is a pass somebody
+    will want that number about. The words themselves do not: the rule this
+    module already follows is that a status line says what kind of run it was
+    and never what was in it.
+    """
+    from prompt_master.krea import neutralizer
+
+    counted = len(neutralizer.tokens(source))
+    yield from _traced(f"{mc_llm_roles.prefix(mc_llm_roles.NEUTRALIZER)}a prompt "
+                       f"neutralization over {counted} word{'' if counted == 1 else 's'}",
+                       _neutralize(source, seed, cancel, reserve))
 
 
 def krea_compose(source: str, scene: str, layout, ratio: str, seed: int,

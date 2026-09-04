@@ -77,12 +77,26 @@ def configured(tmp_path, **over):
     return runtime.Config(**base)
 
 
-def pair(monkeypatch, creative, spatial, shared=None):
-    """Make ``config(role)`` answer with these two, and register a fresh registry."""
+def pair(monkeypatch, creative, spatial, shared=None, neutralizer=None):
+    """Make ``config(role)`` answer with these, and register a fresh registry.
+
+    The Neutralizer follows the installation unless a test gives it a
+    configuration of its own, which is what an unsplit third role does on a
+    real installation -- and what keeps every two-role test below true of
+    three: the third role resolves to the shared runtime, or to the Creative
+    one where a test never named a shared configuration at all.
+    """
+    answers = {roles.CREATIVE: creative, roles.SPATIAL: spatial}
+    if neutralizer is not None:
+        answers[roles.NEUTRALIZER] = neutralizer
     monkeypatch.setattr(runtime, "config",
-                        lambda role="": {roles.CREATIVE: creative,
-                                         roles.SPATIAL: spatial}.get(role, shared or creative))
+                        lambda role="": answers.get(role, shared or creative))
     return runtime.RuntimeRegistry()
+
+
+def trio(monkeypatch, neutralizer, creative, spatial, shared=None):
+    """Three roles, each given a configuration by name."""
+    return pair(monkeypatch, creative, spatial, shared, neutralizer=neutralizer)
 
 
 # --------------------------------------------------------------------------- #
@@ -553,7 +567,8 @@ class TestTheRegistryAnswersForEveryRuntime:
         assert stopped == ["big"]
 
     def test_a_request_for_everything_reaches_them_all(self, tmp_path, monkeypatch):
-        registry = pair(monkeypatch,
+        registry = trio(monkeypatch,
+                        configured(tmp_path, mode="gpu", model_name="N.gguf"),
                         configured(tmp_path, mode="gpu"),
                         configured(tmp_path, mode="gpu", model_name="B.gguf"))
         stopped: list = []

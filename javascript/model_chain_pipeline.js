@@ -75,8 +75,12 @@
 
     // The first line of a stage card's label. Python's mc_pipeline_panel.TITLES
     // says these, and tests/test_pipeline.py fails if the two lists drift --
-    // the same coupling PHASES has, for the same reason.
-    const TITLES = ["Creative", "Spatial", "Stage 2"];
+    // the same coupling PHASES has, for the same reason. Neutralize Prompt is
+    // listed although its row is never dressed by this file: it has no
+    // disclosure, so Python writes its two lines as two elements and there is
+    // no label here to split. The name is in the list so that the one rule
+    // about titles -- the table and the panel agree -- stays one rule.
+    const TITLES = ["Neutralize Prompt", "Creative", "Spatial", "Stage 2"];
 
     // The Literal Prompt boxes. Read from here rather than reported by them,
     // because the note has exactly one writer and this is it -- two files
@@ -105,22 +109,36 @@
         {match: "stage 2", stage: "stage2"},
         {match: "loading ", stage: "stage2"},
         {match: "finishing", stage: "output"},
+        // The Neutralizer names all three of its phases, its wait included,
+        // so nothing about it is inferred from which row happened to be lit
+        // last -- with three language-model passes that guess stops being
+        // one. "Reading the source prompt" is deliberately not a substring of
+        // Creative's "reading the prompt", and is listed ahead of it anyway.
+        {match: "waiting for the prompt neutralizer", stage: "neutralize"},
+        {match: "reading the source prompt", stage: "neutralize"},
+        {match: "neutralizing pose and placement", stage: "neutralize"},
         {match: "reading the layout", stage: "spatial"},
         {match: "reconciling the scene", stage: "spatial"},
         {match: "reading the prompt", stage: "creative"},
         {match: "writing the krea prompt", stage: "creative"},
     ];
 
-    // Said by both language-model passes, so on its own it names no stage.
-    // Handled by keeping whatever stage was running -- the writer and the
-    // composer each announce themselves on the phase either side of their
-    // wait, so "still that one" is always the right answer after the first.
+    // Said by the writer and the composer, so on its own it names no stage.
+    // Handled by keeping whatever stage was running -- each of those two
+    // announces itself on the phase either side of its wait, so "still that
+    // one" is always the right answer after the first. The Neutralizer never
+    // says it: its wait is its own, above, because a generic wait arriving
+    // before any row had lit would default to Creative for a stage that had
+    // not been entered.
     const AMBIGUOUS = "waiting for the language model";
 
-    // The rows the panel draws. Stage 1 and Output are still phases a run goes
-    // through -- see PHASES -- and no longer rows anybody looks at, so a phase
-    // that names one lights nothing and that is the whole of it.
-    const ORDER = ["creative", "spatial", "stage2"];
+    // The rows the panel draws, top to bottom and in the order a generation
+    // runs them. Stage 1 and Output are still phases a run goes through -- see
+    // PHASES -- and no longer rows anybody looks at, so a phase that names one
+    // lights nothing and that is the whole of it. A row that is never entered
+    // -- Neutralize Prompt bypassed, say -- is never marked done: only stages
+    // in `live.seen` are, and a stage gets there by having been lit.
+    const ORDER = ["neutralize", "creative", "spatial", "stage2"];
 
     const live = {
         stage: "",
@@ -399,9 +417,9 @@
 
     function labelNode(accordion) {
         // The text node carrying a stage card's label: two lines, and a first
-        // line that is one of the three names this panel gives a stage. Both
-        // halves matter -- a body full of prose has newlines in it too, and
-        // this walk cannot know where the header ends.
+        // line that is one of the names this panel gives a stage. Both halves
+        // matter -- a body full of prose has newlines in it too, and this walk
+        // cannot know where the header ends.
         let walk;
         try {
             walk = document.createTreeWalker(accordion, NodeFilter.SHOW_TEXT, null);
@@ -493,8 +511,10 @@
     // A stage card's own disclosure, and only that.
     //
     // Not `drawers()`, which is every disclosure this extension builds -- and
-    // that includes the Image Pipeline panel the three cards live *inside*, and
-    // the drawers nested in each card's body. The panel comes first in document
+    // that includes the Image Pipeline panel the cards live *inside*, and the
+    // drawers nested in each card's body. Not the Neutralize Prompt row either:
+    // it has no disclosure to select, so nothing here ever visits it, and its
+    // two lines are Python's from the moment the page is built. The panel comes first in document
     // order, so it was dressed first, and the walk below found the first
     // two-line label inside it: Creative's. Creative's text was then split
     // against the panel's own header, and Creative's card -- already carrying a
@@ -701,6 +721,8 @@
         echo: echo,
         wire: wire,
         watchBar: watchBar,
+        read: read,
+        show: show,
         clear: clear,
     };
 })();

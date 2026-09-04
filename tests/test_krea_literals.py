@@ -1236,8 +1236,9 @@ class TestPastingOneBack:
             mc_infotext.LITERAL_NEGATIVE: "blue hat"}))
         returned = creative_script._restore_setup(False)
 
-        assert returned[-2]["value"] == "<lora:x:1>"
-        assert returned[-1]["value"] == "blue hat"
+        # The two boxes sit before the Neutralize switch, the last output.
+        assert returned[-3]["value"] == "<lora:x:1>"
+        assert returned[-2]["value"] == "blue hat"
 
     def test_a_literal_only_restore_changes_nothing_else(self, built, store):
         """No Creative record means no prompt overwrite and no switching
@@ -1246,12 +1247,14 @@ class TestPastingOneBack:
 
         mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
             mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}))
-        prompt, enabled, status, _view, positive, _negative = \
+        prompt, enabled, status, _view, positive, _negative, neutralize = \
             creative_script._restore_setup(False)
 
         assert positive["value"] == "<lora:x:1>"
         assert prompt == {} or "value" not in prompt
         assert enabled == {} or "value" not in enabled
+        # An image that never neutralized is not a reason to start.
+        assert neutralize == {} or "value" not in neutralize
         assert "no Creative Mode setup" in status
 
     def test_the_pasted_view_says_what_the_boxes_held(self, built, store):

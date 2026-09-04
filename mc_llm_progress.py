@@ -83,6 +83,18 @@ WRITING = "Writing the Krea prompt"
 COMPOSING_READ = "Reading the layout"
 COMPOSING_WRITE = "Reconciling the scene with the layout"
 
+NEUTRALIZING_WAIT = "Waiting for the prompt neutralizer"
+NEUTRALIZING_READ = "Reading the source prompt"
+NEUTRALIZING_WRITE = "Neutralizing pose and placement"
+"""The Neutralizer's three phases, and its wait is not the shared one.
+
+The writer and the Composer both wait under "Waiting for the language model",
+and the browser file copes by keeping whichever row was already lit -- each of
+those two announces itself on the phase either side of the wait. A third pass
+that used the same words would be a phase two rows could claim and a row that
+lit before the stage had been entered, so the Neutralizer names its wait.
+"""
+
 
 @dataclass(frozen=True)
 class Pass:
@@ -119,6 +131,21 @@ WRITER = Pass("krea:read", "krea:write", "krea:reply")
 COMPOSER = Pass("krea:compose:read", "krea:compose:write", "krea:compose:reply",
                 reading=COMPOSING_READ, writing=COMPOSING_WRITE)
 """Pass 2: the Spatial Composer, measured separately and named differently."""
+
+NEUTRALIZER = Pass("krea:neutralize:read", "krea:neutralize:write",
+                   "krea:neutralize:reply", waiting=NEUTRALIZING_WAIT,
+                   reading=NEUTRALIZING_READ, writing=NEUTRALIZING_WRITE)
+"""Pass 0: the Neutralizer, which runs before either of the other two.
+
+Its own keys, for the reason the Composer has its own: a reply that is a
+subset of a short prompt is nothing like a Krea paragraph, and a bar that
+averaged the two would predict neither. Its first-run guesses are seeded from
+the writer's rates in :data:`mc_progress.BASELINES` -- the same request shape
+on the same server -- and replaced by measurement from the first run on.
+"""
+
+PASSES = (NEUTRALIZER, WRITER, COMPOSER)
+"""Every language-model pass the txt2img pipeline can make, in the order it makes them."""
 
 # Kept for anything that read the labels directly; the writer's are the ones
 # every existing caller meant.

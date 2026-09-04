@@ -93,7 +93,7 @@ class TestTheCardComesBackBeforeTheLastWord:
                 and statement.value.func.value.id == "gpu")
 
     @pytest.mark.parametrize("name", ["_prompt_studio", "_conversation", "_minimax",
-                                      "_krea", "_compose"])
+                                      "_krea", "_compose", "_neutralize"])
     def test_every_terminal_event_is_preceded_by_a_release(self, name):
         """The whole fix, as a property rather than as five careful edits.
 
