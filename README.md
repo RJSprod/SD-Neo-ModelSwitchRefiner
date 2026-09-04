@@ -51,13 +51,17 @@ settings would normally have produced.
 
 ### The Image Pipeline
 
-Everything this extension adds to txt2img is in one panel: three rows, one per
+Everything this extension adds to txt2img is in one panel: four rows, one per
 stage this extension runs. Every drawer starts closed, so the whole thing costs
-four lines until you open something.
+five lines until you open something.
 
 ```
 ▸ IMAGE PIPELINE
 
+  ┌───────────────────────────────────────────────────────────┐
+  │ Neutralize Prompt                             [ ] ON      │
+  │ Bypassed — prompt as-is                                   │
+  └───────────────────────────────────────────────────────────┘
   ┌───────────────────────────────────────────────────────────┐
   │ Creative                                      [✓] ON   ›  │
   │ Bypassed — prompt as-is                                   │
@@ -102,6 +106,14 @@ header, switch, body — with every control still present and reachable.
 The switch has a lane of its own on the right, the caret has a zone beyond it,
 and the whole header outside those two opens the card.
 
+**One row has nothing to open.** Neutralize Prompt is a switch and nothing
+else — no strength, no mode, no model chooser; the language model it uses is
+configured where the other two roles are, in LLM Studio → Setup — so its row
+is the same two lines and the same switch lane with no caret and no drawer.
+The two lines are written by Python and never split by the browser, which is
+what lets the row stay legible when a theme or the browser file has done
+nothing to it.
+
 **The summary is derived, never typed.** `Smart · 2 regions · Studio thirds` is
 computed from the saved settings on every render — the same settings Generate
 reads — so a collapsed card cannot disagree with the controls behind it. A
@@ -119,7 +131,7 @@ cannot read anywhere else on the page.
 
 **Every stage comes up switched off.** Being armed lasts for a session and is
 never inherited from one: whatever you left on last time, a fresh page has
-Creative, Spatial and Stage 2 all bypassed, and pressing Generate does exactly
+Neutralize Prompt, Creative, Spatial and Stage 2 all bypassed, and pressing Generate does exactly
 what Forge would do without this extension until you say otherwise. It is also
 the only state the card can describe honestly — the switch and the description
 are built at the same moment, and a remembered switch used to come back reading
@@ -134,7 +146,7 @@ level — *Create a profile*, *Directions*, *Advanced settings*, *Recovery &
 diagnostics* — rather than onto twenty axis rows. The Directions drawer says how
 many are active in its own label.
 
-**All three stages ship switched off.** A fresh install generates exactly as
+**All four stages ship switched off.** A fresh install generates exactly as
 Forge would without the extension until you say otherwise.
 
 **It survives your theme,** because it has no palette of its own. The cards,
@@ -738,9 +750,9 @@ two phases — and the host's own handler prints no time at all.
 ### Generation Memory & Persistent LLM
 
 Everything above is about one workload. A generation is often several — a
-Creative Writer call, a Spatial Composer call, Stage 1, the handoff into
-Stage 2, Stage 2 itself, and the Stage 1 warm-up afterwards — and the phases do
-not all happen at once.
+Prompt Neutralizer call, a Creative Writer call, a Spatial Composer call,
+Stage 1, the handoff into Stage 2, Stage 2 itself, and the Stage 1 warm-up
+afterwards — and the phases do not all happen at once.
 
 Before anything runs, the extension works out which of those phases this
 generation will actually contain and what each will cost at its peak. That is
@@ -1561,6 +1573,108 @@ and `[[<lora:name:0.8>]]` do the same job for every kind of syntax. Images made
 with the old field still show what they used, under *Continue from a pasted
 image* — nothing applies it any more.
 
+### Neutralize Prompt: taking pose and placement out first
+
+The first row of the Image Pipeline, and the first stage that runs. Switched
+on, a short language-model pass reads the prompt you typed and takes two kinds
+of thing *out* of it — how a body is arranged (*arms crossed*, *kneeling*, *one
+hand on her hip*) and where in the picture something sits (*centred in frame*,
+*in the lower left*, *in front of the car*) — and puts nothing in. Everything
+else survives, word for word: who and how many, build and clothing, what they
+are doing, where they are looking, expression, props, the setting, the light,
+the style, the lens. What the Creative Director reads, the writer expands and
+the Composer reconciles is then the neutralized text, so a composition
+Creative Mode chooses or a layout you drew is no longer arguing with a
+placement you typed into the sentence.
+
+```
+Neutralize on:   typed prompt -> Neutralizer -> [Creative] -> [Spatial] -> Forge
+                                 (deletes only)
+```
+
+**It may delete and it may do nothing else.** The instruction says so, and the
+reply is *checked* rather than trusted: every word it kept has to be a word
+the source had, in the order the source had it, punctuation and capitals
+aside. A reply that adds a synonym, moves a clause, writes a "natural pose"
+where the old one was, or comes back empty is refused whole — not repaired,
+because a repair would be a second editor nobody can see — and the generation
+carries on from the prompt as typed. A reply that changes nothing is a
+successful run: the stage ran and its answer was accepted, and "ran" has never
+meant "changed something". The pass decodes greedily, so the same prompt
+neutralizes the same way twice on the same machine and model.
+
+The guard is one-sided on purpose. It proves nothing was added or moved; it
+cannot prove too much was taken. Over-deletion is the instruction's job, and
+when the instruction is unsure, keeping wins — a word wrongly deleted is worse
+than a pose left in.
+
+**What it never sees.** A `[[literal]]`, the two Literal boxes, a bare
+`<lora:…>` tag, a region's words, the negative prompt, a reference image.
+Those come out before the pass and go back exactly once, where they were, the
+same way they do for the writer. Neutralize Prompt works on the transformable
+text and nothing else.
+
+**The combinations.** One switch, and it composes with the two rows under it:
+
+| With | What happens |
+| --- | --- |
+| nothing else | one request; the neutralized text is the prompt Krea is given |
+| Creative | the writer expands the neutralized text instead of the typed one |
+| Spatial, Direct | the neutralized text is the scene the boxes are merged with |
+| Spatial, Smart | the Composer is shown the neutralized text as the source it reconciles against — handing it the original would reintroduce, as a comparison, exactly what was taken out |
+| all three | three requests, in that order, on one server if the roles share one |
+
+**It is a switch and nothing else.** No drawer, no caret, no slider. Bypassed it
+reads *Bypassed — prompt as-is*; armed it reads *Pose + placement neutralized*,
+which describes the next generation rather than the last. It ships off, and
+like the other three stages it is never remembered across a page load — an
+LLM stage that quietly re-armed itself a week later would be a surprise on
+every count.
+
+**When it cannot run, the picture still comes.** No runtime, no model, a server
+that will not start, a reply the guard refuses, a timeout: none of those is
+fatal. The stages after it work from the prompt as typed, the row is left
+unlit, and the image's own comments say what did not run and why, in the same
+words as the console. The one thing that is *not* a failure is your own
+Interrupt — pressed while the Neutralizer is working it stops the generation,
+and nothing after the pass runs.
+
+**Never at the image model's expense.** The Neutralizer is placed in VRAM the
+image plan is not using and shrinks down the same ladder as any other role —
+context first, then experts, then blocks, then all of it in system RAM. What it
+never does is evict the checkpoint: even with **LLM priority** set for its
+role, its requests decline that permission, and a pass that cannot be placed
+without disturbing the image model fails and the source answers. When it is the
+last language-model phase of the press, the card is handed back to the image
+generation straight after it; when Creative or a Smart layout follow, the
+server stays up between them, because stopping a shared server between two
+phases that both want it costs a second model load and a cold prompt cache in
+the middle of one generation.
+
+**What the bar says.** *Waiting for the prompt neutralizer*, *Reading the source
+prompt*, *Neutralizing pose and placement* — words that name this pass and no
+other, so the Neutralize row lights for them and the Creative row does not.
+The work is small: the instruction is the same every time and a warm server
+has it cached, the prompt is a prompt box's worth of tokens, and the reply is
+a subset of it.
+
+**What the image records.** `Krea Neutralize Prompt: True` and
+`Krea Neutralize Source` — the prompt exactly as you typed it, brackets and
+all. They are written only when the pass ran and its answer was used. The
+image's own `Prompt:` line is still the finished prompt, so an ordinary paste
+reproduces the picture with no model request, and **switches Neutralize Prompt
+off** for the same reason it switches Creative Mode off: the recorded prompt
+has already been through it. **Restore Creative setup** puts the typed source
+back in the prompt box and turns the stage back on, from what it recorded.
+
+**The Pose Neutralizer is a role.** In LLM Studio → Setup it appears beside the
+Creative Writer and the Spatial Composer, and it follows the installation's
+runtime, model and placement until you configure it separately — exactly as
+those two do. Roles configured identically share one llama-server, whatever
+the combination: all three on one, any two on one with the third apart, or a
+server each. A fresh install needs nothing new: the Neutralizer inherits
+whatever the other roles already have, and the row is simply off.
+
 ### The Negative Prompt at CFG 1
 
 Forge already stops the native Negative Prompt doing anything at CFG 1, which is
@@ -1982,8 +2096,8 @@ nothing at all, which is the lever if you want it back.
 The image's own `Prompt:` line is the finished structured prompt — aspect ratio,
 scene, background and every element — because that is exactly what Krea was
 given. So pasting the PNG back reproduces the picture with **no model request of
-any kind**, and the paste switches *both* Creative Mode and Spatial Layout off so
-nothing rebuilds a prompt that is already built.
+any kind**, and the paste switches Creative Mode, Spatial Layout and Neutralize
+Prompt off so nothing rebuilds a prompt that is already built.
 
 Separately, `Krea Spatial Layout` records the canvas itself — every box, every
 word, every framing and angle, the stacking order and the compose mode. **Restore
@@ -2030,8 +2144,9 @@ calls.
 **Creative Controls → Continue from a pasted image**. It shows what the pasted
 image recorded, and **Restore Creative setup** puts the short source phrase back
 in the prompt box, the axis configuration back on the panel, and Creative Mode
-back on — the paste turned it off so the picture would reproduce, and continuing
-from the source is the opposite request. With *Replay the
+back on — and Neutralize Prompt back on, from the source it recorded, if the
+image used it — the paste turned them off so the picture would reproduce, and
+continuing from the source is the opposite request. With *Replay the
 recorded recipe exactly* ticked, it also arms the recorded recipe for **one**
 generation, which is the only way to get the recorded art direction back
 verbatim — re-rolling at the recorded seed re-derives the same draw, and the draw
@@ -2404,10 +2519,13 @@ ordinary decoding, and nothing asks for it again until the runtime changes.
 
 Every memory decision is keyed to one physical GPU. A Creative Writer on a 3090
 with **LLM priority** set will never empty a 5090 that is holding a checkpoint,
-in either direction and whichever way round the two roles are pinned —
-releasing a card the model is not being placed on cannot free a byte of the one
-it is. Each role has its own Performance setting, so a writer and a composer on
-two different cards can answer this differently.
+in either direction and whichever way round the roles are pinned — releasing a
+card the model is not being placed on cannot free a byte of the one it is. Each
+role has its own Performance setting, so a writer and a composer on two
+different cards can answer this differently. The Pose Neutralizer is the one
+role the setting cannot give that permission to: its requests never release
+image residency, whatever its Performance says — see *Neutralize Prompt* under
+Krea Creative Mode.
 
 #### What it measured
 
@@ -3747,7 +3865,7 @@ three minutes, which buried the line that explained it.
 
 ```
 mc_arch.py            architecture detection + per-architecture geometry
-mc_pipeline_panel.py  the Image Pipeline shell: three stage cards, the drawer
+mc_pipeline_panel.py  the Image Pipeline shell: four stage rows, the drawer
                       every disclosure is made with, and the slots they offer
 mc_literal_prompts.py the two Literal Prompt boxes, and the note when they hide
 mc_profile_state.py   loaded / modified / not saved, said one way for all three
@@ -3823,6 +3941,7 @@ voice/managed-pipeline-models.json  the pipeline trust root (data only, unpinned
 tools/pin_pipeline_models.py  resolves and pins it after Phase 0 (maintainers only)
 voice/managed-pocket-models.json  the Pocket closure and its voices (data only)
 tools/pin_pocket_models.py  resolves that closure from PyPI (maintainers only)
+mc_neutralize.py      Neutralize Prompt: one subtraction pass, and what it answers
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default
@@ -3833,6 +3952,8 @@ prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
 prompt_master/krea/library.py     loads and validates that package
 prompt_master/krea/director.py    the local Creative Director; no inference
 prompt_master/krea/variation.py   Creativity 0-10, as sampling settings
+prompt_master/krea/neutralizer.py the Neutralizer's request, cleanup and subtraction guard
+prompt_master/krea/neutralize.txt its standing instruction, read and never rewritten
 prompt_master/models/managed-models.json  the curated backbone registry (data only)
 prompt_master/models/managed_profiles.py  the hidden per-backbone quality profiles
 
@@ -4187,6 +4308,25 @@ or finishing that task, and — driven on a thread with a deadline, because a
 deadlock hangs a test run rather than failing it — that a roll requested from
 inside a running image job completes instead of waiting for the job that is
 waiting for it.
+
+`tests/test_krea_neutralizer.py` holds Neutralize Prompt to its one authority.
+The guard is driven with every way a model tidies a sentence — a synonym, a
+connector, a reordered clause, a repeated word, a replacement pose, an empty
+reply — and each is refused, while a deletion, the punctuation repair around
+it and an unchanged reply pass; the acceptance cases that ship with the
+instruction are read as fixtures, so what must survive and what must go are
+asserted against the same wording the model is given. The pipeline is then
+pressed through every combination of the three switches, asserting what each
+language-model pass was handed and what the image model received, that a
+literal, a bare tag, a region's words and the negative prompt never reach the
+pass and are restored exactly once, that a refused or unavailable pass leaves
+the writer the typed prompt while an Interrupt runs nothing after it, and that
+the card is handed back after the last language-model phase and never between
+two. The role is checked as a role: it inherits, it splits, all five ways of
+partitioning three roles across servers resolve to the right number of
+servers, and — with the image model resident and the free VRAM too small — the
+writer's request is allowed to use LLM priority and the Neutralizer's, in the
+same registry under the same setting, is not.
 
 Three of those files are lopsided on purpose, because their failure modes are:
 

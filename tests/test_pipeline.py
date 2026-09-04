@@ -96,7 +96,7 @@ class TestTheShell:
         """The one ordering in the extension a user can see. A panel that drew
         Spatial above Creative while the code ran them the other way round
         would be a diagram of a different program."""
-        assert mc_pipeline_panel.ORDER == ("creative", "spatial", "stage2")
+        assert mc_pipeline_panel.ORDER == ("neutralize", "creative", "spatial", "stage2")
 
     def test_every_row_is_one_this_extension_runs(self):
         """The panel used to draw Prompt, Stage 1 and Output as well: Forge's
@@ -121,7 +121,20 @@ class TestTheShell:
 
         for stage in mc_pipeline_panel.OWNED:
             assert pipeline.head(stage) is not None
+        for stage in mc_pipeline_panel.EXPANDABLE:
             assert pipeline.body(stage) is not None
+
+    def test_the_toggle_only_stage_offers_a_switch_slot_and_no_editor(self, host):
+        """Neutralize Prompt has one control and no settings, so its row is a
+        name, a description and a switch, and not a way in. A body slot it
+        offered would be a drawer somebody opened onto nothing."""
+        pipeline = mc_pipeline_panel.host()
+
+        for stage in mc_pipeline_panel.PLAIN:
+            assert stage in pipeline.heads
+            assert stage not in pipeline.bodies
+            assert stage not in pipeline.editors
+            assert pipeline.summaries[stage] is not None
 
     def test_the_rows_forge_owned_are_not_built_at_all(self, host):
         """Not hidden, not muted: absent. A row that is present and refuses to
@@ -189,11 +202,28 @@ class TestTheStageCard:
         header. Name on the first line, description on the second."""
         pipeline = mc_pipeline_panel.host()
 
-        for stage in mc_pipeline_panel.ORDER:
+        for stage in mc_pipeline_panel.EXPANDABLE:
             name, said = pipeline.editors[stage].label.split("\n", 1)
 
             assert name == mc_pipeline_panel.TITLES[stage]
             assert said == mc_pipeline_panel.PLACEHOLDERS[stage]
+
+    def test_a_toggle_only_row_carries_the_same_two_lines_as_elements(self, host):
+        """No disclosure, so no label for the browser file to split: Python
+        writes the name and the description as the two elements the browser
+        file would have made, under the same two classes, so the stylesheet's
+        rules for a dressed card's lines apply from the moment the page is
+        built and whether or not any script ever runs."""
+        pipeline = mc_pipeline_panel.host()
+
+        for stage in mc_pipeline_panel.PLAIN:
+            markup = pipeline.summaries[stage].value
+
+            assert f'class="{mc_pipeline_panel.PREFIX}-name">' \
+                   f"{mc_pipeline_panel.TITLES[stage]}<" in markup
+            assert mc_pipeline_panel.PLACEHOLDERS[stage] in markup
+            assert f'class="{mc_pipeline_panel.PREFIX}-said"' in markup
+            assert mc_pipeline_panel.CARD_HEAD in markup
 
     def test_a_stage_with_nothing_to_say_is_just_its_name(self):
         assert mc_pipeline_panel.card_label("creative") == "Creative"
@@ -221,14 +251,14 @@ class TestTheStageCard:
         pipeline = mc_pipeline_panel.host()
 
         # One disclosure per card: the editor. The body is a plain Column.
-        for stage in mc_pipeline_panel.ORDER:
+        for stage in mc_pipeline_panel.EXPANDABLE:
             body = pipeline.bodies[stage]
             assert not hasattr(body, "open")
 
     def test_the_card_opens_closed(self, host):
         pipeline = mc_pipeline_panel.host()
 
-        for stage in mc_pipeline_panel.ORDER:
+        for stage in mc_pipeline_panel.EXPANDABLE:
             assert pipeline.editors[stage].open is False
 
     def test_a_bypassed_card_says_bypassed(self):
@@ -342,6 +372,8 @@ class TestTheStagesShipOff:
         comes back armed."""
         for path, marker in (
                 ("scripts/model_chain.py", 'with pipeline.head("stage2"):'),
+                ("scripts/model_chain_krea_creative.py",
+                 'with pipeline.head("neutralize"):'),
                 ("scripts/model_chain_krea_creative.py",
                  'with pipeline.head("creative"):'),
                 ("scripts/model_chain_krea_creative.py",
@@ -641,7 +673,7 @@ class TestThePipelineStylesheet:
     @pytest.fixture
     def section(self):
         css = (ROOT / "style.css").read_text(encoding="utf-8")
-        block = css.split("The Image Pipeline: three rows, and nothing else.", 1)[1]
+        block = css.split("The Image Pipeline: four rows, and nothing else.", 1)[1]
         block = block.split("*/", 1)[1].split("/* -- the treatment rows", 1)[0]
         return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
 
@@ -1419,6 +1451,9 @@ class TestEveryPhaseLightsARow:
         assert stage_for(label) == stage
 
     @pytest.mark.parametrize("label,stage", [
+        (mc_llm_progress.NEUTRALIZING_WAIT, "neutralize"),
+        (mc_llm_progress.NEUTRALIZING_READ, "neutralize"),
+        (mc_llm_progress.NEUTRALIZING_WRITE, "neutralize"),
         (mc_llm_progress.READING, "creative"),
         (mc_llm_progress.WRITING, "creative"),
         (mc_llm_progress.COMPOSING_READ, "spatial"),
@@ -1426,14 +1461,23 @@ class TestEveryPhaseLightsARow:
     ])
     def test_a_language_model_phase_lights_the_stage_that_asked_for_it(self, label,
                                                                       stage):
-        """The writer is Creative's and the composer is Spatial's. They share a
-        progress vocabulary and belong to different rows."""
+        """The neutralizer is Neutralize Prompt's, the writer is Creative's and
+        the composer is Spatial's. They share a progress vocabulary and belong
+        to different rows."""
         assert stage_for(label) == stage
 
     def test_the_shared_waiting_label_is_treated_as_ambiguous(self):
-        """Both passes say it, so on its own it names no stage. The browser
-        keeps whatever was already running rather than guessing."""
+        """The writer and the composer say it, so on its own it names no
+        stage. The browser keeps whatever was already running rather than
+        guessing."""
         assert stage_for(mc_llm_progress.WAITING) == "ambiguous"
+
+    def test_the_neutralizer_names_its_own_wait(self):
+        """The one pass that must not share the ambiguous wait: it runs first,
+        so "keep whatever was running" would light nothing, and the fallback
+        would light Creative for a stage that had not been entered."""
+        assert stage_for(mc_llm_progress.NEUTRALIZING_WAIT) == "neutralize"
+        assert not mc_llm_progress.NEUTRALIZING_WAIT.lower().startswith(_ambiguous())
 
     def test_every_label_the_planner_can_emit_is_matched(self):
         """Built from the real plan rather than from a list written here, so a
@@ -1448,7 +1492,7 @@ class TestEveryPhaseLightsARow:
         assert unmatched == []
 
     def test_every_language_model_label_is_matched(self):
-        for pass_ in (mc_llm_progress.WRITER, mc_llm_progress.COMPOSER):
+        for pass_ in mc_llm_progress.PASSES:
             for label in pass_.labels().values():
                 assert stage_for(label) != "", label
 

@@ -80,6 +80,13 @@ BASELINES = {
     # the store folds the factor in on the first run and never sees it again.
     "krea:read": 0.0028,
     "krea:write": 0.0150,
+    # The Neutralizer is the same request shape on the same server, so it
+    # starts from the writer's per-character rates and learns its own from the
+    # first run. Its reply is a subset of a prompt-box line rather than a Krea
+    # paragraph, which is why the expected length is not the writer's 700.
+    "krea:neutralize:read": 0.0028,
+    "krea:neutralize:write": 0.0150,
+    "krea:neutralize:reply": 250.0,
     # The handover before the request goes out, per roll. Bimodal and kept as
     # two keys for that reason: a warm llama-server is a lock acquisition, and
     # a cold one is twenty seconds of reading weights off a disk. Averaging the

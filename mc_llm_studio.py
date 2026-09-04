@@ -1715,9 +1715,10 @@ def _role_choices() -> list[tuple[str, str]]:
     """What the Configure-for selector offers.
 
     The installation first, because it is what every mode that is not one of
-    the two roles runs on and what an unsplit role inherits -- somebody who
-    never opens this selector is configuring the thing they have always
-    configured.
+    the roles runs on and what an unsplit role inherits -- somebody who never
+    opens this selector is configuring the thing they have always configured.
+    The roles follow in :data:`mc_llm_roles.ROLES` order, which is pipeline
+    order, so the menu reads the way the Image Pipeline does.
     """
     return [("Installation (shared)", mc_llm_roles.SHARED),
             *((mc_llm_roles.LABELS[role], role) for role in mc_llm_roles.ROLES)]
@@ -1728,8 +1729,13 @@ def _role_line(role: str) -> str:
 
     The one place the shared-runtime tradeoff is stated in the UI. Section 10.2
     asks for it to be visible rather than hidden behind invented scheduling:
-    two roles on one server switch system prompts, and switching system prompts
+    roles on one server switch system prompts, and switching system prompts
     re-reads the prefix.
+
+    Written for however many roles there are. The sentences used to name
+    Creative and Spatial by hand and to speak of "the other role", which stopped
+    having a referent the day a third one arrived; what a role shares with, and
+    with whom it competes, is asked of the registry instead.
     """
     import mc_llm_runtime
 
@@ -1737,18 +1743,20 @@ def _role_line(role: str) -> str:
     try:
         shared = mc_llm_runtime.registry.shared()
         where = mc_llm_runtime.registry.contending()
+        partners = mc_llm_runtime.registry.partners(chosen) if chosen else ()
     except Exception:
         logger.debug("Model Chain: could not describe the role runtimes", exc_info=True)
         return ""
 
+    everyone = mc_llm_roles.describe(mc_llm_roles.ROLES)
     if not chosen:
         if shared:
-            return ui.notice("Creative and Spatial both follow this configuration, so they "
-                             "share one llama-server. Switching between them re-reads the "
-                             "system prompt — configure one of them separately to stop that, "
-                             "or give them a server each in Settings → Model Chain without "
-                             "changing anything else.")
-        return ui.notice("Creative and/or Spatial are configured separately. Changes here "
+            return ui.notice(f"{everyone} all follow this configuration, so they share "
+                             "one llama-server. Switching between them re-reads the "
+                             "system prompt — configure one of them separately to stop "
+                             "that, or give them a server each in Settings → Model Chain "
+                             "without changing anything else.")
+        return ui.notice("At least one role is configured separately. Changes here "
                          "still apply to Prompt Studio, Conversation and MiniMax.")
 
     label = mc_llm_roles.LABELS[chosen]
@@ -1756,20 +1764,22 @@ def _role_line(role: str) -> str:
         return ui.notice(f"{label} follows the installation. Record a runtime here to give "
                          f"it hardware of its own; it keeps its own prompt cache only once "
                          f"something differs.")
-    if shared:
-        return ui.notice(f"{label} is configured separately but resolves to the same runtime "
-                         f"as the other role, so they still share one llama-server. Settings "
-                         f"→ Model Chain can give them one each instead.")
+    if partners:
+        return ui.notice(f"{label} is configured separately but resolves to the same "
+                         f"runtime as {mc_llm_roles.describe(partners)}, so they still "
+                         f"share one llama-server. Settings → Model Chain can give them "
+                         f"one each instead.")
     if where:
         policy = mc_llm_runtime.resolved_sharing(where)
-        wording = ("take turns — one stops before the other starts"
+        wording = ("take turns — one stops before another starts"
                    if policy == mc_llm_runtime.SHARE_TAKE_TURNS
-                   else "coexist — both stay up and compete")
+                   else "coexist — every server stays up and they compete")
         pool = "system RAM" if where == mc_llm_runtime.POOL_SYSTEM_RAM else where.upper()
-        return ui.notice(f"{label} has its own runtime. Both roles are in {pool}, so they "
-                         f"{wording}. Change that in Settings → Model Chain.")
+        return ui.notice(f"{label} has its own runtime. More than one role's server is in "
+                         f"{pool}, so they {wording}. Change that in Settings → Model "
+                         f"Chain.")
     return ui.notice(f"{label} has its own runtime and its own prompt cache, in different "
-                     f"memory from the other role.")
+                     f"memory from the other roles.")
 
 
 def _role_is_split(role: str) -> bool:

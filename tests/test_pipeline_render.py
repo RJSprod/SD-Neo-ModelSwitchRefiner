@@ -83,6 +83,7 @@ body { font-size: 16px; font-family: system-ui, sans-serif; margin: 0; }
 <pre id="out"></pre>
 <script>
 const CARDS = %(cards)s;
+const PLAIN = %(plain)s;
 
 // The real nesting, which is the part that mattered. The three cards live
 // inside the Image Pipeline panel -- itself one of this extension's drawers --
@@ -138,6 +139,30 @@ for (const [id, label] of CARDS) {
   stage.append(ed, sw);
   panelBody.appendChild(stage);
 }
+
+// The toggle-only row, exactly as mc_pipeline_panel builds it: a stage column
+// already carded by the server, a gr.HTML block holding Python's two lines,
+// and the same switch column in the same lane. No accordion, so the browser
+// file never dresses it and nothing below depends on that having happened.
+{
+  const stage = document.createElement('div');
+  stage.className = 'mc-pipeline-stage mc-pipeline-stage-plain mc-pipeline-carded';
+  stage.id = 'mc-pipeline-stage-neutralize';
+  const holder = document.createElement('div');
+  holder.className = 'mc-pipeline-plain';
+  const prose = document.createElement('div');   // Gradio's wrapper for HTML
+  prose.className = 'prose';
+  prose.innerHTML = PLAIN;
+  holder.appendChild(prose);
+  const sw = document.createElement('div');
+  sw.className = 'mc-pipeline-switch';
+  const lab = document.createElement('label');
+  lab.append(Object.assign(document.createElement('input'), { type: 'checkbox' }),
+             Object.assign(document.createElement('span'), { textContent: 'ON' }));
+  sw.appendChild(lab);
+  stage.append(holder, sw);
+  panelBody.insertBefore(stage, panelBody.firstChild);
+}
 window.gradioApp = () => document;
 window.onUiLoaded = f => f();
 window.onAfterUiUpdate = () => {};
@@ -175,6 +200,35 @@ for (const [id] of CARDS) {
     })(),
   };
 }
+{
+  const stage = document.getElementById('mc-pipeline-stage-neutralize');
+  const name = stage.querySelector('.mc-pipeline-name');
+  const said = stage.querySelector('.mc-pipeline-said');
+  const lab = stage.querySelector('.mc-pipeline-switch label');
+  const n = name.getBoundingClientRect(), s = said.getBoundingClientRect();
+  const sw = lab.getBoundingClientRect();
+  seen.neutralize = {
+    // Two elements from the server, not from the browser file: the same
+    // property the cards have, reached the other way round.
+    split: true,
+    carded: stage.classList.contains('mc-pipeline-carded'),
+    name: name.textContent,
+    said: said.textContent,
+    stacked: s.top >= n.bottom - 1,
+    nameSize: parseFloat(getComputedStyle(name).fontSize),
+    saidSize: parseFloat(getComputedStyle(said).fontSize),
+    nameWeight: getComputedStyle(name).fontWeight,
+    clearOfSwitch: Math.max(n.right, s.right) <= sw.left + 1,
+    withinBand: s.bottom <= stage.getBoundingClientRect().bottom + 1,
+    switchInside: sw.top >= stage.getBoundingClientRect().top - 1
+                  && sw.bottom <= stage.getBoundingClientRect().bottom + 1,
+    caret: getComputedStyle(stage.querySelector('.mc-pipeline-card-head'), '::after').content,
+    strays: [...stage.querySelector('.mc-pipeline-card-head').children].filter(function (kid) {
+      return !kid.classList.contains('mc-pipeline-label')
+             && getComputedStyle(kid).display !== 'none';
+    }).length,
+  };
+}
 document.getElementById('out').textContent = JSON.stringify(seen);
 </script>
 """
@@ -189,10 +243,14 @@ CARDS = [["creative", "Creative\nBypassed — prompt as-is"],
 @pytest.fixture(scope="module")
 def rendered(tmp_path_factory):
     page = tmp_path_factory.mktemp("render") / "card.html"
+    import mc_pipeline_panel
+
     page.write_text(PAGE % {
         "style": STYLE.read_text(encoding="utf-8"),
         "js": PIPELINE_JS.read_text(encoding="utf-8"),
         "cards": json.dumps(CARDS),
+        "plain": json.dumps(mc_pipeline_panel.plain_label(
+            "neutralize", mc_pipeline_panel.PLACEHOLDERS["neutralize"])),
     }, encoding="utf-8")
 
     done = subprocess.run(
@@ -257,3 +315,28 @@ class TestTheCardRenders:
         assert rendered["spatial"]["name"] == "Spatial"
         assert rendered["stage2"]["name"] == "Stage 2"
         assert rendered["stage2"]["said"].startswith("1024")
+
+
+class TestTheToggleOnlyRowRenders:
+    """The Neutralize Prompt row, drawn without a disclosure and without the
+    browser file's help, and measured against the same bar the cards clear."""
+
+    def test_it_reads_as_two_lines_in_the_cards_voice(self, rendered):
+        row = rendered["neutralize"]
+
+        assert row["name"] == "Neutralize Prompt"
+        assert row["said"].startswith("Bypassed")
+        assert row["stacked"]
+        assert row["nameSize"] > row["saidSize"]
+        assert int(row["nameWeight"]) >= 600
+
+    def test_the_switch_sits_in_its_lane_and_nothing_runs_under_it(self, rendered):
+        row = rendered["neutralize"]
+
+        assert row["clearOfSwitch"]
+        assert row["withinBand"]
+        assert row["switchInside"]
+
+    def test_nothing_draws_a_caret_on_it(self, rendered):
+        """No disclosure, so no way in, so no arrow promising one."""
+        assert rendered["neutralize"]["caret"] in ("none", "normal", "", '""')

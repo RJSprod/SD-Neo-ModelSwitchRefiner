@@ -2,6 +2,9 @@
 
     IMAGE PIPELINE
 
+    Neutralize Prompt                OFF
+      Bypassed - prompt as-is
+      |
     Creative                         ON
       C7 - 2 directions - Editorial
       |
@@ -17,16 +20,19 @@ accordion were three independent top-level surfaces on txt2img, each one
 truthful about itself and none of them saying what the others were going to do
 to the same picture. A user could read all three and still not know what the
 next press of Generate would produce, because the one thing none of them
-described was the *order*.
+described was the *order*. Neutralize Prompt joined the top of the path later,
+and joined it as a row, because a stage that runs first and is drawn anywhere
+else would be the same hole in the diagram.
 
 What this module is
 -------------------
 A presentation shell and nothing else. It owns no setting, reads no
-preference, and runs no part of a generation. It builds three rows and hands out
-the empty containers -- two per row -- that the feature scripts fill with their
-own existing controls. Every control on the finished panel is the same Gradio
-component, wired to the same handler, writing to the same state as before this
-file existed. The pipeline is where they are drawn, not what they do.
+preference, and runs no part of a generation. It builds four rows and hands out
+the empty containers -- two per expandable row, one for the toggle-only row --
+that the feature scripts fill with their own existing controls. Every control on
+the finished panel is the same Gradio component, wired to the same handler,
+writing to the same state as before this file existed. The pipeline is where
+they are drawn, not what they do.
 
 Why the shell is shared rather than owned
 -----------------------------------------
@@ -36,7 +42,7 @@ lives in ``scripts/model_chain.py``. Forge builds each ``alwayson`` script's
 choose, so neither script can contain the other.
 
 So neither does. Whichever script's ``ui()`` runs first calls :func:`host`,
-which builds the whole shell -- all three rows, in pipeline order, with empty
+which builds the whole shell -- all four rows, in pipeline order, with empty
 slots -- and remembers it against the Blocks currently being assembled. The
 second script calls :func:`host`, gets the same object back, and fills its
 slots by re-entering them:
@@ -46,14 +52,14 @@ slots by re-entering them:
 
 Gradio appends to a container that is re-entered, and renders each container's
 children in the order they were added. The slots are created in pipeline order
-at build time, so the finished panel reads Creative -> Spatial -> Stage 2
-whichever script got there first. Nothing here
-depends on script order, which is the property that makes it safe: a host that
-sorts its scripts differently tomorrow rearranges nothing.
+at build time, so the finished panel reads Neutralize Prompt -> Creative ->
+Spatial -> Stage 2 whichever script got there first. Nothing here depends on
+script order, which is the property that makes it safe: a host that sorts its
+scripts differently tomorrow rearranges nothing.
 
 Only what this extension owns
 -----------------------------
-Three rows, and they are the three stages Model Chain runs. The panel used to
+Four rows, and they are the four stages Model Chain runs. The panel used to
 draw Prompt, Stage 1 and Output as well -- Forge's own, muted and uneditable, so
 that the path had no holes in it. What that produced in practice was three rows
 restating things the page already said louder: the prompt box is directly above,
@@ -71,14 +77,18 @@ because two controls holding one value is a bug with a delay on it.
 
 Everything is a stock component
 -------------------------------
-Accordion, Row, Column, Group, Checkbox, Markdown. No custom-HTML control, no
-Gradio-generated class in any selector, and an extension-owned id on every
-element. That is what lets a theme extension -- Lobe, or any other -- restyle
-this panel along with the rest of the page instead of around it.
+Accordion, Row, Column, Group, Checkbox, Markdown, HTML. No custom-HTML
+*control*, no Gradio-generated class in any selector, and an extension-owned id
+on every element. That is what lets a theme extension -- Lobe, or any other --
+restyle this panel along with the rest of the page instead of around it. The
+one ``gr.HTML`` is the Neutralize Prompt row's two lines of text, which take no
+input and carry no state; the switch beside them is the same stock Checkbox
+every other stage has.
 """
 
 from __future__ import annotations
 
+import html
 import logging
 
 import gradio as gr
@@ -89,8 +99,23 @@ logger = logging.getLogger("model_chain")
 PREFIX = "mc-pipeline"
 """Element-id and class stem for everything this module puts in the page."""
 
-OWNED = ("creative", "spatial", "stage2")
-"""The stages Model Chain controls: switchable, expandable, emphasised."""
+OWNED = ("neutralize", "creative", "spatial", "stage2")
+"""The stages Model Chain controls: switchable, emphasised, all but one expandable."""
+
+PLAIN = ("neutralize",)
+"""The stages with one control and nothing behind it.
+
+Neutralize Prompt has a switch and no settings: model, device and runtime are
+decided where every other role's are, in LLM Studio's Setup, and the txt2img
+surface answers one question -- should this generation neutralize pose and
+placement before Creative and Spatial? A row for that is a name, a description
+and a switch, and not a way in. Drawing it with the card builder below would
+put a caret on it that opens a drawer with nothing inside, which is the kind
+of furniture the card was pared down to remove.
+"""
+
+EXPANDABLE = tuple(stage for stage in OWNED if stage not in PLAIN)
+"""The stages with a disclosure: everything a feature fills a body slot in."""
 
 ORDER = OWNED
 """Top to bottom, and the order a generation actually runs in.
@@ -122,6 +147,7 @@ had gone stale.
 """
 
 TITLES = {
+    "neutralize": "Neutralize Prompt",
     "creative": "Creative",
     "spatial": "Spatial",
     "stage2": "Stage 2",
@@ -164,6 +190,7 @@ height at all, so the line costs nothing until there is something to say.
 """
 
 PLACEHOLDERS = {
+    "neutralize": "Bypassed — prompt as-is",
     "creative": "Bypassed — prompt as-is",
     "spatial": "Bypassed — no regions",
     "stage2": "Bypassed — Stage 1 is final",
@@ -279,6 +306,14 @@ no ellipsis to show for it, which reads as a description that just stops.
 """
 
 
+def _said(summary: str) -> str:
+    """One description, flattened and cut to the header's budget."""
+    said = " ".join(str(summary or "").split())
+    if len(said) > SAID:
+        said = said[:SAID - 1].rstrip(" ·,—-") + "…"
+    return said
+
+
 def card_label(stage: str, summary: str = "") -> str:
     """A stage card's whole header, as the one string Gradio gives it.
 
@@ -300,11 +335,31 @@ def card_label(stage: str, summary: str = "") -> str:
     that gets one line reading "Creative C7 · 2 directions" -- which is a worse
     layout and still the right information in the right place.
     """
-    said = " ".join(str(summary or "").split())
-    if len(said) > SAID:
-        said = said[:SAID - 1].rstrip(" ·,—-") + "…"
+    said = _said(summary)
     name = TITLES.get(stage, str(stage))
     return f"{name}\n{said}" if said else name
+
+
+def plain_label(stage: str, summary: str = "") -> str:
+    """A toggle-only row's whole header, as the markup its ``gr.HTML`` shows.
+
+    The same two lines a card carries, cut to the same budget, and written as
+    two elements rather than one string with a newline in it. A card has to
+    put both lines in an accordion's label -- the only text a disclosure is
+    guaranteed to keep inside its header -- and leave it to the browser file
+    to split them. This row has no disclosure and so no such constraint: the
+    elements the browser file would have made are made here, with the same
+    classes, so the stylesheet's rules for a dressed card's two lines apply to
+    them from the moment the page is built and whether or not any script
+    ever runs. Escaped, because a description is text and not markup.
+    """
+    said = _said(summary)
+    name = html.escape(TITLES.get(stage, str(stage)))
+    return (f'<div class="{CARD_HEAD} {PREFIX}-plain-head">'
+            f'<div class="{PREFIX}-label">'
+            f'<div class="{PREFIX}-name">{name}</div>'
+            f'<div class="{PREFIX}-said" title="{html.escape(said)}">{html.escape(said)}</div>'
+            f'</div></div>')
 
 
 def switch(*, elem_id=None, label="ON", **kwargs):
@@ -334,17 +389,25 @@ def switch(*, elem_id=None, label="ON", **kwargs):
 
 
 def card_summary(stage: str, summary: str):
-    """The update that repaints one stage card's description."""
+    """The update that repaints one stage's description.
+
+    A card's description is its accordion's label, so the update sets a
+    label; a toggle-only row's is the value of its ``gr.HTML``, so the update
+    sets a value. One function for both, because the feature scripts repaint
+    a row by stage name and should not have to know which kind it is.
+    """
+    if stage in PLAIN:
+        return gr.update(value=plain_label(stage, summary))
     return gr.update(label=card_label(stage, summary))
 
 
 class Pipeline:
-    """The three rows, and the empty containers the feature scripts fill.
+    """The four rows, and the empty containers the feature scripts fill.
 
-    Built once per Gradio Blocks by :func:`host`. A script asks for the two
-    slots belonging to a stage it owns, re-enters them, and builds whatever it
-    was building before -- unchanged, and in most cases moved rather than
-    rewritten.
+    Built once per Gradio Blocks by :func:`host`. A script asks for the slots
+    belonging to a stage it owns -- two for a card, one for a toggle-only row
+    -- re-enters them, and builds whatever it was building before, unchanged
+    and in most cases moved rather than rewritten.
     """
 
     def __init__(self):
@@ -368,7 +431,11 @@ class Pipeline:
 
         Section 3.3: a stage is switched from the collapsed row, so the switch
         cannot live inside the drawer it would otherwise be needed to open.
+        For a toggle-only row the switch is the whole of what a feature fills,
+        so asking for its head is what marks the stage filled.
         """
+        if stage in PLAIN:
+            self.filled.add(stage)
         return self._slot(self.heads, stage, "head")
 
     def body(self, stage: str):
@@ -379,10 +446,12 @@ class Pipeline:
     def summary(self, stage: str):
         """The component a stage's description is written to, or ``None``.
 
-        It is the stage's own disclosure. A feature repaints its description by
-        returning ``card_summary(stage, text)`` for this component, which sets
-        the accordion's label -- so the description is inside the header under
-        every theme, and there is no second element to fall out of it.
+        For a card it is the stage's own disclosure: a feature repaints its
+        description by returning ``card_summary(stage, text)`` for this
+        component, which sets the accordion's label -- so the description is
+        inside the header under every theme, and there is no second element to
+        fall out of it. For a toggle-only row it is the ``gr.HTML`` that holds
+        both lines, and the same call repaints its value.
         """
         return self.summaries.get(stage)
 
@@ -447,6 +516,44 @@ def _row(pipeline: Pipeline, stage: str) -> None:
             pipeline.heads[stage] = head
 
 
+def _plain_row(pipeline: Pipeline, stage: str) -> None:
+    """One toggle-only stage: a name, a description, a switch, and no way in.
+
+    The first three of the four things a card is and not the fourth. Built as
+    a stage column like every other row, with the same switch slot in the same
+    lane, so the stylesheet and the browser file treat it as one of the panel's
+    rows -- it lights when its phase runs, it sits in the same outline -- and
+    differ from a card in exactly one respect: there is no disclosure, so
+    nothing draws a caret and nothing opens.
+
+    The two lines are written here as two elements rather than as a label the
+    browser file splits, and the column carries :data:`CARDED` from the start,
+    because Python furnished this header itself and there is nothing left for a
+    script to find. If every line of JavaScript on the page fails, this row
+    looks exactly as it does when none of it does.
+    """
+    with gr.Column(elem_id=ident("stage", stage),
+                   elem_classes=[*classes("stage", "stage-owned", f"stage-{stage}",
+                                          "stage-plain"), CARDED]) as row:
+        pipeline.rows[stage] = row
+
+        # The summary target: the same call that sets a card's label sets this
+        # component's value. See card_summary().
+        head = gr.HTML(plain_label(stage, PLACEHOLDERS.get(stage, "")),
+                       elem_id=ident("plain", stage), elem_classes=classes("plain"))
+        pipeline.summaries[stage] = head
+
+        # Filled by the feature that owns the stage, with the one control it
+        # has. Nothing is created here, for the reason nothing is created in
+        # a card's switch slot: the switch is the control the generation reads,
+        # and a second one mirroring it would be the duplicate source-of-truth
+        # section 2.5 forbids.
+        with gr.Column(min_width=0, scale=0,
+                       elem_id=ident("switch", stage),
+                       elem_classes=classes("switch")) as switch:
+            pipeline.heads[stage] = switch
+
+
 def _build() -> Pipeline:
     """Assemble the whole shell into whatever container is currently open."""
     pipeline = Pipeline()
@@ -468,7 +575,10 @@ def _build() -> Pipeline:
                 elem_id=ident("notes"), elem_classes=classes("notes"))
 
         for stage in ORDER:
-            _row(pipeline, stage)
+            if stage in PLAIN:
+                _plain_row(pipeline, stage)
+            else:
+                _row(pipeline, stage)
 
     return pipeline
 

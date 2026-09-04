@@ -67,7 +67,7 @@ RUNTIME_MARKER = ".runtime-id"
 
 Written on install and read to decide where the *next* install goes. Without it
 there is no way to ask a directory what is in it, and the only alternatives are
-to trust the state file -- which describes one role and there may now be two --
+to trust the state file -- which describes one role and there may now be three --
 or to overwrite, which is the failure this exists to prevent.
 """
 

@@ -1026,3 +1026,22 @@ The constant is renamed, and `test_the_files_under_test_avoid_the_placeholders`
 now fails on any of those words appearing in either file under test, comments
 included. This cost two rounds of confusion inside one change; it should not
 cost a third.
+
+
+## 17. A fourth row, and the first with nothing to open (4 September 2026)
+
+The Neutralize Prompt stage put a row above Creative, and it is the first row
+that is not an Accordion: a switch, two lines, no body and no caret. How that
+row is built without a second set of header rules, why the browser file never
+touches it, and how the render harness measures it beside the three cards are
+in `docs/20-neutralize-prompt.md` §8. Two things from this document changed
+with it:
+
+* **§13 "Three rows, and nothing else" is now four.** The rule is the same —
+  a name, a description, a switch and, where there is anything to open, a way
+  in — and `OWNED` in `mc_pipeline_panel` is still the one ordered tuple every
+  consumer iterates. `PLAIN` and `EXPANDABLE` partition it.
+* **§1's argument-list invariant moved by one.** `ScriptKreaCreative.ui()`
+  returns `[enabled, creativity] + settings + axes + literal + neutralize +
+  spatial`; the Spatial tail is still last, and `_split()` still cuts from the
+  two fixed ends.

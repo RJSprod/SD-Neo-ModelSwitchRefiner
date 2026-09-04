@@ -1510,11 +1510,12 @@ class TestRestoringTheWorkflow:
 
         mc_spatial.remember(**{mc_spatial.ENABLED: False, mc_spatial.LAYOUT: ""})
         returned = creative_script._restore_setup(False)
-        _prompt, _enabled, status, _view, _positive, _negative = returned
+        _prompt, _enabled, status, _view, _positive, _negative, _neutralize = returned
 
-        # Six now: the two Literal Prompt boxes joined the outputs when they
-        # became a restorable part of the setup. Still nothing of Spatial's.
-        assert len(returned) == 6
+        # Seven now: the two Literal Prompt boxes joined the outputs when they
+        # became a restorable part of the setup, and the Neutralize switch
+        # when its stage did. Still nothing of Spatial's.
+        assert len(returned) == 7
         assert mc_spatial.settings()["enabled"] is False
         assert mc_spatial.settings()["layout"] == ""
         assert "Spatial Layout" in status
