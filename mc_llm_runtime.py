@@ -935,6 +935,28 @@ def execution_domain(configuration: Config | None) -> mc_broker.ExecutionDomain:
                                     name=getattr(configuration, "card_name", ""))
 
 
+def mapped_key(model: str | None) -> str:
+    """One GGUF's identity for the page cache, spelled the way the OS sees it.
+
+    Two servers that name the same file are two mappings of one set of physical
+    pages, and the only thing that decides whether they *are* the same file is
+    the operating system's own idea of the path. ``normcase`` is what carries
+    that: on Windows it folds case and turns every ``/`` into ``\\``, so a role
+    configured through the UI and one configured from a settings file agree;
+    on POSIX it is the identity function and the comparison is exact already.
+
+    Empty for a model that cannot be named, and empty never matches anything --
+    a server that will not say which file it holds is counted on its own, which
+    is the direction that over-states rather than under-states a claim.
+    """
+    if not model:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(str(model)))
+    except Exception:
+        return ""
+
+
 def host_ram_demand(configuration: Config | None,
                     placement: mc_llm_context.Placement | None = None) -> int:
     """Host RAM this placement materially needs, as an estimate (section 10.7).
@@ -4197,22 +4219,46 @@ class Runtime:
         (invariant I-5).
         """
         wanted = host_ram_demand(configuration, placement)
-        if wanted <= 0 or mc_broker.host_ram_fits(wanted):
+        # Weights another server already has mapped are memory that is already
+        # spent. Mapping the same GGUF a second time allocates nothing -- the
+        # pages are one set, shared -- so asking the machine to find room for
+        # them again asks for memory it already has and is told no, and the
+        # thing that then "gives ground" is the very server whose mapping made
+        # the answer nothing. That is a sibling ended to make room for itself.
+        #
+        # The image side reached this conclusion first and states it in as many
+        # words (see mc_memory.make_host_ram_room): "the weights that are in
+        # system RAM are a stake, not a demand". Same rule, other family.
+        shared = registry.mapped_host_ram_bytes(
+            getattr(configuration, "model", None), excluding=self)
+        adding = max(wanted - shared, 0)
+
+        if adding <= 0:
+            if shared > 0:
+                logger.info(
+                    "Model Chain: %sthis model is already in system RAM for another "
+                    "server — %.1f GB of it, mapped once and shared — so starting this "
+                    "one asks the machine for nothing and nothing was moved to make room",
+                    self._said_for(), shared / _GB)
+            return
+        if mc_broker.host_ram_fits(adding):
             return
         admission = mc_broker.admit_host_ram(
-            wanted, reason=f"{_backbone_label(configuration)} in system RAM")
+            adding, reason=f"{_backbone_label(configuration)} in system RAM")
         if admission.fits:
             if admission.moved_anything:
                 logger.info("Model Chain: %s%s before starting llama-server",
                             self._said_for(), admission.describe())
             return
         logger.warning(
-            "Model Chain: %sthis placement needs about %.1f GB of system RAM and only "
+            "Model Chain: %sthis placement needs about %.1f GB of system RAM%s and only "
             "%.1f GB is available above the %.1f GB reserve%s. llama.cpp will still try, "
             "and reads through the page cache, so expect a slow load and slow replies "
             "until something on this machine gives that memory back.",
-            self._said_for(), wanted / _GB, admission.available / _GB,
-            admission.reserve / _GB,
+            self._said_for(), adding / _GB,
+            f" beyond the {shared / _GB:.1f} GB already mapped for another server"
+            if shared > 0 else "",
+            admission.available / _GB, admission.reserve / _GB,
             f" (after {admission.describe()})" if admission.moved_anything else "")
 
     def _prepare_vision(self, cancel=None) -> None:
@@ -5011,6 +5057,35 @@ class Runtime:
             if not self._running:
                 return 0
             return host_ram_demand(self.configuration(), self._placement)
+        finally:
+            self._lock.release()
+
+    def host_ram_claim(self) -> tuple[str, int]:
+        """The GGUF this server holds in system RAM, and how much of it.
+
+        A pair rather than two calls, and that is the whole reason it exists.
+        The two halves have to describe one instant -- a server that stops
+        between them would report a file it no longer holds, or a size against
+        no file -- and one timed acquisition is also the whole of the deadlock
+        discipline :meth:`host_ram_bytes` documents. Asking twice would take
+        this lock twice and give a torn answer for the trouble.
+
+        ``("", 0)`` when the runtime is busy, stopped, or cannot be sized, for
+        the same reason zero is safe there: an unknown claim matches no other
+        server's and is counted on its own.
+        """
+        if not self._lock.acquire(timeout=HOST_RAM_READ_TIMEOUT):
+            logger.debug("Model Chain: the runtime was busy, so its host-RAM claim reads "
+                         "as nothing for now")
+            return "", 0
+        try:
+            if not self._running:
+                return "", 0
+            configuration = self.configuration()
+            held = host_ram_demand(configuration, self._placement)
+            if held <= 0:
+                return "", 0
+            return mapped_key(getattr(configuration, "model", None)), held
         finally:
             self._lock.release()
 
@@ -5976,18 +6051,115 @@ class RuntimeRegistry:
         return freed
 
     def host_ram_bytes(self) -> int:
-        """System RAM the running servers materially need. See :func:`host_ram_demand`."""
-        total = 0
+        """System RAM the running servers materially need. See :func:`host_ram_demand`.
+
+        Counted per *GGUF* and not per server, which is the whole of the
+        correction. llama.cpp reads a model through ``mmap`` -- deliberately, on
+        every placement that is entirely in system RAM, and :data:`NO_MMAP_FLAG`
+        exists to say which single placement is the exception -- so two servers
+        that name one file are two mappings of one set of physical pages. The
+        weights are in memory once however many roles are answering from them.
+
+        Summing per server said otherwise, and said it in gigabytes. From a
+        user's log, two roles on one 12.5 GB model::
+
+            [Neutralizer] system RAM after this server loaded — 47.3 GB free ...
+                          12.5 GB in our language models
+            [Creative]    system RAM after this server loaded — 39.1 GB free ...
+                          25.0 GB in our language models
+
+        The counter claimed a second 12.5 GB. Free RAM fell by 8.2 GB, and most
+        of that is the second server's own KV cache and buffers rather than any
+        second copy of the weights -- there was never a second copy to make.
+        """
+        return sum(self._host_ram_claims().values())
+
+    def _host_ram_claims(self) -> dict[str, int]:
+        """Per GGUF, the largest claim any running server makes on system RAM.
+
+        The largest rather than the sum, because the physical thing being
+        counted is one set of pages: two servers mapping the whole of a file
+        hold that file's size between them, not twice it, and a server that maps
+        only part of a file cannot make the whole cost more than the file. The
+        answer is therefore bounded by the file, which a sum was not.
+
+        A runtime that cannot say which file it holds is keyed on its own
+        identity, so it is counted on its own exactly as it always was. That is
+        the direction that over-states, and over-stating a claim only ever costs
+        an eviction that was not needed -- never a load the machine could not
+        take.
+        """
+        claims: dict[object, int] = {}
         for found in self.running():
-            asking = getattr(found, "host_ram_bytes", None)
-            if not callable(asking):
+            key, held = self._claim_of(found)
+            if held <= 0:
                 continue
+            claims[key] = max(claims.get(key, 0), held)
+        return claims
+
+    @staticmethod
+    def _claim_of(found) -> tuple[object, int]:
+        """``(what it holds, how much)`` for one runtime, however little it will say.
+
+        Duck-typed in the same shape as everything else the registry asks of a
+        runtime, because the test doubles and the real class are both allowed to
+        be here. A double that answers only ``host_ram_bytes`` is keyed on
+        ``id`` -- its claim shares with nothing, which is what summing already
+        assumed about every server.
+        """
+        asking = getattr(found, "host_ram_claim", None)
+        if callable(asking):
             try:
-                total += max(int(asking() or 0), 0)
+                key, held = asking()
+                held = max(int(held or 0), 0)
+                return (key or id(found)), held
             except Exception:
-                logger.debug("Model Chain: could not read a runtime's host-RAM demand",
+                logger.debug("Model Chain: could not read a runtime's host-RAM claim",
                              exc_info=True)
-        return total
+                return id(found), 0
+
+        asking = getattr(found, "host_ram_bytes", None)
+        if not callable(asking):
+            return id(found), 0
+        try:
+            return id(found), max(int(asking() or 0), 0)
+        except Exception:
+            logger.debug("Model Chain: could not read a runtime's host-RAM demand",
+                         exc_info=True)
+            return id(found), 0
+
+    def mapped_host_ram_bytes(self, model: str | None, *, excluding=None) -> int:
+        """How much of ``model`` a running server already has in system RAM.
+
+        The question a *start* has to ask before it asks for room. Weights another
+        server has already mapped are memory that is already spent: mapping them a
+        second time allocates nothing, so asking the machine to find room for them
+        again is asking it for memory it has, and being told no.
+
+        ``excluding`` leaves a runtime out of the answer -- the one that is about
+        to start, which must not be allowed to count its own previous mapping as
+        somebody else's and conclude it needs nothing.
+
+        That exclusion is about correctness and not about locks, which is worth
+        saying because it looks like the other thing. ``_admit_host_ram`` runs
+        inside ``_launch``'s ``with self._lock``, and the lock is an ``RLock``,
+        so a starting runtime asking itself would succeed and answer with its
+        own outgoing mapping -- a restart in place would then ask the machine
+        for nothing at all. Sibling locks are taken with
+        :data:`HOST_RAM_READ_TIMEOUT`, so a busy one costs a second and answers
+        "nothing" rather than holding up a start.
+        """
+        key = mapped_key(model)
+        if not key:
+            return 0
+        largest = 0
+        for found in self.running():
+            if excluding is not None and found is excluding:
+                continue
+            held_key, held = self._claim_of(found)
+            if held_key == key and held > largest:
+                largest = held
+        return largest
 
     def describe(self) -> str:
         import mc_llm_roles

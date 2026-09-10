@@ -77,12 +77,14 @@ class Server:
     with no scoping at all.
     """
 
-    def __init__(self, card=OTHER_CARD, holds=0, up=True, host_ram=0, cpu=False):
+    def __init__(self, card=OTHER_CARD, holds=0, up=True, host_ram=0, cpu=False,
+                 model=None):
         self.card = None if cpu else card
         self.cpu = cpu
         self.holds = holds
         self.up = up
         self.host_ram = host_ram
+        self.model = model
         self.calls: list[tuple[int, str, object]] = []
         self.roles: tuple = ()
         self.stopped = False
@@ -104,6 +106,17 @@ class Server:
 
     def host_ram_bytes(self):
         return self.host_ram if self.up else 0
+
+    def host_ram_claim(self):
+        """What this server holds, and which file it holds it in.
+
+        ``model=None`` answers with no name, which is what a runtime that
+        cannot say looks like -- and is why every test written before shared
+        mappings existed still has each of its servers counted on its own.
+        """
+        if not self.up or self.host_ram <= 0:
+            return "", 0
+        return runtime.mapped_key(self.model), self.host_ram
 
     def release(self, needed_bytes, reason="", *, card=mc_broker.ANY_CARD):
         self.calls.append((int(needed_bytes), reason, card))
@@ -2566,3 +2579,178 @@ class TestReadingHostRamNeverWaitsForAModelLoad:
         held = runtime.Runtime()
 
         assert held.host_ram_bytes() == 0, "not running, so it holds nothing"
+
+
+# --------------------------------------------------------------------------- #
+# One GGUF, however many servers are reading it
+# --------------------------------------------------------------------------- #
+
+
+class TestAModelMappedTwiceIsCountedOnce:
+    """llama.cpp reads a GGUF through ``mmap``, so two servers on one file are
+    two mappings of one set of physical pages -- the weights are in memory once
+    however many roles answer from them. Counting them per server said
+    otherwise, and said it in gigabytes. From a user's log, two roles on one
+    12.5 GB model::
+
+        [Neutralizer] system RAM after this server loaded — 47.3 GB free ...
+                      12.5 GB in our language models
+        [Creative]    system RAM after this server loaded — 39.1 GB free ...
+                      25.0 GB in our language models
+
+    The counter claimed a second copy. Free RAM fell by 8.2 GB, and there was
+    never a second copy of the weights to make.
+    """
+
+    GGUF = "/models/managed/gemma/model.gguf"
+
+    def test_two_servers_on_one_model_hold_it_once(self, scoped, registry):
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "neutralizer")
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "creative")
+
+        assert registry.host_ram_bytes() == 12 * _GB
+
+    def test_two_servers_on_different_models_hold_both(self, scoped, registry):
+        """The dedup must key on the file, not merely collapse everything."""
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "one")
+        hold(registry, Server(cpu=True, host_ram=8 * _GB, model="/models/other.gguf"), "two")
+
+        assert registry.host_ram_bytes() == 20 * _GB
+
+    def test_the_largest_share_of_a_shared_file_is_the_claim(self, scoped, registry):
+        """A partial offload maps part of the file; a processor placement maps
+        all of it. Between them they hold the file, not the file and a half."""
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "whole")
+        hold(registry, Server(cpu=True, host_ram=5 * _GB, model=self.GGUF), "part")
+
+        assert registry.host_ram_bytes() == 12 * _GB
+
+    def test_one_file_spelled_two_ways_is_still_one_claim(self, scoped, registry):
+        """Two roles configured by different routes name the same file
+        differently. The operating system does not care and neither may this."""
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "one")
+        hold(registry, Server(cpu=True, host_ram=12 * _GB,
+                              model="/models/managed/gemma/./model.gguf"), "two")
+
+        assert registry.host_ram_bytes() == 12 * _GB
+
+    def test_a_runtime_that_will_not_name_its_model_is_counted_on_its_own(
+            self, scoped, registry):
+        """The direction that over-states. An unknown claim shares with nothing,
+        which is what summing already assumed about every server -- so nothing
+        written before shared mappings existed changes meaning."""
+        hold(registry, Server(cpu=True, host_ram=6 * _GB), "one")
+        hold(registry, Server(cpu=True, host_ram=5 * _GB), "two")
+
+        assert registry.host_ram_bytes() == 11 * _GB
+
+    def test_a_stopped_server_holds_nothing(self, scoped, registry):
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF, up=False), "gone")
+
+        assert registry.host_ram_bytes() == 0
+
+
+class TestAStartIsNotChargedForPagesItShares:
+    """The half of this that ends processes.
+
+    A start asks the machine for room for its weights, and when it cannot have
+    them the broker stops an idle server to make space. With the same GGUF
+    already mapped by a sibling, that ask was for memory the machine had
+    already spent -- so the answer was always no, and the thing that "gave
+    ground" was the very server whose mapping made the answer nothing. A
+    sibling ended to make room for itself.
+
+    The image side reached this first and states it in as many words
+    (``mc_memory.make_host_ram_room``): *the weights that are in system RAM are
+    a stake, not a demand*.
+    """
+
+    GGUF = "/models/managed/gemma/model.gguf"
+
+    def test_a_model_a_sibling_already_maps_costs_nothing_to_add(self, scoped, registry):
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "sibling")
+
+        assert registry.mapped_host_ram_bytes(self.GGUF) == 12 * _GB
+
+    def test_a_model_nobody_maps_costs_its_full_size(self, scoped, registry):
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model="/models/other.gguf"), "other")
+
+        assert registry.mapped_host_ram_bytes(self.GGUF) == 0
+
+    def test_a_partly_mapped_model_leaves_the_difference_to_find(self, scoped, registry):
+        hold(registry, Server(cpu=True, host_ram=5 * _GB, model=self.GGUF), "part")
+
+        assert registry.mapped_host_ram_bytes(self.GGUF) == 5 * _GB
+
+    def test_a_start_does_not_count_its_own_mapping_as_somebody_elses(
+            self, scoped, registry):
+        """A restart in place would otherwise read its own outgoing mapping and
+        conclude it needed nothing."""
+        mine = hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "mine")
+
+        assert registry.mapped_host_ram_bytes(self.GGUF) == 12 * _GB
+        assert registry.mapped_host_ram_bytes(self.GGUF, excluding=mine) == 0
+
+    def test_a_model_that_cannot_be_named_matches_nothing(self, scoped, registry):
+        hold(registry, Server(cpu=True, host_ram=12 * _GB, model=self.GGUF), "sibling")
+
+        assert registry.mapped_host_ram_bytes(None) == 0
+        assert registry.mapped_host_ram_bytes("") == 0
+
+    def test_the_sibling_is_not_stopped_for_weights_it_is_already_holding(
+            self, scoped, registry, monkeypatch, tmp_path, caplog):
+        """The whole point, end to end: a machine far below its floor, a second
+        role starting on the model the first one already has mapped, and
+        nothing asked of the broker because nothing more is needed."""
+        import logging
+        import types
+
+        settings = configuration_on(tmp_path, card=None, mode="cpu")
+        ram(monkeypatch, available_gb=3)
+        monkeypatch.setattr(runtime, "host_ram_demand",
+                            lambda configuration, placement=None: 12 * _GB)
+        monkeypatch.setattr(runtime, "registry", registry)
+        sibling = hold(registry, Server(cpu=True, host_ram=12 * _GB,
+                                        model=settings.model), "sibling")
+
+        asked: list = []
+
+        def admit(needed, **kwargs):
+            asked.append(needed)
+            return mc_broker.Admission(needed, 2 * _GB, 3 * _GB, 3 * _GB)
+
+        monkeypatch.setattr(mc_broker, "admit_host_ram", admit)
+
+        starting = types.SimpleNamespace(_said_for=lambda: "[Creative] ")
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            runtime.Runtime._admit_host_ram(starting, settings, None)
+
+        assert asked == [], "the broker was asked to find room for pages already in RAM"
+        assert not sibling.stopped
+        assert "already in system RAM for another server" in caplog.text
+
+    def test_a_start_with_no_sibling_still_asks_for_the_whole_model(
+            self, scoped, registry, monkeypatch, tmp_path):
+        """The other direction, and the one that must not regress: with nothing
+        sharing the file, a start that does not fit still asks."""
+        import types
+
+        settings = configuration_on(tmp_path, card=None, mode="cpu")
+        ram(monkeypatch, available_gb=3)
+        monkeypatch.setattr(runtime, "host_ram_demand",
+                            lambda configuration, placement=None: 12 * _GB)
+        monkeypatch.setattr(runtime, "registry", registry)
+
+        asked: list = []
+
+        def admit(needed, **kwargs):
+            asked.append(needed)
+            return mc_broker.Admission(needed, 2 * _GB, 20 * _GB, 20 * _GB)
+
+        monkeypatch.setattr(mc_broker, "admit_host_ram", admit)
+
+        starting = types.SimpleNamespace(_said_for=lambda: "")
+        runtime.Runtime._admit_host_ram(starting, settings, None)
+
+        assert asked == [12 * _GB]
+

@@ -3182,6 +3182,66 @@ reload: it is llama.cpp's prompt cache thrown away, so the standing instruction
 above your prompt — several hundred tokens that have not changed — is processed
 from scratch again before the first word appears.
 
+#### One model, several servers, one copy in system RAM
+
+The same rule reaches system RAM, and there it had a counting error that ended
+servers for nothing.
+
+llama.cpp reads a GGUF through `mmap`. That is deliberate and it is the warm
+tier for language models: after one load the file's pages are in RAM, stopping
+the server does not evict them, and the next start reads at memory bandwidth
+instead of off the disk. `--no-mmap` is added for exactly one placement — the
+one that overrides some tensors to the processor while the rest stay on the card
+— and never for a placement that is entirely in system RAM.
+
+It follows that **two servers naming one file are two mappings of one set of
+pages.** Roles are separate processes, so a Neutralizer and a Creative on the
+same model are two llama-servers; the weights are in memory once, and only each
+server's own KV cache and buffers are private.
+
+The accounting summed per server, so it reported a second copy that was never
+made. From a user's log:
+
+```
+[Neutralizer] system RAM after this server loaded — 47.3 GB free ...
+              12.5 GB in our language models
+[Creative]    system RAM after this server loaded — 39.1 GB free ...
+              25.0 GB in our language models
+```
+
+The counter claimed **+12.5 GB**; free RAM fell by **8.2 GB**, most of it the
+second server's own cache. Two consequences, and the second one ended processes:
+
+- the figure in every `system RAM` line, and the one `_llm_ram_note` puts on a
+  cache refusal, over-stated what the language models held;
+- **a start asked the machine for room it did not need.** `_admit_host_ram` asks
+  for the model's full size before a server comes up, and when that does not fit
+  above the floor the broker stops an idle server to make space. With the same
+  GGUF already mapped by a sibling, the ask was for memory already spent — so
+  the answer was always no, and the thing that gave ground was the very server
+  whose mapping made the ask unnecessary. **A sibling ended to make room for
+  itself**, paying a reload and a cold prompt cache for zero bytes.
+
+Both now count per GGUF rather than per server: the largest claim any running
+server makes on a file, once. A start asks only for what it *adds*, so a model
+a sibling already holds costs nothing and moves nothing, and says so:
+
+```
+Model Chain: [Creative] this model is already in system RAM for another server
+             — 12.5 GB of it, mapped once and shared — so starting this one asks
+             the machine for nothing and nothing was moved to make room
+```
+
+A runtime that cannot name its model is counted on its own, exactly as
+everything was before. That is the direction that over-states a claim, and
+over-stating only ever costs an eviction that was not needed — never a load the
+machine could not take.
+
+This is the same correction the image side made first, and it is worth stating
+in the same words it used: **the weights that are in system RAM are a stake, not
+a demand.** Asking whether there is room for memory that is already committed
+gets "no" on a full machine, every time, for a request that needed nothing.
+
 ### Why the second prompt is faster than the first
 
 llama.cpp keeps the last prompt and resumes the next one at their common prefix.
