@@ -1049,6 +1049,79 @@ Model Chain: Stage 1 is cold — 12.4 GB still to move from system RAM
 That line is measured against the host's live view every time, not reported from
 what the warm-up believed it achieved.
 
+##### It declines to warm a model the prompt is about to re-merge
+
+There is one case where placing weights on the card before a generation makes
+that generation *slower*, and it is not a rare one — it is any prompt with a
+LoRA in it on a freshly loaded model.
+
+With **on-the-fly LoRA off** — Forge's default — a LoRA is not held beside the
+weights, it is merged *into* them, and the host stamps each model with which
+merge it is carrying. Its LoRA loader applies patches to a *clone* of the
+patcher, so a composite the resident weights do not already carry produces a new
+`patches_uuid`, and the host answers a mismatch by moving the whole model to
+system RAM and loading all of it back with the new merge applied.
+
+A warm-up running first is what *creates* that mismatch. Without one, the pass's
+own first load happens after the LoRA has been added, the model carries no merge
+yet, and there is no round trip at all. From a user's log — a 24 GB card, an
+18.3 GB plan, a single LoRA in the prompt:
+
+```
+warm-up finished in 19.7s — armed — image model
+[LORA] Loaded ... 264 keys at weight 1.0 (skipped 0 keys) with on_the_fly = False
+Requested to load KModel
+loaded completely; 15860.23 MB usable, 12866.82 MB loaded, full load: True
+Moving model(s) has taken 106.95 seconds
+  25%|████████▊       | 2/8 [06:34<19:43, 197.23s/it]
+```
+
+Twenty seconds of warming bought a hundred and seven seconds of undoing, and
+left so little of the card free that sampling spilled into system memory at 197
+seconds a step. The same session, with the prompt unchanged so the host took its
+early return, ran eight steps in six.
+
+So the warm-up now asks, before it moves anything, whether the pass behind it is
+*certain* to re-merge these weights. Two cases need nothing inferred:
+
+| The loaded model carries | The prompt asks for | Then |
+| --- | --- | --- |
+| no networks | an extra network | it will merge — **weights stay in system RAM** |
+| a network | no networks | it will unmerge — **weights stay in system RAM** |
+| a network | a network | not knowable here — warm as usual |
+| no networks | no networks | nothing will change — warm as usual |
+
+The third row is deliberately left alone. Telling two non-empty composites apart
+means resolving names to filenames the way the host's own loader does, which is
+the reimplementation this extension does not do — and it is also the cheap case,
+because a model already carrying a merge has been through a generation and its
+weights are already on the card.
+
+**Only the placement is held back, never the disk read.** Reading an 18 GB
+checkpoint off disk is the expensive half and the host needs those bytes in
+system RAM whichever way this goes, so a held warm-up still does it, still
+reports the model loaded, and still makes the next generation re-budget. What it
+skips is the one move that would be undone. The console says so:
+
+```
+Model Chain: Stage 1 is loaded but its weights are staying in system RAM for
+             this generation — the prompt asks for an extra network and nothing
+             is applied yet, so the host will merge it into these weights.
+             Moving them onto the card first would cost the move twice, because
+             the host takes them off again to merge
+```
+
+The background warm-up that runs *after* a generation passes no prompt and is
+never held. It cannot know what will be typed next, and it is the cheap case
+anyway — topping a resident model back up by a few hundred megabytes.
+
+**If you change LoRAs or their weights often, turn on-the-fly LoRA on.** Forge's
+**Diffusion in Low Bits** dropdown offers each storage mode twice, once plain and
+once as *(fp16 LoRA)*; the second sets `dynamic_args.online_lora`, which keeps
+the LoRA beside the weights instead of merging it into them. No merge means no
+round trip on any change, at the cost of some per-step sampling speed. `Automatic
+(fp16 LoRA)` is the same storage dtype as `Automatic`.
+
 ##### Its relationship with "Warm up before generating"
 
 Two settings, two questions. This one permits a background thread **after** a

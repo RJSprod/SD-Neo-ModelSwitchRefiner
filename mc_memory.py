@@ -2185,7 +2185,12 @@ class PreloadResult:
     """What the last preload achieved, in the terms the next generation needs."""
 
     state: str
-    """``ready``, ``partial``, ``nothing`` or ``failed``."""
+    """``ready``, ``partial``, ``held``, ``nothing`` or ``failed``.
+
+    ``held`` is the one that did not fail and did not finish: the weights were
+    deliberately left in system RAM because the pass behind this warm-up is
+    going to re-merge them. See :func:`mc_lora.will_rebake`.
+    """
     key: str = ""
     """Loading-parameter key the preload warmed, for detecting a stale result."""
     checkpoint: str = ""
@@ -2315,13 +2320,19 @@ def _preload_task(allow_disk_load: bool = False) -> str | None:
 
 
 def preload_async(width: int = 0, height: int = 0, *, allow_disk_load: bool = False,
-                  force: bool = False) -> bool:
+                  force: bool = False, prompts: tuple = ()) -> bool:
     """Start warming Stage 1's weights into VRAM in the background.
 
     ``width``/``height`` size the VRAM budget, and are the *current*
     generation's Stage 1 size because the next one's is not knowable yet. That
     only affects how much room is freed, and ``before_process`` re-checks
     against the real size before Stage 1 runs.
+
+    ``prompts`` are the prompts the generation behind this warm-up will hand the
+    host, and they are what lets the warm-up decline to place weights the pass
+    is about to move straight back off the card -- see :func:`mc_lora.will_rebake`.
+    Empty is "not known", which is the honest answer from the background pass
+    *after* a generation, and it holds nothing back.
 
     ``allow_disk_load`` permits the expensive case -- see :func:`_preload_task`.
     ``force`` runs even with the preload setting off, and is for :mod:`mc_arm`:
@@ -2350,7 +2361,7 @@ def preload_async(width: int = 0, height: int = 0, *, allow_disk_load: bool = Fa
     _preload_result = None
     _preload_thread = threading.Thread(
         target=_preload_worker,
-        args=(width, height, task),
+        args=(width, height, task, tuple(prompts or ())),
         name="model-chain-preload",
         daemon=True,
     )
@@ -2471,7 +2482,39 @@ def _host_torch_context():
         return contextlib.nullcontext()
 
 
-def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
+def _loading_key_or_blank() -> str:
+    """:func:`_loading_parameters_key`, and never a reason to fail a preload."""
+    try:
+        return _loading_parameters_key()
+    except Exception:
+        return ""
+
+
+def _held_for_a_rebake(prompts: tuple) -> str:
+    """Why this warm-up must not move weights onto the card, or "" to go ahead.
+
+    The whole of the judgement is :func:`mc_lora.will_rebake`; what is added
+    here is that it is only asked when the caller knows what the pass wants.
+    The background warm-up that runs *after* a generation does not -- the next
+    prompt has not been typed -- and it is also the cheap case, topping a
+    resident model back up by a few hundred megabytes. It passes no prompts and
+    is never held.
+
+    Never raises. A host this cannot read is a host the warm-up behaves on
+    exactly as it did before this existed.
+    """
+    if not prompts:
+        return ""
+    try:
+        return mc_lora.will_rebake(model_data_sd_model(), *prompts)
+    except Exception:
+        logger.debug("Model Chain: could not tell whether this pass will re-merge "
+                     "the weights; warming as usual", exc_info=True)
+        return ""
+
+
+def _preload_worker(width: int, height: int, task: str = RESTORE,
+                    prompts: tuple = ()) -> None:
     global _preload_reinstated, _preload_result, _preload_failures
     global _preload_resident, _preload_target
 
@@ -2505,6 +2548,28 @@ def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
             from modules import shared
 
             name = shared.opts.sd_model_checkpoint
+
+            # The disk half of a warm-up is never wasted -- the host needs those
+            # bytes in system RAM whatever happens next. The *placement* is only
+            # worth doing if it survives the pass, and there is one case where it
+            # provably does not.
+            held = _held_for_a_rebake(prompts)
+            if held:
+                logger.info(
+                    "Model Chain: Stage 1 is loaded but its weights are staying in system "
+                    "RAM for this generation — %s. Moving them onto the card first would "
+                    "cost the move twice, because the host takes them off again to merge",
+                    held,
+                )
+                _preload_result = PreloadResult(
+                    state="held",
+                    key=_loading_key_or_blank(),
+                    checkpoint=name,
+                    seconds=time.perf_counter() - started,
+                    detail=held,
+                )
+                return
+
             # Never at a language model's expense. See make_vram_room: a
             # warm-up is not a generation, and the generation that does arrive
             # asks this same question for itself.
@@ -2716,11 +2781,17 @@ def _log_preload_result(result: PreloadResult | None) -> None:
         logger.debug("Model Chain: nothing to preload; %s", result.detail)
         return
 
+    if result.state == "held":
+        # Said at the moment it was decided, where the reason is, rather than
+        # again here. Repeating it would put two lines in the log for one
+        # decision and neither would be the one with the numbers on it.
+        return
+
     if result.state == "ready":
         logger.info(
             "Model Chain: %s is in VRAM — %.1f GB resident after %.1fs (%.1f GB moved%s, %s). "
             "It stays there until something needs the room, so the next generation starts "
-            "sampling immediately and its LoRA is applied to weights already on the card",
+            "sampling immediately",
             result.checkpoint,
             result.resident_bytes / _GB,
             result.seconds,

@@ -255,7 +255,8 @@ def _degraded(found) -> bool:
 _arming = threading.Lock()
 
 
-def arm(width: int = 0, height: int = 0, *, reason: str = "") -> Readiness:
+def arm(width: int = 0, height: int = 0, *, reason: str = "",
+        prompts: tuple = ()) -> Readiness:
     """Load what a generation would have loaded, now. Returns the state after.
 
     Synchronous, because the case it exists for is "never a cold run" and a
@@ -270,6 +271,12 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "") -> Readiness:
     The lock is not for correctness; both halves are safe to call twice. It is
     so that a startup warm-up and a Generate pressed two seconds later do not
     both pay for the same model load.
+
+    ``prompts`` are what the generation is about to ask the host for. They are
+    passed straight through to the preload, which uses them to decline the one
+    kind of warming that makes a generation *slower* -- see
+    :func:`mc_memory._held_for_a_rebake`. A startup warm-up has none to give,
+    which is correct: nobody has typed a prompt yet.
     """
     if not _arming.acquire(blocking=False):
         logger.info("Model Chain: a warm-up is already running; waiting for it")
@@ -282,7 +289,7 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "") -> Readiness:
             return before
         logger.info("Model Chain: warming up%s — %s",
                     f" for {reason}" if reason else "", before.describe())
-        _arm_image(width, height)
+        _arm_image(width, height, prompts)
         after = readiness()
     finally:
         _arming.release()
@@ -291,7 +298,7 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "") -> Readiness:
     return after
 
 
-def _arm_image(width: int = 0, height: int = 0) -> None:
+def _arm_image(width: int = 0, height: int = 0, prompts: tuple = ()) -> None:
     """Get Stage 1's weights into VRAM, and wait for them.
 
     ``mc_memory`` owns every part of this: the load, the budget, the eviction
@@ -319,7 +326,8 @@ def _arm_image(width: int = 0, height: int = 0) -> None:
     try:
         import mc_memory
 
-        if mc_memory.preload_async(width, height, allow_disk_load=True, force=True):
+        if mc_memory.preload_async(width, height, allow_disk_load=True, force=True,
+                                   prompts=prompts):
             mc_memory.join_preload()
             return
         # Nothing started. Either it was already warm -- in which case the line
