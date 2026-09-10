@@ -1115,6 +1115,41 @@ The background warm-up that runs *after* a generation passes no prompt and is
 never held. It cannot know what will be typed next, and it is the cheap case
 anyway — topping a resident model back up by a few hundred megabytes.
 
+###### Where this came from, because the timeline is misleading
+
+None of the host-side machinery above changed in the Forge Neo update the user
+who reported this had just installed. `partially_load`, the `current_weight_patches_uuid`
+stamp, `add_patches` regenerating `patches_uuid`, `unpatch_model`'s move to the
+offload device — all byte-identical across that update. The round trip is old.
+
+What changed is *ours*, and it is
+[#191](https://github.com/RJSprod/SD-Neo-ModelSwitchRefiner/pull/191), "Let a
+warm-up's disk load count as the reload Forge was waiting for". That fixed a
+real double load: the warm-up ran `forge_model_reload`, consumed nothing, and
+Forge's `manage_model_and_prompt_cache` then called `unload_all_models()`
+because `need_global_unload` was still up — moving every weight the warm-up had
+just placed back off the card.
+
+But `unload_all_models()` was also, accidentally, the thing that made the first
+generation of a session safe. It reaches
+`model_unload` → `detach(unpatch_weights=True)` → `unpatch_model(offload_device,
+unpatch_weights=True)`, and that clears `current_weight_patches_uuid` on its way
+past. So before #191 the first pass always started from an unstamped model and
+always took the single-pass branch, however many LoRAs the prompt carried.
+
+After #191 the flag is consumed, the flush does not happen, and the weights stay
+on the card *with the stamp set* — which is precisely the state that makes the
+first LoRA of the session cost a full round trip on a card the plan has already
+filled. It is why the catastrophic case in that log is always the first
+generation after a restart, and why the mid-session LoRA changes only cost the
+ordinary ten to sixteen seconds.
+
+#191 is not reverted here and should not be: the double load it fixed is real,
+and holding the placement keeps its benefit for every prompt that is not about
+to re-merge. It is recorded because "we updated Forge and it broke" was the
+wrong end of the telescope, and the next person to read this log will start from
+the same wrong end.
+
 **If you change LoRAs or their weights often, turn on-the-fly LoRA on.** Forge's
 **Diffusion in Low Bits** dropdown offers each storage mode twice, once plain and
 once as *(fp16 LoRA)*; the second sets `dynamic_args.online_lora`, which keeps

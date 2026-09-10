@@ -2502,6 +2502,25 @@ def _held_for_a_rebake(prompts: tuple) -> str:
 
     Never raises. A host this cannot read is a host the warm-up behaves on
     exactly as it did before this existed.
+
+    Why this became necessary when it did
+    -------------------------------------
+    None of the host machinery involved changed recently -- ``partially_load``,
+    the ``current_weight_patches_uuid`` stamp and ``unpatch_model``'s move to
+    the offload device are all byte-identical across the Forge Neo update the
+    reporting user had just installed. What changed is this extension's own
+    #191, which let a warm-up's disk load consume ``need_global_unload``.
+
+    That flag being consumed means ``manage_model_and_prompt_cache`` no longer
+    calls ``unload_all_models()`` after a warm-up -- and that call was, by
+    accident, what kept the first generation of a session safe. It reaches
+    ``model_unload`` -> ``detach(unpatch_weights=True)`` ->
+    ``unpatch_model(offload_device, unpatch_weights=True)``, which clears the
+    stamp on its way past. So the first pass used to start from an unstamped
+    model whatever the prompt asked for, and took the single-pass branch.
+
+    #191 fixed a real double load and is not undone by this. The placement is
+    what is held, and only when it is provably about to be undone.
     """
     if not prompts:
         return ""
