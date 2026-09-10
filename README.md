@@ -1247,6 +1247,25 @@ exactly the weights the next pass is about to use, and the load happens twice.
 That was a real bug — the warm-up's 8.5s of work was being discarded and redone
 on every Generate click.
 
+A checkpoint's measured resident size is written down (`model_chain_weights.json`)
+so the *next* session's plan — built before anything is loaded — can reserve from
+a measurement rather than from a file size. The key carries the checkpoint's
+name, the total bytes of it and its modules, **and the host's own release**
+(`modules_forge.forge_version`).
+
+The byte count proves the files have not been replaced. It proves nothing about
+the build that loads them, and what a checkpoint weighs on the card is a fact
+about the two jointly: a Forge update that teaches the loader a quantisation
+format it used to widen — or stops widening one it used to — changes the answer
+without moving a byte on disk. The stale figure would then be served on the
+first generation after an update, which is the run least able to absorb a wrong
+reserve. Keying on the release retires every measurement when the host changes.
+It costs one estimated plan per checkpoint per update.
+
+Nothing branches on that release. It is a cache key and must not grow into a
+compatibility layer; a host that will not report one keys as "a host that would
+not say", which is stable and therefore still safe to cache under.
+
 #### The reserve
 
 Every eviction decision is a subtraction from free VRAM, and the thing being

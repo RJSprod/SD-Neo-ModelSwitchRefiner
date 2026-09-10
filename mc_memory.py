@@ -359,6 +359,41 @@ def host_reserved_bytes() -> int:
     return max(reserved, 0)
 
 
+def host_release() -> str:
+    """The Forge build this is running against, or "" when it will not say.
+
+    ``modules_forge.forge_version`` carries ``version`` ("neo") and ``release``
+    (a number the maintainer bumps). It is the only thing the host publishes
+    about itself that changes when its *behaviour* does, and the one place that
+    matters is the measured-weights store: a checkpoint's file is proof that the
+    file has not changed, and proof of nothing else. The same bytes can land on
+    the card at a different size after a host update -- a quantisation format
+    the previous build did not recognise, a layer type it used to widen -- and a
+    plan built from the old measurement then reserves for a model that no longer
+    exists.
+
+    So this is deliberately *not* a compatibility layer and must not become one.
+    Nothing branches on the number. It is a cache key, and the only property
+    asked of it is that it changes when the host does; an empty answer keys as
+    "a host that would not say", which is stable and therefore still safe to
+    cache under.
+    """
+    try:
+        from modules_forge import forge_version
+    except Exception:
+        return ""
+
+    parts = []
+    for name in ("version", "release"):
+        try:
+            value = str(getattr(forge_version, name, "") or "").strip()
+        except Exception:
+            continue
+        if value:
+            parts.append(value)
+    return "-".join(parts)
+
+
 # -- observed activation peaks --------------------------------------------- #
 #
 # The static estimate is a starting heuristic and was always documented as one.
