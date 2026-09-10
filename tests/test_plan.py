@@ -1228,6 +1228,47 @@ class TestAMeasurementSurvivesTheSession:
         assert mc_plan.measured_weights("krea2", ["vae_a.safetensors"]) == 17 * GB
         assert mc_plan.measured_weights("krea2", ["vae_b.safetensors"]) == 0
 
+    def test_a_host_update_retires_the_measurement(self, store, monkeypatch):
+        """The file size proves the file has not changed and nothing else.
+
+        What a checkpoint weighs on the card is a fact about the file and the
+        build that loads it, jointly. A Forge update that changes how the same
+        bytes land -- a quantisation format it now recognises, a layer type it
+        has stopped widening -- would otherwise serve the old figure to the plan
+        that runs before anything is loaded, on the first generation after an
+        update.
+        """
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "host_release", lambda: "neo-2.28")
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        assert mc_plan.measured_weights("krea2") == 17 * GB
+
+        monkeypatch.setattr(mc_memory, "host_release", lambda: "neo-2.29")
+        mc_plan.forget_weights()
+
+        assert mc_plan.measured_weights("krea2") == 0
+
+    def test_the_same_host_still_finds_it(self, store, monkeypatch):
+        """The other half: retiring on every read would be a store that never hits."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "host_release", lambda: "neo-2.29")
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        mc_plan.forget_weights()
+
+        assert mc_plan.measured_weights("krea2") == 17 * GB
+
+    def test_a_host_that_will_not_say_is_still_cacheable(self, store, monkeypatch):
+        """An empty answer is a stable key, not a reason to stop remembering."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "host_release", lambda: "")
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        mc_plan.forget_weights()
+
+        assert mc_plan.measured_weights("krea2") == 17 * GB
+
     def test_an_unwritable_store_costs_one_estimate_and_nothing_else(
             self, store, monkeypatch):
         monkeypatch.setattr(mc_plan, "_weights_path", lambda: "/nowhere/at/all/w.json")

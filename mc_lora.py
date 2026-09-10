@@ -179,6 +179,16 @@ def stage1_inheritable(p) -> tuple[str, str]:
 HASH_ATTRIBUTE = "current_lora_hash"
 """Where Forge records what produced a model's currently applied LoRA state."""
 
+NO_NETWORKS = str([])
+"""What a freshly loaded model carries before any LoRA has been applied.
+
+``backend/diffusion_engine/base.py`` opens every engine with
+``self.current_lora_hash = str([])``, and the LoRA loader compares against that
+literal to decide whether it may return early. So "``[]``" is not a hash of
+anything -- it is the host spelling "no networks", and reading it as a prepared
+state was reporting *LoRA state ready* over a model with no LoRA in it at all.
+"""
+
 REBUILD = "<model-chain: rebuild>"
 """Value written to force the host to rebuild the state on its next use.
 
@@ -209,7 +219,7 @@ def state_of(sd_model) -> str | None:
     except Exception:
         return None
 
-    if value in (None, "", REBUILD):
+    if value in (None, "", REBUILD, NO_NETWORKS):
         return None
     return str(value)
 
@@ -219,6 +229,115 @@ def describe(state: str | None) -> str:
     if not state:
         return "no LoRA applied"
     return "LoRA state ready"
+
+
+def composite(*texts) -> str:
+    """The extra-network composite these prompts ask the host to bake, as a key.
+
+    Not a hash of anything Forge computes, and deliberately not an attempt to
+    reproduce one -- ``current_lora_hash`` is the host's own record of what it
+    *has* applied, and this is a statement about what the pass is about to ask
+    for. Two of these compare equal when the pass will leave the baked weights
+    alone, and differ when it will not.
+
+    Why the answer matters more than it looks
+    -----------------------------------------
+    With ``on_the_fly`` false -- the default -- Forge does not hold a LoRA
+    beside the weights, it merges it *into* them, and it records which merge
+    each loaded model is carrying::
+
+        backend/patcher/base.py     model.current_weight_patches_uuid = self.patches_uuid
+
+    The LoRA loader applies its patches to a *clone* of the patcher, so a change
+    to the composite mints a new ``patches_uuid``, and the next load compares
+    the two::
+
+        unpatch_weights = (self.model.current_weight_patches_uuid is not None
+                           and self.model.current_weight_patches_uuid != self.patches_uuid)
+
+    A mismatch is not a small correction. ``unpatch_model`` moves the whole
+    model to the offload device and ``load`` brings all of it back with the new
+    merge applied, so changing one LoRA weight from 1.0 to 1.3 costs a round
+    trip of the entire UNet across the bus. From a user's log, the same
+    checkpoint on the same card::
+
+        [LORA] Loaded ... at weight 1.0     Moving model(s) has taken 106.95 seconds
+        (no LoRA line -- unchanged prompt)  8/8 [00:06<00:00,  1.15it/s]
+        [LORA] Loaded ... at weight 1.3     Moving model(s) has taken 10.73 seconds
+        [LORA] Loaded ... four LoRAs        Moving model(s) has taken 70.54 seconds
+
+    Every slow generation in that session is a line with a LoRA in it and every
+    fast one is a line without.
+
+    The first entry of that table is the one this function exists for. Nothing
+    was baked into those weights yet, because a warm-up had just placed them --
+    so the pass had to take all of them off the card and put them back, and the
+    warm-up's twenty seconds bought a hundred seconds of undoing.
+
+    Order is kept, and weights count
+    --------------------------------
+    ``names`` reaches the host's hash as a list in prompt order, so a reordered
+    prompt rebuilds and this has to say so; sorting for tidiness would make two
+    genuinely different requests compare equal. The multipliers are inside the
+    tag and are part of it for the same reason: a weight change is a different
+    merge, and the log above is what a weight change costs.
+
+    Case and inner spacing are normalised because ``<LoRA:foo:1>`` and
+    ``<lora:foo:1>`` are one request to Forge, and reading them as two would
+    hold a warm-up back for a difference that does not exist.
+    """
+    found: list[str] = []
+    for text in texts:
+        for match in RE_EXTRA_NET.finditer(str(text or "")):
+            found.append(_RUNS_OF_SPACES.sub(" ", match.group(0)).strip().casefold())
+    return "\n".join(found)
+
+
+def will_rebake(sd_model, *texts) -> str:
+    """Why the pass about to run is *certain* to re-merge the weights, or "".
+
+    Answers one question and refuses to guess at the rest, because the two
+    mistakes are not symmetric. Saying "it will re-merge" when it will not costs
+    a warm-up that had nothing to warm; saying "it will not" when it will costs
+    the round trip this exists to avoid, on a card with no room for it.
+
+    So only the two cases nothing has to be inferred for are reported:
+
+    *nothing is applied and the prompt asks for something.* The host's
+    ``current_lora_hash`` is ``str([])`` and ``compiled_lora_targets_hash`` will
+    not be, so ``process_network_files`` cannot take its early return. Every
+    tag in the prompt becomes a patch on a *clone* of the patcher, the clone's
+    ``patches_uuid`` differs from the ``current_weight_patches_uuid`` stamped on
+    the model by whatever loaded it, and ``partially_load`` responds to that by
+    unpatching the model to the offload device and loading all of it back.
+
+    *something is applied and the prompt asks for nothing.* The mirror image,
+    and it costs exactly the same: the composite becomes ``str([])``, the hash
+    still differs, and the weights still make the round trip. A user who deletes
+    a LoRA tag pays what a user who adds one pays.
+
+    Everything else returns "". Two non-empty composites may or may not be the
+    same set at the same weights, and telling them apart means resolving names
+    to filenames the way the host's own loader does -- which is the
+    reimplementation this module exists not to do. The case is also the cheap
+    one: a model that already carries a merge is a model that has been through a
+    generation, so its weights are on the card and there is nothing for a
+    warm-up to place.
+
+    ``sd_model`` is the loaded model; ``texts`` are the prompts the pass will
+    hand the host, positive and negative -- both, because the host's extra
+    networks pass reads both.
+    """
+    applied = state_of(sd_model)
+    wanted = composite(*texts)
+
+    if applied is None and wanted:
+        return ("the prompt asks for an extra network and nothing is applied yet, "
+                "so the host will merge it into these weights")
+    if applied is not None and not wanted:
+        return ("an extra network is merged into these weights and the prompt no "
+                "longer asks for one, so the host will unmerge it")
+    return ""
 
 
 def is_preservable(flags: dict | None) -> tuple[bool, str]:

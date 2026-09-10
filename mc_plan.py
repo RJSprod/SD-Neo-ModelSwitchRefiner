@@ -398,6 +398,18 @@ def _weights_key(name: str, modules) -> str:
     moves, the key moves with it, and the stale measurement is simply never
     found again.
 
+    It is proof about the *files* and about nothing else, which is why the
+    host's own release is in the key beside it. What a checkpoint weighs on the
+    card is a fact about the file and the build that loads it, jointly: a Forge
+    update that teaches the loader a quantisation format it used to widen, or
+    stops widening one it used to, changes the answer without moving a byte on
+    disk. The stored figure would then be served to the plan that runs before
+    anything is loaded, on exactly the first generation after an update -- the
+    run least able to absorb a wrong reserve. Keying on the release retires
+    every measurement when the host changes, which costs one estimated plan per
+    checkpoint per update and buys back the guarantee the byte count alone was
+    being asked to carry.
+
     Empty when there is no checkpoint to describe, which the callers read as
     "do not store this".
     """
@@ -418,10 +430,11 @@ def _weights_key(name: str, modules) -> str:
             resolved = [modules] if isinstance(modules, str) else list(modules)
         parts = tuple(sorted(os.path.basename(str(module)) for module in resolved or ()))
         size = int(mc_memory.file_size_bytes(name, modules))
+        release = mc_memory.host_release()
     except Exception:
         logger.debug("Model Chain: could not key the measured weights", exc_info=True)
         return ""
-    return "|".join((os.path.basename(name), str(size)) + parts)
+    return "|".join((os.path.basename(name), str(size), release) + parts)
 
 
 def _load_weights() -> dict[str, int]:

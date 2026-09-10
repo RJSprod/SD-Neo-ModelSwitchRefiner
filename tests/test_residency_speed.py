@@ -429,6 +429,106 @@ def preload(memory, monkeypatch, host):
     mc_memory.consume_preload()
 
 
+class TestTheWarmUpDeclinesAMergeItCannotWin:
+    """Placing weights a pass is about to take straight off again is a net loss.
+
+    With ``on_the_fly`` false -- the default -- Forge merges a LoRA *into* the
+    weights and stamps the model with which merge it is carrying. The loader
+    applies patches to a clone, so a composite the loaded weights do not already
+    carry mints a new ``patches_uuid``, and ``partially_load`` answers a
+    mismatch by moving the whole model to the offload device and loading all of
+    it back.
+
+    A warm-up that runs first is what *creates* that mismatch on a cold start:
+    without one, the pass's own first load happens after the LoRA is added,
+    ``current_weight_patches_uuid`` is still None, and there is no round trip at
+    all. From a user's log, a 24 GB card with an 18.3 GB plan on it::
+
+        warm-up finished in 19.7s - armed - image model
+        [LORA] Loaded ... 264 keys at weight 1.0 ... on_the_fly = False
+        Requested to load KModel
+        loaded completely; 15860.23 MB usable, 12866.82 MB loaded, full load: True
+        Moving model(s) has taken 106.95 seconds
+        2/8 [06:34<19:43, 197.23s/it]
+
+    Twenty seconds of warming bought a hundred and seven seconds of undoing, and
+    left so little of the card free that sampling spilled into system memory.
+    """
+
+    def clean(self, monkeypatch, hash_=None):
+        """Point the worker at a loaded model carrying the given merge."""
+        model = types.SimpleNamespace(current_lora_hash=str([]) if hash_ is None else hash_)
+        monkeypatch.setattr(mc_memory, "model_data_sd_model", lambda: model)
+        return model
+
+    def test_it_does_not_place_weights_a_pending_merge_will_move_back(
+            self, preload, monkeypatch):
+        self.clean(monkeypatch)
+
+        mc_memory.preload_async(1024, 1024, prompts=("a room <lora:a:1>", ""))
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.gpu_loads == 0
+        assert mc_memory.preload_result().state == "held"
+
+    def test_it_places_them_when_the_prompt_asks_for_nothing_new(
+            self, preload, monkeypatch):
+        self.clean(monkeypatch)
+
+        mc_memory.preload_async(1024, 1024, prompts=("a quiet room", ""))
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.gpu_loads == 1
+
+    def test_dropping_the_last_network_is_held_the_same_way(self, preload, monkeypatch):
+        """A user who deletes a tag pays what a user who adds one pays."""
+        self.clean(monkeypatch, hash_="[['a', 1.0, 1.0, False]]")
+
+        mc_memory.preload_async(1024, 1024, prompts=("a quiet room", ""))
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.gpu_loads == 0
+
+    def test_the_background_warm_up_knows_no_prompt_and_is_never_held(
+            self, preload, monkeypatch):
+        """The pass *after* a generation cannot know the next prompt.
+
+        It is also the cheap case -- topping a resident model back up by a few
+        hundred megabytes -- so "not known" warms exactly as it always did.
+        """
+        self.clean(monkeypatch)
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.gpu_loads == 1
+
+    def test_a_held_warm_up_still_loaded_the_model(self, preload, monkeypatch):
+        """Only the placement is held; the load itself still happened.
+
+        The next generation must still re-budget, because the loaded model
+        changed underneath it even though nothing reached the card.
+        """
+        self.clean(monkeypatch)
+
+        mc_memory.preload_async(1024, 1024, prompts=("a room <lora:a:1>", ""))
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.reinstated == 1
+        assert mc_memory.consume_preload() is True
+
+    def test_a_host_it_cannot_read_warms_as_it_always_did(self, preload, monkeypatch):
+        def boom():
+            raise RuntimeError("no host")
+
+        monkeypatch.setattr(mc_memory, "model_data_sd_model", boom)
+
+        mc_memory.preload_async(1024, 1024, prompts=("a room <lora:a:1>", ""))
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.gpu_loads == 1
+
+
 class TestPreloadIsOptIn:
     """The preload is the only mechanism here that leaves the generation thread.
 

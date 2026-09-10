@@ -1049,6 +1049,122 @@ Model Chain: Stage 1 is cold — 12.4 GB still to move from system RAM
 That line is measured against the host's live view every time, not reported from
 what the warm-up believed it achieved.
 
+##### It declines to warm a model the prompt is about to re-merge
+
+There is one case where placing weights on the card before a generation makes
+that generation *slower*, and it is not a rare one — it is any prompt with a
+LoRA in it on a freshly loaded model.
+
+With **on-the-fly LoRA off** — Forge's default — a LoRA is not held beside the
+weights, it is merged *into* them, and the host stamps each model with which
+merge it is carrying. Its LoRA loader applies patches to a *clone* of the
+patcher, so a composite the resident weights do not already carry produces a new
+`patches_uuid`, and the host answers a mismatch by moving the whole model to
+system RAM and loading all of it back with the new merge applied.
+
+A warm-up running first is what *creates* that mismatch. Without one, the pass's
+own first load happens after the LoRA has been added, the model carries no merge
+yet, and there is no round trip at all. From a user's log — a 24 GB card, an
+18.3 GB plan, a single LoRA in the prompt:
+
+```
+warm-up finished in 19.7s — armed — image model
+[LORA] Loaded ... 264 keys at weight 1.0 (skipped 0 keys) with on_the_fly = False
+Requested to load KModel
+loaded completely; 15860.23 MB usable, 12866.82 MB loaded, full load: True
+Moving model(s) has taken 106.95 seconds
+  25%|████████▊       | 2/8 [06:34<19:43, 197.23s/it]
+```
+
+Twenty seconds of warming bought a hundred and seven seconds of undoing, and
+left so little of the card free that sampling spilled into system memory at 197
+seconds a step. The same session, with the prompt unchanged so the host took its
+early return, ran eight steps in six.
+
+So the warm-up now asks, before it moves anything, whether the pass behind it is
+*certain* to re-merge these weights. Two cases need nothing inferred:
+
+| The loaded model carries | The prompt asks for | Then |
+| --- | --- | --- |
+| no networks | an extra network | it will merge — **weights stay in system RAM** |
+| a network | no networks | it will unmerge — **weights stay in system RAM** |
+| a network | a network | not knowable here — warm as usual |
+| no networks | no networks | nothing will change — warm as usual |
+
+The third row is deliberately left alone. Telling two non-empty composites apart
+means resolving names to filenames the way the host's own loader does, which is
+the reimplementation this extension does not do — and it is also the cheap case,
+because a model already carrying a merge has been through a generation and its
+weights are already on the card.
+
+**Only the placement is held back.** The load itself still happens: the host
+builds the model, resolves its modules, consumes its unload flag, and the next
+generation still re-budgets. What is deferred is the reading of the weight
+bytes — and that is not a saving given up. Forge opens a safetensors file
+through `safetensors.safe_open` (`backend/utils.py`), so the tensors are
+memory-mapped and their pages fault in only when something first touches them,
+which is the move to the card. It is why an 18.3 GB warm-up reports "moved at
+1,028 MB/s": that is the checkpoint's drive, not the bus.
+
+So the bytes are read exactly once either way. Held, they are read by the host's
+own load at sampling, with the LoRA merged during the same pass. Unheld, they
+were read by the warm-up **and then paid for again** by the 12.6 GB round trip
+that followed. The console says which happened:
+
+```
+Model Chain: Stage 1 is loaded but its weights are staying off the card for
+             this generation — the prompt asks for an extra network and nothing
+             is applied yet, so the host will merge it into these weights.
+             Moving them there first would cost the move twice, because the
+             host takes them off again to merge
+```
+
+The background warm-up that runs *after* a generation passes no prompt and is
+never held. It cannot know what will be typed next, and it is the cheap case
+anyway — topping a resident model back up by a few hundred megabytes.
+
+###### Where this came from, because the timeline is misleading
+
+None of the host-side machinery above changed in the Forge Neo update the user
+who reported this had just installed. `partially_load`, the `current_weight_patches_uuid`
+stamp, `add_patches` regenerating `patches_uuid`, `unpatch_model`'s move to the
+offload device — all byte-identical across that update. The round trip is old.
+
+What changed is *ours*, and it is
+[#191](https://github.com/RJSprod/SD-Neo-ModelSwitchRefiner/pull/191), "Let a
+warm-up's disk load count as the reload Forge was waiting for". That fixed a
+real double load: the warm-up ran `forge_model_reload`, consumed nothing, and
+Forge's `manage_model_and_prompt_cache` then called `unload_all_models()`
+because `need_global_unload` was still up — moving every weight the warm-up had
+just placed back off the card.
+
+But `unload_all_models()` was also, accidentally, the thing that made the first
+generation of a session safe. It reaches
+`model_unload` → `detach(unpatch_weights=True)` → `unpatch_model(offload_device,
+unpatch_weights=True)`, and that clears `current_weight_patches_uuid` on its way
+past. So before #191 the first pass always started from an unstamped model and
+always took the single-pass branch, however many LoRAs the prompt carried.
+
+After #191 the flag is consumed, the flush does not happen, and the weights stay
+on the card *with the stamp set* — which is precisely the state that makes the
+first LoRA of the session cost a full round trip on a card the plan has already
+filled. It is why the catastrophic case in that log is always the first
+generation after a restart, and why the mid-session LoRA changes only cost the
+ordinary ten to sixteen seconds.
+
+#191 is not reverted here and should not be: the double load it fixed is real,
+and holding the placement keeps its benefit for every prompt that is not about
+to re-merge. It is recorded because "we updated Forge and it broke" was the
+wrong end of the telescope, and the next person to read this log will start from
+the same wrong end.
+
+**If you change LoRAs or their weights often, turn on-the-fly LoRA on.** Forge's
+**Diffusion in Low Bits** dropdown offers each storage mode twice, once plain and
+once as *(fp16 LoRA)*; the second sets `dynamic_args.online_lora`, which keeps
+the LoRA beside the weights instead of merging it into them. No merge means no
+round trip on any change, at the cost of some per-step sampling speed. `Automatic
+(fp16 LoRA)` is the same storage dtype as `Automatic`.
+
 ##### Its relationship with "Warm up before generating"
 
 Two settings, two questions. This one permits a background thread **after** a
@@ -1138,6 +1254,25 @@ evictable thing on the card, so asking to free the whole requirement evicts
 exactly the weights the next pass is about to use, and the load happens twice.
 That was a real bug — the warm-up's 8.5s of work was being discarded and redone
 on every Generate click.
+
+A checkpoint's measured resident size is written down (`model_chain_weights.json`)
+so the *next* session's plan — built before anything is loaded — can reserve from
+a measurement rather than from a file size. The key carries the checkpoint's
+name, the total bytes of it and its modules, **and the host's own release**
+(`modules_forge.forge_version`).
+
+The byte count proves the files have not been replaced. It proves nothing about
+the build that loads them, and what a checkpoint weighs on the card is a fact
+about the two jointly: a Forge update that teaches the loader a quantisation
+format it used to widen — or stops widening one it used to — changes the answer
+without moving a byte on disk. The stale figure would then be served on the
+first generation after an update, which is the run least able to absorb a wrong
+reserve. Keying on the release retires every measurement when the host changes.
+It costs one estimated plan per checkpoint per update.
+
+Nothing branches on that release. It is a cache key and must not grow into a
+compatibility layer; a host that will not report one keys as "a host that would
+not say", which is stable and therefore still safe to cache under.
 
 #### The reserve
 

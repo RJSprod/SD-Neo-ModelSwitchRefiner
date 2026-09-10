@@ -360,3 +360,92 @@ class TestPreservability:
     def test_missing_flags_are_treated_as_an_ordinary_model(self):
         assert mc_lora.is_preservable(None)[0] is True
         assert mc_lora.is_preservable({})[0] is True
+
+
+# --------------------------------------------------------------------------- #
+# The merge a prompt is about to cost
+# --------------------------------------------------------------------------- #
+
+
+class TestWhatAFreshModelCarries:
+    """``str([])`` is the host saying "no networks", not a prepared state.
+
+    ``backend/diffusion_engine/base.py`` opens every engine with
+    ``self.current_lora_hash = str([])``. Reading that as a state to preserve
+    made a cold load report "LoRA state ready" over weights with no LoRA in
+    them, and -- worse -- made the two questions below unanswerable, because
+    "something is applied" was true of every model ever loaded.
+    """
+
+    def test_the_hosts_empty_hash_is_not_a_prepared_state(self):
+        assert mc_lora.state_of(make_model(lora_hash=str([]))) is None
+
+    def test_a_real_hash_still_is(self):
+        assert mc_lora.state_of(make_model(lora_hash="hash-1")) == "hash-1"
+
+    def test_a_fresh_model_is_described_as_carrying_nothing(self):
+        assert mc_lora.describe(mc_lora.state_of(make_model(lora_hash=str([])))) == (
+            "no LoRA applied"
+        )
+
+
+class TestTheCompositeAPromptAsksFor:
+    def test_a_prompt_with_no_tags_asks_for_nothing(self):
+        assert mc_lora.composite("a quiet room") == ""
+
+    def test_order_is_part_of_the_request(self):
+        """``names`` reaches the host's hash in prompt order, so a reorder rebuilds."""
+        assert (mc_lora.composite("<lora:a:1> <lora:b:1>")
+                != mc_lora.composite("<lora:b:1> <lora:a:1>"))
+
+    def test_a_weight_change_is_a_different_request(self):
+        """The case from the user's log: 1.0 to 1.3 cost a full round trip."""
+        assert mc_lora.composite("<lora:a:1.0>") != mc_lora.composite("<lora:a:1.3>")
+
+    def test_case_and_spacing_are_not(self):
+        assert mc_lora.composite("<LoRA:a:1>") == mc_lora.composite("<lora:a:1>")
+
+    def test_both_prompts_are_read(self):
+        """A tag in a negative prompt merges into the same weights."""
+        assert mc_lora.composite("", "<lora:a:1>") == mc_lora.composite("<lora:a:1>")
+
+    def test_lycos_and_hypernets_count_too(self):
+        assert mc_lora.composite("<lyco:a:1>") != ""
+        assert mc_lora.composite("<hypernet:a:1>") != ""
+
+
+class TestWhenTheWeightsAreCertainToBeReMerged:
+    """Only the two cases that need no inference are reported.
+
+    Getting this wrong in the permissive direction costs the round trip the
+    whole change exists to avoid; getting it wrong in the cautious direction
+    costs a warm-up that had nothing to warm. So the test set is lopsided
+    towards proving the "" answers are the ones that cannot be known.
+    """
+
+    def test_adding_a_network_to_clean_weights_will_re_merge(self):
+        model = make_model(lora_hash=str([]))
+        assert mc_lora.will_rebake(model, "portrait <lora:a:1>")
+
+    def test_removing_the_last_network_will_re_merge(self):
+        model = make_model(lora_hash="[['a', 1.0, 1.0, False]]")
+        assert mc_lora.will_rebake(model, "portrait")
+
+    def test_clean_weights_and_a_plain_prompt_will_not(self):
+        model = make_model(lora_hash=str([]))
+        assert mc_lora.will_rebake(model, "portrait") == ""
+
+    def test_two_composites_are_never_guessed_at(self):
+        """Telling these apart means resolving names the way the host does."""
+        model = make_model(lora_hash="[['a', 1.0, 1.0, False]]")
+        assert mc_lora.will_rebake(model, "portrait <lora:b:1>") == ""
+
+    def test_a_negative_prompt_alone_is_enough_to_trigger_it(self):
+        model = make_model(lora_hash=str([]))
+        assert mc_lora.will_rebake(model, "portrait", "<lora:a:1>")
+
+    def test_a_model_the_host_cannot_describe_is_treated_as_clean(self):
+        blank = types.SimpleNamespace()
+        assert mc_lora.will_rebake(blank, "portrait <lora:a:1>")
+        assert mc_lora.will_rebake(blank, "portrait") == ""
+

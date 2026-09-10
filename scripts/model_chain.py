@@ -100,6 +100,26 @@ def _warm_up_wanted() -> bool:
         return False
 
 
+def _warm_up_prompts(p) -> tuple:
+    """The prompts this generation will hand the host, for the warm-up to read.
+
+    Both halves, because the host's extra-networks pass reads both and a LoRA
+    tag typed into a negative prompt merges into the same weights a positive one
+    does. Read from ``p`` before anything in this extension has rewritten it,
+    which is the right moment: the tags are protected from every rewriter that
+    follows (see ``prompt_master.krea.extra_networks``), so what is here now is
+    what reaches the host.
+
+    Never raises, and returns ``()`` when it cannot read them -- which the
+    warm-up treats as "not known" and warms exactly as it did before.
+    """
+    try:
+        return (str(getattr(p, "prompt", "") or ""),
+                str(getattr(p, "negative_prompt", "") or ""))
+    except Exception:
+        return ()
+
+
 _NO_MODEL = "None"
 
 _REFINED_MARKER = "_model_chain_refined"
@@ -2441,7 +2461,8 @@ class ScriptModelChain(scripts.Script):
         # session it is, so this costs a measurement and nothing else.
         if mc_arm.mode() in (mc_arm.WARM_BEFORE, mc_arm.WARM_STARTUP):
             try:
-                mc_arm.arm(p.width, p.height, reason="this generation")
+                mc_arm.arm(p.width, p.height, reason="this generation",
+                           prompts=_warm_up_prompts(p))
             except Exception:
                 errors.report("Model Chain: could not warm up before generating",
                               exc_info=True)
