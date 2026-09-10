@@ -503,8 +503,8 @@ class TestTheWarmUpDeclinesAMergeItCannotWin:
 
         assert preload.gpu_loads == 1
 
-    def test_a_held_warm_up_still_did_the_expensive_half(self, preload, monkeypatch):
-        """The disk read is never the wasted part; only the placement is.
+    def test_a_held_warm_up_still_loaded_the_model(self, preload, monkeypatch):
+        """Only the placement is held; the load itself still happened.
 
         The next generation must still re-budget, because the loaded model
         changed underneath it even though nothing reached the card.

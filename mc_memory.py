@@ -2603,16 +2603,22 @@ def _preload_worker(width: int, height: int, task: str = RESTORE,
 
             name = shared.opts.sd_model_checkpoint
 
-            # The disk half of a warm-up is never wasted -- the host needs those
-            # bytes in system RAM whatever happens next. The *placement* is only
-            # worth doing if it survives the pass, and there is one case where it
-            # provably does not.
+            # What is held back is the *placement*, and only when it provably
+            # will not survive the pass. The load itself still happened: the
+            # host has built the model, resolved its modules and consumed its
+            # unload flag. The weight bytes have not been read, and that is not
+            # a saving being given up -- Forge opens a safetensors file through
+            # ``safetensors.safe_open`` (backend/utils.py), so the tensors are
+            # memory-mapped and the pages fault in when something first touches
+            # them, which is the move to the card. Held, that read is paid once,
+            # by the host's own load, with the LoRA merged in the same pass.
+            # Unheld, it was paid here and then paid for again by the round trip.
             held = _held_for_a_rebake(prompts)
             if held:
                 logger.info(
-                    "Model Chain: Stage 1 is loaded but its weights are staying in system "
-                    "RAM for this generation — %s. Moving them onto the card first would "
-                    "cost the move twice, because the host takes them off again to merge",
+                    "Model Chain: Stage 1 is loaded but its weights are staying off the "
+                    "card for this generation — %s. Moving them there first would cost the "
+                    "move twice, because the host takes them off again to merge",
                     held,
                 )
                 _preload_result = PreloadResult(

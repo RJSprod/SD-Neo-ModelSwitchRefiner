@@ -1097,18 +1097,26 @@ the reimplementation this extension does not do — and it is also the cheap cas
 because a model already carrying a merge has been through a generation and its
 weights are already on the card.
 
-**Only the placement is held back, never the disk read.** Reading an 18 GB
-checkpoint off disk is the expensive half and the host needs those bytes in
-system RAM whichever way this goes, so a held warm-up still does it, still
-reports the model loaded, and still makes the next generation re-budget. What it
-skips is the one move that would be undone. The console says so:
+**Only the placement is held back.** The load itself still happens: the host
+builds the model, resolves its modules, consumes its unload flag, and the next
+generation still re-budgets. What is deferred is the reading of the weight
+bytes — and that is not a saving given up. Forge opens a safetensors file
+through `safetensors.safe_open` (`backend/utils.py`), so the tensors are
+memory-mapped and their pages fault in only when something first touches them,
+which is the move to the card. It is why an 18.3 GB warm-up reports "moved at
+1,028 MB/s": that is the checkpoint's drive, not the bus.
+
+So the bytes are read exactly once either way. Held, they are read by the host's
+own load at sampling, with the LoRA merged during the same pass. Unheld, they
+were read by the warm-up **and then paid for again** by the 12.6 GB round trip
+that followed. The console says which happened:
 
 ```
-Model Chain: Stage 1 is loaded but its weights are staying in system RAM for
+Model Chain: Stage 1 is loaded but its weights are staying off the card for
              this generation — the prompt asks for an extra network and nothing
              is applied yet, so the host will merge it into these weights.
-             Moving them onto the card first would cost the move twice, because
-             the host takes them off again to merge
+             Moving them there first would cost the move twice, because the
+             host takes them off again to merge
 ```
 
 The background warm-up that runs *after* a generation passes no prompt and is
