@@ -40,6 +40,13 @@ def _u32s(key: str, values) -> bytes:
     return _pair(key, mc_gguf.ARRAY, payload)
 
 
+def _bools(key: str, values) -> bytes:
+    """One key whose value is an array of booleans, one per block."""
+    payload = struct.pack("<IQ", mc_gguf.BOOL, len(values))
+    payload += b"".join(struct.pack("<?", bool(value)) for value in values)
+    return _pair(key, mc_gguf.ARRAY, payload)
+
+
 def write_gguf(path, metadata: bytes, count: int, version: int = 3,
                tensors: int = 291, padding: int = 4096):
     header = mc_gguf.MAGIC + struct.pack("<I", version) + struct.pack("<QQ", tensors, count)
@@ -456,3 +463,146 @@ class TestRemembering:
                 write_gguf(tmp_path / f"m{index}.gguf", metadata, 2)) is not None
 
         assert len(mc_gguf._described) <= mc_gguf._DESCRIBED_LIMIT
+
+
+# --------------------------------------------------------------------------- #
+# Two attention shapes in one model (Gemma 4)
+# --------------------------------------------------------------------------- #
+
+
+def gemma4_header(blocks: int = 30) -> bytes:
+    """A header shaped like Gemma 4 26B-A4B, from a real file's own keys.
+
+    Five dense blocks among twenty-five sliding-window ones, and the two kinds
+    disagree about *both* numbers that size a cache: the sliding-window blocks
+    carry four times the key/value heads and half the width per head. Every
+    value here is transcribed from the metadata dump of
+    ``Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf``.
+    """
+    pattern = [(index % 6) != 5 for index in range(blocks)]
+    return b"".join([
+        _text("general.architecture", "gemma4"),
+        _u32("gemma4.block_count", blocks),
+        _u32("gemma4.context_length", 262144),
+        _u32("gemma4.embedding_length", 2816),
+        _u32("gemma4.attention.head_count", 16),
+        _u32s("gemma4.attention.head_count_kv",
+              [8 if windowed else 2 for windowed in pattern]),
+        _u32("gemma4.attention.key_length", 512),
+        _u32("gemma4.attention.value_length", 512),
+        _u32("gemma4.attention.key_length_swa", 256),
+        _u32("gemma4.attention.value_length_swa", 256),
+        _bools("gemma4.attention.sliding_window_pattern", pattern),
+    ])
+
+
+GEMMA4_KEYS = 11
+
+
+class TestASlidingWindowModelHasTwoHeadWidths:
+    """The widths llama.cpp uses per block, read from the same keys it reads.
+
+    ``llama_hparams::n_embd_head_k`` is ``is_swa(il) ? n_embd_head_k_swa :
+    n_embd_head_k_full``, and the pattern that decides ``is_swa`` is in the
+    file. Reading one width for every block charged twenty-five of Gemma 4's
+    thirty blocks at twice their true size.
+    """
+
+    @pytest.fixture
+    def gemma(self, tmp_path):
+        return mc_gguf.read(write_gguf(tmp_path / "gemma4.gguf", gemma4_header(),
+                                       GEMMA4_KEYS))
+
+    def test_the_windowed_blocks_take_the_windowed_width(self, gemma):
+        assert gemma.key_lengths[:6] == (256, 256, 256, 256, 256, 512)
+        assert gemma.value_lengths[:6] == (256, 256, 256, 256, 256, 512)
+        assert gemma.key_lengths.count(256) == 25
+        assert gemma.key_lengths.count(512) == 5
+
+    def test_the_pattern_is_read_as_one_answer_per_block(self, gemma):
+        assert len(gemma.swa_blocks) == 30
+        assert gemma.swa_blocks[:6] == (True, True, True, True, True, False)
+
+    def test_the_two_kinds_agree_with_llama_cpp_s_own_arithmetic(self, gemma):
+        """``n_embd_k_gqa`` per block, which llama.cpp prints at load:
+        ``[2048, 2048, 2048, 2048, 2048, 1024, ...]``."""
+        widths = [heads * key for heads, key
+                  in zip(gemma.head_counts_kv, gemma.key_lengths)]
+
+        assert widths[:6] == [2048, 2048, 2048, 2048, 2048, 1024]
+
+    def test_the_widest_head_is_still_reported_for_a_status_line(self, gemma):
+        assert gemma.key_length == 512
+        assert gemma.value_length == 512
+
+    def test_it_is_not_a_uniform_shape(self, gemma):
+        assert not gemma.uniform_attention
+        assert gemma.attending_blocks == 30
+
+
+class TestAModelThatDoesNotSayKeepsTheWidthsItHad:
+    """Every file without the sliding-window keys reads exactly as before."""
+
+    def test_no_swa_keys_leaves_one_width(self, tmp_path):
+        metadata = b"".join([
+            _text("general.architecture", "gemma4"),
+            _u32("gemma4.block_count", 30),
+            _u32("gemma4.attention.head_count", 16),
+            _u32s("gemma4.attention.head_count_kv", [8] * 30),
+            _u32("gemma4.attention.key_length", 512),
+            _u32("gemma4.attention.value_length", 512),
+            _bools("gemma4.attention.sliding_window_pattern",
+                   [(index % 6) != 5 for index in range(30)]),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "plain.gguf", metadata, 7))
+
+        assert set(found.key_lengths) == {512}
+        assert found.swa_blocks[:2] == (True, True)
+
+    def test_no_pattern_leaves_one_width(self, tmp_path):
+        """The widths are known and where they go is not, so nothing moves."""
+        metadata = b"".join([
+            _text("general.architecture", "gemma4"),
+            _u32("gemma4.block_count", 30),
+            _u32("gemma4.attention.head_count", 16),
+            _u32s("gemma4.attention.head_count_kv", [8] * 30),
+            _u32("gemma4.attention.key_length", 512),
+            _u32("gemma4.attention.key_length_swa", 256),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "nopattern.gguf", metadata, 6))
+
+        assert found.swa_blocks == ()
+        assert set(found.key_lengths) == {512}
+
+    def test_a_scalar_stride_is_not_read_as_a_per_block_map(self, tmp_path):
+        """The same key is also written as a stride, and a stride means
+        different blocks depending on whether the dense one comes first --
+        llama.cpp takes a flag for that and the header does not carry it."""
+        metadata = b"".join([
+            _text("general.architecture", "gemma3"),
+            _u32("gemma3.block_count", 30),
+            _u32("gemma3.attention.head_count", 16),
+            _u32s("gemma3.attention.head_count_kv", [8] * 30),
+            _u32("gemma3.attention.key_length", 512),
+            _u32("gemma3.attention.key_length_swa", 256),
+            _u32("gemma3.attention.sliding_window_pattern", 6),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "stride.gguf", metadata, 7))
+
+        assert found.swa_blocks == ()
+        assert set(found.key_lengths) == {512}
+
+    def test_a_pattern_of_the_wrong_length_is_not_stretched(self, tmp_path):
+        metadata = b"".join([
+            _text("general.architecture", "gemma4"),
+            _u32("gemma4.block_count", 30),
+            _u32("gemma4.attention.head_count", 16),
+            _u32s("gemma4.attention.head_count_kv", [8] * 30),
+            _u32("gemma4.attention.key_length", 512),
+            _u32("gemma4.attention.key_length_swa", 256),
+            _bools("gemma4.attention.sliding_window_pattern", [True, True, False]),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "short.gguf", metadata, 7))
+
+        assert found.swa_blocks == ()
+        assert set(found.key_lengths) == {512}

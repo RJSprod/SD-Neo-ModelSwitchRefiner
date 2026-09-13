@@ -206,6 +206,30 @@ class Gguf:
         return self._spread(found) if found else self.head_counts
 
     @property
+    def swa_blocks(self) -> tuple[bool, ...]:
+        """Which blocks attend over a sliding window, one entry per block.
+
+        From ``attention.sliding_window_pattern`` when the file writes it as a
+        bool array with one entry per block, which is how llama.cpp records
+        an interleaved local/global design: true is a sliding-window block,
+        false a dense one (``llama_hparams::is_swa_impl``).
+
+        Empty for everything else, and that is the conservative half. The same
+        key is also written as a *scalar stride*, and a stride means different
+        blocks depending on whether the architecture counts its dense block
+        first -- llama.cpp's ``set_swa_pattern`` takes a ``dense_first`` flag
+        for exactly that, and nothing in the header says which way round it is.
+        Guessing would move the widths below onto the wrong blocks, so an
+        answer that is not one entry per block is read as no answer at all and
+        every width stays what it was.
+        """
+        raw = self._numbers("attention.sliding_window_pattern")
+        blocks = self.block_count
+        if blocks <= 1 or len(raw) != blocks:
+            return ()
+        return tuple(bool(entry) for entry in raw)
+
+    @property
     def key_lengths(self) -> tuple[int, ...]:
         """Per-head key width per block, from the file when it says so.
 
@@ -215,12 +239,45 @@ class Gguf:
         only by these keys.
         """
         declared = self._numbers("attention.key_length")
-        return self._spread(declared) if declared else self._head_dims
+        widths = self._spread(declared) if declared else self._head_dims
+        return self._windowed(widths, "attention.key_length_swa")
 
     @property
     def value_lengths(self) -> tuple[int, ...]:
         declared = self._numbers("attention.value_length")
-        return self._spread(declared) if declared else self._head_dims
+        widths = self._spread(declared) if declared else self._head_dims
+        return self._windowed(widths, "attention.value_length_swa")
+
+    def _windowed(self, widths: tuple[int, ...], suffix: str) -> tuple[int, ...]:
+        """``widths``, with the sliding-window blocks given their own head width.
+
+        A model can hold two attention shapes at once, and Gemma 4 holds the
+        pair that costs the most to confuse: its dense blocks are 512 wide per
+        head and its sliding-window blocks are 256, while the sliding-window
+        blocks carry *four times* as many key/value heads. Reading one width
+        for all of them is not a small error in either direction -- against a
+        real load of that model, twenty-five blocks of thirty were charged at
+        twice their true width and the cache came out at 3.3 GB where
+        llama.cpp allocated 1.7 GB.
+
+        What that over-estimate costs is not caution, it is capacity. It is
+        subtracted from the same budget the warm prompt caches are bought out
+        of, so on a 24 GB card it reduced six caches to one where three would
+        have fitted, and every mode that shares a cache then re-reads the
+        others' prompts.
+
+        ``llama.cpp`` defaults these keys to the dense widths when a file does
+        not carry them (``llama-model.cpp``: ``n_embd_head_k_swa =
+        n_embd_head_k_full`` before the optional read), and so does this: a
+        file with no sliding-window keys, or no per-block pattern to place
+        them by, keeps exactly the widths it had before this existed.
+        """
+        narrow = self._numbers(suffix)
+        pattern = self.swa_blocks
+        if not narrow or narrow[0] <= 0 or len(pattern) != len(widths):
+            return widths
+        return tuple(narrow[0] if windowed else width
+                     for width, windowed in zip(widths, pattern))
 
     # -- one number each, for a status line ------------------------------- #
 

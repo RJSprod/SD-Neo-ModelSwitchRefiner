@@ -4029,3 +4029,139 @@ and the other two name the memory they are actually going into. And the Setup
 menu built its current value as `mode:index`, which Mixed Minimum shares with
 Aggressive, so a Minimum installation showed as Aggressive; the menu now asks
 the same question `configured_device` already answered.
+
+## 38. Six minutes of nothing, and a cache charged at twice its width (13 September 2026)
+
+The Intel target from §37 ran on the machine it was written for. Two things
+came back from that first run: a start that sat still for six minutes, and a
+generation speed that was not what the user expected. One is a defect in what
+this extension says; the other is arithmetic, and a third thing turned up
+underneath it that had been costing the NVIDIA card as well.
+
+### 38.1 The hang is a compiler, and it is llama.cpp's
+
+`llama-server.log`, with `--log-verbosity 4` finally making the load report
+visible (§36.3):
+
+```
+0.26.854.644 cmn common_init_: warming up the model with an empty run - please wait ...
+6.13.590.338 srv    load_model: initializing, n_slots = 6, n_ctx_slot = 8192
+```
+
+Five minutes and forty-seven seconds, in `common_init_`'s warm-up: a single
+forward pass over an empty batch. The same server then ran that pass in 106 ms
+once it was up — a factor of three thousand between the first and the second.
+Nothing else in the start comes close: the tensor copy of 16 GB took 10.5 s and
+the 9.4 GB key/value allocation 7.6 s, both separately timed in the same log.
+
+A factor of three thousand on identical work is a compiler. llama.cpp says so
+itself, under Known Issues in `docs/backend/SYCL.md`: *"Missed the AOT
+(Ahead-of-Time) in building. Bad: The startup is slow (JIT) in first time, but
+subsequent performance is unaffected."* The official Windows SYCL release ships
+SPIR-V, and the graphics driver turns it into this device's instructions the
+first time a build runs.
+
+The extension contributed 0.1 s of the 6 min 14 s. What it contributed to the
+*experience* was the whole of it: a progress caption reading "Starting Gemma 4
+26B-A4B Balanced… — 0.0%" and a console that had said nothing since the launch
+line. So the fix is the sentence rather than the seconds. `FIRST_START_SLOW` is
+said before the wait, `COMPILING` goes on the progress caption of both routes
+that can trigger one, and `_report_start_time` prints the elapsed figure above
+`SYCL_SLOW_START_SECONDS` together with the one thing that would settle whether
+it recurs: the next start's figure.
+
+One thing was already right and is worth recording, because getting it wrong
+would have turned this into a failure rather than a wait. §37 gave a SYCL start
+the processor's `CPU_READY_TIMEOUT` of 1200 s rather than `GPU_READY_TIMEOUT`
+of 180 s, on the reasoning that unified memory loads at system-RAM speed. With
+the card's timeout this start would have been abandoned at three minutes.
+
+**What was rejected.** `SYCL_CACHE_PERSISTENT=1` does skip the JIT on later
+starts. The same document asks projects not to set it: the cache is keyed
+loosely enough that a changed binary mixes new and old code and crashes, "it
+has brought more failed cases", and — in as many words — *"We find some AI will
+tell user this cmd to speed up SYCL backend."* A test walks every `mc_*.py` for
+a string literal equal to that name, comparing for equality so the paragraph
+explaining the refusal is still allowed to mention it.
+
+### 38.2 The speed is the memory bus, and it is shared
+
+Same machine, same backbone, same quantisation:
+
+| Placement | Prompt | Generation |
+| --- | --- | --- |
+| Processor | 45 tok/s | 8.9 – 9.4 |
+| Intel Arc via SYCL | 64.5 tok/s | 9.41 |
+
+Prompt processing gained 43%; generation gained nothing. That is the expected
+shape and not a fault in the placement — the log confirms the placement was
+exactly what was asked for: `offloaded 31/31 layers to GPU`, `SYCL0 model
+buffer size = 16002.91 MiB`, `graph splits = 2`, flash attention resolved on.
+
+Generating one token reads the active weights once. For a 26B-A4B at 5.32 bits
+a weight that is about 2.7 GB, and 2.7 GB at 9.41 tokens a second is 25 GB/s.
+The processor measures the same 25 GB/s, because an integrated GPU and the
+cores are behind one memory controller: the work moved, the bus did not. Prompt
+processing multiplies 492 tokens at once, which is arithmetic rather than
+traffic, and that is the half the GPU can win.
+
+So the honest framing for the Intel target is the one the design intent gave
+it: not the fast option, the option that leaves the NVIDIA card alone. The
+card is where speed lives, and §36.1 is what makes the card worth using again.
+
+### 38.3 Twenty-five blocks of thirty, charged at twice their width
+
+The ready line said 35.3 GB of shared system memory. llama.cpp allocated
+26.0 GB — 16002 MiB of weights, 10560 MiB of cache, 112 MiB of compute. The
+9 GB of daylight is one reading error, and it predates every part of §37.
+
+Gemma 4 holds two attention shapes. Its five dense blocks carry two key/value
+heads at 512 wide; its twenty-five sliding-window blocks carry eight at 256.
+`llama_hparams::n_embd_head_k` picks between them per block —
+`is_swa(il) ? n_embd_head_k_swa : n_embd_head_k_full` — and llama.cpp prints
+the result at load: `n_embd_k_gqa = [2048, 2048, 2048, 2048, 2048, 1024, ...]`.
+
+`mc_gguf.key_lengths` read `attention.key_length` and spread it across every
+block, never reading `attention.key_length_swa`. Twenty-five blocks of thirty
+were therefore charged at twice their true width, which is why the estimator
+panel read **430,080 bytes** a token where the truth is 225,280, and 3.3 GB of
+cache where llama.cpp allocates 1.7 GB.
+
+What that cost was capacity, not caution, and it was costing the 3090 too. The
+over-estimate is subtracted from the same budget the warm prompt caches are
+bought out of, so on 22.7 GB of card it reduced six caches to one — where the
+true figure fits three — and every mode that shares a cache then re-reads the
+others' prompts.
+
+`swa_blocks` reads `attention.sliding_window_pattern`, and `_windowed` places
+the narrow width on the blocks it names. Only the unambiguous form is honoured:
+a bool array with one entry per block. The same key is also written as a scalar
+*stride*, and a stride means different blocks depending on whether the
+architecture counts its dense one first — `set_swa_pattern` takes a
+`dense_first` flag for exactly that and nothing in the header says which way
+round it is. Anything that is not one entry per block is read as no answer, and
+every width stays what it was, which is also what a file carrying no
+sliding-window keys gets (llama.cpp defaults them to the dense widths the same
+way).
+
+The tests are checked against the load rather than against the sum: 1760 MiB a
+sequence, and 960 + 9600 MiB at the six sequences that run actually used.
+
+### 38.4 Where the shared memory went, for anyone reading the same log
+
+Not a defect, but worth writing down, because two settings dominate the figure
+and both are the user's. `--swa-full` holds the sliding-window layers at the
+full context instead of `GGML_PAD(min(n_ctx, n_swa + n_ubatch), 256)` — 8192
+cells instead of 1536 here, a factor of 5.3 across twenty-five of thirty
+blocks. Warm prompt caches multiply all of it. At 8,192 tokens on this backbone:
+
+| Warm prompt caches | `--swa-full` | Key/value cache |
+| --- | --- | --- |
+| Six | on | 10.3 GB |
+| Six | off | 2.7 GB |
+| One | on | 1.7 GB |
+| One | off | 0.45 GB |
+
+Neither is changed here. `--swa-full` was chosen in §26.2 for prompt reuse and
+the cache count is a setting somebody picked; what was missing was the
+arithmetic to choose between them, and §38.3 is that.
