@@ -175,12 +175,24 @@ def user_content(prompt: str, image_caption: str | None = None) -> str:
     return f"user_prompt: {prompt}\nimage_caption: {image_caption}"
 
 
-def messages(prompt: str, *, variant: str = FL2VA,
-             image_caption: str | None = None) -> list[dict[str, str]]:
-    """The whole request: the instructions, and the request under them."""
+def messages(prompt: str, *, variant: str = FL2VA, image_caption: str | None = None,
+             system: str | None = None) -> list[dict[str, str]]:
+    """The whole request: the instructions, and the request under them.
+
+    ``system`` substitutes for the instructions this variant and this image
+    would otherwise have used. It exists for the external API, where a caller
+    generating requests programmatically should not have to encode an override
+    as a magic ``@@`` string in the prompt text, and it is applied exactly where
+    the model definition's own text would have gone -- so ``@`` still appends to
+    it and ``@@`` still replaces it. An override changes which instructions
+    apply; it does not change the calling convention.
+
+    Still no prompt text written here: ``None``, which is every caller inside
+    this application, is the vendored instruction set unchanged.
+    """
     body, suffix, replace = split_system_suffix(prompt)
-    system = merge_system(instructions(variant, image_caption is not None), suffix, replace)
-    return [{"role": "system", "content": system},
+    base = instructions(variant, image_caption is not None) if system is None else str(system)
+    return [{"role": "system", "content": merge_system(base, suffix, replace)},
             {"role": "user", "content": user_content(body, image_caption)}]
 
 

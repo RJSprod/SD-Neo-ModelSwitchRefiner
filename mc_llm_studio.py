@@ -227,7 +227,7 @@ def _build():
                         "minimax": mc_llm_minimax_panel.build,
                         "krea": mc_llm_krea_panel.build,
                         "setup": _setup_panel}
-            views, settings, conversation = [], None, None
+            views, settings, conversation, minimax = [], None, None, None
             for _, value in MODES:
                 # visible= comes from the stored mode rather than being
                 # hard-coded. It used to be hard-coded to Prompt Studio while
@@ -244,6 +244,8 @@ def _build():
                         settings = built
                     if value == "chat":
                         conversation = built
+                    if value == "minimax":
+                        minimax = built
                 views.append(view)
 
         # -- wiring ------------------------------------------------------- #
@@ -257,6 +259,13 @@ def _build():
 
         mode.change(fn=_switch, inputs=[mode],
                     outputs=views + [runtime_status, shellbar, title] + sheets + chips,
+                    queue=False)
+        # A second handler on the same event rather than three more values out
+        # of _switch. MiniMax's gate has a component count that depends on
+        # whether the host's Gradio has a Timer, and threading a variable-length
+        # tail through a function that returns a fixed list is how a mode switch
+        # comes to write the runtime line into a banner.
+        mode.change(fn=minimax["on_mode"], inputs=[mode], outputs=minimax["gate"],
                     queue=False)
 
         # Toggles, not openers. A menu that can only open is a menu you cannot
@@ -312,6 +321,12 @@ def _build():
         opened = block.load(fn=_on_load,
                             outputs=[runtime_status, settings["residency"], chooser],
                             queue=False)
+        # The tab reopens on whichever workspace it was left on, so MiniMax's
+        # gate has to be read on load and not only on a switch: a page refreshed
+        # while an external request is running would otherwise come back with an
+        # enabled Enhance over a queue that is busy.
+        block.load(fn=minimax["on_mode"], inputs=[mode], outputs=minimax["gate"],
+                   queue=False)
         # Applying a managed backbone is in this list for the same reason Load
         # is: it starts a server, so the state chip in the bar and the one in
         # Conversation's header are both stale until they are told.

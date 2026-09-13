@@ -12,6 +12,15 @@ The instructions, the sampling, the token budgets, the caption pass and the
 output cleaning are all the vendored ``prompt_master.minimax`` package's, which
 in turn carries WanGP's own prompt text with its provenance recorded beside it
 in ``UPSTREAM_SOURCE.txt``. Nothing here writes prompt text.
+
+The one thing on this page that is not about writing a prompt is the gate at
+the top of it. Another extension can now ask for H3 prompts through
+:mod:`mc_llm_api`, and while any of those are running or waiting this panel is
+inert: the alternative is two products pressing Enhance at the same moment, and
+whichever of them lost the race would appear to have a broken button. Being
+told what is running, and being able to stop it, is a better answer than a
+disabled control with no explanation -- which is why the gate is a banner with
+two buttons rather than a greyed-out Enhance.
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ import time
 
 import gradio as gr
 
+import mc_llm_jobs
 import mc_llm_runtime
 import mc_llm_sessions as sessions
 import mc_llm_state
@@ -28,6 +38,14 @@ import mc_llm_ui as ui
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
+
+GATE_SECONDS = 2.0
+"""How often the gate re-reads the external queue while this workspace is open.
+
+Two seconds is chosen against what the banner says rather than against the
+queue: it carries an elapsed time in whole seconds, and a readout that ticks
+noticeably slower than the number it is showing reads as frozen.
+"""
 
 
 def build() -> dict:
@@ -54,6 +72,21 @@ def build() -> dict:
 
         # -- centre: the written prompt, then what it was written from ----- #
         with gr.Column(scale=4, min_width=420, elem_classes=ui.classes("stage")):
+            # The external gate, above the status line rather than beside it:
+            # it explains why the controls below are inert, and a reason placed
+            # after the thing it explains is a reason nobody reads first.
+            external = gr.HTML(_banner(), visible=jobs_active(),
+                               elem_id=ui.ident("minimax", "external"))
+            with gr.Row(visible=jobs_active(),
+                        elem_id=ui.ident("minimax", "external-actions"),
+                        elem_classes=ui.classes("actions")) as external_actions:
+                stop_external = gr.Button("Stop the running request", size="sm",
+                                          variant="stop",
+                                          elem_id=ui.ident("minimax", "external-stop"))
+                clear_external = gr.Button("Cancel all queued", size="sm",
+                                           elem_id=ui.ident("minimax", "external-clear"))
+                recheck = gr.Button("\u21bb Check again", size="sm",
+                                    elem_id=ui.ident("minimax", "external-recheck"))
             status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("minimax", "status"))
             # max_lines == lines, and that equality is the whole point: a
             # Gradio Textbox grows from `lines` towards `max_lines` as text
@@ -94,6 +127,7 @@ def build() -> dict:
 
             with gr.Row(elem_classes=ui.classes("actions")):
                 enhance = gr.Button(enhancer.BUTTON_LABEL, variant="primary",
+                                    interactive=not jobs_active(),
                                     elem_id=ui.ident("minimax", "enhance"))
                 stop = gr.Button("Stop", variant="stop", interactive=False,
                                  elem_id=ui.ident("minimax", "stop"))
@@ -132,7 +166,130 @@ def build() -> dict:
                outputs=[prompt, written, caption, variant, status], queue=False)
     drop.click(fn=_delete_session, inputs=[history], outputs=[history, status], queue=False)
 
-    return {"status": status, "output": written, "stop": stop}
+    # -- the external gate ------------------------------------------------ #
+    #
+    # ``gr.Timer`` arrived in Gradio 4.30 and this extension is installed into
+    # whatever the host ships, so it is asked for rather than assumed. With it,
+    # the banner tracks a queue that is moving on its own and the panel unblocks
+    # itself the moment the last external request finishes. Without it, the
+    # gate is still correct -- it is re-read on every mode switch, on Check
+    # again, and by _enhance itself, which is the one that actually decides --
+    # it just does not refresh while nobody touches anything.
+    ticker = gr.Timer(GATE_SECONDS, active=False) if hasattr(gr, "Timer") else None
+    gate = [external, external_actions, enhance]
+
+    def _on_mode(chosen):
+        """Re-read the gate when a workspace is opened, and park the timer.
+
+        The timer only ticks while this workspace is the one on screen. A poll
+        every two seconds for the life of the tab, on behalf of a panel nobody
+        is looking at, is a cost every user of LLM Studio would pay for a
+        feature most of them do not use.
+        """
+        updates = _gate()
+        if ticker is None:
+            return updates
+        return updates + (gr.update(active=(chosen == "minimax")),)
+
+    if ticker is not None:
+        gate.append(ticker)
+        ticker.tick(fn=_gate, outputs=[external, external_actions, enhance], queue=False)
+
+    recheck.click(fn=_gate, outputs=[external, external_actions, enhance], queue=False)
+    stop_external.click(fn=_stop_external,
+                        outputs=[external, external_actions, enhance, status], queue=False)
+    clear_external.click(fn=_clear_external,
+                         outputs=[external, external_actions, enhance, status], queue=False)
+
+    return {"status": status, "output": written, "stop": stop,
+            "gate": gate, "on_mode": _on_mode}
+
+
+# --------------------------------------------------------------------------- #
+# The external gate
+# --------------------------------------------------------------------------- #
+
+
+def jobs_active() -> bool:
+    """Whether an external request is running or waiting. Never raises.
+
+    Called while the panel is being built, so it has to survive an LLM side that
+    is not up yet: a gate that raised here would take the whole tab down to
+    report that nothing was queued.
+    """
+    try:
+        return mc_llm_jobs.active()
+    except Exception:
+        logger.debug("Model Chain: could not read the external MiniMax queue",
+                     exc_info=True)
+        return False
+
+
+def _banner() -> str:
+    """What is holding this panel, in one line, named rather than implied.
+
+    "Busy" on its own is what a user reads as broken. Which extension asked,
+    how long ago, and how many more are behind it are the three facts that turn
+    a blocked button into a queue somebody can decide what to do about.
+    """
+    try:
+        found = mc_llm_jobs.snapshot(limit=0)
+    except Exception:
+        logger.debug("Model Chain: could not describe the external MiniMax queue",
+                     exc_info=True)
+        return ui.notice("An external request may be running. Press Check again.", "warn")
+    if not found["active"]:
+        return ui.notice("Ready.")
+    current, waiting = found["running"], found["waiting"]
+    if current is None:
+        return ui.notice(
+            f"{waiting} external MiniMax request{'' if waiting == 1 else 's'} waiting. "
+            f"This panel unblocks when the queue is empty.", "warn")
+    who = current["origin"] or "another extension"
+    said = (f"MiniMax H3 is writing a {current['variant'].upper()} prompt for {who} "
+            f"({current['elapsed']:.0f}s). Request {current['id']}.")
+    if waiting:
+        said += f" {waiting} more waiting."
+    return ui.notice(said + " This panel is blocked until it finishes.", "warn")
+
+
+def _gate() -> tuple:
+    """The three updates the gate owns: the banner, its buttons, and Enhance.
+
+    One function for all three because they are one decision. Split across
+    three handlers, the panel could show a banner over an enabled Enhance --
+    which is the state a user would press.
+    """
+    busy = jobs_active()
+    return (gr.update(value=_banner(), visible=busy),
+            gr.update(visible=busy),
+            gr.update(interactive=not busy))
+
+
+def _stop_external() -> tuple:
+    """Cancel whatever external request is running. Leaves the queue behind it.
+
+    The narrow button of the two, and the one offered first: the common case is
+    somebody who wants the card back for the prompt they are typing now, not
+    somebody who wants to throw away another extension's whole queue.
+    """
+    current = mc_llm_jobs.running()
+    if current is None:
+        return _gate() + (ui.notice("Nothing external is running.", "warn"),)
+    found = mc_llm_jobs.cancel(current.identifier, "stopped from LLM Studio")
+    said = (f"Stopping external request {current.identifier}."
+            if found.get("ok") else found.get("error", "That request could not be stopped."))
+    return _gate() + (ui.notice(said, "warn" if found.get("ok") else "error"),)
+
+
+def _clear_external() -> tuple:
+    """Cancel everything external: the running request and the whole queue."""
+    found = mc_llm_jobs.cancel_all("cancelled from LLM Studio")
+    count = found.get("cancelled", 0)
+    return _gate() + (ui.notice(
+        f"Cancelled {count} external request{'' if count == 1 else 's'}."
+        if count else "There was nothing external to cancel.",
+        "warn" if count else "info"),)
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +304,17 @@ def _enhance(prompt, variant, picture, seed):
     busy = (gr.update(interactive=False), gr.update(interactive=True))
     idle = (gr.update(interactive=True), gr.update(interactive=False))
     hidden = gr.update(value="", visible=False)
+
+    # Asked here and not only in the gate, because the gate is a picture of the
+    # queue as it was when something last redrew it and this is the moment that
+    # matters. A request that arrived between the last tick and this click must
+    # not find two runs starting on one server.
+    if jobs_active():
+        yield (None, "", hidden,
+               ui.notice("MiniMax H3 is busy with a request from another extension. Stop "
+                         "it above, or wait for the queue to empty.", "warn"),
+               gr.update(interactive=False), gr.update(interactive=False))
+        return
 
     if not (prompt or "").strip():
         yield None, "", hidden, ui.notice("Write a prompt to enhance first.", "warn"), *idle

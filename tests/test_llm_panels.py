@@ -1518,7 +1518,7 @@ class TestMiniMax:
     def test_it_builds(self):
         built = mc_llm_minimax_panel.build()
 
-        assert set(built) == {"status", "output", "stop"}
+        assert set(built) == {"status", "output", "stop", "gate", "on_mode"}
 
     def test_an_empty_prompt_is_refused(self):
         events = list(mc_llm_minimax_panel._enhance("  ", "fl2va", None, 7))
