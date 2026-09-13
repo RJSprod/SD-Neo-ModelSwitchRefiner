@@ -46,10 +46,11 @@ def enhancement(text: str = "Shot one.", *, caption: str = "", chunks: int = 2,
     other order would let a consumer that depends on the real one pass.
     """
 
-    def double(prompt, variant, image, seed, cancel, system=None):
+    def double(prompt, variant, image, seed, cancel, system=None, trace=""):
         if record is not None:
             record.append({"prompt": prompt, "variant": variant, "image": image,
-                           "seed": seed, "system": system, "cancel": cancel})
+                           "seed": seed, "system": system, "cancel": cancel,
+                           "trace": trace})
         yield sessions.Event(sessions.STATUS, "Preparing the model…")
         if image is not None and caption:
             yield sessions.Event(sessions.CAPTION, caption)
@@ -72,7 +73,7 @@ def enhancement(text: str = "Shot one.", *, caption: str = "", chunks: int = 2,
 def blocking_enhancement(started, release, record: list | None = None):
     """A run that parks until a test lets it go. For "in progress, not interrupted"."""
 
-    def double(prompt, variant, image, seed, cancel, system=None):
+    def double(prompt, variant, image, seed, cancel, system=None, trace=""):
         if record is not None:
             record.append(prompt)
         yield sessions.Event(sessions.STATUS, "Working…")
@@ -147,6 +148,17 @@ def written(monkeypatch):
     monkeypatch.setattr(sessions, "minimax", enhancement())
 
 
+@pytest.fixture
+def sighted(monkeypatch):
+    """A model with a vision projector, as far as the submit-time check can tell.
+
+    The harness configures no ``mmproj``, so without this every request that
+    carries a picture is refused at the door -- correctly, and by the check
+    these tests would otherwise be unable to get past to test anything else.
+    """
+    monkeypatch.setattr(api, "_sees", lambda: True)
+
+
 def picture(tmp_path, name="frame.png", colour=(200, 30, 30)):
     from PIL import Image
 
@@ -211,6 +223,68 @@ class TestAsking:
     def test_status_for_a_forgotten_request_is_none_rather_than_an_error(self):
         assert api.status("never-existed") is None
 
+    def test_a_picture_for_a_model_that_cannot_see_is_refused_at_the_door(self, written,
+                                                                          tmp_path,
+                                                                          monkeypatch):
+        """The panel declines before starting; so does this. Nothing is queued."""
+        monkeypatch.setattr(api, "_sees", lambda: False)
+
+        with pytest.raises(api.Rejected) as raised:
+            api.submit_minimax("a car chase", first_frame=picture(tmp_path))
+
+        assert raised.value.code == "no_vision"
+        assert "Setup" in str(raised.value)
+        assert jobs.active() is False
+
+    def test_a_blind_model_still_takes_a_text_only_request(self, written, monkeypatch):
+        monkeypatch.setattr(api, "_sees", lambda: False)
+
+        assert api.status(api.submit_minimax("a car chase"))["state"] == jobs.QUEUED
+
+    def test_a_projector_that_cannot_be_read_is_left_for_the_run_to_judge(self, written,
+                                                                           tmp_path,
+                                                                           monkeypatch):
+        """``None`` is "I could not tell", and a refusal on a guess would be wrong
+        in the direction that costs the caller its request."""
+        monkeypatch.setattr(api, "_sees", lambda: None)
+
+        assert api.submit_minimax("a car chase", first_frame=picture(tmp_path))
+
+    def test_the_check_reads_the_configured_models_projector(self, monkeypatch):
+        """Not a stub behind a stub: the real question is whether an mmproj is set."""
+        import mc_llm_runtime
+
+        class Sighted:
+            sees = True
+
+        class Blind:
+            sees = False
+
+        monkeypatch.setattr(mc_llm_runtime, "config", lambda *a, **k: Sighted())
+        assert api._sees() is True
+        monkeypatch.setattr(mc_llm_runtime, "config", lambda *a, **k: Blind())
+        assert api._sees() is False
+
+    def test_llm_studio_switched_off_refuses_everything(self, written, monkeypatch):
+        """The tab does not exist when the setting is off, so neither does this."""
+        import mc_llm_studio
+
+        monkeypatch.setattr(mc_llm_studio, "enabled", lambda: False)
+
+        with pytest.raises(api.Rejected) as raised:
+            api.submit_minimax("a car chase")
+
+        assert raised.value.code == "disabled"
+        assert jobs.active() is False
+
+    def test_the_switch_is_the_tabs_own(self, host):
+        """Read through ``mc_llm_studio.enabled`` and not a second copy of the key."""
+        import modules
+
+        assert api._enabled() is True
+        modules.shared.opts.model_chain_llm_studio = False
+        assert api._enabled() is False
+
 
 # --------------------------------------------------------------------------- #
 # Pictures
@@ -226,7 +300,7 @@ class TestPictures:
     prompt was written about.
     """
 
-    def test_fl2va_captions_the_first_frame_when_it_has_one(self, written, tmp_path):
+    def test_fl2va_captions_the_first_frame_when_it_has_one(self, written, sighted, tmp_path):
         identifier = api.submit_minimax(
             "a car chase", variant=enhancer.FL2VA,
             first_frame=picture(tmp_path, "first.png"),
@@ -237,7 +311,7 @@ class TestPictures:
         assert found["image_used"] == api.FIRST_FRAME
         assert sorted(found["image_ignored"]) == [api.LAST_FRAME, api.REFERENCE]
 
-    def test_ref2va_captions_the_reference_instead(self, written, tmp_path):
+    def test_ref2va_captions_the_reference_instead(self, written, sighted, tmp_path):
         identifier = api.submit_minimax(
             "a car chase", variant=enhancer.REF2VA,
             first_frame=picture(tmp_path, "first.png"),
@@ -245,7 +319,7 @@ class TestPictures:
 
         assert api.status(identifier)["image_used"] == api.REFERENCE
 
-    def test_a_variant_falls_back_to_a_slot_it_would_not_have_chosen(self, written,
+    def test_a_variant_falls_back_to_a_slot_it_would_not_have_chosen(self, written, sighted,
                                                                      tmp_path):
         """A caller that filled only the "wrong" slot still gets a picture used.
 
@@ -259,13 +333,13 @@ class TestPictures:
 
         assert api.status(identifier)["image_used"] == api.REFERENCE
 
-    def test_no_picture_means_no_caption_and_an_empty_record(self, written):
+    def test_no_picture_means_no_caption_and_an_empty_record(self, written, sighted):
         found = api.status(api.submit_minimax("a car chase"))
 
         assert found["image_used"] == ""
         assert found["images"] == []
 
-    def test_exactly_one_picture_reaches_the_enhancer(self, monkeypatch, tmp_path):
+    def test_exactly_one_picture_reaches_the_enhancer(self, monkeypatch, tmp_path, sighted):
         seen: list = []
         monkeypatch.setattr(sessions, "minimax", enhancement(record=seen))
         api.submit_minimax("a car chase", variant=enhancer.FL2VA,
@@ -276,7 +350,7 @@ class TestPictures:
         assert seen[0]["image"].startswith("data:image/")
 
     @pytest.mark.parametrize("shape", ["path", "string", "bytes", "pil", "data_url"])
-    def test_every_shape_a_caller_might_hold_a_picture_in_is_accepted(self, written,
+    def test_every_shape_a_caller_might_hold_a_picture_in_is_accepted(self, written, sighted,
                                                                       tmp_path, shape):
         """Four shapes and a pass-through, because a caller in this process has all of them.
 
@@ -299,7 +373,7 @@ class TestPictures:
 
         assert api.status(identifier)["image_used"] == api.FIRST_FRAME
 
-    def test_an_unreadable_picture_is_refused_at_the_call_site(self, written, tmp_path):
+    def test_an_unreadable_picture_is_refused_at_the_call_site(self, written, sighted, tmp_path):
         broken = tmp_path / "broken.png"
         broken.write_bytes(b"not a picture")
 
@@ -309,7 +383,7 @@ class TestPictures:
         assert raised.value.code == "bad_image"
         assert "first frame" in str(raised.value)
 
-    def test_no_picture_bytes_are_kept_in_the_record(self, written, tmp_path):
+    def test_no_picture_bytes_are_kept_in_the_record(self, written, sighted, tmp_path):
         """A record somebody may log must not contain a base64 photograph.
 
         The same rule the Krea history follows. The data URL exists for exactly
@@ -535,6 +609,114 @@ class TestTheQueue:
         assert found["running"] is None
         assert [entry["origin"] for entry in found["queue"]] == ["video-tools", ""]
 
+    def test_a_status_read_is_taken_under_the_queues_lock(self, written):
+        """The worker writes a record from another thread; a reader that took the
+        fields one at a time could see ``done`` beside the previous stage's text.
+
+        Proven by contention rather than by inspection: with the lock held
+        elsewhere, a status read has to wait for it.
+        """
+        import threading
+
+        # The record itself, fetched *before* the lock is taken elsewhere: the
+        # lookup in ``status()`` is locked on its own and would block anyway,
+        # which is not the thing under test.
+        found = jobs.job(api.submit_minimax("one"))
+        held, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def holder():
+            with jobs._lock:
+                held.set()
+                release.wait(timeout=5)
+
+        def reader():
+            found.describe()
+            finished.set()
+
+        threading.Thread(target=holder, daemon=True).start()
+        assert held.wait(timeout=5)
+        threading.Thread(target=reader, daemon=True).start()
+
+        assert not finished.wait(timeout=0.3), "the read went through a held lock"
+        release.set()
+        assert finished.wait(timeout=5)
+
+    def test_a_polling_caller_can_see_what_stage_its_request_is_at(self, monkeypatch):
+        """``running`` alone cannot tell generating from waiting behind an image pass."""
+        import threading
+
+        started, release = threading.Event(), threading.Event()
+        monkeypatch.setattr(sessions, "minimax", blocking_enhancement(started, release))
+        identifier = api.submit_minimax("one")
+        worker = threading.Thread(target=jobs.drain_once, daemon=True)
+        worker.start()
+        assert started.wait(timeout=5)
+
+        assert api.status(identifier)["stage"] == "Working…"
+        release.set()
+        worker.join(timeout=5)
+
+    def test_a_caller_can_list_only_its_own_requests(self, written):
+        mine = api.submit_minimax("one", origin="video-tools")
+        api.submit_minimax("two", origin="somebody-else")
+        api.submit_minimax("three", origin="video-tools")
+
+        found = api.queue(origin="video-tools")
+
+        assert [entry["id"] for entry in found["queue"]][0] == mine
+        assert all(entry["origin"] == "video-tools" for entry in found["queue"])
+        assert found["waiting"] == 3, "the wait is the whole queue's, not one caller's"
+        assert found["origin"] == "video-tools"
+
+    def test_another_callers_running_request_is_not_shown_as_mine(self, monkeypatch):
+        import threading
+
+        started, release = threading.Event(), threading.Event()
+        monkeypatch.setattr(sessions, "minimax", blocking_enhancement(started, release))
+        api.submit_minimax("theirs", origin="somebody-else")
+        worker = threading.Thread(target=jobs.drain_once, daemon=True)
+        worker.start()
+        assert started.wait(timeout=5)
+
+        found = api.queue(origin="video-tools")
+
+        assert found["running"] is None
+        assert found["active"] is True, "but the card is still busy, and that is said"
+        release.set()
+        worker.join(timeout=5)
+
+    def test_the_console_can_tell_one_external_run_from_another(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(sessions, "minimax", enhancement(record=seen))
+        identifier = api.submit_minimax("one", origin="video-tools")
+        jobs.drain_once()
+
+        assert seen[0]["trace"] == f"request {identifier} from video-tools"
+
+    def test_the_trace_reaches_the_console_line(self, client, caplog):
+        """Through the real ``sessions.minimax`` -- the label is its to write."""
+        import logging
+
+        identifier = api.submit_minimax("a car chase", origin="video-tools")
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            jobs.drain_once()
+
+        finished = [record.getMessage() for record in caplog.records
+                    if "LLM run finished" in record.getMessage()]
+        assert finished and f"request {identifier} from video-tools" in finished[0]
+
+    def test_a_panel_run_has_no_trace_and_its_label_is_unchanged(self, client, caplog):
+        """The line every panel run has always written keeps its exact shape."""
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            list(sessions.minimax("a car chase", enhancer.FL2VA, None, 7,
+                                  sessions.Cancellation()))
+
+        started = [record.getMessage() for record in caplog.records
+                   if "LLM run started" in record.getMessage()]
+        assert started and started[0].endswith("a MiniMax fl2va enhancement")
+
     def test_the_queue_listing_does_not_carry_everyone_elses_prompts(self, written):
         """A caller polling for position should not be handed the answers."""
         api.submit_minimax("one")
@@ -641,6 +823,26 @@ class TestCancelling:
         assert found["cancelled"] == 3
         assert jobs.active() is False
 
+    def test_a_caller_can_cancel_everything_it_asked_for_and_nothing_else(self, written):
+        api.submit_minimax("one", origin="video-tools")
+        theirs = api.submit_minimax("two", origin="somebody-else")
+        api.submit_minimax("three", origin="video-tools")
+
+        found = api.cancel_all("video-tools", "panel closed")
+
+        assert found["cancelled"] == 2
+        assert api.status(theirs)["state"] == jobs.QUEUED
+
+    def test_cancel_all_without_an_origin_is_refused_rather_than_taking_everyone_down(
+            self, written):
+        api.submit_minimax("one", origin="video-tools")
+
+        with pytest.raises(api.Rejected) as raised:
+            api.cancel_all("")
+
+        assert raised.value.code == "empty_origin"
+        assert jobs.active() is True
+
     def test_a_request_cancelled_before_it_ran_never_reaches_the_enhancer(self,
                                                                           monkeypatch):
         """Not merely marked cancelled -- the double must never be called at all."""
@@ -692,7 +894,7 @@ class TestFeeds:
                          jobs.EV_CHUNK, jobs.EV_CHUNK, jobs.EV_DONE]
 
     def test_the_caption_arrives_as_its_own_event_before_the_prompt(self, monkeypatch,
-                                                                    tmp_path):
+                                                                    tmp_path, sighted):
         monkeypatch.setattr(sessions, "minimax", enhancement(caption="a red car"))
         identifier = api.submit_minimax("one", first_frame=picture(tmp_path))
         feed = api.subscribe(identifier)
@@ -846,6 +1048,27 @@ class TestTheHistory:
 
         assert mc_llm_state.minimax_sessions() == []
 
+    def test_a_picture_from_a_file_is_filed_by_its_name_and_never_its_path(self, written,
+                                                                          sighted,
+                                                                          tmp_path):
+        """The panel's rule, ``mc_llm_ui.picked_name``'s reason."""
+        api.submit_minimax("a car chase", first_frame=picture(tmp_path, "opening.png"))
+        jobs.drain_once()
+
+        saved = mc_llm_state.minimax_sessions()[0]
+        assert saved.image_name == "opening.png"
+        assert str(tmp_path) not in saved.image_name
+
+    def test_a_picture_with_no_name_is_filed_by_the_slot_it_filled(self, written, sighted,
+                                                                   tmp_path):
+        from PIL import Image
+
+        api.submit_minimax("a car chase", variant=enhancer.REF2VA,
+                           reference=Image.open(picture(tmp_path)).copy())
+        jobs.drain_once()
+
+        assert mc_llm_state.minimax_sessions()[0].image_name == api.REFERENCE
+
     def test_a_failed_request_is_not_filed_as_a_prompt(self, monkeypatch):
         monkeypatch.setattr(sessions, "minimax", enhancement(fail="no model"))
         api.submit_minimax("a car chase")
@@ -970,6 +1193,57 @@ class TestThePanelIsBlocked:
         assert len(events) == 1
         assert "another extension" in events[0][3]
         assert events[0][4]["interactive"] is False
+
+    def test_the_busy_refusal_leaves_the_last_prompt_on_screen(self, written):
+        """The user did nothing wrong; their previous result stays where it was."""
+        api.submit_minimax("one")
+
+        events = list(mc_llm_minimax_panel._enhance("my own prompt", "fl2va", None, 7))
+
+        written_box, caption_box = events[0][1], events[0][2]
+        assert "value" not in written_box, "an empty update, not an empty string"
+        assert "value" not in caption_box
+
+    def test_the_gate_is_re_read_after_every_panel_run(self, monkeypatch):
+        """A run whose last yield re-enabled Enhance must not leave it enabled over
+        an external request that took the card meanwhile -- and there is no timer
+        to lean on for that on every host.
+
+        The fake hands back a dependency from every binding and keeps no list of
+        them, so the chain is read by watching what gets chained while the panel
+        is built.
+        """
+        from conftest import _Dependency
+
+        linked: list = []
+        chain = _Dependency._chain
+
+        def watched(self, kind, kwargs):
+            linked.append((self.component, self.kind, kind, kwargs))
+            return chain(self, kind, kwargs)
+
+        monkeypatch.setattr(_Dependency, "_chain", watched)
+        built = mc_llm_minimax_panel.build()
+        enhance = next(component for component in built["gate"]
+                       if getattr(component, "elem_id", "") == "mc-llm-minimax-enhance")
+
+        after_a_run = [kwargs["fn"] for component, first, kind, kwargs in linked
+                       if component is enhance and first == "click" and kind == "then"]
+
+        assert mc_llm_minimax_panel._gate in after_a_run
+
+    def test_stop_does_not_hand_enhance_back_while_something_external_holds_the_card(
+            self, written):
+        api.submit_minimax("one")
+
+        _status, enhance, _stop = mc_llm_minimax_panel._cancel(None)
+
+        assert enhance["interactive"] is False
+
+    def test_stop_hands_enhance_back_when_nothing_external_is_waiting(self):
+        _status, enhance, _stop = mc_llm_minimax_panel._cancel(None)
+
+        assert enhance["interactive"] is True
 
     def test_the_panel_can_stop_the_running_request(self, monkeypatch):
         import threading

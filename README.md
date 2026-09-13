@@ -3307,9 +3307,10 @@ what matters from this side of the screen is the following.
 
 **Nothing gets interrupted.** External requests form a queue. One runs at a
 time, a request that arrives during another waits behind it, and nothing can
-jump the line — including a request you start yourself. On the GPU they are the
-same as any other LLM turn: they take the workload lock, and they wait for an
-image generation on the same card exactly as a Krea roll does.
+jump the line. On the GPU they are the same as any other LLM turn: they take the
+workload lock, so one that arrives while you are mid-way through a MiniMax,
+Krea or Conversation run waits for yours to finish, and they wait for an image
+generation on the same card exactly as a Krea roll does.
 
 **MiniMax H3 goes inert while they run.** Open the workspace during one and the
 Enhance button is disabled behind a banner saying which extension is asking, how
@@ -3325,7 +3326,11 @@ and no picture is ever kept.
 
 Only MiniMax H3 is exposed. Prompt Studio, Conversation and Krea 2 have no
 external surface. The API adds no web server, no port and no password — it is an
-import, usable only by code already running inside this WebUI.
+import, usable only by code already running inside this WebUI. Turning LLM
+Studio off in Settings turns this off with it: a request made while the tab does
+not exist is refused, not queued. A request carrying a picture is refused the
+same way, before anything is queued, when the model running has no vision
+projector — the answer you would have got from the panel.
 
 ## Voice Chat
 

@@ -154,6 +154,13 @@ def build() -> dict:
         outputs=[cancellation, written, caption, status, enhance, stop],
         show_progress="minimal")
     running.then(fn=lambda: gr.update(choices=_history_choices()), outputs=[history])
+    # The gate is re-read the moment a panel run ends, whichever way it ended.
+    # Two cases need it and neither has a timer to lean on: an external request
+    # that arrived during the run and now has the card, which the run's own
+    # last yield has just drawn an enabled Enhance over; and the refusal above,
+    # which says "stop it above" and needs the banner it is pointing at to be
+    # on screen on a host whose Gradio cannot tick.
+    running.then(fn=_gate, outputs=[external, external_actions, enhance], queue=False)
 
     stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, enhance, stop],
                cancels=[running], queue=False)
@@ -310,7 +317,11 @@ def _enhance(prompt, variant, picture, seed):
     # matters. A request that arrived between the last tick and this click must
     # not find two runs starting on one server.
     if jobs_active():
-        yield (None, "", hidden,
+        # The output boxes are left alone. The empty-prompt refusal below clears
+        # them, and that is right for a fresh attempt; this refusal is about
+        # something the user did not do, and taking their last prompt off the
+        # screen for it would be a second thing they did not ask for.
+        yield (None, gr.update(), gr.update(),
                ui.notice("MiniMax H3 is busy with a request from another extension. Stop "
                          "it above, or wait for the queue to empty.", "warn"),
                gr.update(interactive=False), gr.update(interactive=False))
@@ -388,8 +399,11 @@ def _cancel(cancel):
     """
     if cancel is not None:
         cancel.cancel()
+    # ``cancels=`` runs no ``then``, so the gate is not re-read after a stop the
+    # way it is after a run ends -- which makes this the one handler that has
+    # to ask for itself whether Enhance may come back.
     return (ui.notice("Stopped.", "warn"),
-            gr.update(interactive=True), gr.update(interactive=False))
+            gr.update(interactive=not jobs_active()), gr.update(interactive=False))
 
 
 def _structure(variant):

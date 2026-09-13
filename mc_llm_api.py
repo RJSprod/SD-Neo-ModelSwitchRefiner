@@ -104,6 +104,11 @@ text-only prompt and no explanation.
 Rejected = jobs.Rejected
 """Re-exported so a caller catches one name rather than importing two modules."""
 
+Feed = jobs.Feed
+"""Re-exported for the same reason: it is what :func:`subscribe` returns, and a
+caller annotating a function that takes one should not have to know where it
+lives."""
+
 
 # --------------------------------------------------------------------------- #
 # Asking
@@ -140,8 +145,16 @@ def submit_minimax(prompt: str, *, variant: str = "", first_frame=None, last_fra
 
     Raises :class:`Rejected` -- never a bare ``ValueError`` -- for everything
     the caller can do something about: a blank prompt, an unreadable picture, a
-    full queue.
+    full queue, a picture sent to a model that cannot see, LLM Studio switched
+    off. The last two are the panel's own refusals: the tab does not exist when
+    the setting is off, and the panel declines a picture before starting when
+    the model has no projector. "As if somebody had gone to LLM Studio" has to
+    include the answers that person would have got at the door.
     """
+    if not _enabled():
+        raise Rejected("LLM Studio is switched off in this WebUI's settings, so nothing "
+                       "can write a prompt. Turn it on under Settings → Model Chain.",
+                       "disabled")
     from prompt_master.core.models import RANDOM_SEED, draw_seed
     from prompt_master.minimax import enhancer
 
@@ -154,6 +167,10 @@ def submit_minimax(prompt: str, *, variant: str = "", first_frame=None, last_fra
     supplied = {FIRST_FRAME: first_frame, LAST_FRAME: last_frame, REFERENCE: reference}
     filled = tuple(slot for slot in SLOTS if supplied[slot] is not None)
     used = _primary(chosen, filled)
+    if used and _sees() is False:
+        raise Rejected("The model running has no vision projector, so a picture cannot be "
+                       "sent to it. Choose one in LLM Studio → Setup, or send the prompt "
+                       "without pictures.", "no_vision")
     image = _data_url(supplied[used], used) if used else None
 
     resolved = RANDOM_SEED if seed is None else int(seed)
@@ -169,7 +186,52 @@ def submit_minimax(prompt: str, *, variant: str = "", first_frame=None, last_fra
         kind="minimax", origin=str(origin or "")[:120], variant=chosen, prompt=text,
         seed=resolved, system=override, images=filled, image_used=used,
         image_ignored=tuple(slot for slot in filled if slot != used),
+        image_name=_image_name(supplied[used], used) if used else "",
         remember=bool(remember), _image=image)).identifier
+
+
+def _enabled() -> bool:
+    """Whether the LLM half exists at all, by the same setting that builds the tab."""
+    try:
+        import mc_llm_studio
+
+        return bool(mc_llm_studio.enabled())
+    except Exception:
+        logger.debug("Model Chain: could not read whether LLM Studio is enabled",
+                     exc_info=True)
+        return True
+
+
+def _sees() -> bool | None:
+    """Whether the configured model can take a picture. ``None`` when unreadable.
+
+    ``None`` and not ``False`` on a failure to read, so that a configuration
+    this module cannot inspect is left to the run to judge -- which will refuse
+    with the vendored client's own sentence if it must -- rather than refused
+    here on a guess.
+    """
+    try:
+        import mc_llm_runtime
+
+        return bool(mc_llm_runtime.config().sees)
+    except Exception:
+        logger.debug("Model Chain: could not read whether the model can see", exc_info=True)
+        return None
+
+
+def _image_name(picture, slot: str) -> str:
+    """What the saved history calls the picture: the panel's rule, then the slot.
+
+    A file contributes its basename and never its path -- ``mc_llm_ui
+    .picked_name``'s rule, for its reason -- and a picture that arrived with no
+    name at all is called by the slot it filled, which is at least a true
+    sentence about where it came from.
+    """
+    import mc_llm_ui as ui
+
+    if isinstance(picture, (str, Path)) and not str(picture).startswith("data:"):
+        return ui.picked_name(picture) or slot
+    return slot
 
 
 def _primary(variant: str, filled: tuple) -> str:
@@ -239,9 +301,14 @@ def result(job_id: str) -> str:
     return found.result if found is not None else ""
 
 
-def queue(*, limit: int = 20) -> dict:
-    """The whole queue in one consistent read: running, waiting, recently done."""
-    return jobs.snapshot(limit=limit)
+def queue(*, limit: int = 20, origin: str | None = None) -> dict:
+    """The queue in one consistent read: running, waiting, recently done.
+
+    ``origin`` narrows the listings to one caller's own requests. ``active``
+    and ``waiting`` stay the whole queue's, because a caller's next request is
+    behind everything that is there and not only behind its own.
+    """
+    return jobs.snapshot(limit=limit, origin=origin)
 
 
 def busy() -> bool:
@@ -252,6 +319,22 @@ def busy() -> bool:
 def cancel(job_id: str, reason: str = "") -> dict:
     """Stop one request, queued or running. See :func:`mc_llm_jobs.cancel`."""
     return jobs.cancel(job_id, reason)
+
+
+def cancel_all(origin: str, reason: str = "") -> dict:
+    """Cancel every request one caller made, running or waiting.
+
+    The shape a caller wants when its own panel closes. ``origin`` is required
+    here where :func:`mc_llm_jobs.cancel_all` leaves it optional, because "cancel
+    everything, whoever asked for it" is the panel's decision to make and not a
+    thing a caller should reach by forgetting an argument.
+    """
+    label = str(origin or "").strip()
+    if not label:
+        raise Rejected("cancel_all needs the origin you submitted under. To cancel "
+                       "every request regardless of origin, use mc_llm_jobs.cancel_all.",
+                       "empty_origin")
+    return jobs.cancel_all(reason, origin=label)
 
 
 def subscribe(job_id: str = "", *, ttl: float = jobs.FEED_TTL, cursor: int = 0):
@@ -326,7 +409,8 @@ def capabilities() -> dict:
     """
     found = {
         "api_version": API_VERSION,
-        "kinds": ("minimax",),
+        "kinds": ["minimax"],
+        "enabled": _enabled(),
         "variants": [value for value, _ in variants()],
         "slots": list(SLOTS),
         "events": list(jobs.EVENTS),
@@ -345,7 +429,10 @@ def capabilities() -> dict:
         found["configured"] = bool(configuration.configured)
         found["vision"] = bool(configuration.sees)
         found["model"] = Path(str(configuration.model or "")).name
-        if not found["configured"]:
+        if not found["enabled"]:
+            found["reason"] = ("LLM Studio is switched off in this WebUI's settings. "
+                               "Requests will be refused until it is turned on.")
+        elif not found["configured"]:
             found["reason"] = ("No language model is set up. Choose one in LLM Studio → "
                                "Setup.")
         elif not found["vision"]:

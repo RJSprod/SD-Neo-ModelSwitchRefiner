@@ -208,6 +208,9 @@ class Job:
     image_used: str = ""
     """Which one was captioned. Empty when the request had no image."""
     image_ignored: tuple = ()
+    image_name: str = ""
+    """What the saved history will call the picture: a file's basename, or the
+    slot. Never a path -- see :func:`mc_llm_api._image_name`."""
     remember: bool = True
 
     announced_position: int = 0
@@ -223,6 +226,13 @@ class Job:
     error: str = ""
     cancel_reason: str = ""
     cancelling: bool = False
+    stage: str = ""
+    """The last thing the run said it was doing -- "Describing the image…",
+    "Waiting for image generation on GPU 0…". A ``running`` state on its own
+    cannot tell a request that is generating from one that is queued behind an
+    image pass on the same lock, and that is the question a caller looking at a
+    slow request actually has. The feed carries the same text as ``status``
+    events; this is for the caller that only polls."""
 
     _image: str | None = None
     _cancel: object = None
@@ -244,7 +254,16 @@ class Job:
         ``prompt=False`` leaves the written prompt out, which is what the queue
         listing wants: a caller polling for position should not be handed
         thirty kilobytes of other people's prompts on every poll.
+
+        Read under the module lock, because the worker writes these fields from
+        another thread and a reader that took them one at a time could see a
+        ``done`` beside the previous stage's text. The lock is reentrant, so a
+        listing that already holds it pays nothing.
         """
+        with _lock:
+            return self._describe(prompt)
+
+    def _describe(self, prompt: bool) -> dict:
         found = {
             "id": self.identifier,
             "kind": self.kind,
@@ -257,8 +276,13 @@ class Job:
             "finished": self.finished or None,
             "elapsed": self.elapsed,
             "queued_for": self.queued_for,
-            "position": position_of(self.identifier),
+            # Read straight off the deque rather than through position_of():
+            # the lock is already held here, and a second acquisition is only
+            # a way for a reader that held nothing to look as though it did.
+            "position": (_pending.index(self.identifier) + 1
+                         if self.identifier in _pending else 0),
             "cancelling": self.cancelling,
+            "stage": self.stage,
             "system_override": self.system_override,
             "images": list(self.images),
             "image_used": self.image_used,
@@ -395,27 +419,40 @@ def active() -> bool:
         return bool(_running) or bool(_pending)
 
 
-def snapshot(*, limit: int = 20) -> dict:
+def snapshot(*, limit: int = 20, origin: str | None = None) -> dict:
     """Everything a queue view needs, in one consistent read.
 
     One function rather than three, because a banner assembled from separate
     calls to :func:`running`, :func:`position_of` and a listing can describe a
     state that never existed -- a job counted as running by the first call and
     as finished by the third.
+
+    ``origin`` narrows the three lists to one caller's requests, which is what
+    that caller's own panel wants to draw. ``active`` and ``waiting`` are still
+    the whole queue's: a caller with nothing of its own in the line is still
+    behind everything that is there, and a count that said otherwise would be
+    the number it would use to predict how long its next request takes.
     """
     with _lock:
         _reap_locked()
         current = _jobs.get(_running) if _running else None
         waiting = [_jobs[key] for key in _pending if key in _jobs]
         recent = sorted((found for found in _jobs.values() if found.terminal),
-                        key=lambda found: found.finished, reverse=True)[:limit]
+                        key=lambda found: found.finished, reverse=True)
+
+        def mine(found) -> bool:
+            return origin is None or found.origin == origin
+
         return {
             "active": bool(current) or bool(waiting),
-            "running": current.describe(prompt=False) if current else None,
+            "running": (current.describe(prompt=False)
+                        if current is not None and mine(current) else None),
             "waiting": len(waiting),
-            "queue": [found.describe(prompt=False) for found in waiting],
-            "recent": [found.describe(prompt=False) for found in recent],
+            "queue": [found.describe(prompt=False) for found in waiting if mine(found)],
+            "recent": [found.describe(prompt=False)
+                       for found in recent if mine(found)][:limit],
             "capacity": MAX_QUEUED,
+            "origin": origin,
         }
 
 
@@ -462,15 +499,21 @@ def cancel(identifier: str, reason: str = "") -> dict:
     return {"ok": True, "state": "cancelling", "was": RUNNING}
 
 
-def cancel_all(reason: str = "") -> dict:
+def cancel_all(reason: str = "", *, origin: str | None = None) -> dict:
     """Cancel the running request and everything waiting behind it.
 
     What the panel's banner offers, and the only bulk operation there is. It
     takes the queue as it stands at one instant rather than looping until empty,
     so a caller submitting while this runs is not starved by it.
+
+    ``origin`` limits it to one caller's requests -- the shape a caller wants
+    when its own panel closes and everything it asked for should go with it.
+    Nobody checks that the origin is really theirs, and nothing here pretends
+    to; see :mod:`mc_llm_api` on what ``origin`` is and is not.
     """
     with _lock:
-        keys = list(_pending) + ([_running] if _running else [])
+        keys = [key for key in list(_pending) + ([_running] if _running else [])
+                if origin is None or (key in _jobs and _jobs[key].origin == origin)]
     stopped = [key for key in keys if cancel(key, reason).get("ok")]
     return {"ok": True, "cancelled": len(stopped), "ids": stopped}
 
@@ -767,10 +810,11 @@ def _run(found: Job) -> None:
             cancel_token.cancel()
 
     text, caption = "", ""
+    trace = f"request {found.identifier}" + (f" from {found.origin}" if found.origin else "")
     try:
         for event in sessions.minimax(found.prompt, found.variant, found._image,
                                       found.seed, cancel_token,
-                                      system=found.system):
+                                      system=found.system, trace=trace):
             if event.kind == sessions.CHUNK:
                 text += event.text or ""
                 with _wake:
@@ -782,7 +826,8 @@ def _run(found: Job) -> None:
                     _emit_locked(found, EV_CAPTION, {"text": caption})
             elif event.kind == sessions.STATUS:
                 with _wake:
-                    _emit_locked(found, EV_STATUS, {"text": event.text or ""})
+                    found.stage = event.text or ""
+                    _emit_locked(found, EV_STATUS, {"text": found.stage})
             elif event.kind == sessions.DONE:
                 with _wake:
                     found.result = event.text or ""
@@ -857,7 +902,7 @@ def _remember(found: Job) -> None:
         mc_llm_state.save_minimax_session(mc_llm_state.MinimaxSession(
             variant=found.variant, prompt=found.prompt, caption=found.caption,
             result=found.result, seed=int(found.seed),
-            image_name=found.image_used))
+            image_name=found.image_name or found.image_used))
     except Exception:
         logger.debug("Model Chain: could not save the MiniMax session for request %s",
                      found.identifier, exc_info=True)

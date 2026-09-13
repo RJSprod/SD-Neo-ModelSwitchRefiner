@@ -53,6 +53,8 @@ forwarding a request to your own browser panel is a handful of lines on *your*
 routes, under *your* auth:
 
 ```python
+import json
+
 from starlette.responses import StreamingResponse
 
 def stream(job_id: str):
@@ -108,10 +110,17 @@ you can act on. It carries a `.code`:
 
 | `.code` | Means |
 |---|---|
+| `disabled` | LLM Studio is switched off in this WebUI's settings. The tab does not exist, so neither does this. |
 | `empty_prompt` | The prompt was blank. |
 | `empty_system_prompt` | An override was given but was blank. Leave it out to use the default. |
 | `bad_image` | One of the pictures could not be read. The message names which slot. |
+| `no_vision` | A picture was sent but the model running has no vision projector. Nothing was queued. The same refusal the panel makes before starting. |
 | `queue_full` | `MAX_QUEUED` (32) requests are already waiting. Retry later. |
+| `empty_origin` | `cancel_all()` was called without an origin (§9). |
+| `unknown_job` | `subscribe()` was given an id that does not exist (§7). |
+
+New codes may be added; treat one you do not recognise as a refusal you cannot
+retry your way past, and show its message.
 
 
 ## 4. Pictures: three slots, one caption
@@ -152,14 +161,18 @@ Any picture at all also switches the enhancer from its text instructions to its
 image instructions, which is WanGP's behaviour and not something the slot
 choice changes.
 
-**Vision is required for any picture.** If the loaded model has no vision
-projector the request fails with that reason. Check first with
-`capabilities()["vision"]` (§8) so you can say so in your own UI rather than
-queueing something that cannot work.
+**Vision is required for any picture.** If the model running has no vision
+projector, `submit_minimax` raises `Rejected("no_vision")` and queues nothing —
+the same refusal the panel makes before it starts. `capabilities()["vision"]`
+(§8) tells you in advance so you can say so in your own UI. If that
+configuration cannot be read at all, the request is queued and the run itself
+decides, failing with the vendored client's own message if it must.
 
 **No picture bytes are kept.** The data URL exists for as long as the run needs
 it and is dropped when the run ends. It never appears in `status()`, in a log
-line, or in the saved history — which records the file's name only.
+line, or in the saved history — which records a name only: a file's basename
+(never its path), or, for a picture that arrived with no name, the slot it
+filled (`"first_frame"`).
 
 
 ## 5. Tracking it
@@ -180,10 +193,11 @@ fifteen minutes after a request finished — not an error.
   "created": 1789012345.67,     # epoch seconds
   "started": 1789012346.01,     # None while queued
   "finished": 1789012389.42,    # None until terminal
-  "elapsed": 43.41,             # seconds spent running
-  "queued_for": 0.34,           # seconds spent waiting
+  "elapsed": 43.41,             # seconds since it started (see below)
+  "queued_for": 0.34,           # seconds spent in the line before that
   "position": 0,                # 1 == next to run; 0 == running or finished
   "cancelling": False,          # a stop has been asked for but not yet taken
+  "stage": "Describing the image…",   # the last thing the run said it was doing
   "system_override": False,
   "images": ["first_frame"],
   "image_used": "first_frame",
@@ -201,9 +215,18 @@ fifteen minutes after a request finished — not an error.
 `result(job_id)` is shorthand for the finished prompt alone, and is `""` until
 there is one.
 
-### `queue(limit=20) -> dict`
+**`stage` is what "running" is actually doing.** A request is `running` from
+the moment the worker takes it off the line, and that includes time spent
+waiting for the GPU behind an image generation or a panel run on the same card
+— the same wait the panel shows as *Waiting for …*. `stage` carries that text
+(`"Waiting for image generation on GPU 0…"`, `"Describing the image…"`, and
+so on), so a caller that only polls can tell a request that is generating from
+one that is queued behind something the queue cannot see. `elapsed` counts
+from `started` and therefore includes that wait.
 
-One consistent read of the whole queue. Assembling this from separate calls can
+### `queue(limit=20, origin=None) -> dict`
+
+One consistent read of the queue. Assembling this from separate calls can
 describe a state that never existed, so it is a single function.
 
 ```python
@@ -214,8 +237,15 @@ describe a state that never existed, so it is a single function.
   "queue": [{...}, {...}], # in the order they will run
   "recent": [{...}],       # most recently finished first
   "capacity": 32,
+  "origin": None,          # the filter this listing was made under
 }
 ```
+
+`origin="my-extension"` narrows `running`, `queue` and `recent` to requests
+submitted under that label — what your own panel wants to draw. `active` and
+`waiting` stay the whole queue's on purpose: your next request is behind
+everything in the line, not only behind your own, and that is the number you
+would use to predict how long it takes.
 
 `busy()` is the one-line version: `True` if anything external is running or
 waiting.
@@ -267,7 +297,8 @@ feed = mc_llm_api.subscribe(job_id, cursor=n, ttl=300.0)
 ```
 
 `subscribe` raises `Rejected("unknown_job")` for an id that does not exist,
-rather than handing back a feed that will never produce anything.
+rather than handing back a feed that will never produce anything. The class it
+returns is `mc_llm_api.Feed`, re-exported for annotations.
 
 Two ways to read one:
 
@@ -347,15 +378,18 @@ mc_llm_api.capabilities()
 #  "slots": ["first_frame", "last_frame", "reference"],
 #  "events": [...],
 #  "max_queued": 32, "feed_ttl": 300.0, "job_retention": 900.0,
+#  "enabled": True,           # LLM Studio is switched on at all
 #  "configured": True,        # a language model is set up
 #  "vision": True,            # …and it can see pictures
 #  "model": "qwen3-vl-8b.gguf",
-#  "reason": ""}              # why not, when configured or vision is False
+#  "reason": ""}              # why not, when any of the three is False
 ```
 
 Every field is a fact about this machine at this moment, not a promise:
-`vision` can go false when somebody switches models. Reading this first turns a
-failed job into a message you can show.
+`vision` can go false when somebody switches models, and `enabled` when
+somebody turns the tab off. Reading this first turns a refusal into a message
+you can show before the user presses anything. `reason` names the first of the
+three that is false, in the order a person would fix them.
 
 `API_VERSION` is bumped when something documented here changes meaning. Adding
 a field, an event name or a keyword argument does not bump it — so read fields
@@ -375,6 +409,17 @@ mc_llm_api.cancel(job_id, "the user closed the panel")
 | Finished | Refused. | `{"ok": False, "code": "already_finished", ...}` |
 | Unknown | Refused. | `{"ok": False, "code": "unknown_job", ...}` |
 
+```python
+mc_llm_api.cancel_all("my-extension", "the user closed the panel")
+```
+
+cancels every request submitted under that origin, running or waiting, and
+returns `{"ok": True, "cancelled": n, "ids": [...]}`. The origin is required —
+"cancel everything, whoever asked for it" is the user's decision to make from
+the panel, not something a caller should reach by forgetting an argument — and
+a blank one is refused with `empty_origin`. (`mc_llm_jobs.cancel_all()` with no
+origin exists for the panel and does take everyone down.)
+
 `"cancelling"` is deliberate. `llama.cpp` honours a stop between tokens, so the
 call returns before the run has actually ended. Watch the feed for the
 `cancelled` event if you need to know it really stopped. Cancellation is
@@ -385,6 +430,12 @@ and the next request is a warm one.
 be bought, and nothing cancels somebody else's request to make room. A request
 that is running is never interrupted by one that arrives during it. This is the
 property the whole feature was asked for.
+
+The same holds in the other direction, through the lock rather than the queue:
+a panel run — MiniMax, Krea, a conversation reply — that began before your
+request holds the GPU workload lock, and your request waits for it exactly as
+it waits for an image generation. It is `running` with a `stage` of *Waiting
+for …* while that happens. It is never started on top of one.
 
 **One at a time.** Two external requests never run concurrently, even on a
 two-card machine. `llama-server` is one process per role and its prompt cache
@@ -420,9 +471,30 @@ at any time.** You will see a `cancelled` event with a `reason` naming LLM
 Studio. Handle it as an ordinary outcome, not an error.
 
 The gate is re-read when the workspace is opened, on page load, on *Check
-again*, every two seconds while the workspace is on screen (on hosts whose
-Gradio has `gr.Timer`), and — authoritatively — by the Enhance handler itself
-at the moment it is pressed.
+again*, after every panel run ends, every two seconds while the workspace is
+on screen (on hosts whose Gradio has `gr.Timer`), and — authoritatively — by
+the Enhance handler itself at the moment it is pressed.
+
+**If LLM Studio is switched off** (Settings → Model Chain), the tab does not
+exist and every request is refused with `disabled`. The toggle turns off the
+whole LLM half, this API included.
+
+### What the console says
+
+Every run this API starts writes the same console lines a panel run writes,
+with the request named on the end of each:
+
+```
+Model Chain: MiniMax request 8e8983b7cd4f418d queued at position 1 for my-extension
+Model Chain: LLM run started — a MiniMax fl2va enhancement (request 8e8983b7cd4f418d from my-extension)
+Model Chain: LLM a MiniMax fl2va enhancement (request 8e8983b7cd4f418d from my-extension) — Describing the image…
+Model Chain: LLM run finished — a MiniMax fl2va enhancement (request 8e8983b7cd4f418d from my-extension), 1,412 characters in 43.4s
+Model Chain: MiniMax request 8e8983b7cd4f418d done after 43.4s
+```
+
+Nothing written there is content: no prompt, no override, no caption, no
+picture. `origin` is the one caller-supplied string that reaches the log, which
+is worth knowing when you choose it.
 
 
 ## 11. A complete example
@@ -492,3 +564,30 @@ reaches a terminal value and stays there until retention drops the record.
 `mc_llm_jobs` is not private, and reading it is fine — `mc_llm_jobs.feeds()`
 and the state constants are useful. But `mc_llm_api` is the part that carries
 `API_VERSION`, and it is the part that will be kept working.
+
+
+## 13. Revisions
+
+Everything below is additive. `API_VERSION` is still `1`; a caller written
+against the first revision keeps working unchanged, and one that matches on
+refusal codes exhaustively should read the note under §3.
+
+**V1, second revision** — after review against the original brief:
+
+| Added | Where |
+|---|---|
+| `Rejected("disabled")` when LLM Studio is switched off | §3, §10 |
+| `Rejected("no_vision")` at submit time for a picture the model cannot see, instead of a queued job that fails | §3, §4 |
+| `status()["stage"]` — what a `running` request is actually doing, waits included | §5 |
+| `queue(origin=…)` — a caller's own requests | §5 |
+| `cancel_all(origin, reason)` — a caller's own requests, origin required | §9 |
+| `capabilities()["enabled"]`; `kinds` is now a list | §8 |
+| `mc_llm_api.Feed` re-exported | §7 |
+| Saved-prompts history records a file's basename, as the panel does; a nameless picture is recorded by its slot | §4 |
+| Every console line names the request and its origin | §10 |
+| The panel re-reads its gate after every run of its own, so a host without `gr.Timer` never shows an enabled Enhance over a running external request; the panel's Stop does the same; the busy refusal no longer clears the last prompt off the screen | §10 |
+| A status read is taken under the queue's lock, so a record is never seen half-written | §5 |
+
+**V1, first revision** — the original surface: `submit_minimax`, `status`,
+`result`, `queue`, `busy`, `cancel`, `forget`, `subscribe`, `system_prompt`,
+`system_prompts`, `variants`, `capabilities`.

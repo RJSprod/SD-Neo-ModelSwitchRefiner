@@ -1203,16 +1203,23 @@ def conversation(request: ChatRequest, cancel: Cancellation):
 
 
 def minimax(prompt: str, variant: str, image: str | None, seed: int,
-            cancel: Cancellation, system: str | None = None):
+            cancel: Cancellation, system: str | None = None, trace: str = ""):
     """One MiniMax enhancement. See :func:`_minimax`.
 
     Whether the instructions were overridden reaches the console line as a word,
     because a run that came back unlike its neighbours is a run somebody has to
     be able to account for -- and the override itself, which is caller-supplied
     text, is no more logged than a prompt is.
+
+    ``trace`` is the external queue's name for the request -- its id and who
+    asked -- and goes on the end of every console line this run writes. A
+    console with a panel run and three external ones interleaved is otherwise
+    six identical "a MiniMax fl2va enhancement" lines with nothing to say which
+    started, which finished, and which is the one somebody is asking about.
     """
     yield from _traced(f"a MiniMax {variant} enhancement"
-                       + (" under caller instructions" if system is not None else ""),
+                       + (" under caller instructions" if system is not None else "")
+                       + (f" ({trace})" if trace else ""),
                        _minimax(prompt, variant, image, seed, cancel, system))
 
 
