@@ -1436,6 +1436,17 @@ _CACHE = re.compile(r"(\S+)\s+KV buffer size\s*=\s*([0-9.]+)\s*MiB")
 # which is the number the whole placement argument is really about.
 _GRANTED = re.compile(r"n_ctx_seq\s*\((\d+)\)")
 _DEVICE = re.compile(r"-\s*(CUDA\d+|GPU\d+)\s*:.*?\(\s*(\d+)\s*MiB,\s*(\d+)\s*MiB free\s*\)")
+_DEVICE_AT_LOAD = re.compile(
+    r"using device\s+([A-Za-z]+\d+)\s*\(.*?\)[^\n]*?-\s*(\d+)\s*MiB free")
+"""The third spelling: what the loader itself saw free on each device it used.
+
+A 2026 build writes ``using device CUDA0 (NVIDIA GeForce RTX 3090)
+(0000:01:00.0) - 22700 MiB free`` as it opens the model, with no total beside
+it. Read as a device line with the total unknown, because it answers the
+question that matters -- what the card had when llama.cpp looked -- and a
+reading from inside the process that did the allocating is the one this
+extension cannot take for itself.
+"""
 _ALLOC_FAILED = re.compile(
     r"allocating\s+([0-9.]+)\s*MiB on device\s*(\d+):\s*(?:cudaMalloc|.*?)\s*failed:?\s*(.*)")
 _LOAD_FAILED = re.compile(r"(?:error loading model|failed to load model|exiting due to)[^\n]*")
@@ -1520,6 +1531,17 @@ class Offload:
         return self._bytes(self.weights, False)
 
     @property
+    def device_resident_bytes(self) -> int:
+        """Weights and cache llama.cpp says it put on a card, together.
+
+        The report's own answer to the question the free-VRAM difference is a
+        proxy for. Smaller than the difference by the compute buffers and the
+        context, which the report does not itemise, and never inflated by
+        anything else on the machine moving in between two readings.
+        """
+        return self._bytes(self.weights, False) + self._bytes(self.cache, False)
+
+    @property
     def system_share(self) -> float:
         total = self.system_bytes + self.device_bytes
         return self.system_bytes / total if total else 0.0
@@ -1538,8 +1560,8 @@ class Offload:
         if self.granted_context:
             parts.append(f"{self.granted_context:,} token context")
         for device, total, free in self.device_free:
-            parts.append(f"{device} {free * _MB / _GB:.1f} GB free of "
-                         f"{total * _MB / _GB:.1f} GB at start")
+            parts.append(f"{device} {free * _MB / _GB:.1f} GB free"
+                         f"{f' of {total * _MB / _GB:.1f} GB' if total else ''} at start")
         return ", ".join(parts)
 
 
@@ -1563,6 +1585,9 @@ def read_offload(text: str) -> Offload:
     granted = _GRANTED.findall(text)
     devices = tuple((name, int(total_mib), int(free_mib))
                     for name, total_mib, free_mib in _DEVICE.findall(text))
+    if not devices:
+        devices = tuple((name.upper(), 0, int(free_mib))
+                        for name, free_mib in _DEVICE_AT_LOAD.findall(text))
     return Offload(layers=layers, total_layers=total, weights=weights, cache=cache,
                    granted_context=int(granted[-1]) if granted else 0,
                    device_free=devices)
@@ -1735,9 +1760,35 @@ the full context for every block. So the reserve does not move; reality merely
 stops being cheaper than the arithmetic that placed it.
 """
 
+LOG_VERBOSITY_FLAG = "--log-verbosity"
+LOAD_REPORT_VERBOSITY = "4"
+"""Ask a newer llama.cpp to write the load report it hides by default.
+
+Every figure this module reads back after a start -- how many layers reached
+the card, how large each device buffer is, what the card had free when the
+server looked -- comes from the library's *informational* log lines. A 2026
+build demoted those: its ``common_get_verbosity`` maps the library's INFO
+level to its own ``trace`` threshold (4), while the server starts at ``info``
+(3). So ``load_tensors: offloaded 41/41 layers to GPU`` and ``CUDA0 model
+buffer size = 15600.00 MiB`` are no longer written unless somebody asks, and
+the console line "llama.cpp wrote no load report this run" became true of
+every start on such a build.
+
+From a user's log, on exactly such a build: the free-VRAM difference said a
+16 GB model had taken 0.1 GB, the shortfall warning fired, and there was no
+report anywhere to say which of the two was lying. The flag is passed only
+when the build's own help text names the scale on which four means trace --
+an older build spells the same flag with a different scale, and a number that
+means "debug everything" there would fill the log with every request body.
+"""
+
+_TRACE_SCALE = re.compile(r"--log-verbosity[\s\S]{0,900}?\b4\s*:\s*trace", re.IGNORECASE)
+"""The help text of a build whose load report sits at verbosity four."""
+
 OPTIONAL_FLAGS = frozenset({
     CPU_MOE_FLAG, N_CPU_MOE_FLAG, FLASH_ATTENTION_FLAG, NO_MMAP_FLAG,
     NO_KV_OFFLOAD_FLAG, OP_OFFLOAD_FLAG, FULL_ATTENTION_WINDOW_FLAG,
+    LOG_VERBOSITY_FLAG,
     mc_llm_accel.SPEC_TYPE_FLAG, mc_llm_accel.SPEC_MAX_FLAG,
 })
 """Every flag this extension *chooses* to append, and none that it must.
@@ -1964,7 +2015,7 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     remaining llama.cpp knobs -- thread counts, batch sizes -- are hardware
     guesses this module has no way to verify from here.
     """
-    flags: list[str] = []
+    flags: list[str] = list(verbosity_flags(configuration))
     if runtime_supports(FULL_ATTENTION_WINDOW_FLAG, configuration):
         flags.append(FULL_ATTENTION_WINDOW_FLAG)
     flags.extend(conservative_flags(configuration))
@@ -2244,6 +2295,19 @@ def _without_flash_attention(flags: list[str]) -> list[str]:
             continue
         kept.append(flag)
     return kept
+
+
+def verbosity_flags(configuration: Config) -> list[str]:
+    """``--log-verbosity 4`` on a build that hides its load report below it.
+
+    Empty everywhere else, and that includes a build that advertises the flag
+    with the older scale: only the help text that says four is *trace* is
+    evidence that four is the level the load report sits at. See
+    :data:`LOG_VERBOSITY_FLAG`.
+    """
+    if _TRACE_SCALE.search(_capability_text(configuration)):
+        return [LOG_VERBOSITY_FLAG, LOAD_REPORT_VERBOSITY]
+    return []
 
 
 def conservative_flags(configuration: Config) -> list[str]:
@@ -3708,10 +3772,78 @@ RESIDENCY_SETTLE_SECONDS = 0.25
 """How long to keep asking the driver what a new server took.
 
 A second at the outside, and only on the path where the first answer was
-impossible -- an on-GPU placement that appears to be holding nothing. A start
-already costs several seconds; a fifth of one to stop printing "0.0 GB VRAM"
-about a model holding fourteen is cheap.
+implausible -- an on-GPU placement that appears to be holding nothing, or a
+sliver of what was sent to it. A start already costs several seconds; a fifth
+of one to stop printing "0.0 GB VRAM" about a model holding fourteen is cheap.
 """
+
+RESIDENCY_PLAUSIBLE_FRACTION = 0.25
+"""How little of the weights the driver may report before the reading is doubted.
+
+The zero case was already retried, and it turned out not to be the only shape
+the same failure takes. From a user's log: an "all layers on the GPU" start of
+a 15.6 GB model measured 0.1 GB -- the CUDA context and nothing else -- and
+was believed at once, because a tenth of a gigabyte is not zero. Forty seconds
+later the next start read the same card as still having 22.7 GB free and
+placed a second server against it. Below a quarter of the weights this
+placement sends to the card, the reading is treated exactly as a zero is:
+asked again, briefly, before it is written down. A card that genuinely took a
+quarter reads the same after the wait, and is then believed and warned about.
+"""
+
+
+def _expected_weights(gguf, placement: mc_llm_context.Placement) -> int:
+    """The weights this placement sends to the card, as the estimator counts them.
+
+    Zero when the header could not be read, which switches the plausibility
+    check off rather than inventing a figure to doubt readings against.
+    """
+    if gguf is None or not getattr(gguf, "usable", False):
+        return 0
+    try:
+        return max(int(mc_llm_context.weights_bytes(gguf, placement)), 0)
+    except Exception:
+        logger.debug("Model Chain: could not size the weights this placement sends to the "
+                     "card", exc_info=True)
+        return 0
+
+
+def _implausible(observed: int, expected: int) -> bool:
+    """Whether a free-VRAM difference is too small to be the placement it measures."""
+    if observed <= 0:
+        return True
+    return expected > 0 and observed < expected * RESIDENCY_PLAUSIBLE_FRACTION
+
+
+def _reconciled_residency(observed: int, expected: int, offload: "Offload",
+                          placement: mc_llm_context.Placement) -> int:
+    """The residency to record: the driver's difference, unless llama.cpp knows better.
+
+    The difference of two free-VRAM readings is the only measurement this
+    extension can take from outside another process, and it has been wrong in
+    both directions. The load report is the process's own account of what it
+    put on the card. When the two disagree by the margin that means the driver
+    has not caught up -- the difference is a sliver of the weights and the
+    report names gigabytes of device buffers -- the report is used, and the
+    line says so. A plausible difference is kept: it includes the context and
+    compute buffers the report does not itemise, and it is what every earlier
+    figure in this module was.
+    """
+    if not getattr(placement, "on_gpu", False) or placement.gpu_layers == mc_llm_context.NO_LAYERS:
+        return observed
+    if not _implausible(observed, expected):
+        return observed
+    try:
+        reported = int(offload.device_resident_bytes) if offload.known else 0
+    except Exception:
+        return observed
+    if reported <= 0 or _implausible(reported, expected):
+        return observed
+    logger.info("Model Chain: the card's free VRAM moved by %.1f GB after llama-server started, "
+                "but llama.cpp reports %.1f GB of weights and cache on it — the driver's figure "
+                "has not caught up, and the report is what is recorded",
+                max(observed, 0) / _GB, reported / _GB)
+    return reported
 
 OVERSPEND_TOLERANCE = 256 * 1024 * 1024
 """How far above its allowance a running server may sit before it is re-placed.
@@ -4387,7 +4519,9 @@ class Runtime:
         # reading of another card makes the second of those a subtraction of two
         # unrelated numbers.
         before = mc_broker.device_free_vram_bytes(card_of(configuration))
-        layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
+        described = mc_gguf.describe(configuration.model)
+        layers = _layers_argument(placement, described)
+        expected = _expected_weights(described, placement)
         # Which program is started. The plan carries its own executable only
         # if it ever grows one; today this is the configured runtime, and the
         # line exists so that a plan which does grow one cannot be launched
@@ -4459,14 +4593,21 @@ class Runtime:
             raise _StartFailed(said.text or str(exc), said.out_of_memory,
                                said.bad_argument, said.bad_value) from exc
 
-        observed = self._observed_residency(before, placement, card_of(configuration))
+        observed = self._observed_residency(before, placement, card_of(configuration),
+                                            expected)
         _check_slots(log_path, written_before, placement)
-        return process, observed, _await_offload(log_path, written_before)
+        offload = _await_offload(log_path, written_before)
+        return process, _reconciled_residency(observed, expected, offload, placement), offload
 
     @staticmethod
     def _observed_residency(before: int, placement: mc_llm_context.Placement,
-                            card: int | None) -> int:
+                            card: int | None, expected: int = 0) -> int:
         """How much VRAM the server that just started actually took, on ``card``.
+
+        ``expected`` is what the estimator says the placement sends to the
+        card, and it decides what counts as a reading worth waiting on: see
+        :data:`RESIDENCY_PLAUSIBLE_FRACTION`. Zero switches that off and leaves
+        only the zero-reading retry this always had.
 
         ``card`` has no default, deliberately: the default *was* the bug. The
         measurement is a difference of
@@ -4510,21 +4651,23 @@ class Runtime:
             return mc_broker.device_free_vram_bytes(card)
 
         observed = max(before - reading(), 0)
-        if observed > 0 or not getattr(placement, "on_gpu", False):
+        if not getattr(placement, "on_gpu", False):
             return observed
         if placement.gpu_layers == mc_llm_context.NO_LAYERS:
             return observed  # nothing was asked for; zero is the right answer
+        if not _implausible(observed, expected):
+            return observed
 
         for _attempt in range(RESIDENCY_SETTLE_ATTEMPTS):
             time.sleep(RESIDENCY_SETTLE_SECONDS)
             observed = max(before - reading(), 0)
-            if observed > 0:
+            if not _implausible(observed, expected):
                 return observed
 
-        logger.debug("Model Chain: the card reported no change in free VRAM after "
-                     "llama-server started; the residency figure falls back to the "
-                     "estimate")
-        return 0
+        logger.debug("Model Chain: the card reported %.1f GB taken after llama-server "
+                     "started, against %.1f GB of weights sent to it; the reading is "
+                     "recorded as it stands", observed / _GB, expected / _GB)
+        return observed
 
     def _client(self, configuration: Config):
         """A client for the server that is up, carrying the profile's samplers.
