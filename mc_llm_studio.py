@@ -615,7 +615,10 @@ def _load_model(progress=gr.Progress()):
     # did nothing gets pressed again.
     yield _runtime_line(LOADING), gr.update(), gr.update()
     try:
-        progress(0, desc="Starting llama-server…")
+        # The same caption the backbone switch uses, for the same reason: an
+        # Intel GPU start compiles llama.cpp's kernels first, and minutes of
+        # "Starting llama-server…" at nothing reads as a hang.
+        progress(0, desc=f"Starting llama-server…{_compiling_suffix()}")
         mc_llm_runtime.runtime.client()
     except Exception as exc:
         logger.warning("Model Chain: llama-server could not be started: %s", ui.failure(exc))
@@ -624,6 +627,18 @@ def _load_model(progress=gr.Progress()):
                _residency_html(), _estimator_html())
         return
     yield _runtime_line(), _residency_html(), _estimator_html()
+
+
+def _compiling_suffix() -> str:
+    """``" compiling kernels…"`` for an Intel GPU start, and ``""`` otherwise."""
+    try:
+        import mc_llm_managed_models
+
+        note = mc_llm_managed_models._compiling_note()
+        return f" {note}" if note else ""
+    except Exception:
+        logger.debug("Model Chain: could not read the start caption", exc_info=True)
+        return ""
 
 
 def _unload_model():

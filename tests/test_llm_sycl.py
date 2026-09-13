@@ -841,6 +841,131 @@ class TestTheCommandThatStartsAnIntelServer:
         runtime._capabilities.clear()
 
 
+class TestAFirstIntelStartExplainsItself:
+    """Six minutes of nothing is a hang unless something says otherwise.
+
+    From the machine this was built against: 6 min 14 s from the command line
+    to a server that would answer, of which 5 min 47 s was inside llama.cpp's
+    own warm-up run -- one forward pass over an empty batch, which the same
+    server then repeated in 106 ms. That is a compiler, and it is llama.cpp's
+    rather than this extension's: the official Windows SYCL build ships no
+    precompiled kernels and says so under Known Issues. Nothing here can make
+    it quicker; what it can do is not leave the tab silent through it.
+    """
+
+    def test_the_console_says_so_before_the_wait(self, placed, server, tmp_path,
+                                                 monkeypatch, caplog):
+        managed, _started = server
+        configure_intel(monkeypatch, tmp_path)
+        budget_of(monkeypatch, 40)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            managed.client()
+
+        said = [record.getMessage() for record in caplog.records]
+        note = next(line for line in said if "compiles its kernels" in line)
+        start = next(line for line in said if "starting llama-server" in line)
+        ready = next(line for line in said if "llama-server ready" in line)
+        assert said.index(note) > said.index(start)
+        assert said.index(note) < said.index(ready), "said after the wait is no use"
+        assert "Known Issues" in note and "minutes" in note
+
+    def test_a_cuda_start_says_nothing_of_the_kind(self, placed, server, tmp_path,
+                                                   monkeypatch, caplog):
+        managed, _started = server
+        model = build_model(tmp_path, blocks=32, size_mb=64)
+        binary = tmp_path / "llama-server"
+        binary.write_bytes(b"")
+        monkeypatch.setattr(runtime, "config", lambda role="": runtime.Config(
+            runtime=binary, model=model, mmproj=None, gpu_index=0, device="CUDA0",
+            gpu_layers="all", context_size=8192, context_mode="fixed",
+            context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16", mode="gpu"))
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 20 * _GB)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda index=None: 20 * _GB)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            managed.client()
+
+        assert not any("compiles its kernels" in record.getMessage()
+                       for record in caplog.records)
+
+    def test_a_slow_start_prints_what_to_compare_it_with(self, placed, tmp_path,
+                                                         monkeypatch, caplog):
+        configuration = configure_intel(monkeypatch, tmp_path)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            runtime._report_start_time(configuration, 374.0)
+
+        said = next(record.getMessage() for record in caplog.records
+                    if "Intel GPU start took" in record.getMessage())
+        assert "374 seconds" in said
+        assert "next start" in said
+
+    def test_a_quick_start_is_not_narrated(self, placed, tmp_path, monkeypatch, caplog):
+        configuration = configure_intel(monkeypatch, tmp_path)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            runtime._report_start_time(configuration, 12.0)
+
+        assert not any("Intel GPU start took" in record.getMessage()
+                       for record in caplog.records)
+
+    def test_a_slow_cuda_start_is_not_narrated_either(self, placed, tmp_path, monkeypatch,
+                                                      caplog):
+        with caplog.at_level("INFO", logger="model_chain"):
+            runtime._report_start_time(configured(tmp_path), 374.0)
+
+        assert not any("Intel GPU start took" in record.getMessage()
+                       for record in caplog.records)
+
+    def test_the_progress_caption_says_it_too(self, intel, root, monkeypatch):
+        """The console is for afterwards; the caption is what somebody is
+        actually looking at while it happens."""
+        import mc_llm_managed_models
+        import mc_llm_studio
+
+        server = make_build(root / "runtime", pinned.SYCL_RUNTIME)
+        listing(monkeypatch, LISTING_ARC)
+        setup.record(server, arc_device())
+
+        assert mc_llm_managed_models._compiling_note() == sycl.COMPILING
+        assert sycl.COMPILING in mc_llm_studio._compiling_suffix()
+
+    def test_the_caption_is_unchanged_for_every_other_device(self, a_card, root, monkeypatch):
+        import mc_llm_managed_models
+        import mc_llm_studio
+
+        server = make_build(root / "runtime", "llama-runtime-cuda12")
+        listing(monkeypatch, LISTING_CUDA)
+        setup.record(server, setup.device_for_token("gpu:0"))
+
+        assert mc_llm_managed_models._compiling_note() == ""
+        assert mc_llm_studio._compiling_suffix() == ""
+
+    def test_nothing_sets_the_cache_variable_llama_cpp_warns_against(self):
+        """SYCL_CACHE_PERSISTENT=1 does skip the JIT and llama.cpp's SYCL
+        documentation asks projects not to set it: a changed binary mixes new
+        and old code and crashes, and its Q&A names this as advice an AI gives
+        and a user regrets. The driver's own shader cache is the supported way
+        for a second start to be quick."""
+        import ast
+        import pathlib
+
+        # Every *use* of the name is a string literal equal to it -- an
+        # environment key, a subscript, an argument. Prose about why it is not
+        # set is a docstring, which is a literal that only ever *contains* the
+        # name, so comparing for equality tells the two apart without banning
+        # the explanation.
+        root = pathlib.Path(runtime.__file__).resolve().parent
+        for module in sorted(root.glob("mc_*.py")):
+            tree = ast.parse(module.read_text(encoding="utf-8"))
+            used = [node for node in ast.walk(tree)
+                    if isinstance(node, ast.Constant) and node.value == "SYCL_CACHE_PERSISTENT"]
+            assert not used, f"{module.name} names it in code, line {used[0].lineno}"
+        assert sycl.launch_environment({"PATH": "x"}) == {"PATH": "x",
+                                                          "CUDA_VISIBLE_DEVICES": ""}
+
+
 # --------------------------------------------------------------------------- #
 # 15.5 The broker: execution domains and memory domains
 # --------------------------------------------------------------------------- #

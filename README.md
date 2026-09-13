@@ -3369,6 +3369,62 @@ is available — install the SYCL llama.cpp runtime*, and a recorded device that
 has since disappeared with *the recorded SYCL device is no longer enumerated*.
 None of those is ever reworded as a CUDA problem.
 
+**The first start is slow, and it is a compiler.** The official Windows SYCL
+release ships no precompiled kernels, so llama.cpp builds them for your device
+the first time a build runs on it — listed under its own Known Issues as *"the
+startup is slow (JIT) in first time, but subsequent performance is
+unaffected"*. Measured here: **6 min 14 s** from the command line to a server
+that would answer, of which **5 min 47 s** was inside llama.cpp's warm-up run —
+one forward pass over an empty batch, which the same server then repeated in
+106 ms. Nothing in this extension can shorten it, so it says so before the wait
+instead, in the console and on the progress caption, and prints how long the
+start took when it runs long. Compare that figure with your next start: quick
+means the graphics driver kept the compiled kernels, and as slow again means it
+is not keeping them and every start will pay it.
+
+`SYCL_CACHE_PERSISTENT=1` would skip the compile on later starts and this
+extension deliberately does not set it. llama.cpp's SYCL documentation asks
+projects not to: the cache is keyed loosely enough that a changed binary mixes
+new and old code and crashes, and its Q&A names this as exactly the advice an
+AI is apt to give. The driver's own shader cache is the supported route.
+
+**What to expect from the speed.** On the same machine and the same 26B-A4B
+backbone at Q4_K_M:
+
+| Placement | Prompt | Generation |
+| --- | --- | --- |
+| Processor | 45 tok/s | 8.9 – 9.4 tok/s |
+| Intel Arc via SYCL | 64 tok/s | 9.4 tok/s |
+
+Prompt processing is **43% faster**; generation is **the same**. That is the
+shape to expect from an integrated GPU rather than a disappointment in this
+implementation. Generating a token reads the active weights from memory once —
+about 2.7 GB for this model — and the Arc and the processor cores sit behind
+*the same* memory controller, so moving that work across cannot raise a ceiling
+they share; both measure about 25 GB/s of effective traffic. Prompt processing
+multiplies hundreds of tokens at once, which is arithmetic rather than traffic,
+and that is where the GPU's extra lanes count.
+
+So the Intel target is not the fast option, it is the option that **leaves your
+NVIDIA card alone**. For speed, put the language model on the card: a 3090 has
+roughly ten times the memory bandwidth of a laptop's system memory.
+
+**Where the shared memory goes.** Two settings dominate it, and both are yours.
+Warm prompt caches multiply the whole cache, and `--swa-full` — which this
+extension passes so llama.cpp can resume a cached prompt exactly rather than at
+a checkpoint — holds the sliding-window layers at the full context instead of
+`n_swa + n_ubatch` cells. On the 26B-A4B backbone at 8,192 tokens:
+
+| Warm prompt caches | `--swa-full` | Key/value cache |
+| --- | --- | --- |
+| Six | on (as shipped) | 10.3 GB |
+| Six | off | 2.7 GB |
+| One | on | 1.7 GB |
+| One | off | 0.45 GB |
+
+If shared memory is tight, **Prompt caches** in Settings is the larger lever of
+the two.
+
 **The launch.** The server is started with `--device SYCL0` and every layer on
 the device. `CUDA_VISIBLE_DEVICES` is emptied for that start — the number the
 launcher would otherwise write there is a SYCL ordinal being read as an NVIDIA

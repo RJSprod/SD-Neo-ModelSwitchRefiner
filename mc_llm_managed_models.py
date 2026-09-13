@@ -1631,6 +1631,14 @@ def _switch(model: ManagedModel, bundle: Installed, say) -> Selection:
 
         say(f"Starting {model.label}…")
         _record(model, bundle, previous)                               # STEP 5
+        # Said again, once the selection is recorded, because only then is the
+        # device known -- and an Intel GPU start compiles llama.cpp's kernels
+        # before it will answer. On the machine that found this it was six
+        # minutes behind a progress bar reading "Starting …" at nothing, which
+        # is indistinguishable from a hang. See ``mc_llm_sycl.COMPILING``.
+        waiting = _compiling_note()
+        if waiting:
+            say(f"Starting {model.label}… {waiting}")
         try:
             _start_and_smoke_test()                                    # STEPS 6, 7
         except Exception as exc:
@@ -1644,6 +1652,24 @@ def _switch(model: ManagedModel, bundle: Installed, say) -> Selection:
 
     logger.info("Model Chain: LLM backbone switched to %s (%s)", model.label, model.identifier)
     return selection()                                                 # STEP 8
+
+
+def _compiling_note() -> str:
+    """What to add to the progress line when this start will compile kernels.
+
+    Empty for every other device, so that line stays exactly what it was, and
+    empty on any failure: a progress caption is not worth failing a switch for.
+    """
+    try:
+        import mc_llm_runtime
+        import mc_llm_sycl
+
+        if mc_llm_runtime.config().uses_sycl_compute:
+            return mc_llm_sycl.COMPILING
+    except Exception:
+        logger.debug("Model Chain: could not tell whether this start compiles kernels",
+                     exc_info=True)
+    return ""
 
 
 def _record(model: ManagedModel, bundle: Installed, previous: dict) -> None:

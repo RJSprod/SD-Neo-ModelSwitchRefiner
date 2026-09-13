@@ -3624,6 +3624,37 @@ PRIME_TOKENS = 1
 PRIME_SEED = 1
 
 
+SYCL_SLOW_START_SECONDS = 90.0
+"""How long an Intel GPU start has to take before the log explains itself again.
+
+Above this it is a kernel compile rather than a model load, and the number is
+worth printing because the *next* start is the measurement that matters: one
+that is quick means the graphics driver kept the compiled kernels, and one that
+is this slow again means it is not keeping them and every start will pay. That
+is a question this extension cannot answer from inside a single start, so it
+prints the figure and says what to compare it with.
+"""
+
+
+def _report_start_time(configuration: Config, waited: float, said_for: str = "") -> None:
+    """Say how long a slow Intel GPU start took, and what its successor proves.
+
+    Silent for every other device and for a quick start, so nothing about a
+    CUDA or processor start changes.
+    """
+    try:
+        if not configuration.uses_sycl_compute or waited < SYCL_SLOW_START_SECONDS:
+            return
+    except Exception:
+        return
+    logger.info(
+        "Model Chain: %sthat Intel GPU start took %.0f seconds, and most of a first one is "
+        "llama.cpp compiling kernels rather than reading the model. The next start is the "
+        "one that tells you which: quick means the graphics driver kept them, and this slow "
+        "again means it is not keeping them and every start will cost the same.",
+        said_for, waited)
+
+
 def _warn_about_an_idle_card(configuration: Config, layers: str) -> None:
     """Say once, per start, when a card is present and holding nothing it wanted to.
 
@@ -4842,6 +4873,15 @@ class Runtime:
         # nobody can find is a log nobody reads. It is one line per start, and
         # starts are rare.
         logger.info("Model Chain: llama-server log — %s", log_path)
+        if configuration.uses_sycl_compute:
+            # Before the wait rather than after it. See
+            # ``mc_llm_sycl.FIRST_START_SLOW``: the minutes this can take are
+            # llama.cpp compiling kernels, they are not this extension's to
+            # shorten, and a user watching a progress bar at nothing has no
+            # other way to tell a compile from a hang.
+            import mc_llm_sycl
+
+            logger.info("Model Chain: %s%s", self._said_for(), mc_llm_sycl.FIRST_START_SLOW)
         # Asked for only when this build advertises the flag. A runtime too old
         # for --parallel is not a reason to refuse to start; it is a reason to
         # run the one cache it has always run, and to say so once rather than
@@ -4874,6 +4914,7 @@ class Runtime:
         # the variable it is written into is read in CUDA's order.
         _arm_visibility(getattr(configuration, "gpu_uuid", ""))
         _arm_backend(configuration.backend)
+        began = time.monotonic()
         try:
             process.start(executable, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
@@ -4886,11 +4927,14 @@ class Runtime:
             raise _StartFailed(said.text or str(exc), said.out_of_memory,
                                said.bad_argument, said.bad_value) from exc
 
+        _report_start_time(configuration, time.monotonic() - began, self._said_for())
         observed = self._observed_residency(before, placement, card_of(configuration),
                                             expected)
         _check_slots(log_path, written_before, placement)
         offload = _await_offload(log_path, written_before)
         return process, _reconciled_residency(observed, expected, offload, placement), offload
+
+    # -- how long that took ----------------------------------------------- #
 
     @staticmethod
     def _observed_residency(before: int, placement: mc_llm_context.Placement,

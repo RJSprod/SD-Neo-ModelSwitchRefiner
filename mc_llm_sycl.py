@@ -117,6 +117,36 @@ CANNOT_ASK = (
     "was not recorded. Check that the runtime's own DLLs are beside llama-server.exe and "
     "that the Intel graphics driver is installed."
 )
+FIRST_START_SLOW = (
+    "llama.cpp compiles its kernels for the Intel GPU the first time a build runs on this "
+    "device: the official Windows SYCL release ships none precompiled, and llama.cpp lists "
+    "that under its own Known Issues as \"the startup is slow (JIT) in first time, but "
+    "subsequent performance is unaffected\". Expect a first start to take minutes with "
+    "nothing to show for it — the tab is waiting, not stuck — and a later one to reuse "
+    "whatever the graphics driver kept."
+)
+"""Said before a SYCL start, because the alternative is a silent wait.
+
+Measured on the validation machine: 6 min 14 s from the command line to a
+server that would answer, of which 5 min 47 s was inside llama.cpp's own
+``common_init_`` warm-up run -- a single forward pass over an empty batch,
+which the same server then repeated in 106 ms once it was up. A gap of three
+thousand times between the first pass and the second is a compiler, not a
+model load, and it is the one part of this the extension can neither speed up
+nor interrupt. What it can do is say so first.
+
+Deliberately *not* accompanied by ``SYCL_CACHE_PERSISTENT=1``. That variable
+does skip the JIT on later starts, and llama.cpp's SYCL documentation asks
+projects not to set it: the cache is keyed loosely enough that a changed
+binary mixes new and old code and crashes, and the Q&A section names this as
+advice an AI is apt to give and a user is apt to regret. The driver's own
+shader cache is the supported way for a second start to be quick, and it is
+the driver's to manage.
+"""
+
+COMPILING = "compiling kernels for the Intel GPU — a first start takes minutes"
+"""The short form, for a progress line that has one line to work with."""
+
 MISSING_TOKEN = (
     "The recorded SYCL device is no longer enumerated. Rescan the devices in LLM Studio → "
     "Setup and choose the Intel device again."

@@ -12,7 +12,8 @@ import pytest
 
 import mc_gguf
 import mc_llm_context as ctx
-from test_gguf import _text, _u32, _u32s, write_gguf  # noqa: F401
+from test_gguf import (GEMMA4_KEYS, _bools, _text, _u32, _u32s,  # noqa: F401
+                       gemma4_header, write_gguf)
 
 _GB = 1024**3
 _MB = 1024**2
@@ -404,3 +405,88 @@ class TestHybridModels:
         found = ctx.capacity(hybrid.path, ctx.Placement(), 4 * _GB, gguf=hybrid)
 
         assert found.usable > 0
+
+
+# --------------------------------------------------------------------------- #
+# An oracle from a real load
+# --------------------------------------------------------------------------- #
+
+
+class TestGemma4sCacheIsSizedFromItsOwnTwoShapes:
+    """Checked against what llama.cpp actually allocated, not against this sum.
+
+    From a user's ``llama-server.log``, loading
+    ``Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf`` at 8192 cells
+    with six sequences::
+
+        llama_kv_cache: size =  960.00 MiB ( 8192 cells,  5 layers, 6/6 seqs)
+        llama_kv_cache: size = 9600.00 MiB ( 8192 cells, 25 layers, 6/6 seqs)
+
+    1760 MiB per sequence. The panel had been printing 430,080 bytes a token
+    and 3.3 GB of cache against a true 225,280 and 1.7 GB, because twenty-five
+    of the thirty blocks were charged at the dense head width.
+
+    What the over-estimate cost was capacity rather than caution: it comes out
+    of the same budget the warm prompt caches are bought from, and on the 24 GB
+    card in that log it reduced six caches to one where three would have fitted.
+    """
+
+    MIB = 1024**2
+
+    @pytest.fixture
+    def gemma(self, tmp_path):
+        return mc_gguf.read(write_gguf(tmp_path / "gemma4.gguf", gemma4_header(),
+                                       GEMMA4_KEYS, padding=4096))
+
+    def test_the_cost_per_token_is_what_the_two_shapes_come_to(self, gemma):
+        # 25 windowed blocks x 8 heads x (256 K + 256 V) x 2 bytes = 204,800
+        # 5 dense blocks     x 2 heads x (512 K + 512 V) x 2 bytes =  20,480
+        assert ctx.kv_bytes_per_token(gemma, ctx.Placement(context=8192)) == 225280.0
+
+    def test_one_sequence_matches_the_load(self, gemma, tmp_path):
+        found = ctx.estimate(tmp_path / "gemma4.gguf", ctx.Placement(context=8192),
+                             gguf=gemma)
+
+        assert found.kv_bytes == 1760 * self.MIB
+
+    def test_six_sequences_match_the_load(self, gemma, tmp_path):
+        """960 + 9600 MiB, which is what llama.cpp allocated for this run."""
+        found = ctx.estimate(tmp_path / "gemma4.gguf",
+                             ctx.Placement(context=8192, slots=6), gguf=gemma)
+
+        assert found.kv_bytes == (960 + 9600) * self.MIB
+
+    def test_the_dense_width_alone_would_have_been_nearly_twice_as_much(self, tmp_path):
+        """The bug, kept as a number: the same header without the two
+        sliding-window keys is the estimate this used to produce."""
+        pattern = [(index % 6) != 5 for index in range(30)]
+        metadata = b"".join([
+            _text("general.architecture", "gemma4"),
+            _u32("gemma4.block_count", 30),
+            _u32("gemma4.attention.head_count", 16),
+            _u32s("gemma4.attention.head_count_kv",
+                  [8 if windowed else 2 for windowed in pattern]),
+            _u32("gemma4.attention.key_length", 512),
+            _u32("gemma4.attention.value_length", 512),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "dense.gguf", metadata, 6))
+
+        assert ctx.kv_bytes_per_token(found, ctx.Placement(context=8192)) == 430080.0
+
+    def test_a_quantised_cache_scales_both_shapes(self, gemma):
+        """A cache type has to reach both kinds of block, or the ratio between
+        them moves. q8_0 is 1.0625 bytes an element -- a byte plus a scale
+        shared by thirty-two of them -- not one, which is why this is written
+        against the table rather than against a halving."""
+        placement = ctx.Placement(context=8192, kv_type_k="q8_0", kv_type_v="q8_0")
+        share = ctx.KV_TYPE_BYTES["q8_0"] / ctx.KV_TYPE_BYTES["f16"]
+
+        assert ctx.kv_bytes_per_token(gemma, placement) == 225280.0 * share
+        assert ctx.kv_bytes_per_token(gemma, placement) == 119680.0
+
+    def test_a_partial_offload_still_costs_the_blocks_it_keeps(self, gemma):
+        """llama.cpp offloads the last N blocks, and for this model the last
+        six are five windowed and one dense."""
+        placement = ctx.Placement(context=8192, gpu_layers=6)
+
+        assert ctx.kv_bytes_per_token(gemma, placement) == 5 * 8192.0 + 4096.0
