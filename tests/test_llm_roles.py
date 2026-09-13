@@ -379,6 +379,123 @@ class TestAnInstallationThatHasNeverHeardOfRoles:
         assert registry.for_role(roles.SPATIAL) is not runtime.runtime
 
 
+class TestTheSharedRuntimeFollowsTheInstallation:
+    """One llama-server for the installation, however its settings move.
+
+    LLM Studio's Load and Unload buttons and a backbone switch drive the module
+    singleton directly; every request -- a conversation reply, a MiniMax job,
+    the Krea writer -- resolves its server through the registry. The registry
+    filed the singleton under the identity the installation had the first time
+    anybody asked, and never moved it. After a model or device change the next
+    request found the singleton "already held" under the old identity, built a
+    second runtime for the new one, and the two started a llama-server each on
+    the same settings. In system RAM the second mapping cost nothing; on a card
+    it was a second copy of the weights, which is how 23.7 of 24 GB came to be
+    in use for a single language model that a user's log shows being loaded
+    twice -- once by Load, once by the request that followed it.
+    """
+
+    def test_a_changed_installation_gets_the_same_server_back(self, tmp_path, monkeypatch):
+        answers = {"": configured(tmp_path, model_name="A.gguf")}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers[""])
+        registry = runtime.RuntimeRegistry()
+        assert registry.for_role() is runtime.runtime
+
+        answers[""] = configured(tmp_path, model_name="B.gguf")  # a backbone switch
+
+        assert registry.for_role() is runtime.runtime
+
+    def test_the_register_lists_the_moved_server_once(self, tmp_path, monkeypatch):
+        """Two entries for one object would count its VRAM twice and answer
+        every fan-out -- a release, a stop-everything -- against it twice."""
+        answers = {"": configured(tmp_path, model_name="A.gguf")}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers[""])
+        registry = runtime.RuntimeRegistry()
+        registry.for_role()
+        answers[""] = configured(tmp_path, model_name="B.gguf", device="none", mode="cpu")
+        registry.for_role()
+
+        assert registry.all() == (runtime.runtime,)
+
+    def test_an_unsplit_role_moves_with_the_installation(self, tmp_path, monkeypatch):
+        """A role that follows the installation resolves to whatever the
+        installation now is, and that is still the one shared server."""
+        answers = {"": configured(tmp_path, model_name="A.gguf")}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers[""])
+        registry = runtime.RuntimeRegistry()
+        assert registry.for_role(roles.CREATIVE) is runtime.runtime
+
+        answers[""] = configured(tmp_path, model_name="B.gguf")
+
+        assert registry.for_role(roles.CREATIVE) is runtime.runtime
+        assert registry.for_role() is runtime.runtime
+        assert registry.all() == (runtime.runtime,)
+
+    def test_a_role_left_on_the_old_identity_gets_a_server_of_its_own(
+            self, tmp_path, monkeypatch):
+        """The un-sharing case, seen from the installation's side. A role split
+        with settings that happened to equal the installation's shared its
+        server; when the installation moves on, the role keeps its settings and
+        is the one that needs a new process -- the shared server belongs to the
+        installation, not to whichever role last matched it."""
+        old = configured(tmp_path, model_name="A.gguf")
+        answers = {"": old, roles.CREATIVE: old}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers.get(role, answers[""]))
+        registry = runtime.RuntimeRegistry()
+        assert registry.for_role(roles.CREATIVE) is runtime.runtime
+
+        answers[""] = configured(tmp_path, model_name="B.gguf")
+
+        assert registry.for_role() is runtime.runtime
+        creative = registry.for_role(roles.CREATIVE)
+        assert creative is not runtime.runtime
+        assert runtime.runtime.configuration().model == answers[""].model
+        assert creative.configuration().model == old.model
+
+    def test_the_installations_server_starts_from_the_installations_settings(
+            self, tmp_path, monkeypatch):
+        """Before the registry has re-filed anything -- Load pressed straight
+        after the change -- the singleton already answers for the installation
+        rather than for a role that once shared it."""
+        old = configured(tmp_path, model_name="A.gguf")
+        answers = {"": old, roles.CREATIVE: old}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers.get(role, answers[""]))
+        registry = runtime.RuntimeRegistry()
+        registry.for_role(roles.CREATIVE)
+        answers[""] = configured(tmp_path, model_name="B.gguf")
+
+        assert runtime.runtime.configuration().model == answers[""].model
+
+    def test_a_moved_server_keeps_its_register_key(self, tmp_path, monkeypatch):
+        """A server declared under one key and retired under another leaves a
+        phantom line in the register, so the key a runtime carries must not
+        change underneath a process that may be running."""
+        answers = {"": configured(tmp_path, model_name="A.gguf")}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers[""])
+        registry = runtime.RuntimeRegistry()
+        registry.for_role()
+        before = runtime.runtime.residency_key
+
+        answers[""] = configured(tmp_path, model_name="B.gguf")
+        registry.for_role()
+
+        assert runtime.runtime.residency_key == before
+
+    def test_a_role_with_its_own_server_is_untouched_by_the_move(self, tmp_path, monkeypatch):
+        answers = {"": configured(tmp_path, model_name="A.gguf"),
+                   roles.SPATIAL: configured(tmp_path, model_name="S.gguf")}
+        monkeypatch.setattr(runtime, "config", lambda role="": answers.get(role, answers[""]))
+        registry = runtime.RuntimeRegistry()
+        spatial = registry.for_role(roles.SPATIAL)
+        registry.for_role()
+
+        answers[""] = configured(tmp_path, model_name="B.gguf")
+        registry.for_role()
+
+        assert registry.for_role(roles.SPATIAL) is spatial
+        assert set(registry.all()) == {runtime.runtime, spatial}
+
+
 class TestRoleOverrides:
     def test_an_override_layers_over_the_installation(self):
         state = {"model": "A.gguf", "mode": "gpu",

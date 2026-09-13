@@ -3889,7 +3889,34 @@ class Runtime:
         resolved = config(self._role)
         if self._key is not None and _identity(resolved, resolved.mmproj) != self._key:
             return config()
+        if self is runtime:
+            # The installation's own server, claimed by a role whose settings
+            # happened to equal the installation's at the time. The role is
+            # still on those settings and the installation has moved on -- a
+            # backbone switch, another card -- and this process belongs to the
+            # installation: it is what Load starts and what every mode that is
+            # not a role talks to. Starting it from the role's settings here
+            # would load the wrong model when Load is pressed, and the role is
+            # the one the registry gives a server of its own at its next
+            # request (see ``RuntimeRegistry._refile_shared``).
+            shared = config()
+            if self._key is not None and _identity(shared, shared.mmproj) != self._key:
+                return shared
         return resolved
+
+    def forget_filing(self) -> None:
+        """Forget which identity and roles the registry filed this server under.
+
+        Called by the registry, and only for the installation's own server,
+        when the installation's identity has moved and the entry that filed
+        this runtime under the old one is being dropped. The next ``adopt``
+        files it afresh; the roles that resolved to it re-attach on their next
+        request, or find they now resolve somewhere else. Nothing about the
+        running process changes -- ``client`` compares the settings in force
+        with what is up, exactly as it does after any settings change.
+        """
+        self._role, self._key = "", None
+        self.roles = ()
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -5688,13 +5715,53 @@ class RuntimeRegistry:
         """
         try:
             shared = config()
-            if key == _identity(shared, shared.mmproj) and not self._holds(runtime):
-                runtime.residency_key = _residency_key(key)
-                return runtime
+            if key == _identity(shared, shared.mmproj):
+                self._refile_shared(key)
+                if not self._holds(runtime):
+                    return runtime
         except Exception:
             logger.debug("Model Chain: could not compare the shared runtime identity",
                          exc_info=True)
         return Runtime(residency_key=_residency_key(key))
+
+    def _refile_shared(self, key: tuple) -> None:
+        """Drop the entry still filing the shared runtime under a superseded identity.
+
+        The singleton is filed under the installation's identity the first
+        time anything asks for it, and the installation's identity moves: a
+        backbone switch, a device change in Setup, a different context size.
+        The singleton moves with it -- ``client`` restarts it from the settings
+        in force -- but the entry that filed it did not, and the next request
+        for the new identity then found the singleton "already held" under the
+        old one and built a second runtime for the same settings.
+
+        What that cost, from a user's log: Load started the installation's
+        llama-server on the card; the MiniMax request that followed resolved
+        its server through this registry, got a *new* runtime, and started a
+        second llama-server holding a second copy of the same 15.6 GB of
+        weights on the same 24 GB card. The two were only ever told apart at
+        Unload, which stopped both. In system RAM the second mapping had cost
+        nothing -- the OS shares the pages -- which is why it went unnoticed
+        until the placement was a card.
+
+        The singleton keeps its residency key across the move, deliberately:
+        a running process declared its VRAM under that key and retires it under
+        the same one when it stops, and a key changed underneath it would leave
+        a phantom line in the register. Every other runtime carries an
+        identity-derived key with a digest suffix, so the two never collide.
+        """
+        for filed, existing in list(self._runtimes.items()):
+            if existing is not runtime or filed == key:
+                continue
+            self._runtimes.pop(filed, None)
+            try:
+                runtime.forget_filing()
+            except AttributeError:
+                logger.debug("Model Chain: %s cannot forget its filing",
+                             type(runtime).__name__)
+            logger.info("Model Chain: the installation's llama-server follows the settings "
+                        "now in force — the register files it under them, so a request "
+                        "and the Load button drive one server rather than one each")
 
     def _holds(self, wanted: Runtime) -> bool:
         return any(found is wanted for found in self._runtimes.values())
