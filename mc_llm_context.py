@@ -195,10 +195,29 @@ class Placement:
     other rung of the ladder costs speed on every token afterwards.
     """
 
+    uma: bool = False
+    """Whether "on the GPU" means unified memory shared with the processor.
+
+    An Intel GPU reached through SYCL has no VRAM bank: every layer sent to it
+    lands in system RAM the processor is also using. The layers are on the
+    device -- ``on_gpu`` stays true, ``--n-gpu-layers`` is passed, llama.cpp
+    runs them there -- and their memory is host RAM, which is a different
+    pool with different rules. Everything that turns "on the GPU" into a VRAM
+    figure asks this first: nothing is declared to the broker as VRAM, no
+    card's free memory is read, and a speed measured here is filed apart from
+    one measured on a CUDA card.
+    """
+
     def with_slots(self, slots: int) -> "Placement":
         from dataclasses import replace
 
         return replace(self, slots=max(int(slots), 1))
+
+    def with_uma(self, uma: bool = True) -> "Placement":
+        """The same placement, in unified memory rather than dedicated VRAM."""
+        from dataclasses import replace
+
+        return replace(self, uma=bool(uma))
 
     @property
     def total_context(self) -> int:
@@ -267,7 +286,7 @@ class Placement:
         the other is worse than no measurement at all.
         """
         return (f"{self.gpu_layers}/{self.kv_type_k}/{self.kv_type_v}/"
-                f"{int(self.on_gpu)}/{self.experts_key}")
+                f"{int(self.on_gpu)}/{self.experts_key}{'/uma' if self.uma else ''}")
 
     @property
     def speed_token(self) -> str:
@@ -285,7 +304,12 @@ class Placement:
         """
         if not self.on_gpu or self.gpu_layers == NO_LAYERS:
             return "cpu"
-        token = "gpu" if self.cpu_expert_layers == NO_EXPERTS else self.experts_key
+        # Unified memory is its own word. A rate measured with the weights in
+        # system RAM behind an Intel GPU says nothing about the same backbone
+        # resident on a CUDA card, and a store that averaged the two would
+        # answer neither question.
+        resident = "uma" if self.uma else "gpu"
+        token = resident if self.cpu_expert_layers == NO_EXPERTS else self.experts_key
         if self.gpu_layers != ALL_LAYERS and self.gpu_layers > 0:
             token = f"{token}-l{self.gpu_layers}"
         return token
@@ -295,13 +319,17 @@ class Placement:
         caches = self._describe_caches()
         if not self.on_gpu:
             return f"system RAM (no GPU offload){caches}"
+        # Said in the memory's own words. "On the GPU" beside a figure a reader
+        # will take for VRAM is how an Intel placement would come to be read as
+        # holding dedicated memory it does not have.
+        where = "the Intel GPU, in shared system memory" if self.uma else "the GPU"
         if self.gpu_layers == ALL_LAYERS:
-            return f"all layers on the GPU{experts}{caches}"
+            return f"all layers on {where}{experts}{caches}"
         if self.gpu_layers <= 0:
             return f"no layers on the GPU (weights in system RAM){caches}"
         if total_layers:
-            return f"{self.gpu_layers} of {total_layers} layers on the GPU{experts}{caches}"
-        return f"{self.gpu_layers} layers on the GPU{experts}{caches}"
+            return f"{self.gpu_layers} of {total_layers} layers on {where}{experts}{caches}"
+        return f"{self.gpu_layers} layers on {where}{experts}{caches}"
 
     def _describe_caches(self) -> str:
         """", 3 warm prompt caches" -- and nothing at all for the ordinary one.

@@ -152,6 +152,17 @@ EXEC_CPU = "cpu"
 """Executes on the processor. Positive evidence of no CUDA conflict."""
 EXEC_CUDA = "cuda"
 """Executes on a *known* physical CUDA card."""
+EXEC_SYCL = "sycl"
+"""Executes on an Intel GPU through llama.cpp's SYCL backend.
+
+A fourth kind rather than a CUDA card with a strange index, because the
+indices are different namespaces: ``CUDA0`` and ``SYCL0`` can both exist on
+one machine and are never the same processor. A SYCL workload conflicts with
+another SYCL workload on the same device, and with nothing else -- an image
+generation on an NVIDIA card runs beside it, and so does a processor-resident
+language model. Its *memory* is host RAM, which is not this vocabulary's
+question at all; see :mod:`mc_llm_sycl`.
+"""
 EXEC_CUDA_UNKNOWN = "cuda?"
 """Executes on CUDA, on a card that could not be resolved.
 
@@ -196,9 +207,15 @@ class ExecutionDomain:
         return self.kind in (EXEC_CUDA, EXEC_CUDA_UNKNOWN)
 
     @property
+    def is_sycl(self) -> bool:
+        return self.kind == EXEC_SYCL
+
+    @property
     def known(self) -> bool:
         """Whether the physical processor is identified."""
-        return self.kind == EXEC_CPU or (self.kind == EXEC_CUDA and self.card is not None)
+        if self.kind == EXEC_CPU:
+            return True
+        return self.kind in (EXEC_CUDA, EXEC_SYCL) and self.card is not None
 
     def conflicts_with(self, other: "ExecutionDomain | None") -> bool:
         """Whether two active workloads are competing for one processor.
@@ -231,6 +248,17 @@ class ExecutionDomain:
             # processor workload and a CUDA one do not, whatever else they
             # share (invariant I-1).
             return self.is_cpu and other.is_cpu
+        if self.is_sycl or other.is_sycl:
+            # An Intel GPU shares no processor with a CUDA card, whatever
+            # memory the two may be competing for -- that is the host-RAM
+            # broker's question, not this one's. Two SYCL workloads conflict
+            # on one device, and conservatively when either cannot name its
+            # device, for the reason an unresolved CUDA card does.
+            if not (self.is_sycl and other.is_sycl):
+                return False
+            if self.card is None or other.card is None:
+                return True
+            return self.card == other.card
         if self.uuid and other.uuid:
             return self.uuid == other.uuid
         if self.name and other.name and self.name != other.name:
@@ -246,6 +274,9 @@ class ExecutionDomain:
     def describe(self) -> str:
         if self.is_cpu:
             return "the processor"
+        if self.is_sycl:
+            return (f"the Intel GPU (SYCL{self.card})" if self.card is not None
+                    else "an Intel GPU")
         if self.kind == EXEC_CUDA and self.card is not None:
             return f"GPU {self.card}"
         return "an unidentified GPU"
@@ -276,6 +307,25 @@ def cuda_execution(card: int | None, *, uuid: str = "", name: str = "") -> Execu
     if index is None or index < 0:
         return ExecutionDomain(EXEC_CUDA_UNKNOWN, None, **identity)
     return ExecutionDomain(EXEC_CUDA, index, **identity)
+
+
+def sycl_execution(index: int | None, *, name: str = "") -> ExecutionDomain:
+    """The execution domain of a workload on Intel GPU ``index`` through SYCL.
+
+    The index is a SYCL ordinal -- ``SYCL0`` -- and lives in ``card`` only
+    because that is the field a domain has for "which one"; it is never
+    compared with a CUDA index, because :meth:`ExecutionDomain.conflicts_with`
+    settles a SYCL-versus-CUDA question before it looks at any index. An
+    unparseable ordinal is an unnamed Intel device, which conflicts with every
+    other SYCL workload and with nothing else.
+    """
+    try:
+        ordinal = None if index is None else int(index)
+    except (TypeError, ValueError):
+        ordinal = None
+    if ordinal is not None and ordinal < 0:
+        ordinal = None
+    return ExecutionDomain(EXEC_SYCL, ordinal, name=str(name or ""))
 
 
 def image_execution_domain() -> ExecutionDomain:

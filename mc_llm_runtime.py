@@ -178,6 +178,13 @@ class Config:
     invalidate a warm server, which is a question :func:`_identity` answers by
     reading this object and nothing else.
     """
+    compute_backend: str = ""
+    """``cuda``, ``sycl`` or ``cpu`` as the state file recorded it, or ``""``.
+
+    Empty for every state file written before Intel devices existed, and for
+    a configuration built by hand. :attr:`backend` resolves it either way, so
+    nothing reads this field directly.
+    """
     profile: "ManagedProfile | None" = None
     """The hidden quality profile in force, or ``None`` on a manual install.
 
@@ -240,11 +247,37 @@ class Config:
         question about the *card* has to be asked here; a question about
         *residency* is ``on_gpu``.
         """
-        from prompt_master.core.models import CPU_MODE
-        from prompt_master.inference.device_detection import CPU_DEVICE
+        import mc_llm_sycl
 
-        return (self.device.casefold() != CPU_DEVICE
-                and str(self.mode).strip().casefold() != CPU_MODE)
+        return self.backend == mc_llm_sycl.BACKEND_CUDA
+
+    @property
+    def backend(self) -> str:
+        """Which compute backend the device belongs to: ``cuda``, ``sycl`` or ``cpu``.
+
+        The recorded field when there is one, and otherwise exactly what every
+        reader used to work out for itself: ``none`` or CPU mode is the
+        processor, a ``SYCL`` device token is SYCL, anything else is CUDA. An
+        installation set up before the field existed answers the same way it
+        always did; see :func:`mc_llm_sycl.resolve_backend`.
+        """
+        import mc_llm_sycl
+
+        return mc_llm_sycl.resolve_backend(self.compute_backend, self.device, self.mode)
+
+    @property
+    def uses_sycl_compute(self) -> bool:
+        """Whether the device is an Intel GPU reached through SYCL.
+
+        The third answer to the question ``uses_cuda_compute`` used to answer
+        with two. A SYCL placement executes on a GPU that is not a CUDA card,
+        so every CUDA rule -- the image plan's budget, the card's free VRAM,
+        the reclaim that stops a server to give VRAM back -- must not see it,
+        and its memory is host RAM, so every host-RAM rule must.
+        """
+        import mc_llm_sycl
+
+        return self.backend == mc_llm_sycl.BACKEND_SYCL
 
     @property
     def configured(self) -> bool:
@@ -282,6 +315,7 @@ def config(role: str = "") -> Config:
     from prompt_master.core.config import read_json
 
     import mc_llm_roles
+    import mc_llm_sycl
 
     paths = mc_llm_paths.app_paths()
     try:
@@ -348,6 +382,7 @@ def config(role: str = "") -> Config:
         expert_minimum=bool(state.get("expert_minimum", False)),
         gpu_name=str(state.get("gpu_name", "")),
         mode=str(state.get("mode", "gpu")),
+        compute_backend=mc_llm_sycl.backend_of_state(state),
         source=source,
         managed_id=managed_id,
         accelerator=performance.accelerator,
@@ -492,6 +527,13 @@ def negotiate(configuration: Config | None = None,
     wanted = _requested_placement(configuration, described, already_ours)
     notes: list[str] = []
 
+    if wanted.uma:
+        # Admitted against shared system memory, not against any card: the
+        # ladder below spends VRAM the image side is not using, and an Intel
+        # GPU has none to spend.
+        return _negotiate_uma(configuration, described, wanted, vision=vision,
+                              extra_reserve=extra_reserve, already_ours=already_ours)
+
     if not wanted.on_gpu:
         # System RAM or CPU execution: there is no VRAM decision to make, and
         # pretending to make one would report movements that never happened.
@@ -541,6 +583,103 @@ def negotiate(configuration: Config | None = None,
     fits = _fits(estimate, reserve, already_ours, card_of(configuration), configuration)
     notes.extend(_unsatisfied(configuration, placement, described))
     return Negotiation(placement, estimate, tuple(notes), fits)
+
+
+def _negotiate_uma(configuration: Config, gguf, wanted: mc_llm_context.Placement, *,
+                   vision: bool = False, extra_reserve: int = 0,
+                   already_ours: int = 0) -> Negotiation:
+    """Where an Intel GPU placement goes: all of it on the device, if the RAM is safe.
+
+    Design intent section 4.3. The budget is :func:`mc_llm_sycl.budget` --
+    the smaller of what remains under the OS shared-GPU limit and what host
+    RAM has above this extension's reserve -- and the whole estimate is
+    charged against it: the weights, the cache and the compute buffers are all
+    real allocations in unified memory, even though none of them is VRAM.
+
+    Two rungs rather than the CUDA ladder's six, because the others do not
+    apply. Moving layers or experts "off the device" here moves them from one
+    part of system RAM to another and frees nothing (section 9.2), so what can
+    give ground is the caches a user asked for and then the context, down to
+    the floor. Below that the placement does not fit, and it says so in the
+    sentence section 13 asks for rather than starting a server the machine
+    would page against itself; :func:`_refuse_uma_shortfall` turns that into a
+    refusal on the one path that would start something.
+
+    A budget that cannot be read fits everything. Refusing to start a language
+    model because ``psutil`` is missing would be a new refusal where there was
+    never a problem; the note says the check could not be made.
+
+    ``already_ours`` is host RAM a server of ours holds at this moment and
+    gives back before the next start -- the running Intel server being
+    replaced. It is added to what is safe, for the reason ``_free_vram`` adds
+    a CUDA server's VRAM back: every path that acts on this number stops that
+    server first.
+    """
+    import mc_llm_sycl
+
+    found = mc_llm_sycl.budget(excluding=None)
+    safe = found.safe + max(int(already_ours), 0)
+    reserve = projector_bytes(configuration, vision) + max(int(extra_reserve), 0)
+    explicit = _wanted_slots()
+    if explicit > 1:
+        wanted = wanted.with_slots(_slots_for(configuration, wanted.with_slots(explicit)))
+    placement = wanted
+    estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
+    if not found.known:
+        return Negotiation(placement, estimate,
+                           ("system RAM could not be read, so the shared-memory budget "
+                            "was not checked",), True)
+
+    def fits(candidate: mc_llm_context.Estimate) -> bool:
+        return candidate.total_bytes + reserve <= safe
+
+    if fits(estimate):
+        return Negotiation(placement, estimate, (), True)
+
+    notes: list[str] = []
+    if placement.slots > 1:
+        was = placement.slots
+        placement = placement.with_slots(1)
+        estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
+        notes.append(f"warm prompt caches reduced from {was} to 1 to fit the shared system "
+                     f"memory that is safe to use")
+        if fits(estimate):
+            return Negotiation(placement, estimate, tuple(notes), True)
+
+    per_token = estimate.kv_bytes_per_token
+    if per_token > 0:
+        fixed = estimate.weights_bytes + estimate.compute_bytes + estimate.state_bytes + reserve
+        affordable = int(max(safe - fixed, 0) / per_token)
+        affordable = (affordable // mc_llm_context.CONTEXT_GRANULARITY
+                      * mc_llm_context.CONTEXT_GRANULARITY)
+        if MINIMUM_CONTEXT <= affordable < placement.context:
+            was = placement.context
+            placement = placement.with_context(affordable)
+            estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
+            notes.append(f"context reduced from {was:,} to {affordable:,} tokens to fit the "
+                         f"shared system memory that is safe to use")
+
+    if fits(estimate):
+        return Negotiation(placement, estimate, tuple(notes), True)
+    notes.append(mc_llm_sycl.shortfall_sentence(estimate.total_bytes + reserve, found))
+    return Negotiation(placement, estimate, tuple(notes), False)
+
+
+def _refuse_uma_shortfall(configuration: Config, negotiated: Negotiation) -> None:
+    """Refuse an Intel GPU start that shared system memory cannot safely hold.
+
+    Design intent sections 8.4 and 13: a selected SYCL target never quietly
+    becomes something else, and a request the budget refuses is reported in a
+    sentence with both numbers in it. The CUDA ladder's last rung -- run from
+    system RAM instead -- is not an alternative here, because system RAM is
+    where this placement already was.
+    """
+    if not getattr(negotiated.placement, "uma", False) or negotiated.fits:
+        return
+    said = next((note for note in reversed(negotiated.notes)
+                 if note.startswith("The requested model")), "")
+    raise RuntimeError(said or "The requested model and context do not fit the shared "
+                               "system memory that is currently safe to use.")
 
 
 PARALLEL_FLAG = "--parallel"
@@ -752,6 +891,13 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
     on_gpu = configuration.on_gpu
     if is_mixed(configuration):
         layers, on_gpu = mc_llm_context.ALL_LAYERS, True
+    # One placement for an Intel GPU: the whole model on the device, in the
+    # system RAM the device shares with the processor. No mixed variants,
+    # because the modes those names describe move weights between two pools
+    # this hardware does not have (design intent section 9.1).
+    uma = bool(getattr(configuration, "uses_sycl_compute", False))
+    if uma:
+        layers, on_gpu = mc_llm_context.ALL_LAYERS, True
 
     placement = mc_llm_context.Placement(
         gpu_layers=layers,
@@ -759,14 +905,22 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
         kv_type_k=configuration.kv_type_k,
         kv_type_v=configuration.kv_type_v,
         on_gpu=on_gpu,
+        uma=uma,
     )
 
     if configuration.context_mode == "auto" and placement.on_gpu:
         # Automatic sizing: spend what is free after weights and reserves on
         # context, rather than whatever number the state file happens to hold.
         weights = mc_llm_context.weights_bytes(gguf, placement) if gguf is not None else 0
+        if uma:
+            import mc_llm_sycl
+
+            spendable = mc_llm_sycl.budget().safe
+        else:
+            spendable = _spendable(already_ours, card_of(configuration),
+                                   configuration=configuration)
         budget = mc_llm_context.automatic_buffer_bytes(
-            _spendable(already_ours, card_of(configuration), configuration=configuration),
+            spendable,
             weights,
             mc_broker.safety_margin_bytes())
         sized = mc_llm_context.context_for_budget(configuration.model, placement, budget)
@@ -919,6 +1073,11 @@ def execution_domain(configuration: Config | None) -> mc_broker.ExecutionDomain:
     if configuration is None:
         return mc_broker.UNKNOWN_CUDA_EXECUTION
     try:
+        if getattr(configuration, "uses_sycl_compute", False):
+            # A fourth answer: an Intel GPU, which shares a processor with
+            # another request on the same Intel GPU and with nothing else.
+            return mc_broker.sycl_execution(_ordinal_of(configuration),
+                                            name=getattr(configuration, "card_name", ""))
         if not configuration.uses_cuda_compute:
             return mc_broker.CPU_EXECUTION
     except Exception:
@@ -933,6 +1092,14 @@ def execution_domain(configuration: Config | None) -> mc_broker.ExecutionDomain:
     return mc_broker.cuda_execution(card_of(configuration),
                                     uuid=getattr(configuration, "gpu_uuid", ""),
                                     name=getattr(configuration, "card_name", ""))
+
+
+def _ordinal_of(configuration) -> int | None:
+    """The SYCL ordinal a configuration names, or None when it cannot be read."""
+    try:
+        return int(configuration.gpu_index)
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def mapped_key(model: str | None) -> str:
@@ -966,7 +1133,9 @@ def host_ram_demand(configuration: Config | None,
 
     * a processor placement, or Mixed Conservative, needs the model in system
       RAM. That is a real, model-size-scale claim on the host pool and is
-      counted in full;
+      counted in full. So does an Intel GPU reached through SYCL: its "device
+      memory" is the same pool, and counting it anywhere else would be the
+      double count design intent section 4.4 forbids;
     * a partial offload needs the share that is not on the card. Counted in
       proportion to the layers left behind, which is coarse and is far closer
       than either extreme;
@@ -2028,8 +2197,19 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     if placement.gpu_layers == mc_llm_context.NO_LAYERS:
         return flags
     if runtime_supports(FLASH_ATTENTION_FLAG, configuration):
+        takes_value = _flash_attention_takes_a_value(configuration)
+        if getattr(placement, "uma", False):
+            # Asked for, not insisted on. The SYCL backend supports the fused
+            # kernel for some head shapes and not others, and ``on`` for a
+            # shape it lacks is attention computed somewhere slow; ``auto``
+            # lets llama.cpp decide per model, which is the capability probing
+            # design intent section 12 asks for. A build that spells the flag
+            # as a switch cannot be asked, and is not.
+            if takes_value:
+                flags.extend([FLASH_ATTENTION_FLAG, "auto"])
+            return flags
         flags.append(FLASH_ATTENTION_FLAG)
-        if _flash_attention_takes_a_value(configuration):
+        if takes_value:
             flags.append("on")
     return flags
 
@@ -2479,6 +2659,7 @@ def measurement_token(placement=None, accelerator: str = "", card: int | None = 
 
 PLACEMENT_WORDS = {
     "gpu": "all layers on the GPU",
+    "uma": "on the Intel GPU, in shared system memory",
     "cpu": "in system RAM",
     "cpu-moe": "experts in system RAM",
 }
@@ -2843,6 +3024,46 @@ def _arm_visibility(uuid: str) -> None:
         _pending_visibility.append(text)
 
 
+_pending_backend: list[str] = []
+"""Which backend the very next llama-server start belongs to. See :func:`_arm_backend`."""
+
+
+def _arm_backend(backend: str) -> None:
+    """Say which backend the next start is for, so the launcher can isolate it."""
+    del _pending_backend[:]
+    text = str(backend or "").strip().casefold()
+    if text:
+        _pending_backend.append(text)
+
+
+def with_backend_isolation(command, environ):
+    """``environ`` with no NVIDIA card visible behind an Intel GPU selection.
+
+    The vendored launcher writes ``CUDA_VISIBLE_DEVICES=<gpu_index>`` for every
+    device that is not ``none``. For a SYCL start that index is a SYCL ordinal
+    being written where an NVIDIA slot is read: it selects nothing for a build
+    with no CUDA backend, and design intent section 8.2 says it must never
+    become the SYCL identity either. So it is emptied, exactly as a processor
+    placement empties it, and ``--device SYCL0`` on the command line stays the
+    whole of the selection. Consumed by the start that armed it, like the pin
+    and the flags, so it can never follow a later start onto a CUDA card.
+    """
+    import mc_llm_sycl
+
+    wanted = list(_pending_backend)
+    del _pending_backend[:]
+    if not wanted or wanted[0] != mc_llm_sycl.BACKEND_SYCL or not isinstance(environ, dict):
+        return environ
+    argv = [str(part) for part in command or ()]
+    if "--model" not in argv or "--ctx-size" not in argv:
+        return environ
+    found = mc_llm_sycl.launch_environment(environ)
+    logger.info("Model Chain: llama-server is starting on the Intel GPU through SYCL — "
+                "CUDA_VISIBLE_DEVICES is emptied so no NVIDIA card is picked up behind it, "
+                "and --device on the command line is the whole of the selection")
+    return found
+
+
 def with_pinned_card(command, environ):
     """``environ``, with ``CUDA_VISIBLE_DEVICES`` naming a card rather than a slot.
 
@@ -3049,7 +3270,8 @@ class _Launcher:
         # Called on every start, including one that passes no environment of
         # its own, because the pin is consumed by the call: left armed it would
         # follow the next server onto a card it does not belong to.
-        environ = with_pinned_card(corrected, kwargs.get("env"))
+        environ = with_backend_isolation(corrected, with_pinned_card(corrected,
+                                                                    kwargs.get("env")))
         if "env" in kwargs:
             kwargs = dict(kwargs)
             kwargs["env"] = environ
@@ -3564,6 +3786,31 @@ def _profile_arguments(configuration: Config,
             "jinja": bool(configuration.profile.jinja)}
 
 
+def _room_clause(configuration: Config, before: int) -> str:
+    """What the start line says about the memory this placement is going into.
+
+    Three pools, three sentences. A CUDA placement names the card's free VRAM,
+    as it always has; an Intel GPU names the shared system memory that is
+    safe to use, with the numbers it was worked out from; a processor
+    placement names free system RAM, which is the figure that actually
+    decides how it loads. The old line printed the image card's free VRAM for
+    all three, which for the second and third was a number about a card the
+    model was not going to.
+    """
+    try:
+        if configuration.uses_sycl_compute:
+            import mc_llm_sycl
+
+            return mc_llm_sycl.budget().describe()
+        if not configuration.uses_cuda_compute:
+            free = int(mc_broker.free_ram_bytes() or 0)
+            return (f"{free / _GB:.1f} GB of system RAM free" if free > 0
+                    else "system RAM free: could not be read")
+    except Exception:
+        logger.debug("Model Chain: could not describe the room this start has", exc_info=True)
+    return f"{before / _GB:.1f} GB free"
+
+
 def _device_label(configuration: Config) -> str:
     """The card's name, without the numbers recorded beside it during setup.
 
@@ -3831,6 +4078,11 @@ def _reconciled_residency(observed: int, expected: int, offload: "Offload",
     """
     if not getattr(placement, "on_gpu", False) or placement.gpu_layers == mc_llm_context.NO_LAYERS:
         return observed
+    if getattr(placement, "uma", False):
+        # The report names buffers on the device, and on an Intel GPU those
+        # buffers are system RAM. Reading them as VRAM here is how a SYCL
+        # server would come to be declared resident on a card it is not on.
+        return observed
     if not _implausible(observed, expected):
         return observed
     try:
@@ -4036,6 +4288,17 @@ class Runtime:
                 return shared
         return resolved
 
+    def _held_host_ram(self) -> int:
+        """Host RAM the running process holds, read under the lock already held."""
+        if not self._running:
+            return 0
+        try:
+            return max(int(host_ram_demand(self.configuration(), self._placement)), 0)
+        except Exception:
+            logger.debug("Model Chain: could not size the running server's host RAM",
+                         exc_info=True)
+            return 0
+
     def forget_filing(self) -> None:
         """Forget which identity and roles the registry filed this server under.
 
@@ -4159,9 +4422,21 @@ class Runtime:
                 raise RuntimeError(chosen.refusal)
 
             ours = self.resident_bytes()
+            if configuration.uses_sycl_compute:
+                # Unified memory: what this server holds is host RAM that a
+                # re-placement gives back before the next start, exactly as a
+                # CUDA server's VRAM is "free" to the negotiation that replaces
+                # it. Without this a restart -- the projector arriving, a
+                # setting change -- would be admitted against a budget the
+                # running server itself had emptied.
+                ours = self._held_host_ram()
+            # An Intel GPU server has nothing to grow into: every layer is on
+            # the device already, and the question "could the card now hold
+            # more" is about a card it is not on.
+            grown = (configuration.uses_cuda_compute
+                     and self._outgrown(configuration, ours, vision))
             if (self._running and self._identity == _identity(configuration, projector)
-                    and self._accelerator == chosen.identity
-                    and not self._outgrown(configuration, ours, vision)):
+                    and self._accelerator == chosen.identity and not grown):
                 if self._projector is not None and not needs_vision:
                     logger.debug("Model Chain: %sreusing the vision-loaded server for a "
                                  "text-only request", self._said_for())
@@ -4238,6 +4513,7 @@ class Runtime:
                                            vision=vision, expert_floor=expert_floor)
                     placement = negotiated.placement
                     signature = _signature_of(configuration, projector, placement, plan)
+                _refuse_uma_shortfall(configuration, negotiated)
                 try:
                     process, observed, offload = self._launch(configuration, placement,
                                                               projector, plan)
@@ -4345,7 +4621,7 @@ class Runtime:
         """
         try:
             if not configuration.uses_cuda_compute:
-                logger.debug("Model Chain: this placement is on the processor; the image "
+                logger.debug("Model Chain: this placement is not on a CUDA card; the image "
                              "allocator's cached VRAM was left where it is")
                 return 0
             card = card_of(configuration)
@@ -4518,7 +4794,12 @@ class Runtime:
         # reports and what the residency is measured against afterwards, and a
         # reading of another card makes the second of those a subtraction of two
         # unrelated numbers.
-        before = mc_broker.device_free_vram_bytes(card_of(configuration))
+        # Only a CUDA placement has a card to read. A processor or Intel GPU
+        # placement measured against the image card's free VRAM produced a
+        # "5.8 GB VRAM" ready line for a server holding none, from a user's
+        # log, taken while the image model happened to be loading.
+        before = (mc_broker.device_free_vram_bytes(card_of(configuration))
+                  if configuration.uses_cuda_compute else 0)
         described = mc_gguf.describe(configuration.model)
         layers = _layers_argument(placement, described)
         expected = _expected_weights(described, placement)
@@ -4537,16 +4818,25 @@ class Runtime:
 
         logger.info(
             "Model Chain: %sstarting llama-server — %s on %s, %s, %s token context, "
-            "%.1f GB free%s",
+            "%s%s",
             self._said_for(),
             configuration.quantization or Path(configuration.model).stem,
             _device_label(configuration),
             placement.describe(),
             f"{placement.context:,}",
-            before / _GB,
+            _room_clause(configuration, before),
             "" if plan is None or plan.accelerator == mc_llm_accel.ACCEL_NONE
             else f", {mc_llm_accel.short_label(plan.accelerator)}",
         )
+        if configuration.uses_sycl_compute and _runtime_enumerates_a_device(executable) is False:
+            # Never a silent start on the processor (design intent section
+            # 8.4). The launcher drops a device selection a build cannot
+            # enumerate and starts on the processor, which is the right
+            # recovery for a CUDA token recorded beside a CPU-only build and
+            # the wrong one for an Intel target somebody chose by name.
+            import mc_llm_sycl
+
+            raise _StartFailed(mc_llm_sycl.NO_DEVICE)
         # Said every time, and said in full. llama-server's own log is where the
         # answer lives when a placement and a reply speed disagree, and a log
         # nobody can find is a log nobody reads. It is one line per start, and
@@ -4570,8 +4860,10 @@ class Runtime:
         self._log = (log_path, written_before)
 
         process = self._new_process()
+        # Unified memory reads the weights at system-RAM speed, so an Intel GPU
+        # start is given the processor's patience rather than a card's.
         from_system_ram = (configuration.device.casefold() == CPU_DEVICE
-                           or layers == NO_OFFLOAD)
+                           or layers == NO_OFFLOAD or configuration.uses_sycl_compute)
         # The accelerator's flags go on last, so a build that spells
         # ``--flash-attn`` as a switch does not get it twice: the ordinary set
         # adds it for a resident placement, and an accelerator's flags are
@@ -4581,6 +4873,7 @@ class Runtime:
         # ``with_pinned_card``: the index recorded at setup is nvidia-smi's and
         # the variable it is written into is read in CUDA's order.
         _arm_visibility(getattr(configuration, "gpu_uuid", ""))
+        _arm_backend(configuration.backend)
         try:
             process.start(executable, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
@@ -4961,6 +5254,7 @@ class Runtime:
         """
         placement = self._placement
         if placement is not None and (not placement.on_gpu
+                                      or getattr(placement, "uma", False)
                                       or placement.gpu_layers == mc_llm_context.NO_LAYERS):
             return
         estimated = self.report.estimate.resident_bytes if self.report.estimate else 0
@@ -5016,7 +5310,14 @@ class Runtime:
         # (invariant I-11), and one it can is the whole reason a shortfall on
         # GPU 0 can leave a server on GPU 1 alone (invariant I-3).
         card = self._card if self._card is not None else card_of(configuration)
-        if negotiated.placement.on_gpu and observed > 0:
+        uma = bool(getattr(negotiated.placement, "uma", False))
+        if uma:
+            # Design intent invariant I-5: an Intel GPU's model memory is host
+            # RAM. It is counted there, by host_ram_demand, and appears in the
+            # VRAM register of no card -- so no image shortfall on any card can
+            # ever pick it as a victim, and no card's budget subtracts it.
+            mc_broker.retire(self.residency_key)
+        elif negotiated.placement.on_gpu and observed > 0:
             mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
                               observed, rank=mc_broker.RANK_HOT, card=card)
             mc_llm_context.record_observation(configuration.model, negotiated.placement, observed)
@@ -5043,15 +5344,24 @@ class Runtime:
         estimated = (observed <= 0 and negotiated.placement.on_gpu
                      and negotiated.estimate is not None)
         shown = negotiated.estimate.resident_bytes if estimated else observed
+        if uma:
+            # The memory in its own words. "GB VRAM" beside an Intel placement
+            # is the sentence design intent section 11.4 forbids.
+            unit, caveat = "GB of shared system memory", (
+                " (estimated — shared system memory is not measured from outside the "
+                "process; it is charged as host RAM)")
+        else:
+            unit, caveat = "GB VRAM", (
+                " (estimated — the card reported no change in free VRAM after the server "
+                "started, so nothing here has measured what it actually took)")
         logger.info(
-            "Model Chain: %sllama-server ready — %s, %s token context, %.1f GB VRAM%s%s",
+            "Model Chain: %sllama-server ready — %s, %s token context, %.1f %s%s%s",
             self._said_for(),
             negotiated.placement.describe(),
             f"{negotiated.placement.context:,}",
             max(shown, 0) / _GB,
-            " (estimated — the card reported no change in free VRAM after the server "
-            "started, so nothing here has measured what it actually took)"
-            if estimated else "",
+            unit,
+            caveat if estimated else "",
             "" if not said else f" ({'; '.join(said)})",
         )
         self._report_host_ram(negotiated)
@@ -5074,7 +5384,7 @@ class Runtime:
         is the same distinction :func:`host_ram_demand` already draws.
         """
         try:
-            if negotiated.placement.on_gpu:
+            if negotiated.placement.on_gpu and not getattr(negotiated.placement, "uma", False):
                 return
             logger.info("Model Chain: %ssystem RAM after this server loaded — %s",
                         self._said_for(), mc_broker.describe_host_ram())
@@ -5113,7 +5423,8 @@ class Runtime:
                         mc_llm_paths.app_paths().logs / "llama-server.log")
             return
         logger.info("Model Chain: llama.cpp reports %s", offload.describe())
-        if offload.spilled and negotiated.placement.on_gpu:
+        if (offload.spilled and negotiated.placement.on_gpu
+                and not getattr(negotiated.placement, "uma", False)):
             logger.warning(
                 "Model Chain: %.1f GB of the weights (%.0f%%) are in system RAM, not on the "
                 "card — generation will run at a fraction of the speed it would with all of "
@@ -5303,8 +5614,15 @@ class Runtime:
             if not self._running:
                 mc_broker.retire(self.residency_key)
                 return 0
-            if self._placement is not None and not self._placement.on_gpu:
-                return 0  # already in system RAM; there is nothing on the card to give
+            if self._placement is not None and (not self._placement.on_gpu
+                                                or getattr(self._placement, "uma", False)):
+                # Already in system RAM -- or on an Intel GPU, whose memory is
+                # system RAM -- so there is nothing on any card to give. The
+                # card filter above lets an unfiltered request through on a
+                # machine the broker counts as single-card, which a machine
+                # with Intel graphics beside one NVIDIA card is; the answer
+                # has to be the same here (design intent invariant I-7).
+                return 0
 
             where = self._card if self._card is not None else mc_broker._card_index(card)
             measure = (lambda: mc_broker.device_free_vram_bytes(where)) if where is not None \
@@ -5484,6 +5802,8 @@ class Runtime:
         with self._lock:
             if not self._running or (self._placement is not None and not self._placement.on_gpu):
                 return 0
+            if getattr(self._placement, "uma", False):
+                return 0  # unified memory is host RAM; see host_ram_bytes
             return self.report.observed_bytes or (
                 self.report.estimate.resident_bytes if self.report.estimate else 0)
 
@@ -5625,6 +5945,7 @@ class Runtime:
                 "quantization": configuration.quantization,
                 "device": configuration.device_name or configuration.device,
                 "mode": configuration.mode,
+                "backend": configuration.backend,
                 "sees": configuration.sees,
                 # Two answers because they are two facts (section 10): "sees"
                 # is whether a compatible projector is known, and this is
