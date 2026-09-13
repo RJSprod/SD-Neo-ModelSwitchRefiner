@@ -2855,6 +2855,219 @@ class TestAZeroResidencyIsNotBelievedStraightAway:
         assert not waited
 
 
+class TestASliverOfTheModelIsNotBelievedStraightAway:
+    """The zero case was not the only shape the unsettled-driver failure takes.
+
+    From a user's log: an "all layers on the GPU" start of a 15.6 GB model
+    measured 0.1 GB -- the CUDA context and nothing else -- and was believed at
+    once, because a tenth of a gigabyte is not zero. The next start, forty
+    seconds later, read the same card as still having 22.7 GB free, placed a
+    second server against it, and the two together filled the card.
+    """
+
+    def card(self, monkeypatch, readings):
+        seen = iter(readings)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: next(seen, readings[-1]))
+
+    def test_a_reading_far_below_the_placement_is_waited_for(self, placed, monkeypatch):
+        self.card(monkeypatch, [int(19.9 * _GB), int(19.9 * _GB), 6 * _GB])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(
+            20 * _GB, placement, None, expected=14 * _GB) == 14 * _GB
+
+    def test_a_sliver_that_never_grows_is_recorded_as_it_stands(self, placed, monkeypatch):
+        """Not zero, and not the estimate: a card that genuinely took a tenth
+        of the model reads the same after the wait, and the shortfall warning
+        is then about a measurement rather than a guess."""
+        self.card(monkeypatch, [int(19.9 * _GB)])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        observed = runtime.Runtime()._observed_residency(
+            20 * _GB, placement, None, expected=14 * _GB)
+
+        assert round(observed / _GB, 1) == 0.1
+
+    def test_a_reading_near_the_placement_is_not_waited_for(self, placed, monkeypatch):
+        waited = []
+        monkeypatch.setattr(runtime.time, "sleep", lambda s: waited.append(s))
+        self.card(monkeypatch, [6 * _GB])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(
+            20 * _GB, placement, None, expected=14 * _GB) == 14 * _GB
+        assert not waited
+
+    def test_without_an_expectation_only_a_zero_is_doubted(self, placed, monkeypatch):
+        """A header that could not be read switches the check off rather than
+        inventing a figure to doubt readings against."""
+        waited = []
+        monkeypatch.setattr(runtime.time, "sleep", lambda s: waited.append(s))
+        self.card(monkeypatch, [int(19.9 * _GB)])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert round(runtime.Runtime()._observed_residency(
+            20 * _GB, placement, None) / _GB, 1) == 0.1
+        assert not waited
+
+    def test_the_load_report_outranks_a_reading_the_driver_has_not_caught_up_with(self):
+        """llama.cpp's own account of what it put on the card is the process's
+        word against the driver's, and when the driver's figure is a sliver of
+        the weights it is the driver that is behind."""
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+        offload = runtime.read_offload(FULL_LOAD)
+
+        reconciled = runtime._reconciled_residency(int(0.1 * _GB), 14 * _GB, offload,
+                                                   placement)
+
+        assert reconciled == offload.device_resident_bytes
+        assert round(reconciled / _GB, 1) == 17.5
+
+    def test_a_plausible_reading_is_kept_over_the_report(self):
+        """The difference includes the context and compute buffers the report
+        does not itemise; it is the better figure whenever it is credible."""
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime._reconciled_residency(
+            18 * _GB, 14 * _GB, runtime.read_offload(FULL_LOAD), placement) == 18 * _GB
+
+    def test_no_report_leaves_the_reading_alone(self):
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime._reconciled_residency(
+            int(0.1 * _GB), 14 * _GB, runtime.read_offload(""), placement) == int(0.1 * _GB)
+
+    def test_a_report_as_implausible_as_the_reading_is_not_preferred(self):
+        """Two figures that agree the card took almost nothing are agreeing."""
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+        offload = runtime.read_offload(
+            "load_tensors: offloaded 2/31 layers to GPU\n"
+            "load_tensors:        CUDA0 model buffer size =   900.00 MiB\n")
+
+        assert runtime._reconciled_residency(
+            int(0.1 * _GB), 14 * _GB, offload, placement) == int(0.1 * _GB)
+
+    def test_the_start_records_the_reconciled_figure(self, placed, server, tmp_path,
+                                                     monkeypatch):
+        """End to end: a fake server that writes a load report while the driver
+        reports a sliver, and the residency the broker is told about."""
+        import mc_llm_paths
+
+        managed, started = server
+        configuration = configure(monkeypatch, tmp_path, size_mb=64)
+        log = mc_llm_paths.app_paths().logs / "llama-server.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("")
+        readings = iter([20 * _GB] + [int(19.9 * _GB)] * 20)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 20 * _GB)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: next(readings, int(19.9 * _GB)))
+        original = managed._new_process
+
+        def writing():
+            process = original()
+            start = process.start
+
+            def start_and_report(*args, **kwargs):
+                start(*args, **kwargs)
+                with log.open("a") as handle:
+                    handle.write(FULL_LOAD)
+
+            process.start = start_and_report
+            return process
+
+        monkeypatch.setattr(managed, "_new_process", writing)
+
+        managed.client()
+
+        assert round(managed.report.observed_bytes / _GB, 1) == 17.5
+        assert round(managed.resident_bytes() / _GB, 1) == 17.5
+
+
+class TestTheLoadReportIsAskedFor:
+    """A 2026 build hides the load report below the verbosity it starts at."""
+
+    @pytest.fixture(autouse=True)
+    def forget(self):
+        runtime._capabilities.clear()
+        yield
+        runtime._capabilities.clear()
+
+    @pytest.fixture
+    def build(self, tmp_path, monkeypatch):
+        executable = tmp_path / "llama-server"
+        executable.write_text("")
+
+        def announce(text):
+            monkeypatch.setattr(
+                runtime.subprocess, "run",
+                lambda *args, **kwargs: types.SimpleNamespace(stdout=text, stderr=""))
+            return runtime.Config(
+                runtime=executable, model=tmp_path / "model.gguf", mmproj=None,
+                gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+                context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16",
+                kv_type_v="f16")
+
+        return announce
+
+    NEW_SCALE = ("-lv, --verbosity, --log-verbosity N\n"
+                 "        Set the verbosity threshold. Messages with a higher verbosity "
+                 "will be ignored. Values:\n"
+                 "         - 0: generic output\n"
+                 "         - 1: error\n"
+                 "         - 2: warning\n"
+                 "         - 3: info\n"
+                 "         - 4: trace (more info)\n"
+                 "         - 5: debug\n"
+                 "        (default: 3)\n")
+    OLD_SCALE = ("-lv, --verbosity, --log-verbosity N\n"
+                 "        Set the verbosity threshold. Messages with a higher verbosity "
+                 "will be ignored.\n")
+
+    def test_a_build_on_the_trace_scale_is_asked_for_its_report(self, build):
+        configuration = build(self.NEW_SCALE)
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        flags = runtime.accelerator_flags(configuration, placement)
+
+        assert flags[:2] == [runtime.LOG_VERBOSITY_FLAG, runtime.LOAD_REPORT_VERBOSITY]
+
+    def test_a_processor_placement_asks_too(self, build):
+        """The report says which buffers landed where on every placement."""
+        configuration = build(self.NEW_SCALE)
+        placement = ctx.Placement(gpu_layers=ctx.NO_LAYERS, on_gpu=False)
+
+        assert runtime.LOG_VERBOSITY_FLAG in runtime.accelerator_flags(configuration, placement)
+
+    def test_the_older_scale_is_left_alone(self, build):
+        """The same flag with a different scale: four there means everything,
+        and everything is every request body in the log."""
+        configuration = build(self.OLD_SCALE)
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.LOG_VERBOSITY_FLAG not in runtime.accelerator_flags(configuration,
+                                                                          placement)
+
+    def test_a_build_without_the_flag_is_not_given_it(self, build):
+        configuration = build("  -m, --model FNAME\n")
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.accelerator_flags(configuration, placement) == []
+
+    def test_a_refused_verbosity_flag_is_blamed_on_this_extension(self):
+        assert runtime.LOG_VERBOSITY_FLAG in runtime.OPTIONAL_FLAGS
+
+    def test_the_free_figure_the_loader_saw_is_read_from_the_newer_line(self):
+        offload = runtime.read_offload(
+            "llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3090) "
+            "(0000:01:00.0) - 22700 MiB free\n")
+
+        assert offload.known
+        assert offload.device_free == (("CUDA0", 0, 22700),)
+        assert "CUDA0 22.2 GB free at start" in offload.describe()
+
+
 class TestMixedMinimumStartsWhereAggressiveEndsUp:
     """What the mode actually changes, which is one number.
 

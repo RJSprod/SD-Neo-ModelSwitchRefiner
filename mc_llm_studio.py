@@ -747,6 +747,9 @@ def _device_detail(state) -> str:
 
     name = state["device"] or "unknown"
     mode = str(state.get("mode", "")).strip().casefold()
+    if state.get("backend") == "sycl":
+        # Never "VRAM": the memory behind an Intel GPU is the system's.
+        return f"{name} — Intel GPU (SYCL), model in shared system memory"
     if mode == MIXED_MODE:
         return f"{name} — mixed, weights in system RAM"
     if mode == CPU_MODE:
@@ -775,6 +778,13 @@ def _runtime_detail(state=None) -> str:
     if state["running"] and state["resident_bytes"]:
         parts.append(f"VRAM: {ui.gigabytes(state['resident_bytes'])}")
     report = state["report"]
+    if (state["running"] and state.get("backend") == "sycl" and report is not None
+            and report.estimate is not None):
+        # The figure a CUDA placement prints as VRAM, in the words this memory
+        # deserves: an estimate, because nothing outside the process can
+        # measure how much of the shared pool a SYCL server took.
+        parts.append(f"Shared system memory: about "
+                     f"{ui.gigabytes(report.estimate.resident_bytes)} (estimated)")
     if report is not None and report.placement is not None:
         parts.append(f"Context: {ui.tokens(report.placement.context)}")
     # Which mechanism produced the tokens, named rather than implied. Section 9
@@ -946,6 +956,14 @@ def _residency_table() -> str:
         # can ever show.
         summary.append(f"<li><b>{ui.gigabytes(stray)}</b> "
                        f"{ui.escape(mc_broker.stray_explanation())}.</li>")
+    if state.get("running") and state.get("backend") == "sycl":
+        # Section 11.4 of the Intel design intent: a status view has to tell
+        # unified memory apart from VRAM, because the table below has no row
+        # for it -- an Intel GPU's model memory is host RAM and is registered
+        # nowhere as VRAM, which is exactly what keeps it off every card's
+        # budget and out of every reclaim.
+        summary.append("<li>Memory domain: <b>shared system memory</b> — the Intel GPU's "
+                       "model memory is charged as host RAM, never as VRAM on any card</li>")
     report = state.get("report")
     if report is not None and report.placement is not None:
         summary.append(
@@ -1845,10 +1863,30 @@ def _current_device(choices=None, role: str = "") -> str | None:
     configuration = mc_llm_runtime.config(mc_llm_roles.named(role))
     choices = _device_choices() if choices is None else choices
     values = [value for _, value in choices]
-    token = f"{_recorded_mode(configuration)}:{configuration.gpu_index}"
+    token = _recorded_token(configuration)
     if token in values:
         return token
     return values[0] if values else None
+
+
+def _recorded_token(configuration) -> str:
+    """The menu value the recorded device answers to.
+
+    The backend first: an Intel device records ``gpu`` as its mode like any
+    full offload, and ``gpu:0`` names whichever CUDA card is numbered zero.
+    Then Mixed Minimum, which shares Aggressive's mode and is told apart by one
+    field -- the same recovery ``mc_llm_setup.configured_device`` makes, and
+    without it the dropdown showed a Minimum installation as Aggressive.
+    """
+    import mc_llm_setup
+    import mc_llm_sycl
+
+    if getattr(configuration, "uses_sycl_compute", False):
+        return f"{mc_llm_sycl.TOKEN_PREFIX}:{configuration.gpu_index}"
+    if getattr(configuration, "expert_minimum", False) and getattr(
+            configuration, "uses_cuda_compute", False):
+        return f"{mc_llm_setup.MINIMUM_PREFIX}:{configuration.gpu_index}"
+    return f"{_recorded_mode(configuration)}:{configuration.gpu_index}"
 
 
 def _recorded_mode(configuration) -> str:
@@ -2151,6 +2189,10 @@ def _estimate_html() -> str:
     # loaded model as a card with no room on it, and reports that the model
     # currently answering at 7,168 tokens could not be given a context at all.
     ours = mc_llm_runtime.runtime.resident_bytes()
+    if getattr(configuration, "uses_sycl_compute", False):
+        # Unified memory: what the running server holds is host RAM a
+        # re-placement gives back first, and it is what the table adds back.
+        ours = max(int(mc_llm_runtime.runtime.host_ram_bytes() or 0), 0)
 
     try:
         # reclaim=False: this panel is drawn when the tab is built and whenever
@@ -2167,6 +2209,18 @@ def _estimate_html() -> str:
     reserve = mc_broker.safety_margin_bytes()
     free = mc_broker.device_free_vram_bytes() + ours
     image_resident = mc_broker.resident_bytes(mc_broker.FAMILY_IMAGE)
+    uma = bool(getattr(configuration, "uses_sycl_compute", False))
+    shared = None
+    if uma:
+        # The table is about shared system memory here, not about any card:
+        # what is safe after the host reserve, plus what this server already
+        # holds (a re-placement stops it first), and no image checkpoint to
+        # compare against, because an Intel placement never displaces one.
+        import mc_llm_sycl
+
+        shared = mc_llm_sycl.budget(excluding=mc_llm_runtime.runtime)
+        free = shared.safe + ours
+        image_resident = 0
 
     rows = []
     for found in mc_llm_context.table(configuration.model, placement):
@@ -2184,25 +2238,38 @@ def _estimate_html() -> str:
     with_image = mc_llm_context.capacity(configuration.model, placement, keeping, gguf=described)
     without_image = mc_llm_context.capacity(configuration.model, placement, moving, gguf=described)
 
+    if uma:
+        residency = [
+            f"<li>Safe shared system memory now buys: <b>{ui.tokens(with_image.usable)}</b> "
+            f"tokens</li>",
+            *(f"<li>{ui.escape(line)}</li>" for line in mc_llm_sycl.detail_lines(found=shared)),
+        ]
+    else:
+        residency = [
+            f"<li>Keeping the current image model resident: "
+            f"<b>{ui.tokens(with_image.usable)}</b> tokens</li>",
+            # Not "if it were demoted": nothing here will ever demote it for
+            # the LLM. It is what the card would give a language model on a
+            # day when no checkpoint is loaded, which is a real state and a
+            # fair comparison.
+            f"<li>With no image model on the card: "
+            f"<b>{ui.tokens(without_image.usable)}</b> tokens</li>",
+        ]
     facts = [
         f"<li>Model ceiling: <b>{ui.tokens(described.context_length)}</b> tokens</li>",
         f"<li>Current context: <b>{ui.tokens(placement.context)}</b> tokens "
         f"({ui.gigabytes(estimate.kv_bytes)} of key/value cache)</li>",
         f"<li>Cost per token: {per_token:,.0f} bytes ({_attention(described)})</li>",
-        f"<li>Weights on the GPU: {ui.gigabytes(estimate.weights_bytes)} "
+        f"<li>Weights on {'the Intel GPU, in shared system memory' if uma else 'the GPU'}: "
+        f"{ui.gigabytes(estimate.weights_bytes)} "
         f"({ui.escape(placement.describe(described.block_count))})</li>",
         f"<li>Runtime reserve: {ui.megabytes(estimate.compute_bytes)} — "
         f"<b>{'calibrated from a real load' if estimate.calibrated else 'estimated'}</b></li>",
-        f"<li>Keeping the current image model resident: "
-        f"<b>{ui.tokens(with_image.usable)}</b> tokens</li>",
-        # Not "if it were demoted": nothing here will ever demote it for the
-        # LLM. It is what the card would give a language model on a day when no
-        # checkpoint is loaded, which is a real state and a fair comparison.
-        f"<li>With no image model on the card: "
-        f"<b>{ui.tokens(without_image.usable)}</b> tokens</li>",
+        *residency,
     ]
     if estimate.capped:
-        facts.append("<li>Context is limited by the model's own ceiling, not by VRAM.</li>")
+        facts.append(f"<li>Context is limited by the model's own ceiling, not by "
+                     f"{'shared system memory' if uma else 'VRAM'}.</li>")
     if estimate.detail:
         facts.append(f"<li>{ui.escape(estimate.detail)}</li>")
     for text in negotiated.notes:

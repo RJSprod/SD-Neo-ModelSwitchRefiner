@@ -2912,7 +2912,11 @@ llama-server ready — all layers on the GPU, 7,168 token context, 18.1 GB VRAM
 llama.cpp reports 31/31 layers on the GPU, CUDA0 16.6 GB, CPU_Mapped 0.3 GB, CUDA0 KV 0.9 GB
 ```
 
-The same summary is in the model sheet and in Setup. A small host
+The same summary is in the model sheet and in Setup. A 2026 llama.cpp build
+writes that report only at its *trace* verbosity, above the level the server
+starts at, so the start passes `--log-verbosity 4` when the build's own help
+text shows that scale; an older build spelling the same flag on a different
+scale is left exactly as it was. A small host
 buffer is normal — many models keep their token embeddings there even on a full
 offload. A tenth or more of the weights in system RAM is not, and is called out
 as a warning: it means the card had less room than this extension could see,
@@ -3043,7 +3047,10 @@ panel does that one first.
   copied into the data directory. This route works on every platform.
 - **Download the pinned build** — fetches and SHA-256-verifies the build from
   `release-manifest.json`. Those are **Windows x64 archives only**, so this
-  button is disabled elsewhere and the panel says why.
+  button is disabled elsewhere and the panel says why. With an Intel device
+  selected it fetches the SYCL build pinned in `mc_llm_runtime_components.py`
+  instead, into a runtime directory of its own — see
+  [Intel Arc through SYCL](#intel-arc-through-sycl).
 
 The runtime is copied in rather than referenced where it lies, because it is a
 program this extension *starts* — unlike the weights, which it only reads. A
@@ -3288,6 +3295,92 @@ The one thing this deliberately does *not* do is hold a lock across a whole
 generation. `postprocess` is not called from a `finally`, so a generation that
 raised would leave the lock held and LLM Studio dead until the WebUI restarted —
 a far worse failure than the brief overlap the lock would have prevented.
+
+### Intel Arc through SYCL
+
+An Intel GPU — the Arc built into a Meteor Lake processor, or a discrete Arc
+card — is a target for the language model, through llama.cpp's SYCL / oneAPI
+Level Zero backend. It appears in Setup's device menu whenever Windows reports
+Intel graphics (or a SYCL build is already installed), for the installation and
+for each of the three roles, from the one device list every "Configure for"
+scope reads:
+
+```
+Intel(R) Arc(TM) Graphics — SYCL / shared system memory — up to 54.4 GB shared
+```
+
+A role that follows the installation inherits the Intel choice exactly as it
+inherits a CUDA or CPU one; a split role may choose Intel while another stays
+on an NVIDIA card or the processor. Nothing is moved to Intel by itself, and
+Intel is never the default: a machine with Intel graphics and no NVIDIA card
+still defaults to the processor until you choose the Arc.
+
+**One mode, not four.** The Intel target offers the whole model on the device
+and nothing else. Mixed Aggressive, Minimum and Conservative describe moving
+weights between a card's VRAM and system RAM, and an integrated Arc has no
+separate VRAM to move them between — a mode by those names would promise a
+memory separation the hardware does not have.
+
+**The memory is the system's.** Three numbers are kept apart and never
+collapsed into one:
+
+| Number | What it is | Where you see it |
+| --- | --- | --- |
+| Shared GPU limit | The ceiling Windows may let graphics use — 54.4 GB on the machine this was built against. A limit, not free memory, and not memory set aside. | The menu line and the estimator |
+| Available host RAM | What the machine has free right now | The residency panel |
+| Safe for LLM now | Available RAM above this extension's host reserve, capped by what remains under the shared limit once its own Intel servers are counted | The estimator; the number placement is admitted against |
+
+The Windows *Adapter RAM* field — 2 GB on that machine — is recorded for the
+label and used for nothing; a model far larger than it loads whenever the
+numbers above permit. When they do not, the context gives ground first, down
+to its floor, and below that the request is refused in a sentence with both
+numbers in it rather than started on a machine that would page the model
+against itself:
+
+```
+The requested model and context need 18.4 GB of shared system memory; 4.0 GB is
+currently safe after the 2.0 GB host-RAM reserve, within the 54.4 GB shared GPU limit.
+```
+
+An Intel server's weights are charged as **host RAM**, never as VRAM on any
+card. So it never asks for an NVIDIA checkpoint to leave the 3090 to make
+itself fit — not even under LLM priority — and an image generation short of
+system RAM may stop an idle Intel server exactly as it may stop an idle
+processor one. The status line says "Shared system memory: about 17.2 GB
+(estimated)" rather than a VRAM figure, because nothing outside the process
+can measure what it took from the shared pool.
+
+**A different processor.** An Intel LLM and an NVIDIA image generation share
+no processor, so they run at the same time; two Intel requests still take turns.
+The console says so once: *image generation is on GPU 1 and the LLM is on the
+Intel GPU (SYCL0) — they use different processors and run at the same time.*
+
+**The runtime.** Download fetches the official `llama-b10621-bin-win-sycl-x64.zip`
+— the same llama.cpp release every other family is pinned to, verified against
+the SHA-256 recorded in `mc_llm_runtime_components.py` — into
+`runtime-llama-runtime-sycl/` beside whatever CUDA or CPU family is already
+installed. Nothing is overwritten and there is no cudart companion: the archive
+carries its oneAPI runtime libraries inside it. The Intel graphics driver, which
+provides Level Zero, is the one thing it needs from the machine. Before an
+Intel choice is recorded the chosen build is run with `--list-devices` and has
+to enumerate the device: a build that lists none is refused with *the SYCL
+llama-server could not see Intel Arc*, a CUDA-only installation with *Intel Arc
+is available — install the SYCL llama.cpp runtime*, and a recorded device that
+has since disappeared with *the recorded SYCL device is no longer enumerated*.
+None of those is ever reworded as a CUDA problem.
+
+**The launch.** The server is started with `--device SYCL0` and every layer on
+the device. `CUDA_VISIBLE_DEVICES` is emptied for that start — the number the
+launcher would otherwise write there is a SYCL ordinal being read as an NVIDIA
+slot, and it must never become the selection — and `ONEAPI_DEVICE_SELECTOR`
+is left as your shell had it. A build that cannot see the device at start time
+is a refusal, never a quiet start on the processor with Intel still showing as
+the target. Flash attention is asked for as `auto` so llama.cpp decides per
+model; the same capability probing that gates every other optional flag gates
+these.
+
+Not in this version: Vulkan or OpenVINO as alternative Intel backends, Intel
+equivalents of the mixed modes, or running the image side on Intel.
 
 ### If it goes wrong
 
@@ -4119,6 +4212,8 @@ mc_llm_files.py       what a pasted path means, and what is in a folder
 mc_llm_browse.py      the Browse button beside every path box
 mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
+mc_llm_sycl.py        Intel graphics through SYCL: discovery, budget, launch environment
+mc_llm_runtime_components.py   runtime archives pinned beyond the vendored manifest
 mc_llm_accel.py       acceleration and VRAM priority, as two settings
 mc_llm_managed_models.py   the managed backbone catalogue: verify, install, switch
 mc_llm_vision.py      which projector belongs to the model, and repairing it

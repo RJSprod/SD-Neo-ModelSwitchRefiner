@@ -549,10 +549,16 @@ def download(device=None, on_status=None, on_progress=None) -> Path:
     runtime and only the runtime, so this reuses the same verified download and
     the same atomic extract for the runtime components alone.
     """
+    import mc_llm_runtime_components as pinned
     from prompt_master.provisioning.downloader import download as fetch
     from prompt_master.provisioning.extractor import extract_zips_atomic
-    from prompt_master.inference.device_detection import runtime_component_id
-    from prompt_master.provisioning.installer import load_components, runtime_component_ids
+
+    # Chosen by backend rather than by the vendored rule, which pairs every
+    # non-CPU runtime with a cudart archive: true of every CUDA family, false
+    # of the self-contained SYCL zip. See mc_llm_runtime_components.
+    runtime_component_id = pinned.runtime_component_id
+    runtime_component_ids = pinned.runtime_component_ids
+    load_components = pinned.components
 
     if not downloadable():
         raise SetupError(_no_download_reason())
@@ -657,8 +663,33 @@ def devices(refresh: bool = False) -> list:
                              memory_total_mb=0, memory_free_mb=0, driver_version="")]
 
     found = _with_minimum(found)
+    found = _with_sycl(found)
     _devices_cache = (time.monotonic(), list(found))
     return list(found)
+
+
+def _with_sycl(found: list) -> list:
+    """``found``, with every Intel GPU this machine offers through SYCL before the processor.
+
+    One list feeds every "Configure for" scope -- the installation and each of
+    the three roles -- so the Intel target is merged in here and nowhere else
+    (design intent invariant I-2). After the CUDA cards and their variants,
+    before the processor, so that the first entry is what it has always been
+    and the processor is still last. Empty on a machine with no Intel graphics,
+    which leaves the menu exactly as it was.
+    """
+    try:
+        import mc_llm_sycl
+
+        intel = mc_llm_sycl.devices()
+    except Exception:
+        logger.debug("Model Chain: could not list Intel SYCL devices", exc_info=True)
+        return found
+    if not intel:
+        return found
+    processors = [device for device in found if getattr(device, "is_cpu", False)]
+    cards = [device for device in found if not getattr(device, "is_cpu", False)]
+    return [*cards, *intel, *processors]
 
 
 MINIMUM_PREFIX = "minimum"
@@ -706,6 +737,12 @@ def forget_devices() -> None:
 
     _devices_cache = None
     _enumerated.clear()
+    try:
+        import mc_llm_sycl
+
+        mc_llm_sycl.forget()
+    except Exception:
+        logger.debug("Model Chain: could not forget the Intel SYCL device list", exc_info=True)
 
 
 def preferred_device():
@@ -714,11 +751,16 @@ def preferred_device():
     The first card detected, or the processor when there is none. A default
     rather than a decision: the panel offers the list and this only fills it in.
     """
+    import mc_llm_sycl
+
     found = devices()
     for device in found:
-        if not device.is_cpu and not device.is_mixed:
+        # Never the Intel target by default (design intent section 17): a
+        # machine with Intel graphics and no NVIDIA card keeps defaulting to
+        # the processor, and chooses the Arc only when somebody chooses it.
+        if not device.is_cpu and not device.is_mixed and not mc_llm_sycl.is_sycl_device(device):
             return device
-    return found[0]
+    return next((device for device in found if device.is_cpu), found[0])
 
 
 MIXED_TRUTH = ("Mixed Aggressive — as much of the model as fits in spare VRAM, the "
@@ -806,10 +848,13 @@ def describe_device(device) -> str:
     because the label is the whole of what the menu communicates -- see
     :data:`CONSERVATIVE_TRUTH`.
     """
+    import mc_llm_sycl
     from prompt_master.inference.device_detection import describe
 
     try:
         name = getattr(device, "name", "GPU")
+        if mc_llm_sycl.is_sycl_device(device):
+            return mc_llm_sycl.describe(device)
         if is_minimum_device(device):
             return f"{name} — {MINIMUM_TRUTH}"
         if getattr(device, "is_conservative", False):
@@ -830,8 +875,11 @@ def device_token(device) -> str:
     Aggressive's ``mode``: the menu stores a token, and two entries that
     stringify identically are two entries a dropdown cannot tell apart.
     """
+    import mc_llm_sycl
     from prompt_master.inference.device_detection import device_token as token
 
+    if mc_llm_sycl.is_sycl_device(device):
+        return mc_llm_sycl.token(device)
     if is_minimum_device(device):
         return f"{MINIMUM_PREFIX}:{int(device.physical_index)}"
     return token(device)
@@ -839,10 +887,19 @@ def device_token(device) -> str:
 
 def device_for_token(value, offered=None):
     """The detected device ``value`` names, or None when nothing matches."""
+    import mc_llm_sycl
     from prompt_master.inference.device_detection import device_for_token as resolve
 
     found = devices() if offered is None else offered
     text = str(value or "").strip().casefold()
+    if mc_llm_sycl.parse_token(text) is not None:
+        return mc_llm_sycl.device_for_token(text, found)
+    # Every other token is answered from the devices that are not Intel. The
+    # vendored resolver matches on the bare index and the mode, and an Intel
+    # device carries ``0`` and ``gpu`` like the first CUDA card does -- so
+    # ``gpu:0`` on a machine with no NVIDIA card would have quietly answered
+    # with the Arc, which is the collision design intent invariant I-3 forbids.
+    found = [device for device in found if not mc_llm_sycl.is_sycl_device(device)]
     if text.startswith(f"{MINIMUM_PREFIX}:"):
         try:
             wanted = int(text.split(":", 1)[1])
@@ -881,6 +938,16 @@ def configured_device():
 
     mode = recorded_mode(state.get("mode", ""), state.get("gpu_device", ""),
                          state.get("gpu_layers", ""))
+    # The backend before the mode: an Intel device records ``gpu`` as its mode
+    # like any full offload, and ``gpu:0`` would read back as whichever CUDA
+    # card is numbered zero.
+    import mc_llm_sycl
+
+    if mc_llm_sycl.backend_of_state(state) == mc_llm_sycl.BACKEND_SYCL:
+        try:
+            return device_for_token(f"{mc_llm_sycl.TOKEN_PREFIX}:{int(index)}", devices())
+        except (TypeError, ValueError):
+            return None
     # Recovered explicitly, because Minimum and Aggressive share a mode: without
     # this a restart would read the state back as Aggressive and quietly fill
     # the card somebody had asked to keep nearly empty.
@@ -1015,17 +1082,24 @@ def _runtime_for_device(paths, path: Path, chosen) -> Path:
     An unmarked directory is left alone. That is an installation made before
     the family marker existed, not a wrong one, and :func:`family_in` says so.
     """
-    from prompt_master.inference.device_detection import runtime_component_id
+    import mc_llm_runtime_components as pinned
+    import mc_llm_sycl
 
     if chosen.is_cpu:
         return path
-    wanted = runtime_component_id(chosen)
+    wanted = pinned.runtime_component_id(chosen)
     holds = family_in(path.parent)
     if not holds or holds == wanted:
         return path
 
     installed = runtime_families(paths.root)
     server = installed.get(wanted)
+    if server is None and mc_llm_sycl.is_sycl_device(chosen):
+        # Section 13's first sentence: the hardware is here and the build for
+        # it is not, and the button to press is named.
+        raise SetupError(f"{mc_llm_sycl.HARDWARE_WITHOUT_RUNTIME} This installation's "
+                         f"{path.parent.name} directory holds the {holds} build, which has "
+                         f"no SYCL backend in it.")
     if server is None:
         raise SetupError(
             f"{chosen.name} needs the {wanted} build of llama.cpp and this installation "
@@ -1057,12 +1131,14 @@ def record(executable: str | Path, device=None, role: str = "") -> dict:
     probe that fails falls back to the conventional token and says so in the
     log rather than refusing to record a runtime that is otherwise fine.
     """
+    import mc_llm_runtime_components as pinned
+    import mc_llm_sycl
     from prompt_master.core.config import atomic_write_json, read_json
     from prompt_master.inference.device_detection import (CPU_DEVICE, NO_OFFLOAD,
-                                                          list_llama_devices,
-                                                          runtime_component_id)
+                                                          list_llama_devices)
     from prompt_master.provisioning.installer import DEFAULT_CONTEXT_SIZE, FULL_OFFLOAD
 
+    runtime_component_id = pinned.runtime_component_id
     paths = mc_llm_paths.app_paths()
     path = (mc_llm_files.to_path(executable) or Path("")).resolve()
     if not path.is_file():
@@ -1099,6 +1175,18 @@ def record(executable: str | Path, device=None, role: str = "") -> dict:
 
     if chosen.is_cpu:
         token, token_name, layers = CPU_DEVICE, chosen.name, NO_OFFLOAD
+    elif mc_llm_sycl.is_sycl_device(chosen):
+        # Validated by running the build, never assumed from the hardware
+        # being present (design intent section 7.4). A SYCL token recorded
+        # beside a build that cannot see the device would refuse ``--device
+        # SYCL0`` at every start, and a recording refused here leaves the
+        # working placement in place with the cause in front of the person
+        # who can fix it.
+        try:
+            token, token_name = mc_llm_sycl.validate_runtime(path, chosen)
+        except mc_llm_sycl.SyclError as exc:
+            raise SetupError(str(exc)) from None
+        layers = FULL_OFFLOAD
     else:
         try:
             token, token_name = list_llama_devices(path, chosen.physical_index)
@@ -1136,6 +1224,12 @@ def record(executable: str | Path, device=None, role: str = "") -> dict:
         "gpu_device": token,
         "gpu_device_name": token_name,
         "gpu_layers": str(layers),
+        # Which backend the token above belongs to. ``SYCL0`` and ``CUDA0``
+        # are different namespaces, and this is what tells a reader of the
+        # state file which one it is looking at without parsing the token.
+        "compute_backend": (mc_llm_sycl.BACKEND_CPU if chosen.is_cpu
+                            else mc_llm_sycl.BACKEND_SYCL if mc_llm_sycl.is_sycl_device(chosen)
+                            else mc_llm_sycl.BACKEND_CUDA),
         # Beside ``mode`` rather than inside it. The mode stays
         # ``mixed_aggressive`` so every lifecycle rule keeps treating this as
         # what it is -- see :func:`minimum_device` -- and this is the one bit

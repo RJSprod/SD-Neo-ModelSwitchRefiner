@@ -3863,3 +3863,169 @@ thread is one long reply: two pixels of the host's accent on the side each
 message is aligned to. An edge and not a wash — a background strong enough to
 separate two speakers on a dark theme is strong enough to be the loudest thing
 on a page whose job is to be read.
+
+## 36. One server for the installation, and a report a newer build hides (13 September 2026)
+
+Two findings from one log, in which a 24 GB card ended up 23.7 GB full for a
+single 15.6 GB language model, and the console had said "0.1 GB VRAM" about
+the first copy of it.
+
+### 36.1 The registry filed the singleton once and never moved it
+
+Every request path -- a conversation reply, a MiniMax job, the Krea writer --
+resolves its server through `RuntimeRegistry.for_role`. LLM Studio's Load and
+Unload buttons and a backbone switch drive the module singleton directly. The
+two agreed for as long as the installation's identity did not change: the
+registry adopted the singleton for the shared identity the first time anybody
+asked, and filed it under that identity.
+
+Then the identity changed -- a backbone switch, a device change in Setup -- and
+the entry did not move. The next request for the new identity found the
+singleton "already held" under the old one, built a second `Runtime` for the
+new one, and started a second llama-server on the same settings. In system RAM
+the second mapping cost nothing, because the operating system shares the pages
+and `_admit_host_ram` said so in as many words. On a card, two processes are
+two copies of the weights. The log has Load starting the installation's server
+on the 3090 and the MiniMax request forty seconds later starting another one on
+the same card, and both being stopped by Unload.
+
+`_instance` now re-files the singleton under the installation's current
+identity when the installation has moved, dropping the entry that filed it
+under the superseded one, and the singleton keeps its register key across the
+move so a process declared under one key is retired under the same one.
+`Runtime.configuration()` also answers for the installation rather than for a
+role that once shared the singleton: a role split with settings that happened
+to equal the installation's keeps its settings and gets a server of its own at
+its next request. The tests reproduce the log's sequence -- resolve, change the
+installation, resolve again -- and failed before the change.
+
+### 36.2 A sliver is as suspect as a zero
+
+The residency a start records is the difference of two free-VRAM readings
+taken either side of it. A zero was already retried, because the health
+endpoint answers before the driver's figure catches up (§4h of the memory
+document). The same failure took a second shape in this log: an "all layers on
+the GPU" start of a 15.6 GB model measured 0.1 GB -- the CUDA context and
+nothing else -- and was believed at once, because a tenth of a gigabyte is not
+zero. Forty seconds later the next start read the card as still having 22.7 GB
+free and placed against it.
+
+Below a quarter of the weights the placement sends to the card
+(`RESIDENCY_PLAUSIBLE_FRACTION`), a reading is now treated as a zero was:
+asked again, briefly, before it is written down. A card that genuinely took a
+quarter reads the same after the wait and is then believed, and the shortfall
+warning is about a measurement rather than a guess.
+
+### 36.3 The report was there to be read, and the build had hidden it
+
+llama.cpp's own report outranks a reading the driver has not caught up with:
+when the difference is a sliver and the load report names gigabytes of weights
+and cache on the card, the report's figure is what reaches the register, and
+the console says which was used.
+
+The report has to be written to be read. A 2026 build maps the library's
+informational lines -- offloaded layers, per-device buffer sizes, what the
+loader saw free -- to its *trace* verbosity, one above the level the server
+starts at (`common_get_verbosity` returns `LOG_LEVEL_TRACE` for
+`GGML_LOG_LEVEL_INFO`), so on such a build every start ended "llama.cpp wrote
+no load report this run". The start now passes `--log-verbosity 4` when the
+build's own help text names the scale on which four means trace. An older
+build spells the same flag on a different scale, where four would mean every
+request body in the log, and is left exactly alone. The loader's newer
+`using device ... MiB free` line is read as well, because it is the one reading
+from inside the process that did the allocating.
+
+## 37. Intel Arc through SYCL (13 September 2026)
+
+A design intent for an Intel Arc target arrived with the log above: one
+central Intel/SYCL device, selectable for the installation and each of the
+three roles, with the memory model stated up front and the vendored tree left
+byte-identical. What follows is the shape it took and the decisions inside it;
+`README.md` carries the behaviour.
+
+### 37.1 Two resources, modelled apart
+
+The execution resource is the Intel GPU. The broker's execution-domain
+vocabulary gained a fourth kind, `EXEC_SYCL`, whose whole truth table is: a
+SYCL workload conflicts with another SYCL workload on the same ordinal, with an
+unnamed one conservatively, and with nothing else. An image generation on the
+3090 and a conversation on the Arc run at the same time; two Arc requests take
+turns. `CUDA0` and `SYCL0` are different namespaces, so the ordinal lives in
+the domain's `card` field only as "which one" and is never compared across
+kinds.
+
+The memory resource is system RAM. This is the part the design intent calls
+the most important, and it is carried by one flag on the placement --
+`Placement.uma` -- read by everything that turns "on the GPU" into a VRAM
+figure. A UMA placement declares nothing to the VRAM register, reads no card's
+free memory, keys its measured speed under `uma` rather than `gpu`, and reports
+itself in the memory's own words. Its weights are charged in full by
+`host_ram_demand`, which is what lets the image side's host-RAM floor rule stop
+an idle Intel server exactly as it stops an idle processor one, and what keeps
+`_make_room_for_the_llm` -- LLM priority's one authority over image residency
+-- from ever firing for it: there is no card to make room on.
+
+### 37.2 The budget, and why it is a refusal
+
+`mc_llm_sycl.Budget` keeps the three numbers apart: the OS shared-GPU limit,
+available host RAM, and what is safe -- the smaller of what remains under the
+limit once this extension's own Intel servers are counted and what host RAM
+has above the reserve. Placement is admitted against the third alone. The
+limit is read from the DirectX adapter records under
+`HKLM\SOFTWARE\Microsoft\DirectX`, which carry the same `SharedSystemMemory`
+figure Task Manager shows, and never from WMI's `AdapterRAM`, which is the 2 GB
+field the design intent names as the number that must not become a ceiling.
+An unreadable limit is reported as unknown and the budget falls back to host
+RAM alone; an unreadable host admits everything and says the check could not
+be made, for the reason every other unanswerable memory question here
+proceeds rather than refuses.
+
+`_negotiate_uma` has two rungs where the CUDA ladder has six, because the
+others do not apply: moving layers or experts "off the device" moves them from
+one part of system RAM to another and frees nothing. Warm caches give ground,
+then the context down to its floor, and below that the placement does not fit.
+That is a refusal, in the sentence the design intent asks for, rather than the
+CUDA ladder's last rung -- run from system RAM instead -- because system RAM is
+where this placement already was. A selected Intel target never quietly becomes
+something else, which is also why a build that cannot enumerate the device at
+start time is a failure rather than the launcher's usual recovery of dropping
+the selection and starting on the processor.
+
+### 37.3 Identity, old files, and the collision that a test caught
+
+`compute_backend` joined `STATE_FIELDS`, written by `record` for every device
+and resolved by `mc_llm_sycl.resolve_backend` when absent: `none` or CPU mode
+is the processor, a `SYCL` token or a SYCL runtime family is SYCL, everything
+else is CUDA. `Config.uses_cuda_compute` is now `backend == "cuda"`, which is
+exactly what it used to compute for every file written before the field
+existed and differs only for the new one.
+
+The menu token is `sycl:0`, and the first test written against it caught the
+vendored resolver answering `gpu:0` with the Arc on a machine with no NVIDIA
+card, because the Arc carries `0` and `gpu` like the first CUDA card does.
+`device_for_token` now answers every token that is not Intel's from the devices
+that are not Intel, and `preferred_device` never answers with the Arc -- a
+machine with Intel graphics and no NVIDIA card keeps defaulting to the
+processor.
+
+### 37.4 Provisioning without touching the vendored manifest
+
+`mc_llm_runtime_components.py` pins the SYCL archive from the same `b10621`
+release every other family comes from, verified against the archive itself
+(119,290,141 bytes, `llama-server.exe` beside `ggml-sycl.dll` and the oneAPI
+runtime DLLs), and answers "which archives does this device need" by backend:
+one for SYCL, the vendored pair for CUDA. `runtime_directory` gives it a
+directory of its own beside the CUDA and CPU families, and `record` runs the
+chosen build with `--list-devices` and refuses to write `SYCL0` beside a build
+that cannot see it.
+
+### 37.5 Found on the way
+
+Two things the Intel path made visible. A processor placement's start and
+ready lines printed the image card's free VRAM and a "VRAM" figure read off
+it -- from the log, "5.8 GB VRAM" for a server holding none, taken while the
+image model happened to be loading; only a CUDA placement reads a card now,
+and the other two name the memory they are actually going into. And the Setup
+menu built its current value as `mode:index`, which Mixed Minimum shares with
+Aggressive, so a Minimum installation showed as Aggressive; the menu now asks
+the same question `configured_device` already answered.
