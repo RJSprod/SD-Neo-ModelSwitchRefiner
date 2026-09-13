@@ -100,6 +100,17 @@ class _Component:
     def load(self, **kwargs):
         return self._record("load", kwargs)
 
+    def tick(self, **kwargs):
+        """Gradio 4.30's Timer event, fired once per interval.
+
+        Faked rather than left out because the MiniMax gate is built around it:
+        without a tick binding the panel would still assemble, and the one thing
+        these tests exist to catch -- a handler whose output list does not match
+        what it returns -- would go unexercised on the path the host actually
+        takes.
+        """
+        return self._record("tick", kwargs)
+
     def _record(self, kind, kwargs):
         """Register a handler and hand back a dependency.
 
@@ -159,7 +170,7 @@ def _make_gradio() -> types.ModuleType:
         "Dropdown", "Radio", "Textbox", "Slider", "Number", "Checkbox",
         "Markdown", "Row", "Column", "Group", "Accordion", "Button", "HTML",
         "State", "Gallery", "Image", "Chatbot", "File", "Blocks", "Tab",
-        "DownloadButton",
+        "DownloadButton", "Timer",
     ):
         setattr(gradio, name, type(name, (_Component,), {}))
 
@@ -757,6 +768,28 @@ def active_plan(tmp_path, monkeypatch):
     mc_plan.note_placement(None)
     mc_plan.forget_misses()
     mc_plan.forget_weights()
+
+
+@pytest.fixture(autouse=True)
+def _forget_external_jobs():
+    """No external MiniMax request survives a test, and no worker thread starts.
+
+    Autouse for the reason every other fixture in this block is: the queue is
+    module state that outlives a test, and it is *load-bearing* -- the MiniMax
+    panel is inert whenever it is non-empty, so one test that queued a request
+    and did not drain it would silently disable the panel for every test after
+    it, in this file and in others.
+
+    The worker is paused as well as the queue cleared. A background thread
+    draining jobs while a test is asserting about their positions is a race
+    nobody can debug, so the tests step it themselves with ``drain_once``.
+    """
+    import mc_llm_jobs
+
+    mc_llm_jobs.pause_worker(True)
+    mc_llm_jobs.reset()
+    yield
+    mc_llm_jobs.reset()
 
 
 @pytest.fixture(autouse=True)

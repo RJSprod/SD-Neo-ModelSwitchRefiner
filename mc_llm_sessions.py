@@ -686,13 +686,18 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
 
 
 def _minimax(prompt: str, variant: str, image: str | None, seed: int,
-             cancel: Cancellation):
+             cancel: Cancellation, system: str | None = None):
     """One H3 prompt, in WanGP's order: caption first, then the prompt built from it.
 
     Kept a separate function from :func:`conversation` even though both stream
     from the same server, because section 4.4 asks for the enhancer to stay a
     dedicated workflow. The caption is emitted as its own event for the same
     reason -- it is a step of this product, not a chat turn.
+
+    ``system`` is the external API's instruction override and is ``None`` for
+    every run the panel starts. It reaches the vendored ``enhancer.messages``
+    and nothing else: an overridden request is the same run, over the same
+    server, under the same lock, with different instructions on it.
     """
     from prompt_master.minimax import enhancer
 
@@ -729,7 +734,8 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
         written = ""
         for chunk, result in _streamed(
                 lambda on_text: client.stream_chat(
-                    enhancer.messages(prompt, variant=variant, image_caption=caption),
+                    enhancer.messages(prompt, variant=variant, image_caption=caption,
+                                      system=system),
                     enhancer.max_tokens(variant), seed, on_text, cancel.event,
                     temperature=enhancer.TEMPERATURE, top_p=enhancer.TOP_P),
                 when_done=gpu.release):
@@ -1196,10 +1202,25 @@ def conversation(request: ChatRequest, cancel: Cancellation):
     yield from _traced("a conversation reply", _conversation(request, cancel))
 
 
-def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Cancellation):
-    """One MiniMax enhancement. See :func:`_minimax`."""
-    yield from _traced(f"a MiniMax {variant} enhancement",
-                       _minimax(prompt, variant, image, seed, cancel))
+def minimax(prompt: str, variant: str, image: str | None, seed: int,
+            cancel: Cancellation, system: str | None = None, trace: str = ""):
+    """One MiniMax enhancement. See :func:`_minimax`.
+
+    Whether the instructions were overridden reaches the console line as a word,
+    because a run that came back unlike its neighbours is a run somebody has to
+    be able to account for -- and the override itself, which is caller-supplied
+    text, is no more logged than a prompt is.
+
+    ``trace`` is the external queue's name for the request -- its id and who
+    asked -- and goes on the end of every console line this run writes. A
+    console with a panel run and three external ones interleaved is otherwise
+    six identical "a MiniMax fl2va enhancement" lines with nothing to say which
+    started, which finished, and which is the one somebody is asking about.
+    """
+    yield from _traced(f"a MiniMax {variant} enhancement"
+                       + (" under caller instructions" if system is not None else "")
+                       + (f" ({trace})" if trace else ""),
+                       _minimax(prompt, variant, image, seed, cancel, system))
 
 
 def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None,
