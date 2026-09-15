@@ -168,6 +168,17 @@ class TestTheRequirementStaysAttainable:
 
         assert mc_memory._pass_requirement("A", None, 1024, 1024, []) > 20 * GB
 
+    def test_an_estimated_requirement_is_trimmed_the_same_way(self, warming, monkeypatch):
+        """``vram_required_bytes`` is the file-size twin of ``_pass_requirement``
+        and the plan reaches for whichever one has an answer. A phase must not
+        be described as fitting or not fitting according to whether the
+        checkpoint behind it happens to have been loaded once already."""
+        monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 24 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0, batch=1: 20 * GB)
+        monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 18 * GB)
+
+        assert mc_memory.vram_required_bytes("A", None, 1024, 1024) <= 24 * GB
+
     def test_a_pass_that_fits_is_left_alone(self, warming, monkeypatch):
         monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 24 * GB)
         monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0, batch=1: 2 * GB)

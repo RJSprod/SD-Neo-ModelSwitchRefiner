@@ -280,7 +280,7 @@ def vram_headroom_bytes(width: int = 0, height: int = 0, batch: int = 1) -> int:
     llama-server was holding under a promise the plan had made it. The
     generation died before its first step.
 
-    Four floors, and the largest of them wins:
+    Five floors, and the largest of them wins:
 
     * the static estimate below, which scales with pixel count,
     * the largest activation peak actually observed this session, plus a margin,
@@ -553,7 +553,41 @@ a floor under the reserve, the next preload stops short of the level the host
 will claw back to, and the round trip does not happen again.
 
 Monotonic within a session, for the reason the peak observation is: a pass that
-happened to need less is not evidence the next one will."""
+happened to need less is not evidence the next one will.
+
+Only ever a *trim*, though. See :data:`RECLAIM_TRIM_FRACTION`."""
+
+
+RECLAIM_TRIM_FRACTION = 0.25
+"""Most of a preload that one reclaim reading may account for.
+
+The reserve above answers "how much does the host insist on having free *beside
+a resident model*", and that question only has an answer while the model is
+still there. Weights that have largely left the card left for some other reason
+-- a checkpoint swap, an unload, or the round trip Forge makes through system
+RAM when it merges a LoRA into weights that did not carry one -- and none of
+those is a statement about headroom.
+
+Read as one, they are ruinous, because the reserve they teach is the size of a
+model rather than the size of an activation. From a user's log, on a 24 GB card:
+
+    23:36:28  17.6 GB resident               preloaded, whole
+    23:41:42  a generation, one LoRA tag     nothing applied yet, so Forge merges
+    23:41:55  5.7 GB resident, 21.6 GB free  the weights made the round trip
+    23:41:55  the host took 11.9 GB back     read as headroom, capped to 6.0 GB
+
+From there the pass requirement was 17.6 + 6.0 = 23.6 GB on a card whose
+obtainable figure was 22.6. Every generation for the rest of that session filed
+*reserve miss -- Stage 1 exceeded the protected image budget by 1.0 GB*, drove
+the language model's allowance to *0.0 GB for the LLM (auto)*, asked
+``free_memory`` for room that did not exist, and left the preload 1.8 GB short
+of fully warm while the card had 6.7 GB free. Note the 21.6 GB free on the third
+line: the host was not short of anything.
+
+A quarter is deliberately generous. The readings this exists to keep are a few
+per cent of the model -- 0.8 GB of 18.4 -- and the ones it exists to refuse are
+most of it. Card size does not enter into it, because the question is about the
+model."""
 
 
 def reclaimed_headroom_bytes() -> int:
@@ -593,6 +627,14 @@ def _observe_reclaim(target_name: str, resident: int) -> None:
     if _preload_resident <= 0 or resident <= 0 or resident >= _preload_resident:
         return
     taken = _preload_resident - resident
+    if taken > _preload_resident * RECLAIM_TRIM_FRACTION:
+        logger.info(
+            "Model Chain: %.1f GB of Stage 1's weights have left the card since the "
+            "preload, which is too much of the model to be room the host needed — a "
+            "swap, an unload or a LoRA merge moves them the same way. Not folded into "
+            "the reserve",
+            taken / _GB)
+        return
     if taken <= _reclaimed_bytes:
         return
     _reclaimed_bytes = taken
@@ -612,9 +654,17 @@ _preload_target = ""
 
 def vram_required_bytes(name: str, modules=None, width: int = 0, height: int = 0,
                         batch: int = 1) -> int:
-    """VRAM a pass on ``name`` needs: the model, resident, plus its activations."""
-    model = file_size_bytes(name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION)
-    return int(model + vram_headroom_bytes(width, height, batch))
+    """VRAM a pass on ``name`` needs: the model, resident, plus its activations.
+
+    The estimated-weights twin of :func:`pass_bytes_from_weights`, and it trims
+    its reserve the same way and for the same reason -- a requirement the card
+    could never have satisfied is not a demanding target but an impossible one.
+    Sharing the trim is the point: a plan must not describe a phase as fitting
+    or not fitting according to whether the checkpoint behind it happens to
+    have been loaded once already.
+    """
+    model = int(file_size_bytes(name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
+    return model + _attainable_headroom(model, width, height, batch)
 
 RAM_RESERVE_BYTES = 2 * _GB
 """System RAM never handed to the cache, so the host process cannot be OOM-killed."""
@@ -2896,6 +2946,15 @@ def _load_current_to_gpu(width: int = 0, height: int = 0) -> int:
     the card would be undone moments later by the host partially unloading to
     make room for its own activations, which is the thrash this module exists
     to avoid.
+
+    It is the *attainable* reserve, for the reason :func:`_attainable_headroom`
+    gives and with a symptom of its own. ``load_models_gpu`` honours
+    ``memory_required`` by loading less of the model, so a reserve larger than
+    the card can spare beside these weights does not produce a warning -- it
+    produces a preload that stops short, every time, and a generation that
+    moves the remainder on demand. From a user's log: *warmed 15.9 GB of
+    17.6 GB ... Stage 1 stopped 1.8 GB short of fully warm*, on a card with
+    6.7 GB free, on every warm-up for the rest of the session.
     """
     from backend import memory_management
     from modules.sd_models import model_data
@@ -2906,10 +2965,29 @@ def _load_current_to_gpu(width: int = 0, height: int = 0) -> int:
 
     before = free_vram_bytes()
     try:
-        memory_management.load_models_gpu(patchers, memory_required=vram_headroom_bytes(width, height))
+        memory_management.load_models_gpu(
+            patchers,
+            memory_required=_attainable_headroom(_patcher_bytes(patchers), width, height),
+        )
     except TypeError:
         memory_management.load_models_gpu(patchers)
     return max(before - free_vram_bytes(), 0)
+
+
+def _patcher_bytes(patchers: list) -> int:
+    """What these patchers weigh, wherever they currently are. Zero if unknowable.
+
+    Zero is the safe answer rather than a guess: it leaves the reserve trimmed
+    against the whole card, which is what this module did before the trim knew
+    about the model at all.
+    """
+    size = 0
+    for patcher in patchers:
+        try:
+            size += int(patcher.model_size())
+        except Exception:
+            return 0
+    return max(size, 0)
 
 
 STAGE_1 = "Stage 1"
@@ -3078,13 +3156,7 @@ def _weights_bytes(target_name: str, modules, patchers: list) -> int:
     are a VRAM cost; the *host* RAM the image side needs is the weights alone,
     because that is what Forge parks on the offload device and reads back.
     """
-    size = 0
-    for patcher in patchers:
-        try:
-            size += int(patcher.model_size())
-        except Exception:
-            size = 0
-            break
+    size = _patcher_bytes(patchers)
 
     if size > 0:
         # The one moment a real figure for this checkpoint exists. Both stages
@@ -3137,12 +3209,7 @@ def measured_weight_bytes(name: str, modules=None) -> int:
     patchers = _loaded_target_patchers(name)
     if not patchers:
         return 0
-    size = 0
-    for patcher in patchers:
-        try:
-            size += int(patcher.model_size())
-        except Exception:
-            return 0
+    size = _patcher_bytes(patchers)
     if size > 0:
         _remember_measured_weights(name, modules, size)
     return size

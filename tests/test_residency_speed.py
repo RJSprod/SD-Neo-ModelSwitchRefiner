@@ -854,6 +854,42 @@ class TestTheHostTakingWeightsBackIsAMeasurement:
             pytest.skip("no card to size the cap against")
         assert mc_memory.reclaimed_headroom_bytes() <= total * mc_memory.MAX_RESERVE_FRACTION
 
+    def test_a_wholesale_departure_is_not_a_trim(self):
+        """Regression, from a user's log. A generation whose prompt asked for a
+        LoRA the loaded weights did not carry sent them through system RAM to be
+        merged, and the residency afterwards was 5.7 GB of 17.6. Read as
+        headroom, that taught a 6.0 GB reserve -- capped, but still enough that
+        every pass after it wanted 23.6 GB of a card that could give 22.6."""
+        mc_memory._preload_resident = int(17.6 * GB)
+
+        mc_memory._observe_reclaim("A", int(5.7 * GB))
+
+        assert mc_memory.reclaimed_headroom_bytes() == 0, (
+            "most of the model leaving the card is a swap, an unload or a merge, "
+            "and none of them says anything about how much has to stay free")
+
+    def test_the_pass_requirement_is_left_exactly_where_it_was(self):
+        """The consequence the reading had, in the units it had it in. The
+        requirement it built was 17.6 + 6.0 = 23.6 GB, against a card that could
+        give 22.6 -- so every pass afterwards filed a reserve miss, drove the
+        language model's allowance to zero and left the preload short of warm."""
+        weights = int(17.6 * GB)
+        before = mc_memory.pass_bytes_from_weights(weights, 1024, 1024)
+
+        mc_memory._preload_resident = weights
+        mc_memory._observe_reclaim("A", int(5.7 * GB))
+
+        assert mc_memory.pass_bytes_from_weights(weights, 1024, 1024) == before
+
+    def test_a_trim_just_inside_the_fraction_is_still_learned(self):
+        """The guard refuses departures, not the large end of ordinary trims."""
+        mc_memory._preload_resident = 20 * GB
+        taken = int(20 * GB * mc_memory.RECLAIM_TRIM_FRACTION) - 1
+
+        mc_memory._observe_reclaim("A", 20 * GB - taken)
+
+        assert mc_memory.reclaimed_headroom_bytes() == taken
+
     def test_a_second_stage_is_not_measured_against_the_first_s_preload(self):
         """The coincidence this must not read as a measurement.
 
@@ -1336,6 +1372,41 @@ class TestLoadCurrentToGpu:
         host.sd_models.model_data.sd_model = types.SimpleNamespace(name="bare")
         assert mc_memory._load_current_to_gpu() == 0
         assert memory.mm.loaded_to_gpu == []
+
+    def test_the_reserve_handed_to_the_host_is_one_the_card_can_honour(
+            self, memory, monkeypatch):
+        """``load_models_gpu`` honours ``memory_required`` by loading *less*, so
+        a reserve larger than the card can spare beside these weights does not
+        warn -- it produces a preload that stops short, every time. From a
+        user's log: *warmed 15.9 GB of 17.6 GB ... stopped 1.8 GB short of fully
+        warm*, on a card with 6.7 GB free, for the rest of the session."""
+        asked = []
+        monkeypatch.setattr(
+            memory.mm, "load_models_gpu",
+            lambda models, **kw: asked.append(kw.get("memory_required")))
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes",
+                            lambda w=0, h=0, batch=1: 20 * GB)
+
+        mc_memory._load_current_to_gpu(1024, 1024)
+
+        weights = 13 * GB  # the fixture's unet + clip + vae
+        assert asked == [mc_memory.total_vram_bytes() - weights]
+
+    def test_a_patcher_that_cannot_be_weighed_reserves_as_it_always_did(
+            self, memory, monkeypatch):
+        """Zero is the safe answer: the reserve is trimmed against the whole
+        card, which is what this did before the trim knew about the model."""
+        asked = []
+        monkeypatch.setattr(
+            memory.mm, "load_models_gpu",
+            lambda models, **kw: asked.append(kw.get("memory_required")))
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes",
+                            lambda w=0, h=0, batch=1: 20 * GB)
+        monkeypatch.setattr(mc_memory, "_patcher_bytes", lambda patchers: 0)
+
+        mc_memory._load_current_to_gpu(1024, 1024)
+
+        assert asked == [20 * GB]
 
 
 # --------------------------------------------------------------------------- #
