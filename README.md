@@ -1278,7 +1278,7 @@ not say", which is stable and therefore still safe to cache under.
 
 Every eviction decision is a subtraction from free VRAM, and the thing being
 subtracted is the reserve: what has to stay free for the pass to run without the
-driver quietly spilling into system memory. Four figures answer that question,
+driver quietly spilling into system memory. Five figures answer that question,
 and **the largest of them wins**:
 
 | Floor | Where it comes from |
@@ -1287,6 +1287,7 @@ and **the largest of them wins**:
 | Observed peak | the largest activation peak measured this session, plus 15% |
 | Manual reserve | your **Minimum VRAM reserve (GB)** setting, if you set one |
 | Host reservation | whatever Forge itself reports set aside for inference |
+| Host reclaim | what the host trimmed off a finished preload during the pass that followed |
 
 Taking the maximum rather than a sum is the point: each is an answer to the same
 question, so the strongest answer is the useful one and none of them may be
@@ -1313,6 +1314,34 @@ dividing it by a small pass's megapixels let a 512×512 observation authorise
 log reached 7.4 GB/megapixel and reserved 10.4 GB for a 1280×960 pass: more
 than the 13.9 GB model it was protecting.
 
+**The host reclaim floor is a trim, never a departure.** It exists because the
+other four are estimated in PyTorch's units while the host frees against
+driver-reported VRAM, so the host can insist on more free than any of them
+allowed and claw a little back after every generation — a round trip the preload
+then pays for before the next one. Comparing what a finished preload left
+resident with what is resident when the next pass starts measures that directly.
+
+But weights leave the card for other reasons, and those readings mean something
+else entirely. A checkpoint swap, an unload, or the round trip Forge makes
+through system RAM when it merges a LoRA into weights that did not carry one all
+move most of the model, and none of them is a statement about headroom. So a
+reading larger than **a quarter of what the preload left resident** is refused
+rather than folded in, and the console says so:
+
+```
+Model Chain: 11.9 GB of Stage 1's weights have left the card since the preload,
+             which is too much of the model to be room the host needed — a swap,
+             an unload or a LoRA merge moves them the same way. Not folded into
+             the reserve
+```
+
+The readings this keeps are a few per cent of the model — 0.8 GB of 18.4 is a
+typical one. Before the guard, one LoRA merge on a 17.6 GB checkpoint taught a
+6 GB reserve, and every generation for the rest of that session wanted 23.6 GB
+of a card that could give 22.6: a `reserve miss` warning each time, a language
+model allowance driven to `0.0 GB`, and a preload that stopped 1.8 GB short of
+warm while the card had 6.7 GB free.
+
 **And the requirement never exceeds the card.** A target larger than physical
 VRAM is not demanding, it is impossible, and it fails in the worst available
 way: `free_memory` evicts everything it is allowed to, still reports a
@@ -1320,6 +1349,13 @@ shortfall, and the pass runs having thrown away models it could have kept. When
 model plus reserve would not fit, the *reserve* is what gives — the model has to
 be resident to sample at all, whereas a margin that cannot be honoured is better
 spent than pretended.
+
+That trim applies wherever the requirement is built — from measured weights or
+from a file size — and to the reserve the preload hands Forge as well.
+`load_models_gpu` honours a `memory_required` it cannot satisfy by loading
+*less* of the model, so an untrimmed reserve there does not warn about anything;
+it just leaves the warm-up permanently short and the remainder to be moved on
+demand by the generation that follows.
 
 #### Spending what is left
 
