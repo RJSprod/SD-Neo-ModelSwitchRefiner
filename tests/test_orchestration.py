@@ -502,6 +502,50 @@ class TestStageOneSize:
 
         assert seen == [(unet, (1, 16, 120, 80))]
 
+    def test_a_change_of_merge_is_evicted_before_the_demand_is_read(self, chain, host,
+                                                                    image_factory, monkeypatch):
+        """The eviction changes what the sampler will ask for, so it goes first,
+        and both are handed the patcher the host has just installed."""
+        import types
+
+        import mc_memory
+
+        seen = []
+        monkeypatch.setattr(mc_memory, "evict_for_rebake",
+                            lambda unet: seen.append(("evict", unet)))
+        monkeypatch.setattr(mc_memory, "note_sampler_demand",
+                            lambda unet, shape: seen.append(("demand", unet)))
+        p = make_p(host, width=640, height=960)
+        unet = object()
+        p.sd_model = types.SimpleNamespace(
+            forge_objects=types.SimpleNamespace(unet=unet))
+        chain.script._armed = False
+        chain.script._in_stage_2 = False
+
+        chain.script.process_before_every_sampling(
+            p, *[DEFAULTS[name] for name in UI_ORDER],
+            noise=types.SimpleNamespace(shape=(1, 16, 120, 80)))
+
+        assert seen == [("evict", unet), ("demand", unet)]
+
+    def test_stage_2_never_evicts_for_a_merge(self, chain, host, image_factory, monkeypatch):
+        import types
+
+        import mc_memory
+
+        seen = []
+        monkeypatch.setattr(mc_memory, "evict_for_rebake", lambda unet: seen.append(unet))
+        p = make_p(host, width=640, height=960)
+        p.sd_model = types.SimpleNamespace(
+            forge_objects=types.SimpleNamespace(unet=object()))
+        chain.script._in_stage_2 = True
+
+        chain.script.process_before_every_sampling(
+            p, *[DEFAULTS[name] for name in UI_ORDER],
+            noise=types.SimpleNamespace(shape=(1, 16, 120, 80)))
+
+        assert seen == []
+
     def test_stage_2_never_reports_its_own_latent(self, chain, host, image_factory):
         """Stage 2 runs with scripts unset; the hook describes Stage 1 only."""
         import types

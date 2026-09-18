@@ -738,6 +738,8 @@ class SamplerDemand:
     host would unload them: smallest first among fully loaded models."""
     latent: str
     stale_tag: bool
+    spilled: int = 0
+    """PyTorch allocations already outside dedicated VRAM going into this pass."""
 
     @property
     def request(self) -> int:
@@ -858,6 +860,7 @@ def sampler_demand(unet, noise_shape) -> SamplerDemand | None:
             others=tuple(others),
             latent="x".join(str(dim) for dim in shape),
             stale_tag=(not on_card) and size > 0 and resident >= size,
+            spilled=spilled_vram_bytes(),
         )
     except Exception:
         logger.debug("Model Chain: could not read what the sampler will ask for", exc_info=True)
@@ -867,7 +870,9 @@ def sampler_demand(unet, noise_shape) -> SamplerDemand | None:
 def describe_sampler_demand(demand: SamplerDemand) -> str:
     """One sentence with the request, what is free, what leaves, and who asked."""
     gone = demand.leaving()
-    if gone:
+    if demand.shortfall <= 0:
+        leaving = "and that fits"
+    elif gone:
         names = " and ".join(f"the {held / _GB:.1f} GB {name}" for name, held in gone)
         leaving = f"so it will evict {demand.evicts / _GB:.1f} GB before the first step, taken from {names}"
         if demand.evictable < demand.shortfall:
@@ -896,7 +901,7 @@ def describe_sampler_demand(demand: SamplerDemand) -> str:
 
     return (f"the host's sampler is about to ask for {demand.request / _GB:.1f} GB of free VRAM "
             f"beside Stage 1's weights and the card has {demand.free / _GB:.1f} GB, {leaving}. "
-            f"The request is made of {', '.join(made_of)}")
+            f"The request is made of {', '.join(made_of)}{describe_spill(demand.spilled)}")
 
 
 def note_sampler_demand(unet, noise_shape) -> SamplerDemand | None:
@@ -913,7 +918,7 @@ def note_sampler_demand(unet, noise_shape) -> SamplerDemand | None:
     _last_sampler_demand = demand
     if demand is None:
         return None
-    if demand.shortfall > 0:
+    if demand.shortfall > 0 or demand.spilled > 0:
         logger.info("Model Chain: %s", describe_sampler_demand(demand))
     else:
         logger.debug("Model Chain: the host's sampler will ask for %.1f GB free beside Stage 1's "
@@ -951,6 +956,162 @@ def _log_evicted_during_sampling(result: PreloadResult) -> None:
         "pays this move twice: once out, once back",
         result.moved_bytes / _GB, demand.request / _GB, demand.free / _GB,
     )
+
+
+# --------------------------------------------------------------------------- #
+# A change of merge is an eviction
+# --------------------------------------------------------------------------- #
+#
+# With on-the-fly LoRA off, the host merges a LoRA *into* the weights and stamps
+# the model with which merge it carries. A prompt that changes the merge -- a
+# LoRA added, removed, reweighted or swapped -- reaches the sampler as a clone
+# of the patcher with a new ``patches_uuid``, and ``partially_load`` answers
+# the mismatch by moving the whole model to system RAM and loading all of it
+# back with the new merge applied. It does that inside the sampler's own load,
+# with the card's allocator cache holding the old copy's blocks the whole way
+# through, and it says nothing but ``Moving model(s) has taken N seconds``.
+#
+# On a card the plan has filled that is not a slow path but a catastrophic one.
+# From two users' logs, the first merge into resident weights took 102 and 107
+# seconds against 11 for a re-merge and about 20 for the same load made into a
+# cleared card, and both left so little of the card free that the pass behind
+# them spilled into system memory. The README's LoRA section has the logs.
+#
+# So a change of merge is treated as what the user calls it: a change of model.
+# The weights leave the card *here*, before the sampler asks for them, through
+# the host's own ``free_memory`` -- the same move ``partially_load`` was about
+# to make, made a few milliseconds earlier and followed by the host's cache
+# flush, so the merge loads into free VRAM rather than on top of the old copy.
+# Nothing else on the card is touched, and the language model is not involved:
+# this is the image family rearranging its own weights.
+
+
+@dataclass(frozen=True)
+class Rebake:
+    """A merge the host is about to redo, read from the fields it decides by."""
+
+    name: str
+    """The class the host logs -- ``Requested to load KModel``."""
+    resident: int
+    """Bytes of it on the card now."""
+
+
+def pending_rebake(unet) -> Rebake | None:
+    """The host's own test, asked before the sampler asks it.
+
+    ``partially_load`` unpatches to the offload device exactly when the model's
+    ``current_weight_patches_uuid`` is set and differs from the patcher's
+    ``patches_uuid``. Those two fields and nothing else decide it, so those two
+    fields and nothing else are read here. None when nothing will be redone,
+    when nothing is on the card to redo it over, or when the host cannot be
+    read -- a host this cannot read is a host this leaves exactly alone.
+    """
+    try:
+        inner = unet.model
+        stamped = getattr(inner, "current_weight_patches_uuid", None)
+        wanted = getattr(unet, "patches_uuid", None)
+        if stamped is None or wanted is None or stamped == wanted:
+            return None
+        resident = max(int(getattr(inner, "model_loaded_weight_memory", 0) or 0), 0)
+        if resident <= 0:
+            return None
+        return Rebake(name=_model_name(unet), resident=resident)
+    except Exception:
+        return None
+
+
+def evict_for_rebake(unet) -> int:
+    """Take a model the host is about to re-merge off the card first. Bytes freed.
+
+    Only that model leaves. Every other entry on the card -- the text encoder,
+    the VAE, whatever else the host holds -- is named in ``keep_loaded``, and
+    no language model is asked for anything: the eviction is the image family
+    moving its own weights, which is the one reclaim that never crosses into
+    the LLM's rules. A host whose ``free_memory`` cannot be told what to keep
+    is left to make the move itself, as it always has.
+
+    The move is the whole of the model, never part of it. ``free_memory``
+    unloads a candidate *partially* when the shortfall is smaller than what the
+    candidate holds, and a model left half on the card is the one state worse
+    than either whole one -- so the figure asked for is beyond what any card
+    holds, which reads as "all of this one" once everything else is kept.
+    """
+    rebake = pending_rebake(unet)
+    if rebake is None:
+        return 0
+    try:
+        from backend import memory_management
+
+        registry = list(getattr(memory_management, "current_loaded_models", []))
+        inner = getattr(unet, "model", None)
+        own = [entry for entry in registry
+               if getattr(getattr(entry, "model", None), "model", None) is inner]
+        if not own:
+            return 0
+        keep = [entry for entry in registry if not any(entry is mine for mine in own)]
+        device = memory_management.get_torch_device()
+        before = free_vram_bytes()
+        spilled = spilled_vram_bytes()
+        started = time.perf_counter()
+        try:
+            memory_management.free_memory(float("inf"), device, keep_loaded=keep)
+        except TypeError:
+            logger.debug("Model Chain: free_memory does not take keep_loaded; the host "
+                         "will move Stage 1 for its re-merge itself")
+            return 0
+        seconds = time.perf_counter() - started
+        after = free_vram_bytes()
+    except Exception:
+        logger.warning("Model Chain: could not take Stage 1 off the card ahead of its "
+                       "re-merge; the host will do it inside the sampler", exc_info=True)
+        return 0
+    logger.info(
+        "Model Chain: Stage 1's %s left the card before this pass (%.1f GB in %.1fs, "
+        "%.1f GB -> %.1f GB free): the prompt changed what is merged into its weights, "
+        "and the host re-merges a LoRA by moving every weight to system RAM and back. "
+        "Moved out here first, the merge loads into free VRAM instead of over the old "
+        "copy. A change of LoRA is a change of model, and costs one load%s",
+        rebake.name,
+        rebake.resident / _GB,
+        seconds,
+        before / _GB,
+        after / _GB,
+        describe_spill(spilled),
+    )
+    return max(after - before, 0)
+
+
+def spilled_vram_bytes() -> int:
+    """PyTorch allocations the driver has placed outside the card's own memory, or 0.
+
+    A lower bound, and a certain one. ``memory_reserved`` is what this process
+    has taken from the driver; ``mem_get_info`` says what the card has given
+    out to everyone; and the first cannot exceed the second while every byte
+    is in dedicated VRAM. On Windows the driver does not refuse an allocation
+    the card cannot hold -- it puts it in shared system memory, and every
+    kernel that touches it runs at the speed of the bus. That is the "VRAM is
+    full and everything crawls" state a user reports from the task manager,
+    and this is its measurement from inside the process.
+    """
+    try:
+        import torch
+        from backend import memory_management
+
+        device = memory_management.get_torch_device()
+        free, total = torch.cuda.mem_get_info(device)
+        reserved = int(torch.cuda.memory_reserved(device))
+        return max(reserved - (int(total) - int(free)), 0)
+    except Exception:
+        return 0
+
+
+def describe_spill(spilled: int) -> str:
+    """The over-commit clause for a console line, or "" when there is none."""
+    if spilled <= 0:
+        return ""
+    return (f". The card was already over-committed: at least {spilled / _GB:.1f} GB of "
+            "PyTorch's allocations sat outside its own memory, in shared system memory, "
+            "where every step that touches them runs at bus speed")
 
 
 # --------------------------------------------------------------------------- #
