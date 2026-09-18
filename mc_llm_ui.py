@@ -5,6 +5,12 @@ built by separate modules; what they genuinely have in common is the handful of
 conversions below, plus one rule about element identifiers that section 5 turns
 into a compatibility requirement.
 
+:func:`seed_box` is the one thing here that builds a control rather than
+converting a value, and it is shared for a reason the panels cannot each solve
+for themselves: the host restores seed boxes over what the panel asked for, and
+in this tab it restores all of them from one entry. Its docstring has the
+mechanism.
+
 Element identifiers and theming
 -------------------------------
 Section 5 asks for stable, extension-owned ids and classes, extension-scoped
@@ -45,6 +51,47 @@ def ident(*parts: str) -> str:
 def classes(*names: str) -> list[str]:
     """Extension-owned class names, for CSS that a theme cannot accidentally match."""
     return [f"{PREFIX}-{name}" for name in names]
+
+
+def seed_box(*, info: str, value=None, label: str = "Seed", **kwargs):
+    """A seed control that opens on the value the panel asked for.
+
+    That second clause is the whole reason this exists rather than five loose
+    ``gr.Number`` calls, and it is not a Gradio matter. Forge keeps a
+    ``ui-config.json`` of every labelled component a script builds and writes
+    the stored value back over the one the script asked for. That is right for
+    a slider somebody has tuned and wrong for a seed, whose default *is* "draw
+    a fresh one" -- a restored seed is a generator that repeats itself until
+    the user notices the box and changes it.
+
+    It went wrong here in a way worth naming, because the key is
+    ``<path>/<label>/value`` and ``modules/ui_loadsave.py`` grows that path at
+    Tabs and not at Columns or Rows. LLM Studio builds its four panels as
+    sibling columns inside one tab, so every control labelled "Seed" in it
+    collapses onto *one* entry: a single number, written once by an older
+    build, pinned Prompt Studio, Conversation, MiniMax H3 and Krea together.
+    Each panel's own resolver was correct and simply never reached -- the box
+    handed it a real number, so the sentinel that means "draw one" never
+    arrived, and the box sat there contradicting its own hint.
+
+    ``do_not_save_to_config`` is the host's own opt-out, and it suppresses the
+    *restore* rather than only the save: ``apply_field`` returns on the flag
+    before it reads the stored value at all, so an entry already in the file
+    goes inert the moment the control carries this. Nothing has to be found,
+    edited or deleted -- which matters, because txt2img has its own controls
+    labelled "Seed", the key format is the host's private detail, and the host
+    rewrites that file itself.
+    """
+    import gradio as gr
+
+    from prompt_master.core.models import RANDOM_SEED
+
+    box = gr.Number(value=RANDOM_SEED if value is None else value, label=label,
+                    precision=0, info=info, **kwargs)
+    # An attribute rather than an argument: it is Forge's, not Gradio's, and a
+    # host that does not have it simply does not read it.
+    box.do_not_save_to_config = True
+    return box
 
 
 def choices(options) -> list[tuple[str, str]]:

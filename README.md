@@ -2561,6 +2561,38 @@ header, beside the character and the thread. **Model / Runtime**, **Setup** and
 **Switch mode** are also in its menu, which is where you leave Conversation from
 without going back to a row of pills above the transcript.
 
+### Seeds
+
+Every **Seed** box in this tab opens on **−1**, which draws a fresh seed for
+each request. That is the default in all four modes and it is not remembered
+between restarts: a seed you type wins for as long as the tab is open, and the
+box is back on −1 next time Forge starts. Type a recorded number back in to
+reproduce a prompt; **0** is a seed like any other and can be typed back in
+like any other.
+
+This is deliberate, and it is the one place where the extension opts out of a
+host convention. Forge keeps a `ui-config.json` of every labelled control an
+extension builds and restores the stored value over the one the panel asked
+for — right for a slider you have tuned, wrong for a seed, whose whole default
+is *draw a new one*. Worse here than elsewhere: the host's key is built from
+the tab, not the column, so all four panels' **Seed** boxes shared one entry
+and a single stored number pinned Prompt Studio, Conversation, MiniMax H3 and
+Krea together. Every seed control now carries the host's own
+`do_not_save_to_config`, which suppresses the restore, so a stale entry left in
+the file by an older build has no effect and does not need removing. The same
+applies to **Creative seed**, which pins more than itself — the writer's seed
+is derived from it.
+
+A character's own seed is different and is left alone: it is saved *with* the
+character because it is a number you chose for it, and a new character has −1
+already.
+
+Some passes stay on a fixed seed on purpose, and randomising them would change
+nothing: **Neutralize Prompt** runs greedy (there is no draw to seed, and a
+constant keeps two requests byte-identical so llama.cpp can reuse its cache),
+the caption passes run at temperature 0, and the warm-up and installer probes
+discard their single token.
+
 ### Managed backbones
 
 **Setup → Managed backbones** is a short list of models this extension was

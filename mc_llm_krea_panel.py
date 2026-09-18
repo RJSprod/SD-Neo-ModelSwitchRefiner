@@ -120,9 +120,9 @@ def build() -> dict:
                 load = gr.Button("Load", size="sm")
                 drop = gr.Button("Delete", size="sm", variant="stop")
             refresh = gr.Button("Refresh", size="sm")
-            seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
-                             info=f"{RANDOM_SEED} draws a fresh seed for every prompt.",
-                             elem_id=ui.ident("krea", "seed"))
+            seed = ui.seed_box(
+                info=f"{RANDOM_SEED} draws a fresh seed for every prompt.",
+                elem_id=ui.ident("krea", "seed"))
 
             creative = gr.Checkbox(
                 value=bool(stored["enabled"]), label="Creative Mode",
@@ -472,7 +472,11 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
             yield None, "", hidden, keep, ui.notice(unreadable, "error"), *idle
             return
 
-    resolved = int(seed or RANDOM_SEED)
+    # ``seed or RANDOM_SEED`` read a typed 0 as "nothing chosen" and drew over
+    # it. ``draw_seed`` can return 0 and the finished notice reports whatever it
+    # ran at, so that made the one seed a user could be shown the one seed they
+    # could not type back in. Only an absent value means "draw one".
+    resolved = RANDOM_SEED if seed is None else int(seed)
     if resolved == RANDOM_SEED:
         resolved = draw_seed()
     position = clamp(creativity)

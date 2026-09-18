@@ -56,13 +56,19 @@ def build() -> dict:
         return stored.get(key, defaults.get(key, fallback))
 
     # The seed is the one control that does *not* go through ``initial``, and
-    # the reason is what the engine's default is for. ``opt.DEFAULTS["seed"]``
-    # is 7 because upstream's node needs a fixed number for its own self-tests
-    # -- it is a value chosen to make two runs identical. A panel that opens on
-    # it hands every user a generator that repeats itself until they notice the
-    # box and change it, which is the opposite of what a seed control is for.
-    # So what is offered is RANDOM_SEED, and a seed somebody actually chose is
-    # still remembered in ``stored`` and still wins.
+    # it does not go through ``stored`` either. ``opt.DEFAULTS["seed"]`` is 7
+    # because upstream's node needs a fixed number for its own self-tests -- a
+    # value chosen to make two runs identical. A panel that opens on it hands
+    # every user a generator that repeats itself until they notice the box and
+    # change it, which is the opposite of what a seed control is for.
+    #
+    # Reading the stored preference back was the second half of the same bug
+    # rather than a courtesy. ``_remember`` writes the whole control set after
+    # every generation, so the number it found there was almost never one
+    # somebody chose -- it was whatever the last run happened to resolve to,
+    # re-offered as a default, which turned one generation into a pin. The box
+    # is offered at RANDOM_SEED unconditionally, and a seed somebody types
+    # still wins for the session they type it in.  See :func:`_remember`.
 
     controls: dict = {}
     cancellation = gr.State(None)
@@ -150,8 +156,7 @@ def build() -> dict:
                     label="Dimensions", choices=DIMENSIONS,
                     value=initial("dimensions",
                                   f"{defaults['output_width']}x{defaults['output_height']}"))
-                controls["seed"] = gr.Number(
-                    label="Seed", value=stored.get("seed", RANDOM_SEED), precision=0,
+                controls["seed"] = ui.seed_box(
                     info=f"{RANDOM_SEED} draws a new seed for every generation.")
 
             with gr.Accordion("Look", open=False):
@@ -380,7 +385,15 @@ def _remember(settings: dict, request, positive: str, negative: str) -> None:
             title=request.intent[:60], intent=request.intent, positive=positive,
             negative=negative, seed=int(request.seed), image_name=request.image_name,
             controls=dict(settings)))
-        mc_llm_state.remember(prompt_defaults=dict(settings))
+        # Every control except the seed. Persisting the seed made the next
+        # panel open on the last run's number, which is a pin nobody asked
+        # for; the box's own default is "draw a fresh one" and has to survive
+        # a generation. ``remember`` replaces this mapping wholesale, so a
+        # seed left in the file by an older build is dropped by the first
+        # generation after this rather than needing a migration.
+        mc_llm_state.remember(prompt_defaults={key: value
+                                               for key, value in settings.items()
+                                               if key != "seed"})
     except Exception:
         logger.debug("Model Chain: could not save the Prompt Studio session", exc_info=True)
 
