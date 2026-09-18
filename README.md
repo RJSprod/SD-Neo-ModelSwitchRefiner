@@ -1179,6 +1179,56 @@ llama-server and reported the image model cold.
 The circuit breaker below is not lifted by either: a machine where this does not
 work is a machine where it does not work however it was asked for.
 
+##### When the host's sampler undoes it
+
+A warm-up can leave the card exactly as the next generation wants it and still
+be undone before the first step. Forge's sampler asks `load_models_gpu` for the
+UNet with a memory requirement of its own — the pass's activations, plus
+whatever other extensions have reserved on the model through
+`add_extra_preserved_memory_during_sampling`, plus Forge's own reserve — and
+`load_models_gpu` frees against that figure with nothing protected. A request
+larger than what is free beside the resident weights evicts the text encoder,
+and the VAE with it, and the warm-up after the generation moves them straight
+back. From a user's log, one generation after another with nothing changed:
+
+```
+Stage 1 is warm — 18.3 GB already in VRAM (preloaded in 4.9s).
+Moving model(s) has taken 4.55 seconds                       ← the text encoder leaving
+100%|████████| 3/3
+Stage 1 needs 19.7 GB, has 10.0 GB free and 12.6 GB already resident — no eviction needed
+Requested to load JointTextEncoder
+Moving model(s) has taken 4.92 seconds                       ← and coming back
+```
+
+The host says nothing about why, so this extension does, on the line before the
+pass:
+
+```
+Model Chain: the host's sampler is about to ask for 10.4 GB of free VRAM beside
+             Stage 1's weights and the card has 4.4 GB, so it will evict 5.7 GB
+             before the first step, taken from the 0.1 GB Qwen2DVAE and the
+             5.6 GB JointTextEncoder — and that is everything else on the card,
+             so the pass still starts short. The request is made of 1.8 GB for
+             this pass's activations (a 1x16x128x128 latent), 8.6 GB reserved
+             during sampling on the model by another extension (Forge's
+             extra_preserved_memory_during_sampling; this extension makes no
+             such reservation)
+```
+
+Each figure names its owner. This extension makes no reservation of that kind,
+and `extra_preserved_memory_during_sampling` is cumulative and copied onto every
+clone of the patcher — the one the LoRA loader makes on each change of networks
+included — so a reservation another extension made once outlives the generation
+that made it. A fourth term appears when the host counts weights as still to
+load although they are resident: a clone of a patcher that was never itself
+loaded carries a stale device tag, and the host asks for room to load all of it.
+
+The warm-up still moves the text encoder back afterwards, on purpose: encoding
+the next prompt needs it on the card, and moving it in the idle gap is cheaper
+than moving it while somebody waits. What it cannot do is keep it there. That
+takes the request shrinking — in the extension that made the reservation, or in
+the host's own figure — and the line above is what says which.
+
 ##### What happens when it goes wrong
 
 Nothing downstream depends on it completing, and the failure behaviour is the

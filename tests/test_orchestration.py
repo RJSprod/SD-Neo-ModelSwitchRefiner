@@ -477,6 +477,31 @@ class TestStageOneSize:
         assert chain.script._stage1_latent == "1x16x1x60x40"
         assert chain.script._stage1_requested == (640, 960)
 
+    def test_the_samplers_demand_is_read_before_the_armed_check(self, chain, host, image_factory,
+                                                                monkeypatch):
+        """The reading is about Stage 1's own pass, chained or not, and it is
+        taken from the patcher the host has just installed and the noise it
+        hands over -- the two things the sampler's request is built from."""
+        import types
+
+        import mc_memory
+
+        seen = []
+        monkeypatch.setattr(mc_memory, "note_sampler_demand",
+                            lambda unet, shape: seen.append((unet, shape)))
+        p = make_p(host, width=640, height=960)
+        unet = object()
+        p.sd_model = types.SimpleNamespace(
+            forge_objects=types.SimpleNamespace(unet=unet))
+        chain.script._armed = False
+        chain.script._in_stage_2 = False
+
+        chain.script.process_before_every_sampling(
+            p, *[DEFAULTS[name] for name in UI_ORDER],
+            noise=types.SimpleNamespace(shape=(1, 16, 120, 80)))
+
+        assert seen == [(unet, (1, 16, 120, 80))]
+
     def test_stage_2_never_reports_its_own_latent(self, chain, host, image_factory):
         """Stage 2 runs with scripts unset; the hook describes Stage 1 only."""
         import types

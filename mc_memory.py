@@ -675,6 +675,285 @@ class ModelChainError(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
+# What the host's sampler is about to ask for
+# --------------------------------------------------------------------------- #
+#
+# The one eviction this module cannot prevent and could not, until now, explain.
+# ``sampling_prepare`` asks ``load_models_gpu`` for the UNet with a memory
+# requirement of its own, and ``load_models_gpu`` frees against
+#
+#     off_card * 1.1 + max(floor, activations + preserved + reserved)
+#
+# with nothing protected. A request larger than what is free beside the
+# resident weights evicts the text encoder, and the VAE with it, before the
+# first step -- and the warm-up after the generation moves them straight back.
+# Every generation then pays the same move twice, once out and once in, and
+# the console shows only ``Moving model(s) has taken 4.55 seconds`` with no
+# word on why. This is that word.
+#
+# Nothing here changes what the host does. It is a reading, taken from the
+# fields ``sampling_prepare`` reads at the moment it reads them, so the figure
+# reported is the figure the host acts on a few milliseconds later.
+
+
+@dataclass(frozen=True)
+class SamplerDemand:
+    """The VRAM the host's sampler will ask ``free_memory`` for, in its terms.
+
+    Four things make up the host's request and they are kept apart because
+    they have different owners:
+
+    ``activations``
+        ``unet.memory_required`` for this latent with the batch doubled -- the
+        host's estimate of what the pass itself allocates. The one term that is
+        about the image being made.
+    ``preserved``
+        ``extra_preserved_memory_during_sampling``, which any extension may add
+        to through ``add_extra_preserved_memory_during_sampling``. Cumulative,
+        and copied onto every clone of the patcher -- the clone the LoRA loader
+        makes on each change of networks included -- so a reservation made once
+        outlives the generation that made it. This extension makes none.
+        ControlNet's requirement and an on-the-fly LoRA's weights are folded in
+        here too, exactly as the host folds them.
+    ``reserved``
+        Forge's own settings: ``--reserve-vram`` and the VRAM slider.
+    ``off_card``
+        What the host counts as still to move: the bytes not loaded, or the
+        *whole* model when the patcher's device tag says it was never loaded.
+        A clone inherits that tag from a patcher that was never itself put on
+        the card, so :attr:`stale_tag` marks the case where the weights are
+        resident and the host will nonetheless ask for room to load them again.
+    """
+
+    activations: int
+    preserved: int
+    reserved: int
+    floor: int
+    off_card: int
+    resident: int
+    free: int
+    evictable: int
+    others: tuple
+    """``(name, bytes)`` for every other model on the card, in the order the
+    host would unload them: smallest first among fully loaded models."""
+    latent: str
+    stale_tag: bool
+
+    @property
+    def request(self) -> int:
+        """What ``free_memory`` is asked to have free, summed as the host sums it."""
+        return int(self.off_card * 1.1
+                   + max(self.floor, self.activations + self.preserved + self.reserved))
+
+    @property
+    def shortfall(self) -> int:
+        return max(self.request - self.free, 0)
+
+    @property
+    def evicts(self) -> int:
+        """Bytes of *other* models the host will take off the card first."""
+        return min(self.shortfall, self.evictable)
+
+    def leaving(self) -> list:
+        """The other models the host will unload, smallest first, until the
+        shortfall is covered -- or all of them, when it cannot be."""
+        gone, covered = [], 0
+        for name, held in self.others:
+            if covered >= self.shortfall:
+                break
+            gone.append((name, held))
+            covered += held
+        return gone
+
+
+_last_sampler_demand: SamplerDemand | None = None
+"""The reading taken before the most recent pass, for the warm-up that follows it."""
+
+
+def _host_figure(memory_management, name: str) -> int:
+    source = getattr(memory_management, name, None)
+    try:
+        return max(int(source() if callable(source) else (source or 0)), 0)
+    except Exception:
+        return 0
+
+
+def _model_name(patcher) -> str:
+    """The class name the host itself logs -- ``Requested to load KModel``."""
+    return type(getattr(patcher, "model", patcher)).__name__
+
+
+def _other_loaded_models(unet) -> list:
+    """The other models on the card, in the order the host would unload them.
+
+    ``free_memory`` sorts by most-offloaded first, then by the patcher's
+    reference count, then by size ascending -- so among fully loaded models the
+    smallest goes first, which is why a 0.1 GB VAE always leaves before a
+    5.6 GB text encoder. Reference counts are not reproduced; size is what
+    decides it among fully loaded models. A clone of the UNet's own weights is
+    left out: the host pops its entry rather than moving anything.
+    """
+    try:
+        from backend import memory_management
+
+        registry = list(getattr(memory_management, "current_loaded_models", []))
+    except Exception:
+        return []
+
+    inner = getattr(unet, "model", None)
+    found = []
+    for entry in registry:
+        patcher = getattr(entry, "model", None)
+        if patcher is None or patcher is unet:
+            continue
+        if inner is not None and getattr(patcher, "model", None) is inner:
+            continue
+        held = _entry_vram_bytes(entry)
+        if held > 0:
+            found.append((_model_name(patcher), held))
+    found.sort(key=lambda item: item[1])
+    return found
+
+
+def sampler_demand(unet, noise_shape) -> SamplerDemand | None:
+    """Read what the host's sampler is about to ask for. None when it cannot be read.
+
+    Best-effort on purpose: this runs before every pass, on the generation
+    thread, and a host whose patcher lacks any of these fields is a host this
+    leaves exactly alone. A field the host does not have is not guessed at.
+    """
+    try:
+        from backend import memory_management
+
+        shape = [int(dim) for dim in noise_shape]
+        if unet is None or len(shape) < 2:
+            return None
+        activations = max(int(unet.memory_required([2 * shape[0]] + shape[1:])), 0)
+
+        preserved = max(int(getattr(unet, "extra_preserved_memory_during_sampling", 0) or 0), 0)
+        linked = getattr(unet, "controlnet_linked_list", None)
+        if linked is not None:
+            preserved += max(int(linked.inference_memory_requirements(unet.model_dtype())), 0)
+        online = getattr(unet, "has_online_lora", None)
+        if callable(online) and online():
+            from backend import utils
+
+            preserved += max(int(utils.nested_compute_size(
+                unet.weight_wrapper_patches,
+                element_size=utils.dtype_to_element_size(unet.model.computation_dtype))), 0)
+
+        size = max(int(unet.model_size()), 0)
+        resident = min(max(int(unet.loaded_size()), 0), size)
+        on_card = unet.current_device == unet.load_device
+        others = _other_loaded_models(unet)
+        return SamplerDemand(
+            activations=activations,
+            preserved=preserved,
+            reserved=_host_figure(memory_management, "extra_reserved_memory"),
+            floor=_host_figure(memory_management, "minimum_inference_memory"),
+            off_card=max(size - resident, 0) if on_card else size,
+            resident=resident,
+            free=free_vram_bytes(),
+            evictable=sum(held for _name, held in others),
+            others=tuple(others),
+            latent="x".join(str(dim) for dim in shape),
+            stale_tag=(not on_card) and size > 0 and resident >= size,
+        )
+    except Exception:
+        logger.debug("Model Chain: could not read what the sampler will ask for", exc_info=True)
+        return None
+
+
+def describe_sampler_demand(demand: SamplerDemand) -> str:
+    """One sentence with the request, what is free, what leaves, and who asked."""
+    gone = demand.leaving()
+    if gone:
+        names = " and ".join(f"the {held / _GB:.1f} GB {name}" for name, held in gone)
+        leaving = f"so it will evict {demand.evicts / _GB:.1f} GB before the first step, taken from {names}"
+        if demand.evictable < demand.shortfall:
+            leaving += " — and that is everything else on the card, so the pass still starts short"
+    else:
+        leaving = "and there is nothing else on the card to evict, so the pass starts short"
+
+    made_of = [f"{demand.activations / _GB:.1f} GB for this pass's activations (a {demand.latent} latent)"]
+    if demand.preserved > 0:
+        made_of.append(
+            f"{demand.preserved / _GB:.1f} GB reserved during sampling on the model by another "
+            "extension (Forge's extra_preserved_memory_during_sampling; this extension makes no "
+            "such reservation)")
+    if demand.reserved > 0:
+        made_of.append(f"{demand.reserved / _GB:.1f} GB reserved in Forge's own settings")
+    if demand.off_card > 0:
+        if demand.stale_tag:
+            made_of.append(
+                f"{demand.off_card / _GB:.1f} GB of Stage 1's weights the host counts as still to "
+                "load although they are resident — this copy of the model's patcher was never "
+                "loaded itself and carries a stale device tag")
+        else:
+            made_of.append(f"{demand.off_card / _GB:.1f} GB of Stage 1's weights still to move")
+    if demand.request <= demand.floor + int(demand.off_card * 1.1):
+        made_of.append(f"Forge's minimum of {demand.floor / _GB:.1f} GB, which is what counts here")
+
+    return (f"the host's sampler is about to ask for {demand.request / _GB:.1f} GB of free VRAM "
+            f"beside Stage 1's weights and the card has {demand.free / _GB:.1f} GB, {leaving}. "
+            f"The request is made of {', '.join(made_of)}")
+
+
+def note_sampler_demand(unet, noise_shape) -> SamplerDemand | None:
+    """Take the reading for the pass about to run, and say it when it will cost something.
+
+    Said before the pass rather than after, because the host's own line --
+    ``Moving model(s) has taken 4.55 seconds`` -- comes with no explanation and
+    this is the explanation. Silent when nothing leaves the card, which is every
+    generation that is going well.
+    """
+    global _last_sampler_demand
+
+    demand = sampler_demand(unet, noise_shape)
+    _last_sampler_demand = demand
+    if demand is None:
+        return None
+    if demand.shortfall > 0:
+        logger.info("Model Chain: %s", describe_sampler_demand(demand))
+    else:
+        logger.debug("Model Chain: the host's sampler will ask for %.1f GB free beside Stage 1's "
+                     "weights and the card has %.1f GB — nothing leaves",
+                     demand.request / _GB, demand.free / _GB)
+    return demand
+
+
+def _log_evicted_during_sampling(result: PreloadResult) -> None:
+    """Tie the warm-up's move to the eviction that made it necessary.
+
+    Only when this warm-up moved something *and* the reading before the last
+    pass predicted an eviction, and only a move no larger than that eviction:
+    a warm-up after a pass that fit has nothing to tie together, a first
+    warm-up of a session has no pass before it, and a warm-up that moved a
+    whole checkpoint back is a checkpoint change, not the sampler's doing.
+    The tenth of slack is for the two figures being taken by different hands.
+
+    The reading is spent by the warm-up that uses it, so it is said once per
+    pass: a later warm-up undoing something else -- the LLM's turn on the
+    card, say -- is not blamed on the sampler.
+    """
+    global _last_sampler_demand
+
+    demand = _last_sampler_demand
+    if result.moved_bytes <= 0 or demand is None or demand.shortfall <= 0:
+        return
+    if result.moved_bytes > demand.evicts * 1.1:
+        return
+    _last_sampler_demand = None
+    logger.info(
+        "Model Chain: the %.1f GB just moved back left the card during the last sampling, when "
+        "the host's sampler asked for %.1f GB free beside the weights and had %.1f GB — the line "
+        "before that pass says what the request was made of. Until it shrinks, every generation "
+        "pays this move twice: once out, once back",
+        result.moved_bytes / _GB, demand.request / _GB, demand.free / _GB,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Cache
 # --------------------------------------------------------------------------- #
 
@@ -2912,6 +3191,7 @@ def _log_preload_result(result: PreloadResult | None) -> None:
         if result.host_ram:
             logger.info("Model Chain: system RAM as Stage 1 finished warming — %s",
                         result.host_ram)
+        _log_evicted_during_sampling(result)
         return
 
     logger.info(
@@ -2923,6 +3203,7 @@ def _log_preload_result(result: PreloadResult | None) -> None:
         result.seconds,
         _moved_at(result),
     )
+    _log_evicted_during_sampling(result)
     # Said on this branch above all others. A preload that stopped short is the
     # symptom whose cause is never in the log next to it: the card had room --
     # it says so two lines up -- so what it ran out of was somewhere else, and
