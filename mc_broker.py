@@ -1093,15 +1093,22 @@ def await_idle(timeout: float = 120.0, *, domain: ExecutionDomain | None = None)
     """
     deadline = time.monotonic() + max(float(timeout), 0.0)
     first = True
+    waited_for = None
     while True:
         running = conflicting_llm(domain)
         if running is None:
             if not first:
+                # The processor the *LLM* was on, which is what the wait was
+                # about. This used to print the image side's own card -- the
+                # only one it had in hand -- which on a machine with two read
+                # as the LLM having been on the image card all along.
                 logger.info("Model Chain: the LLM on %s has finished; generating",
-                            domain.describe() if domain is not None else "the card")
+                            waited_for.domain.describe() if waited_for is not None
+                            else "the card")
             elif domain is not None:
                 _say_independence(domain)
             return True
+        waited_for = running
         if time.monotonic() >= deadline:
             note(FAMILY_IMAGE,
                  f"an LLM request on {running.domain.describe()} was still running after the "

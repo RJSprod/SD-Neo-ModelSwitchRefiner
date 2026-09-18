@@ -580,3 +580,59 @@ class TestTheSetupPanel:
         assert mc_llm_studio._managed_current() is None
         assert "could not be read" in mc_llm_studio._managed_line("first-model")
         assert built["model"] is not None and built["mmproj"] is not None
+
+
+class TestWhereASwitchExecutes:
+    """The switch's workload says which processor it is on, so the image side
+    can tell whether a generation on its own card has to wait for it at all."""
+
+    def test_a_switch_on_the_intel_gpu_does_not_hold_a_generation_on_a_cuda_card(
+            self, root, registry, runtime, monkeypatch):
+        # The machine this was found on: the backbone on the Intel GPU through
+        # SYCL, Forge on a 3090. The switch entered its workload without a
+        # domain, which the broker reads as an unresolved CUDA card -- in
+        # conflict with every card -- so the 3090's generation waited out the
+        # whole two minutes it is allowed, twice, while llama.cpp compiled
+        # kernels for a processor Forge was never going to touch.
+        install_bundle(root, "first-model", "gemma4-12b-qat-balanced")
+        write_state(root, runtime="runtime/llama-server", model="", mmproj="",
+                    gpu_device="SYCL0", compute_backend="sycl", gpu_index=0)
+        seen = {}
+        smoke = managed._start_and_smoke_test
+
+        def observed():
+            # Inside the switch, with its workload held: what the image side
+            # would be told if it asked right now.
+            entry = mc_broker.active()
+            seen["domain"] = entry.domain if entry is not None else None
+            seen["holds_cuda"] = mc_broker.conflicting_llm(mc_broker.cuda_execution(1))
+            seen["holds_intel"] = mc_broker.conflicting_llm(mc_broker.sycl_execution(0))
+            smoke()
+
+        monkeypatch.setattr(managed, "_start_and_smoke_test", observed)
+
+        managed.use("first-model")
+
+        assert seen["domain"] is not None and seen["domain"].is_sycl
+        assert seen["holds_cuda"] is None, "a 3090's generation would have waited for this"
+        assert seen["holds_intel"] is not None, "a second Intel workload shares the processor"
+
+    def test_a_switch_on_a_cuda_card_still_holds_a_generation_on_that_card(
+            self, root, registry, runtime, monkeypatch):
+        install_bundle(root, "first-model", "gemma4-12b-qat-balanced")
+        write_state(root, runtime="runtime/llama-server", model="", mmproj="",
+                    gpu_device="CUDA0", compute_backend="cuda", gpu_index=1)
+        seen = {}
+        smoke = managed._start_and_smoke_test
+
+        def observed():
+            seen["same_card"] = mc_broker.conflicting_llm(mc_broker.cuda_execution(1))
+            seen["other_card"] = mc_broker.conflicting_llm(mc_broker.cuda_execution(0))
+            smoke()
+
+        monkeypatch.setattr(managed, "_start_and_smoke_test", observed)
+
+        managed.use("first-model")
+
+        assert seen["same_card"] is not None, "a generation on the switch's own card waits"
+        assert seen["other_card"] is None, "a generation on another card does not"

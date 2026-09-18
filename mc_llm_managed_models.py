@@ -1618,7 +1618,8 @@ def _switch(model: ManagedModel, bundle: Installed, say) -> Selection:
     # workload we cannot take is an image generation on the card, and the
     # honest answer is to say so rather than to queue behind it for minutes.
     with mc_broker.workload(mc_broker.FAMILY_LLM, f"switching to {model.label}",
-                            timeout=SWITCH_LOCK_TIMEOUT, required=False) as held:
+                            timeout=SWITCH_LOCK_TIMEOUT, required=False,
+                            domain=_switch_domain()) as held:
         if not held:
             busy = mc_broker.active()
             raise Busy(
@@ -1652,6 +1653,30 @@ def _switch(model: ManagedModel, bundle: Installed, say) -> Selection:
 
     logger.info("Model Chain: LLM backbone switched to %s (%s)", model.label, model.identifier)
     return selection()                                                 # STEP 8
+
+
+def _switch_domain():
+    """Where the server this switch starts will execute, for the image side.
+
+    A managed switch changes the backbone and keeps the installation's device,
+    so this is the installation's domain, read before anything is stopped. It
+    is what an image generation consults to decide whether it has to wait for
+    this workload at all: a switch on the Intel GPU shares no processor with a
+    generation on a CUDA card, and one on the same card does. Left unsaid, a
+    workload is the conservative "unresolved CUDA card", which conflicts with
+    every card there is -- a switch to a backbone on the Intel GPU held a
+    3090's generation for the whole of the wait it is allowed, twice over,
+    while llama.cpp compiled kernels on a processor Forge was never going to
+    touch. None on any failure, which is that conservative answer again.
+    """
+    try:
+        import mc_llm_runtime
+
+        return mc_llm_runtime.execution_domain(mc_llm_runtime.config())
+    except Exception:
+        logger.debug("Model Chain: could not tell which device this switch starts on",
+                     exc_info=True)
+        return None
 
 
 def _compiling_note() -> str:
