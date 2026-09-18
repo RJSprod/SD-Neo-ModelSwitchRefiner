@@ -56,6 +56,7 @@ import gradio as gr
 
 import mc_creative_krea
 import mc_creative_profiles as profiles
+import mc_llm_ui
 import mc_pipeline_panel
 import mc_profile_state
 
@@ -856,8 +857,14 @@ def build(ident, notice, status, *, creativity=None, stored=None) -> Panel | Non
     # -- drawer three: the secondary settings ------------------------------ #
     with mc_pipeline_panel.drawer("Advanced settings", elem_id=ident("settings"),
                                   elem_classes=classes("drawer", "settings")):
-        panel.seed = gr.Number(
-            label="Creative seed", value=stored["seed"], precision=0,
+        # Through the shared factory for the host opt-out it carries, and this
+        # box needs it more than the ones in LLM Studio rather than less: the
+        # writer's own seed is *derived* from this number, so a Creative seed
+        # restored from ui-config.json repeats the art direction and the prompt
+        # written from it. It is built into two tabs, which is two entries the
+        # opt-out makes inert rather than one.
+        panel.seed = mc_llm_ui.seed_box(
+            label="Creative seed", value=stored["seed"],
             elem_id=ident("seed"),
             info="-1 rolls new art direction each time; a fixed value repeats it. "
                  "Not the image seed.")

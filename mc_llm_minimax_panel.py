@@ -139,8 +139,8 @@ def build() -> dict:
                 label="Variant", choices=ui.choices(enhancer.VARIANTS),
                 value=prefs.get("minimax_variant") or enhancer.FL2VA,
                 elem_id=ui.ident("minimax", "variant"))
-            seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
-                             info=f"{RANDOM_SEED} draws a fresh seed for every prompt.")
+            seed = ui.seed_box(
+                info=f"{RANDOM_SEED} draws a fresh seed for every prompt.")
             with gr.Accordion("What an H3 prompt is made of", open=False):
                 structure = gr.Markdown(enhancer.infos(prefs.get("minimax_variant")
                                                        or enhancer.FL2VA))
@@ -348,7 +348,11 @@ def _enhance(prompt, variant, picture, seed):
             yield None, "", hidden, ui.notice(ui.failure(exc), "error"), *idle
             return
 
-    resolved = int(seed or RANDOM_SEED)
+    # ``seed or RANDOM_SEED`` read a typed 0 as "nothing chosen" and drew over
+    # it. ``draw_seed`` can return 0 and the finished notice reports whatever it
+    # ran at, so that made the one seed a user could be shown the one seed they
+    # could not type back in. Only an absent value means "draw one".
+    resolved = RANDOM_SEED if seed is None else int(seed)
     if resolved == RANDOM_SEED:
         resolved = draw_seed()
 

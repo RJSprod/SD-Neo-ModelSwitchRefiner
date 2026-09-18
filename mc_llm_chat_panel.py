@@ -511,8 +511,8 @@ def build() -> dict:
                                       value=DEFAULT_TOP_P)
                 reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
                                          step=64, value=DEFAULT_MAX_REPLY_TOKENS)
-                seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
-                                 info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
+                seed = ui.seed_box(
+                    info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
             with gr.Group(elem_classes=ui.classes("destructive")):
                 gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
                 delete_character = gr.Button("Delete this character", size="sm",

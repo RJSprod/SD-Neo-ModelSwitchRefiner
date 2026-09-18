@@ -3283,15 +3283,48 @@ class TestSeedsAreRandomUntilSomebodyChoosesOne:
         assert opt.DEFAULTS["seed"] == 7, "the engine's own test default"
         assert boxes and all(box.value == RANDOM_SEED for box in boxes)
 
-    def test_a_seed_somebody_chose_still_wins(self, store, monkeypatch):
+    def test_a_stored_default_no_longer_reaches_the_box(self, store, monkeypatch):
+        """This assertion used to run the other way, and the inversion is the fix.
+
+        It was written as "a seed somebody chose still wins", which treated
+        ``prompt_defaults["seed"]`` as a choice. It never was one:
+        :func:`mc_llm_prompt_panel._remember` wrote the whole control set after
+        every generation, so the number in there was whatever the last run
+        resolved to. Re-offering it turned one generation into a pin that
+        outlived the session -- the second, independent half of the bug whose
+        first half was the host's own restore.
+        """
         import mc_llm_state
+        from prompt_master.core.models import RANDOM_SEED
 
         monkeypatch.setattr(mc_llm_state, "preferences",
                             lambda: {"prompt_defaults": {"seed": 4242}})
 
         boxes = self._seed_boxes(mc_llm_prompt_panel, monkeypatch)
 
-        assert [box.value for box in boxes] == [4242]
+        assert [box.value for box in boxes] == [RANDOM_SEED]
+
+    def test_a_generation_does_not_persist_the_seed_it_ran_at(self, store, monkeypatch):
+        """The other end of the same pin: what ``_remember`` writes back.
+
+        The seed still goes into the saved *session*, which is what makes a
+        recorded prompt reproducible -- it is only the ``prompt_defaults``
+        mapping the next panel opens on that must not carry it.
+        """
+        import types
+
+        import mc_llm_state
+
+        written = {}
+        monkeypatch.setattr(mc_llm_state, "remember",
+                            lambda **values: written.update(values))
+        monkeypatch.setattr(mc_llm_state, "save_prompt_session", lambda session: None)
+        request = types.SimpleNamespace(intent="a car", seed=4242, image_name="")
+
+        mc_llm_prompt_panel._remember({"seed": 4242, "style": "cinematic"},
+                                      request, "positive", "negative")
+
+        assert written["prompt_defaults"] == {"style": "cinematic"}
 
     @pytest.mark.parametrize("module", ["minimax", "krea", "chat"])
     def test_every_other_mode_opens_on_one_too(self, store, monkeypatch, module):
@@ -3324,6 +3357,188 @@ class TestSeedsAreRandomUntilSomebodyChoosesOne:
                                           RANDOM_SEED)
 
         assert held.load("Ada").seed == RANDOM_SEED
+
+
+class TestNoSeedBoxIsRestoredByTheHost:
+    """The half the source cannot show, and the half that actually shipped.
+
+    Forge keeps a ``ui-config.json`` of every labelled component a script
+    builds and writes the stored value back over the one the script asked for.
+    The key is ``<path>/<label>/value`` and ``modules/ui_loadsave.py`` grows
+    that path at Tabs, not at Columns or Rows -- and LLM Studio builds its four
+    panels as sibling columns inside one tab. So every control labelled "Seed"
+    in the tab collapsed onto a single entry, one stored number pinned all four
+    panels at once, and each panel's own resolver was never reached with the
+    sentinel that means "draw one".
+
+    ``TestSeedsAreRandomUntilSomebodyChoosesOne`` above asserts the value each
+    box *asks for*, which is exactly the half the host overrode -- trusting it
+    alone is what let this ship. These assert the opt-out that makes the asked
+    for value the value that arrives.
+    """
+
+    @staticmethod
+    def _seed_numbers(module, monkeypatch):
+        """Every ``gr.Number`` this panel builds whose label mentions a seed.
+
+        Wider than the sibling helper's exact-match on "Seed", because the
+        Krea panel also builds Creative seed and that one pins more than
+        itself: the writer's seed is derived from it.
+        """
+        import gradio as gr
+
+        found = []
+        original = gr.Number
+
+        def record(*args, **kwargs):
+            made = original(*args, **kwargs)
+            if "seed" in str(kwargs.get("label", "")).casefold():
+                found.append(made)
+            return made
+
+        monkeypatch.setattr(gr, "Number", record)
+        module.build()
+        return found
+
+    @pytest.mark.parametrize("module", ["prompt", "chat", "minimax", "krea"])
+    def test_every_seed_box_opts_out_of_the_restore(self, store, monkeypatch, module):
+        panel = {"prompt": mc_llm_prompt_panel, "chat": mc_llm_chat_panel,
+                 "minimax": mc_llm_minimax_panel, "krea": mc_llm_krea_panel}[module]
+
+        boxes = self._seed_numbers(panel, monkeypatch)
+
+        assert boxes, "this panel offers no seed at all"
+        assert all(getattr(box, "do_not_save_to_config", False) is True
+                   for box in boxes)
+
+    def test_the_creative_seed_opts_out_too(self, store, monkeypatch):
+        """It is built into the Krea panel as well as txt2img, and a restored
+        one repeats the art direction *and* the prompt written from it."""
+        labelled = {box.label: box
+                    for box in self._seed_numbers(mc_llm_krea_panel, monkeypatch)}
+
+        assert "Creative seed" in labelled, "the creative panel built no seed"
+        assert labelled["Creative seed"].do_not_save_to_config is True
+
+    def test_the_factory_is_what_carries_it(self, store):
+        """So the next seed control inherits the fix instead of repeating it."""
+        import mc_llm_ui as ui
+
+        assert ui.seed_box(info="").do_not_save_to_config is True
+
+
+class TestASeedOfZeroIsASeed:
+    """``draw_seed`` can return 0 and every panel reports what it ran at.
+
+    ``int(seed or RANDOM_SEED)`` read a typed 0 as "nothing chosen" and drew
+    over it, which made 0 the one seed a user could be shown and then not
+    reproduce by typing it back. It matters more now than it did: after the
+    opt-out above, a drawn seed is how most runs get one.
+    """
+
+    def test_minimax_runs_at_a_typed_zero(self, store, monkeypatch):
+        seen = []
+        monkeypatch.setattr(mc_llm_minimax_panel, "jobs_active", lambda: False)
+        monkeypatch.setattr(mc_llm_minimax_panel.sessions, "minimax",
+                            lambda prompt, variant, image, seed, cancel: seen.append(seed) or ())
+
+        list(mc_llm_minimax_panel._enhance("a car", "fl2va", None, 0))
+
+        assert seen == [0]
+
+    def test_krea_runs_at_a_typed_zero(self, store, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            mc_llm_krea_panel.sessions, "krea",
+            lambda prompt, references, seed, cancel, *a, **kw: seen.append(seed) or ())
+
+        list(mc_llm_krea_panel._generate("a car", 0, False, 5, -1, False))
+
+        assert seen == [0]
+
+    @pytest.mark.parametrize("panel", ["minimax", "krea"])
+    def test_an_empty_box_still_draws(self, store, monkeypatch, panel):
+        """The sentinel path has to survive the fix: a cleared Number arrives as
+        ``None``, and that -- not a zero -- is what means "draw one"."""
+        seen = []
+        if panel == "minimax":
+            monkeypatch.setattr(mc_llm_minimax_panel, "jobs_active", lambda: False)
+            monkeypatch.setattr(
+                mc_llm_minimax_panel.sessions, "minimax",
+                lambda prompt, variant, image, seed, cancel: seen.append(seed) or ())
+            list(mc_llm_minimax_panel._enhance("a car", "fl2va", None, None))
+        else:
+            monkeypatch.setattr(
+                mc_llm_krea_panel.sessions, "krea",
+                lambda prompt, references, seed, cancel, *a, **kw: seen.append(seed) or ())
+            list(mc_llm_krea_panel._generate("a car", None, False, 5, -1, False))
+
+        assert seen and seen[0] not in (None, -1), "the sentinel was not resolved"
+
+
+class TestADirectedRunWritesAtTheRecipesSeed:
+    """The seed the recipe card names is the seed the writer runs at.
+
+    The Director derives the writer's seed from the Creative seed so that one
+    number reproduces the whole chain -- the recipe *and* the prompt written
+    from it -- and the image tab keeps that contract where ``mc_creative_krea``
+    starts the writer at ``recipe.llm_seed``. This panel drew a seed of its own
+    instead, while its card showed the derived one it was not using, so
+    re-rolling at a recorded Creative seed gave the direction back with a
+    different prompt. Nothing covered which seed the writer actually ran at.
+    """
+
+    @staticmethod
+    def _directed(monkeypatch, seed, creative_seed=1):
+        """One Creative Mode run at a pinned Creative seed: (writer seed, card).
+
+        Every axis on Vary, built from the library as the sibling harness does,
+        so the roll directs something and the card carries its seed line.
+        """
+        from prompt_master.krea import director
+        from prompt_master.krea import library as library_module
+
+        axes = []
+        for _ in library_module.library().axis_keys:
+            axes.extend([director.VARY, None, []])
+        seen = []
+        monkeypatch.setattr(
+            mc_llm_krea_panel.sessions, "krea",
+            lambda prompt, references, seed, cancel, *a, **kw: seen.append(seed) or ())
+
+        frames = list(mc_llm_krea_panel._generate("a car", seed, True, 5, creative_seed,
+                                                  False, *axes))
+
+        cards = [frame[3] for frame in frames if frame[3].get("visible")]
+        assert len(seen) == 1, "the writer did not run exactly once"
+        assert cards, "a directed run showed no recipe card"
+        return seen[0], cards[0]["value"]
+
+    def test_the_writer_runs_at_the_seed_the_director_derived(self, store, monkeypatch):
+        from prompt_master.krea import director
+
+        ran_at, card = self._directed(monkeypatch, seed=None, creative_seed=1)
+
+        assert ran_at == director.stable_hash(1, "llm")
+        assert f"writer seed: {ran_at}" in card
+
+    def test_one_creative_seed_reproduces_the_writer_seed(self, store, monkeypatch):
+        """The property the image tab had and this panel lacked."""
+        first, _ = self._directed(monkeypatch, seed=-1, creative_seed=1)
+        second, _ = self._directed(monkeypatch, seed=-1, creative_seed=1)
+
+        assert first == second
+
+    def test_a_typed_seed_still_wins_and_the_card_says_so(self, store, monkeypatch):
+        """Explicit over derived: the box is not dead while Creative Mode is on,
+        and the card names what ran rather than what would have."""
+        from prompt_master.krea import director
+
+        ran_at, card = self._directed(monkeypatch, seed=4242, creative_seed=1)
+
+        assert ran_at == 4242 != director.stable_hash(1, "llm")
+        assert "writer seed: 4242" in card
+        assert "Creative seed: 1" in card
 
 
 class TestStoppingGivesTheControlsBack:
