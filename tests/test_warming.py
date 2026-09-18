@@ -18,7 +18,7 @@ import types
 import pytest
 
 import mc_memory
-from test_residency_speed import FakeLoadedModel, make_model
+from test_residency_speed import FakeLoadedModel, FakePatcher, make_model
 
 GB = 1024**3
 
@@ -594,3 +594,188 @@ class TestWarmingIsConfinedToThePreload:
         mc_memory.consume_preload()
 
         assert order == ["stage 1", "stage 2"]
+
+
+# --------------------------------------------------------------------------- #
+# What the host's sampler is about to ask for
+# --------------------------------------------------------------------------- #
+
+
+class FakeUnet(FakePatcher):
+    """A UNet patcher carrying the fields ``sampling_prepare`` reads."""
+
+    def __init__(self, size, *, activations, preserved=0, loaded=None, on_card=True):
+        super().__init__("unet", size)
+        self.model = type("KModel", (), {})()
+        self.extra_preserved_memory_during_sampling = preserved
+        self.controlnet_linked_list = None
+        self.weight_wrapper_patches = {}
+        self.load_device = "cuda"
+        self.current_device = "cuda" if on_card else "cpu"
+        self._activations = activations
+        self._loaded = size if loaded is None else loaded
+
+    def memory_required(self, shape):
+        self.asked_shape = list(shape)
+        return self._activations
+
+    def loaded_size(self):
+        return self._loaded
+
+    def has_online_lora(self):
+        return False
+
+
+def loaded(name, size):
+    """Another model on the card, named the way the host names it in its log."""
+    patcher = FakePatcher(name, size)
+    patcher.model = type(name, (), {})()
+    return FakeLoadedModel(patcher)
+
+
+@pytest.fixture
+def card(warming, monkeypatch):
+    """The reporting user's card: 4.4 GB free beside an 18.3 GB resident set."""
+    warming.mm.current_loaded_models.clear()
+    unet = FakeUnet(12.6 * GB, activations=1.8 * GB)
+    warming.mm.current_loaded_models.extend([
+        FakeLoadedModel(unet),
+        loaded("JointTextEncoder", 5.6 * GB),
+        loaded("Qwen2DVAE", 0.1 * GB),
+    ])
+    monkeypatch.setattr(warming.mm, "get_free_memory", lambda dev=None: 4.4 * GB)
+    monkeypatch.setattr(warming.mm, "minimum_inference_memory", lambda: 0.8 * GB, raising=False)
+    monkeypatch.setattr(warming.mm, "extra_reserved_memory", lambda: 0, raising=False)
+    monkeypatch.setattr(mc_memory, "_last_sampler_demand", None)
+    return types.SimpleNamespace(unet=unet, mm=warming.mm)
+
+
+class TestWhatTheSamplerAsksFor:
+    """The host frees against its own request with nothing protected, and says
+    nothing about why. The reading is taken where the host takes it."""
+
+    def test_a_pass_that_fits_says_nothing(self, card, caplog):
+        with caplog.at_level("INFO"):
+            demand = mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+
+        assert demand.request == pytest.approx(1.8 * GB)
+        assert demand.evicts == 0
+        assert card.unet.asked_shape == [2, 16, 128, 128], "the host doubles the batch"
+        assert not [m for m in caplog.messages if "about to ask for" in m]
+
+    def test_a_reservation_that_forces_an_eviction_is_named(self, card, caplog):
+        # The reporting user's log: 4.4 GB free, the same prompt every time, and
+        # ``Moving model(s) has taken 4.55 seconds`` before every pass -- the
+        # 5.6 GB text encoder leaving to satisfy a request this extension had
+        # no part in. The only line that could say so is the one before it.
+        card.unet.extra_preserved_memory_during_sampling = 8.6 * GB
+
+        with caplog.at_level("INFO"):
+            demand = mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+
+        assert demand.request == pytest.approx(10.4 * GB)
+        assert demand.shortfall == pytest.approx(6.0 * GB)
+        assert demand.evicts == pytest.approx(5.7 * GB)
+        assert [name for name, _held in demand.leaving()] == ["Qwen2DVAE", "JointTextEncoder"]
+        [line] = [m for m in caplog.messages if "about to ask for" in m]
+        assert "10.4 GB of free VRAM" in line and "the card has 4.4 GB" in line
+        assert "the 0.1 GB Qwen2DVAE and the 5.6 GB JointTextEncoder" in line
+        assert "8.6 GB reserved during sampling on the model by another extension" in line
+        assert "this extension makes no such reservation" in line
+        assert "1.8 GB for this pass's activations (a 1x16x128x128 latent)" in line
+
+    def test_a_clone_the_host_never_loaded_is_charged_its_whole_size(self, card, caplog):
+        # ``Requested to load KModel`` followed by a move with no ``loaded``
+        # line: every weight is on the card, but the patcher's device tag says
+        # it was never loaded, so the host asks for room to load all of it.
+        card.unet.current_device = "cpu"
+
+        with caplog.at_level("INFO"):
+            demand = mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+
+        assert demand.stale_tag
+        assert demand.off_card == pytest.approx(12.6 * GB)
+        assert demand.request == pytest.approx(12.6 * GB * 1.1 + 1.8 * GB)
+        [line] = [m for m in caplog.messages if "about to ask for" in m]
+        assert "counts as still to load although they are resident" in line
+        assert "stale device tag" in line
+
+    def test_forges_own_reserve_is_counted_as_the_hosts(self, card, monkeypatch, caplog):
+        monkeypatch.setattr(card.mm, "extra_reserved_memory", lambda: 6 * GB, raising=False)
+
+        with caplog.at_level("INFO"):
+            demand = mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+
+        assert demand.request == pytest.approx(7.8 * GB)
+        [line] = [m for m in caplog.messages if "about to ask for" in m]
+        assert "6.0 GB reserved in Forge's own settings" in line
+
+    def test_forges_minimum_is_a_floor_under_the_request(self, card, monkeypatch, caplog):
+        # ``minimum_inference_memory`` is the host's floor: a small pass asks
+        # for the whole of it, and it evicts exactly as a reservation would.
+        monkeypatch.setattr(card.mm, "minimum_inference_memory", lambda: 6 * GB, raising=False)
+
+        with caplog.at_level("INFO"):
+            demand = mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+
+        assert demand.request == pytest.approx(6.0 * GB)
+        assert demand.shortfall == pytest.approx(1.6 * GB)
+        [line] = [m for m in caplog.messages if "about to ask for" in m]
+        assert "Forge's minimum of 6.0 GB, which is what counts here" in line
+
+    def test_the_warm_up_ties_its_move_to_the_eviction(self, card, caplog):
+        card.unet.extra_preserved_memory_during_sampling = 8.6 * GB
+        mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+        result = mc_memory.PreloadResult(state="ready", checkpoint="A", moved_bytes=int(5.6 * GB),
+                                         resident_bytes=int(18.3 * GB), model_bytes=int(18.3 * GB),
+                                         seconds=4.8, moved_seconds=4.8)
+
+        with caplog.at_level("INFO"):
+            mc_memory._log_preload_result(result)
+
+        [line] = [m for m in caplog.messages if "left the card during the last sampling" in m]
+        assert "5.6 GB just moved back" in line and "asked for 10.4 GB" in line
+
+    def test_a_move_larger_than_the_eviction_is_not_the_samplers(self, card, caplog):
+        # The sampler took 5.7 GB; a warm-up that moved a whole checkpoint back
+        # is a checkpoint change, and the line would blame the wrong thing.
+        card.unet.extra_preserved_memory_during_sampling = 8.6 * GB
+        mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+        result = mc_memory.PreloadResult(state="ready", checkpoint="B", moved_bytes=int(18.3 * GB),
+                                         resident_bytes=int(18.3 * GB), model_bytes=int(18.3 * GB),
+                                         seconds=15.0, moved_seconds=15.0)
+
+        with caplog.at_level("INFO"):
+            mc_memory._log_preload_result(result)
+
+        assert not [m for m in caplog.messages if "left the card during the last sampling" in m]
+
+    def test_the_reading_is_spent_by_the_warm_up_that_uses_it(self, card, caplog):
+        card.unet.extra_preserved_memory_during_sampling = 8.6 * GB
+        mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+        result = mc_memory.PreloadResult(state="ready", checkpoint="A", moved_bytes=int(5.6 * GB),
+                                         resident_bytes=int(18.3 * GB), model_bytes=int(18.3 * GB),
+                                         seconds=4.8, moved_seconds=4.8)
+
+        with caplog.at_level("INFO"):
+            mc_memory._log_preload_result(result)
+            mc_memory._log_preload_result(result)
+
+        assert len([m for m in caplog.messages if "left the card during the last sampling" in m]) == 1
+
+    def test_a_warm_up_after_a_pass_that_fit_ties_nothing(self, card, caplog):
+        mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+        result = mc_memory.PreloadResult(state="ready", checkpoint="A", moved_bytes=int(0.6 * GB),
+                                         resident_bytes=int(18.3 * GB), model_bytes=int(18.3 * GB),
+                                         seconds=0.8, moved_seconds=0.8)
+
+        with caplog.at_level("INFO"):
+            mc_memory._log_preload_result(result)
+
+        assert not [m for m in caplog.messages if "left the card during the last sampling" in m]
+
+    def test_a_host_without_the_fields_is_left_alone(self, card, caplog):
+        with caplog.at_level("INFO"):
+            assert mc_memory.note_sampler_demand(FakePatcher("unet", 8 * GB), (1, 16, 128, 128)) is None
+        assert mc_memory.note_sampler_demand(card.unet, None) is None
+        assert not [m for m in caplog.messages if "about to ask for" in m]

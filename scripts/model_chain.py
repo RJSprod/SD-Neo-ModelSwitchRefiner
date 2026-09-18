@@ -2828,7 +2828,19 @@ class ScriptModelChain(scripts.Script):
         It is also the only per-pass boundary the host offers, which makes it
         where the estimator is told a Stage 1 pass is starting -- including the
         hires second pass, which fires this hook again.
+
+        And it is the last hook before ``sampling_prepare``: the host has just
+        installed the patcher the sampler will use, and the noise it hands over
+        is the shape the sampler's memory estimate is built from. So this is
+        where what the host is about to demand of the card is read -- before
+        the armed check, because it is about Stage 1's own pass whether or not
+        a chain follows it.
         """
+        if not self._in_stage_2:
+            objects = getattr(getattr(p, "sd_model", None), "forge_objects", None)
+            mc_memory.note_sampler_demand(getattr(objects, "unet", None),
+                                          getattr(kwargs.get("noise"), "shape", None))
+
         if not self._armed or self._in_stage_2:
             return
 
