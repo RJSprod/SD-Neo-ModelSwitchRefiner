@@ -2583,6 +2583,13 @@ the file by an older build has no effect and does not need removing. The same
 applies to **Creative seed**, which pins more than itself — the writer's seed
 is derived from it.
 
+In Krea mode with Creative Mode on, the writer's seed *is* the one the Director
+derives from the Creative seed, exactly as in txt2img: one Creative seed
+reproduces the recipe and the prompt written from it, and the recipe card's
+*writer seed* is the seed the writer ran at. A number typed into **Seed**
+overrides that for the writer only — the Creative seed still governs the
+recipe, and the card shows the seed actually used.
+
 A character's own seed is different and is left alone: it is saved *with* the
 character because it is a number you chose for it, and a new character has −1
 already.

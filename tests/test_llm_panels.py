@@ -3476,6 +3476,71 @@ class TestASeedOfZeroIsASeed:
         assert seen and seen[0] not in (None, -1), "the sentinel was not resolved"
 
 
+class TestADirectedRunWritesAtTheRecipesSeed:
+    """The seed the recipe card names is the seed the writer runs at.
+
+    The Director derives the writer's seed from the Creative seed so that one
+    number reproduces the whole chain -- the recipe *and* the prompt written
+    from it -- and the image tab keeps that contract where ``mc_creative_krea``
+    starts the writer at ``recipe.llm_seed``. This panel drew a seed of its own
+    instead, while its card showed the derived one it was not using, so
+    re-rolling at a recorded Creative seed gave the direction back with a
+    different prompt. Nothing covered which seed the writer actually ran at.
+    """
+
+    @staticmethod
+    def _directed(monkeypatch, seed, creative_seed=1):
+        """One Creative Mode run at a pinned Creative seed: (writer seed, card).
+
+        Every axis on Vary, built from the library as the sibling harness does,
+        so the roll directs something and the card carries its seed line.
+        """
+        from prompt_master.krea import director
+        from prompt_master.krea import library as library_module
+
+        axes = []
+        for _ in library_module.library().axis_keys:
+            axes.extend([director.VARY, None, []])
+        seen = []
+        monkeypatch.setattr(
+            mc_llm_krea_panel.sessions, "krea",
+            lambda prompt, references, seed, cancel, *a, **kw: seen.append(seed) or ())
+
+        frames = list(mc_llm_krea_panel._generate("a car", seed, True, 5, creative_seed,
+                                                  False, *axes))
+
+        cards = [frame[3] for frame in frames if frame[3].get("visible")]
+        assert len(seen) == 1, "the writer did not run exactly once"
+        assert cards, "a directed run showed no recipe card"
+        return seen[0], cards[0]["value"]
+
+    def test_the_writer_runs_at_the_seed_the_director_derived(self, store, monkeypatch):
+        from prompt_master.krea import director
+
+        ran_at, card = self._directed(monkeypatch, seed=None, creative_seed=1)
+
+        assert ran_at == director.stable_hash(1, "llm")
+        assert f"writer seed: {ran_at}" in card
+
+    def test_one_creative_seed_reproduces_the_writer_seed(self, store, monkeypatch):
+        """The property the image tab had and this panel lacked."""
+        first, _ = self._directed(monkeypatch, seed=-1, creative_seed=1)
+        second, _ = self._directed(monkeypatch, seed=-1, creative_seed=1)
+
+        assert first == second
+
+    def test_a_typed_seed_still_wins_and_the_card_says_so(self, store, monkeypatch):
+        """Explicit over derived: the box is not dead while Creative Mode is on,
+        and the card names what ran rather than what would have."""
+        from prompt_master.krea import director
+
+        ran_at, card = self._directed(monkeypatch, seed=4242, creative_seed=1)
+
+        assert ran_at == 4242 != director.stable_hash(1, "llm")
+        assert "writer seed: 4242" in card
+        assert "Creative seed: 1" in card
+
+
 class TestStoppingGivesTheControlsBack:
     """``cancels=`` closes the running generator where it stands, which is what
     makes Stop immediate — and a closed generator never reaches the yield that

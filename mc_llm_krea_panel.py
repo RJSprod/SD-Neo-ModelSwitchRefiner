@@ -418,6 +418,8 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     around the finished text -- so the writer never sees them and the box the
     user copies from already has them in it.
     """
+    import dataclasses
+
     from prompt_master.core.models import RANDOM_SEED, draw_seed
     from prompt_master.krea import extra_networks, literals
     from prompt_master.krea.variation import clamp
@@ -475,10 +477,10 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     # ``seed or RANDOM_SEED`` read a typed 0 as "nothing chosen" and drew over
     # it. ``draw_seed`` can return 0 and the finished notice reports whatever it
     # ran at, so that made the one seed a user could be shown the one seed they
-    # could not type back in. Only an absent value means "draw one".
-    resolved = RANDOM_SEED if seed is None else int(seed)
-    if resolved == RANDOM_SEED:
-        resolved = draw_seed()
+    # could not type back in. Only an absent value means nothing was chosen;
+    # what a run does with that is decided below, once it knows whether it was
+    # directed.
+    asked = RANDOM_SEED if seed is None else int(seed)
     position = clamp(creativity)
 
     # The Director runs here, before anything is streamed and before the GPU is
@@ -490,6 +492,25 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     if complaint:
         yield None, "", hidden, keep, ui.notice(complaint, "error"), *idle
         return
+
+    # Explicit over derived over drawn. A directed run takes the writer's seed
+    # from the recipe: the Director derives it from the Creative seed so that
+    # one number reproduces the whole chain, the recipe *and* the prompt
+    # written from it -- the contract the image tab keeps where
+    # mc_creative_krea starts the writer at ``recipe.llm_seed``. This panel
+    # used to draw its own instead, while the card below showed the derived
+    # seed it was not running at, so re-rolling at a recorded Creative seed
+    # gave back the direction and a different prompt. A seed typed into the
+    # box still wins, and the recipe is re-issued at it so that the card and
+    # the writer agree about what ran.
+    if asked != RANDOM_SEED:
+        resolved = asked
+    elif recipe is not None:
+        resolved = recipe.llm_seed
+    else:
+        resolved = draw_seed()
+    if recipe is not None and recipe.llm_seed != resolved:
+        recipe = dataclasses.replace(recipe, llm_seed=resolved)
     direction = getattr(recipe, "brief", "") if recipe is not None else ""
     shown = (gr.update(value=_recipe_view(recipe), visible=True)
              if recipe is not None else gr.update(value="", visible=False))
