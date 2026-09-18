@@ -481,6 +481,33 @@ class TestHostExclusion:
     def test_await_idle_returns_at_once_when_no_llm_is_running(self, broker):
         assert broker.await_idle(timeout=0.1)
 
+    def test_await_idle_names_the_processor_the_llm_was_on(self, broker, caplog):
+        # "the LLM on GPU 1 has finished" used to carry the *image* side's card
+        # -- the only one the wait had in hand -- so on a machine with two
+        # processors it named the wrong one, and read as the LLM having been on
+        # the image card all along.
+        holding = threading.Event()
+        release = threading.Event()
+
+        def occupy():
+            with broker.workload(broker.FAMILY_LLM, "a turn on an unresolved card"):
+                holding.set()
+                release.wait(3)
+
+        thread = threading.Thread(target=occupy)
+        thread.start()
+        holding.wait(2)
+        threading.Timer(0.2, release.set).start()
+
+        with caplog.at_level("INFO"):
+            assert broker.await_idle(timeout=3.0, domain=broker.cuda_execution(1))
+        thread.join(3)
+
+        finished = [line for line in caplog.messages if "has finished; generating" in line]
+        assert len(finished) == 1
+        assert "the LLM on an unidentified GPU has finished; generating" in finished[0]
+        assert "the LLM on GPU 1" not in finished[0]
+
     def test_await_idle_gives_up_rather_than_blocking_a_generation_forever(self, broker):
         holding = threading.Event()
         release = threading.Event()

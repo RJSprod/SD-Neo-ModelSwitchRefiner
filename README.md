@@ -3427,6 +3427,10 @@ can measure what it took from the shared pool.
 
 **A different processor.** An Intel LLM and an NVIDIA image generation share
 no processor, so they run at the same time; two Intel requests still take turns.
+A backbone switch on the Intel GPU is the same: the stop, the start and the
+smoke test it holds the LLM for are Intel work, and a generation on the NVIDIA
+card does not wait for them — not even for the minutes a first Intel start
+spends compiling kernels.
 The console says so once: *image generation is on GPU 1 and the LLM is on the
 Intel GPU (SYCL0) — they use different processors and run at the same time.*
 
