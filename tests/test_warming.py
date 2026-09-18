@@ -13,6 +13,8 @@ reserve, of the user's manual floor, of Forge's own reservation, or of Stage 1.
 
 from __future__ import annotations
 
+import math
+import sys
 import types
 
 import pytest
@@ -606,21 +608,37 @@ class FakeUnet(FakePatcher):
 
     def __init__(self, size, *, activations, preserved=0, loaded=None, on_card=True):
         super().__init__("unet", size)
+        # The torch module, shared by every clone of the patcher exactly as
+        # ``ModelPatcher.clone`` shares it, and stamped by the host's ``load``
+        # with the merge it carries.
         self.model = type("KModel", (), {})()
+        self.model.current_weight_patches_uuid = "merge-0"
+        self.model.model_loaded_weight_memory = size if loaded is None else loaded
+        self.patches_uuid = "merge-0"
+        self.patches = {}
         self.extra_preserved_memory_during_sampling = preserved
         self.controlnet_linked_list = None
         self.weight_wrapper_patches = {}
         self.load_device = "cuda"
         self.current_device = "cuda" if on_card else "cpu"
         self._activations = activations
-        self._loaded = size if loaded is None else loaded
 
     def memory_required(self, shape):
         self.asked_shape = list(shape)
         return self._activations
 
     def loaded_size(self):
-        return self._loaded
+        return self.model.model_loaded_weight_memory
+
+
+def with_a_new_merge(unet, patches=228):
+    """The clone the host's LoRA loader hands the sampler: same weights, new merge."""
+    clone = FakeUnet(unet.size, activations=unet._activations,
+                     preserved=unet.extra_preserved_memory_during_sampling)
+    clone.model = unet.model
+    clone.patches_uuid = "merge-1"
+    clone.patches = {f"key-{i}": [] for i in range(patches)}
+    return clone
 
     def has_online_lora(self):
         return False
@@ -779,3 +797,120 @@ class TestWhatTheSamplerAsksFor:
             assert mc_memory.note_sampler_demand(FakePatcher("unet", 8 * GB), (1, 16, 128, 128)) is None
         assert mc_memory.note_sampler_demand(card.unet, None) is None
         assert not [m for m in caplog.messages if "about to ask for" in m]
+
+
+class TestAChangeOfMergeIsAnEviction:
+    """A LoRA added, removed or reweighted is a change of model: the weights the
+    host is about to take off the card to re-merge leave it first, cleanly,
+    and nothing else on the card is touched."""
+
+    def test_a_changed_merge_takes_the_weights_off_before_the_sampler_does(self, card, caplog):
+        # The reporting user's log: several generations with no LoRA, then one
+        # with -- ``Requested to load KModel``, ``Moving model(s) has taken
+        # 101.95 seconds``, a first step that never finished.
+        clone = with_a_new_merge(card.unet)
+
+        with caplog.at_level("INFO"):
+            mc_memory.evict_for_rebake(clone)
+
+        assert math.isinf(card.mm.freed[-1]), "all of the model, never part of it"
+        [line] = [m for m in caplog.messages if "left the card before this pass" in m]
+        assert "Stage 1's KModel left the card" in line and "12.6 GB" in line
+        assert "A change of LoRA is a change of model" in line
+
+    def test_everything_else_on_the_card_is_kept(self, card):
+        clone = with_a_new_merge(card.unet)
+
+        mc_memory.evict_for_rebake(clone)
+
+        others = [e for e in card.mm.current_loaded_models if e.model is not card.unet]
+        assert card.mm.kept[-1] == others and len(others) == 2
+
+    def test_an_unchanged_merge_leaves_the_card_alone(self, card):
+        assert mc_memory.evict_for_rebake(card.unet) == 0
+        assert card.mm.freed == []
+
+    def test_a_model_the_host_never_stamped_is_left_alone(self, card):
+        # ``current_weight_patches_uuid`` is None until the host's own load
+        # sets it, and None is the single-pass branch the host takes itself.
+        clone = with_a_new_merge(card.unet)
+        card.unet.model.current_weight_patches_uuid = None
+
+        assert mc_memory.evict_for_rebake(clone) == 0
+        assert card.mm.freed == []
+
+    def test_weights_already_off_the_card_are_not_moved_again(self, card):
+        clone = with_a_new_merge(card.unet)
+        card.unet.model.model_loaded_weight_memory = 0
+
+        assert mc_memory.evict_for_rebake(clone) == 0
+        assert card.mm.freed == []
+
+    def test_a_model_the_host_is_not_holding_is_left_alone(self, card):
+        card.mm.current_loaded_models[:] = [
+            e for e in card.mm.current_loaded_models if e.model is not card.unet]
+        clone = with_a_new_merge(card.unet)
+
+        assert mc_memory.evict_for_rebake(clone) == 0
+        assert card.mm.freed == []
+
+    def test_a_host_that_cannot_be_told_what_to_keep_is_left_to_itself(self, card, monkeypatch):
+        # Without ``keep_loaded`` the only figure that means "all of this one"
+        # would take the text encoder too. The host makes its own move then.
+        monkeypatch.setattr(card.mm, "free_memory",
+                            lambda required, device: card.mm.freed.append(required))
+
+        assert mc_memory.evict_for_rebake(with_a_new_merge(card.unet)) == 0
+        assert card.mm.freed == []
+
+    def test_the_language_model_is_not_asked_for_anything(self, card, monkeypatch):
+        import mc_broker
+
+        asked = []
+        monkeypatch.setattr(mc_memory, "_reclaim_foreign", lambda *a, **k: asked.append(a))
+        monkeypatch.setattr(mc_broker, "request_vram", lambda *a, **k: asked.append(a))
+
+        mc_memory.evict_for_rebake(with_a_new_merge(card.unet))
+
+        assert asked == []
+
+    def test_an_over_committed_card_is_said_on_the_way_out(self, card, caplog, monkeypatch):
+        monkeypatch.setattr(mc_memory, "spilled_vram_bytes", lambda: int(1.5 * GB))
+
+        with caplog.at_level("INFO"):
+            mc_memory.evict_for_rebake(with_a_new_merge(card.unet))
+
+        [line] = [m for m in caplog.messages if "left the card before this pass" in m]
+        assert "over-committed: at least 1.5 GB" in line
+
+
+class TestOverCommit:
+    """What the task manager shows as "VRAM full and everything crawls",
+    measured from inside the process."""
+
+    @staticmethod
+    def torch_with(reserved, free, total):
+        return types.SimpleNamespace(cuda=types.SimpleNamespace(
+            mem_get_info=lambda dev: (free, total), memory_reserved=lambda dev: reserved))
+
+    def test_it_is_what_torch_holds_beyond_what_the_card_gave_out(self, card, monkeypatch):
+        monkeypatch.setitem(sys.modules, "torch", self.torch_with(25 * GB, 1 * GB, 24 * GB))
+        assert mc_memory.spilled_vram_bytes() == 2 * GB
+
+    def test_a_card_holding_everything_reports_none(self, card, monkeypatch):
+        monkeypatch.setitem(sys.modules, "torch", self.torch_with(20 * GB, 1 * GB, 24 * GB))
+        assert mc_memory.spilled_vram_bytes() == 0
+
+    def test_without_torch_the_reading_is_zero(self, card, monkeypatch):
+        monkeypatch.setitem(sys.modules, "torch", None)
+        assert mc_memory.spilled_vram_bytes() == 0
+
+    def test_an_over_committed_card_is_said_even_when_the_pass_fits(self, card, caplog, monkeypatch):
+        monkeypatch.setattr(mc_memory, "spilled_vram_bytes", lambda: int(2 * GB))
+
+        with caplog.at_level("INFO"):
+            demand = mc_memory.note_sampler_demand(card.unet, (1, 16, 128, 128))
+
+        assert demand.evicts == 0
+        [line] = [m for m in caplog.messages if "about to ask for" in m]
+        assert "and that fits" in line and "over-committed: at least 2.0 GB" in line

@@ -1095,7 +1095,8 @@ The third row is deliberately left alone. Telling two non-empty composites apart
 means resolving names to filenames the way the host's own loader does, which is
 the reimplementation this extension does not do — and it is also the cheap case,
 because a model already carrying a merge has been through a generation and its
-weights are already on the card.
+weights are already on the card. What happens to weights that *are* on the card
+when the merge changes is the next section's.
 
 **Only the placement is held back.** The load itself still happens: the host
 builds the model, resolves its modules, consumes its unload flag, and the next
@@ -1164,6 +1165,98 @@ once as *(fp16 LoRA)*; the second sets `dynamic_args.online_lora`, which keeps
 the LoRA beside the weights instead of merging it into them. No merge means no
 round trip on any change, at the cost of some per-step sampling speed. `Automatic
 (fp16 LoRA)` is the same storage dtype as `Automatic`.
+
+##### A change of merge is a change of model
+
+Holding the placement covers a model that is *not yet* on the card. The other
+half of the same problem is a model that already is — a mid-session LoRA change
+on weights that several generations have left resident, which is where a
+prompt's first LoRA lands whenever the warm-up placed nothing because nothing
+needed placing. From a user's log, one no-LoRA generation after another and
+then a prompt with a LoRA in it:
+
+```
+Stage 1 is warm — 18.3 GB already in VRAM (preloaded in 0.9s).
+[LORA] Loaded krea2_turbo_2step_rank_64_lora.safetensors for KModel-UNet with 228 keys at weight 0.8
+Requested to load KModel
+loaded completely; 15828.71 MB usable, 12866.82 MB loaded, full load: True
+Moving model(s) has taken 101.95 seconds
+  0%|          | 0/3 [00:00<?, ?it/s]
+```
+
+The first step never finished, the generation was abandoned, and the one that
+followed ran at ten seconds a step before the card recovered. What the host did
+in those 102 seconds is the round trip above — every weight to system RAM,
+every weight back with the merge applied — made *inside the sampler's own
+load*, with the allocator's cache holding the old copy's blocks the whole way
+through, on a card the plan had already filled. Nothing in this extension had
+moved anything, and nothing in it could have known what was coming: the
+decision is the host's, and it takes it a few milliseconds before the first
+step.
+
+So the extension takes it first. A LoRA added, removed, reweighted or swapped is
+treated as what it is — a change of model — and the weights the host is about
+to take off the card to re-merge leave it before the sampler asks for them,
+through the host's own `free_memory`, with everything else on the card named as
+kept and the host's cache flushed behind them. The host then finds a model to
+load and free VRAM to load it into, and does what it does for a cold model: one
+load, merge included, which the same card measures at about twenty seconds. The
+console line has this shape:
+
+```
+Model Chain: Stage 1's KModel left the card before this pass (12.6 GB in 9.8s,
+             4.4 GB -> 17.0 GB free): the prompt changed what is merged into
+             its weights, and the host re-merges a LoRA by moving every weight
+             to system RAM and back. Moved out here first, the merge loads into
+             free VRAM instead of over the old copy. A change of LoRA is a
+             change of model, and costs one load
+Requested to load KModel
+loaded completely; 21689.52 MB usable, 12866.82 MB loaded, full load: True
+Moving model(s) has taken 19.7 seconds
+```
+
+The test is the host's own — the merge stamp on the model against the
+`patches_uuid` of the patcher the sampler was handed — read at the last hook
+before `sampling_prepare`, for the first pass and the hires pass alike. Nothing
+is inferred from prompt text, so it covers every case the table above cannot: a
+weight changed from 0.8 to 1.0, a second LoRA added, the set reordered, every
+LoRA removed. A model the host never stamped, a model already off the card, and
+a host whose `free_memory` cannot be told what to keep are all left alone, and
+the host makes its own move as it always did.
+
+It is an eviction inside the image family and nothing more. The text encoder and
+VAE stay where they are, no language model is asked for anything, and the broker
+is not involved — the rule that an image generation may reclaim VRAM from an
+idle LLM is unchanged, and this is not that rule.
+
+Two things it does not do. It does not avoid the load: a merge is a rewrite of
+the weights and the host makes it from system RAM, so the bytes cross the bus
+once whatever else happens — what changes is that they no longer cross it twice
+under a full card. And it does not decide the warm-up's third row above: a model
+carrying one merge, warmed cold while the prompt asks for another, is still
+placed and then evicted and reloaded. That costs the warm-up's placement, which
+holding would have saved, and it stays that way until telling two merges apart
+is worth reimplementing the host's name resolution.
+
+###### The card being over-committed is measured
+
+The state the task manager shows as "VRAM full" while everything crawls is
+PyTorch holding more GPU memory than the card has given out. The Windows driver
+does not refuse an allocation the card cannot hold; it places it in shared
+system memory, and every step that touches it runs at bus speed. That is a
+certain reading from inside the process — `memory_reserved` against
+`mem_get_info` — and both the eviction line above and the sampler's demand line
+carry it whenever it is not zero:
+
+```
+... The card was already over-committed: at least 1.5 GB of PyTorch's
+allocations sat outside its own memory, in shared system memory, where every
+step that touches them runs at bus speed
+```
+
+The demand line is printed for a pass that fits, too, when the card is in that
+state: a pass that fits on paper and runs at bus speed is the one case where
+"nothing leaves" would be the wrong thing to say.
 
 ##### Its relationship with "Warm up before generating"
 
