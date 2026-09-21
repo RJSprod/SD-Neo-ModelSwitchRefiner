@@ -193,6 +193,90 @@ class TestAttachments:
         assert staging.resolve(payload["token"]) is not None
 
 
+class TestUnloading:
+    """The two entries in the assistant's utility menu.
+
+    It used to offer whatever buttons walking the header turned up -- "Apply
+    settings", "Reload UI" and a column of controls whose only visible text is
+    the word JSON. These two are what somebody opens that menu for: I need this
+    card back, now.
+    """
+
+    def test_a_scope_it_does_not_know_is_refused(self):
+        payload, status = api.unload("everything, and the kitchen sink")
+
+        assert status == 400
+        assert payload["error"]["code"] == service.INVALID_INPUT
+
+    def test_unloading_the_llm_stops_llama_server_and_nothing_else(self, monkeypatch):
+        import mc_llm_runtime
+        import mc_memory
+
+        stopped = []
+        monkeypatch.setattr(mc_llm_runtime, "shutdown", lambda: stopped.append("llm"))
+        monkeypatch.setattr(mc_memory, "release_all",
+                            lambda: stopped.append("image cache"))
+
+        payload, status = api.unload(api.LLM)
+
+        assert status == 200
+        assert stopped == ["llm"], "Unload LLM touched the image side"
+        assert payload["released"] == ["the language model"]
+
+    def test_unloading_everything_releases_all_three(self, monkeypatch):
+        import mc_llm_runtime
+        import mc_memory
+
+        stopped = []
+        monkeypatch.setattr(mc_llm_runtime, "shutdown", lambda: stopped.append("llm"))
+        monkeypatch.setattr(mc_memory, "release_all", lambda: stopped.append("cache"))
+        monkeypatch.setattr(api, "_unload_host_models", lambda: stopped.append("host")
+                            or True)
+
+        payload, status = api.unload(api.ALL)
+
+        assert status == 200
+        assert stopped == ["llm", "cache", "host"]
+        assert payload["failed"] == []
+
+    def test_one_half_failing_does_not_stop_the_other(self, monkeypatch):
+        """A machine where the image side is mid-generation and refuses is
+        still a machine where stopping llama-server frees twenty gigabytes."""
+        import mc_llm_runtime
+        import mc_memory
+
+        stopped = []
+        monkeypatch.setattr(mc_llm_runtime, "shutdown", lambda: stopped.append("llm"))
+
+        def busy():
+            raise RuntimeError("a generation is running")
+
+        monkeypatch.setattr(mc_memory, "release_all", busy)
+        monkeypatch.setattr(api, "_unload_host_models", lambda: False)
+
+        payload, status = api.unload(api.ALL)
+
+        assert status == 200
+        assert stopped == ["llm"]
+        assert payload["released"] == ["the language model"]
+        assert "the checkpoint" in payload["failed"]
+        assert "Released the language model" in payload["message"]
+        assert "Could not release" in payload["message"]
+
+    def test_the_answer_says_what_actually_happened(self, monkeypatch):
+        import mc_llm_runtime
+
+        def broken():
+            raise RuntimeError("no runtime here")
+
+        monkeypatch.setattr(mc_llm_runtime, "shutdown", broken)
+
+        payload, _ = api.unload(api.LLM)
+
+        assert payload["released"] == []
+        assert payload["message"] == "Nothing was loaded to release."
+
+
 class TestServingPictures:
     def test_a_ticket_is_not_a_path(self, store):
         """6.6. No filesystem path leaves the server -- a route that took one

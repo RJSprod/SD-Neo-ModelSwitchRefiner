@@ -1,21 +1,17 @@
 // Forge Assistant -- workspace focus, as a transaction that can be undone.
 //
-// Focus gives the whole viewport to the workspace that is open: the host's
-// header, sidebars and footer go under an opaque background and the workspace
-// fills what is left. It is not the Fullscreen API -- that takes the browser's
-// own chrome as well, needs a gesture, and cannot be entered for one element
-// without the page losing the ability to draw anything outside it.
+// Focus makes one workspace take the whole browser window: the Forge Neo tab
+// bar, a theme's sidebars, the footer -- none of it is visible until the person
+// leaves focus mode, by the control on the assistant or by pressing Escape. It
+// is not the Fullscreen API: that takes the browser's own chrome as well, needs
+// a gesture every time, and cannot be entered for one element without the page
+// losing the ability to draw anything outside it.
 //
-// The hard part is not entering. It is *leaving*, on a page whose DOM another
-// extension may have changed in the meantime.
-//
-// So this is written as a transaction. Before anything is touched, every value
-// that will change is recorded -- the exact inline styles, the scroll
-// positions, the tabindex and inert and aria state of what will be made
-// unreachable, and where the keyboard focus was. Exit restores those values.
-// It never sets `inert = false`, `tabindex = 0` or `overflow: auto` as a guess
-// at what was there before, because a page where something else had already set
-// `inert` would come back subtly broken and nobody would connect it to this.
+// It does not hide, remove or restyle the host's tab bar, and it never touches
+// the host's DOM. The tab bar is still there, underneath; this extension's own
+// root element is simply laid over everything else. That is what keeps it safe:
+// nothing about the host changes, so nothing about the host can break, and
+// leaving is one class removal.
 //
 // The other rule: never change a canvas's bitmap dimensions. Mini Paint and the
 // Krea spatial editor both draw into one, and resizing a canvas element clears
@@ -103,44 +99,44 @@
         return "";
     }
 
-    // -- the transaction ---------------------------------------------------- //
+    // -- entering and leaving ------------------------------------------------ //
+    //
+    // The whole mechanism, and it is deliberately one line of DOM work:
+    //
+    //     root.classList.add("forge-assistant-focus-root")
+    //
+    // The stylesheet makes that `position: fixed; inset: 0` with an opaque
+    // themed background and a z-index above the tab bar, the sidebars and the
+    // footer. Nothing of the host's is hidden, moved, restyled or made
+    // unreachable -- the tab bar is still exactly where it was, underneath --
+    // and leaving is one class removal. That is what makes this safe: nothing
+    // about the host changes, so nothing about the host can break.
+    //
+    // It was not one line to begin with. The first version also locked the
+    // body's scrolling and walked up the tree setting `inert` on every sibling
+    // at every level, to make the covered page unreachable. Both were beyond
+    // what this needs -- the focus root covers the viewport, so there is
+    // nothing to reach -- and between them they produced the failure that was
+    // reported: on Txt2Img the tab bar stayed exactly where it was and the only
+    // thing that changed was that the page would no longer scroll.
+    //
+    // What is left of that: `overscroll-behavior: contain` in the stylesheet,
+    // which stops a wheel gesture inside the focused workspace from chaining
+    // out to the page behind it, and does it without touching the page at all.
 
-    function record(node, properties) {
-        const kept = {node, style: {}, attributes: {}};
-        properties.forEach((name) => {
-            // The *inline* value, not the computed one. Restoring a computed
-            // value would write a stylesheet's answer into the element and
-            // freeze it there.
-            kept.style[name] = node.style[name];
-        });
-        return kept;
-    }
-
-    function restore(kept) {
-        Object.keys(kept.style).forEach((name) => {
-            const was = kept.style[name];
-            if (was === undefined || was === "") kept.node.style.removeProperty
-                ? kept.node.style.removeProperty(hyphenate(name))
-                : (kept.node.style[name] = "");
-            else kept.node.style[name] = was;
-        });
-        Object.keys(kept.attributes).forEach((name) => {
-            const was = kept.attributes[name];
-            if (was === null) kept.node.removeAttribute(name);
-            else kept.node.setAttribute(name, was);
-        });
-        if (kept.inert !== undefined) {
-            if (kept.inert === null) kept.node.removeAttribute("inert");
-            else kept.node.inert = kept.inert;
-        }
-        if (kept.scroll !== undefined) {
-            kept.node.scrollTop = kept.scroll.top;
-            kept.node.scrollLeft = kept.scroll.left;
-        }
-    }
-
-    function hyphenate(name) {
-        return name.replace(/[A-Z]/g, (letter) => "-" + letter.toLowerCase());
+    function saveState(root) {
+        // The one thing worth recording, because it is the one thing that can
+        // be changed by something other than the class: where the workspace was
+        // scrolled to. A focus that returned somebody to the top of a long tab
+        // would be a focus nobody used twice.
+        return {
+            root,
+            scrollTop: root.scrollTop || 0,
+            scrollLeft: root.scrollLeft || 0,
+            pageX: window.scrollX || 0,
+            pageY: window.scrollY || 0,
+            focused: document.activeElement,
+        };
     }
 
     Focus.prototype.enter = function (id, host) {
@@ -153,46 +149,8 @@
         if (!allowed.ok) return allowed;
 
         const adapter = this.adapterFor(id);
-        const context = {
-            id,
-            root,
-            adapter,
-            saved: [],
-            focused: document.activeElement,
-        };
+        const context = Object.assign(saveState(root), {id, adapter});
 
-        // Everything that will change, written down before anything changes.
-        context.saved.push(Object.assign(record(document.body, ["overflow"]),
-                                         {scroll: {top: window.scrollY || 0,
-                                                   left: window.scrollX || 0}}));
-        context.saved.push(record(root, ["position", "inset", "zIndex", "margin",
-                                         "padding", "overflow", "background"]));
-
-        // Only the *siblings* outside the root are made unreachable, and only
-        // as far up as the root's own parents. Never an ancestor -- inerting an
-        // ancestor inerts the root inside it -- and never `aria-hidden` on the
-        // application, which would take the whole page out of the accessibility
-        // tree rather than the part that is covered.
-        const assistantRoot = document.getElementById("forge-assistant-root");
-        let walk = root;
-        while (walk && walk.parentElement && walk.parentElement !== document.body
-               .parentElement) {
-            const parent = walk.parentElement;
-            Array.prototype.forEach.call(parent.children, (sibling) => {
-                if (sibling === walk || sibling === assistantRoot) return;
-                if (assistantRoot && sibling.contains && sibling.contains(assistantRoot)) {
-                    return;
-                }
-                const kept = {node: sibling, style: {}, attributes: {},
-                              inert: sibling.hasAttribute("inert")
-                                  ? sibling.inert : null};
-                sibling.inert = true;
-                context.saved.push(kept);
-            });
-            walk = parent;
-        }
-
-        document.body.style.overflow = "hidden";
         root.classList.add(ROOT_CLASS);
         document.body.classList.add(BODY_CLASS);
 
@@ -202,6 +160,10 @@
             console.error("Forge Assistant: a focus adapter failed to enter", error);
         }
 
+        // Anything in the workspace sized against the window -- a fitted
+        // canvas, a panel with a max-height taken from the viewport -- has to
+        // be recomputed now, because the root's box just changed from "a row in
+        // the page" to "the whole window".
         if (typeof ResizeObserver === "function") {
             this.observer = new ResizeObserver(() => {
                 try {
@@ -231,29 +193,27 @@
         } catch (error) {
             console.error("Forge Assistant: a focus adapter failed to exit", error);
         }
-        // The class comes off even if the root was detached while focused --
-        // a workspace rebuilt by a Gradio update is still a workspace whose
-        // siblings have to come back.
+        // The class comes off even if the root was detached while focused -- a
+        // workspace rebuilt by a Gradio update is still a workspace that has to
+        // stop being fixed to the viewport.
         if (context.root && context.root.classList) {
             context.root.classList.remove(ROOT_CLASS);
         }
         document.body.classList.remove(BODY_CLASS);
-        context.saved.slice().reverse().forEach((kept) => {
+        if (context.root) {
+            context.root.scrollTop = context.scrollTop;
+            context.root.scrollLeft = context.scrollLeft;
+        }
+        if (typeof window.scrollTo === "function") {
             try {
-                restore(kept);
-            } catch (error) {
-                console.error("Forge Assistant: could not restore a focused element", error);
-            }
-        });
+                window.scrollTo(context.pageX, context.pageY);
+            } catch (error) { /* a window that will not be scrolled is not a failure */ }
+        }
         if (context.focused && typeof context.focused.focus === "function"
             && document.contains(context.focused)) {
             try {
                 context.focused.focus();
             } catch (error) { /* an element that will not take focus */ }
-        } else if (context.root && typeof context.root.querySelector === "function") {
-            const first = context.root.querySelector(
-                "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
-            if (first && typeof first.focus === "function") first.focus();
         }
         return true;
     };

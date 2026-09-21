@@ -92,9 +92,25 @@
         // A tab's panel is a direct child with an id, which is what Forge and
         // every extension that registers a tab produce. Nested ids -- the
         // hundreds inside each panel -- are not candidates.
+        //
+        // And never a candidate that CONTAINS THE TAB BAR. That is the check
+        // focus mode turns on: the panel is about to be laid over the whole
+        // window, and a "panel" that has the tab bar inside it lays the tab bar
+        // over the window too. What that looks like is focus mode doing
+        // nothing except stopping the page scrolling, which is exactly how it
+        // was first reported.
         return all(":scope > div[id], :scope > .tabitem[id]", tabs)
-            .filter((panel) => panel.id && panel.id !== "tabs");
+            .filter((panel) => panel.id && panel.id !== "tabs" && !holdsTabBar(panel));
     };
+
+    function holdsTabBar(node) {
+        if (!node || typeof node.querySelector !== "function") return false;
+        try {
+            return !!node.querySelector(".tab-nav, [role='tablist']");
+        } catch (error) {
+            return false;
+        }
+    }
 
     Host.prototype.listWorkspaces = function () {
         const bar = this.bar();
@@ -210,39 +226,40 @@
     // -- the header's utilities -------------------------------------------- //
 
     Host.prototype.listUtilities = function () {
-        const found = [];
-        const seen = new Set();
-        const add = (node, label, kind) => {
-            if (!node || seen.has(node)) return;
-            const name = (label || node.textContent || node.title || "").trim();
-            if (!name) return;
-            seen.add(node);
-            found.push({
-                id: node.id || (kind + ":" + found.length),
-                label: name,
-                enabled: !node.disabled,
-                kind,
-                node,
-                // The original handler, called once. A link and a file picker
-                // keep direct gesture execution: routing a press through
-                // anything at all loses the user activation a browser requires
-                // for both.
-                invoke() {
-                    if (node.disabled) return false;
-                    node.click();
-                    return true;
-                },
-            });
-        };
-        all("#quicksettings button, .gradio-container > .app > div button.settings",
-            app()).forEach((node) => add(node, "", "quicksetting"));
-        ["#settings_submit", "#restart_submit", "#reload_ui", "#settings_restart_gradio"]
-            .forEach((selector) => add(app().querySelector(selector), "", "action"));
-        all("#footer a, .gradio-container a[href]:not([href^='#'])", app())
-            .filter((link) => (link.textContent || "").trim())
-            .slice(0, 8)
-            .forEach((link) => add(link, "", "link"));
-        return found;
+        // Two entries, written down rather than discovered.
+        //
+        // This used to walk the header and offer whatever buttons it found,
+        // which on a real installation is "Apply settings", "Reload UI" and a
+        // column of controls whose only visible text is the word JSON. A menu
+        // assembled from whatever happened to be in the DOM is a menu nobody
+        // can predict the contents of, and half of what it found was already
+        // one click away on the page behind it.
+        //
+        // What is here instead is the thing somebody actually opens this menu
+        // for: I need this card back, now. Both go to the server rather than
+        // pressing a control in the page, because the Settings page's Actions
+        // row is a button that may or may not exist under a given theme and a
+        // menu entry that silently does nothing on half of them is worse than
+        // not offering it.
+        return [
+            {
+                id: "unload-all",
+                label: "Unload All Models",
+                title: "Release the checkpoint, this extension's model cache and the "
+                    + "language model",
+                enabled: true,
+                kind: "unload",
+                scope: "all",
+            },
+            {
+                id: "unload-llm",
+                label: "Unload LLM",
+                title: "Stop llama-server and release its VRAM and RAM",
+                enabled: true,
+                kind: "unload",
+                scope: "llm",
+            },
+        ];
     };
 
     // -- the assistant's own menus ----------------------------------------- //

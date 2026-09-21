@@ -69,10 +69,11 @@ ATTACHMENTS_ROUTE = f"{PREFIX}/attachments"
 ATTACHMENT_ROUTE = f"{PREFIX}/attachments/{{token}}"
 WORKSPACES_ROUTE = f"{PREFIX}/workspaces"
 SERVED_ROUTE = f"{PREFIX}/attachment/{{ticket}}"
+UNLOAD_ROUTE = f"{PREFIX}/unload"
 
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
-          WORKSPACES_ROUTE, SERVED_ROUTE)
+          WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -303,6 +304,134 @@ def workspaces() -> dict:
     return {"ok": True, "workspaces": found, "server_epoch": service.SERVER_EPOCH}
 
 
+ALL = "all"
+LLM = "llm"
+SCOPES = (ALL, LLM)
+"""What the assistant's utility menu can give back, and nothing else.
+
+Two entries, both of them a thing somebody wants at a particular moment --
+"I need this card back now" -- rather than a control surface. Everything else
+the host's header offers is still in the host's header.
+"""
+
+
+def unload(scope: str) -> tuple[dict, int]:
+    """Give VRAM and RAM back. Returns what was actually released.
+
+    Each half is attempted independently and none of them can fail the others:
+    a machine where the image side is mid-generation and refuses is still a
+    machine where stopping llama-server frees twenty gigabytes, and the honest
+    answer is "the LLM went, the checkpoint did not" rather than an error that
+    says neither happened.
+
+    Nothing here decides *policy*. It does not unload on a timer, on a mode
+    switch or on a hunch -- it is a button somebody pressed, and the next
+    request that needs a model loads it again exactly as it would have.
+    """
+    wanted = str(scope or "").strip().lower()
+    if wanted not in SCOPES:
+        return {"ok": False, "error": {"code": service.INVALID_INPUT,
+                                       "message": "Choose all or llm.",
+                                       "retryable": False}}, 400
+    released = []
+    failed = []
+
+    if _stop_llm():
+        released.append("the language model")
+    else:
+        failed.append("the language model")
+
+    if wanted == ALL:
+        if _release_image_cache():
+            released.append("this extension's model cache")
+        else:
+            failed.append("this extension's model cache")
+        if _unload_host_models():
+            released.append("the checkpoint")
+        else:
+            failed.append("the checkpoint")
+
+    logger.info("Model Chain: unload (%s) released %s%s", wanted,
+                ", ".join(released) or "nothing",
+                f"; could not release {', '.join(failed)}" if failed else "")
+    return {"ok": True, "scope": wanted, "released": released, "failed": failed,
+            "message": _said(released, failed)}, 200
+
+
+def _said(released: list, failed: list) -> str:
+    if not released:
+        return "Nothing was loaded to release."
+    found = "Released " + _listed(released) + "."
+    if failed:
+        found += " Could not release " + _listed(failed) + "."
+    return found
+
+
+def _listed(items: list) -> str:
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _stop_llm() -> bool:
+    """Stop every llama-server this extension started. Never raises."""
+    try:
+        import mc_llm_runtime
+
+        mc_llm_runtime.shutdown()
+        return True
+    except Exception:
+        logger.warning("Model Chain: could not stop the language model", exc_info=True)
+        return False
+
+
+def _release_image_cache() -> bool:
+    """Drop this extension's own cached checkpoints. Never raises."""
+    try:
+        import mc_memory
+
+        mc_memory.release_all()
+        return True
+    except Exception:
+        logger.warning("Model Chain: could not release the model cache", exc_info=True)
+        return False
+
+
+def _unload_host_models() -> bool:
+    """Ask the host to put its own checkpoint down, the way its own button does.
+
+    Through ``modules.sd_models`` rather than by pressing a control in the page:
+    the Settings page's Actions row is a button that may or may not exist under
+    a given theme, and a menu entry that silently did nothing on half of them
+    would be worse than not offering it.
+    """
+    freed = False
+    try:
+        from modules import sd_models
+
+        for name in ("unload_model_weights", "unload_models", "unload_all_models"):
+            found = getattr(sd_models, name, None)
+            if callable(found):
+                found()
+                freed = True
+                break
+    except Exception:
+        logger.warning("Model Chain: could not ask the host to unload its checkpoint",
+                       exc_info=True)
+    try:
+        import gc
+
+        from backend import memory_management
+
+        gc.collect()
+        memory_management.unload_all_models()
+        memory_management.soft_empty_cache()
+        freed = True
+    except Exception:
+        logger.debug("Model Chain: the backend had no cache to empty", exc_info=True)
+    return freed
+
+
 def stage_upload(raw: bytes, name: str = "") -> tuple[dict, int]:
     import mc_llm_attachment_staging as staging
 
@@ -489,6 +618,18 @@ def install(_demo=None, app=None) -> bool:
 
         return _json({"ok": staging.discard(request.path_params.get("token", ""))})
 
+    async def unload_route(request: Request):
+        try:
+            checked(request)
+            body = await _body(request)
+        except Refused as exc:
+            return _refusal(exc)
+        try:
+            payload, status = unload(str(body.get("scope") or ""))
+            return _json(payload, status)
+        except Exception:
+            return _failed("could not unload the models", "Nothing could be unloaded.")
+
     async def workspaces_route(request: Request):
         try:
             checked(request)
@@ -534,6 +675,7 @@ def install(_demo=None, app=None) -> bool:
                 (ATTACHMENTS_ROUTE, attachments_route, ["POST"]),
                 (ATTACHMENT_ROUTE, attachment_delete_route, ["DELETE"]),
                 (WORKSPACES_ROUTE, workspaces_route, ["GET"]),
+                (UNLOAD_ROUTE, unload_route, ["POST"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

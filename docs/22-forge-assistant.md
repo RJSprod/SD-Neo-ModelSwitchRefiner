@@ -117,6 +117,72 @@ the executor starts.
 
 ---
 
+## 3.5 Four defects found in use, and what they were
+
+Reported against the first build, on a running Forge.
+
+### The panel could not be minimised, and the workspace menu would not close
+
+One missing CSS rule, and it presented as three separate bugs.
+
+`hidden` is how every piece of this panel is shown and hidden from JavaScript,
+and the browser implements it as `[hidden] { display: none }` in its
+*user-agent* stylesheet. **Any author declaration of `display` beats a
+user-agent one outright, whatever the specificity** — so
+`.forge-assistant-panel { display: flex }` made the panel unhideable, and the
+same for `.forge-assistant-menu` and the conversation body. ✕ set an attribute
+and changed nothing anybody could see.
+
+Fixed with one rule scoped to the assistant's root, carrying `!important`
+because what it overrides is the `display: flex` rules a few lines below it and
+a plain declaration would tie and lose on source order. `tests/
+test_assistant_js.py` asserts the rule exists and that everything hidden from
+script is inside the root it is scoped to.
+
+### The workspace menu also waited for a confirmation that never came
+
+Independently of the above: the menu closed in the `.then()` of
+`activateWorkspace`, whose watchdog rejects after four seconds if
+`getActiveWorkspace()` never reports the destination. On a page whose tab bar
+the adapter reads differently from the way it expected to, that is never. The
+menu now closes on the press; the highlight still follows the host's own
+selection, and a failed switch is reported in the status line.
+
+### The utility menu was assembled from whatever was in the header
+
+It walked `#quicksettings` and the footer and offered what it found, which on a
+real installation is "Apply settings", "Reload UI" and a column of controls
+whose only visible text is the word JSON. Replaced with two written-down
+entries — Unload All Models and Unload LLM — behind a route
+(`POST …/v2/unload`) rather than by pressing a control in the page, because the
+Settings page's Actions row is a button that may or may not exist under a given
+theme.
+
+### Focus mode covered nothing and stopped the page scrolling
+
+Two causes, both of them this implementation doing more than the reference one.
+
+`Host.panels()` paired tab buttons with `#tabs`'s children that carry an id.
+One of those candidates *contained the tab bar*, so the class went onto a box
+holding the tab bar and the workspace together — laid over the window, tab bar
+and all. `panels()` now excludes any candidate containing `.tab-nav` or a
+`role="tablist"`, with a test.
+
+And `enter()` locked the body's scrolling and walked up the tree setting
+`inert` on every sibling at every level. Neither is in the reference
+implementation and neither is needed — the focus root covers the viewport, so
+there is nothing behind it to reach — and between them they produced the visible
+half of the report. Focus is now what the reference document describes: add a
+class, and that is the whole of the DOM work. `overscroll-behavior: contain` in
+the stylesheet keeps a wheel gesture inside the workspace without touching the
+page at all.
+
+The pin was removed at the same time. It was a preference for "keep the panel
+open across workspace changes" occupying the corner everybody aims at for
+"close this"; the panel now simply stays open.
+
+---
+
 ## 4. Deliberate deviations
 
 **No `DataTransfer` adapter for the tab's image input.** The specification names

@@ -3151,30 +3151,53 @@ one gesture for a mouse, a finger and a pen, it costs six pixels of movement
 before it counts as a drag rather than a tap, and it never fires the click it
 was.
 
-**Opened**, it is a header you can drag, a workspace picker, a Focus toggle, and
-the conversation under a heading that collapses the whole of it — collapsed, the
-transcript and the composer leave the layout and the accessibility tree rather
-than merely stopping being painted. The panel is an overlay: it never pushes the
-workspace, and it is not modal on a desktop, so nothing behind it stops
-working while it is open. On a phone it becomes a sheet anchored to the half the
-docking says, and *that* is modal, because a sheet the page scrolls behind is a
-sheet you lose.
+**Opened**, it is a header you can drag with one **✕** on it, a workspace
+picker, a Focus toggle, a small utility menu, and the conversation under a
+heading that collapses the whole of it — collapsed, the transcript and the
+composer leave the layout and the accessibility tree rather than merely stopping
+being painted. **✕** puts the panel back to the launcher, at the same corner;
+pressing the launcher brings it back there. The panel is an overlay: it never
+pushes the workspace, and it is not modal on a desktop, so nothing behind it
+stops working while it is open. On a phone it becomes a sheet anchored to the
+half the docking says, and *that* is modal, because a sheet the page scrolls
+behind is a sheet you lose.
 
 **The workspace picker** lists the tabs this installation actually has and
-activates the host's own tab button. Which one is highlighted follows the host's
-selection, not the press — so a switch made by a header button, or by another
-extension's "send to img2img", moves the highlight too, and a switch that fails
-says so instead of highlighting a workspace you are not in. **Pin** keeps the
-panel open across workspace changes; unpinned, a successful switch minimises it.
+activates the host's own tab button. The menu closes on the press. Which tab is
+highlighted follows the host's selection, not the press — so a switch made by a
+header button, or by another extension's "send to img2img", moves the highlight
+too, and a switch that fails says so in the status line instead of highlighting
+a workspace you are not in. The panel stays open across the switch.
+
+**The utility menu** — the **⋯** beside Focus — has two entries, and both of
+them are the same request: *I need this card back, now.*
+
+| | |
+| --- | --- |
+| **Unload All Models** | Stops llama-server, drops this extension's cached checkpoints, and asks the host to put its own checkpoint down. The equivalent of the Actions row on the Settings page, without leaving the workspace you are in. |
+| **Unload LLM** | Stops llama-server and nothing else. The image side keeps everything it has. |
+
+Each half is attempted independently and none of them can fail the others, so a
+machine that is mid-generation and will not give up the checkpoint still gets
+the twenty gigabytes back from llama-server — and what the status line says is
+what actually happened, not a tick. Neither is policy: the next request that
+needs a model loads it again exactly as it would have.
 
 **Focus** gives the whole browser viewport to whichever workspace is open: the
-header, the sidebars and the footer go under an opaque background and the
-workspace takes the space. It is not the browser's full-screen mode — that takes
-the browser's own chrome as well and needs a gesture every time. Escape leaves
-it, unless something closer to hand wants Escape first: the assistant's own menu,
-an edit in progress, a dialog, or an IME. A running reply is never interrupted
-by leaving focus, and a workspace that cannot be focused safely says why rather
-than half-doing it.
+Forge tab bar, a theme's sidebars and the footer all go under an opaque
+background and the workspace takes the space. It is not the browser's
+full-screen mode — that takes the browser's own chrome as well and needs a
+gesture every time.
+
+Nothing of Forge's is hidden, moved or restyled to do it. The tab bar is still
+exactly where it was, underneath; the workspace's own element is simply laid
+over everything else, which is what makes leaving it one class removal and what
+means nothing about the host can break. Escape leaves it, unless something
+closer to hand wants Escape first: the assistant's own menu, an edit in
+progress, a dialog, or an IME. A running reply is never interrupted by leaving
+focus, and a workspace that cannot be focused safely — one inside a transformed
+ancestor, where `position: fixed` would fill a box rather than the screen — says
+why rather than half-doing it.
 
 **The conversation** in the panel is the one in the tab, with every action the
 tab has: edit, regenerate, continue, send again from here, branch, the version

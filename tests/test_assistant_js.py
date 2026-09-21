@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -52,6 +53,7 @@ function element(id, tag) {
         id,
         tagName: tag || "DIV",
         dataset: {},
+        handlers: {},
         style: {values: {},
                 setProperty(name, value) { node.style.values[name] = value; },
                 removeProperty(name) { delete node.style.values[name]; },
@@ -80,7 +82,10 @@ function element(id, tag) {
         removeChild(child) { node.children = node.children.filter((c) => c !== child); },
         querySelector() { return null; },
         querySelectorAll() { return []; },
-        addEventListener(type, fn) { (listeners[id + ":" + type] ||= []).push(fn); },
+        addEventListener(type, fn) {
+            (listeners[id + ":" + type] ||= []).push(fn);
+            (node.handlers[type] ||= []).push(fn);
+        },
         removeEventListener() {},
         focus() { node.focused = true; },
         click() { node.clicks = (node.clicks || 0) + 1; },
@@ -529,6 +534,160 @@ class TestTheSubmitShortcut:
     def test_an_ime_composition_never_submits(self):
         assert self.submits({"key": "Enter", "ctrlKey": True},
                             {"focusedComposer": True, "composing": True}) is False
+
+
+class TestTheStylesheetCanHideThings:
+    """One missing rule, three bugs.
+
+    `hidden` is how every piece of this panel is shown and hidden, and the
+    browser implements it in its *user-agent* stylesheet. Any author
+    declaration of `display` beats a user-agent one outright, whatever the
+    specificity -- so `.forge-assistant-panel { display: flex }` made the
+    panel, the menu and the conversation body unhideable.
+
+    From the outside that was: ✕ did nothing, the workspace menu stayed open
+    after a workspace was chosen, and the collapsed launcher sat beside a panel
+    that was supposed to be closed. None of it is visible in the JavaScript,
+    which is why it is asserted against the stylesheet.
+    """
+
+    def stylesheet(self):
+        return (pathlib.Path(__file__).resolve().parent.parent
+                / "style.css").read_text(encoding="utf-8")
+
+    def test_the_root_carries_a_hidden_rule(self):
+        css = self.stylesheet()
+
+        assert "#forge-assistant-root [hidden]" in css
+        block = css.split("#forge-assistant-root [hidden]", 1)[1].split("}", 1)[0]
+        assert "display: none" in block
+        assert "!important" in block, (
+            "a plain declaration ties with the display rules below it and loses "
+            "on source order")
+
+    def test_every_part_that_is_hidden_from_script_is_inside_that_root(self):
+        """The rule is scoped to the assistant's root, so anything the script
+        hides has to be a descendant of it or the rule does not reach it."""
+        shell = SHELL.read_text(encoding="utf-8")
+        hidden = set(re.findall(r"nodes\.(\w+)\.hidden", shell))
+
+        assert hidden, "nothing is hidden from script any more; this test is stale"
+        assert hidden <= {"panel", "launcher", "menu", "body", "chip", "jump", "stop",
+                          "send", "unread", "suppressed", "selector", "transcript",
+                          "composer", "status", "filePicker", "launcherIcon",
+                          "launcherLabel", "input", "ghost"}, hidden
+
+
+class TestOpeningAndClosing:
+    def build(self, scenario):
+        return run("""
+            const shell = new NS.Shell(NEW_STORE, NEW_HOST, NEW_FOCUS);
+            shell.mount();
+            %s
+        """ % scenario, sources=("shell",))
+
+    def test_exactly_one_of_the_launcher_and_the_panel_is_ever_drawn(self):
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.state = {panelOpen: false, conversationExpanded: true};
+            shell.nodes = {
+                panel: {hidden: false},
+                launcher: {hidden: false, setAttribute(n, v) { this[n] = v; },
+                           focus() { this.focused = true; }},
+            };
+            shell._save = () => {};
+            shell.placeNow = () => {};
+            shell.closeMenu = () => { shell.menuClosed = true; };
+            const seen = [];
+            shell.showOpen(true);
+            seen.push([shell.nodes.panel.hidden, shell.nodes.launcher.hidden]);
+            shell.showOpen(false);
+            seen.push([shell.nodes.panel.hidden, shell.nodes.launcher.hidden]);
+            console.log(JSON.stringify({seen, expanded: shell.nodes.launcher["aria-expanded"],
+                                        menuClosed: !!shell.menuClosed}));
+        """, sources=("shell",))
+
+        assert found["seen"] == [[False, True], [True, False]]
+        assert found["expanded"] == "false"
+
+    def test_closing_the_panel_also_closes_its_menu(self):
+        """A menu left open on a panel that is not drawn is a menu that comes
+        back with it."""
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.state = {panelOpen: true};
+            shell.nodes = {panel: {hidden: false},
+                           launcher: {hidden: true, setAttribute() {}, focus() {}}};
+            shell._save = () => {};
+            shell.placeNow = () => {};
+            shell.closeMenu = () => { shell.menuClosed = true; };
+            shell.close();
+            console.log(JSON.stringify({menuClosed: !!shell.menuClosed,
+                                        open: shell.state.panelOpen}));
+        """, sources=("shell",))
+
+        assert found["menuClosed"] is True
+        assert found["open"] is False
+
+    def test_the_header_carries_no_pin(self):
+        """It was a preference nobody asked for, in the corner everybody aims
+        at."""
+        shell = SHELL.read_text(encoding="utf-8")
+
+        assert "pinned" not in shell
+        assert "nodes.pin" not in shell
+
+
+class TestTheUtilityMenu:
+    def test_it_offers_exactly_the_two_actions(self):
+        """It used to walk the header and offer whatever it found, which on a
+        real installation is "Apply settings", "Reload UI" and a column of
+        controls whose only visible text is the word JSON."""
+        found = run("""
+            const host = NS.host();
+            console.log(JSON.stringify({
+                items: host.listUtilities().map((u) => [u.label, u.kind, u.scope]),
+            }));
+        """, sources=("host",))
+
+        assert found["items"] == [["Unload All Models", "unload", "all"],
+                                  ["Unload LLM", "unload", "llm"]]
+
+    def test_it_never_reads_the_host_s_header(self):
+        host = HOST.read_text(encoding="utf-8")
+        utilities = host.split("Host.prototype.listUtilities = function", 1)[1] \
+            .split("Host.prototype", 1)[0]
+
+        assert "querySelector" not in utilities
+        assert "quicksettings" not in utilities
+        assert "settings_submit" not in utilities
+
+
+class TestTheWorkspacePicker:
+    def test_the_menu_closes_on_the_press_not_on_the_confirmation(self):
+        """Held open until the host confirmed, it stayed open for ever whenever
+        the confirmation did not arrive -- and it did not, because the watchdog
+        rejects after four seconds on any page whose tab bar this adapter reads
+        differently from the way it expected to."""
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.state = {panelOpen: true};
+            let closed = 0;
+            shell.closeMenu = () => { closed += 1; };
+            shell.say = () => {};
+            shell.host = {
+                getActiveWorkspace: () => "somewhere_else",
+                listWorkspaces: () => [{id: "tab_txt2img", label: "Txt2Img",
+                                        available: true}],
+                // Never settles: the host has not confirmed and never will.
+                activateWorkspace: () => new Promise(() => {}),
+            };
+            const items = shell.workspaceItems();
+            items[0].handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({closed}));
+        """, sources=("shell",))
+
+        assert found["closed"] == 1
 
 
 class TestTheStore:
