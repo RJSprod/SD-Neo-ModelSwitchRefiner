@@ -5973,22 +5973,43 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: none !important;
 }
 
+/* `!important` throughout, and it is load-bearing.
+
+   The workspace is a Gradio tab panel, and Gradio styles it from a component
+   whose rules are scoped by a generated class: what ships for the panel is a
+   tag-plus-class selector setting `position: relative`, padding and a border,
+   and a tag plus a class outranks the lone class below. Without `!important`
+   the panel stayed `position: relative` -- a row in the page -- with this rule
+   silently losing, which is the whole of why the first three attempts at focus
+   mode changed nothing anybody could see.
+
+   The class only ever goes on a panel focus mode chose, so there is nothing
+   here for `!important` to trample. */
 .forge-assistant-focus-root {
-    position: fixed;
-    inset: 0;
-    z-index: var(--forge-assistant-workspace-layer, 1100);
-    margin: 0;
-    padding: 8px;
-    box-sizing: border-box;
-    overflow: auto;
+    position: fixed !important;
+    inset: 0 !important;
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    z-index: var(--forge-assistant-workspace-layer, 1100) !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 8px !important;
+    box-sizing: border-box !important;
+    overflow: auto !important;
+    display: block !important;
     /* The workspace scrolls inside itself, and a wheel gesture that reaches the
        end of it stops there rather than chaining out to the page underneath.
        This is what replaced locking the body's scrolling: the lock was visible
        to the person (the page simply stopped moving) and was not needed, because
        the focus root covers the viewport and there is nothing behind it to
        reach. */
-    overscroll-behavior: contain;
-    background: var(--body-background-fill, var(--background-fill-primary, #101010));
+    overscroll-behavior: contain !important;
+    background: var(--body-background-fill, var(--background-fill-primary, #101010)) !important;
 }
 
 /* Reduced motion is respected rather than ignored: every transition here is
