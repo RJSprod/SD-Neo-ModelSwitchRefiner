@@ -1741,7 +1741,33 @@
         return holder.tagName === "TEXTAREA" ? holder : holder.querySelector("textarea");
     }
 
-    function insert(text) {
+    function insert(text, options) {
+        // ``options.origin`` says which composer asked. The Forge Assistant is
+        // a DOM panel rather than a Gradio component, so a transcript it asked
+        // for cannot simply be written into the textarea -- and must not be:
+        // the two composers share one draft, and the assistant's copy of it is
+        // the one its own view reads.
+        //
+        // The append-never-replace rule below is the same in both, and it is
+        // the rule that matters: somebody who typed half a message and then
+        // dictated the rest has not asked for the half they typed to be thrown
+        // away, and there is no undo in a Gradio textbox.
+        const settings = options || {};
+        if (settings.origin === "assistant") {
+            const store = window.forgeAssistant && window.forgeAssistant._store;
+            if (store) {
+                const key = settings.conversationKey;
+                const draft = store.draft(key);
+                const existing = draft.text || "";
+                store.setDraftText(existing.trim()
+                    ? existing.replace(/\s*$/, "") + " " + text
+                    : text, key);
+                return true;
+            }
+            // The panel went away between the microphone opening and the words
+            // coming back. Fall through to the tab's composer rather than
+            // dropping what was said.
+        }
         const field = composer();
         if (!field) return false;
         const existing = field.value || "";
@@ -2425,7 +2451,14 @@
             + "microphone is usually much more accurate.";
     }
 
-    function send(wav) {
+    function send(wav, options) {
+        // ``options`` is where the recording came from and what is to be done
+        // with the words: ``{origin, mode, conversationKey}``. ``mode:
+        // "review"`` never auto-sends whatever the preference says, which is
+        // what the flyout always asks for -- a panel that sent what it heard
+        // would send a half-heard sentence, and the preference is not that
+        // control's to change.
+        const settings = options || {};
         markMic("working");
         say("Transcribing…");
         fetch(url(ROUTES.stt), {
@@ -2442,11 +2475,12 @@
                     "warn");
                 return;
             }
-            if (!insert(payload.text)) {
+            if (!insert(payload.text, settings)) {
                 say(MESSAGES.failed, "error");
                 return;
             }
             say("Transcribed." + microphoneNote(false));
+            if (settings.mode === "review") return;
             if (!payload.auto_send) return;
             // One task, so Gradio has taken the value off the textarea before
             // the Send handler reads it. Send is pressed rather than reproduced:
@@ -6952,6 +6986,191 @@
         wire();
         watch();
     }
+
+    // -- the facade the Forge Assistant speaks through ------------------------ //
+    //
+    // One capture instance, one playback owner, no second AudioContext and no
+    // second queue. Everything below calls the functions this file already has;
+    // what it adds is a *second trigger* for them, because the flyout's
+    // microphone is a click and the composer's is a slide, and a click cannot
+    // reasonably synthesise a slide.
+    //
+    // The originating conversation and draft version are captured BEFORE
+    // permission is asked for, not after it is granted: a reader who switches
+    // thread while the browser's permission prompt is up must not have the
+    // words land in the thread they switched to.
+
+    let dictation = null;
+
+    function speechSnapshot() {
+        return {
+            capturing: !!dictation || !!capture,
+            state: dictation ? dictation.phase : (capture ? "recording" : "idle"),
+            playing: voiceBusy,
+            generating: llmBusy(),
+            turn: (fieldValue(IDS.token) || "").trim(),
+            automatic: readingAloud(),
+        };
+    }
+
+    // The preference, read off and written through the switch that owns it.
+    // One switch, both views -- a second copy of "should replies be spoken"
+    // is a second thing to be out of step with Settings.
+    function autoSpeakBox() {
+        const holder = byId(IDS.autoSpeak);
+        if (!holder) return null;
+        return holder.tagName === "INPUT" ? holder
+            : holder.querySelector("input[type=checkbox]");
+    }
+
+    function readingAloud() {
+        const box = autoSpeakBox();
+        if (!box) return false;
+        return box.checked !== undefined ? !!box.checked
+            : box.getAttribute("aria-checked") === "true";
+    }
+
+    const speechListeners = new Set();
+
+    function announceSpeech() {
+        const found = speechSnapshot();
+        speechListeners.forEach(function (listener) {
+            try {
+                listener(found);
+            } catch (error) {
+                console.error("Model Chain: a speech listener failed", error);
+            }
+        });
+    }
+
+    const FACADE = {
+        getSpeechSnapshot: speechSnapshot,
+
+        subscribeSpeech: function (listener) {
+            speechListeners.add(listener);
+            try {
+                listener(speechSnapshot());
+            } catch (error) { /* reported by the caller */ }
+            return function () { speechListeners.delete(listener); };
+        },
+
+        startDictation: function (options) {
+            const settings = options || {};
+            if (dictation || capture) return Promise.resolve(false);
+            const record = {
+                phase: "permission",
+                conversationKey: settings.conversationKey || "",
+                draftVersion: settings.draftVersion || 0,
+                mode: "review",
+                cancelled: false,
+                state: null,
+            };
+            dictation = record;
+            announceSpeech();
+            // The speaker first: the assistant's own output is the thing most
+            // likely to end up in a microphone opened beside it.
+            stopSpeaking(true);
+            unlock();
+            return startCapture(null, true).then(function (state) {
+                if (record.cancelled || dictation !== record) {
+                    // Cancelled while the browser was asking. Stop every track,
+                    // attach nothing, accept nothing.
+                    releaseCapture(state);
+                    return false;
+                }
+                record.state = state;
+                record.phase = "recording";
+                announceSpeech();
+                return true;
+            }).catch(function (error) {
+                if (dictation === record) {
+                    dictation = null;
+                    announceSpeech();
+                }
+                say(captureFailure(error), "warn");
+                return false;
+            });
+        },
+
+        stopDictation: function (options) {
+            const settings = options || {};
+            const record = dictation;
+            if (!record) return false;
+            dictation = null;
+            record.phase = "transcribing";
+            announceSpeech();
+            const state = record.state;
+            if (!state) return false;
+            let samples = null;
+            try {
+                samples = resample(state.chunks || [], 0, 0);
+            } catch (error) {
+                samples = null;
+            }
+            releaseCapture(state);
+            if (!samples || !samples.length || settings.commit === false) {
+                announceSpeech();
+                return false;
+            }
+            send(encodeWav(samples, state.rate), {
+                origin: "assistant",
+                mode: record.mode,
+                conversationKey: record.conversationKey,
+                draftVersion: record.draftVersion,
+            });
+            announceSpeech();
+            return true;
+        },
+
+        cancelDictation: function () {
+            const record = dictation;
+            if (!record) return false;
+            record.cancelled = true;
+            dictation = null;
+            if (record.state) releaseCapture(record.state);
+            announceSpeech();
+            return true;
+        },
+
+        setAutomaticReadAloud: function (on) {
+            // The existing preference, one switch for both views. Turning it
+            // off stops the automatic playback that is running as well as
+            // future automatic starts; explicit Listen is unaffected.
+            const box = autoSpeakBox();
+            if (box && readingAloud() !== !!on) {
+                // Pressed rather than assigned. The switch is a Gradio control
+                // and Gradio has to hear about a change to store it; assigning
+                // ``checked`` would move the tick and leave the setting alone.
+                box.click();
+            }
+            if (!on) stopSpeaking(true, "preference");
+            announceSpeech();
+            return !!on;
+        },
+
+        listen: function () {
+            // Explicit playback of a reply that is already on screen. The
+            // server holds the lease, so asking for one stops whoever had it.
+            const token = (fieldValue(IDS.token) || "").trim();
+            if (!token) return false;
+            // The non-streaming path, which is what an explicit Listen is: the
+            // reply is already whole, so there is nothing to stream. Acquiring
+            // the lease is the server's -- the token is one-shot and the page
+            // that redeems it is the one that speaks.
+            speakCompleted(token);
+            return true;
+        },
+
+        stopPlayback: function (options) {
+            const settings = options || {};
+            stopSpeaking(settings.origin !== "automatic", settings.origin || "any");
+            announceSpeech();
+            return true;
+        },
+    };
+
+    window.forgeAssistant = window.forgeAssistant || {};
+    window.forgeAssistant.speech = FACADE;
 
     if (typeof onUiLoaded === "function") {
         onUiLoaded(start);

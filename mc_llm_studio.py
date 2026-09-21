@@ -60,6 +60,7 @@ import mc_broker
 import mc_llm_files
 import mc_llm_roles
 import mc_llm_paths
+import mc_llm_overlays
 import mc_llm_ui as ui
 import mc_llm_vision
 
@@ -132,6 +133,10 @@ def _build():
     import mc_llm_prompt_panel
 
     initial = _initial_mode()
+
+    # A UI reload builds a second set of components, and a handler writing into
+    # the first set's would be writing into a page nobody is looking at.
+    mc_llm_overlays.reset()
 
     with gr.Blocks(analytics_enabled=False) as block:
         with gr.Column(elem_id=ui.ident("studio"), elem_classes=ui.classes("studio")):
@@ -218,6 +223,13 @@ def _build():
                 to_setup = gr.Button("Open Setup", size="sm",
                                      elem_classes=ui.classes("nav-entry"))
 
+            # Registered before the panels are built, because Conversation's
+            # own handlers have to be able to close these and are wired inside
+            # its ``build()``.
+            mc_llm_overlays.register("mode", mode_sheet)
+            mc_llm_overlays.register("model", model_sheet)
+            mc_llm_overlays.register_state(OVERLAY_OWNER, sheet_state)
+
             # Keyed by mode rather than zipped against MODES: a mode added to
             # the selector without a panel behind it should fail here, where
             # on_ui_tabs turns it into the "could not start" tab, rather than
@@ -252,7 +264,7 @@ def _build():
 
         # The State first, then one visibility per sheet: the order
         # :func:`_sheet` answers in.
-        sheets = [sheet_state, mode_sheet, model_sheet]
+        sheets = _sheet_outputs(sheet_state)
         # Both state controls say the same thing and are updated together: the
         # one in this bar, and the one Conversation draws in its own header.
         chips = [chip, conversation["chip"]]
@@ -267,6 +279,14 @@ def _build():
         # comes to write the runtime line into a banner.
         mode.change(fn=minimax["on_mode"], inputs=[mode], outputs=minimax["gate"],
                     queue=False)
+        # A third handler, writing nothing. The Forge Assistant hides its
+        # conversation section while this tab is showing Conversation -- the
+        # same conversation, twice on one screen, is two places to type into
+        # and one of them is wrong -- and the only way it can know is to be
+        # told. Published rather than polled, and it fails open: an event that
+        # cannot be sent leaves the panel showing a conversation it did not
+        # need to, which is a duplicate rather than a defect.
+        mode.change(fn=_publish_mode, inputs=[mode], outputs=[], queue=False)
 
         # Toggles, not openers. A menu that can only open is a menu you cannot
         # dismiss from the button you opened it with, and on a desktop that
@@ -343,6 +363,16 @@ def _build():
     return block
 
 
+def _publish_mode(chosen) -> None:
+    """Tell every open page which workspace LLM Studio is showing."""
+    try:
+        import mc_llm_conversation_service as service
+
+        service.publish(service.MODE_CHANGED, None, mode=str(chosen or ""))
+    except Exception:
+        logger.debug("Model Chain: could not publish the mode change", exc_info=True)
+
+
 def _sheet(name: str = "") -> list:
     """Which sheet is open, and one visibility per sheet.
 
@@ -350,9 +380,28 @@ def _sheet(name: str = "") -> list:
     that State is what makes ``\u2630`` a toggle rather than a control that can
     only ever open something -- a Column has no value a handler can be given,
     so the open sheet has to be remembered somewhere a handler can read.
+
+    The answer runs past this shell's own two sheets now. Conversation's four
+    screens and its message action sheet are pop surfaces over the same
+    workspace, and they used to be a separate idea of "only one at a time" that
+    this one had never heard of -- so opening the workspace chooser left the
+    character editor underneath it. :mod:`mc_llm_overlays` decides for all
+    seven; the extra values land in the components it registered, and callers
+    that only read the first three see exactly what they always did.
     """
     wanted = name if name in SHEETS else ""
-    return [wanted] + [gr.update(visible=(wanted == key)) for key in SHEETS]
+    return ([wanted] + mc_llm_overlays.updates(wanted, SHEETS)
+            + mc_llm_overlays.foreign(SHEETS, OVERLAY_OWNER)[1])
+
+
+OVERLAY_OWNER = "shell"
+"""What this shell's open-sheet State is called in the overlay registry."""
+
+
+def _sheet_outputs(sheet_state) -> list:
+    """The components :func:`_sheet`'s answer lands in, in its order."""
+    return ([sheet_state] + mc_llm_overlays.components(SHEETS)
+            + mc_llm_overlays.foreign(SHEETS, OVERLAY_OWNER)[0])
 
 
 def _toggle_sheet(name: str):

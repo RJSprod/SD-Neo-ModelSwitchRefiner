@@ -675,8 +675,18 @@ def _remember(*, key: str, **values):
 def speech_marker(take_reply, character_named=None):
     """A success-only handler that turns a completed reply into a target token.
 
-    ``take_reply`` is the chat panel's own record of what the run that just
-    finished produced -- consumed, so one run can only ever create one target.
+    ``take_reply`` is the panel's own record of what the run that just finished
+    produced. It takes the operation id now, and *reads* rather than consumes.
+
+    Those are one change and it fixes one defect. The record used to be a
+    single process-global slot that this function popped, so two pages -- or
+    two threads replying at once -- could take each other's answer, and the
+    page that lost spoke somebody else's reply. Bound to an operation id it
+    cannot happen; read rather than popped, a duplicate terminal callback (which
+    a host is entitled to deliver) gets the same answer twice instead of
+    somebody else's once. Speaking twice is prevented where it always was, by
+    the streamed-turn check below.
+
     Four separate refusals, and each is one of the ways this feature could
     otherwise speak something nobody asked it to:
 
@@ -698,9 +708,9 @@ def speech_marker(take_reply, character_named=None):
     this path did for every reply before characters had voices of their own.
     """
 
-    def marker(who=""):
+    def marker(who="", operation_id=""):
         try:
-            text = take_reply()
+            text = take_reply(operation_id)
             if not text or not str(text).strip():
                 return ""
             if _last_run.get("turn"):

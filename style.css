@@ -2074,6 +2074,7 @@
     flex: 1 1 auto;
 }
 
+
 .mc-krea-spatial-switch-row {
     display: flex;
     align-items: center;
@@ -5505,4 +5506,494 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.5em 0.8em;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The Forge Assistant                                                       */
+/* ------------------------------------------------------------------------- */
+
+/* Not under #mc-llm-studio, and that is the one exception in this file worth
+   explaining. Everything else this extension draws lives inside a tab, so it is
+   scoped to the tab's id and a theme can restyle its surroundings without
+   reaching it. The assistant is appended to document.body -- there is no Forge
+   callback that mounts a Gradio component outside the tab tree, and a panel
+   that is only available on one tab is not a global assistant -- so its scope
+   is its own root id and its own class prefix instead. No selector below
+   depends on anything Gradio generated.
+
+   Colours are the host's custom properties throughout, so a theme switch or a
+   light/dark toggle flows through without this file being told. */
+
+#forge-assistant-root {
+    --forge-assistant-layer: 1200;
+    --forge-assistant-workspace-layer: 1100;
+    /* The safe-area insets, published as numbers the script can read. Added
+       once, then the gap: adding the gap first and the inset afterwards puts a
+       panel on an iPhone's home indicator. */
+    --forge-assistant-inset-top: env(safe-area-inset-top, 0px);
+    --forge-assistant-inset-right: env(safe-area-inset-right, 0px);
+    --forge-assistant-inset-bottom: env(safe-area-inset-bottom, 0px);
+    --forge-assistant-inset-left: env(safe-area-inset-left, 0px);
+    --forge-assistant-bubble: 75%;
+
+    position: fixed;
+    inset: 0;
+    z-index: var(--forge-assistant-layer);
+    /* The root covers the page and catches nothing. Only what is drawn inside
+       it takes a pointer, which is what lets a full-viewport root sit over the
+       workspace without being a full-viewport click shield. */
+    pointer-events: none;
+}
+
+#forge-assistant-root > * {
+    pointer-events: auto;
+}
+
+.forge-assistant-launcher,
+.forge-assistant-panel {
+    position: fixed;
+    box-sizing: border-box;
+    font-family: inherit;
+    color: var(--body-text-color);
+    background: var(--background-fill-primary);
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg, 10px);
+    box-shadow: var(--shadow-drop-lg, 0 6px 24px rgba(0, 0, 0, 0.28));
+}
+
+.forge-assistant-launcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    /* 44 is the floor a finger needs, and the label decides the rest up to a
+       width that still leaves a phone screen usable. */
+    min-height: 44px;
+    min-width: 44px;
+    max-width: min(240px, calc(100vw - 32px));
+    padding: 0.4em 0.8em;
+    font-size: 0.95em;
+    cursor: pointer;
+    touch-action: none;
+}
+
+.forge-assistant-launcher-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forge-assistant-unread {
+    min-width: 1.4em;
+    padding: 0 0.35em;
+    border-radius: 999px;
+    background: var(--color-accent-soft, var(--background-fill-secondary));
+    color: var(--body-text-color);
+    font-size: 0.75em;
+    line-height: 1.6;
+    text-align: center;
+}
+
+.forge-assistant-panel {
+    display: flex;
+    flex-direction: column;
+    /* The thread scrolls; the panel does not grow past the viewport. On a very
+       short screen the body scrolls too, so no control is ever unreachable. */
+    max-height: calc(100vh - 2 * 24px);
+    width: 360px;
+    overflow: hidden;
+}
+
+.forge-assistant-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.5em 0.6em;
+    border-bottom: 1px solid var(--border-color-primary);
+    cursor: grab;
+    touch-action: none;
+}
+
+.forge-assistant-title {
+    flex: 1 1 auto;
+    margin: 0;
+    font-size: 0.95em;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forge-assistant-icon-button,
+.forge-assistant-nav-button,
+.forge-assistant-action,
+.forge-assistant-send,
+.forge-assistant-stop,
+.forge-assistant-menu-item {
+    min-height: 44px;
+    padding: 0.3em 0.6em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.forge-assistant-icon-button {
+    min-width: 44px;
+}
+
+.forge-assistant-nav {
+    display: flex;
+    gap: 0.35em;
+    padding: 0.4em 0.6em;
+    flex-wrap: wrap;
+}
+
+.forge-assistant-accordion {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    width: 100%;
+    padding: 0.5em 0.6em;
+    border: 0;
+    border-top: 1px solid var(--border-color-primary);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+
+.forge-assistant-chevron {
+    display: inline-block;
+    transition: transform 120ms ease;
+}
+
+.forge-assistant-accordion[aria-expanded="true"] .forge-assistant-chevron {
+    transform: rotate(90deg);
+}
+
+.forge-assistant-conversation {
+    display: flex;
+    flex-direction: column;
+    /* min-height: 0 is what lets the transcript scroll instead of the panel
+       growing: a flex child's default minimum is its content. */
+    min-height: 0;
+    gap: 0.4em;
+    padding: 0 0.6em 0.6em;
+}
+
+.forge-assistant-transcript {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5em;
+    min-height: 0;
+    max-height: 48vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.forge-assistant-bubble {
+    max-width: var(--forge-assistant-bubble, 75%);
+    padding: 0.45em 0.65em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg, 10px);
+    background: var(--background-fill-secondary, transparent);
+    font-size: var(--forge-assistant-text, inherit);
+    word-break: break-word;
+}
+
+/* Yours on the right, the character's on the left -- the same distinction the
+   tab's avatars already make, kept when the avatars are off. */
+.forge-assistant-mine {
+    align-self: flex-end;
+}
+
+.forge-assistant-reply {
+    align-self: flex-start;
+}
+
+.forge-assistant-provisional {
+    opacity: 0.85;
+    border-style: dashed;
+}
+
+/* Wide code and tables scroll inside the bubble rather than widening it. A
+   bubble that grows to fit a table is a panel with a horizontal scrollbar. */
+.forge-assistant-code,
+.forge-assistant-bubble table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.forge-assistant-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25em;
+    margin-top: 0.4em;
+}
+
+/* Reachable without hover, always: a control that only appears on hover is a
+   control a touch screen does not have. */
+.forge-assistant-action {
+    min-height: 32px;
+    padding: 0.15em 0.4em;
+    font-size: 0.8em;
+}
+
+.forge-assistant-status {
+    margin: 0;
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+.forge-assistant-status[data-kind="warn"] {
+    color: var(--color-accent, #b45309);
+    opacity: 1;
+}
+
+.forge-assistant-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+}
+
+.forge-assistant-input {
+    width: 100%;
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 0.45em 0.6em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-primary);
+    color: inherit;
+    font: inherit;
+    font-size: var(--forge-assistant-text, inherit);
+    resize: none;
+}
+
+.forge-assistant-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
+    flex-wrap: nowrap;
+}
+
+.forge-assistant-send {
+    margin-left: auto;
+}
+
+.forge-assistant-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.3em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+}
+
+.forge-assistant-thumb {
+    width: 44px;
+    height: 44px;
+    object-fit: cover;
+    border-radius: var(--radius-sm, 6px);
+}
+
+.forge-assistant-menu {
+    position: absolute;
+    left: 0.6em;
+    right: 0.6em;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2em;
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 0.4em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg, 10px);
+    background: var(--background-fill-primary);
+    box-shadow: var(--shadow-drop-lg, 0 6px 20px rgba(0, 0, 0, 0.25));
+}
+
+.forge-assistant-menu-item {
+    text-align: left;
+}
+
+.forge-assistant-menu-item[aria-current="true"] {
+    border-color: var(--color-accent, #2563eb);
+    font-weight: 600;
+}
+
+.forge-assistant-pending {
+    opacity: 0.6;
+}
+
+.forge-assistant-ghost {
+    position: fixed;
+    border: 2px dashed var(--border-color-primary);
+    border-radius: var(--radius-lg, 10px);
+    background: transparent;
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+.forge-assistant-resize {
+    position: absolute;
+    top: 44px;
+    bottom: 0;
+    left: 0;
+    width: 8px;
+    cursor: ew-resize;
+}
+
+.forge-assistant-jump {
+    align-self: center;
+    padding: 0.2em 0.6em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    background: var(--background-fill-primary);
+    color: inherit;
+    font: inherit;
+    font-size: 0.8em;
+    cursor: pointer;
+}
+
+.forge-assistant-link {
+    border: 0;
+    background: none;
+    color: var(--color-accent, #2563eb);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.forge-assistant-suppressed {
+    margin: 0;
+    font-size: 0.85em;
+}
+
+/* The phone sheet. Full width, anchored to the half the docking says, and
+   genuinely modal -- dialog semantics, contained focus, inert background --
+   because a non-modal sheet on a phone is a sheet the page scrolls behind. */
+@media (max-width: 639px) {
+    #forge-assistant-root .forge-assistant-sheet {
+        left: 0;
+        right: 0;
+        width: 100%;
+        max-width: 100%;
+        max-height: calc(100% - var(--forge-assistant-inset-top)
+                              - var(--forge-assistant-inset-bottom));
+        border-radius: var(--radius-lg, 10px) var(--radius-lg, 10px) 0 0;
+        padding-bottom: var(--forge-assistant-inset-bottom);
+    }
+
+    #forge-assistant-root[data-anchor^="top"] .forge-assistant-sheet {
+        top: var(--forge-assistant-inset-top);
+        bottom: auto;
+        border-radius: 0 0 var(--radius-lg, 10px) var(--radius-lg, 10px);
+    }
+
+    #forge-assistant-root[data-anchor^="bottom"] .forge-assistant-sheet {
+        top: auto;
+        bottom: 0;
+    }
+
+    .forge-assistant-bubble {
+        /* At this width the gutter costs more than the shape gains. */
+        max-width: max(var(--forge-assistant-bubble, 75%), 90%);
+    }
+}
+
+/* Focus mode. The workspace fills the viewport under the assistant and over
+   everything else; the host's own bindings underneath are untouched, because
+   nothing is moved in the DOM -- only painted somewhere else.
+
+   A large z-index is not on its own sufficient and the script checks what it
+   cannot know from here: an ancestor with a transform, filter or containment
+   makes `position: fixed` resolve against that ancestor, and the failure is
+   silent. */
+.forge-assistant-focus-root {
+    position: fixed;
+    inset: 0;
+    z-index: var(--forge-assistant-workspace-layer, 1100);
+    margin: 0;
+    padding: 8px;
+    box-sizing: border-box;
+    overflow: auto;
+    background: var(--body-background-fill, var(--background-fill-primary, #101010));
+}
+
+body.forge-assistant-focused {
+    overflow: hidden;
+}
+
+/* Reduced motion is respected rather than ignored: every transition here is
+   decoration and none of it carries information. */
+@media (prefers-reduced-motion: reduce) {
+    #forge-assistant-root * {
+        transition: none !important;
+        animation: none !important;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The conversation column, and the bubbles in the tab                       */
+/* ------------------------------------------------------------------------- */
+
+/* A variable, not a class per preset: changing the column reloads nothing,
+   resets no scroll and interrupts no reply, because all that changes is one
+   number. `none` is the "full" preset and means no limit at all.
+
+   The column applies to the transcript AND the composer so they share an edge.
+   The page never scrolls sideways at any setting: the limit is a max-width, so
+   as the window narrows the column narrows with it. */
+#mc-llm-studio .mc-llm-chat-stage {
+    --mc-llm-column: 820px;
+}
+
+#mc-llm-studio .mc-llm-transcript,
+#mc-llm-studio .mc-llm-composer,
+#mc-llm-studio .mc-llm-chat-status {
+    max-width: var(--mc-llm-column, 820px);
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+}
+
+/* Below the comfortable floor the column fills what is there minus the gutter,
+   and below about 360px the gutter goes before the content does. */
+@media (max-width: 400px) {
+    #mc-llm-studio .mc-llm-chat-stage {
+        --mc-llm-column: none;
+    }
+
+    #mc-llm-studio .mc-llm-transcript,
+    #mc-llm-studio .mc-llm-composer {
+        padding-left: 0.2em;
+        padding-right: 0.2em;
+    }
+}
+
+/* Bubble width inside gr.Chatbot. CSS only, so it cannot break anything -- and
+   it CAN silently stop matching after a Gradio or theme upgrade, because the
+   row classes are Gradio's rather than ours. That is recorded in the
+   compatibility notes and there is a visual check on the upgrade checklist;
+   there is no way to do this without depending on them, short of replacing the
+   component, which is out of scope. */
+#mc-llm-chat-transcript .message-wrap .message,
+#mc-llm-chat-transcript .message-row .message,
+#mc-llm-chat-transcript .bubble-wrap .message {
+    max-width: var(--forge-assistant-bubble, 75%);
+}
+
+@media (max-width: 480px) {
+    #mc-llm-chat-transcript .message-wrap .message,
+    #mc-llm-chat-transcript .message-row .message,
+    #mc-llm-chat-transcript .bubble-wrap .message {
+        max-width: max(var(--forge-assistant-bubble, 75%), 90%);
+    }
 }

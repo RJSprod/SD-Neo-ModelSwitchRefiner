@@ -435,7 +435,7 @@ class TestTheExtensionStartsWithoutVoice:
             raise RuntimeError("no voice here")
 
         monkeypatch.setattr(mc_voice_models, "status", broken)
-        marker = mc_voice_ui.speech_marker(lambda: "a completed reply")
+        marker = mc_voice_ui.speech_marker(lambda _="": "a completed reply")
         assert marker() == ""
 
     def test_the_voice_modules_import_without_a_host(self):
