@@ -5955,15 +5955,21 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: none !important;
 }
 
-/* The tab bar, wherever the theme has put it. The rule above finds it as a
-   child of a marked ancestor, which is where Forge leaves it -- but a theme is
-   free to move it, and Lobe draws its own header from it. A second rule keyed
-   on what the bar *is* rather than where it sits costs nothing and is the
-   difference between focus mode working under a theme and not.
+/* Chrome the script decided to hide: a tab bar the theme moved somewhere the
+   rule above cannot reach.
 
-   Scoped to the focused body so it is inert the rest of the time. */
-body.forge-assistant-focused .tab-nav,
-body.forge-assistant-focused [role="tablist"] {
+   Marked one element at a time rather than selected here, and that distinction
+   cost a blank page. A rule naming the tab bar by its class and its ARIA role
+   looks like a free safety net for a theme that relocates the bar. It is not
+   free: those names are on every nested tab group as well -- Txt2Img is full
+   of them -- and on a host where the role sits on a container rather than on
+   the strip of buttons, that container is an ancestor of the focused workspace
+   and such a rule hides the whole page.
+
+   The condition that makes it safe is "unless it contains the workspace", and
+   there is no way to write that as a selector. So enter() decides and this
+   rule only does as it is told. */
+.forge-assistant-focus-hidden {
     display: none !important;
 }
 
