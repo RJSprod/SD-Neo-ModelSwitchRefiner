@@ -26,7 +26,14 @@
     const ROOT_CLASS = "forge-assistant-focus-root";
     const BODY_CLASS = "forge-assistant-focused";
     const PATH_CLASS = "forge-assistant-focus-path";
+    const HIDDEN_CLASS = "forge-assistant-focus-hidden";
     const ASSISTANT_ROOT = "forge-assistant-root";
+
+    // Tab bars outside the focused workspace. Marked one at a time by the
+    // script rather than selected by a stylesheet, because the decision that
+    // makes it safe -- "unless it contains the workspace" -- is one CSS cannot
+    // express, and the version that left it to CSS hid the page.
+    const TAB_BARS = ".tab-nav, [role=\"tablist\"]";
 
     // Properties on an ancestor that would make `position: fixed` resolve
     // against that ancestor instead of the viewport. A focus root inside one of
@@ -87,6 +94,50 @@
                         + ", so it fills that area rather than the whole window."
                     : ""};
     };
+
+    function each(selector, visit) {
+        let found = [];
+        try {
+            found = Array.prototype.slice.call(document.querySelectorAll(selector));
+        } catch (error) {
+            return;
+        }
+        found.forEach((node) => {
+            if (node && node.classList) visit(node);
+        });
+    }
+
+    // Is this element actually being drawn? Asked of the layout rather than of
+    // the classes, because the question is whether somebody can see the
+    // workspace and the ways to hide an element are not enumerable from here --
+    // a `display: none` anywhere above it is enough, and so is a zero box.
+    //
+    // `getBoundingClientRect` forces the pending layout, which is what makes
+    // this answerable in the same turn as the marking that caused it.
+    function painted(root) {
+        try {
+            const box = root.getBoundingClientRect();
+            return box.width > 0 && box.height > 0;
+        } catch (error) {
+            // A host with no layout to ask -- assume the marking was fine
+            // rather than throwing away a mode that may well be working.
+            return true;
+        }
+    }
+
+    // Every mark this module put on the page, taken off. Split out of `exit`
+    // because the safety valve needs exactly this and none of the rest of
+    // leaving: no scroll restored, no observer stopped, no adapter told.
+    function undo(context) {
+        (context.path || []).forEach((node) => {
+            if (node && node.classList) node.classList.remove(PATH_CLASS);
+        });
+        (context.hidden || []).forEach((node) => {
+            if (node && node.classList) node.classList.remove(HIDDEN_CLASS);
+        });
+        context.path = [];
+        context.hidden = [];
+    }
 
     function trapped(root) {
         // Walked to the document, because one ancestor with a transform is
@@ -164,7 +215,8 @@
 
         const adapter = this.adapterFor(id);
         const context = Object.assign(saveState(root),
-                                      {id, adapter, path: [], note: allowed.note || ""});
+                                      {id, adapter, path: [], hidden: [],
+                                       note: allowed.note || ""});
 
         // Mark the workspace's ancestors, from its parent up to <body>. One
         // stylesheet rule then hides every child of a marked element that is
@@ -191,8 +243,36 @@
             walk = walk.parentElement;
         }
 
+        // Tab bars the marking above did not reach, because the theme moved
+        // them out of the workspace's ancestry. Never one that contains the
+        // workspace, and never one inside it -- a workspace with nested tabs
+        // keeps its own.
+        each(TAB_BARS, (bar) => {
+            if (bar === root || root.contains(bar) || bar.contains(root)) return;
+            if (bar.id === ASSISTANT_ROOT || bar.querySelector("#" + ASSISTANT_ROOT)) return;
+            bar.classList.add(HIDDEN_CLASS);
+            context.hidden.push(bar);
+        });
+
         root.classList.add(ROOT_CLASS);
         document.body.classList.add(BODY_CLASS);
+
+        // The safety valve, and the reason it is here: the rule that hides the
+        // chrome is written against a shape this code cannot see -- somebody
+        // else's theme, on somebody else's Forge. When it got that shape wrong
+        // the whole page went blank, which is a worse outcome than focus mode
+        // not working, because nothing on screen says what happened or how to
+        // undo it.
+        //
+        // So the one thing focus mode exists to show is checked, after the
+        // marking and before anybody looks at it. If the workspace is not being
+        // painted, the marking comes off and what is left is the plain overlay
+        // -- the reference implementation's behaviour, which is imperfect under
+        // a theme that draws its own header and is never blank.
+        if (!painted(root)) {
+            undo(context);
+            context.degraded = true;
+        }
 
         try {
             if (typeof adapter.enter === "function") adapter.enter(context);
@@ -218,9 +298,14 @@
 
         this.active = context;
         // The note travels out with the success. A containing-block trap is
-        // not a refusal any more, so the sentence describing what the caller
-        // actually got is the only way it hears about it.
-        return {ok: true, reason: "", note: context.note};
+        // not a refusal any more, and neither is a page whose chrome would not
+        // come out of the layout, so the sentence describing what the caller
+        // actually got is the only way it hears about either.
+        const note = context.degraded
+            ? "This page's layout would not let the chrome go, so the workspace "
+                + "is laid over it instead."
+            : context.note;
+        return {ok: true, reason: "", note};
     };
 
     Focus.prototype.exit = function () {
@@ -242,9 +327,7 @@
         if (context.root && context.root.classList) {
             context.root.classList.remove(ROOT_CLASS);
         }
-        (context.path || []).forEach((node) => {
-            if (node && node.classList) node.classList.remove(PATH_CLASS);
-        });
+        undo(context);
         document.body.classList.remove(BODY_CLASS);
         if (context.root) {
             context.root.scrollTop = context.scrollTop;

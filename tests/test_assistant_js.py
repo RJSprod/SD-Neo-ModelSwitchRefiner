@@ -1028,3 +1028,311 @@ class TestWhichConversationIsOnScreen:
         assert found["said"][0] == "Pick a conversation to begin."
         assert found["said"][1] == "No conversations yet. Start one in LLM Studio."
         assert found["said"][2] == "Ready."
+
+
+TRANSCRIPT = """
+// A transcript that can be scrolled and measured. The scroll arithmetic is the
+// whole of what these tests are about, so a stub that merely stored the number
+// it was handed would agree with any implementation -- including one that
+// scrolls past the end.
+function fakeTranscript(rows) {
+    const node = {
+        children: [],
+        clientHeight: 100,
+        rowHeight: 40,
+        get scrollHeight() { return node.children.length * node.rowHeight; },
+        set innerHTML(value) { if (!value) node.children.length = 0; },
+        get innerHTML() { return ""; },
+        appendChild(child) { node.children.push(child); return child; },
+        querySelector() { return node.children.length ? node.children[0] : null; },
+    };
+    let top = 0;
+    Object.defineProperty(node, "scrollTop", {
+        get() { return top; },
+        set(value) {
+            top = Math.max(0, Math.min(value, node.scrollHeight - node.clientHeight));
+        },
+    });
+    return node;
+}
+
+function bottom(node) {
+    return Math.max(0, node.scrollHeight - node.clientHeight);
+}
+
+function shellWith(transcript) {
+    const shell = Object.create(NS.Shell.prototype);
+    shell.nodes = {transcript, jump: {hidden: true, textContent: ""}};
+    shell.settings = {bubbleWidth: 80};
+    shell.following = true;
+    shell.shownEpoch = "";
+    shell.lastRendered = "";
+    shell.settled = false;
+    shell.settling = false;
+    shell.bubble = (row) => ({
+        dataset: {index: String(row.index)},
+        getBoundingClientRect: () => ({top: -transcript.scrollTop}),
+    });
+    shell.updateBubble = () => undefined;
+    return shell;
+}
+
+function conversationOf(count, epoch) {
+    const messages = [];
+    for (let index = 0; index < count; index += 1) {
+        messages.push({index, role: index % 2 ? "assistant" : "user",
+                       text: "m" + index, active: 0, versions: ["m" + index]});
+    }
+    return {conversation: {messages}, selection: {epoch: epoch || "e1"},
+            unread: 0, operation: null};
+}
+"""
+
+
+class TestTheTranscriptScroll:
+    """Reported in use: the thread showed, but not at the end of itself.
+
+    Three behaviours, and they are one rule seen from three places: a
+    conversation opens at its latest message; a reader who is at the end stays
+    at the end as replies arrive; a reader who has scrolled away is not moved.
+    """
+
+    def test_a_conversation_opens_at_its_latest_message(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            console.log(JSON.stringify({top: transcript.scrollTop,
+                                        end: bottom(transcript)}));
+        """)
+
+        assert found["top"] == found["end"]
+        assert found["end"] > 0, "the fixture has to be long enough to scroll"
+
+    def test_a_reader_at_the_end_is_kept_there_by_a_new_message(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.renderTranscript(conversationOf(21));
+            console.log(JSON.stringify({top: transcript.scrollTop,
+                                        end: bottom(transcript),
+                                        jump: shell.nodes.jump.hidden}));
+        """)
+
+        assert found["top"] == found["end"]
+        assert found["jump"] is True
+
+    def test_a_reader_who_scrolled_away_is_not_moved_by_a_new_message(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            transcript.scrollTop = 120;
+            shell.following = false;           // what the scroll listener sets
+            const before = transcript.scrollTop;
+            shell.renderTranscript(conversationOf(21));
+            console.log(JSON.stringify({before, after: transcript.scrollTop,
+                                        jump: shell.nodes.jump.hidden}));
+        """)
+
+        assert found["after"] == found["before"]
+        assert found["jump"] is False, "there has to be a way back to the latest"
+
+    def test_another_conversation_opens_at_its_own_latest_message(self):
+        """A thread left scrolled halfway up must not put the next thread
+        halfway up -- at an offset measured against a message that is not even
+        on the page any more."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20, "e1"));
+            transcript.scrollTop = 40;
+            shell.following = false;
+            shell.renderTranscript(conversationOf(30, "e2"));
+            console.log(JSON.stringify({top: transcript.scrollTop,
+                                        end: bottom(transcript),
+                                        following: shell.following}));
+        """)
+
+        assert found["following"] is True
+        assert found["top"] == found["end"]
+
+    def test_two_threads_that_read_the_same_are_still_two_threads(self):
+        """The redraw is skipped when the content fingerprint is unchanged.
+        Without the conversation in that fingerprint, switching between two
+        threads whose messages happen to match leaves the first one's DOM up --
+        with its bubble actions aimed at the wrong file."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            let built = 0;
+            const make = shell.bubble;
+            shell.bubble = (row) => { built += 1; return make(row); };
+            shell.renderTranscript(conversationOf(4, "e1"));
+            const first = built;
+            shell.renderTranscript(conversationOf(4, "e2"));
+            console.log(JSON.stringify({first, second: built - first}));
+        """)
+
+        assert found["second"] == found["first"], "the second thread is drawn too"
+
+    def test_a_bubble_is_not_reused_across_a_revision(self):
+        """`updateBubble` refreshes the text of a reused node and nothing else.
+        The action buttons under it closed over the row and the revision they
+        were *built* with, and they send those -- so a bubble reused after the
+        thread moved sends a revision the server will refuse, on every action,
+        for as long as the node survives.
+
+        A reply arriving token by token does not move the revision, so the
+        per-token redraw this keying exists to avoid is still avoided.
+        """
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            let built = 0;
+            const make = shell.bubble;
+            shell.bubble = (row) => { built += 1; return make(row); };
+            const at = (revision, text) => ({
+                conversation: {conversation: {revision},
+                               messages: [{index: 0, role: "user", text,
+                                           active: 0, versions: [text]}]},
+                selection: {epoch: "e1"}, unread: 0, operation: null});
+            shell.renderTranscript(at(4, "first"));
+            const start = built;
+            shell.renderTranscript(at(4, "edited in place"));
+            const sameRevision = built - start;
+            shell.renderTranscript(at(5, "edited in place"));
+            console.log(JSON.stringify({start, sameRevision,
+                                        moved: built - start - sameRevision}));
+        """)
+
+        assert found["start"] == 1
+        assert found["sameRevision"] == 0, "the same revision reuses the node"
+        assert found["moved"] == 1, "a moved thread rebuilds it"
+
+    def test_a_redraw_that_changed_nothing_still_holds_the_bottom(self):
+        """A panel that has just opened -- or whose conversation section was
+        collapsed -- has a transcript of no height at the moment the messages
+        go into it, so scrolling to the end scrolls nothing. The box arrives
+        afterwards, and the end has to be found again when it does."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            transcript.clientHeight = 0;
+            transcript.rowHeight = 0;          // nothing has a size yet
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            const whileFlat = transcript.scrollTop;
+            transcript.rowHeight = 40;         // the panel got its box
+            transcript.clientHeight = 100;
+            shell.renderTranscript(conversationOf(20));
+            console.log(JSON.stringify({whileFlat, after: transcript.scrollTop,
+                                        end: bottom(transcript)}));
+        """)
+
+        assert found["whileFlat"] == 0
+        assert found["after"] == found["end"]
+        assert found["end"] > 0
+
+    def test_the_jump_button_only_claims_a_new_response_when_there_is_one(self):
+        """It sits there for as long as somebody is scrolled up. A button
+        labelled "New response" the whole time is a button nobody believes the
+        second time it is right."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.following = false;
+            const quiet = Object.assign(conversationOf(21), {unread: 0});
+            shell.renderTranscript(quiet);
+            const idle = shell.nodes.jump.textContent;
+            const loud = Object.assign(conversationOf(22), {unread: 2});
+            shell.renderTranscript(loud);
+            console.log(JSON.stringify({idle, loud: shell.nodes.jump.textContent}));
+        """)
+
+        assert found["idle"] == "Jump to latest"
+        assert found["loud"] == "New response"
+
+    def test_the_end_is_found_again_once_the_panel_has_a_size(self):
+        """The synchronous scroll covers the ordinary case, where replacing the
+        messages forces the layout that answers "how tall is this". It does not
+        cover a box that arrives *later* -- a panel opening, a conversation
+        section expanding -- and a transcript that scrolled to the end of
+        nothing is a transcript at the top."""
+        found = run(TRANSCRIPT + """
+            let pending = null;
+            globalThis.requestAnimationFrame = (fn) => { pending = fn; return 1; };
+            const transcript = fakeTranscript();
+            transcript.clientHeight = 0;
+            transcript.rowHeight = 0;
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            const flat = transcript.scrollTop;
+            transcript.rowHeight = 40;         // the box arrives
+            transcript.clientHeight = 100;
+            pending();                         // ... and the frame runs
+            console.log(JSON.stringify({flat, after: transcript.scrollTop,
+                                        end: bottom(transcript)}));
+        """)
+
+        assert found["flat"] == 0
+        assert found["after"] == found["end"]
+        assert found["end"] > 0
+
+    def test_a_later_frame_never_drags_a_reader_who_has_scrolled_away(self):
+        """The other half of it. A frame queued while following, running after
+        somebody has scrolled up, must not take them back down."""
+        found = run(TRANSCRIPT + """
+            let pending = null;
+            globalThis.requestAnimationFrame = (fn) => { pending = fn; return 1; };
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            transcript.scrollTop = 40;
+            shell.following = false;           // what the scroll listener sets
+            pending();
+            console.log(JSON.stringify({top: transcript.scrollTop}));
+        """)
+
+        assert found["top"] == 40
+
+    def test_an_empty_conversation_leaves_nothing_behind(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            transcript.scrollTop = 40;
+            shell.following = false;
+            shell.renderTranscript(conversationOf(21));   // the jump appears
+            const shown = shell.nodes.jump.hidden;
+            shell.renderTranscript({conversation: null, selection: {epoch: "e2"},
+                                    unread: 0, operation: null});
+            console.log(JSON.stringify({shown, rows: transcript.children.length,
+                                        jump: shell.nodes.jump.hidden}));
+        """)
+
+        assert found["shown"] is False
+        assert found["rows"] == 0
+        assert found["jump"] is True, (
+            "a button offering to jump to the latest of nothing is a dead control")
+
+    def test_a_conversation_that_comes_back_is_drawn_again(self):
+        """A snapshot can arrive without its conversation -- a refresh in
+        flight, a thread being read. What must not happen is the transcript
+        staying empty when it returns, because the redraw was skipped on the
+        grounds that the messages had not changed since the last time they
+        were drawn."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(6, "e1"));
+            shell.renderTranscript({conversation: null, selection: {epoch: "e1"},
+                                    unread: 0, operation: null});
+            const gone = transcript.children.length;
+            shell.renderTranscript(conversationOf(6, "e1"));
+            console.log(JSON.stringify({gone, back: transcript.children.length}));
+        """)
+
+        assert found["gone"] == 0
+        assert found["back"] == 6

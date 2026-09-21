@@ -231,6 +231,9 @@
         this.frame = 0;
         this.following = true;
         this.lastRendered = "";
+        this.shownEpoch = "";
+        this.settled = false;
+        this.settling = false;
         this._restore();
     }
 
@@ -710,15 +713,26 @@
         this.on(nodes.readAloud, "click", () => this.toggleReadAloud());
         this.on(nodes.jump, "click", () => {
             this.following = true;
-            nodes.transcript.scrollTop = nodes.transcript.scrollHeight;
+            this.toBottom();
             nodes.jump.hidden = true;
         });
         this.on(nodes.transcript, "scroll", () => {
+            // Locked to the latest while the reader is at the end of it, and
+            // left exactly where it is the moment they are not. The slack is
+            // what makes "at the bottom" survive a font metric and a rounded
+            // pixel; without it a transcript can be at the end and not know it.
             const distance = nodes.transcript.scrollHeight - nodes.transcript.scrollTop
                 - nodes.transcript.clientHeight;
             this.following = distance <= BOTTOM_SLACK;
             if (this.following) nodes.jump.hidden = true;
+            else if (this.settled) nodes.jump.hidden = false;
         });
+        // A picture in a bubble arrives after the bubble does and grows it,
+        // which moves the bottom out from under a reader who was at it. Caught
+        // in the capture phase because `load` does not bubble.
+        this.on(nodes.transcript, "load", () => {
+            if (this.following) this.toBottom();
+        }, true);
         this.on(nodes.resize, "keydown", (event) => this.resizeKey(event));
         this.on(nodes.resize, "pointerdown", (event) => this.startResize(event));
 
@@ -1249,8 +1263,22 @@
     Shell.prototype.renderTranscript = function (view) {
         const transcript = this.nodes.transcript;
         const conversation = view.conversation;
+        // A conversation opens at its latest message, which means the arrival
+        // of a *different* conversation resets the reader's place rather than
+        // inheriting it. Without this, a thread left scrolled halfway up put
+        // the next thread halfway up too -- at an offset measured against a
+        // message that is no longer on the page.
+        const epoch = view.selection.epoch || "";
+        if (epoch !== this.shownEpoch) {
+            this.shownEpoch = epoch;
+            this.following = true;
+            this.lastRendered = "";
+            this.settled = false;
+        }
         if (!conversation || !conversation.messages) {
             transcript.innerHTML = "";
+            this.lastRendered = "";
+            this.nodes.jump.hidden = true;
             return;
         }
         // The reader's place, captured before anything moves. Restoring a pixel
@@ -1273,21 +1301,44 @@
             }
         }
 
-        const fingerprint = JSON.stringify(rows.map((row) => [row.index, row.role, row.text,
-                                                              row.active,
-                                                              (row.versions || []).length,
-                                                              !!row.provisional]));
-        if (fingerprint === this.lastRendered) return;
-        // Keyed by (index, version) so only the message that changed is
-        // rewritten. A full redraw per token would restart every animation and
-        // drop the selection in the bubble somebody is reading.
+        // What a skipped redraw has to agree on. The revision is in here
+        // because a thread that moved is not the thread that was drawn: the
+        // text can be identical and the actions under it still stale, which is
+        // a redraw skipped for a transcript that needed one.
+        //
+        // The thread itself is not, because it cannot be: arriving at another
+        // conversation clears `lastRendered` above, so there is nothing for a
+        // second thread's fingerprint to collide with.
+        const revision = conversation.conversation && conversation.conversation.revision;
+        const fingerprint = JSON.stringify([revision,
+            rows.map((row) => [row.index, row.role, row.text, row.active,
+                               (row.versions || []).length, !!row.provisional])]);
+        if (fingerprint === this.lastRendered) {
+            this.pin(wasFollowing);
+            return;
+        }
+        // Keyed so that only the message that changed is rewritten. A full
+        // redraw per token would restart every animation and drop the
+        // selection in the bubble somebody is reading.
+        //
+        // The thread and its revision are part of the key, and that is not
+        // caution. `updateBubble` refreshes the text of a reused node and
+        // nothing else -- the action buttons under it closed over the row and
+        // the revision they were *built* with, and they send those. Reuse a
+        // bubble across a thread change and every action under it is aimed at
+        // the conversation that is no longer on screen; reuse one across a
+        // revision change and every action is refused as stale. A reply
+        // arriving token by token does not move the revision, so the redraw
+        // this exists to avoid is still avoided.
+        const stamp = epoch + ":" + revision + ":";
         const existing = new Map();
         Array.prototype.forEach.call(transcript.children, (node) => {
             existing.set(node.dataset.key, node);
         });
         const wanted = [];
         rows.forEach((row) => {
-            const key = row.index + ":" + (row.active || 0) + ":" + (row.provisional ? "p" : "s");
+            const key = stamp + row.index + ":" + (row.active || 0)
+                + ":" + (row.provisional ? "p" : "s");
             let node = existing.get(key);
             if (!node) node = this.bubble(row, view);
             else this.updateBubble(node, row);
@@ -1299,13 +1350,53 @@
         this.lastRendered = fingerprint;
 
         if (wasFollowing) {
-            transcript.scrollTop = transcript.scrollHeight;
-            this.nodes.jump.hidden = true;
+            this.toBottom();
         } else {
             const now = transcript.querySelector("[data-index]");
             if (now) transcript.scrollTop += now.getBoundingClientRect().top - offset;
-            this.nodes.jump.hidden = false;
         }
+        this.showJump(view);
+    };
+
+    // Put the latest message on screen, now and again once the browser has
+    // finished with it.
+    //
+    // Once is not enough, and both of the reasons are ordinary. A panel that
+    // has just opened -- or whose conversation section was collapsed -- has a
+    // transcript of no height at the moment the messages go into it, so
+    // `scrollHeight` is the height of nothing and the assignment does nothing.
+    // And a bubble carrying a picture grows when the picture arrives, which is
+    // after this returns, taking the bottom with it.
+    Shell.prototype.toBottom = function () {
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        transcript.scrollTop = transcript.scrollHeight;
+        if (this.settling) return;
+        this.settling = true;
+        window.requestAnimationFrame(() => {
+            this.settling = false;
+            if (!this.following || !this.nodes.transcript) return;
+            this.nodes.transcript.scrollTop = this.nodes.transcript.scrollHeight;
+            this.settled = true;
+        });
+    };
+
+    // Called on a redraw that changed nothing: the content is the same, but the
+    // box it is in may not be -- the panel was resized, the conversation
+    // section was expanded, a picture finished loading. Following means the
+    // latest message, whatever the box did.
+    Shell.prototype.pin = function (following) {
+        if (following) this.toBottom();
+    };
+
+    Shell.prototype.showJump = function (view) {
+        const jump = this.nodes.jump;
+        if (!jump) return;
+        jump.hidden = !!this.following;
+        // Honest about which it is. "New response" on a button that has been
+        // sitting there since before the reply started is a button nobody
+        // believes the second time.
+        jump.textContent = view && view.unread ? "New response" : "Jump to latest";
     };
 
     Shell.prototype.bubble = function (row, view) {

@@ -8,17 +8,22 @@ about exit:
     which for most of them is "no inline style at all", and never to a guess
     like ``overflow: auto``;
 
-    ``inert`` on a sibling that already had it is left set, because a page
-    where something else had already made a panel unreachable would come back
-    subtly broken and nobody would connect it to this;
+    every class it put on the page comes off again, including the ones on
+    elements it went looking for rather than walked to;
 
-    nothing is inerted that contains the assistant, or the focused workspace --
-    inerting an ancestor inerts everything inside it, including the control
-    that turns focus off;
+    nothing is hidden that contains the focused workspace, or the assistant --
+    hiding an ancestor hides everything inside it, including the control that
+    turns focus off, and a rule that could not make that distinction is what
+    blanked a page on a real host;
 
-    an ancestor with a transform is reported as a reason rather than
-    discovered as a panel that fills a box instead of the screen, which is the
-    silent failure ``position: fixed`` has.
+    an ancestor with a transform is reported as a note rather than discovered
+    as a panel that fills a box instead of the screen, which is the silent
+    failure ``position: fixed`` has;
+
+    and the workspace is measured once the marking is done, because the rule
+    that hides the chrome is written against somebody else's theme on somebody
+    else's Forge -- so when it gets that shape wrong, focus falls back to
+    covering the page rather than emptying it.
 
 These run under node, which is not a Forge dependency, so they skip without it.
 """
@@ -87,7 +92,15 @@ function make(id, parent) {
             if (name === "inert") node.inertAttribute = false;
         },
         hasAttribute(name) { return node.attributes[name] !== undefined; },
-        querySelector() { return null; },
+        // A box a test can set. `painted()` asks the layout whether the
+        // workspace is on screen, so a stub that cannot be measured would let
+        // the safety valve pass by never firing.
+        box: {width: 1280, height: 800},
+        getBoundingClientRect() {
+            return Object.assign({top: 0, left: 0}, node.box);
+        },
+        querySelector(selector) { return within(node).find(match(selector)) || null; },
+        querySelectorAll(selector) { return within(node).filter(match(selector)); },
         contains(other) {
             let walk = other;
             while (walk) {
@@ -103,6 +116,35 @@ function make(id, parent) {
     return node;
 }
 
+// Enough of a selector engine for the three shapes this module uses: a class,
+// an attribute with a value, and an id -- comma-separated. Written out rather
+// than stubbed to `null`, because the tab bars the script marks are *found*
+// with one of these, and a query that always answers nothing would make the
+// marking untestable and the test a tautology.
+function match(selector) {
+    const parts = String(selector).split(",").map((piece) => piece.trim());
+    return (node) => parts.some((piece) => {
+        if (piece.charAt(0) === ".") return node.classList.contains(piece.slice(1));
+        if (piece.charAt(0) === "#") return node.id === piece.slice(1);
+        const attribute = /^\[([^=\]]+)=?"?([^\]"]*)"?\]$/.exec(piece);
+        if (attribute) {
+            return node.getAttribute(attribute[1]) === attribute[2];
+        }
+        return false;
+    });
+}
+
+function within(node) {
+    const found = [];
+    (function walk(parent) {
+        parent.children.forEach((child) => {
+            found.push(child);
+            walk(child);
+        });
+    })(node);
+    return found;
+}
+
 const documentElement = make("html", null);
 const body = make("body", documentElement);
 const header = make("header", body);
@@ -112,6 +154,17 @@ const assistant = make("forge-assistant-root", body);
 const txt2img = make("tab_txt2img", tabs);
 const studio = make("tab_llm_studio", tabs);
 const paint = make("tab_minipaint", tabs);
+
+// Three tab bars, which is the shape that made the last attempt hide the page.
+// Forge's own, inside `#tabs`; one a theme has drawn for itself over in the
+// header, which is the one a stylesheet rule was added to catch; and a nested
+// `gr.Tabs` inside a workspace, which is the one that rule also caught.
+const bar = make("tab-bar", tabs);
+bar.classList.add("tab-nav");
+const themeBar = make("theme-bar", header);
+themeBar.setAttribute("role", "tablist");
+const nested = make("nested-tabs", studio);
+nested.classList.add("tab-nav");
 
 // Somebody else got there first: this sibling was already unreachable before
 // focus was ever entered, and it has to stay that way afterwards.
@@ -125,6 +178,8 @@ globalThis.document = {
     body,
     activeElement: null,
     getElementById: (id) => nodes.find((node) => node.id === id) || null,
+    querySelector: (selector) => within(documentElement).find(match(selector)) || null,
+    querySelectorAll: (selector) => within(documentElement).filter(match(selector)),
     contains: (node) => nodes.indexOf(node) >= 0,
 };
 globalThis.window = globalThis;
@@ -359,21 +414,165 @@ class TestEntering:
         assert ":not(#forge-assistant-root)" in rule, (
             "the assistant carries the control that turns focus off")
 
-    def test_the_tab_bar_is_hidden_wherever_the_theme_has_put_it(self):
-        """The rule above finds the tab bar as a child of a marked ancestor,
+    def test_a_tab_bar_the_theme_moved_away_is_hidden_too(self):
+        """The path rule finds the tab bar as a child of a marked ancestor,
         which is where Forge leaves it. A theme is free to move it, and Lobe
-        draws its own header out of it -- which is what was still on screen
-        when this was reported a second time."""
+        draws its own header out of it."""
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            const hidden = (id) => document.getElementById(id)
+                .classList.contains("forge-assistant-focus-hidden");
+            console.log(JSON.stringify({theme: hidden("theme-bar"),
+                                        forge: hidden("tab-bar")}));
+        """)
+
+        assert found["theme"] is True
+        assert found["forge"] is True
+
+    def test_the_workspace_keeps_its_own_nested_tabs(self):
+        """This is why the bar is marked by the script and not selected by a
+        stylesheet, and it is the defect that hid the page.
+
+        `.tab-nav` and `role="tablist"` are on every nested `gr.Tabs` as well as
+        on the one at the top -- Txt2Img is full of them -- so a rule keyed on
+        those names alone reaches inside the workspace it is meant to be
+        filling. CSS has no way to say "unless it contains the workspace";
+        `enter()` says it.
+        """
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({
+                nested: document.getElementById("nested-tabs")
+                    .classList.contains("forge-assistant-focus-hidden"),
+            }));
+        """)
+
+        assert found["nested"] is False
+
+    def test_a_tab_bar_that_contains_the_workspace_is_never_hidden(self):
+        """The other half of the same defect, and the one that actually blanked
+        the page: on a host where the role sits on a container rather than on
+        the strip of buttons, that container is an *ancestor* of the workspace
+        and hiding it hides everything."""
+        found = run("""
+            document.getElementById("tabs").setAttribute("role", "tablist");
+            focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({
+                tabs: document.getElementById("tabs")
+                    .classList.contains("forge-assistant-focus-hidden"),
+                workspace: document.getElementById("tab_llm_studio")
+                    .classList.contains("forge-assistant-focus-root"),
+            }));
+        """)
+
+        assert found["tabs"] is False
+        assert found["workspace"] is True
+
+    def test_the_marks_on_the_tab_bars_come_off_again(self):
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            focus.exit();
+            console.log(JSON.stringify({
+                left: nodes.filter((n) =>
+                    n.classList.contains("forge-assistant-focus-hidden")).map((n) => n.id),
+            }));
+        """)
+
+        assert found["left"] == []
+
+    def test_a_page_that_goes_blank_undoes_itself(self):
+        """Reported in use: the whole page went blank.
+
+        The rule that takes the chrome out of the layout is written against a
+        shape this code cannot see -- somebody else's theme, on somebody else's
+        Forge. When it gets that shape wrong the cost is not "focus mode looks
+        odd", it is a page with nothing on it and nothing to say why.
+
+        So the one thing focus mode exists to show is measured, after the
+        marking and before anybody looks at it. If the workspace is not being
+        painted, every mark comes off and what is left is the plain overlay:
+        imperfect under a theme that draws its own header, and never blank.
+        """
+        found = run("""
+            document.getElementById("tab_llm_studio").box = {width: 0, height: 0};
+            const answer = focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({
+                ok: answer.ok,
+                note: answer.note,
+                active: focus.isActive(),
+                root: document.getElementById("tab_llm_studio")
+                    .classList.contains("forge-assistant-focus-root"),
+                body: document.body.classList.contains("forge-assistant-focused"),
+                marked: nodes.filter((n) =>
+                    n.classList.contains("forge-assistant-focus-path")
+                    || n.classList.contains("forge-assistant-focus-hidden"))
+                    .map((n) => n.id),
+            }));
+        """)
+
+        assert found["ok"] is True
+        assert found["active"] is True, "the overlay stays, so Escape still leaves"
+        assert found["root"] is True
+        assert found["body"] is True
+        assert found["marked"] == [], "everything that could hide the page comes off"
+        assert found["note"], "a mode that quietly did half its job says so"
+
+    def test_a_page_that_is_painted_keeps_its_marks(self):
+        """The other side of the valve. A valve that fires on a working page is
+        a valve that has quietly turned the feature off."""
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({
+                tabs: document.getElementById("tabs")
+                    .classList.contains("forge-assistant-focus-path"),
+                theme: document.getElementById("theme-bar")
+                    .classList.contains("forge-assistant-focus-hidden"),
+            }));
+        """)
+
+        assert found["tabs"] is True
+        assert found["theme"] is True
+
+    def test_a_host_with_no_layout_to_ask_is_given_the_benefit_of_the_doubt(self):
+        """Measuring can fail -- a detached node, a host that does not
+        implement it. Throwing away a mode that may well be working, on a
+        question that could not be answered, is the wrong default."""
+        found = run("""
+            const root = document.getElementById("tab_llm_studio");
+            root.getBoundingClientRect = () => { throw new Error("no layout"); };
+            focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({
+                tabs: document.getElementById("tabs")
+                    .classList.contains("forge-assistant-focus-path"),
+            }));
+        """)
+
+        assert found["tabs"] is True
+
+    def test_the_stylesheet_has_a_rule_for_what_the_script_marks(self):
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
 
-        assert 'body.forge-assistant-focused .tab-nav' in css
-        rule = css.split('body.forge-assistant-focused .tab-nav', 1)[1].split("}", 1)[0]
-        assert '[role="tablist"]' in rule, "a themed bar may carry only the role"
+        assert ".forge-assistant-focus-hidden {" in css
+        rule = css.split(".forge-assistant-focus-hidden {", 1)[1].split("}", 1)[0]
         assert "display: none" in rule
-        assert "body.forge-assistant-focused" in rule.split("{")[0] \
-            or "body.forge-assistant-focused" in css.split(".tab-nav", 1)[0][-80:], (
-                "the rule has to be inert while focus is off")
+
+    def test_a_stylesheet_rule_may_not_hide_a_tab_bar_by_name(self):
+        """The rule this replaced. It is asserted *absent*, because it is the
+        kind of thing that looks like a free safety net and reads as an
+        improvement in a diff -- and it hid the whole page on a real host.
+        """
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        rules = [piece.split("{", 1)[0]
+                 for piece in css.split("}") if "{" in piece]
+
+        for selector in rules:
+            naked = selector.split("/*")[-1]
+            assert ".tab-nav" not in naked and "tablist" not in naked, (
+                "a tab bar is hidden by the script, which can check whether it "
+                "contains the workspace, and never by a selector, which cannot: "
+                + selector.strip())
 
 
 class TestLeaving:

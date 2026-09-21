@@ -120,7 +120,7 @@ the executor starts.
 ## 3.5 Four defects found in use, and what they were
 
 Reported against the first build, on a running Forge. Two more followed against
-the second build; those are §3.6.
+the second build (§3.6), and two more against the third (§3.7).
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -258,10 +258,9 @@ modal the host opened over the page is not chrome.
 *`[hidden]` is deliberately not excluded.* Something already hidden stays
 hidden and comes back hidden.
 
-A second rule hides `.tab-nav` and `[role="tablist"]` anywhere on the page
-while focus is on. The path rule already finds the tab bar where Forge leaves
-it; a theme is free to move it, and a rule keyed on what the bar *is* rather
-than where it sits costs nothing.
+A tab bar the theme has moved somewhere the path rule cannot reach is marked
+too — but **by the script, one element at a time, never by a selector**, and
+that distinction is §3.7.
 
 Leaving is the classes coming off. No inline styles to restore, nothing moved
 in the DOM, and a workspace rebuilt by a Gradio update while focused is still
@@ -276,6 +275,98 @@ means a workspace that cannot quite escape its ancestor still fills what is
 left of the window, which is the thing somebody asked for; refusing outright
 meant a press that did nothing at all and a sentence nobody could act on. The
 note is shown in the status line and names the property it found.
+
+## 3.7 A third round, and a rule that cost the page
+
+### The blank page
+
+The first attempt at §3.6 shipped with a second stylesheet rule beside the path
+one: `.tab-nav` and `[role="tablist"]` hidden anywhere on the page while focus
+was on. It was added as a free safety net for a theme that relocates the tab
+bar, it reads as an improvement in a diff, and on a real host it hid
+everything.
+
+Two reasons, either of which is enough:
+
+*Those names are on every nested tab group.* A `gr.Tabs` inside a workspace
+carries the same class and the same ARIA role as the one at the top of the
+page. Txt2Img is full of them. The rule reached inside the workspace it was
+meant to be filling.
+
+*The role need not be on the strip of buttons.* On a host where `role="tablist"`
+sits on a container rather than on the buttons, that container is an **ancestor**
+of the focused workspace, and hiding an ancestor hides the workspace with it.
+
+The condition that makes hiding a tab bar safe is "unless it contains the
+workspace", and there is no way to write that as a selector. So `enter()`
+decides: it walks the tab bars, skips any that is the root, is inside the root,
+or contains the root, and marks the rest with a class whose only rule is
+`display: none`. The stylesheet does as it is told and decides nothing.
+
+`tests/test_assistant_focus_js.py` asserts both halves — that a relocated bar is
+marked, that a nested one and an ancestor one are not — and asserts that **no
+selector in `style.css` names a tab bar at all**. That last one is the test that
+would have caught this.
+
+### The safety valve
+
+The deeper lesson is that the rule which takes the chrome out of the layout is
+written against a shape this code cannot see: somebody else's theme, on somebody
+else's Forge. Getting it wrong does not cost a misaligned panel, it costs a page
+with nothing on it and nothing to say why — and the code has no way to know it
+happened.
+
+So it asks. After the marking and before anybody looks at the result, `enter()`
+measures the workspace. If it is not being painted, every mark this module made
+comes off and what is left is the plain overlay: the reference implementation's
+behaviour, imperfect under a theme that draws its own header, and never blank.
+The mode stays on, so Escape and the Focus toggle still leave it, and the status
+line says what happened.
+
+A host with no layout to ask is given the benefit of the doubt. Throwing away a
+mode that may well be working, on a question that could not be answered, is the
+wrong default.
+
+### The transcript did not open at the latest message
+
+Reported alongside: the thread showed, but not at the end of itself.
+
+The follow-the-bottom machinery was all there — `following`, the slack, the jump
+button — and three things were missing around it.
+
+*`following` and `lastRendered` were per panel, not per conversation.* A thread
+left scrolled halfway up put the next thread halfway up too, at a pixel offset
+measured against a message that was no longer on the page. The selection epoch
+is now compared on every render, and arriving at another conversation resets
+both.
+
+*Scrolling to the end happened once, synchronously.* That covers the ordinary
+case, because replacing the messages forces the layout that answers "how tall is
+this". It does not cover a box that arrives later — a panel opening, a
+conversation section expanding, a picture loading in a bubble — and a transcript
+that scrolled to the end of nothing is a transcript at the top. It is done again
+on the next frame, and again when anything inside the transcript fires `load`,
+in both cases only while still following.
+
+*A redraw skipped for an unchanged fingerprint skipped the scroll with it.* The
+content can be identical while the box it is in is not, which is exactly the
+case above. The early return now re-pins before it returns.
+
+Two defects fell out of writing the tests for this, neither reachable from the
+outside:
+
+**Bubbles were reused across a revision.** `updateBubble` refreshes a reused
+node's text and its provisional class. It does not rebuild the action bar, whose
+buttons closed over the row and the revision they were *built* with and send
+those. A bubble reused after the thread moved sends a stale revision on every
+action, and every one is refused. The bubble key now carries the thread and the
+revision; a reply arriving token by token does not move the revision, so the
+per-token redraw the keying exists to avoid is still avoided.
+
+**A conversation that went away and came back stayed away.** A snapshot can
+arrive without its conversation. The empty branch cleared the transcript and
+left `lastRendered` pointing at what had been in it, so when the conversation
+returned unchanged the redraw was skipped and the transcript stayed empty.
 
 ---
 
@@ -323,7 +414,7 @@ rather than closed.
 | G8 `gr.Chatbot` row classes | **open, and the one thing here that can fail silently.** Three candidate selectors are used; a Gradio or theme upgrade can stop all three matching, which costs bubble width and nothing else. Add a visual check to the upgrade checklist. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,405 passing, 13 skipped. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,425 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---

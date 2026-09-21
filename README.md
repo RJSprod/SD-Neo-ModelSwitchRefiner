@@ -3210,6 +3210,15 @@ against that ancestor rather than the screen — is focused anyway and says so:
 the chrome is gone either way, so it fills what is left of the window, which is
 the thing you asked for.
 
+And if a page's layout will not let the chrome go, focus notices and stops
+trying. Whether the chrome can be taken out depends on a page this extension
+did not build — your theme, your Forge, your other extensions — and the way
+that goes wrong is a blank screen with nothing on it to say why. So the
+workspace is measured before you see it, and if it is not being drawn,
+everything focus changed is put back and it falls back to laying the workspace
+over the page instead. That is worse under a theme with its own header and it
+is never a blank page. The status line says which one you got.
+
 **The conversation** in the panel is the one in the tab, and it follows the tab:
 choose another thread there — or start one, or branch — and the panel moves with
 it. A new panel opens on the conversation Conversation was last left on, and
@@ -3223,6 +3232,14 @@ quietly re-aimed at whatever is at four now.
 Both composers on a page share one draft per thread, so a message half-typed in
 the tab is there in the panel and back again, and switching thread stores and
 restores exactly. Drafts survive a reload; an attachment does not.
+
+**A thread opens at its latest message**, and every thread opens at its own —
+scrolling up in one does not open the next one halfway up. While you are at the
+end of a thread it stays at the end as replies arrive, including the picture in
+a reply, which lands after the words do and used to take the bottom with it.
+Scroll up and nothing moves you: the reply carries on arriving below and a
+button offers to take you back to it, saying whether there is something new
+down there or just the end of what you were already reading.
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip. One per message, and a second one asks whether to replace the first.
@@ -5000,7 +5017,8 @@ on the page has to come off again, and an adapter that throws on the way out
 must not be able to trap somebody in a mode they cannot leave. The rule that
 hides the chrome is asserted against the stylesheet itself, because the class
 and the rule that reads it are each half of the mechanism and either one alone
-does nothing.
+does nothing — and one test asserts a rule is *absent*, because the rule it
+names looked like a free safety net and hid a whole page.
 
 Every guard in this work was checked by removing it. Take out the revision
 comparison, the exclusive name reservation, the branch that replaced the
