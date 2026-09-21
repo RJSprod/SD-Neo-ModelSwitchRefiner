@@ -128,6 +128,12 @@
         this.generation = "";
         this.cursor = 0;
         this.connected = false;
+        // Whether a stream has ever been open. "Connecting…" and
+        // "Reconnecting…" are different sentences and only one of them is true
+        // at a time, and the panel said the second one from the moment it
+        // mounted.
+        this.everConnected = false;
+        this.characters = [];
         this.storageAvailable = true;
         this.failures = 0;
         this.polling = false;
@@ -179,6 +185,7 @@
         return {
             ready: this.ready,
             connected: this.connected,
+            everConnected: this.everConnected,
             polling: this.polling,
             error: this.error,
             capabilities: Object.assign({}, this.capabilities),
@@ -186,6 +193,7 @@
             mode: this.mode,
             activeWorkspace: this.activeWorkspace,
             conversation: this.snapshots.get(key) || null,
+            characters: this.characters.slice(),
             draft: Object.assign({text: "", attachment: null, draftVersion: 0,
                                   pendingTranscripts: [], editBuffer: null},
                                  this.drafts.get(key) || {}),
@@ -251,7 +259,24 @@
                 this.ready = true;
                 this.serverEpoch = found.server_epoch || "";
                 this.capabilities = found.capabilities || {};
+                this.characters = found.characters || [];
+                this.mode = found.mode || this.mode;
                 this.error = "";
+                // WHICH CONVERSATION. Without this the panel opened on an empty
+                // character and an empty thread, `refresh()` returned early
+                // because there was nothing to ask about, and the transcript
+                // was never going to be given anything to draw.
+                //
+                // A seed and not a source of truth: the preference it comes
+                // from is installation-wide, so it says which conversation was
+                // last opened on this machine. This page owns its selection
+                // from here (two windows may deliberately differ).
+                const seed = found.selection || {};
+                if (!this.selection.thread && seed.thread_id) {
+                    this.selection = {character: String(seed.character || ""),
+                                      thread: String(seed.thread_id || ""),
+                                      epoch: uuid()};
+                }
                 this.announce();
                 return this.connect();
             })
@@ -297,6 +322,7 @@
         }).then((response) => {
             if (!response.ok || !response.body) throw new Error("no stream");
             this.connected = true;
+            this.everConnected = true;
             this.failures = 0;
             this.lastTraffic = Date.now();
             this.error = "";
@@ -427,6 +453,14 @@
         case "mode_changed":
             this.mode = (event.payload && event.payload.mode) || "";
             break;
+        case "character_changed":
+            // The tab moved to another conversation. Following it is the whole
+            // point of being a second window onto the same work -- a panel that
+            // stayed on the thread it was seeded with would be a panel showing
+            // a different conversation from the one behind it, with nothing on
+            // screen to say so.
+            this.follow(event.payload || {});
+            break;
         case "reply_patch":
             this.patch(event, key, mine);
             break;
@@ -456,7 +490,6 @@
             break;
         case "conversation_changed":
         case "thread_created":
-        case "character_changed":
         case "capabilities_changed":
             if (mine) this.refresh();
             else this.snapshots.delete(key);
@@ -563,6 +596,16 @@
             this.order.splice(index, 1);
             this.snapshots.delete(oldest);
         }
+    };
+
+    Store.prototype.follow = function (payload) {
+        const character = String(payload.character || "");
+        const thread = String(payload.thread_id || "");
+        if (!thread) return;
+        if (character === this.selection.character && thread === this.selection.thread) {
+            return;
+        }
+        this.select(character, thread);
     };
 
     Store.prototype.select = function (character, thread) {

@@ -119,7 +119,8 @@ the executor starts.
 
 ## 3.5 Four defects found in use, and what they were
 
-Reported against the first build, on a running Forge.
+Reported against the first build, on a running Forge. Two more followed against
+the second build; those are §3.6.
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -181,6 +182,101 @@ The pin was removed at the same time. It was a preference for "keep the panel
 open across workspace changes" occupying the corner everybody aims at for
 "close this"; the panel now simply stays open.
 
+## 3.6 Two more, reported against the second build
+
+### The panel never showed a conversation
+
+It came up on "Reconnecting… Your draft is safe." with an empty transcript and
+stayed there. Nothing was wrong with the transport.
+
+The panel never learned **which** conversation to show. `Store.select()` sets
+the selection and is what every render reads; nothing called it. The selection
+stayed empty, `refresh()` returned early because there was nothing to ask
+about, and the transcript was never going to be given anything to draw. The
+missing piece was not a bug in a function — it was a function with no caller,
+which is the kind of gap a unit test passes straight over.
+
+Three parts to the fix, and they are three because a selection has three
+moments:
+
+*Where a new page starts.* `bootstrap` now answers `selection` — the character
+and thread LLM Studio was last left on, read from the same preference the tab
+uses — along with `characters` and `mode`. A **seed and not a source of
+truth**: the preference is installation-wide, so a second window deliberately
+put on another thread keeps it. The store applies the seed only when its own
+selection is empty.
+
+*Where it goes next.* `_selected()` in `mc_llm_chat_panel` is called by all five
+ways of landing on a thread (choosing a character, opening a thread, a new
+thread, branching, following a generation) and does two things with one fact:
+remembers it, and publishes `character_changed`. The store's `follow()` moves
+the panel to match. Without it the panel seeded itself once and then never
+moved again, which is two views on different conversations with nothing on
+screen to say so.
+
+*What it can switch to on its own.* `snapshot` now carries `threads` for the
+character and `characters` for the installation, which is what the panel's own
+picker lists.
+
+Publishing fails open here as everywhere: a window that cannot be told is one
+selection behind, which is a refresh away, and a selection that *failed* would
+be a tab that would not change threads.
+
+The status line was also lying. "Reconnecting" is only true the second time,
+and it was the first thing on screen on a feed that had never opened — a
+sentence pointing at the wrong problem. It says "Connecting…" until a feed has
+opened once, and "Pick a conversation to begin." when there is a connection and
+nothing chosen, because an empty transcript under the word "Ready" reads like a
+conversation that lost its messages rather than one that was never picked.
+
+### Focus mode still left the theme's header on screen
+
+The first fix made focus mode what the reference document describes: one class,
+one rule, `position: fixed; inset: 0` and a z-index. That is correct, and it is
+not enough.
+
+**A z-index wins over ordinary content. It does not win over a header that is
+positioned and has a stacking context of its own** — which is exactly what a
+theme that draws its own chrome produces, and Lobe draws its own chrome. The
+workspace was nominally on top of the header and the header stayed exactly
+where it was.
+
+Covering is therefore the wrong mechanism. The chrome is now taken **out of the
+layout**: on entering, the workspace's ancestors from its parent up to `<body>`
+are marked `forge-assistant-focus-path`, and one stylesheet rule hides every
+child of a marked element that is not itself on the path, not the workspace,
+and not the assistant. That is the tab bar, the theme's header and sidebars,
+the footer and the other tabs — without this code having to know what any of
+them are called, which is the point: a theme it has never heard of is hidden by
+the same rule.
+
+Two details worth keeping:
+
+*Dialogs are excluded* (`[role="dialog"]`, `[aria-modal="true"]`), because a
+modal the host opened over the page is not chrome.
+
+*`[hidden]` is deliberately not excluded.* Something already hidden stays
+hidden and comes back hidden.
+
+A second rule hides `.tab-nav` and `[role="tablist"]` anywhere on the page
+while focus is on. The path rule already finds the tab bar where Forge leaves
+it; a theme is free to move it, and a rule keyed on what the bar *is* rather
+than where it sits costs nothing.
+
+Leaving is the classes coming off. No inline styles to restore, nothing moved
+in the DOM, and a workspace rebuilt by a Gradio update while focused is still
+handled, because the exit path removes the class from the saved node whether or
+not it is still attached.
+
+One related change: a containing-block trap (a `transform`, `filter`,
+`perspective`, `contain` or `backdrop-filter` on an ancestor, all of which make
+`position: fixed` resolve against that ancestor rather than the viewport) used
+to **refuse** focus. It is a **note** now. Taking the chrome out of the layout
+means a workspace that cannot quite escape its ancestor still fills what is
+left of the window, which is the thing somebody asked for; refusing outright
+meant a press that did nothing at all and a sentence nobody could act on. The
+note is shown in the status line and names the property it found.
+
 ---
 
 ## 4. Deliberate deviations
@@ -218,7 +314,7 @@ rather than closed.
 | Gate | State |
 |---|---|
 | G1 Forge/Gradio versions and event signatures | **open.** The code uses only `click`, `submit`, `change`, `then`, `success` and generator outputs, all of which this repository already relies on. `cancels=` was removed from Stop; if it must stay for a host reason it is harmless, because the operation is not in the generator. |
-| G2 Theme mount points, portal roots, listener order | **open.** The focus transaction inspects ancestors for containing-block traps at runtime and refuses with a reason rather than assuming; portal roots are not inerted because only siblings outside the focused root are. |
+| G2 Theme mount points, portal roots, listener order | **closed for the case that was failing, open in general.** Focus no longer covers the chrome, it takes it out of the layout: the workspace's ancestors are marked and one rule hides everything else under them, so a theme's header is hidden whatever it is called and wherever it sits (§3.6). That is what a z-index could not do under Lobe. A containing-block trap on an ancestor is a note rather than a refusal now, because the workspace still fills what is left of the window. Listener order remains unverified against a running host. |
 | G3 Installed tab ids and header controls | **open.** `forge_assistant_host.js` reads the host's own `#tabs` element, pairs buttons with panels by position, and offers whatever it finds. It never matches a tab by display name. |
 | G4 Whether `script.js` honours `defaultPrevented` | **open.** No document-wide Send or Stop shortcut is installed, so nothing depends on the answer. Escape uses a precedence function with its own tests; the one thing it will not do is swallow Escape when nothing closer to hand wants it. |
 | G5 Hidden field value before its tab is selected | **open.** The capability is rendered into `mc-llm-chat-conversation-key` exactly as `mc-llm-chat-voice-key` is, which is the pattern already proven in this installation. If it turns out to be empty before the tab is selected, the fallback is a bootstrap route behind the host's own auth; the store already treats a missing key as "conversation unavailable" and keeps navigation and focus working. |
@@ -227,7 +323,7 @@ rather than closed.
 | G8 `gr.Chatbot` row classes | **open, and the one thing here that can fail silently.** Three candidate selectors are used; a Gradio or theme upgrade can stop all three matching, which costs bubble width and nothing else. Add a visual check to the upgrade checklist. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,405 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---

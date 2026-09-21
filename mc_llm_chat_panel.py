@@ -1628,6 +1628,28 @@ def _presentation_style() -> str:
         return ""
 
 
+def _selected(who, identifier) -> None:
+    """Remember which conversation this tab is on, and say so.
+
+    Two things, because they are one fact with two audiences. The preference is
+    where the *next* page starts; the event is how the panel already open on
+    this one follows along. Before the event existed the flyout seeded itself
+    once and then never moved again, so choosing a thread in the tab left the
+    two views looking at different conversations with nothing to say they were.
+
+    Publishing fails open, as all publishing does: a window that cannot be told
+    shows a thread that is one selection behind, which is a refresh away.
+    """
+    mc_llm_state.remember(character=who or "", thread=identifier or "")
+    try:
+        import mc_llm_conversation_service as service
+
+        service.publish(service.CHARACTER_CHANGED,
+                        None, character=who or "", thread_id=identifier or "")
+    except Exception:
+        logger.debug("Model Chain: could not publish the selection", exc_info=True)
+
+
 def _conversation_key() -> str:
     """This process's capability for the assistant's routes. Never logged.
 
@@ -1708,7 +1730,7 @@ def _select_character(who, filter_text, typed=""):
         loaded = _characters().load(who) if who else Character(name="")
     except Exception:
         loaded = Character(name=who or "")
-    mc_llm_state.remember(character=who or "", thread=identifier)
+    _selected(who, identifier)
     note = f"{len(choices)} thread{'s' if len(choices) != 1 else ''}."
     # The editor follows the selection. It is usually shut, and when it is not,
     # leaving it bound to the character that *was* selected would have the next
@@ -1735,7 +1757,7 @@ def _open_thread(who, identifier, typed=""):
     conversation = _load(who, identifier)
     if conversation is None:
         return [identifier or "", gr.update()] + _refresh(None, "Choose a thread.", "warn")
-    mc_llm_state.remember(character=who or "", thread=identifier)
+    _selected(who, identifier)
     lifted, conversation = _lift(who, identifier, conversation, typed)
     if lifted is not _UNTOUCHED:
         return ([identifier, lifted]
@@ -1803,7 +1825,7 @@ def _new_thread(who, filter_text):
         return ([gr.update(), ""] + _refresh(None, note, kind) + _screens("threads"))
     identifier = (outcome.get("resulting_conversation") or {}).get("thread_id", "")
     conversation = _load(who, identifier)
-    mc_llm_state.remember(character=who, thread=identifier)
+    _selected(who, identifier)
     return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier),
              identifier]
             + _refresh(conversation, "New thread.")
@@ -2133,7 +2155,7 @@ def _branch_here(who, identifier, index, filter_text, revision=None):
                 + _reopen(who, identifier, note, kind, index=index))
     made = (outcome.get("resulting_conversation") or {}).get("thread_id", "")
     branched = _load(who, made)
-    mc_llm_state.remember(character=who or "", thread=made)
+    _selected(who, made)
     return ([gr.update(choices=_thread_choices(who, filter_text), value=made), made]
             + _refresh(branched,
                        "Branched — this is a new thread, and the one it came from is "
@@ -2434,7 +2456,7 @@ def _follow_thread(outcome, who, identifier, filter_text=""):
     """
     landed = (outcome.get("resulting_conversation") or {}).get("thread_id") or identifier
     if outcome.get("ok") and landed != identifier:
-        mc_llm_state.remember(character=who or "", thread=landed)
+        _selected(who, landed)
         moved = gr.update(choices=_thread_choices(who, filter_text), value=landed)
     else:
         moved = gr.update()

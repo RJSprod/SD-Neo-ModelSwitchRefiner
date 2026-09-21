@@ -238,6 +238,66 @@ class TestConversation:
         assert mc_llm_chat_panel._thread_choices("", "") == []
 
 
+class TestTheTabSaysWhichConversationItIsOn:
+    """Reported in use: the assistant panel never rendered the conversation.
+
+    The panel is a second window onto the same work, and it had no way to know
+    which conversation the tab was showing. It seeded itself once at startup
+    and then never moved again, so choosing a thread in the tab left the two
+    views on different conversations with nothing on screen to say so.
+    """
+
+    def test_choosing_a_thread_is_announced_to_the_open_panels(self, store,
+                                                               monkeypatch):
+        import mc_llm_conversation_service as service
+
+        said = []
+        monkeypatch.setattr(service, "publish",
+                            lambda kind, key=None, **payload: said.append((kind, payload)))
+
+        mc_llm_chat_panel._selected("Ada", "t-42")
+
+        assert said == [(service.CHARACTER_CHANGED,
+                         {"character": "Ada", "thread_id": "t-42"})]
+
+    def test_choosing_a_thread_is_where_the_next_page_starts(self, store):
+        import mc_llm_state
+
+        mc_llm_chat_panel._selected("Ada", "t-42")
+
+        found = mc_llm_state.preferences()
+        assert found["character"] == "Ada"
+        assert found["thread"] == "t-42"
+
+    def test_a_feed_that_cannot_be_told_never_fails_the_selection(self, store,
+                                                                  monkeypatch):
+        """Publishing fails open, as all publishing does. A window that cannot
+        be told shows a thread one selection behind, which is a refresh away;
+        a selection that *failed* is a tab that would not change threads."""
+        import mc_llm_conversation_service as service
+        import mc_llm_state
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("the feed is on fire")
+
+        monkeypatch.setattr(service, "publish", explode)
+
+        mc_llm_chat_panel._selected("Ada", "t-42")
+
+        assert mc_llm_state.preferences()["thread"] == "t-42"
+
+    def test_every_way_of_landing_on_a_thread_announces_it(self):
+        """Five of them, and a new one that forgets is a panel that silently
+        stops following -- the exact bug this fixes, reintroduced."""
+        import inspect
+
+        source = inspect.getsource(mc_llm_chat_panel)
+        for name in ("_select_character", "_open_thread", "_new_thread",
+                     "_branch_here", "_follow_thread"):
+            body = source.split("def " + name + "(", 1)[1].split("\ndef ", 1)[0]
+            assert "_selected(" in body, name + " has to say where it landed"
+
+
 class TestPerMessageActions:
     """The actions the standalone application hangs on every bubble.
 

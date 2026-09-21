@@ -409,9 +409,18 @@
         panel.appendChild(body);
         this.nodes.body = body;
 
+        // Which conversation this is. It was an empty div: the panel gave no
+        // indication of which thread it was showing, which is fine until it is
+        // showing a different one from the tab behind it -- and then it is the
+        // only thing that would have said so.
         const selector = element("div", "forge-assistant-selector");
+        const who = element("button", "forge-assistant-who", "\u2026");
+        who.type = "button";
+        who.setAttribute("aria-haspopup", "menu");
+        who.setAttribute("aria-label", "Choose a conversation");
+        selector.appendChild(who);
         body.appendChild(selector);
-        this.nodes.selector = selector;
+        Object.assign(this.nodes, {selector, who});
 
         const suppressed = element("p", "forge-assistant-suppressed");
         suppressed.hidden = true;
@@ -678,6 +687,7 @@
             this._save();
             this.place();
         });
+        this.on(nodes.who, "click", () => this.toggleMenu("threads"));
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
         this.on(nodes.focusToggle, "click", () => this.toggleFocus());
@@ -739,6 +749,8 @@
                     this.nodes.focusToggle.setAttribute("aria-pressed", "false");
                     this.say(moved.reason, "warn");
                     this._save();
+                } else if (moved.note) {
+                    this.say(moved.note, "warn");
                 }
             }
         }));
@@ -807,6 +819,7 @@
             this.say(found.reason, "warn");
             return;
         }
+        if (found.note) this.say(found.note, "warn");
         this.state.focusEnabled = true;
         this.state.focusWorkspaceId = active;
         this.nodes.focusToggle.setAttribute("aria-pressed", "true");
@@ -824,7 +837,8 @@
         }
         menu.innerHTML = "";
         menu.dataset.which = which;
-        const items = which === "workspaces" ? this.workspaceItems() : this.utilityItems();
+        const items = which === "workspaces" ? this.workspaceItems()
+            : (which === "threads" ? this.threadItems() : this.utilityItems());
         items.forEach((item) => menu.appendChild(item));
         menu.hidden = false;
         this.nodes.picker.setAttribute("aria-expanded",
@@ -878,6 +892,29 @@
                 this.host.activateWorkspace(workspace.id).catch((error) => {
                     this.say(error.message || "That workspace did not open.", "warn");
                 });
+            });
+            return item;
+        });
+    };
+
+    Shell.prototype.threadItems = function () {
+        const view = this.store.snapshot();
+        const conversation = view.conversation || {};
+        const threads = conversation.threads || [];
+        if (!threads.length) {
+            const empty = element("p", "forge-assistant-menu-empty",
+                                  "No threads yet. Start one in LLM Studio.");
+            return [empty];
+        }
+        return threads.map((thread) => {
+            const item = element("button", "forge-assistant-menu-item", thread.title);
+            item.type = "button";
+            item.setAttribute("role", "menuitem");
+            item.setAttribute("aria-current",
+                              String(thread.thread_id === view.selection.thread));
+            item.addEventListener("click", () => {
+                this.closeMenu();
+                this.store.select(view.selection.character, thread.thread_id);
             });
             return item;
         });
@@ -1051,8 +1088,13 @@
     };
 
     Shell.prototype.canSend = function (view) {
+        // Deliberately not "only while the event stream is open". A command is
+        // an ordinary request and the server validates it whatever the stream
+        // is doing; refusing to send because live updates have not started is
+        // refusing to do the thing that works because the thing that watches it
+        // does not.
         if (!view.ready || view.error) return false;
-        if (!view.connected && !view.polling) return false;
+        if (!view.conversation) return false;
         if (view.operation && !view.operation.terminal) return false;
         const draft = view.draft;
         if (draft.attachment && draft.attachment.state !== "ready") return false;
@@ -1147,6 +1189,7 @@
             nodes.input.value = view.draft.text || "";
             this.grow();
         }
+        this.renderSelector(view);
         this.renderChip(view.draft.attachment);
         this.renderTranscript(view);
         this.renderStatus(view);
@@ -1154,6 +1197,16 @@
         const busy = !!(view.operation && !view.operation.terminal);
         nodes.stop.hidden = !(busy || view.speech.playing);
         this.applySuppression();
+    };
+
+    Shell.prototype.renderSelector = function (view) {
+        const conversation = view.conversation && view.conversation.conversation;
+        const character = (conversation && conversation.character)
+            || view.selection.character;
+        const title = conversation && conversation.title;
+        this.nodes.who.textContent = title
+            ? (character ? character + " \u00b7 " + title : title)
+            : (character || "Choose a conversation");
     };
 
     Shell.prototype.renderChip = function (attachment) {
@@ -1395,16 +1448,31 @@
             this.say(view.error, "warn");
             return;
         }
-        if (!view.connected && view.polling) {
-            this.say("Reconnecting… Your draft is safe.", "warn");
-            return;
-        }
         if (!view.connected) {
-            this.say("Reconnecting… Your draft is safe.", "warn");
+            // "Reconnecting" is only true the second time. Saying it on a feed
+            // that has never opened describes a drop that never happened, and
+            // it was the first thing on screen when the panel came up with
+            // nothing in it -- a sentence pointing at the wrong problem.
+            if (!view.everConnected) {
+                this.say("Connecting…", "info");
+                return;
+            }
+            this.say(view.polling
+                ? "Reconnecting… Following along by polling. Your draft is safe."
+                : "Reconnecting… Your draft is safe.", "warn");
             return;
         }
         if (view.operation && !view.operation.terminal) {
             this.say(view.operation.status || "Generating…", "info");
+            return;
+        }
+        // Connected, with nothing chosen to show. Worth saying: an empty
+        // transcript under the word "Ready" reads like a conversation that
+        // lost its messages rather than one that was never picked.
+        if (!view.selection.thread) {
+            this.say(view.characters && view.characters.length
+                ? "Pick a conversation to begin."
+                : "No conversations yet. Start one in LLM Studio.", "info");
             return;
         }
         this.say("Ready.", "info");

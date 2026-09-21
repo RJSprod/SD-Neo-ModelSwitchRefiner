@@ -3184,23 +3184,37 @@ what actually happened, not a tick. Neither is policy: the next request that
 needs a model loads it again exactly as it would have.
 
 **Focus** gives the whole browser viewport to whichever workspace is open: the
-Forge tab bar, a theme's sidebars and the footer all go under an opaque
-background and the workspace takes the space. It is not the browser's
-full-screen mode — that takes the browser's own chrome as well and needs a
-gesture every time.
+Forge tab bar, a theme's header and sidebars and the footer go, and the
+workspace takes the space they were using. It is not the browser's full-screen
+mode — that takes the browser's own chrome as well and needs a gesture every
+time.
 
-Nothing of Forge's is hidden, moved or restyled to do it. The tab bar is still
-exactly where it was, underneath; the workspace's own element is simply laid
-over everything else, which is what makes leaving it one class removal and what
-means nothing about the host can break. Escape leaves it, unless something
+They *go*, rather than being covered. Laying the workspace over the page works
+while the chrome is ordinary content and does not work at all under a theme
+that draws its own header — a positioned header with a stacking context of its
+own stays exactly where it is with the workspace nominally on top of it. So
+while focus is on, everything beside the workspace is taken out of the layout:
+the tab bar, a theme's chrome, the footer and the other tabs. A dialog the host
+opened over the page is not chrome and stays.
+
+Nothing is moved or restyled to do it and no element of Forge's is touched
+beyond a class going on and coming off, which is what makes leaving focus
+nothing more than that, and what means a theme this code has never heard of is
+handled by the same rule as one it has. Escape leaves it, unless something
 closer to hand wants Escape first: the assistant's own menu, an edit in
 progress, a dialog, or an IME. A running reply is never interrupted by leaving
-focus, and a workspace that cannot be focused safely — one inside a transformed
-ancestor, where `position: fixed` would fill a box rather than the screen — says
-why rather than half-doing it.
+focus.
 
-**The conversation** in the panel is the one in the tab, with every action the
-tab has: edit, regenerate, continue, send again from here, branch, the version
+A workspace inside a transformed ancestor — where `position: fixed` resolves
+against that ancestor rather than the screen — is focused anyway and says so:
+the chrome is gone either way, so it fills what is left of the window, which is
+the thing you asked for.
+
+**The conversation** in the panel is the one in the tab, and it follows the tab:
+choose another thread there — or start one, or branch — and the panel moves with
+it. A new panel opens on the conversation Conversation was last left on, and
+from then on the window owns its own selection, so two windows can deliberately
+sit on different threads. Every action the tab has is here: edit, regenerate, continue, send again from here, branch, the version
 pager, delete, delete from here, and Listen. Each action carries the message it
 was pointing at *and the revision the thread was at when you pressed it*, so an
 action aimed at message four is refused if the thread moved rather than being
@@ -4981,10 +4995,12 @@ viewport instead of the visual one, the gap before the safe-area inset — all
 look correct on a desktop. The Markdown renderer gets the most tests of
 anything here: it turns text a language model wrote into HTML this page inserts,
 which is the one place in the feature where a mistake is a scripting hole rather
-than a layout bug. And focus mode is tested by *leaving* it: a sibling that was
-already unreachable before focus was entered has to still be unreachable
-afterwards, and an adapter that throws on the way out must not be able to trap
-somebody in a mode they cannot leave.
+than a layout bug. And focus mode is tested by *leaving* it: every mark it put
+on the page has to come off again, and an adapter that throws on the way out
+must not be able to trap somebody in a mode they cannot leave. The rule that
+hides the chrome is asserted against the stylesheet itself, because the class
+and the rule that reads it are each half of the mechanism and either one alone
+does nothing.
 
 Every guard in this work was checked by removing it. Take out the revision
 comparison, the exclusive name reservation, the branch that replaced the
@@ -4993,7 +5009,9 @@ which is the only way to know a test is testing the thing it is named after.
 Writing them found two bugs that reading had not: the page store's cache could
 spin for ever the first time its oldest entry was a thread with a draft in it,
 and an exact tie between two dock anchors picked the earlier one in the list
-rather than the one the drag already had.
+rather than the one the drag already had. Neither was reachable from the
+outside; both were one unlucky sequence away from being reported as something
+else entirely.
 
 What is left to a real browser and a real host is written down rather than
 implied. The tab's bubble styling reaches inside `gr.Chatbot` and therefore

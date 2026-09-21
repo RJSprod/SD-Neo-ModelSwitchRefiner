@@ -260,30 +260,120 @@ class TestEntering:
         assert found["ok"] is False
         assert found["reason"]
 
-    def test_an_ancestor_with_a_transform_is_reported_by_name(self):
-        """`position: fixed` resolves against a transformed ancestor rather
-        than the viewport, so the panel fills a box instead of the screen --
-        and nothing says so."""
+    def test_an_ancestor_with_a_transform_is_a_note_rather_than_a_refusal(self):
+        """`position: fixed` resolves against a transformed ancestor rather than
+        the viewport, so the workspace fills that box instead of the screen.
+
+        That used to refuse outright, which meant a press that did nothing at
+        all and a sentence nobody could act on. It enters and says so now: the
+        chrome is taken out of the layout as well as covered, so a workspace
+        that cannot quite escape its ancestor still fills what is left of the
+        window -- which is the thing somebody asked for.
+        """
         found = run("""
             document.getElementById("tabs").computed = {transform: "translateZ(0)"};
             const answer = focus.enter("tab_llm_studio", HOST);
-            console.log(JSON.stringify(answer));
+            console.log(JSON.stringify({
+                ok: answer.ok, note: answer.note, active: focus.isActive(),
+                root: document.getElementById("tab_llm_studio")
+                    .classList.contains("forge-assistant-focus-root"),
+            }));
         """)
 
-        assert found["ok"] is False
-        assert "transform" in found["reason"]
+        assert found["ok"] is True
+        assert found["active"] is True
+        assert found["root"] is True
+        assert "transform" in found["note"]
 
     @pytest.mark.parametrize("prop,value,word", [("filter", "blur(2px)", "filter"),
                                                  ("contain", "paint", "contain"),
                                                  ("perspective", "800px", "perspective")])
-    def test_every_containing_block_trap_is_caught(self, prop, value, word):
+    def test_every_containing_block_trap_is_named(self, prop, value, word):
         found = run("""
             document.getElementById("tabs").computed = {%s: "%s"};
             console.log(JSON.stringify(focus.enter("tab_llm_studio", HOST)));
         """ % (prop, value))
 
-        assert found["ok"] is False
-        assert word in found["reason"]
+        assert found["ok"] is True
+        assert word in found["note"]
+
+    def test_the_chrome_is_taken_out_of_the_layout_not_merely_covered(self):
+        """Reported against the Lobe theme: the workspace was laid over the page
+        and the theme's header stayed exactly where it was.
+
+        A z-index wins over ordinary content. It does not win over a header that
+        is positioned and has a stacking context of its own, which is what a
+        theme that draws its own chrome produces. So the workspace's ancestors
+        are marked, and one stylesheet rule hides every child of a marked
+        element that is not itself on the path -- the header, the tab bar, the
+        sidebars, the footer and the other tabs -- without this code having to
+        know what any of them are called.
+        """
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            const marked = (id) => document.getElementById(id)
+                .classList.contains("forge-assistant-focus-path");
+            console.log(JSON.stringify({
+                body: marked("body"),
+                tabs: marked("tabs"),
+                header: marked("header"),
+                footer: marked("footer"),
+                workspace: marked("tab_llm_studio"),
+                assistant: marked("forge-assistant-root"),
+            }));
+        """)
+
+        # On the path: the workspace's own ancestors, and only those.
+        assert found["body"] is True
+        assert found["tabs"] is True
+        # Not on the path, so the rule hides them.
+        assert found["header"] is False
+        assert found["footer"] is False
+        assert found["assistant"] is False
+        # The workspace itself is the root, not a path element.
+        assert found["workspace"] is False
+
+    def test_the_marks_come_off_again(self):
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            focus.exit();
+            console.log(JSON.stringify({
+                left: nodes.filter((n) =>
+                    n.classList.contains("forge-assistant-focus-path")).map((n) => n.id),
+            }));
+        """)
+
+        assert found["left"] == []
+
+    def test_the_stylesheet_hides_what_the_path_leaves_out(self):
+        """The class is only half of it; the rule that reads it is the other."""
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+
+        assert "body.forge-assistant-focused .forge-assistant-focus-path > *" in css
+        rule = css.split("body.forge-assistant-focused .forge-assistant-focus-path > *",
+                         1)[1].split("}", 1)[0]
+        assert "display: none" in rule
+        assert ":not(.forge-assistant-focus-path)" in rule
+        assert ":not(.forge-assistant-focus-root)" in rule
+        assert ":not(#forge-assistant-root)" in rule, (
+            "the assistant carries the control that turns focus off")
+
+    def test_the_tab_bar_is_hidden_wherever_the_theme_has_put_it(self):
+        """The rule above finds the tab bar as a child of a marked ancestor,
+        which is where Forge leaves it. A theme is free to move it, and Lobe
+        draws its own header out of it -- which is what was still on screen
+        when this was reported a second time."""
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+
+        assert 'body.forge-assistant-focused .tab-nav' in css
+        rule = css.split('body.forge-assistant-focused .tab-nav', 1)[1].split("}", 1)[0]
+        assert '[role="tablist"]' in rule, "a themed bar may carry only the role"
+        assert "display: none" in rule
+        assert "body.forge-assistant-focused" in rule.split("{")[0] \
+            or "body.forge-assistant-focused" in css.split(".tab-nav", 1)[0][-80:], (
+                "the rule has to be inert while focus is off")
 
 
 class TestLeaving:
@@ -384,17 +474,17 @@ class TestSwitching:
         assert found["txt2img"] is True
         assert found["studioInert"] is False, "the workspace it left was altered"
 
-    def test_an_unsupported_destination_restores_the_page_and_says_why(self):
+    def test_a_destination_with_no_panel_restores_the_page_and_says_why(self):
         found = run("""
             focus.enter("tab_llm_studio", HOST);
-            document.getElementById("tabs").computed = {transform: "scale(1)"};
-            const answer = focus.moveTo("tab_txt2img", HOST);
+            const answer = focus.moveTo("a_tab_that_is_not_here", HOST);
             console.log(JSON.stringify({
                 ok: answer.ok,
                 reason: answer.reason,
                 active: focus.isActive(),
                 body: document.body.classList.contains("forge-assistant-focused"),
-                header: document.getElementById("header").inert,
+                left: nodes.filter((n) =>
+                    n.classList.contains("forge-assistant-focus-path")).map((n) => n.id),
             }));
         """)
 
@@ -402,7 +492,7 @@ class TestSwitching:
         assert found["reason"]
         assert found["active"] is False
         assert found["body"] is False
-        assert found["header"] is False, "the page was left half-focused"
+        assert found["left"] == [], "the page was left half-focused"
 
     def test_moving_when_focus_is_off_does_nothing(self):
         found = run("""
