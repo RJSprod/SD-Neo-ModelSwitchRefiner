@@ -617,9 +617,13 @@ def run(envelope: Envelope, scope: str = DEFAULT_SCOPE) -> dict:
                           envelope.operation_id)
         registry.settle(scope, envelope.operation_id, REFUSED, failure)
         return failure
-    registry.settle(scope, envelope.operation_id,
-                    ACCEPTED if outcome.get("phase") not in (None, "completed") else DONE,
-                    outcome)
+    # Only a generating command leaves something running to pin a record for.
+    # Everything else is finished the moment it returns, and a record settled as
+    # ACCEPTED is pinned -- so settling a Stop or a rename that way would leave
+    # a record that never expires and is not counted against the terminal cap
+    # either, which is an unbounded one.
+    live = envelope.action in GENERATING and outcome.get("phase") not in (None, "completed")
+    registry.settle(scope, envelope.operation_id, ACCEPTED if live else DONE, outcome)
     return outcome
 
 

@@ -420,8 +420,8 @@ class ChatStore:
         # actually read rather than from a second read a moment later. Two
         # reads would be two different files if something landed between them,
         # which is the whole class of bug the token exists to catch.
-        conversation.comparison = (conversation.revision if conversation.revision
-                                   else fingerprint(raw))
+        conversation.comparison = (conversation.revision
+                                   if conversation.revision else fingerprint(raw))
         return conversation
 
     def listing(self, character: str) -> list[ChatInfo]:

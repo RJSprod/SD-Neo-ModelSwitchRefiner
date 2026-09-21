@@ -527,6 +527,24 @@ Under **Settings → Model Chain**:
 - **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
   colour** and the toggles below them — see
   [Progress-bar appearance](#progress-bar-appearance).
+- **Show the Forge Assistant** (default on), **Forge Assistant label**,
+  **launcher** and **position** — the floating panel, what it is called, whether
+  it draws its name, an icon or both, and which of the six resting places it
+  starts at. See [The Forge Assistant](#the-forge-assistant). Turning it off
+  removes the panel and nothing else: the conversation, the guarding and the
+  server-owned replies are not a panel and do not go with one.
+- **Message bubble width (%)** (default 75) — how much of the transcript's width
+  one message may take, in both views. Below 480 pixels wide at least 90% is
+  used whatever this says.
+- **Conversation column width** (default medium) — how wide the transcript and
+  the composer are allowed to become in the Conversation tab. On a wide monitor
+  a transcript stretched across the whole screen is one nobody can follow from
+  one line to the next, and this is what makes focus mode an improvement there
+  rather than a regression. The page never scrolls sideways at any setting, and
+  the floating panel ignores it.
+- **Conversation text size (px)** (default 0 = inherit the theme),
+  **Conversation density** and **Show avatars in the conversation** — appearance
+  only, and none of them touches a chat, a model or a voice.
 
 ### Progress and ETA
 
@@ -3026,10 +3044,10 @@ composer, so neither of them moves:
 
 | Action | What it does |
 | --- | --- |
-| **Edit** | For a reply: rewrite it in place — the version showing is the one changed. For one of your own messages: it comes **back into the composer**, where it is an unsent message again and Send sends it. If replies followed it, that happens in a new branch and the thread it came from keeps all of them. |
+| **Edit** | Rewrite it in place, at any position in the thread, yours or the character's alike — the version showing is the one changed. The picture it carries is kept unless you take it off, and the replies under it are left exactly as they are. |
 | **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
-| **Continue** | Carry the last reply on from exactly where it stopped. |
-| **Send again from here** | Answer one of your own messages again, dropping everything after it. |
+| **Continue** | Carry a reply on from exactly where it stopped. On the last reply in a thread that happens in place. On an earlier one it **branches** first, because continuing a reply that has messages under it would leave them answering a paragraph that no longer says what they were answering. |
+| **Send again from here** | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. |
 | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
 
@@ -3046,13 +3064,15 @@ after it*, and going back to it loads the whole conversation. Only a reply at
 the end of a thread — where there is nothing after it to lose — keeps its
 attempts as versions on the one message.
 
-A prompt is edited in the box you write prompts in. **Edit** on one of your own
-messages takes it back out of the thread and puts it in the composer: change it,
-press Send, and it is asked again. There is nothing else to press and nothing
-left behind — the copy in the transcript is gone because the one in the composer
-replaces it. Editing a *reply* is a different thing and still happens in place,
-in an *Editing message* row that borrows the composer's space; Cancel gives you
-back whatever you had half-written.
+**Edit** edits, and it is the same thing for both roles. The words in the thread
+change, the thread stays where it is, and the replies that followed are still
+under it — a conversation whose second turn now asks about the sun, with a reply
+under it that says "blue", is a conversation you can then ask about. What was
+said is what the file says was said, and the file is the only record there is.
+Nothing is regenerated to match: rewriting a question does not silently spend a
+GPU minute rewriting every answer below it. The editor borrows the composer's
+space in an *Editing message* row, and Cancel gives you back whatever you had
+half-written.
 
 A thread that ends in one of your messages that never got a reply — a cancelled
 reply, a model that failed to load — opens with that message already in the
@@ -3109,6 +3129,132 @@ on the page moves when a reply starts. It is indeterminate on purpose — nothin
 knows how long a reply will be — and under `prefers-reduced-motion` it stops
 moving and stays lit. The state chip says *Loading…* while the model is being
 read off the disk.
+
+### The Forge Assistant
+
+A floating panel, available from every workspace in Forge, that carries the
+conversation Conversation has open. It runs no model, keeps no history of its
+own and starts no session — it is a second window onto work LLM Studio owns, and
+everything typed into it goes through exactly the same door as everything typed
+into the tab.
+
+It is off nobody's critical path. Turn it off in Settings and the panel, its
+listeners and its focus treatment go; Conversation is untouched, and so is
+everything below.
+
+**The launcher** sits in one of six places — the corners and the two centres,
+top and bottom. Drag it to move it; a setting picks the same six for anybody who
+would rather not drag, and a second setting picks the default for new sessions.
+What is stored is which of the six, never a pixel position: a window resized
+between sessions must not be able to leave the launcher off-screen. Dragging is
+one gesture for a mouse, a finger and a pen, it costs six pixels of movement
+before it counts as a drag rather than a tap, and it never fires the click it
+was.
+
+**Opened**, it is a header you can drag, a workspace picker, a Focus toggle, and
+the conversation under a heading that collapses the whole of it — collapsed, the
+transcript and the composer leave the layout and the accessibility tree rather
+than merely stopping being painted. The panel is an overlay: it never pushes the
+workspace, and it is not modal on a desktop, so nothing behind it stops
+working while it is open. On a phone it becomes a sheet anchored to the half the
+docking says, and *that* is modal, because a sheet the page scrolls behind is a
+sheet you lose.
+
+**The workspace picker** lists the tabs this installation actually has and
+activates the host's own tab button. Which one is highlighted follows the host's
+selection, not the press — so a switch made by a header button, or by another
+extension's "send to img2img", moves the highlight too, and a switch that fails
+says so instead of highlighting a workspace you are not in. **Pin** keeps the
+panel open across workspace changes; unpinned, a successful switch minimises it.
+
+**Focus** gives the whole browser viewport to whichever workspace is open: the
+header, the sidebars and the footer go under an opaque background and the
+workspace takes the space. It is not the browser's full-screen mode — that takes
+the browser's own chrome as well and needs a gesture every time. Escape leaves
+it, unless something closer to hand wants Escape first: the assistant's own menu,
+an edit in progress, a dialog, or an IME. A running reply is never interrupted
+by leaving focus, and a workspace that cannot be focused safely says why rather
+than half-doing it.
+
+**The conversation** in the panel is the one in the tab, with every action the
+tab has: edit, regenerate, continue, send again from here, branch, the version
+pager, delete, delete from here, and Listen. Each action carries the message it
+was pointing at *and the revision the thread was at when you pressed it*, so an
+action aimed at message four is refused if the thread moved rather than being
+quietly re-aimed at whatever is at four now.
+
+Both composers on a page share one draft per thread, so a message half-typed in
+the tab is there in the panel and back again, and switching thread stores and
+restores exactly. Drafts survive a reload; an attachment does not.
+
+**Pictures** can be pasted into either composer, or chosen with the panel's
+paperclip. One per message, and a second one asks whether to replace the first.
+A picture is uploaded, decoded, checked and re-encoded before Send will go — so
+"the upload finished" is something the server knows rather than something a
+timer guessed — and Send says which of those it is waiting for. Paste works over
+plain HTTP, which is worth knowing because the microphone does not.
+
+**Voice** in the panel is the voice you already have: the same engines, the same
+settings, one microphone and one speaker. Dictation here is always *review*
+mode — what you said lands in the box for you to look at — whatever the
+auto-send preference says, and it never changes that preference. The words go to
+the thread you were in when you started talking, not the one you switched to
+while the browser was asking for the microphone.
+
+**When something is happening** the panel says which thing: waiting for
+resources, preparing the model, generating, saving. Never "Ready" while a reply
+is waiting for the card, which is a gap measured in tens of seconds on a cold
+model. Stop is there whenever a reply or its audio is.
+
+**On the Conversation workspace itself** the panel hides its conversation
+section and keeps its navigation — the same conversation twice on one screen is
+two places to type into and one of them is wrong. One line says so, with a
+**Show anyway** if you want it anyway. Leaving the mode or the tab brings it
+straight back, and nothing behind it was stopped: no subscription dropped, no
+reply cancelled, no audio silenced.
+
+### Two windows on one conversation
+
+Open the same thread in two browser windows and both of them work. That used to
+be the way to lose an afternoon.
+
+A chat file was written by whoever wrote last. A second window that had loaded
+the thread ten seconds earlier, edited a message and pressed Save, saved *its*
+copy — every reply that had arrived in between gone, no error anywhere, nothing
+on screen to suggest anything had happened.
+
+Now every conversation carries a revision, every change carries the revision you
+were looking at when you made it, and the two are checked together with the
+message you aimed at. If the thread moved you are told so, your draft is kept,
+and you are offered a fresh look at it. Nothing is overwritten and nothing is
+silently reinterpreted.
+
+The same comparison protects a reply. A reply belongs to the server now rather
+than to the browser tab that asked for it, so refreshing the page, closing the
+panel or switching workspace mid-reply costs you the view and not the reply —
+it carries on and saves itself. When it finishes it is written back against the
+revision it was *started* at: if the conversation moved while the model was
+thinking, the reply is not written over what arrived. It is kept, and you are
+offered it — view it, copy it, save it as a branch from the conversation it was
+actually answering, or discard it.
+
+While a reply is arriving, changes to that thread are refused rather than
+queued: a queue whose head is a language model is a window that has silently
+hung. Reading, browsing, selecting a thread, typing and Stop all stay available.
+
+Two smaller things fall out of the same work. A new thread's name is now
+reserved on disk as it is invented, so two windows opening a thread in the same
+second cannot be handed the same file. And a deleted thread's name is written
+down, so a reply still in flight when you deleted the thread cannot recreate the
+file with one message in it.
+
+None of this is a setting and none of it can be turned off. Turning the Forge
+Assistant off removes a panel; it does not put a conversation back in reach of
+the last writer.
+
+Implementation notes, the gates that still need a running Forge, and what to do
+when adding a workspace adapter or a message action are in
+[`docs/22-forge-assistant.md`](docs/22-forge-assistant.md).
 
 ### Where the log is
 
@@ -4505,6 +4651,20 @@ mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
 
+mc_llm_conversation_store.py    the one place a conversation is written: locks,
+                      revisions, receipts, tombstones and collision-free names
+mc_llm_conversation_service.py  the one door in: envelopes, deduplication,
+                      every message action, snapshots and refusals
+mc_llm_conversation_ops.py      a reply the server owns, from acceptance to the
+                      guarded completion, with checkpoints and a recovery store
+mc_llm_conversation_feed.py     page feeds: monotonic cursors, bounded rings
+mc_llm_conversation_api.py      the browser routes the floating panel speaks
+mc_llm_conversation_startup.py  what all of that does once, at start-up
+mc_llm_attachment_staging.py    an uploaded picture, validated and held, with a
+                      readiness that is a state rather than a timer
+mc_llm_overlays.py    one owner for all seven of LLM Studio's pop surfaces
+mc_assistant_settings.py        the floating panel's settings, validated twice
+
 mc_voice_paths.py     where Voice Chat keeps its runtime, models, bank and clones
 mc_voice_models.py    the voice trust root: manifest, verified install, status
 mc_voice_state.py     the two persisted switches, and the one place they live
@@ -4565,6 +4725,10 @@ scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its ho
 style.css             progress-bar appearance, LLM Studio, the Image Pipeline
 javascript/           the settings-to-CSS layer, LLM Studio polish, the pipeline,
                       the two spatial canvases, Voice Chat's capture and playback
+javascript/forge_assistant.js        the panel: docking, transcript, composer
+javascript/forge_assistant_store.js  the page's copy of the conversation
+javascript/forge_assistant_host.js   Forge's tabs and header, as an adapter
+javascript/forge_assistant_focus.js  workspace focus, as a reversible transaction
 tests/                pytest suite (runs without a WebUI)
 tools/                maintainer scripts; never imported by the extension
 docs/                 revised specifications for the progress and LLM work
@@ -4747,6 +4911,75 @@ different quantisation moves no sampler.
 
 Voice Chat adds seventeen files, and the ones worth naming are the four that
 defend an invariant rather than a behaviour.
+
+The conversation half adds eight files, and most of what they cover is failures
+that do not show up with one window open.
+
+`test_conversation_store.py` runs two threads at one revision through the real
+transaction and asserts that exactly one of them commits and the other is
+refused — the defect this whole layer exists for, stated as an assertion rather
+than as a paragraph. It also holds the store to the rules a counter has to
+follow to be worth having: a file without one reads as zero and is not
+rewritten by the reading, a write that changes nothing does not move it, and a
+counter that is negative, a float or `True` refuses every write rather than
+being repaired to zero — a counter a reader reset is a counter two windows can
+then both win against. The identifier tests ask for sixty-four names in one
+second and check they are sixty-four different files that actually exist on
+disk, which is the part the old "look, then use" could not promise.
+
+`test_conversation_ops.py` drives real replies through the real guarded saving
+with only the model's event stream replaced. The two authorised behaviour fixes
+are there as their original failures: the thread "Send again from here" came
+from still holds every message that followed it, and the reply "Continue" was
+carrying on is still exactly what it was. The completion guard has two tests
+deliberately, because the obvious one passes for the wrong reason — a
+conversation that *grew* is caught by the target index alone, so there is a
+second where an earlier message is edited instead, the length never changes, and
+the revision is the only thing that knows.
+
+`test_conversation_service.py` is mostly refusals: a protocol version this
+server does not speak, an epoch from a process that has gone, a field it does
+not understand (refused rather than ignored — a newer client's "and also delete
+the rest" dropped silently is the worst possible reading of it), and the three
+shapes of a repeated request. `test_conversation_api.py` covers the gates and
+the feed's promises, including a cursor the server has trimmed past being
+reported as a gap rather than papered over. `test_attachment_staging.py` is an
+SVG, an HTML document, a nine-thousand-pixel-square PNG and an animation, each
+refused before any pixel is read.
+
+`test_overlays.py` walks all forty-two ordered pairs of LLM Studio's seven pop
+surfaces from the one function that now decides, which is the shape of the
+defect: three correct mechanisms that had never heard of each other.
+
+`test_assistant_js.py` and `test_assistant_focus_js.py` run the browser code
+under node. The anchor arithmetic is asserted against a viewport a test chooses,
+because the mistakes that put a panel under a phone's keyboard — the layout
+viewport instead of the visual one, the gap before the safe-area inset — all
+look correct on a desktop. The Markdown renderer gets the most tests of
+anything here: it turns text a language model wrote into HTML this page inserts,
+which is the one place in the feature where a mistake is a scripting hole rather
+than a layout bug. And focus mode is tested by *leaving* it: a sibling that was
+already unreachable before focus was entered has to still be unreachable
+afterwards, and an adapter that throws on the way out must not be able to trap
+somebody in a mode they cannot leave.
+
+Every guard in this work was checked by removing it. Take out the revision
+comparison, the exclusive name reservation, the branch that replaced the
+truncation, or the completion guard, and the tests that name each one fail —
+which is the only way to know a test is testing the thing it is named after.
+Writing them found two bugs that reading had not: the page store's cache could
+spin for ever the first time its oldest entry was a thread with a draft in it,
+and an exact tie between two dock anchors picked the earlier one in the list
+rather than the one the drag already had.
+
+What is left to a real browser and a real host is written down rather than
+implied. The tab's bubble styling reaches inside `gr.Chatbot` and therefore
+depends on class names Gradio generates, so it can stop matching silently after
+a Gradio or theme upgrade; the workspace picker and focus mode read Forge's own
+tab registry, which is not in this checkout; and dictation from a phone needs a
+secure context, so a deployment served over plain HTTP has a keyboard and no
+microphone. Pasting a picture works there, because the paste event needs neither
+permission nor HTTPS.
 
 `test_voice_shutdown.py` is a release gate. Every test in it starts a real parent
 process, which starts a real worker, and then ends the parent one particular way:

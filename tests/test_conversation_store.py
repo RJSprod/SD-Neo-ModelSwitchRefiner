@@ -418,8 +418,8 @@ class TestExternalChange:
             store_module.transaction(chats, key, token,
                                      lambda copy: copy.append("user", "x"))
 
-    def test_a_save_that_fails_is_reported_rather_than_claimed(self, chats,
-                                                              monkeypatch):
+    def test_a_save_that_fails_is_reported_rather_than_claimed(
+            self, chats, monkeypatch):
         """H12. No false "Saved"."""
         conversation = thread(chats)
         key = key_for(conversation)

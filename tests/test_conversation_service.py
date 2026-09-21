@@ -219,6 +219,20 @@ class TestDeduplication:
         assert outcome["duplicate"] is True
         assert outcome["ok"] is True
 
+    def test_a_record_for_a_finished_command_does_not_outlive_its_retention(
+            self, conversation):
+        """Only a generating command leaves something running to pin a record
+        for. A Stop or a rename settled as "accepted" would be pinned for the
+        life of the process and would not count against the cap either, which
+        is the shape of an unbounded leak."""
+        service.submit(envelope("rename_thread", conversation, payload={"title": "x"}))
+
+        record = service.registry.find(service.DEFAULT_SCOPE, "op-1")
+
+        assert record.state == service.DONE
+        assert record.pinned is False
+        assert record.settled > 0
+
     def test_a_refused_request_is_remembered_as_refused(self, conversation):
         body = envelope("delete_message", conversation, index=99)
 
@@ -305,8 +319,8 @@ class TestMessageActions:
         assert kept.messages[1].active == 0
         assert kept.revision == 1
 
-    def test_a_stale_index_is_refused_rather_than_reinterpreted(self, chats,
-                                                               conversation):
+    def test_a_stale_index_is_refused_rather_than_reinterpreted(
+            self, chats, conversation):
         """C01. Never "the current last message" -- that is how a delete aimed
         at message four deletes a message that arrived after it."""
         outcome = service.submit(envelope("delete_message", conversation, index=9))
@@ -334,7 +348,10 @@ class TestMessageActions:
         first = service.submit(body)
         again = service.submit(dict(body))
 
+        assert first["ok"] is True
         assert again["duplicate"] is True
+        assert again["resulting_conversation"] == first["resulting_conversation"], (
+            "the retry made a second branch")
         assert len(list((chats.folder("Ada")).glob("*.json"))) == 2
 
 

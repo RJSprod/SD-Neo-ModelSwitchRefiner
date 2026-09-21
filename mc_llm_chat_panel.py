@@ -92,7 +92,6 @@ that carries one is refused with a sentence rather than quietly sent blind.
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 
 import gradio as gr
@@ -101,13 +100,21 @@ import mc_llm_attachments
 import mc_llm_overlays
 import mc_llm_paths
 import mc_llm_runtime
-import mc_llm_sessions as sessions
+import mc_llm_sessions as sessions  # noqa: F401  -- see below
 import mc_llm_state
 import mc_llm_ui as ui
 import mc_voice_ui
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
+
+# ``sessions`` is imported and not called. This panel does not run a model any
+# more -- a reply belongs to :mod:`mc_llm_conversation_ops` and this file
+# follows it -- but the name is part of the module's surface: the tests reach
+# ``mc_llm_chat_panel.sessions`` to replace ``conversation`` with a list of
+# events, and doing that through the alias keeps them pointing at whichever
+# module this panel actually talks to rather than at a second copy of that
+# decision.
 
 NO_SELECTION = -1
 """What ``selected`` holds when the action sheet applies to nothing."""
@@ -320,9 +327,11 @@ def build() -> dict:
             # Python because that is the one channel a cross-site page cannot
             # read -- the same mechanism, and the same reasoning, as the Voice
             # Chat key beside it.
-            conversation_key = gr.Textbox(
-                value=_conversation_key(), visible=False, container=False,
-                elem_id=ui.ident("chat", "conversation-key"))
+            # Built and not held: the browser finds it by its id and Python
+            # never reads it back, so a reference here would be a reference
+            # nothing uses.
+            gr.Textbox(value=_conversation_key(), visible=False, container=False,
+                       elem_id=ui.ident("chat", "conversation-key"))
             # The refresh bridge. When another window writes to the thread this
             # tab is showing, the page store presses this, and the handler
             # re-reads the conversation and redraws the rows. It is READ-ONLY

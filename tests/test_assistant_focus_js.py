@@ -70,7 +70,10 @@ function make(id, parent) {
             names: new Set(),
             add(...names) { names.forEach((n) => node.classList.names.add(n)); },
             remove(...names) { names.forEach((n) => node.classList.names.delete(n)); },
-            toggle(name, on) { if (on) node.classList.add(name); else node.classList.remove(name); },
+            toggle(name, on) {
+                if (on) node.classList.add(name);
+                else node.classList.remove(name);
+            },
             contains(name) { return node.classList.names.has(name); },
         },
         computed: {},
@@ -131,7 +134,10 @@ globalThis.getComputedStyle = (node) => Object.assign(
     node.computed || {});
 globalThis.ResizeObserver = function (fn) {
     globalThis.resizeCallback = fn;
-    return {observe() { globalThis.observed = true; }, disconnect() { globalThis.observed = false; }};
+    return {
+        observe() { globalThis.observed = true; },
+        disconnect() { globalThis.observed = false; },
+    };
 };
 globalThis.console = console;
 

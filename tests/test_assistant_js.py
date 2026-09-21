@@ -67,7 +67,10 @@ function element(id, tag) {
         classList: {names: new Set(),
                     add(...names) { names.forEach((n) => node.classList.names.add(n)); },
                     remove(...names) { names.forEach((n) => node.classList.names.delete(n)); },
-                    toggle(name, on) { if (on) node.classList.add(name); else node.classList.remove(name); },
+                    toggle(name, on) {
+                        if (on) node.classList.add(name);
+                        else node.classList.remove(name);
+                    },
                     contains(name) { return node.classList.names.has(name); }},
         setAttribute(name, value) { node[name] = value; },
         getAttribute(name) { return node[name] === undefined ? null : node[name]; },
@@ -95,7 +98,8 @@ globalThis.document = {
     readyState: "complete",
     hidden: false,
     activeElement: null,
-    createElement: (tag) => element("made-" + Math.random().toString(16).slice(2), tag.toUpperCase()),
+    createElement: (tag) => element("made-" + Math.random().toString(16).slice(2),
+                                   tag.toUpperCase()),
     getElementById: (id) => elements[id] || null,
     querySelector: () => null,
     querySelectorAll: () => [],

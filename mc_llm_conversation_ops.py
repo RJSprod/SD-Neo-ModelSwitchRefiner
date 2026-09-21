@@ -781,7 +781,6 @@ def _execute(operation: Operation, plan: dict) -> None:
     import mc_llm_conversation_service as service
     import mc_llm_sessions as sessions
 
-    character, persona = plan["character"], plan["persona"]
     opening = operation.opening
     streamed = opening
     join_space = bool(opening) and not opening[-1].isspace()

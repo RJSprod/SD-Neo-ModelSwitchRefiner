@@ -143,8 +143,8 @@ class TestContinueOnAnEarlierReplyBranches:
         replies(monkeypatch, pieces=(" and then",))
 
         outcome = run("continue", thread, index=1)
-
         made = outcome["resulting_conversation"]["thread_id"]
+
         assert made != thread.identifier
         branched = chats.load("Ada", made)
         assert branched.messages[-1].text.startswith("reply 0")
@@ -363,7 +363,8 @@ class TestTheCompletionGuard:
         monkeypatch.setattr(sessions, "conversation", slow)
         from test_conversation_service import envelope
 
-        outcome = service.submit(envelope("send", thread, payload={"text": "one"}))
+        accepted = service.submit(envelope("send", thread, payload={"text": "one"}))
+        assert accepted["ok"] is True
         assert started.wait(5)
         # Something else writes to the file while the model is thinking. Not
         # through the service -- that would be refused as busy -- but as an
