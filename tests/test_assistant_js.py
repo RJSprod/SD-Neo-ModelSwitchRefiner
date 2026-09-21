@@ -1336,3 +1336,429 @@ class TestTheTranscriptScroll:
 
         assert found["gone"] == 0
         assert found["back"] == 6
+
+
+HOST_TREE = r"""
+// A DOM with the shape Gradio actually renders, because the stub above has no
+// shape at all and that is how four rounds of focus-mode reports got past
+// this file. `gr.Tabs` is
+//
+//     div#tabs.tabs
+//       div.tab-nav[role=tablist] > button[role=tab][aria-controls=tab_x] ...
+//       div#tab_x.tabitem[role=tabpanel][style="display: block|none"]
+//
+// and every NESTED gr.Tabs -- Forge's extra networks inside Txt2Img, the mode
+// tabs inside Img2Img -- is rendered with the same classes and roles. Enough of
+// a selector engine to ask the questions the adapter asks: a selector list,
+// `:scope >`, tag, #id, .class, [attr], [attr=v], [attr^=v], [attr$=v].
+
+function el(tag, attrs, parent) {
+    attrs = attrs || {};
+    const node = {
+        tagName: tag.toUpperCase(),
+        id: attrs.id || "",
+        attributes: {},
+        children: [],
+        parentElement: parent || null,
+        style: {display: attrs.display || ""},
+        computedPosition: attrs.position || "static",
+        textContent: attrs.text || "",
+        disabled: !!attrs.disabled,
+        clicks: 0,
+        classList: {
+            names: new Set((attrs.className || "").split(" ").filter(Boolean)),
+            add(...names) { names.forEach((n) => node.classList.names.add(n)); },
+            remove(...names) { names.forEach((n) => node.classList.names.delete(n)); },
+            contains(name) { return node.classList.names.has(name); },
+        },
+        getAttribute(name) {
+            if (name === "id") return node.id || null;
+            return name in node.attributes ? node.attributes[name] : null;
+        },
+        hasAttribute(name) { return name === "id" ? !!node.id : name in node.attributes; },
+        setAttribute(name, value) {
+            if (name === "id") node.id = String(value);
+            else node.attributes[name] = String(value);
+        },
+        contains(other) {
+            let walk = other;
+            while (walk) {
+                if (walk === node) return true;
+                walk = walk.parentElement;
+            }
+            return false;
+        },
+        querySelector(selector) { return query(node, selector)[0] || null; },
+        querySelectorAll(selector) { return query(node, selector); },
+        click() { node.clicks += 1; },
+        get offsetParent() {
+            if (effectiveDisplay(node) === "none") return null;
+            if (node.computedPosition === "fixed") return null;
+            return node.parentElement;
+        },
+    };
+    Object.keys(attrs).forEach((key) => {
+        if (["id", "className", "display", "position", "text", "disabled"].indexOf(key) < 0) {
+            node.attributes[key] = String(attrs[key]);
+        }
+    });
+    if (parent) parent.children.push(node);
+    return node;
+}
+
+function effectiveDisplay(node) {
+    let walk = node;
+    while (walk) {
+        if (walk.style && walk.style.display === "none") return "none";
+        walk = walk.parentElement;
+    }
+    return (node.style && node.style.display) || "block";
+}
+
+function descendants(node) {
+    const out = [];
+    (function walk(parent) {
+        parent.children.forEach((child) => {
+            out.push(child);
+            walk(child);
+        });
+    })(node);
+    return out;
+}
+
+function parseCompound(text) {
+    const out = {tag: null, id: null, classes: [], attrs: []};
+    const re = /([a-zA-Z][\w-]*|\*)|#([\w-]+)|\.([\w-]+)|\[([\w-]+)(?:([\^$*]?=)(?:"([^"]*)"|'([^']*)'|([^\]]*)))?\]/g;
+    let m;
+    while ((m = re.exec(text))) {
+        if (m[1]) out.tag = m[1] === "*" ? null : m[1].toUpperCase();
+        else if (m[2]) out.id = m[2];
+        else if (m[3]) out.classes.push(m[3]);
+        else if (m[4]) {
+            const value = m[6] !== undefined ? m[6] : (m[7] !== undefined ? m[7] : m[8]);
+            out.attrs.push({name: m[4], op: m[5] || null,
+                            value: value === undefined ? null : value});
+        }
+    }
+    return out;
+}
+
+function matchesCompound(node, c) {
+    if (c.tag && node.tagName !== c.tag) return false;
+    if (c.id && node.id !== c.id) return false;
+    if (!c.classes.every((name) => node.classList.contains(name))) return false;
+    return c.attrs.every((a) => {
+        const v = node.getAttribute(a.name);
+        if (v === null) return false;
+        if (!a.op) return true;
+        if (a.op === "=") return v === a.value;
+        if (a.op === "^=") return v.indexOf(a.value) === 0;
+        if (a.op === "$=") return v.slice(-a.value.length) === a.value;
+        if (a.op === "*=") return v.indexOf(a.value) >= 0;
+        return false;
+    });
+}
+
+function query(root, selector) {
+    const found = [];
+    String(selector).split(",").map((s) => s.trim()).filter(Boolean).forEach((s) => {
+        let pool;
+        let compound;
+        if (s.indexOf(":scope >") === 0) {
+            pool = root.children;
+            compound = parseCompound(s.slice(8).trim());
+        } else {
+            pool = descendants(root);
+            compound = parseCompound(s);
+        }
+        pool.forEach((node) => {
+            if (matchesCompound(node, compound) && found.indexOf(node) < 0) found.push(node);
+        });
+    });
+    const order = descendants(root);
+    found.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    return found;
+}
+
+function forgeTree(options) {
+    options = options || {};
+    const body = el("body", {id: "body"});
+    const gradioApp = el("gradio-app", {}, body);
+    const container = el("div", {className: "gradio-container app"}, gradioApp);
+    const contain = el("div", {className: "contain"},
+                       el("div", {className: "wrap"}, el("div", {className: "main"}, container)));
+    el("div", {id: "quicksettings"}, contain);
+    const tabs = el("div", {id: "tabs", className: "tabs"}, contain);
+    const nav = el("div", {className: "tab-nav scroll-hide", role: "tablist"}, tabs);
+    const button = (name, id, selected) => el("button", {
+        id: id + "-button", role: "tab", "aria-controls": id,
+        "aria-selected": selected ? "true" : "false",
+        className: selected ? "selected" : "", text: name,
+    }, nav);
+    button("txt2img", "tab_txt2img", true);
+    button("img2img", "tab_img2img", false);
+    button("LLM Studio", "tab_llm_studio", false);
+
+    const txt2img = el("div", {id: "tab_txt2img", className: "tabitem", role: "tabpanel",
+                              display: "block"}, tabs);
+    // Forge's extra networks: a nested gr.Tabs holding the whole of the
+    // generation UI, so this panel has a tab bar inside it on every install.
+    const extra = el("div", {id: "txt2img_extra_tabs", className: "tabs"}, txt2img);
+    const extraNav = el("div", {className: "tab-nav", role: "tablist"}, extra);
+    el("button", {role: "tab", "aria-controls": "txt2img_generation", text: "Generation",
+                  className: "selected"}, extraNav);
+    el("button", {role: "tab", "aria-controls": "txt2img_lora", text: "Lora"}, extraNav);
+    el("div", {id: "txt2img_generation", className: "tabitem", role: "tabpanel",
+               display: "block"}, extra);
+    el("div", {id: "txt2img_lora", className: "tabitem", role: "tabpanel",
+               display: "none"}, extra);
+
+    const img2img = el("div", {id: "tab_img2img", className: "tabitem", role: "tabpanel",
+                              display: "none"}, tabs);
+    const modes = el("div", {id: "mode_img2img", className: "tabs"}, img2img);
+    const modeNav = el("div", {className: "tab-nav", role: "tablist"}, modes);
+    el("button", {role: "tab", text: "img2img", className: "selected"}, modeNav);
+    el("button", {role: "tab", text: "Inpaint"}, modeNav);
+
+    const studio = el("div", {id: "tab_llm_studio", className: "tabitem", role: "tabpanel",
+                             display: "none"}, tabs);
+    el("div", {id: "footer"}, contain);
+    const assistant = el("div", {id: "forge-assistant-root"}, body);
+    const tree = {body, gradioApp, container, contain, tabs, nav, txt2img, img2img, studio,
+                  extraNav, modeNav, assistant};
+    if (options.lobe) lobify(tree);
+    globalThis.gradioApp = () => tree.gradioApp;
+    globalThis.getComputedStyle = (node) => (node && node.tagName ? {
+        display: effectiveDisplay(node), visibility: "visible",
+        position: node.computedPosition, getPropertyValue() { return "0px"; },
+    } : {getPropertyValue() { return "0px"; }});
+    return tree;
+}
+
+// What sd-webui-lobe-theme does at load, read from its source: a React root
+// appended to <gradio-app>; Gradio's `.app` container moved inside that root's
+// <main>; the original bar hidden with an inline style; and a header of its
+// own -- position: sticky, z-index 999 -- carrying a tablist that is NOT
+// under #tabs and whose entries are not <button>s with aria-controls.
+function lobify(tree) {
+    const root = el("div", {id: "root"}, tree.gradioApp);
+    const header = el("header", {id: "lobe-header", position: "sticky"}, root);
+    const lobeNav = el("div", {id: "lobe-nav", role: "tablist", className: "ant-tabs-nav"},
+                       header);
+    ["Txt 2 Img", "Img 2 Img", "LLM Studio"].forEach((label) => {
+        el("div", {role: "tab", text: label}, lobeNav);
+    });
+    el("button", {text: "settings"}, header);
+    const main = el("main", {id: "lobe-main"}, root);
+    el("div", {id: "lobe-background", className: "background", position: "absolute"}, main);
+    const asideLeft = el("aside", {id: "lobe-aside-left", position: "sticky"}, main);
+    const content = el("div", {id: "lobe-content", className: "content"}, main);
+    const asideRight = el("aside", {id: "lobe-aside-right", position: "sticky"}, main);
+    const footer = el("footer", {id: "lobe-footer"}, root);
+    tree.gradioApp.children = tree.gradioApp.children.filter((c) => c !== tree.container);
+    content.children.push(tree.container);
+    tree.container.parentElement = content;
+    tree.nav.style.display = "none";
+    Object.assign(tree, {root, header, lobeNav, main, asideLeft, content, asideRight, footer});
+}
+"""
+
+
+class TestTheHostReadsForgesTabs:
+    """The adapter between this panel and the page, against the page's real
+    shape -- which is the thing the stub DOM above does not have, and the
+    reason every round of "focus mode does not work" got past this file.
+
+    The version these replace collected every tab button on the page as a
+    workspace (nested tab groups have the same class and the same role), threw
+    away every panel with a nested tab group inside it (which is most of them,
+    Txt2Img included), and paired what was left of the two lists by position.
+    Txt2Img came out as a hidden panel or as nothing, and focus mode did what
+    it was told with that.
+    """
+
+    def test_a_workspace_is_a_top_level_tab_and_only_that(self):
+        found = run(HOST_TREE + """
+            forgeTree();
+            const host = NS.host();
+            console.log(JSON.stringify({
+                ids: host.listWorkspaces().map((w) => w.id),
+                labels: host.listWorkspaces().map((w) => w.label),
+            }));
+        """, sources=("host",))
+
+        assert found["ids"] == ["tab_txt2img", "tab_img2img", "tab_llm_studio"]
+        assert found["labels"] == ["txt2img", "img2img", "LLM Studio"]
+        assert "Generation" not in found["labels"], "a nested tab is not a workspace"
+
+    def test_a_panel_holding_nested_tabs_is_still_a_workspace(self):
+        """Txt2Img has a tab bar inside it on every Forge there is: the extra
+        networks are a nested gr.Tabs around the whole generation UI. Excluding
+        a panel for that made the one workspace everybody focuses first the one
+        that could not be."""
+        found = run(HOST_TREE + """
+            forgeTree();
+            const host = NS.host();
+            const root = host.resolveWorkspaceRoot("tab_txt2img");
+            console.log(JSON.stringify({root: root ? root.id : null,
+                                        panels: host.panels().map((p) => p.id)}));
+        """, sources=("host",))
+
+        assert found["root"] == "tab_txt2img"
+        assert found["panels"] == ["tab_txt2img", "tab_img2img", "tab_llm_studio"]
+
+    def test_the_active_workspace_is_the_panel_on_screen(self):
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            const host = NS.host();
+            const first = host.getActiveWorkspace();
+            tree.txt2img.style.display = "none";
+            tree.img2img.style.display = "block";
+            console.log(JSON.stringify({first, second: host.getActiveWorkspace()}));
+        """, sources=("host",))
+
+        assert found["first"] == "tab_txt2img"
+        assert found["second"] == "tab_img2img"
+
+    def test_a_focused_workspace_is_still_the_active_one(self):
+        """Focus makes the panel `position: fixed`, and a fixed element has no
+        offsetParent -- the shortcut for "not laid out". Read from the inline
+        style, where the class says nothing, the one workspace on screen was
+        reported as the one that was not, and the next thing asked for was a
+        workspace switch to where the person already was."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            tree.txt2img.computedPosition = "fixed";
+            // A theme that does not keep the button's selected state in step:
+            // only the panel can answer.
+            tree.nav.children.forEach((b) => {
+                b.classList.remove("selected");
+                b.attributes["aria-selected"] = "false";
+            });
+            console.log(JSON.stringify({active: NS.host().getActiveWorkspace()}));
+        """, sources=("host",))
+
+        assert found["active"] == "tab_txt2img"
+
+    def test_buttons_are_paired_with_panels_by_aria_controls_not_by_position(self):
+        """Gradio renders the panel of a tab that is not offered -- `visible`
+        false -- and leaves out its button. Paired by position, every workspace
+        after it is one panel off, and "focus Txt2Img" focuses whatever comes
+        next."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            // A panel with no button, ahead of the others in the DOM.
+            const ghost = el("div", {id: "tab_hidden_extension", className: "tabitem",
+                                     role: "tabpanel", display: "none"});
+            tree.tabs.children.splice(1, 0, ghost);
+            ghost.parentElement = tree.tabs;
+            // Only aria-controls can answer: the buttons carry no id of their own.
+            tree.nav.children.forEach((b) => { b.id = ""; });
+            const host = NS.host();
+            console.log(JSON.stringify({
+                pairs: host.listWorkspaces().map((w) => [w.button.getAttribute("aria-controls"),
+                                                         w.panel && w.panel.id]),
+            }));
+        """, sources=("host",))
+
+        for controls, panel in found["pairs"]:
+            assert controls == panel, found["pairs"]
+
+    def test_a_button_named_after_its_panel_pairs_without_aria_controls(self):
+        """Gradio also names the button `<panel id>-button`. Second in line,
+        and enough on its own for the same ghost panel."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            const ghost = el("div", {id: "tab_hidden_extension", className: "tabitem",
+                                     role: "tabpanel", display: "none"});
+            tree.tabs.children.splice(1, 0, ghost);
+            ghost.parentElement = tree.tabs;
+            tree.nav.children.forEach((b) => { delete b.attributes["aria-controls"]; });
+            console.log(JSON.stringify({
+                ids: NS.host().listWorkspaces().map((w) => w.id),
+            }));
+        """, sources=("host",))
+
+        assert found["ids"] == ["tab_txt2img", "tab_img2img", "tab_llm_studio"]
+
+    def test_the_bar_is_the_shallowest_one_not_the_first_one(self):
+        """A theme may move the strip -- below the panels, into a wrapper --
+        and a nested bar can then come first in document order. The top-level
+        bar is never inside a panel, so it is always the shallowest; the first
+        one found is whichever the theme happened to put on top."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            tree.tabs.children = tree.tabs.children.filter((c) => c !== tree.nav);
+            tree.tabs.children.push(tree.nav);          // now after every panel
+            console.log(JSON.stringify({
+                labels: NS.host().listWorkspaces().map((w) => w.label),
+            }));
+        """, sources=("host",))
+
+        assert found["labels"] == ["txt2img", "img2img", "LLM Studio"]
+
+    def test_a_host_writing_no_aria_controls_still_gets_a_positional_pairing(self):
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            tree.nav.children.forEach((b) => { delete b.attributes["aria-controls"]; b.id = ""; });
+            console.log(JSON.stringify({
+                ids: NS.host().listWorkspaces().map((w) => w.id),
+            }));
+        """, sources=("host",))
+
+        assert found["ids"] == ["tab_txt2img", "tab_img2img", "tab_llm_studio"]
+
+    def test_a_box_wrapped_around_the_bar_is_not_a_workspace(self):
+        """The one exclusion that is right, kept and made precise. A candidate
+        that has the WORKSPACE bar inside it, focused, is the tab bar laid over
+        the window. A candidate with a nested bar inside it is a workspace."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            const wrapper = el("div", {id: "tab_wrapper"});
+            tree.tabs.children = tree.tabs.children.filter((c) => c !== tree.nav);
+            tree.tabs.children.unshift(wrapper);
+            wrapper.parentElement = tree.tabs;
+            wrapper.children.push(tree.nav);
+            tree.nav.parentElement = wrapper;
+            const host = NS.host();
+            console.log(JSON.stringify({
+                panels: host.panels().map((p) => p.id),
+                ids: host.listWorkspaces().map((w) => w.id),
+            }));
+        """, sources=("host",))
+
+        assert "tab_wrapper" not in found["panels"]
+        assert found["ids"] == ["tab_txt2img", "tab_img2img", "tab_llm_studio"]
+
+    def test_under_the_lobe_theme_the_workspaces_are_still_forge_s(self):
+        """sd-webui-lobe-theme, read from its source: it appends a React root
+        to <gradio-app>, moves Gradio's `.app` container inside it, hides the
+        original bar with an inline style, and draws a header of its own with
+        a tablist that is not under #tabs. None of that is a workspace, and
+        the hidden bar is still the one that says which tabs there are."""
+        found = run(HOST_TREE + """
+            forgeTree({lobe: true});
+            const host = NS.host();
+            console.log(JSON.stringify({
+                ids: host.listWorkspaces().map((w) => w.id),
+                active: host.getActiveWorkspace(),
+                root: (host.resolveWorkspaceRoot("tab_txt2img") || {}).id,
+            }));
+        """, sources=("host",))
+
+        assert found["ids"] == ["tab_txt2img", "tab_img2img", "tab_llm_studio"]
+        assert found["active"] == "tab_txt2img"
+        assert found["root"] == "tab_txt2img"
+
+    def test_activating_a_workspace_presses_forge_s_own_button(self):
+        """Lobe's own nav does exactly this -- finds the hidden Gradio button
+        and clicks it -- so a hidden button is a button that works."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree({lobe: true});
+            const host = NS.host();
+            host.activateWorkspace("tab_img2img").catch(() => undefined);
+            const pressed = tree.nav.children.map((b) => b.clicks);
+            console.log(JSON.stringify({pressed}));
+        """, sources=("host",))
+
+        assert found["pressed"] == [0, 1, 0]

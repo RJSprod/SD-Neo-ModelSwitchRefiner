@@ -165,6 +165,8 @@ const themeBar = make("theme-bar", header);
 themeBar.setAttribute("role", "tablist");
 const nested = make("nested-tabs", studio);
 nested.classList.add("tab-nav");
+const nestedTxt = make("nested-txt2img-tabs", txt2img);
+nestedTxt.classList.add("tab-nav");
 
 // Somebody else got there first: this sibling was already unreachable before
 // focus was ever entered, and it has to stay that way afterwards.
@@ -549,6 +551,84 @@ class TestEntering:
 
         assert found["tabs"] is True
 
+    def test_under_the_lobe_theme_the_header_is_a_hidden_sibling(self):
+        """sd-webui-lobe-theme, read from its source: a React root appended to
+        <gradio-app>, Gradio's container moved inside that root's <main>, and a
+        header of its own -- `position: sticky; z-index: 999` -- beside it. A
+        z-index does not beat that header. Being the child of a marked
+        ancestor that is not itself on the path does, and so it is hidden by
+        the same rule as the footer and the sidebars, without this code ever
+        having heard of Lobe.
+        """
+        found = run("""
+            const gradioApp = make("gradio-app", body);
+            const root = make("root", gradioApp);
+            const lobeHeader = make("lobe-header", root);
+            const lobeNav = make("lobe-nav", lobeHeader);
+            lobeNav.setAttribute("role", "tablist");
+            const main = make("lobe-main", root);
+            const aside = make("lobe-aside", main);
+            const content = make("lobe-content", main);
+            const container = make("gradio-container", content);
+            const lobeFooter = make("lobe-footer", root);
+            // Gradio's #tabs, moved under the theme's content column.
+            body.children = body.children.filter((n) => n !== tabs);
+            container.children.push(tabs);
+            tabs.parentElement = container;
+
+            const answer = focus.enter("tab_txt2img", HOST);
+            const path = (n) => n.classList.contains("forge-assistant-focus-path");
+            const hidden = (n) => n.classList.contains("forge-assistant-focus-hidden");
+            console.log(JSON.stringify({
+                ok: answer.ok,
+                // On the path, so their children are subject to the rule ...
+                rootMarked: path(root), mainMarked: path(main), tabsMarked: path(tabs),
+                // ... and these are the children the rule hides.
+                headerMarked: path(lobeHeader), asideMarked: path(aside),
+                footerMarked: path(lobeFooter),
+                headerParentMarked: path(lobeHeader.parentElement),
+                asideParentMarked: path(aside.parentElement),
+                // The theme's own tablist, outside the workspace: hidden.
+                lobeNavHidden: hidden(lobeNav),
+                // A nested bar inside the workspace: left alone.
+                nestedHidden: hidden(nestedTxt),
+                workspace: document.getElementById("tab_txt2img")
+                    .classList.contains("forge-assistant-focus-root"),
+            }));
+        """)
+
+        assert found["ok"] is True
+        assert found["workspace"] is True
+        assert found["rootMarked"] and found["mainMarked"] and found["tabsMarked"]
+        assert not found["headerMarked"] and not found["asideMarked"] \
+            and not found["footerMarked"]
+        assert found["headerParentMarked"] and found["asideParentMarked"], (
+            "hidden by being the unmarked child of a marked ancestor")
+        assert found["lobeNavHidden"] is True
+        assert found["nestedHidden"] is False
+
+    def test_the_focus_root_rule_outranks_gradio_s_own(self):
+        """Gradio styles a tab panel from a Svelte component whose rules are
+        scoped with a generated class, so what ships is
+        `div.svelte-<hash> { position: relative; ... }`: a tag and a class,
+        which outranks a lone class. Without `!important`, the panel stayed a
+        row in the page with the focus rule silently losing -- which is the
+        whole of why the first three attempts at focus mode changed nothing
+        anybody could see."""
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        rule = css.split(".forge-assistant-focus-root {", 1)[1].split("}", 1)[0]
+        declarations = [line.strip() for line in rule.splitlines()
+                        if ":" in line and not line.strip().startswith("/*")
+                        and not line.strip().startswith("*")]
+
+        for wanted in ("position: fixed", "inset: 0", "z-index:", "overflow: auto",
+                       "display: block"):
+            matching = [d for d in declarations if d.startswith(wanted)]
+            assert matching, wanted + " is missing from the focus root"
+            assert all("!important" in d for d in matching), (
+                wanted + " has to carry !important to beat Gradio's scoped rule")
+
     def test_the_stylesheet_has_a_rule_for_what_the_script_marks(self):
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
@@ -699,83 +779,6 @@ class TestSwitching:
         """)
 
         assert found["ok"] is False
-
-
-class TestTheRootItIsGiven:
-    """The bug that made focus mode look like it did nothing.
-
-    The root came from the host adapter, which paired tab buttons with tab
-    panels by position among ``#tabs``'s children with ids. On the installed
-    page one of those candidates *contained the tab bar* -- so the class went
-    onto a box holding the tab bar and the workspace together, that box was
-    laid over the window, and what the person saw was the tab bar exactly where
-    it had been and a page that would no longer scroll.
-    """
-
-    def test_a_candidate_holding_the_tab_bar_is_not_a_workspace(self):
-        import json as _json
-        import subprocess as _subprocess
-        import tempfile as _tempfile
-
-        harness = """
-        const nodes = [];
-        function make(id, parent, className) {
-            const node = {
-                id, parentElement: parent || null, children: [],
-                className: className || "",
-                classList: {names: new Set((className || "").split(" ").filter(Boolean)),
-                            contains(n) { return node.classList.names.has(n); }},
-                getAttribute() { return null; },
-                querySelectorAll(selector) {
-                    // Only the two shapes the adapter asks for.
-                    if (selector === "button") {
-                        return node.children.filter((c) => c.tagName === "BUTTON");
-                    }
-                    return node.children.filter((c) => c.id);
-                },
-                querySelector(selector) {
-                    if (selector.indexOf("tab-nav") >= 0) {
-                        return node.children.find((c) => c.classList.contains("tab-nav"))
-                            || null;
-                    }
-                    return null;
-                },
-            };
-            if (parent) parent.children.push(node);
-            nodes.push(node);
-            return node;
-        }
-        const tabs = make("tabs", null);
-        // A wrapper with an id that holds the tab bar AND the workspaces. This
-        // is the shape that broke it.
-        const wrapper = make("tab_wrapper", tabs);
-        make("nav", wrapper, "tab-nav");
-        make("tab_txt2img", tabs);
-        globalThis.document = {querySelector: (s) => (s === "#tabs" ? tabs : null)};
-        globalThis.window = globalThis;
-        globalThis.getComputedStyle = () => ({display: "block", visibility: "visible"});
-        globalThis.MutationObserver = function () {
-            return {observe() {}, disconnect() {}};
-        };
-        globalThis.console = console;
-        __SOURCE__
-        const host = globalThis.forgeAssistant.host();
-        console.log(JSON.stringify({
-            panels: host.panels().map((p) => p.id),
-        }));
-        """
-        source = (pathlib.Path(__file__).resolve().parent.parent / "javascript"
-                  / "forge_assistant_host.js").read_text(encoding="utf-8")
-        with _tempfile.TemporaryDirectory() as room:
-            entry = pathlib.Path(room) / "scenario.mjs"
-            entry.write_text(harness.replace("__SOURCE__", source), encoding="utf-8")
-            result = _subprocess.run(["node", str(entry)], capture_output=True, text=True,
-                                     timeout=60)
-        assert result.returncode == 0, result.stderr
-        found = _json.loads(result.stdout.strip().splitlines()[-1])
-
-        assert found["panels"] == ["tab_txt2img"], (
-            "a box holding the tab bar was offered as a workspace to fill the window with")
 
 
 class TestAdapters:

@@ -120,7 +120,8 @@ the executor starts.
 ## 3.5 Four defects found in use, and what they were
 
 Reported against the first build, on a running Forge. Two more followed against
-the second build (§3.6), and two more against the third (§3.7).
+the second build (§3.6), two more against the third (§3.7), and a fifth report
+finally produced the real diagnosis of all four focus-mode reports (§3.8).
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -168,6 +169,11 @@ One of those candidates *contained the tab bar*, so the class went onto a box
 holding the tab bar and the workspace together — laid over the window, tab bar
 and all. `panels()` now excludes any candidate containing `.tab-nav` or a
 `role="tablist"`, with a test.
+
+> **This diagnosis was wrong, and the fix made things worse.** See §3.8. The
+> candidate that "contained the tab bar" was Txt2Img itself, whose extra
+> networks are a nested `gr.Tabs` on every Forge there is. Excluding panels
+> for containing a tab bar excluded most of them, Txt2Img first.
 
 And `enter()` locked the body's scrolling and walked up the tree setting
 `inert` on every sibling at every level. Neither is in the reference
@@ -368,6 +374,84 @@ arrive without its conversation. The empty branch cleared the transcript and
 left `lastRendered` pointing at what had been in it, so when the conversation
 returned unchanged the redraw was skipped and the transcript stayed empty.
 
+## 3.8 What was actually wrong with focus mode
+
+Four reports in a row said focus mode did not work, and each fix answered the
+report it had rather than the cause — the body-scroll lock, then a cover that
+could not beat a sticky header, then chrome taken out of the layout, then a
+safety valve. Every one of them was built on the assumption that the host
+adapter was handing focus mode the right element. It was not, and there was a
+second, independent reason nothing was ever visible. Both were found by reading
+`sd-webui-lobe-theme` and Gradio 4.40's `Tabs.svelte` rather than guessing at
+the DOM a fifth time.
+
+### The host adapter paired the wrong things
+
+Gradio renders `gr.Tabs` as
+
+```
+div#tabs.tabs
+  div.tab-nav[role=tablist]
+    button[role=tab][aria-controls=tab_x][id=tab_x-button] …
+  div#tab_x.tabitem[role=tabpanel][style="display: block|none"]
+  …
+```
+
+and renders every **nested** `gr.Tabs` — Forge's extra networks inside Txt2Img,
+the mode tabs inside Img2Img, the pages inside Settings — with exactly the same
+classes and roles. `forge_assistant_host.js` ignored that:
+
+- `bar()` collected every button under `#tabs` whose parent was a `.tab-nav`,
+  which is every nested tab button on the page as well;
+- `panels()` (from §3.5) threw away every panel with a nested tab group inside
+  it, which is Txt2Img and most of the others;
+- `listWorkspaces()` paired those two corrupted lists **by position**, and
+  `getActiveWorkspace()` walked the filtered panels for a visible one.
+
+On Txt2Img the "active workspace" therefore resolved to a hidden panel, or to
+nothing. Focus mode then did exactly what it was told: marked that hidden
+panel's ancestors and hid everything else — including the real workspace —
+which is the blank page of §3.7. With the valve in place it degraded instead,
+and the header stayed. The picker was mispaired the same way.
+
+Now: the top-level bar is the **shallowest** `.tab-nav`/`[role=tablist]` under
+`#tabs` (a theme may wrap it; a nested one is always inside a panel and so
+deeper); panels are `#tabs > [id^="tab_"]`, excluding only a candidate that
+*contains the bar*; buttons are paired with panels by `aria-controls`, which
+Gradio writes on every tab button, then by the `<id>-button` name, and only
+then by position. `visible()` reads the computed position, because the focused
+panel is fixed by a class and its inline style says nothing.
+
+### The focus rule never applied
+
+Gradio styles a tab panel from a Svelte component whose rules are scoped with
+a generated class: what ships is `div.svelte-<hash> { position: relative; … }`.
+A tag plus a class outranks a lone class, so `.forge-assistant-focus-root {
+position: fixed }` **lost, silently, on every Forge**. The panel stayed a row
+in the page. This is why the very first report — "the menu bar does not go
+away, the page stops scrolling" — showed the scroll lock and nothing else: the
+lock worked, the overlay never did. The rule carries `!important` now, and a
+test reads the stylesheet to keep it that way.
+
+### What Lobe actually does
+
+Read from its source (`src/main.tsx`, `src/app/index.tsx`, `useInject`,
+`useNavBar`): it appends `<div id="root">` to `<gradio-app>`, renders its
+header (`position: sticky; z-index: 999`), a `<main>` with sidebars, and a
+footer inside it, **moves Gradio's `.app` container into that `<main>`**, hides
+`#tabs > .tab-nav` with an inline style, and draws its own tab strip in the
+header — a tablist that is not under `#tabs` and whose entries click the hidden
+Gradio buttons. Nothing in that needs special handling once the adapter reads
+the page correctly: the header, sidebars and footer are unmarked children of a
+marked ancestor and the path rule hides them; the theme's own tablist is
+outside the workspace and `enter()` marks it. `tests/test_assistant_js.py` now
+builds this exact shape (and Forge's plain one, nested tabs included) and runs
+the adapter against it; `tests/test_assistant_focus_js.py` enters focus on it.
+
+`enter()` also writes one line to the console saying which panel it focused,
+how many ancestors it marked, how many bars it hid and whether it degraded.
+That line would have shortened this by three rounds.
+
 ---
 
 ## 4. Deliberate deviations
@@ -405,8 +489,8 @@ rather than closed.
 | Gate | State |
 |---|---|
 | G1 Forge/Gradio versions and event signatures | **open.** The code uses only `click`, `submit`, `change`, `then`, `success` and generator outputs, all of which this repository already relies on. `cancels=` was removed from Stop; if it must stay for a host reason it is harmless, because the operation is not in the generator. |
-| G2 Theme mount points, portal roots, listener order | **closed for the case that was failing, open in general.** Focus no longer covers the chrome, it takes it out of the layout: the workspace's ancestors are marked and one rule hides everything else under them, so a theme's header is hidden whatever it is called and wherever it sits (§3.6). That is what a z-index could not do under Lobe. A containing-block trap on an ancestor is a note rather than a refusal now, because the workspace still fills what is left of the window. Listener order remains unverified against a running host. |
-| G3 Installed tab ids and header controls | **open.** `forge_assistant_host.js` reads the host's own `#tabs` element, pairs buttons with panels by position, and offers whatever it finds. It never matches a tab by display name. |
+| G2 Theme mount points, portal roots, listener order | **closed for Lobe, from its source (§3.8).** The theme's mount point is `<gradio-app> > #root`, Gradio's container is moved inside it, and its header is a sticky sibling of the content — an unmarked child of a marked ancestor, hidden by the path rule. Tested against a DOM of that shape. Listener order remains unverified against a running host. |
+| G3 Installed tab ids and header controls | **closed for Gradio 4.40, from its source (§3.8).** The adapter reads `#tabs > .tab-nav` (the shallowest bar) and `#tabs > [id^="tab_"]`, pairs them by `aria-controls`, and ignores nested tab groups. It never matches a tab by display name. |
 | G4 Whether `script.js` honours `defaultPrevented` | **open.** No document-wide Send or Stop shortcut is installed, so nothing depends on the answer. Escape uses a precedence function with its own tests; the one thing it will not do is swallow Escape when nothing closer to hand wants it. |
 | G5 Hidden field value before its tab is selected | **open.** The capability is rendered into `mc-llm-chat-conversation-key` exactly as `mc-llm-chat-voice-key` is, which is the pattern already proven in this installation. If it turns out to be empty before the tab is selected, the fallback is a bootstrap route behind the host's own auth; the store already treats a missing key as "conversation unavailable" and keeps navigation and focus working. |
 | G6 Whether generation can run outside a Gradio worker | **closed enough to ship, in this checkout.** `mc_llm_sessions.conversation()` takes a request and a cancellation and yields events; the tests drive it from a plain thread. If a host turns out to need request context, the executor is the one place an adapter goes. |
@@ -414,7 +498,7 @@ rather than closed.
 | G8 `gr.Chatbot` row classes | **open, and the one thing here that can fail silently.** Three candidate selectors are used; a Gradio or theme upgrade can stop all three matching, which costs bubble width and nothing else. Add a visual check to the upgrade checklist. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,425 passing, 13 skipped. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,437 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---

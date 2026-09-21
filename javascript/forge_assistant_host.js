@@ -51,10 +51,26 @@
 
     function visible(node) {
         if (!node) return false;
-        if (node.offsetParent !== undefined && node.offsetParent === null
-            && node.style && node.style.position !== "fixed") return false;
         const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
-        return !style || (style.display !== "none" && style.visibility !== "hidden");
+        if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+        // No offsetParent means this or an ancestor is not laid out -- unless
+        // the element is fixed, which has none by definition. The *computed*
+        // position, because the focused workspace is fixed by a class and its
+        // inline style says nothing; reading the inline value reported the one
+        // workspace on screen as the one that was not.
+        if (node.offsetParent !== undefined && node.offsetParent === null
+            && !(style && style.position === "fixed")) return false;
+        return true;
+    }
+
+    function depth(node, top) {
+        let count = 0;
+        let walk = node;
+        while (walk && walk !== top) {
+            count += 1;
+            walk = walk.parentElement;
+        }
+        return walk === top ? count : Infinity;
     }
 
     function Host() {
@@ -75,49 +91,98 @@
     // within the bar -- which is the host's own ordering and therefore the one
     // the picker must preserve.
 
+    // -- the tab bar ------------------------------------------------------- //
+    //
+    // Gradio renders `gr.Tabs` as
+    //
+    //     div#tabs.tabs
+    //       div.tab-nav[role=tablist]
+    //         button[role=tab][aria-controls=tab_x][id=tab_x-button] ...
+    //       div#tab_x.tabitem[role=tabpanel][style="display: block|none"]
+    //       ...
+    //
+    // and it renders every NESTED `gr.Tabs` -- the extra-network tabs inside
+    // Txt2Img, the mode tabs inside Img2Img, the pages inside Settings -- with
+    // exactly the same classes and the same roles. Every line below is written
+    // against that fact, because the version that ignored it collected every
+    // tab button on the page as a workspace, threw away every panel with a
+    // nested tab group inside it (which is most of them), and paired what was
+    // left of the two lists by position. Txt2Img came out as a hidden panel or
+    // as nothing at all, and focus mode did exactly what it was told with that:
+    // hid the page around a panel that was not showing.
+    //
+    // So: the top-level bar is the SHALLOWEST bar under `#tabs` -- a theme may
+    // wrap it, but a nested one is always inside a panel and therefore deeper.
+    // A workspace is a panel paired with its button by `aria-controls`, which
+    // Gradio writes on every tab button; position is the fallback for a host
+    // that does not, never the rule.
+
     Host.prototype.bar = function () {
         const tabs = app().querySelector("#tabs");
         if (!tabs) return null;
-        const buttons = all("button", tabs).filter((button) => {
-            const parent = button.parentElement;
-            return parent && (parent.classList.contains("tab-nav")
-                || parent.getAttribute("role") === "tablist");
+        const bars = all(".tab-nav, [role='tablist']", tabs);
+        if (!bars.length) return null;
+        let strip = bars[0];
+        let shallowest = depth(strip, tabs);
+        bars.forEach((bar) => {
+            const found = depth(bar, tabs);
+            if (found < shallowest) {
+                strip = bar;
+                shallowest = found;
+            }
         });
-        return buttons.length ? {tabs, buttons} : null;
+        // The buttons that are tabs, and not a control a theme has added to
+        // the same strip. Direct children as the fallback for a host that
+        // writes no roles; anything at all as the last resort.
+        let buttons = all("[role='tab']", strip);
+        if (!buttons.length) {
+            buttons = all("button", strip).filter((button) => button.parentElement === strip);
+        }
+        if (!buttons.length) buttons = all("button", strip);
+        return buttons.length ? {tabs, strip, buttons} : null;
     };
 
     Host.prototype.panels = function () {
         const tabs = app().querySelector("#tabs");
         if (!tabs) return [];
-        // A tab's panel is a direct child with an id, which is what Forge and
-        // every extension that registers a tab produce. Nested ids -- the
-        // hundreds inside each panel -- are not candidates.
-        //
-        // And never a candidate that CONTAINS THE TAB BAR. That is the check
-        // focus mode turns on: the panel is about to be laid over the whole
-        // window, and a "panel" that has the tab bar inside it lays the tab bar
-        // over the window too. What that looks like is focus mode doing
-        // nothing except stopping the page scrolling, which is exactly how it
-        // was first reported.
-        return all(":scope > div[id], :scope > .tabitem[id]", tabs)
-            .filter((panel) => panel.id && panel.id !== "tabs" && !holdsTabBar(panel));
+        const bar = this.bar();
+        // A panel is a direct child of `#tabs` with an id. Gradio names them
+        // `tab_<name>`; the looser shapes are for a host that does not.
+        let found = all(":scope > [id^='tab_']", tabs);
+        if (!found.length) found = all(":scope > [role='tabpanel'][id], :scope > .tabitem[id]", tabs);
+        if (!found.length) found = all(":scope > div[id]", tabs);
+        // Never the bar, and never something wrapped around the bar: a
+        // "panel" with the tab bar inside it, focused, is the tab bar laid
+        // over the window. Nested tab groups INSIDE a panel are not that --
+        // they are the panel's own content -- and excluding a panel for
+        // having one is how Txt2Img stopped being a workspace.
+        return found.filter((panel) => panel.id && panel.id !== "tabs"
+            && !(bar && (panel === bar.strip || panel.contains(bar.strip))));
     };
-
-    function holdsTabBar(node) {
-        if (!node || typeof node.querySelector !== "function") return false;
-        try {
-            return !!node.querySelector(".tab-nav, [role='tablist']");
-        } catch (error) {
-            return false;
-        }
-    }
 
     Host.prototype.listWorkspaces = function () {
         const bar = this.bar();
         const panels = this.panels();
         if (!bar) return [];
+        const byId = new Map();
+        panels.forEach((panel) => byId.set(panel.id, panel));
+        const taken = new Set();
+        const pick = (button, order) => {
+            // `aria-controls` first: it is the pairing Gradio itself writes,
+            // and it survives a tab that is rendered but not offered (its
+            // panel is in the DOM, its button is not), which shifts every
+            // positional pairing after it by one.
+            const controls = button.getAttribute("aria-controls");
+            if (controls && byId.has(controls)) return byId.get(controls);
+            const named = button.id && /-button$/.test(button.id)
+                ? button.id.replace(/-button$/, "") : "";
+            if (named && byId.has(named)) return byId.get(named);
+            const positional = panels.filter((panel) => !taken.has(panel));
+            return positional[order - taken.size] || null;
+        };
         return bar.buttons.map((button, order) => {
-            const panel = panels[order] || null;
+            const panel = pick(button, order);
+            if (panel) taken.add(panel);
             const id = (panel && panel.id) || ("tab-" + order);
             const capability = this.focusCapability(id, panel);
             return {
@@ -142,21 +207,20 @@
     };
 
     Host.prototype.getActiveWorkspace = function () {
-        const bar = this.bar();
-        if (!bar) return "";
-        const panels = this.panels();
+        const workspaces = this.listWorkspaces();
+        if (!workspaces.length) return "";
         // The authority is which *panel* is showing, not which button looks
         // selected: a theme is free to restyle the button and several do.
-        for (let index = 0; index < panels.length; index += 1) {
-            if (visible(panels[index])) return panels[index].id;
-        }
-        const selected = bar.buttons.findIndex(
-            (button) => button.classList.contains("selected")
-                || button.getAttribute("aria-selected") === "true");
-        return selected >= 0 && panels[selected] ? panels[selected].id : "";
+        const showing = workspaces.find((item) => item.panel && visible(item.panel));
+        if (showing) return showing.id;
+        const selected = workspaces.find((item) => item.button.classList.contains("selected")
+            || item.button.getAttribute("aria-selected") === "true");
+        return selected && selected.panel ? selected.id : "";
     };
 
     Host.prototype.resolveWorkspaceRoot = function (id) {
+        const paired = this.listWorkspaces().find((item) => item.id === id);
+        if (paired && paired.panel) return paired.panel;
         return this.panels().find((panel) => panel.id === id) || null;
     };
 

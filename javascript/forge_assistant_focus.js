@@ -297,6 +297,17 @@
         }
 
         this.active = context;
+        // One line in the console saying what was actually done, because the
+        // reports that led here were "it does not work" three times over and
+        // each one meant something different. Cheap, and the first thing to
+        // ask for next time.
+        try {
+            console.info("Forge Assistant: focus on #" + id
+                + (context.degraded ? " (chrome left in place)" : "")
+                + ", " + context.path.length + " ancestors marked, "
+                + context.hidden.length + " tab bars hidden"
+                + (context.note ? ", note: " + context.note : ""));
+        } catch (error) { /* a console that cannot be written to */ }
         // The note travels out with the success. A containing-block trap is
         // not a refusal any more, and neither is a page whose chrome would not
         // come out of the layout, so the sentence describing what the caller

@@ -3195,7 +3195,13 @@ that draws its own header — a positioned header with a stacking context of its
 own stays exactly where it is with the workspace nominally on top of it. So
 while focus is on, everything beside the workspace is taken out of the layout:
 the tab bar, a theme's chrome, the footer and the other tabs. A dialog the host
-opened over the page is not chrome and stays.
+opened over the page is not chrome and stays. This was checked against the
+Lobe theme's own source rather than assumed: its header, sidebars and footer
+go, and its tab strip with them.
+
+The workspace's own nested tabs — the extra-network tabs inside Txt2Img, the
+mode tabs inside Img2Img — are the workspace's content and stay exactly as
+they were.
 
 Nothing is moved or restyled to do it and no element of Forge's is touched
 beyond a class going on and coming off, which is what makes leaving focus
