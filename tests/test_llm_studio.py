@@ -771,17 +771,51 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
 
     def test_a_closed_generator_still_writes_the_reply_to_the_thread(self, store, host,
                                                                      monkeypatch):
+        """Closing the follower costs a subscription and nothing else.
+
+        The reply used to live *inside* this generator, so closing it -- which
+        is what ``cancels=`` does, and what a browser refresh amounted to --
+        was the reply ending, and the only thing that saved the partial text
+        was a ``finally`` written after the bug report above.
+
+        The reply belongs to the server now. Closing the follower stops nobody
+        watching it, so the answer is no longer "the partial survived": it is
+        that the whole reply arrives and is saved, because nothing was
+        cancelled. Stopping is a separate request and has its own tests.
+        """
+        import mc_llm_conversation_ops as ops
+
         chat, chats, conversation = self._thread(store, monkeypatch)
 
         run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
         next(run)          # the composer clears and the run starts
         next(run)          # the first chunk arrives
-        run.close()        # what Stop does
+        run.close()        # what a refresh, or a closed tab, does
 
+        assert ops.drain(timeout=10), "the reply did not finish on its own thread"
         saved = chats.load("Ada", conversation.identifier)
         assert [message.role for message in saved.messages] == ["user", "assistant"]
         assert saved.messages[0].text == "hello love"
-        assert saved.messages[1].text == "Hello", "the partial reply is a real reply"
+        assert saved.messages[1].text == "Hello there", "the reply was not cancelled"
+
+    def test_stopping_keeps_the_part_of_the_reply_that_arrived(self, store, host,
+                                                               monkeypatch):
+        """The other half of the same promise, and the one the bug report was
+        about: a reply the reader Stopped is a real reply and is written to the
+        thread, not discarded because the generator drawing it went away."""
+        import mc_llm_conversation_ops as ops
+
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
+        accepted = next(run)
+        next(run)
+        chat._cancel(accepted[0])
+        run.close()
+
+        assert ops.drain(timeout=10)
+        saved = chats.load("Ada", conversation.identifier)
+        assert saved.messages[1].text == "Hello there"
 
     def test_a_reply_that_ran_to_completion_is_saved_once_and_kept(self, store, host,
                                                                    monkeypatch):
@@ -791,18 +825,23 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
 
         saved = chats.load("Ada", conversation.identifier)
         assert saved.messages[1].text == "Hello there"
+        assert len([message for message in saved.messages
+                    if message.role == "assistant"]) == 1, "the reply was saved twice"
 
     def test_a_reply_that_never_started_leaves_no_blank_message_behind(self, store, host,
                                                                        monkeypatch):
         """``_tidy``'s job, and the reason the save cannot simply be
         unconditional: a reply that produced nothing is cleared up rather than
         written to the thread as an empty bubble."""
+        import mc_llm_conversation_ops as ops
+
         chat, chats, conversation = self._thread(store, monkeypatch, pieces=())
 
         run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
         next(run)
         run.close()
 
+        assert ops.drain(timeout=10)
         saved = chats.load("Ada", conversation.identifier)
         assert [message.role for message in saved.messages] == ["user"]
 

@@ -92,6 +92,14 @@ def thread(store, monkeypatch, pieces=("Hello there, this is a long first senten
     return chats, conversation
 
 
+# Positions in a follower frame, by name. They used to be counted from the end,
+# which was fine while the last two values were the ones being read -- the
+# revision of the thread is now the last, so counting from the end reads the
+# run state as a turn id and the turn id as nothing at all.
+TURN = chat.STREAM_ORDER.index("speech_turn")
+RUN_STATE = chat.STREAM_ORDER.index("run_state")
+
+
 def run_reply(store, monkeypatch, **kwargs):
     _chats, conversation = thread(store, monkeypatch, **kwargs)
     return list(chat._send("Ada", conversation.identifier, "hello love",
@@ -105,23 +113,24 @@ class TestTheTurnReachesTheBrowser:
         is a Gradio error, and a yield that carries an empty turn is Voice
         silently switched off."""
         frames = run_reply(store, monkeypatch)
-        assert {len(frame) for frame in frames} == {10}, "the stream outputs changed shape"
-        tokens = {frame[-2] for frame in frames}
+        assert {len(frame) for frame in frames} == {len(chat.STREAM_ORDER)}, (
+            "the stream outputs changed shape")
+        tokens = {frame[TURN] for frame in frames}
         assert len(tokens) == 1 and tokens != {""}, tokens
-        assert [frame[-1] for frame in frames][:1] == [chat.LLM_RUNNING]
-        assert [frame[-1] for frame in frames][-1] == chat.LLM_IDLE
+        assert [frame[RUN_STATE] for frame in frames][:1] == [chat.LLM_RUNNING]
+        assert [frame[RUN_STATE] for frame in frames][-1] == chat.LLM_IDLE
 
     def test_the_token_names_a_turn_the_stream_route_can_find(self, store, monkeypatch,
                                                              speaking):
         """A token the browser cannot exchange for audio is a 404 nothing logs
         and nobody hears."""
         frames = run_reply(store, monkeypatch)
-        token = frames[0][-2]
+        token = frames[0][TURN]
         assert turns.lookup(token) is not None
 
     def test_the_reply_reaches_the_worker_as_segments(self, store, monkeypatch, speaking):
         frames = run_reply(store, monkeypatch)
-        turn = turns.lookup(frames[0][-2])
+        turn = turns.lookup(frames[0][TURN])
         turn.attached.set()
         turn.finished.wait(3.0)
         assert speaking.segments, "the reply was never handed to the worker"
@@ -132,7 +141,7 @@ class TestTheTurnReachesTheBrowser:
                                                                     host):
         host.shared.opts.model_chain_voice_auto_speak = False
         frames = run_reply(store, monkeypatch)
-        assert {frame[-2] for frame in frames} == {""}
+        assert {frame[TURN] for frame in frames} == {""}
         assert not speaking.segments
 
 
@@ -231,7 +240,7 @@ class TestTheLogSaysWhyItIsQuiet:
         with caplog.at_level("WARNING", logger="model_chain"):
             frames = run_reply(store, monkeypatch)
         assert any("could not start speaking" in record.message for record in caplog.records)
-        assert {frame[-2] for frame in frames} == {""}, (
+        assert {frame[TURN] for frame in frames} == {""}, (
             "a turn that could not be created must leave the field empty so the "
             "completed-reply fallback is still allowed to fire")
 

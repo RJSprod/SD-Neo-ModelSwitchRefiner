@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import secrets
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -146,6 +148,75 @@ def locate(recorded: str) -> Path | None:
     if not candidate.is_absolute() and base not in found.parents:
         return None
     return found if found.is_file() else None
+
+
+ATTACHMENT_ROUTE = "/model-chain/conversation/v2/attachment"
+"""Where the assistant asks for one stored picture. See :func:`serving_url`."""
+
+_tickets: dict = {}
+_tickets_lock = threading.Lock()
+
+MAX_TICKETS = 4096
+"""How many picture tickets are remembered. Oldest dropped first.
+
+A thousand-message thread with a picture on every turn would want a thousand,
+and a browser that is handed one can hold it for as long as the page is open.
+Four thousand is a few hundred kilobytes and several transcripts' worth.
+"""
+
+
+def serving_url(recorded: str) -> str:
+    """A URL for one stored picture that is not a path. Empty if there is none.
+
+    The flyout renders a transcript of its own, so it needs to be able to ask
+    for a message's picture -- and specification 6.6 is explicit that no
+    filesystem path leaves the server. The tab's existing ``file=`` markup is
+    the host's own route and stays exactly as it is; this is the second reader,
+    and it gets an opaque ticket instead.
+
+    A ticket is a random name for a record this process has already resolved
+    and contained, so a browser cannot ask for a different file by editing it:
+    there is nothing in it to edit. It is minted only for a record that
+    :func:`locate` accepted, which is the same containment check the ``file=``
+    path relies on.
+    """
+    found = locate(recorded)
+    if found is None:
+        return ""
+    with _tickets_lock:
+        for ticket, held in _tickets.items():
+            if held == str(found):
+                return f"{ATTACHMENT_ROUTE}/{ticket}"
+        ticket = secrets.token_urlsafe(18)
+        _tickets[ticket] = str(found)
+        while len(_tickets) > MAX_TICKETS:
+            _tickets.pop(next(iter(_tickets)), None)
+    return f"{ATTACHMENT_ROUTE}/{ticket}"
+
+
+def serving_path(ticket: str) -> Path | None:
+    """The file one ticket names, re-checked. ``None`` when it is not there."""
+    with _tickets_lock:
+        held = _tickets.get(str(ticket or ""))
+    if not held:
+        return None
+    candidate = Path(held)
+    # Re-contained rather than trusted, even though this process minted it: the
+    # file may have been replaced by a link since, and the check costs a stat.
+    try:
+        base = root().resolve()
+        found = candidate.resolve()
+    except (OSError, ValueError):
+        return None
+    if base not in found.parents:
+        return None
+    return found if found.is_file() else None
+
+
+def forget_tickets() -> None:
+    """Drop every picture ticket. For the tests, and for a UI reload."""
+    with _tickets_lock:
+        _tickets.clear()
 
 
 def data_url(recorded: str) -> str:

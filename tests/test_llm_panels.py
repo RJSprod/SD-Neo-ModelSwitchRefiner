@@ -28,6 +28,16 @@ import mc_llm_prompt_panel
 import mc_llm_studio
 
 
+def _all_shut(tail) -> bool:
+    """Whether every value in an overlay answer's tail says "closed".
+
+    Mixed on purpose: a visibility update for each surface, an empty name for
+    each foreign State. Both mean closed; neither is the other's shape.
+    """
+    return all(value == "" if isinstance(value, str)
+               else value.get("visible") is False for value in tail)
+
+
 @pytest.fixture(autouse=True)
 def store(tmp_path, monkeypatch, host):
     monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path)
@@ -381,8 +391,12 @@ class TestPerMessageActions:
         wrong control."""
         conversation = self._thread(store)
         identifier = conversation.identifier
-        # The four leading values, the header, and one per action-sheet control.
-        width = 5 + len(mc_llm_chat_panel.SELECTION_ORDER)
+        # Asked of the function rather than counted here. It is the four
+        # leading values, the header, one per action-sheet control, and the
+        # revision of the thread as this page last drew it -- and the revision
+        # is exactly the kind of value a list written out by hand would be
+        # missing from one handler in nine.
+        width = len(mc_llm_chat_panel._refresh(None, ""))
 
         for result in (
             mc_llm_chat_panel._close_selection("Ada", identifier),
@@ -391,12 +405,33 @@ class TestPerMessageActions:
             mc_llm_chat_panel._commit_edit("Ada", identifier, 0, "changed", None),
             mc_llm_chat_panel._delete_message("Ada", identifier, 3),
             mc_llm_chat_panel._delete_from("Ada", identifier, 2),
-            mc_llm_chat_panel._select_message("Ada", identifier, [[0, 0, 0]],
-                                             mc_llm_chat_panel.NO_SELECTION),
             mc_llm_chat_panel._open_thread("Ada", identifier)[2:],
             mc_llm_chat_panel._open_editor("Ada", identifier, 1),
         ):
             assert len(result) == width
+
+    def test_tapping_a_bubble_also_writes_the_other_overlays(self, store):
+        """The one handler in this list that *opens* a surface rather than
+        redrawing one, and therefore the one that is wider.
+
+        Tapping a bubble opens the message action sheet, and the action sheet
+        is the seventh pop surface in LLM Studio. It used to know about none of
+        the other six: it opened over the character editor, over the thread
+        list, over the workspace chooser. So this handler writes every other
+        surface shut as well, and its answer carries one value for each.
+        """
+        import mc_llm_overlays
+
+        conversation = self._thread(store)
+        width = len(mc_llm_chat_panel._refresh(None, ""))
+        closing = mc_llm_overlays.foreign(("actions",),
+                                          mc_llm_chat_panel.OVERLAY_OWNER)[1]
+
+        answered = mc_llm_chat_panel._select_message(
+            "Ada", conversation.identifier, [[0, 0, 0]], mc_llm_chat_panel.NO_SELECTION)
+
+        assert len(answered) == width + len(closing)
+        assert _all_shut(answered[width:])
 
     def test_regenerate_falls_back_to_the_last_reply(self, store):
         """"Again" is about the end of the thread unless somebody has said
@@ -1091,7 +1126,7 @@ class TestEditingAMessageInPlace:
     def test_every_answer_is_the_same_shape(self, store):
         """One output list, whichever branch answered it."""
         chats, conversation = self._thread(store)
-        wanted = 5 + len(mc_llm_chat_panel.SELECTION_ORDER)
+        wanted = len(mc_llm_chat_panel._refresh(None, ""))
 
         for index in (-1, 0, 1, 2):
             assert len(mc_llm_chat_panel._open_editor("Ada", conversation.identifier,
@@ -1312,6 +1347,27 @@ class TestTheSurfaces:
         return [update.get("visible")
                 for update in answered[1:1 + len(mc_llm_chat_panel.SCREENS)]]
 
+    def _screens_width(self):
+        """How long a ``_screens``-shaped answer is, asked rather than assumed.
+
+        It used to be ``1 + len(SCREENS)``. It is longer once a build has
+        registered the rest of LLM Studio's pop surfaces with
+        ``mc_llm_overlays``: one decision now closes the shell's two sheets and
+        the message action sheet as well, so the answer carries their
+        visibilities and the other group's State. Asked of the function so that
+        this reads the same whether the registry is populated or empty.
+        """
+        return len(mc_llm_chat_panel._close_screens())
+
+    def _all_closed(self, tail):
+        """Whether a ``_screens``-shaped tail has everything shut.
+
+        Mixed on purpose: a visibility for each surface, then an empty name for
+        each foreign State. Both mean closed and neither is the other's shape.
+        """
+        return all(value == "" if isinstance(value, str)
+                   else value.get("visible") is False for value in tail)
+
     def test_one_surface_is_open_and_the_others_are_not(self):
         answered = mc_llm_chat_panel._screens("character")
         shown = self._visible(answered)
@@ -1356,7 +1412,7 @@ class TestTheSurfaces:
         looking at, and a sheet left open under another sheet is the second half
         of every "why is this still here?"."""
         conversation = self._thread(store)
-        screens = 1 + len(mc_llm_chat_panel.SCREENS)
+        screens = self._screens_width()
 
         answered = mc_llm_chat_panel._leave("Ada", conversation.identifier)
 
@@ -1365,22 +1421,22 @@ class TestTheSurfaces:
 
     def test_tapping_a_thread_opens_it_and_comes_home(self, store):
         conversation = self._thread(store)
-        screens = 1 + len(mc_llm_chat_panel.SCREENS)
+        screens = self._screens_width()
 
         answered = mc_llm_chat_panel._open_thread_home("Ada", conversation.identifier)
 
         assert answered[0] == conversation.identifier
         assert answered[-screens] == ""
-        assert all(update.get("visible") is False for update in answered[-screens + 1:])
+        assert self._all_closed(answered[-screens + 1:])
 
     def test_a_new_thread_comes_home_too(self, store):
         self._thread(store)
-        screens = 1 + len(mc_llm_chat_panel.SCREENS)
+        screens = self._screens_width()
 
         answered = mc_llm_chat_panel._new_thread("Ada", "")
 
         assert answered[-screens] == ""
-        assert all(update.get("visible") is False for update in answered[-screens + 1:])
+        assert self._all_closed(answered[-screens + 1:])
 
     def test_the_threads_screen_opens_on_the_current_list(self, store):
         self._thread(store)
@@ -1606,12 +1662,27 @@ class TestShell:
 
     def test_one_sheet_is_open_at_a_time(self):
         answered = mc_llm_studio._sheet("model")
-        shown = [update.get("visible") for update in answered[1:]]
+        shown = [update.get("visible")
+                 for update in answered[1:1 + len(mc_llm_studio.SHEETS)]]
 
         assert answered[0] == "model"
         assert shown.count(True) == 1
         assert shown[mc_llm_studio.SHEETS.index("model")] is True
-        assert all(update.get("visible") is False for update in mc_llm_studio._sheet("")[1:])
+        assert _all_shut(mc_llm_studio._sheet("")[1:])
+
+    def test_opening_a_shell_sheet_closes_conversation_s_own_surfaces(self):
+        """The rule that used to be three rules. Opening the workspace chooser
+        left the character editor underneath it, because the shell's two sheets
+        and Conversation's four screens were separate ideas of "one at a time"
+        that had never heard of each other."""
+        import mc_llm_overlays
+
+        answered = mc_llm_studio._sheet("mode")
+        rest = answered[1 + len(mc_llm_studio.SHEETS):]
+
+        assert len(rest) == len(mc_llm_overlays.foreign(mc_llm_studio.SHEETS,
+                                                        mc_llm_studio.OVERLAY_OWNER)[1])
+        assert _all_shut(rest)
 
     def test_the_menu_button_closes_the_sheet_it_opened(self):
         """The shell bar's menu is not covered by what it opens on a desktop,
@@ -1621,7 +1692,7 @@ class TestShell:
 
         assert opened[0] == "mode"
         assert closed[0] == ""
-        assert all(update.get("visible") is False for update in closed[1:])
+        assert _all_shut(closed[1:])
 
     def test_a_sheet_that_is_not_a_sheet_closes_everything(self):
         assert mc_llm_studio._sheet("elsewhere")[0] == ""

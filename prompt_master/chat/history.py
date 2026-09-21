@@ -21,6 +21,11 @@ half-written conversation behind.
 
 from __future__ import annotations
 
+import errno
+import hashlib
+import json
+import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,6 +131,46 @@ class Message:
                    image_name=str(data.get("image_name", "")))
 
 
+def _revision_of(data: dict) -> tuple[int, bool]:
+    """``(revision, damaged)`` for one parsed chat file.
+
+    Absent is 0 and is not damage: that is every chat written before revisions
+    existed. Present and not a nonnegative integer *is* damage, and is reported
+    rather than corrected -- a counter reset to zero by a well-meaning reader is
+    a counter two windows can then both win against.
+
+    ``bool`` is excluded explicitly because ``True`` is an ``int`` in Python and
+    would otherwise read as revision 1, which is the one wrong answer that looks
+    entirely plausible in a file listing.
+    """
+    if "revision" not in data:
+        return 0, False
+    value = data.get("revision")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0, True
+    return value, False
+
+
+def fingerprint(raw: bytes) -> str:
+    """The comparison token for a file that has no revision yet.
+
+    A revision-0 file is one nothing guarded has ever written, so there is no
+    counter to compare -- but the bytes on disk are still a fact about what the
+    client last saw. SHA-256 of them is that fact in a form a browser can hold
+    and hand back. It stops being needed the moment the first guarded write
+    lands, because that write makes the file revision 1.
+    """
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+class RevisionMismatch(Exception):
+    """A guarded write whose file no longer carries the token it expected."""
+
+    def __init__(self, current, message: str = ""):
+        super().__init__(message or "This conversation changed in another window.")
+        self.current = current
+
+
 @dataclass
 class Conversation:
     identifier: str
@@ -141,6 +186,51 @@ class Conversation:
     # Nothing but writing over it takes it away — not sending, not regenerating,
     # not reopening the chat a week later.
     response_prefix: str = ""
+
+    revision: int = 0
+    """How many guarded writes this conversation has had. Zero means none.
+
+    The comparison token every mutation is validated against -- see
+    :mod:`mc_llm_conversation_store`. A file written before there was such a
+    thing reads as 0 and is *not* rewritten to say so: reading never writes,
+    and the first guarded write is what makes it 1. A conversation that has
+    never been through the guarded store therefore looks exactly as it always
+    did, which is what makes an older copy of this extension able to open a
+    file a newer one wrote.
+    """
+
+    extra: dict = field(default_factory=dict)
+    """The ``v2`` namespace: receipts, and anything later versions add.
+
+    Kept out of the named fields because it is not conversation content. It
+    round-trips so that a write by this version does not drop what another
+    wrote, and :meth:`from_dict` already tolerates unknown keys, so an older
+    extension reading one of these files simply drops it on the next save --
+    which is why the release notes say downgrade is not write-interoperable.
+    """
+
+    comparison: object = None
+    """What this copy compares as, if it was read through the guarded store.
+
+    A revision integer once anything guarded has written the file, the byte
+    fingerprint before that, and ``None`` for a conversation that was built
+    rather than read. Not serialised: it is a fact about the *read*, and
+    writing it into the file would be writing down what the file used to be.
+
+    It is here so that a panel which has just loaded a thread can say which
+    revision the person is looking at without reading the file a second time --
+    and every mutation from that panel carries it.
+    """
+
+    damaged: bool = False
+    """Whether this file's revision could not be read as a revision.
+
+    Not serialised, and deliberately not a refusal to *load*: a conversation
+    whose metadata is wrong is still a conversation somebody wants to read.
+    What it is, is a conversation nothing may write -- see
+    :func:`mc_llm_conversation_store.transaction`, which raises rather than
+    silently resetting a counter it does not understand.
+    """
 
     # ── editing ──────────────────────────────────────────────────────────────
 
@@ -197,15 +287,28 @@ class Conversation:
     # ── storage ──────────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
-        return {"id": self.identifier, "character": self.character, "title": self.title,
-                "created": self.created, "updated": self.updated,
-                "response_prefix": self.response_prefix,
-                "messages": [message.to_dict() for message in self.messages]}
+        written = {"id": self.identifier, "character": self.character, "title": self.title,
+                   "created": self.created, "updated": self.updated,
+                   "response_prefix": self.response_prefix,
+                   "messages": [message.to_dict() for message in self.messages]}
+        # Written only once there is one. A chat that has never been through
+        # the guarded store keeps the exact shape it had, so upgrading this
+        # extension does not rewrite every file in the folder.
+        if self.revision:
+            written["revision"] = int(self.revision)
+        if self.extra:
+            written["v2"] = self.extra
+        return written
 
     @classmethod
     def from_dict(cls, data: dict) -> "Conversation":
         messages = data.get("messages")
+        revision, damaged = _revision_of(data)
+        extra = data.get("v2")
         return cls(
+            revision=revision,
+            damaged=damaged,
+            extra=dict(extra) if isinstance(extra, dict) else {},
             identifier=str(data.get("id", "")),
             character=str(data.get("character", "")),
             title=str(data.get("title") or UNTITLED),
@@ -248,17 +351,78 @@ class ChatStore:
         return Conversation(identifier=self._identifier(character), character=character,
                             created=now, updated=now)
 
-    def save(self, conversation: Conversation) -> Path:
-        conversation.updated = time.time()
+    UNCHECKED = object()
+    """What ``expected`` holds when a caller is not comparing anything.
+
+    The default, and therefore the behaviour every existing caller keeps: last
+    writer wins. It is named rather than ``None`` because ``None`` is a real
+    token -- it is what a caller that has never seen this file would send.
+    """
+
+    def save(self, conversation: Conversation, expected=UNCHECKED) -> Path:
+        """Write one conversation. With ``expected``, only if it has not moved.
+
+        The comparison is the guarded store's (see
+        :mod:`mc_llm_conversation_store`), and lives here because this is the
+        only function that knows both the path and the bytes about to replace
+        what is at it. ``expected`` is a revision integer, or the string
+        :func:`fingerprint` returned for a revision-0 file, and a mismatch
+        raises :class:`RevisionMismatch` having written nothing.
+
+        Without it the write is exactly what it always was, because fifteen
+        callers in this repository and an unknown number outside it rely on
+        that -- the guard is opt-in at this level and mandatory one level up.
+        """
         path = self.path_for(conversation.character, conversation.identifier)
+        if expected is not ChatStore.UNCHECKED:
+            current = self.token(conversation.character, conversation.identifier)
+            if current != expected:
+                raise RevisionMismatch(current)
+        conversation.updated = time.time()
         atomic_write_json(path, conversation.to_dict())
         return path
+
+    def token(self, character: str, identifier: str):
+        """What this file's revision compares as, right now. ``None`` if absent.
+
+        An integer once anything guarded has written it, the byte fingerprint
+        before that. Read and never written: a caller asking what the token is
+        must not be the reason a file changes.
+        """
+        path = self.path_for(character, identifier)
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return fingerprint(raw)
+        if not isinstance(data, dict):
+            return fingerprint(raw)
+        revision, damaged = _revision_of(data)
+        if damaged:
+            raise RevisionMismatch(None, "Conversation metadata needs repair")
+        return revision if revision else fingerprint(raw)
 
     def load(self, character: str, identifier: str) -> Conversation:
         path = self.path_for(character, identifier)
         if not path.is_file():
             raise FileNotFoundError(f"No chat {identifier}")
-        return Conversation.from_dict(read_json(path))
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            raw = b""
+        conversation = Conversation.from_dict(read_json(path))
+        # What this copy compares as, worked out from the bytes that were
+        # actually read rather than from a second read a moment later. Two
+        # reads would be two different files if something landed between them,
+        # which is the whole class of bug the token exists to catch.
+        conversation.comparison = (conversation.revision if conversation.revision
+                                   else fingerprint(raw))
+        return conversation
 
     def listing(self, character: str) -> list[ChatInfo]:
         """The character's chats, most recently used first."""
@@ -274,17 +438,121 @@ class ChatStore:
         return sorted(rows, key=lambda row: row.updated, reverse=True)
 
     def delete(self, character: str, identifier: str) -> None:
-        self.path_for(character, identifier).unlink(missing_ok=True)
+        """Remove one chat, and write down that this id has been used.
+
+        The tombstone is the half that is new, and it is what makes
+        :meth:`_identifier`'s promise hold in the other direction. Reserving a
+        name stops two pages inventing the same one *at the same time*; a
+        tombstone stops a name coming back round after the file at it has gone,
+        which is how a reply still in flight when its thread was deleted would
+        otherwise be saved into a thread somebody else has since created.
+        """
+        path = self.path_for(character, identifier)
+        final = None
+        try:
+            final = self.token(character, identifier)
+        except (OSError, RevisionMismatch):
+            final = None
+        path.unlink(missing_ok=True)
+        self._entomb(character, identifier, final if isinstance(final, int) else 0)
+
+    # -- tombstones ------------------------------------------------------- #
+
+    TOMBSTONES = ".tombstones.json"
+    """Where a character's spent identifiers are written down.
+
+    A dotfile so ``listing()``'s ``*.json`` glob never sees it, beside the
+    chats rather than in a database because everything else about this store is
+    a file in that folder and a second storage mechanism for one list would be
+    one more thing to keep in step.
+    """
+
+    MAX_TOMBSTONES = 4096
+    """How many spent ids are remembered per character, newest kept.
+
+    Bounded because it is a file that only ever grows, and a chat folder with
+    four thousand deletions in it has long since stopped being able to produce
+    a timestamp collision with any of them by chance: the ids carry six random
+    characters as well as a second.
+    """
+
+    def tombstones(self, character: str) -> dict:
+        try:
+            data = read_json(self.folder(character) / self.TOMBSTONES)
+        except (OSError, ValueError):
+            return {}
+        found = data.get("deleted")
+        return found if isinstance(found, dict) else {}
+
+    def entombed(self, character: str, identifier: str) -> bool:
+        """Whether this identifier names a chat that has been deleted."""
+        return str(identifier) in self.tombstones(character)
+
+    def _entomb(self, character: str, identifier: str, final_revision: int) -> None:
+        kept = self.tombstones(character)
+        kept[str(identifier)] = {"final_revision": int(final_revision or 0),
+                                 "deleted_at": time.time()}
+        if len(kept) > self.MAX_TOMBSTONES:
+            oldest = sorted(kept.items(), key=lambda row: row[1].get("deleted_at", 0.0))
+            for key, _ in oldest[:len(kept) - self.MAX_TOMBSTONES]:
+                kept.pop(key, None)
+        try:
+            atomic_write_json(self.folder(character) / self.TOMBSTONES, {"deleted": kept})
+        except OSError:
+            # A tombstone that cannot be written is a smaller problem than a
+            # deletion that does not happen, and the file is already gone by
+            # here. The id simply stays reusable, which is where it was before
+            # this existed.
+            pass
 
     def branch(self, conversation: Conversation, index: int) -> Conversation:
         branched = conversation.branch(index, self._identifier(conversation.character))
         self.save(branched)
         return branched
 
+    ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+    """Base32's digits, lower-cased: a name that is a file name on every host.
+
+    No uppercase, so a case-insensitive filesystem cannot fold two ids into
+    one; no ``0``/``1``, so nothing here has to be read back off a screen and
+    guessed at.
+    """
+
     def _identifier(self, character: str) -> str:
-        """A file name that sorts by time and cannot collide within a second."""
+        """A file name that sorts by time and cannot collide at all.
+
+        It used to be a timestamp with ``-2`` appended if a file was already
+        there, which is a check and a create with a gap between them: two pages
+        opening a thread in the same second both looked, both saw nothing, and
+        both wrote the same file -- the second one over the first one's
+        conversation.
+
+        So the name carries six random characters as well as the second, and
+        the file at it is *created here*, exclusively, rather than looked for.
+        ``O_CREAT|O_EXCL`` is the operating system answering "was I first?" in
+        the same breath as asking, which is the only way two processes can both
+        ask and only one be told yes. The empty file it leaves is replaced by
+        the first save; ``listing()`` already skips a chat it cannot parse, so
+        one that is never saved is invisible rather than broken.
+        """
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        candidate, index = stamp, 2
-        while self.path_for(character, candidate).exists():
-            candidate, index = f"{stamp}-{index}", index + 1
-        return candidate
+        spent = self.tombstones(character)
+        for _ in range(64):
+            suffix = "".join(secrets.choice(self.ALPHABET) for _ in range(6))
+            candidate = f"{stamp}-{suffix}"
+            if candidate in spent:
+                continue
+            path = self.path_for(character, candidate)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.EEXIST:
+                    continue
+                # A folder that cannot be written to is not a naming problem
+                # and must not be answered with sixty-four more attempts.
+                raise
+            return candidate
+        raise OSError("Could not reserve a name for a new conversation")

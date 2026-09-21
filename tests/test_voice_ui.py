@@ -231,48 +231,81 @@ class TestSuccessOnlySpeech:
 
 
 class TestWhatTheRunLeftBehind:
-    def test_a_completed_reply_is_recorded_and_consumed_once(self):
-        mc_llm_chat_panel._begin_run()
-        mc_llm_chat_panel._completed_reply("the reply that finished")
-        assert mc_llm_chat_panel.take_completed_reply() == "the reply that finished"
-        assert mc_llm_chat_panel.take_completed_reply() == ""
+    """What a finished reply leaves for the speaker, and who is allowed to read it.
 
-    def test_a_new_run_clears_what_the_last_one_left(self):
-        """The mechanism that makes a failed run unable to inherit the previous
-        run's answer, which is half of what makes speech success-only."""
-        mc_llm_chat_panel._completed_reply("an older reply")
-        mc_llm_chat_panel._begin_run()
-        assert mc_llm_chat_panel.take_completed_reply() == ""
+    This used to be one process-global one-shot slot: a dictionary, a string,
+    and a ``take`` that popped it. Two pages could pop each other's answer, and
+    two replies finishing at once in different threads could do it with one
+    page open -- the loser spoke somebody else's reply.
 
-    def test_only_the_completed_branch_records_anything(self, store, monkeypatch):
-        """Driven through the real streaming handler: a run that is Stopped and
-        a run that fails both save the text they had and neither becomes
-        something to speak."""
+    The record belongs to an operation now, and is read rather than consumed.
+    So the tests changed shape and the promises did not: a completed reply is
+    there to be spoken, a Stopped or failed one is not, and no run can ever see
+    another's answer.
+    """
+
+    def _run(self, store, monkeypatch, events):
+        """One reply, driven through the real path, to its terminal phase."""
+        import mc_llm_conversation_ops as ops
         import mc_llm_sessions as sessions
         from prompt_master.chat.characters import Character, CharacterStore
-        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+        from prompt_master.chat.history import ChatStore, USER
 
         CharacterStore(store / "characters").save(Character(name="Ada", context="c"))
         chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.append(USER, "ask")
+        chats.save(conversation)
+        monkeypatch.setattr(sessions, "conversation", lambda request, cancel: iter(events))
+        frames = list(mc_llm_chat_panel._send("Ada", conversation.identifier, "ask again",
+                                              None, 0.7, 0.9, 256, -1))
+        assert ops.drain(timeout=10)
+        return frames[-1][mc_llm_chat_panel.STREAM_ORDER.index("operation")]
 
-        def run(events):
-            conversation = chats.new("Ada")
-            conversation.append(USER, "ask")
-            conversation.append(ASSISTANT, "")
-            chats.save(conversation)
-            monkeypatch.setattr(sessions, "conversation",
-                                lambda request, cancel: iter(events))
-            list(mc_llm_chat_panel._stream("Ada", conversation,
-                                           len(conversation.messages) - 1,
-                                           0.7, 0.9, 256, -1))
-            return mc_llm_chat_panel.take_completed_reply()
+    def test_a_completed_reply_is_there_to_be_read_and_stays_there(self, store, monkeypatch):
+        """Read, not taken. A duplicate terminal callback -- which a host is
+        entitled to deliver -- has to get the same answer twice rather than
+        somebody else's once."""
+        import mc_llm_sessions as sessions
+
+        operation = self._run(store, monkeypatch,
+                              [sessions.Event(sessions.CHUNK, "half a reply"),
+                               sessions.Event(sessions.DONE, "a whole reply")])
+
+        assert mc_llm_chat_panel.completed_reply(operation) == "a whole reply"
+        assert mc_llm_chat_panel.completed_reply(operation) == "a whole reply"
+
+    def test_no_run_can_read_another_run_s_answer(self, store, monkeypatch):
+        """The defect, as an assertion. One slot made this impossible to state;
+        an operation id makes it a one-liner."""
+        import mc_llm_sessions as sessions
+
+        first = self._run(store, monkeypatch, [sessions.Event(sessions.DONE, "the first")])
+        second = self._run(store, monkeypatch, [sessions.Event(sessions.DONE, "the second")])
+
+        assert first != second
+        assert mc_llm_chat_panel.completed_reply(first) == "the first"
+        assert mc_llm_chat_panel.completed_reply(second) == "the second"
+        assert mc_llm_chat_panel.completed_reply("an id nothing ever had") == ""
+
+    def test_only_the_completed_branch_records_anything(self, store, monkeypatch):
+        """A run that is Stopped and a run that fails both keep the text they
+        had and neither becomes something to read aloud."""
+        import mc_llm_sessions as sessions
 
         chunk = sessions.Event(sessions.CHUNK, "half a reply")
 
-        assert run([chunk, sessions.Event(sessions.DONE, "a whole reply")])
-        assert run([chunk, sessions.Event(sessions.CANCELLED, "")]) == "", (
+        whole = self._run(store, monkeypatch,
+                          [chunk, sessions.Event(sessions.DONE, "a whole reply")])
+        stopped = self._run(store, monkeypatch,
+                            [chunk, sessions.Event(sessions.CANCELLED, "")])
+        failed = self._run(store, monkeypatch,
+                           [chunk, sessions.Event(sessions.FAILED, "the server died")])
+
+        assert mc_llm_chat_panel.completed_reply(whole)
+        assert mc_llm_chat_panel.completed_reply(stopped) == "", (
             "a run the reader Stopped produced something to read aloud")
-        assert run([chunk, sessions.Event(sessions.FAILED, "the server died")]) == "", (
+        assert mc_llm_chat_panel.completed_reply(failed) == "", (
             "a failed run produced something to read aloud")
 
 
@@ -280,19 +313,19 @@ class TestTheMarker:
     def test_it_creates_a_target_when_everything_is_right(self, installed, host,
                                                           monkeypatch):
         monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
-        marker = mc_voice_ui.speech_marker(lambda: "the reply that completed")
+        marker = mc_voice_ui.speech_marker(lambda _="": "the reply that completed")
         token = marker()
         assert token
         assert mc_voice_api.take_reply(token)["text"] == "the reply that completed"
 
     def test_it_creates_nothing_when_the_run_left_nothing(self, installed, monkeypatch):
         monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
-        assert mc_voice_ui.speech_marker(lambda: "")() == ""
-        assert mc_voice_ui.speech_marker(lambda: "   ")() == ""
+        assert mc_voice_ui.speech_marker(lambda _="": "")() == ""
+        assert mc_voice_ui.speech_marker(lambda _="": "   ")() == ""
 
     def test_it_creates_nothing_when_the_switch_is_off(self, installed, monkeypatch):
         monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: False)
-        assert mc_voice_ui.speech_marker(lambda: "a whole reply")() == ""
+        assert mc_voice_ui.speech_marker(lambda _="": "a whole reply")() == ""
 
     def test_it_creates_nothing_when_the_voice_is_not_installed(self, monkeypatch):
         """Section 44: an attempt to speak without TTS fails visibly and does
@@ -301,19 +334,19 @@ class TestTheMarker:
         monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
         missing = mc_voice_models.Status(True, True, False, "i", "i", "no", True)
         monkeypatch.setattr(mc_voice_models, "status", lambda: missing)
-        assert mc_voice_ui.speech_marker(lambda: "a whole reply")() == ""
+        assert mc_voice_ui.speech_marker(lambda _="": "a whole reply")() == ""
 
     def test_a_broken_voice_stack_cannot_break_a_finished_reply(self, monkeypatch):
         """I-8 and section 64: TTS failing must not cancel a reply that has
         already arrived."""
-        def explode():
+        def explode(_=""):
             raise RuntimeError("everything is on fire")
 
         assert mc_voice_ui.speech_marker(explode)() == ""
 
     def test_each_completed_reply_gets_its_own_token(self, installed, monkeypatch):
         monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
-        marker = mc_voice_ui.speech_marker(lambda: "the same words every time")
+        marker = mc_voice_ui.speech_marker(lambda _="": "the same words every time")
         assert marker() != marker()
 
 

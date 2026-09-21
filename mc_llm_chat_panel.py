@@ -98,6 +98,7 @@ from pathlib import Path
 import gradio as gr
 
 import mc_llm_attachments
+import mc_llm_overlays
 import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_sessions as sessions
@@ -130,6 +131,22 @@ Voice is the fourth and joined the tuple rather than inventing a mechanism of
 its own. Everything that follows from being in this list is exactly what a voice
 flyout needs: it takes no room when closed, it closes when another opens, and
 ``\u2630`` puts it away with the rest.
+"""
+
+STREAM_ORDER = ("operation", "transcript", "positions", "composer", "attachment", "status",
+                "send", "stop", "speech_turn", "run_state", "revision")
+"""What a reply's follower writes, in order.
+
+Written down for the same reason :data:`SELECTION_ORDER` is: the list is long,
+every frame has to be the same length, and a frame one value short would put a
+status line into a visibility with nothing raising. The two at the end are the
+newest -- the id of the reply being spoken and Python's half of "is the
+composer busy" -- and the last is the revision of the thread the frame draws,
+so a page whose stream was cut short still holds the revision it last saw.
+
+``operation`` is the first, and it changed meaning rather than moving: it held
+a ``Cancellation`` object, and it holds the id of the operation the server is
+running. Stop is a request about that id now, not the closing of a generator.
 """
 
 SELECTION_ORDER = ("sheet", "heading", "back", "pager", "forward", "drop",
@@ -175,7 +192,16 @@ def build() -> dict:
     opened = _load(who, initial_thread)
     initial_rows, initial_map = _view(opened)
 
-    cancellation = gr.State(None)
+    # What Stop is aimed at. It held a ``Cancellation`` object; it holds the id
+    # of the operation the server is running, because the reply is the server's
+    # now and Stop is a request rather than the closing of a generator.
+    cancellation = gr.State("")
+    # The revision of the thread as this page last drew it. Every mutation this
+    # panel sends carries it, and the service validates it together with the
+    # message index under the conversation's own lock -- which is what makes
+    # "delete message 4" mean the message the person was looking at rather than
+    # whatever is at index 4 by the time it arrives.
+    revision_state = gr.State(_token(opened))
     thread_state = gr.State(initial_thread)
     # Which message the action sheet applies to, and how to get from the
     # component's (row, column) to that index. Both are State rather than
@@ -563,17 +589,32 @@ def build() -> dict:
                  "edit": edit_row, "edit_box": edit_box, "edit_image": edit_image,
                  "composer": composer}
     view = ([transcript, positions, selected, status, header]
-            + [selection[key] for key in SELECTION_ORDER])
+            + [selection[key] for key in SELECTION_ORDER] + [revision_state])
     # Two more outputs than V1, and both are hidden values rather than
     # visibilities: the opaque id of the reply being spoken, and Python's half
     # of "is the composer busy". Appended at the end so every existing yield
     # keeps its meaning -- see :data:`LLM_RUNNING`.
-    stream = [cancellation, transcript, positions, message, attachment, status, send, stop,
-              voice_plumbing["turn"], voice_plumbing["run_state"]]
+    streamed = {"operation": cancellation, "transcript": transcript, "positions": positions,
+                "composer": message, "attachment": attachment, "status": status,
+                "send": send, "stop": stop, "speech_turn": voice_plumbing["turn"],
+                "run_state": voice_plumbing["run_state"], "revision": revision_state}
+    stream = [streamed[name] for name in STREAM_ORDER]
     sampling = [temperature, top_p, reply_tokens, seed]
     # The State first, then one visibility per surface: the order
-    # :func:`_screens` answers in.
-    screens = [surface, threads_screen, character_screen, persona_screen, voice["screen"]]
+    # :func:`_screens` answers in. The tail is the surfaces this panel does not
+    # own and closes anyway -- see :mod:`mc_llm_overlays`. It is built from the
+    # registry rather than listed, because what is in it depends on what the
+    # shell managed to build.
+    mc_llm_overlays.register("threads", threads_screen)
+    mc_llm_overlays.register("character", character_screen)
+    mc_llm_overlays.register("persona", persona_screen)
+    mc_llm_overlays.register("voice", voice["screen"])
+    mc_llm_overlays.register("actions", actions["sheet"])
+    mc_llm_overlays.register_state(OVERLAY_OWNER, surface)
+    screens = _screen_outputs(surface)
+    # The transcript's own handler is the only one that *opens* the action
+    # sheet, so it is the only one that carries the rest of the surfaces.
+    selecting = _selection_outputs(view)
 
     # -- getting about ---------------------------------------------------- #
 
@@ -625,7 +666,8 @@ def build() -> dict:
                   inputs=[character, search], outputs=[threads], queue=False)
     new_thread.click(fn=_new_thread, inputs=[character, search],
                      outputs=[threads, thread_state] + view + screens, queue=False)
-    delete.click(fn=_delete_thread, inputs=[character, thread_state, search],
+    delete.click(fn=_delete_thread,
+                 inputs=[character, thread_state, search, revision_state],
                  outputs=[threads, thread_state] + view, queue=False)
 
     rename.click(fn=lambda: (gr.update(visible=True), gr.update(visible=True)),
@@ -633,7 +675,8 @@ def build() -> dict:
     cancel_rename.click(fn=lambda: (gr.update(value="", visible=False), gr.update(visible=False)),
                         outputs=[rename_box, rename_row], queue=False)
     for control in (rename_box.submit, save_rename.click):
-        control(fn=_rename_thread, inputs=[character, thread_state, rename_box, search],
+        control(fn=_rename_thread,
+                inputs=[character, thread_state, rename_box, search, revision_state],
                 outputs=[threads, rename_box, rename_row, status, header], queue=False)
 
     # -- the character and the persona ------------------------------------ #
@@ -709,15 +752,18 @@ def build() -> dict:
 
     transcript.select(fn=_select_message,
                       inputs=[character, thread_state, positions, selected],
-                      outputs=view, queue=False)
+                      outputs=selecting, queue=False)
     actions["close"].click(fn=_close_selection, inputs=[character, thread_state],
                            outputs=view, queue=False)
 
-    actions["back"].click(fn=_page_version(-1), inputs=[character, thread_state, selected],
+    actions["back"].click(fn=_page_version(-1),
+                          inputs=[character, thread_state, selected, revision_state],
                           outputs=view, queue=False)
-    actions["forward"].click(fn=_page_version(1), inputs=[character, thread_state, selected],
+    actions["forward"].click(fn=_page_version(1),
+                             inputs=[character, thread_state, selected, revision_state],
                              outputs=view, queue=False)
-    actions["drop"].click(fn=_drop_version, inputs=[character, thread_state, selected],
+    actions["drop"].click(fn=_drop_version,
+                          inputs=[character, thread_state, selected, revision_state],
                           outputs=view, queue=False)
 
     # One shape for both roles now. Edit used to be able to move the panel onto
@@ -728,17 +774,22 @@ def build() -> dict:
                           inputs=[character, thread_state, selected],
                           outputs=view, queue=False)
     save_edit.click(fn=_commit_edit,
-                    inputs=[character, thread_state, selected, edit_box, edit_image],
+                    inputs=[character, thread_state, selected, edit_box, edit_image,
+                            revision_state],
                     outputs=view, queue=False)
     cancel_edit.click(fn=lambda: (gr.update(visible=False), gr.update(value=None, visible=False),
                                   gr.update(visible=True)),
                       outputs=[edit_row, edit_image, composer], queue=False)
 
-    actions["branch"].click(fn=_branch_here, inputs=[character, thread_state, selected, search],
+    actions["branch"].click(fn=_branch_here,
+                            inputs=[character, thread_state, selected, search,
+                                    revision_state],
                             outputs=[threads, thread_state] + view, queue=False)
-    actions["delete"].click(fn=_delete_message, inputs=[character, thread_state, selected],
+    actions["delete"].click(fn=_delete_message,
+                            inputs=[character, thread_state, selected, revision_state],
                             outputs=view, queue=False)
-    actions["delete_from"].click(fn=_delete_from, inputs=[character, thread_state, selected],
+    actions["delete_from"].click(fn=_delete_from,
+                                 inputs=[character, thread_state, selected, revision_state],
                                  outputs=view, queue=False)
 
     # -- the attachment ---------------------------------------------------- #
@@ -754,7 +805,7 @@ def build() -> dict:
 
     # -- sending, and the three ways of asking again ---------------------- #
 
-    sent = [character, thread_state, message, attachment] + sampling
+    sent = [character, thread_state, message, attachment] + sampling + [revision_state]
     replying = send.click(fn=_send, inputs=sent, outputs=stream, show_progress="minimal")
     # The same pathway from the keyboard. Gradio fires ``submit`` on Enter for
     # a composer that is one line tall, which is what this one starts as.
@@ -765,20 +816,28 @@ def build() -> dict:
     # left pointing at the thread it came from would apply the next action to
     # the wrong conversation.
     regenerating = actions["regenerate"].click(
-        fn=_regenerate, inputs=[character, thread_state, selected] + sampling + [search],
+        fn=_regenerate,
+        inputs=[character, thread_state, selected] + sampling + [search, revision_state],
         outputs=[threads, thread_state] + stream, show_progress="minimal")
     # The same handler, nominated from the bubble instead of from the sheet.
     # One tap rather than three, which is the whole of what the icon is for.
     again = regenerate_now.click(
         fn=_regenerate_reply,
-        inputs=[character, thread_state, positions, regenerate_at] + sampling + [search],
+        inputs=([character, thread_state, positions, regenerate_at] + sampling
+                + [search, revision_state]),
         outputs=[threads, thread_state] + stream, show_progress="minimal")
+    # Continue and Send again from here carry the thread list too now. Both can
+    # land in a branch -- Continue on an earlier reply, and Send again from
+    # here always (specification S8) -- and a panel left pointing at the thread
+    # the reply came from would apply the next action to the wrong one.
     continuing = actions["continue"].click(
-        fn=_continue, inputs=[character, thread_state, selected] + sampling,
-        outputs=stream, show_progress="minimal")
+        fn=_continue,
+        inputs=[character, thread_state, selected] + sampling + [search, revision_state],
+        outputs=[threads, thread_state] + stream, show_progress="minimal")
     resending = actions["resend"].click(
-        fn=_resend, inputs=[character, thread_state, selected] + sampling,
-        outputs=stream, show_progress="minimal")
+        fn=_resend,
+        inputs=[character, thread_state, selected] + sampling + [search, revision_state],
+        outputs=[threads, thread_state] + stream, show_progress="minimal")
 
     # The three that start from the action sheet put it away as they go: the
     # reply is arriving in the transcript behind it, and Stop is in the
@@ -791,7 +850,7 @@ def build() -> dict:
     # a reply cannot be added without either joining this loop or being visibly
     # absent from it. Section 49's requirement is exactly that the registration
     # be structurally shared.
-    speech_marker = mc_voice_ui.speech_marker(take_completed_reply, _character_named)
+    speech_marker = mc_voice_ui.speech_marker(completed_reply, _character_named)
 
     for run in (replying, submitted, regenerating, again, continuing, resending):
         # The thread list is refreshed because an untitled thread has just been
@@ -807,13 +866,20 @@ def build() -> dict:
         # an event that did not raise, and the handler still checks what the run
         # actually left behind, because a nominally successful terminal callback
         # is not the same claim as a whole reply.
-        run.success(fn=speech_marker, inputs=[character],
+        # The operation id rides with the character now. The record it reads is
+        # that operation's own, so two replies finishing at once cannot take
+        # each other's answer -- which one process-global slot could, and did.
+        run.success(fn=speech_marker, inputs=[character, cancellation],
                     outputs=[voice_plumbing["token"]])
 
+    # No ``cancels=``. Closing the follower would stop nothing -- the reply is
+    # on a service thread -- and closing it used to be how a stopped reply lost
+    # the yield that put Send back. Stop asks the service to cancel the
+    # operation this page started, which is the same cancellation token this
+    # button always set; the follower ends when it sees the terminal phase.
     stop.click(fn=_cancel, inputs=[cancellation],
                outputs=[status, send, stop, voice_plumbing["turn"],
                         voice_plumbing["run_state"]],
-               cancels=[replying, submitted, regenerating, again, continuing, resending],
                queue=False)
 
     return {"status": status, "transcript": transcript, "header": header,
@@ -894,6 +960,79 @@ def _chats():
     from prompt_master.chat.history import ChatStore
 
     return ChatStore.from_paths(mc_llm_paths.app_paths())
+
+
+# --------------------------------------------------------------------------- #
+# Every change to a conversation, through the one door
+# --------------------------------------------------------------------------- #
+#
+# Fifteen call sites in this file wrote chat files directly. Each was correct on
+# its own and none of them could see the others, which is exactly the shape of
+# the defect: two windows open on one thread, the second one saving the copy it
+# loaded ten seconds ago, every reply that arrived in between gone with nothing
+# on screen to say so.
+#
+# So none of them writes any more. Each builds a command -- what to do, to which
+# message, and *which revision the person was looking at* -- and hands it to
+# :mod:`mc_llm_conversation_service`, which validates the three together under
+# the conversation's own lock. What comes back is an outcome, and a refusal is
+# a sentence rather than a silent overwrite.
+#
+# The revision travels in a ``gr.State`` that :func:`_refresh` keeps current, so
+# it is always the revision of the thread as this page last drew it.
+
+
+def _expected(token):
+    """One comparison token, in the shape the envelope takes.
+
+    Two shapes because there are two kinds of file: one this store has written,
+    which compares by a counter, and one written before there were counters,
+    which compares by the hash of its bytes. ``None`` is for the commands that
+    have nothing to compare against yet.
+    """
+    if isinstance(token, bool) or token is None:
+        return None
+    if isinstance(token, int):
+        return {"kind": "revision", "value": token}
+    return {"kind": "legacy", "fingerprint": str(token)}
+
+
+def _command(action, who, identifier, *, expected=None, index=None, version=None,
+             payload=None):
+    """Build one command from this panel's inputs and run it. Never raises."""
+    import uuid
+
+    import mc_llm_conversation_service as service
+
+    body = {"protocol_version": service.PROTOCOL_VERSION,
+            "server_epoch": service.SERVER_EPOCH,
+            # Minted here, once per gesture. A retry of *this* press would
+            # reuse it; a second press is a second decision and gets its own.
+            "operation_id": uuid.uuid4().hex,
+            "action": action,
+            "conversation": {"character": who or "", "thread_id": identifier or ""},
+            "expected_revision": _expected(expected),
+            "payload": payload or {}}
+    if index is not None:
+        body["target"] = {"index": int(index), "version": version}
+    return service.submit(body)
+
+
+def _refused(outcome) -> tuple[str, str]:
+    """``(sentence, kind)`` for a command that did not happen."""
+    import mc_llm_conversation_service as service
+
+    error = outcome.get("error") or {}
+    code = error.get("code") or ""
+    message = error.get("message") or "That could not be done."
+    kind = "warn" if code in (service.STALE_REVISION, service.THREAD_BUSY,
+                              service.INVALID_INPUT, service.NOT_FOUND) else "error"
+    return message, kind
+
+
+def _token(conversation):
+    """What the thread on screen compares as, for the next command from it."""
+    return getattr(conversation, "comparison", None) if conversation is not None else None
 
 
 def _persona():
@@ -1004,22 +1143,46 @@ def _load(who: str, identifier: str):
     is saved without them. Once, per chat, invisibly -- and a chat that has
     nothing to move is not written at all.
     """
+    import mc_llm_conversation_store as guarded
+
     if not who or not identifier:
         return None
+    key = guarded.Key(character=who, thread_id=identifier)
+    store = _chats()
     try:
-        conversation = _chats().load(who, identifier)
+        conversation, _ = guarded.read(store, key)
     except Exception:
         logger.debug("Model Chain: could not load thread %s", identifier, exc_info=True)
         return None
+    if not _needs_adoption(conversation):
+        return conversation
     try:
-        if mc_llm_attachments.adopt(conversation, who):
-            _chats().save(conversation)
+        # A guarded maintenance transaction rather than a save inside a read.
+        # It takes the same lock every other write takes, so it cannot land on
+        # top of another window's edit, and it does nothing at all while a
+        # reply is being generated -- a background tidy-up must never be the
+        # reason a reply cannot be saved.
+        committed = guarded.maintain(store, key,
+                                     lambda copy: mc_llm_attachments.adopt(copy, who))
+        if committed.written:
             logger.info("Model Chain: moved this thread's attachments into %s",
                         mc_llm_attachments.folder(who))
+            return committed.conversation
     except Exception:
         logger.warning("Model Chain: could not move this thread's attachments onto disk; "
                        "they stay inside the chat file", exc_info=True)
     return conversation
+
+
+def _needs_adoption(conversation) -> bool:
+    """Whether this thread still carries a picture inside the chat file.
+
+    Asked before the transaction rather than inside it so that opening an
+    already-migrated thread -- which is every thread, after the first time --
+    takes a lock for exactly as long as it takes to answer "no": not at all.
+    """
+    return any(message.image and not message.image_path
+               for message in getattr(conversation, "messages", None) or ())
 
 
 # --------------------------------------------------------------------------- #
@@ -1155,7 +1318,7 @@ def _reply_at(positions, ordinal) -> int:
 
 
 def _regenerate_reply(who, identifier, positions, ordinal, temperature, top_p,
-                      reply_tokens, seed, filter_text=""):
+                      reply_tokens, seed, filter_text="", revision=None):
     """Regenerate the reply whose icon was tapped.
 
     A translation and nothing else: the ordinal becomes a message index and
@@ -1170,7 +1333,7 @@ def _regenerate_reply(who, identifier, positions, ordinal, temperature, top_p,
                                       "and try again.", "warn"))
         return
     yield from _regenerate(who, identifier, index, temperature, top_p, reply_tokens,
-                           seed, filter_text)
+                           seed, filter_text, revision)
 
 
 def _selection_updates(conversation, index: int, editing: bool = False) -> list:
@@ -1260,10 +1423,16 @@ def _refresh(conversation, note: str, kind: str = "info",
     and what that sheet shows all come from the same conversation, and a
     handler that returned four of the five would leave the fifth describing a
     thread that is no longer on screen.
+
+    The revision is the newest of them and belongs in the same list for the
+    same reason: it is what the *next* command from this page will claim to
+    have been looking at, so a redraw that left it behind would be a page
+    quietly claiming to have seen a thread it has not.
     """
     rows, positions = _view(conversation)
     return ([rows, positions, index, ui.notice(note, kind), _heading(None, conversation)]
-            + _selection_updates(conversation, index, editing))
+            + _selection_updates(conversation, index, editing)
+            + [_token(conversation)])
 
 
 def _reopen(who, identifier, note: str, kind: str = "info",
@@ -1282,12 +1451,48 @@ def _screens(name: str = "") -> list:
 
     The name comes back first because it is the answer the ``surface`` State
     holds, and the State is what makes ``\u2630`` a toggle rather than a
-    control that can only ever open something. Everything else is derived from
-    it, so "only one open at a time" is a property of this function rather than
-    a rule every handler has to remember.
+    control that can only ever open something.
+
+    The decision is :mod:`mc_llm_overlays`' rather than this function's now,
+    and the answer is longer than it was: the four screens this panel owns,
+    then every other pop surface in LLM Studio that the build registered --
+    the shell's two sheets and the message action sheet. Those used to be
+    three separate ideas of "only one at a time" that did not know about each
+    other, so opening the character editor left the workspace chooser under it.
+    Callers see the same first five values they always did, which is why the
+    wiring below simply appends components rather than being rewritten.
     """
     wanted = name if name in SCREENS else ""
-    return [wanted] + [gr.update(visible=(wanted == key)) for key in SCREENS]
+    return ([wanted] + mc_llm_overlays.updates(wanted, SCREENS)
+            + mc_llm_overlays.foreign(SCREENS, OVERLAY_OWNER)[1])
+
+
+OVERLAY_OWNER = "chat"
+"""What this panel's open-surface State is called in the overlay registry."""
+
+
+def _screen_outputs(surface) -> list:
+    """The components :func:`_screens`'s answer lands in, in its order."""
+    return ([surface] + mc_llm_overlays.components(SCREENS)
+            + mc_llm_overlays.foreign(SCREENS, OVERLAY_OWNER)[0])
+
+
+def _opening_actions(conversation, note: str, kind: str = "info", index: int = NO_SELECTION,
+                     editing: bool = False) -> list:
+    """:func:`_refresh`, plus every other overlay closed.
+
+    The action sheet is the seventh surface and the one that used to know about
+    none of the others: tapping a bubble opened it over whatever was already
+    open. It is opened by ``view`` -- which every transcript handler writes --
+    so the closing of the rest is appended here rather than folded into
+    ``_refresh``, and only the one handler that *opens* it carries the tail.
+    """
+    return _refresh(conversation, note, kind, index, editing) \
+        + mc_llm_overlays.foreign(("actions",), OVERLAY_OWNER)[1]
+
+
+def _selection_outputs(view) -> list:
+    return view + mc_llm_overlays.foreign(("actions",), OVERLAY_OWNER)[0]
 
 
 def _close_screens() -> list:
@@ -1357,13 +1562,7 @@ def _select_character(who, filter_text, typed=""):
     choices = _thread_choices(who, filter_text)
     identifier = choices[0][1] if choices else ""
     conversation = _load(who, identifier)
-    lifted = gr.update()
-    waiting = (_unanswered(conversation) if conversation is not None
-               and not (typed or "").strip() else NO_SELECTION)
-    if waiting != NO_SELECTION:
-        lifted = conversation.messages[waiting].text
-        conversation.delete_from(waiting)
-        _chats().save(conversation)
+    lifted, conversation = _lift(who, identifier, conversation, typed)
     try:
         loaded = _characters().load(who) if who else Character(name="")
     except Exception:
@@ -1396,15 +1595,53 @@ def _open_thread(who, identifier, typed=""):
     if conversation is None:
         return [identifier or "", gr.update()] + _refresh(None, "Choose a thread.", "warn")
     mc_llm_state.remember(character=who or "", thread=identifier)
-    waiting = _unanswered(conversation) if not (typed or "").strip() else NO_SELECTION
-    if waiting != NO_SELECTION:
-        lifted = conversation.messages[waiting].text
-        conversation.delete_from(waiting)
-        _chats().save(conversation)
+    lifted, conversation = _lift(who, identifier, conversation, typed)
+    if lifted is not _UNTOUCHED:
         return ([identifier, lifted]
                 + _refresh(conversation, "This message never got a reply, so it is back in "
                                          "the box. Send it again when you are ready."))
     return [identifier, gr.update()] + _refresh(conversation, conversation.title)
+
+
+_UNTOUCHED = gr.update()
+"""What ``lifted`` is when nothing was taken back into the composer.
+
+A single shared update rather than a fresh one per call, so that "did the lift
+happen" is an identity test rather than a guess about what an update means.
+"""
+
+
+def _lift(who, identifier, conversation, typed):
+    """Take an unanswered last message back into the composer. Guarded.
+
+    Navigation writes, and always did: opening a thread that ends in a message
+    of yours nobody answered takes it out of the thread and puts it back in the
+    box. That is what the owner asked for and it stays -- but it is a *command*
+    now (``restore_to_draft``), which means two things it was not before.
+
+    It takes the conversation's lock, so it cannot land on top of another
+    window's edit. And it is reachable only from a handler somebody triggered:
+    the read-only refresh that keeps a second window current calls the snapshot
+    path, which cannot delete anything. That mattered, because the refresh and
+    the lift were the same function.
+    """
+    waiting = (_unanswered(conversation) if conversation is not None
+               and not (typed or "").strip() else NO_SELECTION)
+    if waiting == NO_SELECTION:
+        return _UNTOUCHED, conversation
+    import mc_llm_conversation_service as service
+
+    text = conversation.messages[waiting].text
+    outcome = _command(service.RESTORE_TO_DRAFT, who, identifier,
+                       expected=_token(conversation), index=waiting)
+    if not outcome.get("ok"):
+        # The thread moved, or a reply is arriving in it. The message stays
+        # where it is, which is exactly where Edit and Send again from here
+        # still reach it.
+        logger.debug("Model Chain: the unanswered message stayed in the thread: %s",
+                     (outcome.get("error") or {}).get("message"))
+        return _UNTOUCHED, conversation
+    return text, _load(who, identifier)
 
 
 def _open_thread_home(who, identifier, typed=""):
@@ -1417,13 +1654,17 @@ def _new_thread(who, filter_text):
         return ([gr.update(), ""]
                 + _refresh(None, "Choose a character first.", "warn")
                 + _screens("threads"))  # stay where the message can be read
-    store = _chats()
-    conversation = store.new(who)
-    _greet(conversation, who)
-    store.save(conversation)
-    mc_llm_state.remember(character=who, thread=conversation.identifier)
-    return ([gr.update(choices=_thread_choices(who, filter_text),
-                       value=conversation.identifier), conversation.identifier]
+    import mc_llm_conversation_service as service
+
+    outcome = _command(service.CREATE_THREAD, who, "")
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return ([gr.update(), ""] + _refresh(None, note, kind) + _screens("threads"))
+    identifier = (outcome.get("resulting_conversation") or {}).get("thread_id", "")
+    conversation = _load(who, identifier)
+    mc_llm_state.remember(character=who, thread=identifier)
+    return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier),
+             identifier]
             + _refresh(conversation, "New thread.")
             + _close_screens())
 
@@ -1442,26 +1683,62 @@ def _greet(conversation, who: str) -> None:
         conversation.append(ASSISTANT, text)
 
 
-def _delete_thread(who, identifier, filter_text):
+def _delete_thread(who, identifier, filter_text, revision=None):
+    import mc_llm_conversation_service as service
+
     if not (who and identifier):
         return [gr.update(), ""] + _refresh(None, "Choose a thread first.", "warn")
-    _chats().delete(who, identifier)
+    outcome = _command(service.DELETE_THREAD, who, identifier,
+                       expected=_revision_or_read(revision, who, identifier))
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier),
+                 identifier] + _reopen(who, identifier, note, kind))
     choices = _thread_choices(who, filter_text)
     following = choices[0][1] if choices else ""
     return ([gr.update(choices=choices, value=following or None), following]
             + _reopen(who, following, "Deleted."))
 
 
-def _rename_thread(who, identifier, title, filter_text):
+def _rename_thread(who, identifier, title, filter_text, revision=None):
+    import mc_llm_conversation_service as service
+
     conversation = _load(who, identifier)
     if conversation is None or not (title or "").strip():
         return (gr.update(), gr.update(visible=False), gr.update(visible=False),
                 ui.notice("Nothing to rename.", "warn"), gr.update())
-    conversation.title = title.strip()
-    _chats().save(conversation)
+    outcome = _command(service.RENAME_THREAD, who, identifier,
+                       expected=_revision_or(revision, conversation),
+                       payload={"title": title.strip()})
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return (gr.update(), gr.update(visible=False), gr.update(visible=False),
+                ui.notice(note, kind), gr.update())
+    renamed = _load(who, identifier)
     return (gr.update(choices=_thread_choices(who, filter_text), value=identifier),
             gr.update(value="", visible=False), gr.update(visible=False),
-            ui.notice("Renamed."), _heading(who, conversation))
+            ui.notice("Renamed."), _heading(who, renamed))
+
+
+def _revision_or(revision, conversation):
+    """The revision this page last drew, or the one the thread carries now.
+
+    A handler wired before the revision State existed hands ``None``, and the
+    honest answer for it is the token of the copy it is working from -- which
+    is what it read a moment ago, under the same gesture. It is a weaker claim
+    than a State the browser round-tripped and a far stronger one than no
+    comparison at all, and it is never a *silent* overwrite: the transaction
+    still refuses if the file moved between that read and this write.
+    """
+    if revision is None or revision == "":
+        return _token(conversation)
+    return revision
+
+
+def _revision_or_read(revision, who, identifier):
+    if revision is None or revision == "":
+        return _token(_load(who, identifier))
+    return revision
 
 
 # --------------------------------------------------------------------------- #
@@ -1486,11 +1763,11 @@ def _select_message(who, identifier, positions, current, event: gr.SelectData = 
         # reply half of it, which is what a flat index counts.
         index = _message_at(positions, where, 1)
     if index == NO_SELECTION:
-        return _refresh(conversation,
-                        "That part of the transcript is not a message.", "warn")
+        return _opening_actions(conversation,
+                                "That part of the transcript is not a message.", "warn")
     if _selection(current) == index:
-        return _refresh(conversation, "Ready.")
-    return _refresh(conversation, "Ready.", index=index)
+        return _opening_actions(conversation, "Ready.")
+    return _opening_actions(conversation, "Ready.", index=index)
 
 
 def _selection(value) -> int:
@@ -1507,24 +1784,33 @@ def _close_selection(who, identifier):
 
 def _page_version(step: int):
     """Show the previous or next version of the selected reply."""
-    def page(who, identifier, index):
+    def page(who, identifier, index, revision=None):
+        import mc_llm_conversation_service as service
+
         conversation = _load(who, identifier)
         if conversation is None or not (0 <= index < len(conversation.messages)):
             return _refresh(conversation, "Choose a message first.", "warn")
         message = conversation.messages[index]
-        message.show(message.active + step)
-        _chats().save(conversation)
+        wanted = max(0, min(message.active + step, len(message.versions) - 1))
+        outcome = _command(service.SELECT_VERSION, who, identifier,
+                           expected=_revision_or(revision, conversation),
+                           index=index, version=wanted)
+        if not outcome.get("ok"):
+            note, kind = _refused(outcome)
+            return _reopen(who, identifier, note, kind, index=index)
         # The sheet stays open on the message being paged: reading three
         # variants is three taps on one control, not three round trips through
         # the transcript.
-        return _refresh(conversation,
-                        f"Showing version {message.active + 1} of {len(message.versions)}.",
-                        index=index)
+        return _reopen(who, identifier,
+                       f"Showing version {wanted + 1} of {len(message.versions)}.",
+                       index=index)
 
     return page
 
 
-def _drop_version(who, identifier, index):
+def _drop_version(who, identifier, index, revision=None):
+    import mc_llm_conversation_service as service
+
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return _refresh(conversation, "Choose a message first.", "warn")
@@ -1533,9 +1819,13 @@ def _drop_version(who, identifier, index):
         return _refresh(conversation,
                         "This message has only one version — deleting it would delete the "
                         "message.", "warn", index=index)
-    message.drop_version()
-    _chats().save(conversation)
-    return _refresh(conversation, "Version deleted.", index=index)
+    outcome = _command(service.DROP_VERSION, who, identifier,
+                       expected=_revision_or(revision, conversation),
+                       index=index, version=message.active)
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _reopen(who, identifier, note, kind, index=index)
+    return _reopen(who, identifier, "Version deleted.", index=index)
 
 
 def _open_editor(who, identifier, index):
@@ -1594,7 +1884,7 @@ def _unanswered(conversation) -> int:
     return index
 
 
-def _commit_edit(who, identifier, index, text, picture):
+def _commit_edit(who, identifier, index, text, picture, revision=None):
     """Save one edited message -- its words and its picture -- and go home.
 
     Home rather than back to the action sheet: the sheet covers the bottom of
@@ -1608,16 +1898,58 @@ def _commit_edit(who, identifier, index, text, picture):
     onto disk when it was opened -- there is nothing to show in the chip then,
     so an empty chip must not be read as "the user took the picture away".
     """
+    import mc_llm_conversation_service as service
+
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return _refresh(conversation, "Choose a message first.", "warn")
     message = conversation.messages[index]
-    message.text = (text or "").strip()
+    # The editor's chip *is* the message's picture, except for one case: a chat
+    # old enough to still be carrying it inline and too broken to have been
+    # moved onto disk when it was opened. There is nothing to show in the chip
+    # then, so an empty chip must not be read as "the user took the picture
+    # away" -- which is what ``keep`` says and what it is the default for.
     shown = bool(message.image_path) or not message.image
+    payload = {"text": (text or "").strip(), "image_action": service.KEEP}
     if shown:
-        _attach_to(message, picture, who)
-    _chats().save(conversation)
-    return _refresh(conversation, "Edited.")
+        payload["image_action"] = service.REMOVE if picture is None else service.REPLACE
+        if picture is not None:
+            staged = _stage_picture(picture, message.image_name)
+            if staged is None:
+                return _refresh(conversation, "That picture could not be kept.", "error",
+                                index=index, editing=True)
+            payload["attachment_token"] = staged
+    outcome = _command(service.EDIT_MESSAGE, who, identifier,
+                       expected=_revision_or(revision, conversation),
+                       index=index, version=message.active, payload=payload)
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _reopen(who, identifier, note, kind, index=index, editing=True)
+    return _reopen(who, identifier, "Edited.")
+
+
+def _stage_picture(picture, name: str = "") -> str:
+    """One decoded picture from a Gradio chip, staged. Its token, or ``None``.
+
+    The chip hands back a PIL image, because asking Gradio for a path raises on
+    this host -- the composer's own note has the mechanism, and the note is
+    where it stays: a second copy of that sentence is a second thing to update
+    when it stops being true. Staging wants bytes, so the image is encoded once
+    here, losslessly, rather than losing a generation of quality on the way
+    through a second door.
+    """
+    import io
+
+    import mc_llm_attachment_staging as staging
+
+    try:
+        buffer = io.BytesIO()
+        picture.save(buffer, format="PNG")
+    except Exception:
+        logger.warning("Model Chain: could not read the chosen picture", exc_info=True)
+        return None
+    staged = staging.stage(buffer.getvalue(), name or ui.ATTACHED)
+    return staged.token if staged.ready else None
 
 
 def _attach_to(message, picture, who: str) -> None:
@@ -1639,44 +1971,66 @@ def _attach_to(message, picture, who: str) -> None:
     message.image_path, message.image = kept, ""
 
 
-def _branch_here(who, identifier, index, filter_text):
+def _branch_here(who, identifier, index, filter_text, revision=None):
     """Copy the thread up to this message, so an alternative can be explored.
 
     A branch is a copy, which is the vendored store's own semantics: the two
     conversations then diverge as ordinary threads with nothing shared, rather
     than as a tree every later operation would have to understand.
     """
+    import mc_llm_conversation_service as service
+
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return ([gr.update(), identifier or ""]
                 + _refresh(conversation, "Choose a message first.", "warn"))
-    branched = _chats().branch(conversation, index)
-    mc_llm_state.remember(character=who or "", thread=branched.identifier)
-    return ([gr.update(choices=_thread_choices(who, filter_text), value=branched.identifier),
-             branched.identifier]
+    outcome = _command(service.BRANCH, who, identifier,
+                       expected=_revision_or(revision, conversation), index=index)
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return ([gr.update(), identifier or ""]
+                + _reopen(who, identifier, note, kind, index=index))
+    made = (outcome.get("resulting_conversation") or {}).get("thread_id", "")
+    branched = _load(who, made)
+    mc_llm_state.remember(character=who or "", thread=made)
+    return ([gr.update(choices=_thread_choices(who, filter_text), value=made), made]
             + _refresh(branched,
                        "Branched — this is a new thread, and the one it came from is "
                        "untouched."))
 
 
-def _delete_message(who, identifier, index):
+def _delete_message(who, identifier, index, revision=None):
+    import mc_llm_conversation_service as service
+
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return _refresh(conversation, "Choose a message first.", "warn")
-    conversation.delete(index)
-    _chats().save(conversation)
-    return _refresh(conversation, "Message deleted.")
+    outcome = _command(service.DELETE_MESSAGE, who, identifier,
+                       expected=_revision_or(revision, conversation), index=index)
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _reopen(who, identifier, note, kind, index=index)
+    return _reopen(who, identifier, "Message deleted.")
 
 
-def _delete_from(who, identifier, index):
+def _delete_from(who, identifier, index, revision=None):
+    import mc_llm_conversation_service as service
+
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return _refresh(conversation, "Choose a message first.", "warn")
     removed = len(conversation.messages) - index
-    conversation.delete_from(index)
-    _chats().save(conversation)
-    return _refresh(conversation,
-                    f"Deleted {removed} message{'s' if removed != 1 else ''}.")
+    # The count travels with the command and is checked under the lock. A
+    # "delete 4 messages" that arrives when there are now six is not a delete
+    # of six -- it is a question the person has to be asked again.
+    outcome = _command(service.DELETE_FROM, who, identifier,
+                       expected=_revision_or(revision, conversation), index=index,
+                       payload={"confirm_count": removed})
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _reopen(who, identifier, note, kind, index=index)
+    return _reopen(who, identifier,
+                   f"Deleted {removed} message{'s' if removed != 1 else ''}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -1684,9 +2038,20 @@ def _delete_from(who, identifier, index):
 # --------------------------------------------------------------------------- #
 
 
-def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed):
-    """Add your message to the thread, then stream the reply to it."""
-    from prompt_master.chat.history import ASSISTANT, USER
+def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed,
+          revision=None):
+    """Add your message to the thread, then follow the reply to it.
+
+    Nothing here streams any more, and nothing here saves. The command goes to
+    the service, which appends your turn under the conversation's lock and
+    starts the reply on a thread of its own; this generator subscribes and
+    draws what it sees.
+
+    That is the whole of specification 7: the reply used to exist *inside* this
+    generator, so closing it -- a refresh, a dropped queue entry, Stop wired as
+    ``cancels=`` -- was the reply ending. Now closing it loses a subscription.
+    """
+    import mc_llm_conversation_service as service
 
     conversation = _load(who, identifier)
     if conversation is None:
@@ -1696,7 +2061,8 @@ def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed
         yield _idle(conversation, text, gr.update(), "Write a message first.", "warn")
         return
 
-    kept, attachment_name = "", ""
+    payload = {"text": text or "", "settings": _settings(temperature, top_p, reply_tokens,
+                                                         seed)}
     if picture is not None:
         if not mc_llm_runtime.config().sees:
             yield _idle(conversation, text, gr.update(),
@@ -1704,39 +2070,41 @@ def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed
                         "cannot be sent to it. Choose one in Setup, or remove the image.",
                         "error")
             return
-        try:
-            kept = mc_llm_attachments.store(picture, who)
-            attachment_name = ui.picked_name(picture)
-        except Exception as exc:
-            yield _idle(conversation, text, gr.update(), ui.failure(exc), "error")
+        staged = _stage_picture(picture, ui.picked_name(picture))
+        if staged is None:
+            yield _idle(conversation, text, gr.update(),
+                        "That picture could not be read. Choose another, or send the "
+                        "message without one.", "error")
             return
+        payload["attachment_token"] = staged
 
-    conversation.append(USER, (text or "").strip(), image_name=attachment_name,
-                        image_path=kept)
-    _chats().save(conversation)
-    conversation.append(ASSISTANT, "")
-    yield from _stream(who, conversation, len(conversation.messages) - 1,
-                       temperature, top_p, reply_tokens, seed)
+    outcome = _command(service.SEND, who, identifier,
+                       expected=_revision_or(revision, conversation), payload=payload)
+    yield from _follow(outcome, who, identifier, text, clearing=True)
 
 
-def _into_thread(events, threads, identifier):
-    """``events`` from :func:`_stream`, prefixed with the thread they are in.
+def _settings(temperature, top_p, reply_tokens, seed) -> dict:
+    """The four sampling controls, as the envelope carries them.
 
-    Regenerate is the one streaming handler that can change which thread the
-    panel is on, so it is the one whose outputs carry the thread list and the
-    open thread in front of everything :func:`_stream` yields.
+    ``None`` for a box that has been cleared, and the service falls back to the
+    character's own value exactly as the panel did -- so a cleared box still
+    runs at the settings the standalone application would have used rather than
+    at a literal invented somewhere.
     """
-    for event in events:
-        yield (threads, identifier) + tuple(event)
-
-
-def _here(identifier, event):
-    """One :func:`_stream`-shaped event, in the thread that is already open."""
-    return (gr.update(), identifier or "") + tuple(event)
+    found = {}
+    for name, value in (("temperature", temperature), ("top_p", top_p),
+                        ("reply_tokens", reply_tokens), ("seed", seed)):
+        try:
+            found[name] = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            found[name] = None
+        if found[name] is None:
+            found.pop(name)
+    return found
 
 
 def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed,
-                filter_text=""):
+                filter_text="", revision=None):
     """Write this reply again — as a version at the end, as a branch in the middle.
 
     Two behaviours because there are two situations, and one of them used to be
@@ -1762,92 +2130,203 @@ def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed,
 
     The two rules together are also what makes paging safe: versions now only
     ever exist where nothing follows them.
+
+    Both rules are the service's now, and identical from the flyout. What is
+    left here is the panel half: which thread the list should be showing when a
+    branch is where the reply went.
     """
-    from prompt_master.chat.history import ASSISTANT
+    import mc_llm_conversation_service as service
 
     conversation = _load(who, identifier)
-    index = _last_reply(conversation, index)
-    if conversation is None or not (0 <= index < len(conversation.messages)):
-        yield _here(identifier, _idle(conversation, "", None,
+    if conversation is None:
+        yield _here(identifier, _idle(None, "", None,
                                       "There is no reply to regenerate.", "warn"))
         return
-    message = conversation.messages[index]
-    if message.role != ASSISTANT:
+    outcome = _command(service.REGENERATE, who, identifier,
+                       expected=_revision_or(revision, conversation),
+                       index=_last_reply(conversation, index),
+                       payload={"settings": _settings(temperature, top_p, reply_tokens,
+                                                      seed)})
+    yield from _follow_thread(outcome, who, identifier, filter_text)
+
+
+def _continue(who, identifier, index, temperature, top_p, reply_tokens, seed,
+              filter_text="", revision=None):
+    """Carry the reply on from where it stopped.
+
+    On the final reply that is what it always was. On an earlier one it now
+    *branches* first (specification S8): continuing in place mutated a message
+    that had descendants, so the replies under it went on answering a paragraph
+    that no longer said what they were answering, and nothing recorded that it
+    had changed.
+    """
+    import mc_llm_conversation_service as service
+
+    conversation = _load(who, identifier)
+    if conversation is None:
+        yield _here(identifier, _idle(None, "", None,
+                                      "There is no reply to continue.", "warn"))
+        return
+    outcome = _command(service.CONTINUE, who, identifier,
+                       expected=_revision_or(revision, conversation),
+                       index=_last_reply(conversation, index),
+                       payload={"settings": _settings(temperature, top_p, reply_tokens,
+                                                      seed)})
+    yield from _follow_thread(outcome, who, identifier, filter_text)
+
+
+def _resend(who, identifier, index, temperature, top_p, reply_tokens, seed,
+            filter_text="", revision=None):
+    """Answer this message of yours again, in a branch.
+
+    It used to drop everything after it. ``truncate_after(index)`` then
+    ``save()``: every reply that followed the message, permanently deleted, with
+    no branch and nothing to page back to. That is the same defect Regenerate
+    was fixed for and the fix was never applied here — specification S8 calls it
+    live data loss at HEAD, and it is.
+
+    So it branches, exactly as a mid-thread Regenerate does: the thread up to
+    and including your message is copied, the new answer is written in the copy,
+    and the conversation it came from keeps every word of what followed.
+    """
+    import mc_llm_conversation_service as service
+
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= _selection(index) < len(conversation.messages)):
         yield _here(identifier, _idle(conversation, "", None,
-                                      "Regenerate applies to a reply. For one of your own "
-                                      "messages, use Send again from here.", "warn"))
+                                      "Choose one of your messages first.", "warn"))
+        return
+    outcome = _command(service.RESEND_FROM_USER, who, identifier,
+                       expected=_revision_or(revision, conversation), index=index,
+                       payload={"settings": _settings(temperature, top_p, reply_tokens,
+                                                      seed)})
+    yield from _follow_thread(outcome, who, identifier, filter_text)
+
+
+# --------------------------------------------------------------------------- #
+# Following a reply that belongs to the server
+# --------------------------------------------------------------------------- #
+
+
+def _here(identifier, event):
+    """One follower-shaped event, in the thread that is already open.
+
+    The three actions that can land in a branch prefix every yield with the
+    thread list and the thread they are in. A refusal never moves, so it says
+    so: no change to the list, and the thread that was already open.
+    """
+    return (gr.update(), identifier or "") + tuple(event)
+
+
+def _follow(outcome, who, identifier, typed="", clearing: bool = False):
+    """Draw one operation as it happens. Writes nothing, saves nothing.
+
+    Its ``finally`` closes a subscription and that is all, which is the point:
+    ``cancels=`` used to close this generator with ``GeneratorExit`` -- a
+    ``BaseException``, straight past every ``except Exception`` -- and the only
+    reason a stopped reply survived was a ``finally`` block written after a bug
+    report that said replies were disappearing. A browser refresh went through
+    the same hole. There is no hole to go through now.
+
+    ``clearing`` is the composer. It is emptied in the acceptance yield and
+    never again: every yield used to write an unconditional ``""`` into it, so
+    anything typed while a reply arrived was wiped by the next token.
+    """
+    import mc_llm_conversation_ops as ops
+
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        yield _idle(_load(who, identifier), typed, gr.update(), note, kind)
         return
 
-    if index < len(conversation.messages) - 1:
-        # Branch at the message *before* this reply, so the branch ends on the
-        # turn the reply was answering and the new one is written to it. An
-        # opening reply has no turn before it, and ``branch(-1)`` is the empty
-        # copy that says so -- still a branch, so the thread it came from is
-        # still whole, which is the whole point.
-        branched = _chats().branch(conversation, index - 1)
-        mc_llm_state.remember(character=who or "", thread=branched.identifier)
-        branched.append(ASSISTANT, "")
-        yield from _into_thread(
-            _stream(who, branched, len(branched.messages) - 1,
-                    temperature, top_p, reply_tokens, seed),
-            gr.update(choices=_thread_choices(who, filter_text),
-                      value=branched.identifier),
-            branched.identifier)
+    operation_id = outcome.get("operation_id", "")
+    landed = (outcome.get("resulting_conversation") or {}).get("thread_id") or identifier
+    conversation = _load(who, landed)
+    working = _working(conversation, outcome.get("target") or {})
+    target = (outcome.get("target") or {}).get("index", -1)
+
+    first = True
+    for state in ops.listen(operation_id):
+        phase = state.get("phase")
+        text = state.get("generated_text") or ""
+        if phase in ops.TERMINAL:
+            # The authority is the file, not the last patch: a completion that
+            # was refused because the conversation moved must not leave the
+            # reply drawn as though it had been saved.
+            settled = _load(who, landed)
+            rows, positions = _view(settled)
+            note = state.get("status") or "Reply complete."
+            kind = "warn" if phase in (ops.STOPPED, ops.INTERRUPTED) else (
+                "error" if phase in (ops.FAILED, ops.SAVE_FAILED) else "info")
+            if state.get("recovery_status"):
+                note = ("Your reply is ready, but the conversation changed. "
+                        "It is kept — open the assistant to save or discard it.")
+                kind = "warn"
+            yield (operation_id, rows, positions,
+                   "" if first and clearing else gr.update(),
+                   None if first and clearing else gr.update(),
+                   ui.notice(note, kind), *IDLE, state.get("speech_turn_id") or "",
+                   LLM_IDLE, _token(settled))
+            return
+        _provisional(working, target, text)
+        rows, positions = _view(working)
+        yield (operation_id, rows, positions,
+               "" if first and clearing else gr.update(),
+               SENT if first and clearing else gr.update(),
+               ui.working(state.get("status") or "Starting…"), *BUSY,
+               state.get("speech_turn_id") or "", LLM_RUNNING,
+               # The revision does not move while a reply is provisional. It is
+               # carried anyway so the State is written by every yield rather
+               # than only by the last one -- a page whose stream was cut short
+               # still holds the revision it was drawing.
+               _token(conversation))
+        first = False
+
+
+def _follow_thread(outcome, who, identifier, filter_text=""):
+    """:func:`_follow`, for the three actions that can land in another thread.
+
+    Regenerate mid-thread, Continue on an earlier reply and Send again from
+    here all branch, so the panel has to move with the reply: a thread list
+    still pointing at the conversation it came from would apply the next action
+    to the wrong one.
+    """
+    landed = (outcome.get("resulting_conversation") or {}).get("thread_id") or identifier
+    if outcome.get("ok") and landed != identifier:
+        mc_llm_state.remember(character=who or "", thread=landed)
+        moved = gr.update(choices=_thread_choices(who, filter_text), value=landed)
+    else:
+        moved = gr.update()
+    for event in _follow(outcome, who, landed if outcome.get("ok") else identifier):
+        yield (moved, landed if outcome.get("ok") else (identifier or "")) + tuple(event)
+
+
+def _working(conversation, target: dict):
+    """A copy of the thread with room for the reply that is about to arrive.
+
+    A copy, because the reply is *provisional* until the service writes it: it
+    is drawn so the reader can watch it, and it is never presented as a saved
+    version. The authoritative thread is re-read when the operation ends.
+    """
+    if conversation is None:
+        return None
+    from prompt_master.chat.history import ASSISTANT, Conversation
+
+    import mc_llm_conversation_ops as ops
+
+    copy = Conversation.from_dict(conversation.to_dict())
+    kind, index = target.get("kind"), target.get("index", -1)
+    if kind == ops.APPEND and index == len(copy.messages):
+        copy.append(ASSISTANT, "")
+    elif kind == ops.VERSION and 0 <= index < len(copy.messages):
+        copy.messages[index].add_version("")
+    return copy
+
+
+def _provisional(working, index: int, text: str) -> None:
+    if working is None or not (0 <= index < len(working.messages)):
         return
-
-    conversation.truncate_after(index)
-    message.add_version("")
-    yield from _into_thread(
-        _stream(who, conversation, index, temperature, top_p, reply_tokens, seed),
-        gr.update(), identifier)
-
-
-def _continue(who, identifier, index, temperature, top_p, reply_tokens, seed):
-    """Carry the reply on from where it stopped."""
-    from prompt_master.chat.history import ASSISTANT
-    from prompt_master.chat.prompt import continue_instruction
-
-    conversation = _load(who, identifier)
-    index = _last_reply(conversation, index)
-    if conversation is None or not (0 <= index < len(conversation.messages)):
-        yield _idle(conversation, "", None, "There is no reply to continue.", "warn")
-        return
-    message = conversation.messages[index]
-    if message.role != ASSISTANT or not message.text.strip():
-        yield _idle(conversation, "", None, "There is nothing to carry on from.", "warn")
-        return
-
-    try:
-        character = _characters().load(who)
-    except Exception as exc:
-        yield _idle(conversation, "", None, ui.failure(exc), "error")
-        return
-    # ``upto`` includes the reply itself: the model cannot carry on from text
-    # it was not shown.
-    yield from _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
-                       instruction=continue_instruction(character), upto=index + 1,
-                       opening=message.text)
-
-
-def _resend(who, identifier, index, temperature, top_p, reply_tokens, seed):
-    """Answer this message of yours again, dropping everything after it."""
-    from prompt_master.chat.history import ASSISTANT, USER
-
-    conversation = _load(who, identifier)
-    if conversation is None or not (0 <= index < len(conversation.messages)):
-        yield _idle(conversation, "", None, "Choose one of your messages first.", "warn")
-        return
-    if conversation.messages[index].role != USER:
-        yield _idle(conversation, "", None,
-                    "Send again from here applies to one of your own messages. For a reply, "
-                    "use Regenerate.", "warn")
-        return
-
-    conversation.truncate_after(index)
-    _chats().save(conversation)
-    conversation.append(ASSISTANT, "")
-    yield from _stream(who, conversation, len(conversation.messages) - 1,
-                       temperature, top_p, reply_tokens, seed)
+    working.messages[index].text = text
 
 
 def _last_reply(conversation, index) -> int:
@@ -1912,48 +2391,28 @@ side sets visibility the other could contradict.
 """
 
 
-_completed: dict = {}
-_completed_lock = threading.Lock()
-"""What the run that just finished produced, if it produced anything.
+def completed_reply(operation_id: str = "") -> str:
+    """What one finished operation produced, read rather than consumed.
 
-The one authoritative answer to "did this run leave a completed new assistant
-reply, and what was its text". Written by :func:`_stream` and nowhere else, and
-read exactly once by :func:`take_completed_reply`.
+    This used to be ``take_completed_reply()`` over a process-global one-shot
+    slot: one dictionary, one string, popped by whoever asked first. Two pages
+    could pop each other's answer, and the page that lost spoke somebody else's
+    reply into somebody else's conversation. Two threads replying at once could
+    do it to each other with one page open.
 
-It is a *snapshot*, and that is the whole point of it (R2-5). By the time
-anything reads this, the reader may have edited that message, regenerated it,
-branched away, or opened another thread -- so the answer to "what did this run
-say" cannot be a message index, a thread id, or anything else that is re-resolved
-later. It is the string, copied at the moment the run reached its completed
-branch.
-
-Cleared at the start of every run, so a run that fails, is Stopped, or raises
-cannot inherit the previous run's answer -- which is one of the two mechanisms
-that make automatic speech success-only. The other is that this dictionary is
-only ever *filled in* by the branch that reached a whole reply.
-"""
-
-
-def _begin_run() -> None:
-    with _completed_lock:
-        _completed.clear()
-
-
-def _completed_reply(text: str) -> None:
-    """Record a reply that finished. Only ever called on the completed path."""
-    with _completed_lock:
-        _completed["text"] = str(text or "")
-
-
-def take_completed_reply() -> str:
-    """The completed reply, consumed. Empty when the last run produced none.
-
-    Consumed rather than read, so one run can produce at most one of whatever
-    is downstream of it -- a duplicate terminal callback, which a host is
-    entitled to deliver, gets nothing the second time.
+    It is an operation's own record now (:mod:`mc_llm_conversation_ops`), so
+    there is nothing to take and nothing to lose. Reading rather than consuming
+    is safe for the same reason: a duplicate terminal callback, which a host is
+    entitled to deliver, gets the same answer twice instead of somebody else's
+    once, and speaking twice is prevented where it always was -- by the
+    streamed-turn check in :func:`mc_voice_ui.speech_marker`.
     """
-    with _completed_lock:
-        return _completed.pop("text", "")
+    import mc_llm_conversation_ops as ops
+
+    found = ops.completion(operation_id)
+    if found is None or found.status != ops.COMPLETED:
+        return ""
+    return found.final_text
 
 
 def _with_pictures(messages):
@@ -1993,205 +2452,7 @@ def _idle(conversation, text, attachment, note: str, kind: str = "info") -> tupl
     """
     rows, positions = _view(conversation)
     return (None, rows, positions, text, attachment, ui.notice(note, kind)) + IDLE \
-        + ("", LLM_IDLE)
-
-
-def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
-            instruction=None, upto=None, opening: str = ""):
-    """Stream one reply into ``conversation.messages[index]``, and save it.
-
-    ``opening`` is what is already in that message -- the text a continuation
-    extends -- and ``upto`` bounds the history the model is asked from, so an
-    ordinary reply is not written from the empty message being written into
-    while a continuation is written from the reply it continues.
-    """
-    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
-                                               DEFAULT_TOP_P)
-    from prompt_master.chat.prompt import build, clean_reply, needs_vision
-    from prompt_master.core.models import RANDOM_SEED, draw_seed
-
-    store = _chats()
-    # Whatever the previous run left behind stops being true here. See
-    # :data:`_completed`.
-    _begin_run()
-
-    try:
-        character = _characters().load(who)
-    except Exception as exc:
-        yield _idle(conversation, "", None, ui.failure(exc), "error")
-        return
-    persona = _persona()
-    history = conversation.messages[:upto if upto is not None else index]
-
-    # Every control below falls back to the character's own value, and the
-    # character's own value falls back to the vendored default. A cleared
-    # number box therefore runs at the settings the standalone application
-    # would have used, rather than at a literal typed into this file.
-    tokens = _number(reply_tokens, character.max_reply_tokens, DEFAULT_MAX_REPLY_TOKENS)
-    resolved = _number(character.seed, RANDOM_SEED)
-    if resolved == RANDOM_SEED:
-        resolved = draw_seed()
-    asked = _number(seed, RANDOM_SEED)
-
-    # Built once and then asked about, rather than asked about the history and
-    # built afterwards. The two answers differ exactly when trimming has dropped
-    # the only still, and the request that is actually sent is the one whose
-    # needs decide whether a projector has to be loaded for it.
-    wire = build(character, persona, _with_pictures(history),
-                 context_size=_context_size(), reply_tokens=tokens, instruction=instruction)
-    request = sessions.ChatRequest(
-        messages=wire,
-        needs_vision=needs_vision(wire),
-        temperature=_decimal(temperature, character.temperature, DEFAULT_TEMPERATURE),
-        top_p=_decimal(top_p, character.top_p, DEFAULT_TOP_P),
-        max_tokens=tokens,
-        seed=asked if asked != RANDOM_SEED else resolved,
-    )
-
-    message = conversation.messages[index]
-    cancel = sessions.Cancellation()
-    streamed = opening
-    # A continuation is joined to what is already there, and the model is not
-    # reliable about starting with the space that needs.
-    join_space = bool(opening) and not opening[-1].isspace()
-
-    # The speech turn for this run, created before the first chunk arrives so
-    # that the browser has its id in the very first yield and can open the audio
-    # stream while the model is still thinking. ``opening`` is passed because a
-    # continuation must speak only the newly generated tail: the existing
-    # opening is already on screen and may already have been read aloud, and
-    # re-speaking it is the surprising behaviour section 7 rules out.
-    #
-    # Everything about this is failure-tolerant on purpose. A voice turn that
-    # cannot be created is a run that streams text exactly as it always did --
-    # invariant: Voice never takes Conversation down with it.
-    turn = mc_voice_ui.begin_speech(character=character, persona=persona, opening=opening)
-    turn_token = turn.id if turn is not None else ""
-    busy = BUSY + (turn_token, LLM_RUNNING)
-    # The token stays in the field when the run ends rather than being cleared:
-    # the browser reads it by polling, and a short reply whose terminal yield
-    # follows the first one immediately would otherwise blank it before anybody
-    # looked. It is superseded by the next run's token, and a token already
-    # spoken is ignored.
-    idle = IDLE + (turn_token, LLM_IDLE)
-
-    kept = False
-
-    def keep() -> None:
-        """Put what the message holds on to disk. Idempotent, and never raises.
-
-        Every exit from the loop below goes through this, including the one
-        that cannot yield anything afterwards, which is why it is a function
-        rather than three copies of the same three lines.
-        """
-        nonlocal kept
-        try:
-            _tidy(conversation, index)
-            conversation.retitle()
-            store.save(conversation)
-            kept = True
-        except Exception:
-            logger.warning("Model Chain: could not save the conversation", exc_info=True)
-
-    rows, positions = _view(conversation)
-    yield cancel, rows, positions, "", SENT, ui.working("Starting…"), *busy
-
-    try:
-        for event in sessions.conversation(request, cancel):
-            if event.kind == sessions.CHUNK:
-                if join_space and event.text and not event.text[0].isspace():
-                    streamed += " "
-                join_space = False
-                streamed += event.text
-                message.text = streamed
-                # Non-blocking, always: this is inside the generator that draws
-                # the reply, and section 6 is explicit that it must never call
-                # Kokoro. The most this does is run a segmenter over a few
-                # hundred characters and put the result on a queue.
-                if turn is not None:
-                    turn.add_text(event.text)
-                rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", SENT, gr.update(), *busy
-            elif event.kind == sessions.STATUS:
-                rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", SENT, ui.working(event.text), *busy
-            elif event.kind in (sessions.DONE, sessions.CANCELLED):
-                whole = event.text if event.kind == sessions.DONE and not opening else streamed
-                message.text = clean_reply(whole or streamed, character, persona)
-                keep()
-                if event.kind == sessions.DONE:
-                    # The one line that makes a reply eligible to be spoken, in
-                    # the one branch that means the reply is whole. Stopped goes
-                    # to the same place on screen and deliberately not to here.
-                    _completed_reply(message.text)
-                    # The authoritative text, which is what finally decides what
-                    # is spoken: the panel's own ``clean_reply`` has just run,
-                    # and the tail nobody has heard yet is flushed against *that*
-                    # rather than against the concatenated chunks.
-                    if turn is not None:
-                        turn.complete(_spoken_tail(message.text, opening))
-                elif turn is not None:
-                    # Stopped. Nothing further is spoken -- what has already been
-                    # heard cannot be unheard, and section 4 says so plainly.
-                    turn.cancel("stopped")
-                note = "Stopped." if event.kind == sessions.CANCELLED else "Reply complete."
-                rows, positions = _view(conversation)
-                yield (cancel, rows, positions, "", None,
-                       ui.notice(note, "warn" if event.kind == sessions.CANCELLED else "info"),
-                       *idle)
-                return
-            elif event.kind == sessions.FAILED:
-                # The half-written reply goes; your turn stays, so the message
-                # you typed is not lost to a server that would not start.
-                keep()
-                if turn is not None:
-                    turn.cancel("failed")
-                rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", SENT, ui.notice(event.text, "error"), *idle
-                return
-    except Exception as exc:
-        keep()
-        if turn is not None:
-            turn.cancel("failed")
-        rows, positions = _view(conversation)
-        yield cancel, rows, positions, "", SENT, ui.notice(ui.failure(exc), "error"), *idle
-        return
-    finally:
-        # The reply you were reading has to survive whatever ended this
-        # generator, and one of the things that ends it cannot be caught above.
-        #
-        # Stop is wired as ``cancels=``, and what that does is *close* the
-        # generator where it stands -- which raises GeneratorExit, a
-        # BaseException, straight past the ``except Exception``. So the branch
-        # that saves never ran: the reply stayed on screen, because Gradio
-        # keeps the rows it was last given, and was never written to the
-        # thread. It came back missing the next time the thread was opened,
-        # and the transcript showed a message of yours with nothing under it.
-        # The same hole swallowed a browser refresh and a dropped queue entry.
-        #
-        # A ``finally`` runs on all of them. Saving is not yielding, so it is
-        # safe here: yielding during a GeneratorExit would be a RuntimeError,
-        # writing a file is not. What is saved is what the message holds --
-        # a partial reply is a real reply, which is what the CANCELLED branch
-        # already decided.
-        if not kept:
-            keep()
-        # GeneratorExit lands here and nowhere else -- Stop is wired as
-        # ``cancels=``, which closes this generator rather than raising inside
-        # it. A turn left running after that would keep speaking a reply the
-        # user has already stopped, so the cancel goes in the one block that
-        # runs on every way out. Idempotent, so the branches above that already
-        # cancelled cost nothing.
-        if turn is not None and turn.busy and not turn.source_done:
-            turn.cancel("interrupted")
-
-    # The event stream ended without a terminal event, which is the other way
-    # a reply finishes whole: everything that arrived, arrived.
-    _completed_reply(message.text)
-    if turn is not None:
-        turn.complete(_spoken_tail(message.text, opening))
-    rows, positions = _view(conversation)
-    yield cancel, rows, positions, "", SENT, ui.notice("Reply complete."), *idle
+        + ("", LLM_IDLE, _token(conversation))
 
 
 def _spoken_tail(whole: str, opening: str) -> str:
@@ -2260,19 +2521,26 @@ def _decimal(value, *fallbacks) -> float:
     return 0.0
 
 
-def _cancel(cancel):
-    """Stop the run, and put the controls back.
+def _cancel(operation_id):
+    """Stop the reply, and put the controls back.
 
-    The buttons are the point. ``cancels=`` closes the generator where it
-    stands, which is what makes a stop immediate -- and a generator that is
-    closed never reaches the yield that would have put Send back in the
-    composer. So the run stopped, the partial reply stayed, and the panel was
-    left permanently busy with no way to ask for anything else. Whatever
-    restores those controls has to be *this* handler, because it is the only
-    one that still runs.
+    A plain callback now, and ``cancels=`` is gone from the button (7.9). It
+    used to close the streaming generator where it stood, which is what made
+    Stop immediate -- and also what made it dangerous: a closed generator never
+    reached the yield that would have put Send back, so the panel was left
+    permanently busy, and the reply survived only because of a ``finally``
+    written after a bug report about replies disappearing.
+
+    The reply is not in a generator any more. Stop sets the operation's own
+    cancellation, which is the same :class:`mc_llm_sessions.Cancellation` this
+    button always set and which llama.cpp honours between tokens; the follower
+    ends when it sees the terminal phase. Pressing it twice is harmless, and
+    pressing it after the reply finished leaves the reply and stops the audio.
     """
-    if cancel is not None:
-        cancel.cancel()
+    import mc_llm_conversation_ops as ops
+
+    if operation_id:
+        ops.stop(str(operation_id))
     # The other half of one Stop. The browser has already silenced the speaker
     # by the time this arrives -- it is on the same button, in the capture phase
     # -- and this is what guarantees the *backend* stops: Kokoro stops being
