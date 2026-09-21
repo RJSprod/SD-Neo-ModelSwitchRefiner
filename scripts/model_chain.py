@@ -21,10 +21,13 @@ import gradio as gr
 
 import mc_arch
 import mc_arm
+import mc_assistant_settings
 import mc_broker
 import mc_hint
 import mc_infotext
 import mc_literal_report
+import mc_llm_conversation_api
+import mc_llm_conversation_startup
 import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_state
@@ -604,6 +607,103 @@ shared.options_templates.update(
                 "the value half of the cache. Some llama.cpp builds refuse a quantised V "
                 "cache without flash attention; if llama-server will not start after "
                 "changing this, put it back to f16"
+            ),
+            # -- the Forge Assistant ---------------------------------------
+            #
+            # The floating panel, and how it looks. Nothing here is about a
+            # conversation: turning it off removes the panel, its listeners and
+            # its focus treatment, and leaves the guarded store and the
+            # server-owned replies exactly where they are. There is deliberately
+            # no way to get the old unguarded writer back.
+            mc_assistant_settings.OPT_ENABLED: shared.OptionInfo(
+                True,
+                "Show the Forge Assistant",
+            ).info(
+                "a floating panel, available from every workspace, that carries the "
+                "conversation LLM Studio has open plus a workspace picker and a focus "
+                "toggle. It runs no model and keeps no history of its own — it is a second "
+                "window onto work Conversation owns"
+            ),
+            mc_assistant_settings.OPT_LABEL: shared.OptionInfo(
+                mc_assistant_settings.LABEL_DEFAULT,
+                "Forge Assistant label",
+                gr.Textbox,
+            ).info(
+                "what the launcher says, and the accessible name it carries when it is "
+                "showing only an icon. A label for a control rather than a persona: it is "
+                "drawn as text and never as markup"
+            ),
+            mc_assistant_settings.OPT_APPEARANCE: shared.OptionInfo(
+                mc_assistant_settings.APPEARANCE_DEFAULT,
+                "Forge Assistant launcher",
+                gr.Radio,
+                {"choices": list(mc_assistant_settings.APPEARANCES)},
+            ).info(
+                "text, an icon, or both. Changing this never changes where the launcher "
+                "sits, what is in the conversation, or anything about a model"
+            ),
+            mc_assistant_settings.OPT_ANCHOR: shared.OptionInfo(
+                mc_assistant_settings.ANCHOR_DEFAULT,
+                "Forge Assistant position",
+                gr.Radio,
+                {"choices": list(mc_assistant_settings.ANCHORS)},
+            ).info(
+                "which of the six corners and edges the launcher rests at. It can also be "
+                "dragged, which sets the same thing for this browser session only — so a "
+                "change here moves every session that has not been dragged, and none that "
+                "has. Stored by name, never as coordinates: a window resized between "
+                "sessions must not be able to leave the launcher off-screen"
+            ),
+            mc_assistant_settings.OPT_BUBBLE: shared.OptionInfo(
+                mc_assistant_settings.BUBBLE_DEFAULT,
+                "Message bubble width (%)",
+                gr.Slider,
+                {"minimum": mc_assistant_settings.BUBBLE_MIN,
+                 "maximum": mc_assistant_settings.BUBBLE_MAX,
+                 "step": mc_assistant_settings.BUBBLE_STEP},
+            ).info(
+                "how much of the transcript's width a single message may take, in both "
+                "views. Below 480 pixels wide at least 90% is used whatever this says — a "
+                "bubble three-quarters of a phone screen wide is a phone screen "
+                "three-quarters used"
+            ),
+            mc_assistant_settings.OPT_COLUMN: shared.OptionInfo(
+                mc_assistant_settings.COLUMN_DEFAULT,
+                "Conversation column width",
+                gr.Radio,
+                {"choices": [name for name, _ in mc_assistant_settings.COLUMNS]},
+            ).info(
+                "how wide the transcript and composer are allowed to become in the "
+                "Conversation tab. On a wide monitor a transcript stretched across the "
+                "whole screen is one nobody can follow from one line to the next; this is "
+                "what makes focus mode an improvement there rather than a regression. The "
+                "page never scrolls sideways at any setting, and the floating panel ignores "
+                "it"
+            ),
+            mc_assistant_settings.OPT_TEXT_SIZE: shared.OptionInfo(
+                mc_assistant_settings.TEXT_SIZE_DEFAULT,
+                "Conversation text size (px)",
+                gr.Slider,
+                {"minimum": 0, "maximum": mc_assistant_settings.TEXT_SIZE_MAX, "step": 1},
+            ).info(
+                "0 inherits whatever the theme uses, which is what almost everybody wants. "
+                "Anything from 14 to 22 overrides it in the transcript and the composer"
+            ),
+            mc_assistant_settings.OPT_DENSITY: shared.OptionInfo(
+                mc_assistant_settings.DENSITY_DEFAULT,
+                "Conversation density",
+                gr.Radio,
+                {"choices": list(mc_assistant_settings.DENSITIES)},
+            ).info(
+                "how much room there is around each message. Compact tightens the spacing "
+                "and nothing else — touch targets stay at least 44 pixels either way"
+            ),
+            mc_assistant_settings.OPT_AVATARS: shared.OptionInfo(
+                True,
+                "Show avatars in the conversation",
+            ).info(
+                "the two pictures beside the messages. Off is a plainer transcript; the "
+                "left and right alignment still says who wrote what"
             ),
         },
     )
@@ -3948,5 +4048,11 @@ try:
     # the reason every other route in this file is: there is no FastAPI app to
     # add anything to until the host has one.
     script_callbacks.on_app_started(mc_voice_api.install)
+    # The Forge Assistant's own routes, for the same reason and at the same
+    # moment: the panel is a DOM shell outside the tab tree, so this is the
+    # only transport it has, and there is no FastAPI app to add it to until the
+    # host has one.
+    script_callbacks.on_app_started(mc_llm_conversation_api.install)
+    script_callbacks.on_app_started(mc_llm_conversation_startup.on_app_started)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

@@ -223,6 +223,17 @@ class Operation:
     seq: int = 0
     started: float = field(default_factory=time.time)
     finished: float = 0.0
+    accepted_fingerprint: str = ""
+    """The exact bytes of the conversation when this operation was accepted.
+
+    Carried as well as the revision because the two catch different things. The
+    revision catches another window's write, which is the common case and the
+    one the whole design is for. The fingerprint catches a file that changed
+    without going through this code at all -- an editor, a sync client, a second
+    process -- which leaves the counter exactly where it was and the
+    conversation something else entirely.
+    """
+
     request: object = None
     cancel: object = None
     turn: object = None
@@ -426,6 +437,7 @@ def begin(envelope, scope: str) -> dict:
                           target_kind=plan["target_kind"],
                           target_version=plan["target_version"],
                           accepted_revision=plan["accepted_revision"],
+                          accepted_fingerprint=_fingerprint(store, plan["key"]),
                           opening=plan["opening"], page_id=envelope.page_id,
                           voice_wanted=bool(envelope.payload.get("voice", True)),
                           request=plan["request"])
@@ -475,6 +487,23 @@ def begin(envelope, scope: str) -> dict:
             "revision": plan["result_revision"],
             "target": {"index": operation.target_index, "kind": operation.target_kind,
                        "version": operation.target_version}}
+
+
+def _fingerprint(store, key: Key) -> str:
+    """The conversation's exact bytes, right now. Empty if it cannot be read.
+
+    One extra read, once per operation, off every hot path: it happens between
+    accepting the command and starting the model, where the next thing that
+    will happen is a model load measured in seconds.
+    """
+    from prompt_master.chat.history import fingerprint
+
+    try:
+        _, raw = store_module.read(store, key)
+        return fingerprint(raw)
+    except Exception:
+        logger.debug("Model Chain: could not fingerprint a conversation", exc_info=True)
+        return ""
 
 
 def _plan(store, envelope) -> dict:
@@ -939,8 +968,17 @@ def _commit(operation: Operation, plan: dict, whole: str) -> int:
         conversation.retitle()
         return True
 
+    def unchanged(conversation, raw, current):
+        from prompt_master.chat.history import fingerprint
+
+        if operation.accepted_fingerprint and fingerprint(raw) != operation.accepted_fingerprint:
+            # Same revision, different bytes: something wrote this file without
+            # going through the service. The reply is not written over it.
+            raise store_module.StaleRevision(current)
+
     committed = store_module.transaction(store, operation.key, operation.accepted_revision,
-                                         change, receipt=receipt, allow_busy=True)
+                                         change, receipt=receipt, allow_busy=True,
+                                         guard=unchanged)
     return committed.revision
 
 

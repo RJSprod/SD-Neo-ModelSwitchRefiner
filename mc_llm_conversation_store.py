@@ -478,7 +478,8 @@ def token(store, key: Key) -> object:
 
 
 def transaction(store, key: Key, expected, change, receipt: Receipt | None = None,
-                also: list | None = None, allow_busy: bool = False) -> Committed:
+                also: list | None = None, allow_busy: bool = False,
+                guard=None) -> Committed:
     """Read, compare, mutate a copy, write it, remember the number. Under lock.
 
     ``change`` is handed a *copy* of the conversation and may raise: nothing has
@@ -494,6 +495,14 @@ def transaction(store, key: Key, expected, change, receipt: Receipt | None = Non
 
     ``allow_busy`` is for the operation that *is* the active writer saving its
     own reply. Everything else is refused while a generation owns the thread.
+
+    ``guard`` is a second opinion, given the conversation, its exact bytes and
+    the token they compare as, and free to raise. It exists for the one case the
+    revision cannot see: a revision only moves when *this* code writes, so a
+    file changed by something outside the application -- an editor, a sync
+    client, a second process -- comes back with different bytes and the same
+    number. A generation that has been away for a minute is exactly where that
+    matters, so its completion compares the bytes as well.
     """
     path = canonical(store, key)
     others = [canonical(store, other) for other in (also or [])]
@@ -518,6 +527,8 @@ def transaction(store, key: Key, expected, change, receipt: Receipt | None = Non
         if owner and not allow_busy and (receipt is None
                                          or owner.get("operation_id") != receipt.operation_id):
             raise ThreadBusy(str(owner.get("operation_id") or ""))
+        if guard is not None:
+            guard(conversation, raw, current)
 
         copy = _copy(conversation)
         result = change(copy)

@@ -279,6 +279,14 @@ def _build():
         # comes to write the runtime line into a banner.
         mode.change(fn=minimax["on_mode"], inputs=[mode], outputs=minimax["gate"],
                     queue=False)
+        # A third handler, writing nothing. The Forge Assistant hides its
+        # conversation section while this tab is showing Conversation -- the
+        # same conversation, twice on one screen, is two places to type into
+        # and one of them is wrong -- and the only way it can know is to be
+        # told. Published rather than polled, and it fails open: an event that
+        # cannot be sent leaves the panel showing a conversation it did not
+        # need to, which is a duplicate rather than a defect.
+        mode.change(fn=_publish_mode, inputs=[mode], outputs=[], queue=False)
 
         # Toggles, not openers. A menu that can only open is a menu you cannot
         # dismiss from the button you opened it with, and on a desktop that
@@ -353,6 +361,16 @@ def _build():
             outputs=[chooser], queue=False)
 
     return block
+
+
+def _publish_mode(chosen) -> None:
+    """Tell every open page which workspace LLM Studio is showing."""
+    try:
+        import mc_llm_conversation_service as service
+
+        service.publish(service.MODE_CHANGED, None, mode=str(chosen or ""))
+    except Exception:
+        logger.debug("Model Chain: could not publish the mode change", exc_info=True)
 
 
 def _sheet(name: str = "") -> list:

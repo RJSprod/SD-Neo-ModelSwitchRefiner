@@ -308,6 +308,48 @@ def build() -> dict:
             regenerate_now = gr.Button("Regenerate this reply", visible=False,
                                        elem_id=ui.ident("chat", "regenerate-now"))
 
+            # THE FORGE ASSISTANT'S PLUMBING, as far as Gradio is concerned.
+            #
+            # The assistant is a DOM shell appended to document.body, because
+            # Forge exposes no callback that mounts a Gradio component outside
+            # the tab tree. So the three things it *does* need from Gradio live
+            # here, inside the tab, and that asymmetry is accepted rather than
+            # worked around.
+            #
+            # The key is the capability for its HTTP routes, put in the page by
+            # Python because that is the one channel a cross-site page cannot
+            # read -- the same mechanism, and the same reasoning, as the Voice
+            # Chat key beside it.
+            conversation_key = gr.Textbox(
+                value=_conversation_key(), visible=False, container=False,
+                elem_id=ui.ident("chat", "conversation-key"))
+            # The refresh bridge. When another window writes to the thread this
+            # tab is showing, the page store presses this, and the handler
+            # re-reads the conversation and redraws the rows. It is READ-ONLY
+            # and deliberately does not go through ``_open_thread``: that lifts
+            # an unanswered last message out of the thread and deletes it,
+            # which is fine as something somebody asked for and catastrophic as
+            # something an event triggers.
+            refresh_at = gr.Textbox(value="", visible=False, container=False,
+                                    elem_id=ui.ident("chat", "refresh-at"))
+            refresh_now = gr.Button("Refresh this conversation", visible=False,
+                                    elem_id=ui.ident("chat", "refresh-now"))
+            # The paste bridge. A picture pasted into this composer is staged
+            # over the assistant's own upload route by the browser, which hands
+            # back a token; this puts the staged picture into the chip so the
+            # tab shows what the flyout shows. A token rather than a synthesised
+            # file drop, because a drop is a guess about what the installed
+            # Gradio does with a DataTransfer and a token is an answer.
+            paste_token = gr.Textbox(value="", visible=False, container=False,
+                                     elem_id=ui.ident("chat", "paste-token"))
+            paste_now = gr.Button("Attach the pasted picture", visible=False,
+                                  elem_id=ui.ident("chat", "paste-now"))
+            # The presentation settings, as custom properties. A stylesheet
+            # variable rather than a class per value: changing the column or the
+            # bubble width reloads nothing, resets no scroll and interrupts no
+            # reply, because all that changes is one number.
+            gr.HTML(_presentation_style(), elem_id=ui.ident("chat", "presentation"))
+
             # One line, always the same height, immediately above the composer.
             # "Ready." is quiet; a warning or an error is not, and neither of
             # them moves the transcript by a pixel when it arrives.
@@ -798,6 +840,11 @@ def build() -> dict:
     # browser's own, forwarded to this component's file input by
     # javascript/llm_studio.js -- a press that reaches Python and comes back is
     # a round trip to open a dialog that was already one tap away.
+    refresh_now.click(fn=_refresh_from_event, inputs=[character, thread_state, refresh_at],
+                      outputs=view, queue=False)
+    paste_now.click(fn=_attach_staged, inputs=[paste_token],
+                    outputs=[attachment, status], queue=False)
+
     attach.click(fn=_offer_attachment, outputs=[attachment, status], queue=False)
     attachment.clear(fn=_cleared_attachment, outputs=[attachment, status], queue=False)
     edit_attach.click(fn=lambda: gr.update(visible=True), outputs=[edit_image], queue=False)
@@ -1553,6 +1600,91 @@ def _offer_attachment():
 def _cleared_attachment():
     """The component's own ✕. The chip goes away with the picture it held."""
     return gr.update(visible=False), ui.notice("Ready.")
+
+
+def _presentation_style() -> str:
+    """The column width, bubble width and text size, as one ``<style>``.
+
+    Read from the host's own settings through :mod:`mc_assistant_settings`,
+    which validates them -- a Gradio radio stores whatever string it displayed
+    and a hand-edited config can hold anything, so what reaches the page is
+    always one of the values that module names.
+    """
+    try:
+        import mc_assistant_settings
+
+        return f"<style>{mc_assistant_settings.style()}</style>"
+    except Exception:
+        logger.debug("Model Chain: could not read the presentation settings", exc_info=True)
+        return ""
+
+
+def _conversation_key() -> str:
+    """This process's capability for the assistant's routes. Never logged.
+
+    Read through a function rather than at import so that a host without
+    FastAPI -- or a test -- gets an empty field and a panel that works, rather
+    than an import error in a module the conversation does not otherwise need.
+    """
+    try:
+        import mc_llm_conversation_api
+
+        return mc_llm_conversation_api.session_token()
+    except Exception:
+        logger.debug("Model Chain: the conversation routes have no key to publish",
+                     exc_info=True)
+        return ""
+
+
+def _refresh_from_event(who, identifier, wanted=""):
+    """Redraw the thread this tab is showing. Reads; never writes.
+
+    What keeps one window current when the other one writes, without a polling
+    loop: an event arrives, the page store presses the hidden button, this runs
+    once. ``wanted`` is the thread the event was about, and a mismatch is not an
+    error -- the tab has moved on since, and redrawing it with somebody else's
+    conversation is the bug this check exists to prevent.
+
+    Attachment adoption is deliberately not done here. It is a write, it is a
+    write nobody asked for, and a refresh is the one path that must be
+    incapable of changing a file.
+    """
+    import mc_llm_conversation_store as guarded
+
+    if wanted and str(wanted).strip() and str(wanted).strip() != str(identifier or ""):
+        return [gr.update()] * len(_refresh(None, ""))
+    if not (who and identifier):
+        return _refresh(None, "Ready.")
+    try:
+        conversation, _ = guarded.read(_chats(),
+                                       guarded.Key(character=who, thread_id=identifier))
+    except Exception:
+        logger.debug("Model Chain: could not re-read %s for a refresh", identifier,
+                     exc_info=True)
+        return [gr.update()] * len(_refresh(None, ""))
+    return _refresh(conversation, conversation.title)
+
+
+def _attach_staged(token):
+    """Put a staged picture into the composer's chip.
+
+    The browser has already uploaded it and had it decoded, checked and
+    re-encoded by :mod:`mc_llm_attachment_staging`; what arrives here is a
+    token for a picture that is *ready*. So the chip shows exactly what will be
+    sent, which is the whole reason staging exists -- a chip filled from a file
+    the server has not looked at is a chip that can disagree with the message.
+    """
+    import mc_llm_attachment_staging as staging
+
+    staged = staging.resolve(token)
+    if staged is None:
+        return gr.update(), ui.notice("That picture is no longer available. Attach it "
+                                      "again.", "warn")
+    if not staged.ready:
+        return gr.update(), ui.notice(staged.reason or "That picture could not be used.",
+                                      "warn")
+    return (gr.update(value=staged.image, visible=True),
+            ui.notice(f"{staged.name or 'Picture'} is attached to the next message."))
 
 
 def _select_character(who, filter_text, typed=""):

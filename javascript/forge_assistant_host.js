@@ -1,0 +1,352 @@
+// Forge Assistant -- the host, as an interface with seven functions.
+//
+// Everything the assistant knows about Forge is behind `listWorkspaces`,
+// `getActiveWorkspace`, `activateWorkspace`, `subscribeNavigation`,
+// `resolveWorkspaceRoot`, `listUtilities` and `dispose`. That is not
+// architecture for its own sake: the tab bar is the part of this whole feature
+// most likely to be different on the machine it runs on, and an adapter is the
+// difference between "the picker lists nothing" and "the assistant does not
+// load".
+//
+// Two rules the implementation below keeps, and both have cost somebody a
+// working panel somewhere:
+//
+// *Never match a tab by its display name.* Labels are translated, themed and
+// renamed. Tabs are found by the ids Gradio puts on the button and the panel,
+// and a tab whose id cannot be found is simply not offered.
+//
+// *Activation is the host's own operation, forwarded.* The picker clicks the
+// host's own tab button. It does not set a class, hide a panel or dispatch a
+// synthetic navigation, because every one of those leaves the host's own state
+// disagreeing with the screen. Highlighting then follows the host's selection
+// rather than the click -- including a switch made somewhere else entirely,
+// which is the case that catches an implementation that highlights optimistically.
+//
+// The utility menu is the same idea for the header's buttons: each entry calls
+// the original handler once, with its own enabled state, and a gesture-dependent
+// one (a file picker, a link) keeps direct gesture execution rather than being
+// routed through anything.
+
+(function () {
+    "use strict";
+
+    const NS = (window.forgeAssistant = window.forgeAssistant || {});
+
+    // How long to wait for the host to confirm a tab switch before saying so.
+    // A watchdog that *reports* -- it never activates anything a second time,
+    // because a second activation is how a slow switch becomes two switches.
+    const CONFIRM_TIMEOUT = 4000;
+
+    function app() {
+        return (typeof gradioApp === "function" ? gradioApp() : null) || document;
+    }
+
+    function all(selector, root) {
+        try {
+            return Array.prototype.slice.call((root || app()).querySelectorAll(selector));
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function visible(node) {
+        if (!node) return false;
+        if (node.offsetParent !== undefined && node.offsetParent === null
+            && node.style && node.style.position !== "fixed") return false;
+        const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+        return !style || (style.display !== "none" && style.visibility !== "hidden");
+    }
+
+    function Host() {
+        this.listeners = new Set();
+        this.observer = null;
+        this.watchdog = null;
+        this.pending = "";
+        this.menus = new Set();
+        this.openMenu = null;
+        this.disposed = false;
+    }
+
+    // -- the tab bar ------------------------------------------------------- //
+    //
+    // Forge's tab bar is a Gradio Tabs component: one button per tab, and one
+    // panel per tab carrying the id the extension registered. The buttons carry
+    // no id of their own on every theme, so the pairing is done by position
+    // within the bar -- which is the host's own ordering and therefore the one
+    // the picker must preserve.
+
+    Host.prototype.bar = function () {
+        const tabs = app().querySelector("#tabs");
+        if (!tabs) return null;
+        const buttons = all("button", tabs).filter((button) => {
+            const parent = button.parentElement;
+            return parent && (parent.classList.contains("tab-nav")
+                || parent.getAttribute("role") === "tablist");
+        });
+        return buttons.length ? {tabs, buttons} : null;
+    };
+
+    Host.prototype.panels = function () {
+        const tabs = app().querySelector("#tabs");
+        if (!tabs) return [];
+        // A tab's panel is a direct child with an id, which is what Forge and
+        // every extension that registers a tab produce. Nested ids -- the
+        // hundreds inside each panel -- are not candidates.
+        return all(":scope > div[id], :scope > .tabitem[id]", tabs)
+            .filter((panel) => panel.id && panel.id !== "tabs");
+    };
+
+    Host.prototype.listWorkspaces = function () {
+        const bar = this.bar();
+        const panels = this.panels();
+        if (!bar) return [];
+        return bar.buttons.map((button, order) => {
+            const panel = panels[order] || null;
+            const id = (panel && panel.id) || ("tab-" + order);
+            const capability = this.focusCapability(id, panel);
+            return {
+                id,
+                label: (button.textContent || "").trim() || id,
+                order,
+                available: !button.disabled,
+                focusCapability: capability.ok,
+                reason: capability.reason,
+                button,
+                panel,
+            };
+        });
+    };
+
+    Host.prototype.focusCapability = function (id, panel) {
+        if (!panel) return {ok: false, reason: "This workspace has no panel to fill with."};
+        if (NS.focus && typeof NS.focus.canFocus === "function") {
+            return NS.focus.canFocus(id, panel);
+        }
+        return {ok: true, reason: ""};
+    };
+
+    Host.prototype.getActiveWorkspace = function () {
+        const bar = this.bar();
+        if (!bar) return "";
+        const panels = this.panels();
+        // The authority is which *panel* is showing, not which button looks
+        // selected: a theme is free to restyle the button and several do.
+        for (let index = 0; index < panels.length; index += 1) {
+            if (visible(panels[index])) return panels[index].id;
+        }
+        const selected = bar.buttons.findIndex(
+            (button) => button.classList.contains("selected")
+                || button.getAttribute("aria-selected") === "true");
+        return selected >= 0 && panels[selected] ? panels[selected].id : "";
+    };
+
+    Host.prototype.resolveWorkspaceRoot = function (id) {
+        return this.panels().find((panel) => panel.id === id) || null;
+    };
+
+    Host.prototype.activateWorkspace = function (id) {
+        const wanted = this.listWorkspaces().find((item) => item.id === id);
+        if (!wanted || !wanted.button) {
+            return Promise.reject(new Error("That workspace is not on this page."));
+        }
+        if (this.getActiveWorkspace() === id) return Promise.resolve(id);
+        this.pending = id;
+        // The host's own control, pressed once. Nothing here sets a class or
+        // hides a panel: a switch this code performed itself is a switch the
+        // host does not know about.
+        wanted.button.click();
+        return new Promise((resolve, reject) => {
+            const started = Date.now();
+            const check = () => {
+                if (this.disposed) return reject(new Error("The assistant went away."));
+                if (this.getActiveWorkspace() === id) {
+                    this.pending = "";
+                    this.notify();
+                    return resolve(id);
+                }
+                if (Date.now() - started > CONFIRM_TIMEOUT) {
+                    this.pending = "";
+                    this.notify();
+                    // Reported, never retried. A watchdog that activates again
+                    // is a watchdog that switches twice on a slow machine.
+                    return reject(new Error("That workspace did not open."));
+                }
+                window.requestAnimationFrame(check);
+                return undefined;
+            };
+            check();
+        });
+    };
+
+    Host.prototype.subscribeNavigation = function (listener) {
+        this.listeners.add(listener);
+        this.watch();
+        return () => this.listeners.delete(listener);
+    };
+
+    Host.prototype.notify = function () {
+        const active = this.getActiveWorkspace();
+        this.listeners.forEach((listener) => {
+            try {
+                listener(active, this.pending);
+            } catch (error) {
+                console.error("Forge Assistant: a navigation listener failed", error);
+            }
+        });
+    };
+
+    Host.prototype.watch = function () {
+        if (this.observer || typeof MutationObserver !== "function") return;
+        const tabs = app().querySelector("#tabs");
+        if (!tabs) return;
+        // Watching the host's own selection rather than our own clicks, so a
+        // switch made anywhere -- a header button, another extension's
+        // "Send to img2img" -- moves the highlight too.
+        this.observer = new MutationObserver(() => this.notify());
+        this.observer.observe(tabs, {attributes: true, subtree: true,
+                                     attributeFilter: ["class", "style", "aria-selected"]});
+    };
+
+    // -- the header's utilities -------------------------------------------- //
+
+    Host.prototype.listUtilities = function () {
+        const found = [];
+        const seen = new Set();
+        const add = (node, label, kind) => {
+            if (!node || seen.has(node)) return;
+            const name = (label || node.textContent || node.title || "").trim();
+            if (!name) return;
+            seen.add(node);
+            found.push({
+                id: node.id || (kind + ":" + found.length),
+                label: name,
+                enabled: !node.disabled,
+                kind,
+                node,
+                // The original handler, called once. A link and a file picker
+                // keep direct gesture execution: routing a press through
+                // anything at all loses the user activation a browser requires
+                // for both.
+                invoke() {
+                    if (node.disabled) return false;
+                    node.click();
+                    return true;
+                },
+            });
+        };
+        all("#quicksettings button, .gradio-container > .app > div button.settings",
+            app()).forEach((node) => add(node, "", "quicksetting"));
+        ["#settings_submit", "#restart_submit", "#reload_ui", "#settings_restart_gradio"]
+            .forEach((selector) => add(app().querySelector(selector), "", "action"));
+        all("#footer a, .gradio-container a[href]:not([href^='#'])", app())
+            .filter((link) => (link.textContent || "").trim())
+            .slice(0, 8)
+            .forEach((link) => add(link, "", "link"));
+        return found;
+    };
+
+    // -- the assistant's own menus ----------------------------------------- //
+    //
+    // One at a time with each other, and deliberately not with LLM Studio's
+    // sheets: the assistant is exempt from that rule in both directions
+    // (specification 15.2). It is a second window onto the conversation, not
+    // another sheet over it.
+
+    Host.prototype.registerMenu = function (menu) {
+        this.menus.add(menu);
+        return () => this.menus.delete(menu);
+    };
+
+    Host.prototype.openOnly = function (menu) {
+        this.menus.forEach((other) => {
+            if (other !== menu && typeof other.close === "function") other.close();
+        });
+        this.openMenu = menu || null;
+    };
+
+    Host.prototype.closeMenus = function () {
+        const had = !!this.openMenu;
+        this.menus.forEach((menu) => {
+            if (typeof menu.close === "function") menu.close();
+        });
+        this.openMenu = null;
+        return had;
+    };
+
+    Host.prototype.dispose = function () {
+        this.disposed = true;
+        if (this.observer) {
+            this.observer.disconnect();
+            this.observer = null;
+        }
+        window.clearTimeout(this.watchdog);
+        this.listeners.clear();
+        this.menus.clear();
+        this.openMenu = null;
+    };
+
+    // -- keyboard arbitration ---------------------------------------------- //
+    //
+    // One key event, at most one action, in a fixed order (specification 17.1).
+    // The order is the whole of it: Escape means six different things on this
+    // page and the wrong precedence is how Escape stops a reply somebody was
+    // reading instead of closing the menu in front of them.
+    //
+    // No new document-wide Send or Stop shortcut is installed. Ctrl/Cmd+Enter
+    // submits the composer that has focus and nothing else -- never the image
+    // Generate button, which is what a global binding would eventually reach.
+
+    function editing(node) {
+        if (!node) return false;
+        const tag = (node.tagName || "").toLowerCase();
+        return tag === "input" || tag === "textarea" || tag === "select"
+            || node.isContentEditable === true;
+    }
+
+    function inDialog(node) {
+        let walk = node;
+        while (walk) {
+            if (walk.getAttribute && (walk.getAttribute("role") === "dialog"
+                || walk.getAttribute("aria-modal") === "true")) return true;
+            if (walk.tagName === "DIALOG") return true;
+            walk = walk.parentElement;
+        }
+        return false;
+    }
+
+    function escapeOrder(event, context) {
+        // Returns the name of the one thing this Escape does, or "" for
+        // "leave it to the host". Pure, so the precedence can be asserted
+        // without a browser -- which is the only way it is ever going to be
+        // asserted, because six of these cases cannot be produced by hand
+        // reliably.
+        if (context.composing) return "";                  // IME: never ours
+        if (context.nativeDialog) return "";               // browser's own
+        if (context.hostDialogOpen && !context.insideAssistant) return "";
+        if (context.assistantMenuOpen) return "close-menu";
+        if (context.assistantEditing) return "cancel-edit";
+        if (context.focusActive) return "exit-focus";
+        return "";                                         // the host's Escape
+    }
+
+    function submitShortcut(event, context) {
+        if (context.composing) return false;
+        if (!(event.ctrlKey || event.metaKey)) return false;
+        if (event.key !== "Enter") return false;
+        // Only a chat composer, only a visible one, only the focused one. The
+        // image workspaces' Generate is reachable by a shortcut of the host's
+        // and this must never be mistaken for it.
+        return !!context.focusedComposer;
+    }
+
+    NS.Host = Host;
+    NS.escapeOrder = escapeOrder;
+    NS.submitShortcut = submitShortcut;
+    NS.hostEditing = editing;
+    NS.hostInDialog = inDialog;
+
+    NS.host = function () {
+        if (!NS._host) NS._host = new Host();
+        return NS._host;
+    };
+})();
