@@ -168,7 +168,13 @@ def run(scenario: str) -> dict:
 
 
 class TestEntering:
-    def test_the_workspace_takes_the_class_and_the_body_stops_scrolling(self):
+    def test_the_workspace_takes_the_class_and_nothing_else_changes(self):
+        """The whole mechanism, and the whole of what it is allowed to do.
+
+        The class is what the stylesheet turns into `position: fixed; inset: 0`
+        over an opaque background. Everything else about the page is left
+        exactly as it was, which is the property that makes leaving safe.
+        """
         found = run("""
             const answer = focus.enter("tab_llm_studio", HOST);
             console.log(JSON.stringify({
@@ -176,7 +182,6 @@ class TestEntering:
                 root: document.getElementById("tab_llm_studio")
                     .classList.contains("forge-assistant-focus-root"),
                 body: document.body.classList.contains("forge-assistant-focused"),
-                overflow: document.body.style.overflow || null,
                 active: focus.activeWorkspace(),
             }));
         """)
@@ -184,50 +189,67 @@ class TestEntering:
         assert found["ok"] is True
         assert found["root"] is True
         assert found["body"] is True
-        assert found["overflow"] == "hidden"
         assert found["active"] == "tab_llm_studio"
 
-    def test_the_covered_siblings_become_unreachable(self):
+    def test_the_page_is_left_scrollable(self):
+        """Reported: on Txt2Img the tab bar stayed exactly where it was and the
+        only thing that changed was that the page would no longer scroll.
+
+        Locking the body was the half of the old implementation that people
+        could see. It was also unnecessary -- the focus root covers the
+        viewport, so there is nothing behind it to scroll to -- and the
+        stylesheet contains the wheel with `overscroll-behavior` instead.
+        """
+        found = run("""
+            focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({overflow: document.body.style.overflow || null}));
+        """)
+
+        assert found["overflow"] == "scroll", (
+            "focus mode changed how the page scrolls")
+
+    def test_the_host_s_own_dom_is_never_touched(self):
+        """The tab bar is still there, underneath. Nothing of the host's is
+        hidden, moved, restyled or made unreachable -- which is what makes
+        leaving one class removal rather than an undo log."""
         found = run("""
             focus.enter("tab_llm_studio", HOST);
             console.log(JSON.stringify({
                 header: document.getElementById("header").inert,
-                txt2img: document.getElementById("tab_txt2img").inert,
-                studio: document.getElementById("tab_llm_studio").inert,
-            }));
-        """)
-
-        assert found["header"] is True
-        assert found["txt2img"] is True
-        assert found["studio"] is False, "the workspace inerted itself"
-
-    def test_the_assistant_is_never_made_unreachable(self):
-        """It carries the control that turns focus off. A focus mode that
-        inerts its own escape hatch is a page somebody has to reload."""
-        found = run("""
-            focus.enter("tab_llm_studio", HOST);
-            console.log(JSON.stringify({
-                assistant: document.getElementById("forge-assistant-root").inert,
-            }));
-        """)
-
-        assert found["assistant"] is False
-
-    def test_no_ancestor_is_ever_inerted(self):
-        """Inerting an ancestor inerts the root inside it, and the failure
-        looks exactly like "focus mode does nothing"."""
-        found = run("""
-            focus.enter("tab_llm_studio", HOST);
-            console.log(JSON.stringify({
-                body: document.body.inert,
                 tabs: document.getElementById("tabs").inert,
+                txt2img: document.getElementById("tab_txt2img").inert,
+                body: document.body.inert,
                 html: document.documentElement.inert,
+                assistant: document.getElementById("forge-assistant-root").inert,
+                headerClasses: Array.from(
+                    document.getElementById("header").classList.names).length,
             }));
         """)
 
-        assert found["body"] is False
+        assert found["header"] is False
         assert found["tabs"] is False
+        assert found["txt2img"] is False
+        assert found["body"] is False
         assert found["html"] is False
+        assert found["assistant"] is False
+        assert found["headerClasses"] == 0
+
+    def test_a_sibling_that_was_already_unreachable_is_left_alone(self):
+        """The footer in this fixture was inert before focus was ever entered.
+        Focus neither sets nor clears it, because focus does not touch it."""
+        found = run("""
+            const before = document.getElementById("footer").inert;
+            focus.enter("tab_llm_studio", HOST);
+            const during = document.getElementById("footer").inert;
+            focus.exit();
+            console.log(JSON.stringify({
+                before, during, after: document.getElementById("footer").inert,
+            }));
+        """)
+
+        assert found["before"] is True
+        assert found["during"] is True
+        assert found["after"] is True
 
     def test_a_workspace_with_no_panel_is_refused_with_a_reason(self):
         found = run("""
@@ -265,7 +287,7 @@ class TestEntering:
 
 
 class TestLeaving:
-    def test_the_class_and_the_scroll_lock_come_off(self):
+    def test_leaving_is_the_class_coming_off(self):
         found = run("""
             focus.enter("tab_llm_studio", HOST);
             focus.exit();
@@ -273,32 +295,31 @@ class TestLeaving:
                 root: document.getElementById("tab_llm_studio")
                     .classList.contains("forge-assistant-focus-root"),
                 body: document.body.classList.contains("forge-assistant-focused"),
-                overflow: document.body.style.overflow || null,
                 active: focus.isActive(),
             }));
         """)
 
         assert found["root"] is False
         assert found["body"] is False
-        assert found["overflow"] == "scroll", (
-            "the inline style was replaced with a guess rather than restored")
         assert found["active"] is False
 
-    def test_a_sibling_that_was_already_unreachable_stays_that_way(self):
-        """Never a blind ``inert = false``. A page where something else had
-        already made a panel unreachable would come back subtly broken and
-        nobody would connect it to this."""
+    def test_the_workspace_comes_back_where_it_was_scrolled_to(self):
+        """The one thing worth saving and restoring, and the only one left.
+
+        Focus changes the workspace's box from "a row in the page" to "the whole
+        window" and back, which resets its scroll. A focus that returned
+        somebody to the top of a long tab is a focus nobody uses twice.
+        """
         found = run("""
+            const root = document.getElementById("tab_llm_studio");
+            root.scrollTop = 420;
             focus.enter("tab_llm_studio", HOST);
+            root.scrollTop = 0;               // what the reflow does
             focus.exit();
-            console.log(JSON.stringify({
-                footer: document.getElementById("footer").inert,
-                header: document.getElementById("header").inert,
-            }));
+            console.log(JSON.stringify({scrollTop: root.scrollTop}));
         """)
 
-        assert found["footer"] is True
-        assert found["header"] is False
+        assert found["scrollTop"] == 420
 
     def test_focus_is_returned_to_where_it_was(self):
         found = run("""
@@ -324,8 +345,8 @@ class TestLeaving:
         assert found["second"] is False
 
     def test_a_root_detached_while_focused_still_releases_the_page(self):
-        """A workspace rebuilt by a Gradio update is still a workspace whose
-        siblings have to come back."""
+        """A workspace rebuilt by a Gradio update is still a workspace that has
+        to stop being fixed to the viewport."""
         found = run("""
             focus.enter("tab_llm_studio", HOST);
             const root = document.getElementById("tab_llm_studio");
@@ -333,14 +354,14 @@ class TestLeaving:
             focus.exit();
             console.log(JSON.stringify({
                 body: document.body.classList.contains("forge-assistant-focused"),
-                header: document.getElementById("header").inert,
-                overflow: document.body.style.overflow || null,
+                root: root.classList.contains("forge-assistant-focus-root"),
+                active: focus.isActive(),
             }));
         """)
 
         assert found["body"] is False
-        assert found["header"] is False
-        assert found["overflow"] == "scroll"
+        assert found["root"] is False
+        assert found["active"] is False
 
 
 class TestSwitching:
@@ -361,7 +382,7 @@ class TestSwitching:
         assert found["ok"] is True
         assert found["studio"] is False
         assert found["txt2img"] is True
-        assert found["studioInert"] is True
+        assert found["studioInert"] is False, "the workspace it left was altered"
 
     def test_an_unsupported_destination_restores_the_page_and_says_why(self):
         found = run("""
@@ -389,6 +410,83 @@ class TestSwitching:
         """)
 
         assert found["ok"] is False
+
+
+class TestTheRootItIsGiven:
+    """The bug that made focus mode look like it did nothing.
+
+    The root came from the host adapter, which paired tab buttons with tab
+    panels by position among ``#tabs``'s children with ids. On the installed
+    page one of those candidates *contained the tab bar* -- so the class went
+    onto a box holding the tab bar and the workspace together, that box was
+    laid over the window, and what the person saw was the tab bar exactly where
+    it had been and a page that would no longer scroll.
+    """
+
+    def test_a_candidate_holding_the_tab_bar_is_not_a_workspace(self):
+        import json as _json
+        import subprocess as _subprocess
+        import tempfile as _tempfile
+
+        harness = """
+        const nodes = [];
+        function make(id, parent, className) {
+            const node = {
+                id, parentElement: parent || null, children: [],
+                className: className || "",
+                classList: {names: new Set((className || "").split(" ").filter(Boolean)),
+                            contains(n) { return node.classList.names.has(n); }},
+                getAttribute() { return null; },
+                querySelectorAll(selector) {
+                    // Only the two shapes the adapter asks for.
+                    if (selector === "button") {
+                        return node.children.filter((c) => c.tagName === "BUTTON");
+                    }
+                    return node.children.filter((c) => c.id);
+                },
+                querySelector(selector) {
+                    if (selector.indexOf("tab-nav") >= 0) {
+                        return node.children.find((c) => c.classList.contains("tab-nav"))
+                            || null;
+                    }
+                    return null;
+                },
+            };
+            if (parent) parent.children.push(node);
+            nodes.push(node);
+            return node;
+        }
+        const tabs = make("tabs", null);
+        // A wrapper with an id that holds the tab bar AND the workspaces. This
+        // is the shape that broke it.
+        const wrapper = make("tab_wrapper", tabs);
+        make("nav", wrapper, "tab-nav");
+        make("tab_txt2img", tabs);
+        globalThis.document = {querySelector: (s) => (s === "#tabs" ? tabs : null)};
+        globalThis.window = globalThis;
+        globalThis.getComputedStyle = () => ({display: "block", visibility: "visible"});
+        globalThis.MutationObserver = function () {
+            return {observe() {}, disconnect() {}};
+        };
+        globalThis.console = console;
+        __SOURCE__
+        const host = globalThis.forgeAssistant.host();
+        console.log(JSON.stringify({
+            panels: host.panels().map((p) => p.id),
+        }));
+        """
+        source = (pathlib.Path(__file__).resolve().parent.parent / "javascript"
+                  / "forge_assistant_host.js").read_text(encoding="utf-8")
+        with _tempfile.TemporaryDirectory() as room:
+            entry = pathlib.Path(room) / "scenario.mjs"
+            entry.write_text(harness.replace("__SOURCE__", source), encoding="utf-8")
+            result = _subprocess.run(["node", str(entry)], capture_output=True, text=True,
+                                     timeout=60)
+        assert result.returncode == 0, result.stderr
+        found = _json.loads(result.stdout.strip().splitlines()[-1])
+
+        assert found["panels"] == ["tab_txt2img"], (
+            "a box holding the tab bar was offered as a workspace to fill the window with")
 
 
 class TestAdapters:

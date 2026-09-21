@@ -5549,6 +5549,26 @@
     pointer-events: auto;
 }
 
+/* THE ONE RULE WITHOUT WHICH NOTHING IN THIS PANEL CAN BE HIDDEN.
+   `hidden` is how every piece of this panel is shown and hidden from
+   JavaScript, and the browser implements it as `[hidden] { display: none }` in
+   its *user-agent* stylesheet. Any author declaration of `display` beats a
+   user-agent one outright, whatever its specificity -- so
+   `.forge-assistant-panel { display: flex }` a few lines below silently made
+   the panel, the menu and the conversation body unhideable.
+
+   What that looked like from the outside: the panel opened and ✕ did nothing,
+   the workspace menu stayed open after choosing a workspace, and the collapsed
+   launcher sat there beside a panel that was supposed to be closed. Three
+   separate-looking bugs, one missing rule.
+
+   `!important` because the flex rules below are what it is overriding, and a
+   plain declaration would tie with them and lose on source order. */
+#forge-assistant-root [hidden],
+#forge-assistant-root[hidden] {
+    display: none !important;
+}
+
 .forge-assistant-launcher,
 .forge-assistant-panel {
     position: fixed;
@@ -5924,11 +5944,14 @@
     padding: 8px;
     box-sizing: border-box;
     overflow: auto;
+    /* The workspace scrolls inside itself, and a wheel gesture that reaches the
+       end of it stops there rather than chaining out to the page underneath.
+       This is what replaced locking the body's scrolling: the lock was visible
+       to the person (the page simply stopped moving) and was not needed, because
+       the focus root covers the viewport and there is nothing behind it to
+       reach. */
+    overscroll-behavior: contain;
     background: var(--body-background-fill, var(--background-fill-primary, #101010));
-}
-
-body.forge-assistant-focused {
-    overflow: hidden;
 }
 
 /* Reduced motion is respected rather than ignored: every transition here is

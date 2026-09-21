@@ -209,7 +209,6 @@
             anchorOverride: null,
             panelWidth: null,
             panelOpen: false,
-            pinned: true,
             conversationExpanded: true,
             focusEnabled: false,
             focusWorkspaceId: null,
@@ -262,7 +261,7 @@
                 this.state.panelWidth = Math.min(MAX_WIDTH,
                                                  Math.max(MIN_WIDTH, found.panelWidth));
             }
-            ["panelOpen", "pinned", "conversationExpanded"].forEach((name) => {
+            ["panelOpen", "conversationExpanded"].forEach((name) => {
                 if (typeof found[name] === "boolean") this.state[name] = found[name];
             });
             // Focus is deliberately not restored here. A reload starts outside
@@ -282,7 +281,6 @@
             anchorOverride: this.state.anchorOverride,
             panelWidth: this.state.panelWidth,
             panelOpen: this.state.panelOpen,
-            pinned: this.state.pinned,
             conversationExpanded: this.state.conversationExpanded,
             focusEnabled: this.state.focusEnabled,
             focusWorkspaceId: this.state.focusWorkspaceId,
@@ -304,8 +302,11 @@
 
         this.buildLauncher();
         this.buildPanel();
-        this.place();
         this.wire();
+        // One statement decides which of the two is on screen, here and in
+        // open() and close(), so there is no third place for them to disagree
+        // and end up both drawn at once.
+        this.showOpen(this.state.panelOpen);
         this.render(this.store.snapshot());
         return true;
     };
@@ -351,20 +352,19 @@
 
         const header = element("header", "forge-assistant-header");
         const title = element("h2", "forge-assistant-title", this.settings.label);
-        const pin = element("button", "forge-assistant-icon-button");
-        pin.type = "button";
-        pin.setAttribute("aria-pressed", String(this.state.pinned));
-        pin.setAttribute("aria-label", "Keep open while changing workspaces");
-        pin.textContent = "\u{1F4CC}";
+        // One control in the header, and it is the one people reach for: put
+        // the panel away. There was a pin beside it for "keep open while
+        // changing workspaces" -- a preference nobody asked for, occupying the
+        // corner everybody aims at.
         const minimize = element("button", "forge-assistant-icon-button");
         minimize.type = "button";
         minimize.setAttribute("aria-label", "Minimize the assistant");
+        minimize.title = "Minimize";
         minimize.textContent = "✕";
         header.appendChild(title);
-        header.appendChild(pin);
         header.appendChild(minimize);
         panel.appendChild(header);
-        Object.assign(this.nodes, {header, pin, minimize, title});
+        Object.assign(this.nodes, {header, minimize, title});
 
         const nav = element("div", "forge-assistant-nav");
         const picker = element("button", "forge-assistant-nav-button", "Workspace");
@@ -672,11 +672,6 @@
             this.open();
         });
         this.on(nodes.minimize, "click", () => this.close());
-        this.on(nodes.pin, "click", () => {
-            this.state.pinned = !this.state.pinned;
-            nodes.pin.setAttribute("aria-pressed", String(this.state.pinned));
-            this._save();
-        });
         this.on(nodes.heading, "click", () => {
             this.state.conversationExpanded = !this.state.conversationExpanded;
             this.applyAccordion();
@@ -760,30 +755,40 @@
 
     // -- open, close, focus -------------------------------------------------- //
 
-    Shell.prototype.open = function () {
-        this.state.panelOpen = true;
-        this.nodes.panel.hidden = false;
-        this.nodes.launcher.hidden = true;
-        this.nodes.launcher.setAttribute("aria-expanded", "true");
+    // Exactly one of the launcher and the panel is on screen, and this is the
+    // only function that says which. It is also the only one that has to know
+    // that `hidden` alone is not enough here: the panel's own `display: flex`
+    // is an author rule and beats the browser's `[hidden] { display: none }`,
+    // which is why the stylesheet carries an explicit `[hidden]` rule scoped to
+    // this root. Without it ✕ set an attribute and changed nothing visible.
+    Shell.prototype.showOpen = function (open) {
+        this.state.panelOpen = !!open;
+        this.nodes.panel.hidden = !open;
+        this.nodes.launcher.hidden = !!open;
+        this.nodes.launcher.setAttribute("aria-expanded", String(!!open));
+        if (!open) this.closeMenu();
         this._save();
         this.placeNow();
+    };
+
+    Shell.prototype.open = function () {
+        this.showOpen(true);
         this.store.clearUnread();
         const input = this.nodes.input;
         if (input && !input.hidden) input.focus();
     };
 
     Shell.prototype.close = function () {
-        this.state.panelOpen = false;
-        this.nodes.panel.hidden = true;
-        this.nodes.launcher.hidden = false;
-        this.nodes.launcher.setAttribute("aria-expanded", "false");
-        this.host.closeMenus();
-        this._save();
-        this.placeNow();
+        this.showOpen(false);
         // Focus goes back to the control that opened it. A panel that closes
         // and leaves focus on the document is a panel a keyboard user has to
         // tab back to from the top of the page.
         this.nodes.launcher.focus();
+    };
+
+    Shell.prototype.toggle = function () {
+        if (this.state.panelOpen) this.close();
+        else this.open();
     };
 
     Shell.prototype.toggleFocus = function () {
@@ -858,12 +863,19 @@
             item.disabled = !workspace.available;
             item.addEventListener("click", () => {
                 item.classList.add("forge-assistant-pending");
-                this.host.activateWorkspace(workspace.id).then(() => {
-                    item.classList.remove("forge-assistant-pending");
-                    this.closeMenu();
-                    if (!this.state.pinned) this.close();
-                }).catch((error) => {
-                    item.classList.remove("forge-assistant-pending");
+                // The menu closes on the press, not on the confirmation. A
+                // menu held open until the host confirms is a menu that stays
+                // open for ever the moment the confirmation does not arrive --
+                // and it did not, because the watchdog rejects after four
+                // seconds on any page whose tab bar this adapter reads
+                // differently from the way it expected to.
+                //
+                // Nothing is lost by closing early: the highlight follows the
+                // host's own selection rather than this press, so a switch
+                // that fails is visible in the picker next time it is opened,
+                // and it is reported in the status line here and now.
+                this.closeMenu();
+                this.host.activateWorkspace(workspace.id).catch((error) => {
                     this.say(error.message || "That workspace did not open.", "warn");
                 });
             });
@@ -876,14 +888,33 @@
             const item = element("button", "forge-assistant-menu-item", utility.label);
             item.type = "button";
             item.setAttribute("role", "menuitem");
+            if (utility.title) item.title = utility.title;
             item.disabled = !utility.enabled;
-            // Called inside the click, synchronously, so a file picker or a
-            // link still has the user activation a browser requires.
             item.addEventListener("click", () => {
-                utility.invoke();
                 this.closeMenu();
+                if (utility.kind === "unload") this.unload(utility.scope, utility.label);
+                else if (typeof utility.invoke === "function") utility.invoke();
             });
             return item;
+        });
+    };
+
+    // Giving a card back is slow enough to be worth saying so about, and it is
+    // one of the few things here that half-succeed: the language model stops
+    // and the checkpoint refuses because a generation is running. So the answer
+    // is what was actually released, in the words the server used, rather than
+    // a tick.
+    Shell.prototype.unload = function (scope, label) {
+        this.say(label + "\u2026", "info");
+        this.store.request("/unload", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({scope}),
+        }).then((found) => {
+            this.say(found.message || "Released.", found.failed && found.failed.length
+                ? "warn" : "info");
+        }).catch((error) => {
+            this.say((error && error.message) || "Nothing could be unloaded.", "warn");
         });
     };
 
