@@ -5936,6 +5936,37 @@
    cannot know from here: an ancestor with a transform, filter or containment
    makes `position: fixed` resolve against that ancestor, and the failure is
    silent. */
+/* Everything that is not the focused workspace, taken out of the layout.
+   One rule, reading two classes the script adds and removes: the workspace's
+   ancestors carry `-focus-path`, and every child of one of those that is not
+   itself on the path -- not the workspace, not the assistant -- is chrome.
+   That is the tab bar, a theme's header and sidebars, the footer and the other
+   tabs, without this stylesheet having to know what any of them are called.
+
+   Covering them was not enough. Laying the workspace over the page with a
+   z-index works while the chrome is ordinary content; under a theme that draws
+   its own header -- Lobe does -- that header is positioned, has a stacking
+   context of its own, and stayed exactly where it was with the workspace
+   nominally on top of it.
+
+   `[hidden]` is excluded from the "not" list deliberately: something already
+   hidden stays hidden, and comes back hidden. */
+body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root):not(#forge-assistant-root):not([role="dialog"]):not([aria-modal="true"]) {
+    display: none !important;
+}
+
+/* The tab bar, wherever the theme has put it. The rule above finds it as a
+   child of a marked ancestor, which is where Forge leaves it -- but a theme is
+   free to move it, and Lobe draws its own header from it. A second rule keyed
+   on what the bar *is* rather than where it sits costs nothing and is the
+   difference between focus mode working under a theme and not.
+
+   Scoped to the focused body so it is inert the rest of the time. */
+body.forge-assistant-focused .tab-nav,
+body.forge-assistant-focused [role="tablist"] {
+    display: none !important;
+}
+
 .forge-assistant-focus-root {
     position: fixed;
     inset: 0;
@@ -6019,4 +6050,36 @@
     #mc-llm-chat-transcript .bubble-wrap .message {
         max-width: max(var(--forge-assistant-bubble, 75%), 90%);
     }
+}
+
+/* The conversation the panel is on. It was an empty row: the panel gave no
+   indication of which thread it was showing, which is fine right up until it
+   is showing a different one from the tab behind it. */
+.forge-assistant-selector {
+    display: flex;
+    min-width: 0;
+}
+
+.forge-assistant-who {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 32px;
+    padding: 0.2em 0.4em;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.forge-assistant-menu-empty {
+    margin: 0;
+    padding: 0.4em;
+    font-size: 0.85em;
+    opacity: 0.8;
 }

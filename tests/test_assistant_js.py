@@ -874,3 +874,157 @@ class TestTheStore:
         """, sources=("store",))
 
         assert found["text"] == "typed while it was in flight"
+
+
+class TestWhichConversationIsOnScreen:
+    """Reported in use: the panel came up on "Reconnecting… Your draft is safe."
+    with an empty transcript and never drew anything.
+
+    Nothing was broken in the transport. The panel simply never learned *which*
+    conversation to show: nothing called `select()`, so the selection stayed
+    empty, `refresh()` returned early because there was nothing to ask about,
+    and the transcript was never going to be given anything to draw. The fix is
+    two halves -- a seed at startup, and following the tab afterwards -- and
+    both halves are here.
+    """
+
+    def test_the_bootstrap_seeds_which_conversation_to_show(self):
+        found = run("""
+            globalThis.fetch = (url) => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve(String(url).indexOf("/bootstrap") >= 0
+                    ? {server_epoch: "e", page_id: "p", characters: ["Ada"],
+                       selection: {character: "Ada", thread_id: "t-42"}}
+                    : {}),
+            });
+            const store = new NS.Store();
+            store.connect = () => Promise.resolve();
+            store.start().then(() => {
+                console.log(JSON.stringify({
+                    character: store.selection.character,
+                    thread: store.selection.thread,
+                    characters: store.characters,
+                }));
+            });
+        """, sources=("store",))
+
+        assert found["character"] == "Ada"
+        assert found["thread"] == "t-42"
+        assert found["characters"] == ["Ada"]
+
+    def test_a_page_that_already_chose_keeps_its_choice(self):
+        """A seed, not a source of truth. The preference it comes from is
+        installation-wide, so a second window that has deliberately been put on
+        another thread must not be dragged back to the first one."""
+        found = run("""
+            globalThis.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({server_epoch: "e",
+                    selection: {character: "Ada", thread_id: "t-42"}}),
+            });
+            const store = new NS.Store();
+            store.selection = {character: "Bob", thread: "t-9", epoch: "x"};
+            store.connect = () => Promise.resolve();
+            store.start().then(() => {
+                console.log(JSON.stringify({character: store.selection.character,
+                                            thread: store.selection.thread}));
+            });
+        """, sources=("store",))
+
+        assert found["character"] == "Bob"
+        assert found["thread"] == "t-9"
+
+    def test_the_panel_follows_the_tab_to_another_conversation(self):
+        """Being a second window onto the same work is the whole point. A panel
+        that stayed on the thread it was seeded with would show a different
+        conversation from the one behind it, with nothing on screen to say so.
+        """
+        found = run("""
+            const store = new NS.Store();
+            store.serverEpoch = "e";
+            store.selection = {character: "Ada", thread: "t-1", epoch: "x"};
+            const asked = [];
+            store.refresh = () => { asked.push(store.selection.thread);
+                                    return Promise.resolve(null); };
+            store.apply({protocol_version: 2, server_epoch: "e", stream_cursor: 1,
+                         kind: "character_changed",
+                         payload: {character: "Bob", thread_id: "t-2"}});
+            console.log(JSON.stringify({character: store.selection.character,
+                                        thread: store.selection.thread, asked}));
+        """, sources=("store",))
+
+        assert found["character"] == "Bob"
+        assert found["thread"] == "t-2"
+        assert found["asked"] == ["t-2"], "the new conversation has to be fetched"
+
+    def test_following_the_tab_onto_the_thread_already_shown_changes_nothing(self):
+        """The tab re-announces its selection on every rebuild. Re-selecting
+        would mint a new epoch, clear the unread badge and re-fetch, all for a
+        conversation already on screen."""
+        found = run("""
+            const store = new NS.Store();
+            store.serverEpoch = "e";
+            store.selection = {character: "Ada", thread: "t-1", epoch: "keep-me"};
+            let asked = 0;
+            store.refresh = () => { asked += 1; return Promise.resolve(null); };
+            store.follow({character: "Ada", thread_id: "t-1"});
+            console.log(JSON.stringify({epoch: store.selection.epoch, asked}));
+        """, sources=("store",))
+
+        assert found["epoch"] == "keep-me"
+        assert found["asked"] == 0
+
+    def test_an_announcement_with_no_thread_is_not_a_selection(self):
+        """Choosing a character before opening one of its threads announces an
+        empty thread id. Following that would clear a conversation somebody was
+        reading."""
+        found = run("""
+            const store = new NS.Store();
+            store.serverEpoch = "e";
+            store.selection = {character: "Ada", thread: "t-1", epoch: "x"};
+            store.follow({character: "Bob", thread_id: ""});
+            console.log(JSON.stringify({character: store.selection.character,
+                                        thread: store.selection.thread}));
+        """, sources=("store",))
+
+        assert found["character"] == "Ada"
+        assert found["thread"] == "t-1"
+
+    def test_a_feed_that_never_opened_is_connecting_rather_than_reconnecting(self):
+        """"Reconnecting" is only true the second time. It was the first thing
+        on screen when the panel came up with nothing in it -- a sentence
+        pointing at the wrong problem."""
+        found = run("""
+            const said = [];
+            const shell = Object.create(NS.Shell.prototype);
+            shell.say = (text, tone) => said.push({text, tone});
+            shell.renderStatus({ready: true, connected: false, everConnected: false,
+                                selection: {thread: ""}, characters: []});
+            shell.renderStatus({ready: true, connected: false, everConnected: true,
+                                selection: {thread: "t"}, characters: ["Ada"]});
+            console.log(JSON.stringify({said}));
+        """)
+
+        assert found["said"][0]["text"] == "Connecting…"
+        assert found["said"][0]["tone"] == "info"
+        assert "Reconnecting" in found["said"][1]["text"]
+
+    def test_connected_with_nothing_chosen_says_so(self):
+        """An empty transcript under the word "Ready" reads like a conversation
+        that lost its messages rather than one that was never picked."""
+        found = run("""
+            const said = [];
+            const shell = Object.create(NS.Shell.prototype);
+            shell.say = (text) => said.push(text);
+            shell.renderStatus({ready: true, connected: true, everConnected: true,
+                                selection: {thread: ""}, characters: ["Ada"]});
+            shell.renderStatus({ready: true, connected: true, everConnected: true,
+                                selection: {thread: ""}, characters: []});
+            shell.renderStatus({ready: true, connected: true, everConnected: true,
+                                selection: {thread: "t"}, characters: ["Ada"]});
+            console.log(JSON.stringify({said}));
+        """)
+
+        assert found["said"][0] == "Pick a conversation to begin."
+        assert found["said"][1] == "No conversations yet. Start one in LLM Studio."
+        assert found["said"][2] == "Ready."

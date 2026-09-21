@@ -65,6 +65,17 @@ def conversation(chats):
     return found
 
 
+@pytest.fixture
+def character(store):
+    """A character on disk. The chat fixture writes a *conversation* for "Ada";
+    the picker lists characters, which is a different file in a different
+    directory."""
+    from prompt_master.chat.characters import Character, CharacterStore
+
+    CharacterStore(store / "characters").save(Character(name="Ada", context="c"))
+    return "Ada"
+
+
 CURRENT = object()
 """Ask the store what the thread compares as right now.
 
@@ -459,6 +470,70 @@ class TestSnapshots:
         service.snapshot("Ada", conversation.identifier)
 
         assert path.read_bytes() == before
+
+
+class TestTheBootstrapSaysWhichConversation:
+    """Reported in use: the assistant panel came up empty and stayed empty.
+
+    The bootstrap told a new page the protocol version, the epoch and what the
+    host could do, and nothing at all about *which* conversation to show. The
+    page had no way to find out, so its selection stayed empty, its refresh
+    returned early because there was nothing to ask about, and its transcript
+    was never given anything to draw.
+    """
+
+    def test_the_bootstrap_names_the_conversation_last_left_open(self, conversation,
+                                                                 monkeypatch):
+        import mc_llm_state
+
+        monkeypatch.setattr(mc_llm_state, "preferences",
+                            lambda: {"character": "Ada",
+                                     "thread": conversation.identifier,
+                                     "mode": "chat"})
+
+        found = service.bootstrap("page-1")
+
+        assert found["selection"] == {"character": "Ada",
+                                      "thread_id": conversation.identifier}
+        assert found["mode"] == "chat"
+
+    def test_the_bootstrap_lists_the_characters_to_choose_between(self, character):
+        """The panel's picker is fed from here, and it lists what the tab's own
+        dropdown lists -- the characters that exist, not the ones that happen
+        to have a chat file."""
+        found = service.bootstrap("page-1")
+
+        assert "Ada" in found["characters"]
+
+    def test_a_preference_file_that_cannot_be_read_is_an_empty_selection(self,
+                                                                        monkeypatch):
+        """Never a failed bootstrap: a page with no seed opens on "pick a
+        conversation", which is a page somebody can use."""
+        import mc_llm_state
+
+        def explode():
+            raise RuntimeError("no preferences here")
+
+        monkeypatch.setattr(mc_llm_state, "preferences", explode)
+
+        found = service.bootstrap("page-1")
+
+        assert found["selection"] == {"character": "", "thread_id": ""}
+        assert found["protocol_version"] == service.PROTOCOL_VERSION
+
+    def test_a_snapshot_lists_the_threads_the_panel_can_switch_between(
+            self, character, conversation):
+        """Without it the only thread the panel could ever show is the one it
+        was seeded with."""
+        found = service.snapshot("Ada", conversation.identifier)
+
+        assert [thread["thread_id"] for thread in found["threads"]] \
+            == [conversation.identifier]
+        assert "Ada" in found["characters"]
+
+    def test_listing_threads_for_a_character_with_none_is_empty_rather_than_an_error(
+            self):
+        assert service.threads("Nobody") == []
 
 
 class TestPublishingFailsOpen:

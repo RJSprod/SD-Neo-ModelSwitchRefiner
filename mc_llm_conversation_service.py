@@ -995,6 +995,9 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
     found["messages"] = [_message_view(index, message)
                          for index, message in enumerate(conversation.messages)]
 
+    found["threads"] = threads(character)
+    found["characters"] = character_names()
+
     import mc_llm_conversation_ops as ops
 
     running = ops.for_conversation(key)
@@ -1045,9 +1048,69 @@ def capabilities() -> dict:
 
 
 def bootstrap(page_id: str = "") -> dict:
+    """What a page needs before it can show anything, including *which* thread.
+
+    The selection is the part that was missing, and without it the flyout had
+    nothing to draw: it opened with an empty character and an empty thread, the
+    snapshot call returned early because there was nothing to snapshot, and the
+    panel sat on "Reconnecting…" for ever with a transcript it was never going
+    to be given.
+
+    It is a *seed* and not a source of truth -- ``mc_llm_state.remember()`` is
+    installation-wide, so it says which conversation was last opened on this
+    machine, not which one this page is looking at. The page owns its selection
+    from here on (two windows may deliberately differ), and this is only how it
+    starts out on the one the tab has open.
+    """
     return {"protocol_version": PROTOCOL_VERSION, "server_epoch": SERVER_EPOCH,
             "server_time": time.time(), "capabilities": capabilities(),
-            "page_id": page_id or uuid.uuid4().hex, "actions": list(ACTIONS)}
+            "page_id": page_id or uuid.uuid4().hex, "actions": list(ACTIONS),
+            "selection": remembered_selection(),
+            "characters": character_names(),
+            "mode": remembered_mode()}
+
+
+def remembered_selection() -> dict:
+    """The character and thread LLM Studio was last left on."""
+    try:
+        import mc_llm_state
+
+        found = mc_llm_state.preferences()
+        return {"character": str(found.get("character") or ""),
+                "thread_id": str(found.get("thread") or "")}
+    except Exception:
+        logger.debug("Model Chain: could not read the remembered conversation",
+                     exc_info=True)
+        return {"character": "", "thread_id": ""}
+
+
+def remembered_mode() -> str:
+    try:
+        import mc_llm_state
+
+        return str(mc_llm_state.preferences().get("mode") or "")
+    except Exception:
+        return ""
+
+
+def character_names() -> list:
+    try:
+        return list(_characters().names())
+    except Exception:
+        logger.debug("Model Chain: could not list characters", exc_info=True)
+        return []
+
+
+def threads(character: str) -> list:
+    """The character's threads, most recently used first."""
+    try:
+        return [{"thread_id": info.identifier, "title": info.title,
+                 "updated": info.updated}
+                for info in chats().listing(str(character or ""))]
+    except Exception:
+        logger.debug("Model Chain: could not list threads for %s", character,
+                     exc_info=True)
+        return []
 
 
 # --------------------------------------------------------------------------- #

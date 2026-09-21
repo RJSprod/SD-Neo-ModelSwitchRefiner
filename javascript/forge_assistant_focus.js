@@ -25,6 +25,8 @@
 
     const ROOT_CLASS = "forge-assistant-focus-root";
     const BODY_CLASS = "forge-assistant-focused";
+    const PATH_CLASS = "forge-assistant-focus-path";
+    const ASSISTANT_ROOT = "forge-assistant-root";
 
     // Properties on an ancestor that would make `position: fixed` resolve
     // against that ancestor instead of the viewport. A focus root inside one of
@@ -66,17 +68,24 @@
     Focus.prototype.canFocus = function (id, root) {
         const adapter = this.adapterFor(id);
         if (!root) return {ok: false, reason: "This workspace has no panel to fill with."};
-        const trap = trapped(root);
-        if (trap) {
-            return {ok: false,
-                    reason: "This workspace is inside a " + trap
-                        + " and cannot be made full-screen safely."};
-        }
         if (typeof adapter.canFocus === "function") {
             const found = adapter.canFocus(root);
             if (found && found.ok === false) return found;
         }
-        return {ok: true, reason: ""};
+        // A transformed ancestor makes `position: fixed` resolve against that
+        // ancestor rather than the viewport, so it used to be a refusal. It is
+        // a *note* now: the chrome is taken out of the layout as well as
+        // covered, so a workspace that cannot quite escape its ancestor still
+        // fills what is left of the window -- which is the thing somebody
+        // asked for. Refusing outright meant a press that did nothing at all
+        // and a sentence nobody could act on.
+        const trap = trapped(root);
+        return {ok: true,
+                reason: "",
+                note: trap
+                    ? "This workspace sits inside a " + trap
+                        + ", so it fills that area rather than the whole window."
+                    : ""};
     };
 
     function trapped(root) {
@@ -140,7 +149,12 @@
     }
 
     Focus.prototype.enter = function (id, host) {
-        if (this.active && this.active.id === id) return {ok: true, reason: ""};
+        // A second press on a workspace that is already focused answers the
+        // same thing the first one did, note included, rather than a bare
+        // success that would quietly drop the caveat.
+        if (this.active && this.active.id === id) {
+            return {ok: true, reason: "", note: this.active.note || ""};
+        }
         if (this.active) this.exit();
         const root = host && typeof host.resolveWorkspaceRoot === "function"
             ? host.resolveWorkspaceRoot(id)
@@ -149,7 +163,33 @@
         if (!allowed.ok) return allowed;
 
         const adapter = this.adapterFor(id);
-        const context = Object.assign(saveState(root), {id, adapter});
+        const context = Object.assign(saveState(root),
+                                      {id, adapter, path: [], note: allowed.note || ""});
+
+        // Mark the workspace's ancestors, from its parent up to <body>. One
+        // stylesheet rule then hides every child of a marked element that is
+        // neither on that path nor the workspace nor the assistant -- which is
+        // the tab bar, the theme's header and sidebars, the footer, and the
+        // other tabs, without this code having to know what any of them are
+        // called.
+        //
+        // Covering them was not enough, and that is the whole of why this is
+        // here. The reference implementation lays the workspace over the page
+        // with a z-index, which works while the chrome is ordinary content.
+        // Under a theme that draws its own header -- Lobe does -- that header
+        // is positioned and has a stacking context of its own, so it stayed
+        // exactly where it was with the workspace "over" it. Taking it out of
+        // the layout is the only thing that reliably removes it, and a class
+        // that a stylesheet reads is the most reversible way to do that: no
+        // inline styles to restore, no DOM moved, and leaving is the classes
+        // coming off.
+        let walk = root.parentElement;
+        while (walk) {
+            walk.classList.add(PATH_CLASS);
+            context.path.push(walk);
+            if (walk === document.body) break;
+            walk = walk.parentElement;
+        }
 
         root.classList.add(ROOT_CLASS);
         document.body.classList.add(BODY_CLASS);
@@ -177,7 +217,10 @@
         }
 
         this.active = context;
-        return {ok: true, reason: ""};
+        // The note travels out with the success. A containing-block trap is
+        // not a refusal any more, so the sentence describing what the caller
+        // actually got is the only way it hears about it.
+        return {ok: true, reason: "", note: context.note};
     };
 
     Focus.prototype.exit = function () {
@@ -199,6 +242,9 @@
         if (context.root && context.root.classList) {
             context.root.classList.remove(ROOT_CLASS);
         }
+        (context.path || []).forEach((node) => {
+            if (node && node.classList) node.classList.remove(PATH_CLASS);
+        });
         document.body.classList.remove(BODY_CLASS);
         if (context.root) {
             context.root.scrollTop = context.scrollTop;
