@@ -3154,11 +3154,23 @@ one gesture for a mouse, a finger and a pen, it costs six pixels of movement
 before it counts as a drag rather than a tap, and it never fires the click it
 was.
 
-**Opened**, it is a header you can drag with one **✕** on it, a workspace
-picker, a Focus toggle, a small utility menu, and the conversation under a
-heading that collapses the whole of it — collapsed, the transcript and the
-composer leave the layout and the accessibility tree rather than merely stopping
-being painted. **✕** puts the panel back to the launcher, at the same corner;
+**Free Float**, in the **⋯** menu, drops the six and lets you put the panel
+anywhere in the window. Turning it on leaves it exactly where it is rather than
+moving it somewhere of its own choosing, and turning it off snaps it back to
+the nearest of the six. It is remembered between sessions — not just this one,
+unlike the corner and the width, because whether the thing snaps at all is a
+question you answer once. What is remembered is still not a pixel: it is how
+far across the window the panel was, so a smaller screen next time brings it
+proportionally in rather than leaving it outside. On a phone the panel is a
+sheet anchored to a half of the screen, which is a shape a floating position
+has nothing to say about, so Free Float waits there until the window is wider.
+
+**Opened**, it is one row — a workspace picker, a Focus toggle, the **⋯** menu
+and **✕** — and the conversation under a heading that collapses the whole of
+it. Collapsed, the transcript and the composer leave the layout and the
+accessibility tree rather than merely stopping being painted. The space between
+the **⋯** and the **✕** is what you drag the panel by; the buttons in that row
+stay buttons. **✕** puts the panel back to the launcher, at the same place;
 pressing the launcher brings it back there. The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it
 stops working while it is open. On a phone it becomes a sheet anchored to the
@@ -3170,15 +3182,19 @@ activates the host's own tab button. It works in focus mode: focus lifts for
 the switch and settles on the workspace you asked for, and if the switch does
 not happen it goes back where it was. The menu closes on the press, and it ends
 with **Cancel** — every menu here does, because a phone has no Escape key and a
-menu you cannot leave without committing is a menu people learn not to open. Which tab is
+menu you cannot leave without committing is a menu people learn not to open. A
+menu opens into the room there actually is, upwards when that is where the room
+is, and scrolls if it still does not fit: with the conversation collapsed the
+panel is a couple of rows tall, and a menu that could only be as tall as the
+panel was a workspace list you could not reach the bottom of. Which tab is
 highlighted follows the host's selection, not the press — so a switch made by a
 header button, or by another extension's "send to img2img", moves the highlight
 too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
-**The utility menu** — the **⋯** beside Focus — has two entries and a
-**Cancel**, and both entries are the same request: *I need this card back,
-now.*
+**The utility menu** — the **⋯** beside Focus — has **Free Float**, two
+entries and a **Cancel**. The two entries are the same request: *I need this
+card back, now.*
 
 | | |
 | --- | --- |

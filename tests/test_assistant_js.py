@@ -105,6 +105,9 @@ globalThis.document = {
     activeElement: null,
     createElement: (tag) => element("made-" + Math.random().toString(16).slice(2),
                                    tag.toUpperCase()),
+    // The accordion heading is a glyph plus a text node, so the panel cannot
+    // be built at all without this.
+    createTextNode: (text) => ({nodeType: 3, textContent: String(text)}),
     getElementById: (id) => elements[id] || null,
     querySelector: () => null,
     querySelectorAll: () => [],
@@ -2065,3 +2068,491 @@ class TestThePerMessageActions:
 
         for gone in ("listen", "delete_from", "select_version", "confirm_count"):
             assert gone not in act, gone
+
+
+def only(css, selector):
+    """Every declaration of the rules whose selector is exactly `selector`.
+
+    Parsed rather than split on text, because `.forge-assistant-panel` shares a
+    selector list with the launcher and a plain split finds that one first --
+    which is a test that reads the wrong rule and says so convincingly.
+    """
+    import re
+
+    bare = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    found = []
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", bare):
+        names = [piece.strip() for piece in match.group(1).split(",")]
+        if selector in names:
+            found.append(match.group(2))
+    assert found, selector + " has no rule of its own"
+    return "\n".join(found)
+
+
+PANEL = """
+// A shell with the geometry stubbed: a header whose rectangle a test chooses,
+// a menu that can be measured, and the two nodes `placeNow` positions. Every
+// one of these is read by the code under test, and a stub missing one of them
+// fails somewhere that has nothing to do with what is being asserted.
+function panel(options) {
+    options = options || {};
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = Object.assign({
+        panelOpen: true, conversationExpanded: false, panelWidth: 360,
+        anchorOverride: null, freeFloat: false, floatAt: null,
+        focusEnabled: false, focusWorkspaceId: null,
+    }, options.state || {});
+    shell.settings = {label: "Forge Assistant", defaultAnchor: "bottom-right",
+                      bubbleWidth: 80};
+    shell.frame = 0;
+    shell.said = [];
+    shell.say = (text) => shell.said.push(text);
+    shell._save = () => { shell.saved = true; };
+    const box = Object.assign({top: 40, left: 100, width: 360, height: 48},
+                              options.header || {});
+    box.bottom = box.top + box.height;
+    box.right = box.left + box.width;
+    const styleOf = () => {
+        const values = {};
+        return {values,
+                setProperty(n, v) { values[n] = v; },
+                removeProperty(n) { delete values[n]; },
+                getPropertyValue(n) { return values[n] || ""; }};
+    };
+    shell.nodes = {
+        root: {setAttribute(n, v) { this[n] = v; },
+               classList: {names: new Set(),
+                           add(n) { this.names.add(n); },
+                           remove(n) { this.names.delete(n); },
+                           toggle(n, on) { if (on) this.names.add(n);
+                                           else this.names.delete(n); },
+                           contains(n) { return this.names.has(n); }},
+               appendChild() {}},
+        header: {getBoundingClientRect: () => box},
+        menu: {hidden: options.menuOpen === false, style: styleOf(),
+               offsetHeight: options.menuHeight === undefined ? 300 : options.menuHeight},
+        panel: {style: styleOf(), offsetWidth: 360, offsetHeight: 140,
+                classList: {add() {}, remove() {}, contains() { return false; }},
+                setAttribute() {}, removeAttribute() {},
+                getBoundingClientRect: () => ({left: 900, top: 500,
+                                               width: 360, height: 140})},
+        launcher: {style: styleOf(), offsetWidth: 140, offsetHeight: 44,
+                   getBoundingClientRect: () => ({left: 1100, top: 700,
+                                                  width: 140, height: 44})},
+        focusToggle: {setAttribute() {}},
+    };
+    return shell;
+}
+
+// The geometry the code actually sets, which it sets as plain style
+// properties. Only the four that are positions, so a stub gaining a property
+// cannot change what a test is asserting.
+function placed(node) {
+    const out = {};
+    ["left", "top", "width", "maxHeight"].forEach((name) => {
+        if (node.style[name]) out[name] = node.style[name];
+    });
+    return out;
+}
+
+function sized(width, height) {
+    globalThis.visualViewport = {offsetLeft: 0, offsetTop: 0,
+                                 width: width, height: height};
+}
+"""
+
+
+class TestAMenuThePanelCannotClip:
+    """Reported in use: with the conversation collapsed, the workspace list was
+    cut off and could not be scrolled to the bottom of.
+
+    The menu was an absolutely positioned child of the panel, and the panel
+    clips what it contains. A collapsed panel is a header and an accordion
+    tall, so most of the list was outside that box -- and unreachable, because
+    scrolling a menu whose visible region is shorter than its own scroll
+    viewport cannot bring the bottom into view. Cancel is the last item, so the
+    one control added to let people out of a menu was the first thing cut off
+    it.
+    """
+
+    def test_it_opens_below_the_header_when_there_is_room(self):
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel({header: {top: 40, height: 48}});
+            shell.placeMenu();
+            console.log(JSON.stringify(placed(shell.nodes.menu)));
+        """, sources=("shell",))
+
+        assert found["top"] == "92px", "the header's bottom plus the gap"
+        assert found["left"] == "100px"
+        assert found["width"] == "360px"
+
+    def test_it_opens_above_the_header_when_that_is_where_the_room_is(self):
+        """Which it is whenever the panel is docked along the bottom: below the
+        header there is only the rest of a short panel and then the edge of the
+        screen."""
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel({header: {top: 760, height: 48}, menuHeight: 300});
+            shell.placeMenu();
+            console.log(JSON.stringify(placed(shell.nodes.menu)));
+        """, sources=("shell",))
+
+        assert found["top"] == "456px", "its own height above the header"
+        assert int(found["maxHeight"][:-2]) >= 700
+
+    def test_the_height_is_the_room_there_is_not_a_fixed_fraction(self):
+        """`max-height: 50vh` was the old rule, and half a window is not the
+        same as the space between this header and the edge of one."""
+        found = run(PANEL + """
+            sized(1280, 900);
+            const roomy = panel({header: {top: 40, height: 48}});
+            roomy.placeMenu();
+            const tight = panel({header: {top: 700, height: 48}});
+            tight.placeMenu();
+            console.log(JSON.stringify({
+                roomy: roomy.nodes.menu.style.maxHeight,
+                tight: tight.nodes.menu.style.maxHeight,
+            }));
+        """, sources=("shell",))
+
+        assert found["roomy"] == "800px"
+        assert found["roomy"] != found["tight"]
+
+    def test_a_menu_with_no_room_either_way_still_gets_some(self):
+        """Refusing to open is worse than opening small and scrolling: the
+        items are reachable either way, and one of them is the way out."""
+        found = run(PANEL + """
+            sized(1280, 220);
+            const shell = panel({header: {top: 90, height: 48}});
+            shell.placeMenu();
+            console.log(JSON.stringify({height: shell.nodes.menu.style.maxHeight}));
+        """, sources=("shell",))
+
+        assert int(found["height"][:-2]) >= 120
+
+    def test_a_closed_menu_is_not_positioned(self):
+        found = run(PANEL + """
+            const shell = panel({menuOpen: false});
+            shell.placeMenu();
+            console.log(JSON.stringify(placed(shell.nodes.menu)));
+        """, sources=("shell",))
+
+        assert found == {}
+
+    def test_moving_the_panel_takes_an_open_menu_with_it(self):
+        """It is positioned against the window, so a drag, a resize or a
+        keyboard appearing leaves it behind unless something moves it."""
+        shell = SHELL.read_text(encoding="utf-8")
+        body = shell.split("Shell.prototype.placeNow = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+
+        assert body.count("this.placeMenu()") == 2, (
+            "both the sheet and the floating panel have to take it along")
+
+    def test_the_stylesheet_no_longer_lets_the_panel_clip_it(self):
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        rule = only(css, ".forge-assistant-menu")
+
+        assert "position: fixed" in rule
+        assert "50vh" not in rule, "the height is the room there is, set by script"
+        # And the panel still clips its own content, which is what keeps the
+        # conversation inside the rounded corners.
+        assert "overflow: hidden" in only(css, ".forge-assistant-panel")
+
+
+class TestFreeFloat:
+    """Asked for: a mode where the panel goes anywhere in the window rather
+    than snapping to one of six resting places, remembered between sessions.
+    """
+
+    def test_the_utility_menu_offers_it_first(self):
+        found = run(PICKER + """
+            const shell = picker();
+            shell.state.freeFloat = false;
+            shell.host.listUtilities = () => [
+                {id: "a", label: "Unload All Models", enabled: true,
+                 kind: "unload", scope: "all"},
+                {id: "l", label: "Unload LLM", enabled: true,
+                 kind: "unload", scope: "llm"}];
+            const items = shell.utilityItems();
+            console.log(JSON.stringify({
+                labels: items.map((i) => i.textContent),
+                checked: items[0].getAttribute("aria-checked"),
+                role: items[0].getAttribute("role"),
+            }));
+        """, sources=("shell",))
+
+        assert found["labels"] == ["Free Float", "Unload All Models", "Unload LLM"]
+        assert found["checked"] == "false"
+        assert found["role"] == "menuitemcheckbox", (
+            "it reports a state, so a screen reader can say whether it is on")
+
+    def test_it_reports_being_on(self):
+        found = run(PICKER + """
+            const shell = picker();
+            shell.state.freeFloat = true;
+            shell.host.listUtilities = () => [];
+            console.log(JSON.stringify({
+                checked: shell.utilityItems()[0].getAttribute("aria-checked"),
+            }));
+        """, sources=("shell",))
+
+        assert found["checked"] == "true"
+
+    def test_turning_it_on_leaves_the_panel_where_it_already_was(self):
+        """A mode that moves the thing you were looking at is a mode people
+        turn off again to find it."""
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel();
+            shell.setFreeFloat(true);
+            console.log(JSON.stringify({at: shell.state.floatAt}));
+        """, sources=("shell",))
+
+        # The stub panel sits at left 900 of 1280-360 travel, top 500 of 900-140.
+        assert abs(found["at"]["x"] - 900 / 920) < 0.01
+        assert abs(found["at"]["y"] - 500 / 760) < 0.01
+
+    def test_a_floated_panel_is_placed_from_its_fraction(self):
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel({state: {freeFloat: true, floatAt: {x: 0, y: 0}}});
+            shell.placeNow();
+            const topLeft = placed(shell.nodes.panel);
+            shell.state.floatAt = {x: 1, y: 1};
+            shell.placeNow();
+            console.log(JSON.stringify({topLeft,
+                                        bottomRight: placed(shell.nodes.panel)}));
+        """, sources=("shell",))
+
+        assert found["topLeft"]["left"] == "24px"
+        assert found["topLeft"]["top"] == "24px"
+        assert found["bottomRight"]["left"] == "896px"
+        assert found["bottomRight"]["top"] == "736px"
+
+    def test_a_resized_window_cannot_strand_a_floated_panel(self):
+        """The whole reason a fraction is stored rather than a pixel. The six
+        anchors were protecting exactly this, and a remembered pixel position
+        is what would have lost it."""
+        found = run(PANEL + """
+            const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
+            const seen = [];
+            // All above the 640px breakpoint: below it the panel is a sheet
+            // anchored to a half of the screen, which is the case the next
+            // test covers.
+            [[1920, 1080], [1280, 900], [900, 700], [700, 500]].forEach((size) => {
+                sized(size[0], size[1]);
+                shell.placeNow();
+                const style = shell.nodes.panel.style;
+                seen.push([size[0], size[1],
+                           parseInt(style.left, 10), parseInt(style.top, 10)]);
+            });
+            console.log(JSON.stringify({seen}));
+        """, sources=("shell",))
+
+        for width, height, left, top in found["seen"]:
+            assert left >= 0 and top >= 0, (width, height, left, top)
+            assert left < width and top < height, (width, height, left, top)
+
+    def test_a_phone_gets_the_sheet_and_not_a_floating_panel(self):
+        """A sheet is anchored to a half of the screen and covers it, so there
+        is nothing for a floating position to mean. Free float staying on in
+        the preference is right -- it applies again on a wider window."""
+        found = run(PANEL + """
+            sized(420, 640);
+            const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
+            shell.placeNow();
+            console.log(JSON.stringify({placed: placed(shell.nodes.panel),
+                                        on: shell.state.freeFloat}));
+        """, sources=("shell",))
+
+        assert found["placed"] == {}, "the sheet is positioned by the stylesheet"
+        assert found["on"] is True
+
+    def test_with_it_off_the_panel_still_snaps(self):
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel({state: {freeFloat: false,
+                                         floatAt: {x: 0, y: 0},
+                                         anchorOverride: "bottom-right"}});
+            shell.placeNow();
+            console.log(JSON.stringify(placed(shell.nodes.panel)));
+        """, sources=("shell",))
+
+        assert found["left"] == "896px", "a stale fraction is ignored while off"
+        assert found["top"] == "736px"
+
+    def test_the_choice_outlives_the_session(self):
+        """`sessionStorage` is where a panel left open and a width dragged
+        wider belong. Whether the panel snaps to corners at all is answered
+        once and should stay answered."""
+        found = run(PANEL + """
+            const store = {};
+            globalThis.localStorage = {
+                getItem: (k) => (k in store ? store[k] : null),
+                setItem: (k, v) => { store[k] = String(v); },
+            };
+            sized(1280, 900);
+            const shell = panel();
+            shell.setFreeFloat(true);
+            const next = panel();
+            next.state.freeFloat = false;
+            next.state.floatAt = null;
+            next._restoreFloat();
+            console.log(JSON.stringify({keys: Object.keys(store).length,
+                                        on: next.state.freeFloat,
+                                        at: next.state.floatAt !== null}));
+        """, sources=("shell", "store"))
+
+        assert found["keys"] == 1
+        assert found["on"] is True
+        assert found["at"] is True
+
+    def test_a_remembered_position_is_clamped_when_it_is_read(self):
+        """Storage is editable by anybody with the developer tools open, and a
+        fraction of 40 is a panel nobody can reach."""
+        found = run(PANEL + """
+            globalThis.localStorage = {
+                getItem: () => JSON.stringify({freeFloat: true,
+                                               floatAt: {x: 40, y: -12}}),
+                setItem: () => {},
+            };
+            const shell = panel();
+            shell._restoreFloat();
+            console.log(JSON.stringify({at: shell.state.floatAt}));
+        """, sources=("shell", "store"))
+
+        assert found["at"] == {"x": 1, "y": 0}
+
+    def test_storage_that_throws_leaves_the_mode_working(self):
+        found = run(PANEL + """
+            globalThis.localStorage = {
+                getItem() { throw new Error("blocked"); },
+                setItem() { throw new Error("blocked"); },
+            };
+            sized(1280, 900);
+            const shell = panel();
+            shell._restoreFloat();
+            shell.setFreeFloat(true);
+            console.log(JSON.stringify({on: shell.state.freeFloat}));
+        """, sources=("shell", "store"))
+
+        assert found["on"] is True
+
+    def test_a_drag_in_free_float_stores_a_fraction_and_previews_nothing(self):
+        """There is nothing to snap to, so there is nothing to show a ghost of
+        and no anchor to choose."""
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel({state: {freeFloat: true}});
+            shell.preview = () => { shell.previewed = true; };
+            shell.drag = {node: shell.nodes.panel, pointerId: 1,
+                          startX: 500, startY: 400, offsetX: 10, offsetY: 10,
+                          width: 360, height: 140, moved: false,
+                          anchor: "bottom-right", committed: false};
+            shell.moveDrag({pointerId: 1, clientX: 600, clientY: 300});
+            const at = shell.drag.at;
+            shell.endDrag({pointerId: 1}, false);
+            console.log(JSON.stringify({at, stored: shell.state.floatAt,
+                                        anchor: shell.state.anchorOverride,
+                                        previewed: !!shell.previewed}));
+        """, sources=("shell",))
+
+        assert found["previewed"] is False
+        assert found["anchor"] is None, "free float chooses no anchor"
+        assert found["stored"] == found["at"]
+
+    def test_a_drag_with_it_off_still_chooses_an_anchor(self):
+        found = run(PANEL + """
+            sized(1280, 900);
+            const shell = panel({state: {freeFloat: false}});
+            shell.preview = () => { shell.previewed = true; };
+            shell.drag = {node: shell.nodes.panel, pointerId: 1,
+                          startX: 500, startY: 400, offsetX: 10, offsetY: 10,
+                          width: 360, height: 140, moved: false,
+                          anchor: "bottom-right", committed: false};
+            shell.moveDrag({pointerId: 1, clientX: 200, clientY: 100});
+            shell.endDrag({pointerId: 1}, false);
+            console.log(JSON.stringify({anchor: shell.state.anchorOverride,
+                                        at: shell.state.floatAt,
+                                        previewed: !!shell.previewed}));
+        """, sources=("shell",))
+
+        assert found["previewed"] is True
+        assert found["anchor"] == "top-left"
+        assert found["at"] is None
+
+
+class TestTheHeaderIsOneRow:
+    """Asked for: one row carrying Workspace, Focus, ⋯ and ✕, with the title
+    gone. It was two rows, and above a collapsed conversation that was most of
+    the panel."""
+
+    def test_the_row_carries_all_four_controls_and_no_title(self):
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.settings = {label: "Forge Assistant", bubbleWidth: 80};
+            shell.state = {conversationExpanded: false};
+            shell.nodes = {root: {appendChild() {}}};
+            shell.disposers = [];
+            shell.menuHandle = {close() {}};
+            shell.host = {registerMenu: () => () => undefined};
+            shell.buildPanel();
+            const header = shell.nodes.header;
+            console.log(JSON.stringify({
+                order: header.children.map((c) => c.textContent || c.className),
+                title: shell.nodes.title === undefined,
+                nav: shell.nodes.nav === undefined,
+                named: shell.nodes.panel["aria-label"],
+            }));
+        """, sources=("shell",))
+
+        assert found["order"] == ["Workspace", "Focus", "⋯",
+                                 "forge-assistant-grip", "✕"]
+        assert found["title"] is True
+        assert found["nav"] is True
+        assert found["named"] == "Forge Assistant", (
+            "the panel keeps its name where a name is used")
+
+    def test_the_grip_is_space_and_not_a_control(self):
+        """It exists so there is something left to drag by, and it must not
+        read as a button to anybody."""
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.settings = {label: "Forge Assistant", bubbleWidth: 80};
+            shell.state = {conversationExpanded: false};
+            shell.nodes = {root: {appendChild() {}}};
+            shell.disposers = [];
+            shell.menuHandle = {close() {}};
+            shell.host = {registerMenu: () => () => undefined};
+            shell.buildPanel();
+            console.log(JSON.stringify({
+                tag: shell.nodes.grip.tagName,
+                hidden: shell.nodes.grip.getAttribute("aria-hidden"),
+                text: shell.nodes.grip.textContent,
+            }));
+        """, sources=("shell",))
+
+        assert found["tag"] == "DIV"
+        assert found["hidden"] == "true"
+        assert found["text"] == ""
+
+    def test_the_grip_can_take_the_rows_leftover_room(self):
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        rule = css.split(".forge-assistant-grip {", 1)[1].split("}", 1)[0]
+
+        assert "flex: 1 1 auto" in rule
+
+    def test_the_rules_for_the_rows_that_went_are_gone_too(self):
+        """Dead CSS that names a class nothing emits is the next person's
+        wrong mental model of the panel."""
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+
+        assert ".forge-assistant-title" not in css
+        assert ".forge-assistant-nav {" not in css
+        # The button class the three menus share is still in use.
+        assert ".forge-assistant-nav-button" in css

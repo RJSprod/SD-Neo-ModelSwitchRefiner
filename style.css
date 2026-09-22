@@ -5626,6 +5626,7 @@
 .forge-assistant-header {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.4em;
     padding: 0.5em 0.6em;
     border-bottom: 1px solid var(--border-color-primary);
@@ -5633,14 +5634,15 @@
     touch-action: none;
 }
 
-.forge-assistant-title {
+/* What is left of the header once the buttons have taken their room: the part
+   you can take hold of. `startDrag` ignores a press that lands on a control,
+   so without this the single header row would be all controls and nothing to
+   drag the panel by. It carries the row's grab cursor and no appearance of its
+   own -- it is space, and it is the space between the menus and the ✕. */
+.forge-assistant-grip {
     flex: 1 1 auto;
-    margin: 0;
-    font-size: 0.95em;
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    align-self: stretch;
+    min-width: 1.5em;
 }
 
 .forge-assistant-icon-button,
@@ -5663,11 +5665,11 @@
     min-width: 44px;
 }
 
-.forge-assistant-nav {
-    display: flex;
-    gap: 0.35em;
-    padding: 0.4em 0.6em;
-    flex-wrap: wrap;
+/* The way out of a menu and the mode toggle above it, both set slightly apart
+   from the entries that do something to the machine. */
+.forge-assistant-float[aria-checked="true"] {
+    border-color: var(--color-accent, #2563eb);
+    font-weight: 600;
 }
 
 .forge-assistant-accordion {
@@ -5835,16 +5837,21 @@
     border-radius: var(--radius-sm, 6px);
 }
 
+/* Fixed to the window rather than absolute inside the panel, because the
+   panel clips what it contains -- `overflow: hidden`, a few lines up -- and a
+   menu taller than a collapsed panel was cut off at its edge with no way to
+   scroll to the rest. `left`, `width`, `top` and `max-height` are set by
+   `placeMenu()` from the room actually available; there is nothing sensible to
+   state for them here. */
 .forge-assistant-menu {
-    position: absolute;
-    left: 0.6em;
-    right: 0.6em;
+    position: fixed;
     z-index: 2;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 0.2em;
-    max-height: 50vh;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 0.4em;
     border: 1px solid var(--border-color-primary);
     border-radius: var(--radius-lg, 10px);

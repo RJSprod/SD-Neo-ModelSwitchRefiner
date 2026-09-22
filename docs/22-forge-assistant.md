@@ -124,7 +124,8 @@ the second build (§3.6), two more against the third (§3.7), a fifth report
 finally produced the real diagnosis of all four focus-mode reports (§3.8), and
 one more came in once focus mode worked (§3.9). §3.10 is the tab's own
 transcript, which is a separate implementation and had a separate defect, and
-§3.11 is three asks against the panel once the whole of it worked.
+§3.11 is three asks against the panel once the whole of it worked, and §3.12
+three more against its own chrome.
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -619,6 +620,90 @@ the conversation: the service still implements all sixteen actions, the tab
 still offers them, and the guarding is unchanged. What changed is one view's
 opinion about which of them belong on a phone-width panel.
 
+## 3.12 Three more, against the panel's own chrome
+
+### A menu the panel cut off
+
+With the conversation collapsed, the workspace list was clipped and its last
+item — Cancel, added in §3.11 — could not be reached.
+
+The menu was an absolutely positioned child of the panel with
+`max-height: 50vh`, and the panel clips what it contains (`overflow: hidden`,
+which is what keeps the conversation inside the rounded corners). A collapsed
+panel is a header and an accordion tall, so most of a 50vh menu was outside
+that box. Worse than merely hidden: **unreachable**, because scrolling a menu
+whose visible region is shorter than its own scroll viewport cannot bring the
+bottom of it into view. The control added to let people out of a menu was the
+first thing cut off it.
+
+`placeMenu()` fixes the menu to the window instead, sized to the room that is
+actually there and opened upwards when there is more room above — which there
+is whenever the panel is docked along the bottom, where a downward menu has
+only the few pixels between the header and the edge of the screen. A floor of
+120px and `overflow-y: auto` so a window with no room either way still gets a
+menu it can scroll rather than no menu at all.
+
+`top` in both directions and never `bottom`: `bottom` on a fixed element is
+resolved against the layout viewport while everything else in this file is
+measured against the visual one, and mixing the two is how a panel ends up
+behind a phone's keyboard. Opening upwards therefore costs one measurement of
+the menu's own height, taken after the cap is applied so it is the height the
+menu will really be drawn at.
+
+The panel keeps its clipping. Nothing about the conversation changed.
+
+### Free Float
+
+The six anchors exist so that a window resized between sessions cannot leave
+the panel off-screen: what is stored is *which corner*, and a corner is a
+corner at any size. Free float has to store a position, so it stores **how far
+across the available travel** the panel was — 0 against one edge, 1 against the
+other. That maps onto any later viewport and can strand the panel no more
+than an anchor can, which is the property the anchors were protecting and the
+one thing a remembered pixel would have lost. `floatPoint()` clamps inside the
+same safe-area insets and gap as `anchorPoint()`.
+
+Turning it on adopts the panel's current position rather than jumping: a mode
+that moves the thing you were looking at is a mode people turn off again to
+find it. Dragging in free float previews nothing and chooses no anchor, because
+there is nothing to snap to.
+
+It is the one piece of layout state kept in `localStorage` rather than
+`sessionStorage`, under a key of its own. A panel left open, a width dragged
+wider and a corner chosen are this tab's business; whether the panel snaps to
+corners **at all** is a preference answered once, and the user asked for it to
+be remembered. Keeping it out of the session payload also means it survives
+that payload being rejected by a future schema bump.
+
+It does not apply to the phone sheet, which is anchored to a half of the screen
+and covers it. The preference stays on and applies again on a wider window,
+which is tested rather than assumed.
+
+The entry is a `menuitemcheckbox` with `aria-checked`, so it reports its state
+instead of only acting, and it is added in `utilityItems()` rather than in the
+host's `listUtilities()` — that list is about things the *host* can be asked to
+do, and it has a test saying so.
+
+### One header row
+
+Two rows of chrome — a title row with the panel's name and the ✕, a nav row
+with Workspace, Focus and ⋯ — above a collapsed conversation was most of the
+panel. The name was the one thing on screen nobody needed telling, there being
+exactly one floating panel on the page; the panel keeps it as its `aria-label`,
+which is what a screen reader announces on entry and the only place a name was
+doing any work.
+
+One consequence needed handling rather than discovering: `startDrag` ignores a
+press that lands on a control, so a single row of nothing but controls would
+have left nothing to drag the panel by. `.forge-assistant-grip` is that space,
+explicitly — `flex: 1 1 auto`, `aria-hidden`, no appearance of its own — and it
+is also what right-aligns the ✕. The header wraps rather than overflowing if a
+theme's font makes the four controls wider than the panel.
+
+The dead `.forge-assistant-title` and `.forge-assistant-nav` rules went with
+them, with a test asserting their absence: CSS naming a class nothing emits is
+the next person's wrong picture of the panel.
+
 ---
 
 ## 4. Deliberate deviations
@@ -674,7 +759,7 @@ rather than closed.
 | G8 `gr.Chatbot` row classes | **closed for Gradio 4.40, from its source (§3.10).** The three speculative selectors were the defect, not the risk: they constrained `.message`, the text box *inside* the bubble, so the bubble was never limited and the text wrapped at three quarters of its own box. The geometry is now stated against the real shape — `.message-row`, `.flex-wrap`, `.flex-wrap > .message` — with both halves keyed on `.flex-wrap` so a rename stops them matching together and leaves the component's own layout rather than half of ours. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,468 passing, 13 skipped. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,491 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---

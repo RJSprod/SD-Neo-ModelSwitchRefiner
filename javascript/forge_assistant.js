@@ -59,6 +59,12 @@
     const RESIZE_STEP = 16;
     const BOTTOM_SLACK = 100;
 
+    // A menu's gap from the row that opened it, its margin from the edge of
+    // the window, and the least room worth opening into rather than refusing.
+    const MENU_GAP = 4;
+    const MENU_EDGE = 8;
+    const MENU_FLOOR = 120;
+
     // -- geometry ---------------------------------------------------------- //
 
     function viewport() {
@@ -106,6 +112,43 @@
             ? view.top + pad.top + gap
             : view.top + view.height - pad.bottom - gap - height;
         return {left: Math.round(x), top: Math.round(y),
+                width: Math.round(width), height: Math.round(height)};
+    }
+
+    function clamp01(value) {
+        if (!isFinite(value)) return 0;
+        return value < 0 ? 0 : (value > 1 ? 1 : value);
+    }
+
+    // Free float, and why it remembers a fraction rather than a pixel.
+    //
+    // The six anchors exist so that a window resized between sessions cannot
+    // leave the panel off-screen: what is stored is which corner, and a corner
+    // is a corner at any size. Free float has to store a position, so it
+    // stores how far across the *available travel* the panel was -- 0 against
+    // one edge, 1 against the other. That maps onto any later viewport and can
+    // strand the panel no more than an anchor can, which is the property the
+    // anchors were protecting and the one thing a remembered pixel would lose.
+    function fractionOf(box, view) {
+        return {x: clamp01((box.left - view.left) / Math.max(1, view.width - box.width)),
+                y: clamp01((box.top - view.top) / Math.max(1, view.height - box.height))};
+    }
+
+    // The same clamping as `anchorPoint`: inside the safe-area insets, inside
+    // the gap, and never larger than the window.
+    function floatPoint(at, box, view, inset) {
+        const gap = gapFor(view);
+        const pad = inset || {top: 0, right: 0, bottom: 0, left: 0};
+        const width = Math.min(box.width, view.width - pad.left - pad.right - gap * 2);
+        const height = Math.min(box.height, view.height - pad.top - pad.bottom - gap * 2);
+        const minX = view.left + pad.left + gap;
+        const minY = view.top + pad.top + gap;
+        const travelX = Math.max(0, (view.width - pad.right - gap - width)
+            - (pad.left + gap));
+        const travelY = Math.max(0, (view.height - pad.bottom - gap - height)
+            - (pad.top + gap));
+        return {left: Math.round(minX + clamp01(at && at.x) * travelX),
+                top: Math.round(minY + clamp01(at && at.y) * travelY),
                 width: Math.round(width), height: Math.round(height)};
     }
 
@@ -207,6 +250,8 @@
         this.focus = focus;
         this.state = {
             anchorOverride: null,
+            freeFloat: false,
+            floatAt: null,
             panelWidth: null,
             panelOpen: false,
             conversationExpanded: true,
@@ -235,6 +280,7 @@
         this.settled = false;
         this.settling = false;
         this._restore();
+        this._restoreFloat();
     }
 
     Shell.prototype.anchor = function () {
@@ -276,6 +322,50 @@
             // Malformed session state is ignored, never repaired: a half-read
             // layout is worse than the default one.
         }
+    };
+
+    // Free float is remembered across sessions, and the rest of the layout is
+    // not, on purpose.
+    //
+    // A panel left open, a width dragged wider and a corner chosen are this
+    // tab's business, which is what `sessionStorage` is for. Whether the panel
+    // snaps to corners *at all* is a preference about how the thing works: it
+    // is answered once and it should stay answered, so it lives in
+    // `localStorage` under a key of its own. Keeping it out of the session
+    // payload also means it survives that payload being rejected by a schema
+    // bump.
+    Shell.prototype._floatKey = function () {
+        return "forge-assistant-float:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreFloat = function () {
+        let raw = null;
+        try {
+            raw = window.localStorage.getItem(this._floatKey());
+        } catch (error) {
+            raw = null;
+        }
+        if (!raw) return;
+        try {
+            const found = JSON.parse(raw);
+            if (!found) return;
+            if (typeof found.freeFloat === "boolean") {
+                this.state.freeFloat = found.freeFloat;
+            }
+            const at = found.floatAt;
+            if (at && typeof at.x === "number" && typeof at.y === "number") {
+                this.state.floatAt = {x: clamp01(at.x), y: clamp01(at.y)};
+            }
+        } catch (error) {
+            // A half-read preference is the default one.
+        }
+    };
+
+    Shell.prototype._saveFloat = function () {
+        try {
+            window.localStorage.setItem(this._floatKey(), JSON.stringify(
+                {freeFloat: this.state.freeFloat, floatAt: this.state.floatAt}));
+        } catch (error) { /* memory only; the panel still works */ }
     };
 
     Shell.prototype._save = function () {
@@ -353,40 +443,48 @@
         panel.setAttribute("aria-label", this.settings.label);
         this.nodes.panel = panel;
 
+        // One row, and everything is in it.
+        //
+        // It was two: a title row carrying the panel's name and the ✕, and a
+        // nav row under it carrying Workspace, Focus and ⋯. The name was the
+        // one thing on the screen nobody needed telling -- it is the only
+        // floating panel on the page -- and two rows of chrome above a
+        // collapsed conversation was most of the panel. The panel keeps its
+        // name where a name is actually used: `aria-label`, set above, which
+        // is what a screen reader announces when focus enters it.
+        //
+        // The space between the menus and the ✕ is the drag handle. It has to
+        // be explicit now: `startDrag` ignores a press that lands on a
+        // control, so with the row full of controls there would otherwise be
+        // nothing left to take hold of.
         const header = element("header", "forge-assistant-header");
-        const title = element("h2", "forge-assistant-title", this.settings.label);
-        // One control in the header, and it is the one people reach for: put
-        // the panel away. There was a pin beside it for "keep open while
-        // changing workspaces" -- a preference nobody asked for, occupying the
-        // corner everybody aims at.
-        const minimize = element("button", "forge-assistant-icon-button");
-        minimize.type = "button";
-        minimize.setAttribute("aria-label", "Minimize the assistant");
-        minimize.title = "Minimize";
-        minimize.textContent = "✕";
-        header.appendChild(title);
-        header.appendChild(minimize);
-        panel.appendChild(header);
-        Object.assign(this.nodes, {header, minimize, title});
-
-        const nav = element("div", "forge-assistant-nav");
         const picker = element("button", "forge-assistant-nav-button", "Workspace");
         picker.type = "button";
         picker.setAttribute("aria-haspopup", "menu");
         picker.setAttribute("aria-expanded", "false");
+        const focusToggle = element("button", "forge-assistant-nav-button", "Focus");
+        focusToggle.type = "button";
+        focusToggle.setAttribute("aria-pressed", "false");
         const utilities = element("button", "forge-assistant-nav-button", "⋯");
         utilities.type = "button";
         utilities.setAttribute("aria-haspopup", "menu");
         utilities.setAttribute("aria-expanded", "false");
         utilities.setAttribute("aria-label", "More actions");
-        const focusToggle = element("button", "forge-assistant-nav-button", "Focus");
-        focusToggle.type = "button";
-        focusToggle.setAttribute("aria-pressed", "false");
-        nav.appendChild(picker);
-        nav.appendChild(focusToggle);
-        nav.appendChild(utilities);
-        panel.appendChild(nav);
-        Object.assign(this.nodes, {nav, picker, utilities, focusToggle});
+        const grip = element("div", "forge-assistant-grip");
+        grip.setAttribute("aria-hidden", "true");
+        const minimize = element("button", "forge-assistant-icon-button");
+        minimize.type = "button";
+        minimize.setAttribute("aria-label", "Minimize the assistant");
+        minimize.title = "Minimize";
+        minimize.textContent = "✕";
+        header.appendChild(picker);
+        header.appendChild(focusToggle);
+        header.appendChild(utilities);
+        header.appendChild(grip);
+        header.appendChild(minimize);
+        panel.appendChild(header);
+        Object.assign(this.nodes,
+                      {header, minimize, picker, utilities, focusToggle, grip});
 
         const menu = element("div", "forge-assistant-menu");
         menu.hidden = true;
@@ -542,6 +640,7 @@
             node.style.left = "";
             node.style.top = "";
             node.style.width = "";
+            this.placeMenu();
             return;
         }
         this.nodes.panel.classList.remove("forge-assistant-sheet");
@@ -555,9 +654,17 @@
         }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
-        const at = anchorPoint(this.anchor(), box, view, insets());
+        // Free float does not apply to the phone sheet above: a sheet is
+        // anchored to a half of the screen and covers it, and there is nothing
+        // for a floating position to mean.
+        const at = this.state.freeFloat && this.state.floatAt
+            ? floatPoint(this.state.floatAt, box, view, insets())
+            : anchorPoint(this.anchor(), box, view, insets());
         node.style.left = at.left + "px";
         node.style.top = at.top + "px";
+        // An open menu is positioned against the window, so a move, a resize
+        // or a keyboard appearing has to take it along.
+        this.placeMenu();
     };
 
     // -- drag -------------------------------------------------------------- //
@@ -610,6 +717,13 @@
         const top = event.clientY - drag.offsetY;
         drag.node.style.left = Math.round(left) + "px";
         drag.node.style.top = Math.round(top) + "px";
+        // Free float has nothing to snap to, so there is nothing to preview
+        // and nothing to choose: where it is put is where it stays.
+        if (this.state.freeFloat) {
+            drag.at = fractionOf({left, top, width: drag.width, height: drag.height},
+                                 viewport());
+            return;
+        }
         const centre = {x: left + drag.width / 2, y: top + drag.height / 2};
         drag.anchor = nearestAnchor(centre, {width: drag.width, height: drag.height},
                                     viewport(), insets(), drag.anchor);
@@ -642,7 +756,14 @@
         this.nodes.root.classList.remove("forge-assistant-dragging");
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
         if (!cancelled && drag.moved) {
-            this.state.anchorOverride = drag.anchor;
+            if (this.state.freeFloat) {
+                if (drag.at) {
+                    this.state.floatAt = drag.at;
+                    this._saveFloat();
+                }
+            } else {
+                this.state.anchorOverride = drag.anchor;
+            }
             this.suppressClick = true;
             this._save();
         }
@@ -873,6 +994,7 @@
         items.forEach((item) => menu.appendChild(item));
         menu.appendChild(this.cancelItem());
         menu.hidden = false;
+        this.placeMenu();
         this.nodes.picker.setAttribute("aria-expanded",
                                        String(which === "workspaces"));
         this.nodes.utilities.setAttribute("aria-expanded",
@@ -904,6 +1026,51 @@
         item.setAttribute("role", "menuitem");
         item.addEventListener("click", () => this.closeMenu());
         return item;
+    };
+
+    // The menu is positioned against the window, not inside the panel.
+    //
+    // It used to be an absolutely positioned child with `max-height: 50vh`,
+    // which the panel's own `overflow: hidden` then clipped to the panel's
+    // box. With the conversation collapsed that box is a header and an
+    // accordion tall, so most of the workspace list was simply cut off -- and
+    // unreachable, because scrolling a menu whose visible region is shorter
+    // than its own scroll viewport cannot bring the bottom of it into view.
+    // Cancel is the last item, so the one control added to let people out of a
+    // menu was the first thing to be cut off it.
+    //
+    // Fixed to the window, sized to the room that is actually there, and
+    // opened upwards when there is more room above -- which there is whenever
+    // the panel is docked along the bottom, where a downward menu has only the
+    // few pixels between the header and the bottom of the screen.
+    //
+    // `top` in both directions and never `bottom`: `bottom` on a fixed element
+    // is measured against the layout viewport while everything else here is
+    // measured against the visual one, and mixing the two is how a panel ends
+    // up behind a phone's keyboard. Upwards costs one measurement of the
+    // menu's own height, which is the only way to know where its top goes.
+    Shell.prototype.placeMenu = function () {
+        const menu = this.nodes.menu;
+        const header = this.nodes.header;
+        if (!menu || menu.hidden || !header) return;
+        const box = header.getBoundingClientRect();
+        const view = viewport();
+        const below = (view.top + view.height) - box.bottom - MENU_GAP - MENU_EDGE;
+        const above = box.top - view.top - MENU_GAP - MENU_EDGE;
+        const up = above > below;
+        const room = Math.max(MENU_FLOOR, up ? above : below);
+        menu.style.left = Math.round(box.left) + "px";
+        menu.style.width = Math.round(box.width) + "px";
+        menu.style.maxHeight = Math.round(room) + "px";
+        if (!up) {
+            menu.style.top = Math.round(box.bottom + MENU_GAP) + "px";
+            return;
+        }
+        // Measured with the cap already applied, so this is the height it will
+        // actually be drawn at rather than the height it would like.
+        const tall = Math.min(menu.offsetHeight || room, room);
+        menu.style.top = Math.round(Math.max(view.top + MENU_EDGE,
+                                             box.top - MENU_GAP - tall)) + "px";
     };
 
     Shell.prototype.closeMenu = function () {
@@ -1005,7 +1172,12 @@
     };
 
     Shell.prototype.utilityItems = function () {
-        return this.host.listUtilities().map((utility) => {
+        // Free float first, because it is a mode rather than an action, and
+        // because the two below it give a graphics card back and are not what
+        // anybody wants to hit by accident. It is the shell's own preference,
+        // so it is added here rather than in the host's list of utilities,
+        // which is about things the *host* can be asked to do.
+        return [this.floatItem()].concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
             item.type = "button";
             item.setAttribute("role", "menuitem");
@@ -1017,7 +1189,44 @@
                 else if (typeof utility.invoke === "function") utility.invoke();
             });
             return item;
+        }));
+    };
+
+    Shell.prototype.floatItem = function () {
+        const on = !!this.state.freeFloat;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-float",
+                             "Free Float");
+        item.type = "button";
+        // A checkbox, not a command: it reports its state rather than only
+        // acting, so a screen reader says whether the mode is on.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Snap the panel back to one of the six resting places"
+            : "Put the panel anywhere in the window";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setFreeFloat(!on);
         });
+        return item;
+    };
+
+    Shell.prototype.setFreeFloat = function (on) {
+        this.state.freeFloat = !!on;
+        // Turned on where the panel already is, rather than somewhere of its
+        // own choosing: a mode that moves the thing you were looking at is a
+        // mode people turn off again to find it.
+        if (this.state.freeFloat && !this.state.floatAt) {
+            const node = this.state.panelOpen ? this.nodes.panel : this.nodes.launcher;
+            const box = node && node.getBoundingClientRect
+                ? node.getBoundingClientRect() : null;
+            if (box) this.state.floatAt = fractionOf(box, viewport());
+        }
+        this._saveFloat();
+        this._save();
+        this.placeNow();
+        return this.state.freeFloat;
     };
 
     // Giving a card back is slow enough to be worth saying so about, and it is
