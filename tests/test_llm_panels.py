@@ -2165,11 +2165,18 @@ class TestThemeContract:
         assert re.search(r"color:\s*var\(--body-text-color", body), \
             "the text colour has to be stated beside the surface, not assumed"
 
-    def test_the_one_rule_that_names_a_gradio_class_names_no_generated_one(self):
-        """The fallback for a theme that paints the bubble directly rather than
-        through the variables. Gradio’s ``.message`` and ``.user`` have been
-        stable across the 4.x line; a ``.svelte-`` hash is regenerated on every
-        build and is the reason the rest of this file depends on none of it."""
+    def test_every_rule_that_names_a_gradio_class_names_no_generated_one(self):
+        """The rules that paint and place the bubble, which cannot be done
+        through the variables alone. Gradio's ``.message``, ``.user`` and
+        ``.flex-wrap`` have been stable across the 4.x line; a ``.svelte-``
+        hash is regenerated on every build and is the reason the rest of this
+        file depends on none of it.
+
+        ``flex-wrap`` joined the list when the bubble geometry moved onto the
+        element that actually carries the bubble -- see
+        ``TestTheBubbleGeometry``. It is the same dependency as the others and
+        belongs under the same rule.
+        """
         import re
         from pathlib import Path
 
@@ -2178,9 +2185,9 @@ class TestThemeContract:
 
         reaching = [line.strip() for line in section.splitlines()
                     if line.strip().startswith("#mc-llm-studio")
-                    and re.search(r"\.(message|user|bot|message-row)\b", line)]
+                    and re.search(r"\.(message|user|bot|message-row|flex-wrap)\b", line)]
 
-        assert reaching, "the fallback rule is supposed to exist"
+        assert reaching, "the bubble rules are supposed to exist"
         for selector in reaching:
             assert ".svelte" not in selector, selector
             assert selector.startswith("#mc-llm-studio .mc-llm-"), selector
@@ -2294,6 +2301,144 @@ class TestThemeContract:
         import mc_llm_ui as ui
 
         assert "<script>" not in ui.notice("<script>alert(1)</script>")
+
+
+class TestTheBubbleGeometry:
+    """Reported in use: user messages that did not line up with each other,
+    replies whose cell ran the full width, and a two-word message wrapped onto
+    two lines.
+
+    One mistake behind all three -- the rules constrained the text box inside
+    the bubble rather than the bubble -- and the reason it is worth a test class
+    of its own is that it is invisible in the stylesheet unless you know the
+    shape of what Gradio renders:
+
+        div.message-row.bubble.user-row      the flex row, places the bubble
+          div.avatar-container
+          div.flex-wrap.user                 THE BUBBLE: border, radius, padding
+            div.message.user                 the text box
+              button > the markdown
+
+    `max-width: 75%` on `.message` left the bubble unconstrained and squeezed
+    the text into three quarters of a box that had already been sized for all
+    of it, so the text wrapped early and the remaining quarter showed as a gap
+    between the accent stripe and the bubble's edge.
+
+    These read declarations rather than pixels, which is the honest limit of a
+    stylesheet test: what they can prove is that the geometry is stated on the
+    elements that carry it, and what they cannot is how it looks. The shape it
+    is stated against is pinned by the class docstring above and by
+    `docs/07-llm-studio.md`.
+    """
+
+    @staticmethod
+    def rules(pattern):
+        """Every declaration block whose selector list contains `pattern`.
+
+        Parsed rather than split on strings, so a rule that moves in the file
+        is still found and a rule inside a media query is reported with the
+        same shape as one outside it.
+        """
+        import re
+        from pathlib import Path
+
+        css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+        found = []
+        for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+            selectors, body = match.group(1).strip(), match.group(2)
+            if pattern not in selectors:
+                continue
+            declarations = {}
+            for piece in body.split(";"):
+                if ":" not in piece:
+                    continue
+                name, _, value = piece.partition(":")
+                declarations[name.strip()] = value.strip()
+            found.append((selectors, declarations))
+        return found
+
+    def declared(self, selector, name):
+        """The last value given for `name` by a rule whose selector list has
+        `selector` in it, ignoring the narrow-screen override."""
+        values = [declarations[name]
+                  for selectors, declarations in self.rules(selector)
+                  if name in declarations and "max(" not in declarations[name]]
+        assert values, f"nothing declares {name} for {selector}"
+        return values[-1]
+
+    def test_the_bubble_is_what_the_width_is_stated_on(self):
+        """The element with the border, the radius and the padding on it. The
+        old rule put this on the text box inside, which left the bubble itself
+        with nothing to stop it filling the row."""
+        assert self.declared(".message-row > .flex-wrap", "max-width") \
+            == "var(--forge-assistant-bubble, 75%)"
+
+    def test_the_bubble_hugs_its_text(self):
+        """`fit-content`, not `100%`. A bubble that is always the full width of
+        its allowance is the reply cell that was reported."""
+        assert self.declared(".message-row > .flex-wrap", "width") == "fit-content"
+
+    def test_the_text_box_fills_the_bubble_it_is_in(self):
+        """The declaration the old rule had backwards, and the whole of why a
+        two-word message came back as two lines: text wraps when the bubble is
+        full, and a text box narrower than its bubble wraps before that."""
+        assert self.declared(".flex-wrap > .message", "width") == "auto"
+        assert self.declared(".flex-wrap > .message", "max-width") == "none"
+
+    def test_nothing_puts_a_width_limit_back_on_the_text_box(self):
+        """The regression guard, and the one test here that would have caught
+        the original defect. A `max-width` on `.message` is the bug, whatever
+        else it is written next to."""
+        for selectors, declarations in self.rules(".message"):
+            if "flex-wrap" in selectors:
+                continue
+            limit = declarations.get("max-width")
+            assert limit in (None, "none"), (
+                f"{selectors} limits the text box rather than the bubble: {limit}")
+
+    def test_both_sides_measure_against_the_same_row(self):
+        """Gradio shrink-wraps the user row to its content, so its width came
+        from whatever that message happened to need -- and no two user messages
+        agreed on where their right edge was. Stretched, both sides take their
+        share of one width."""
+        row = dict(self.rules(".mc-llm-transcript .message-row")[0][1])
+
+        assert row["align-self"] == "stretch"
+        assert row["max-width"] == "none"
+
+    def test_each_side_is_justified_to_its_own_edge(self):
+        assert self.declared(".message-row.user-row", "justify-content") == "flex-end"
+        assert self.declared(".message-row.bot-row", "justify-content") == "flex-start"
+
+    def test_a_bubble_gives_way_before_it_overflows(self):
+        """A flex item whose minimum is its content cannot shrink, so one
+        unbreakable token -- a URL, a long path -- pushes the row wider than
+        the column and the thread scrolls sideways."""
+        bubble = self.declared(".message-row > .flex-wrap", "min-width")
+
+        assert bubble == "0"
+
+    def test_the_narrow_screen_override_moved_with_the_rest(self):
+        """It was written against the text box too. Left behind, it would put
+        the early wrap back on a phone and nowhere else."""
+        narrow = [declarations for selectors, declarations
+                  in self.rules(".message-row > .flex-wrap")
+                  if "max(" in declarations.get("max-width", "")]
+
+        assert narrow, "a phone still needs most of its width"
+        assert narrow[0]["max-width"] == "max(var(--forge-assistant-bubble, 75%), 90%)"
+
+    def test_the_geometry_is_keyed_on_one_class_so_it_fails_as_one(self):
+        """`.flex-wrap` is Gradio's name, not ours, and an upgrade can rename
+        it. Both halves are keyed on it on purpose: they stop matching together
+        and what is left is the component's own layout, rather than a bubble
+        this file has constrained around a text box it no longer reaches."""
+        selectors = [selectors for selectors, _ in self.rules(".flex-wrap")]
+
+        assert selectors, "the bubble rules are supposed to name it"
+        for found in selectors:
+            assert found.startswith("#mc-llm-studio .mc-llm-"), found
 
 
 class TestBoxesThatDoNotMoveTheButtons:
