@@ -3203,10 +3203,15 @@ The workspace's own nested tabs — the extra-network tabs inside Txt2Img, the
 mode tabs inside Img2Img — are the workspace's content and stay exactly as
 they were.
 
-Nothing is moved or restyled to do it and no element of Forge's is touched
-beyond a class going on and coming off, which is what makes leaving focus
-nothing more than that, and what means a theme this code has never heard of is
-handled by the same rule as one it has. Escape leaves it, unless something
+Nothing is moved to do it, and no element of Forge's is touched beyond a class
+going on and coming off, which is what makes leaving focus nothing more than
+that, and what means a theme this code has never heard of is handled by the
+same rule as one it has. The one exception is deliberate: a column a theme had
+pinned some way down the page to stay clear of its own header — Lobe's split
+previewer does this to the gallery — is pinned to the top instead while focus
+is on, since the header it was clearing is gone, and put back exactly on the
+way out. Without that, the gallery sat under a blank band exactly the height
+of a header that was no longer there. Escape leaves it, unless something
 closer to hand wants Escape first: the assistant's own menu, an edit in
 progress, a dialog, or an IME. A running reply is never interrupted by leaving
 focus.

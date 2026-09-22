@@ -135,8 +135,63 @@
         (context.hidden || []).forEach((node) => {
             if (node && node.classList) node.classList.remove(HIDDEN_CLASS);
         });
+        // Put back exactly what was there: the value and its priority, or no
+        // inline `top` at all, which is what most of them had.
+        (context.stuck || []).forEach((entry) => {
+            const style = entry.node && entry.node.style;
+            if (!style) return;
+            if (entry.value) style.setProperty("top", entry.value, entry.priority || "");
+            else style.removeProperty("top");
+        });
         context.path = [];
         context.hidden = [];
+        context.stuck = [];
+    }
+
+    function paddingTop(root) {
+        try {
+            const style = window.getComputedStyle ? window.getComputedStyle(root) : null;
+            const found = style ? parseFloat(style.paddingTop) : NaN;
+            return found > 0 ? found : 0;
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    // Every element under `root` that is laid out, depth first, within a
+    // budget. Hidden subtrees are skipped whole -- an inactive nested tab is
+    // a thousand elements nobody can see -- and the budget is what keeps a
+    // pathological page from turning a toggle into a pause.
+    const WALK_BUDGET = 8000;
+
+    function visitLaidOut(root, visit) {
+        let seen = 0;
+        (function descend(parent) {
+            const children = parent.children || [];
+            for (let i = 0; i < children.length && seen < WALK_BUDGET; i += 1) {
+                const child = children[i];
+                if (!child || !child.style) continue;
+                seen += 1;
+                const style = window.getComputedStyle ? window.getComputedStyle(child) : null;
+                if (style && style.display === "none") continue;
+                visit(child);
+                descend(child);
+            }
+        })(root);
+    }
+
+    // Is there a scroll container between this element and the root? If so,
+    // a sticky offset on the element is measured against that container, not
+    // against the workspace, and it is not this module's business.
+    function scrollsBetween(node, root) {
+        let parent = node.parentElement;
+        while (parent && parent !== root) {
+            const style = window.getComputedStyle ? window.getComputedStyle(parent) : null;
+            const overflow = style ? (style.overflowY || style.overflow || "visible") : "visible";
+            if (overflow !== "visible" && overflow !== "clip") return true;
+            parent = parent.parentElement;
+        }
+        return false;
     }
 
     function trapped(root) {
@@ -215,7 +270,7 @@
 
         const adapter = this.adapterFor(id);
         const context = Object.assign(saveState(root),
-                                      {id, adapter, path: [], hidden: [],
+                                      {id, adapter, path: [], hidden: [], stuck: [],
                                        note: allowed.note || ""});
 
         // Mark the workspace's ancestors, from its parent up to <body>. One
@@ -256,6 +311,41 @@
 
         root.classList.add(ROOT_CLASS);
         document.body.classList.add(BODY_CLASS);
+
+        // Sticky offsets inside the workspace, and the gap they leave.
+        //
+        // A theme that draws a header reserves room under it. Lobe's split
+        // previewer makes the results column `position: sticky; top: 80px` --
+        // 64px of header and a margin -- so the picture stays on screen while
+        // the prompt column scrolls under it. In focus mode the header is gone
+        // and the workspace is its own scroll container, so the same 80px is
+        // nothing but a gap above the gallery: the column sits at the same
+        // place on the screen whether focus is on or off, which is exactly how
+        // it was reported.
+        //
+        // Reasoned about generally rather than by naming the theme's ids: a
+        // sticky element whose offset is measured against the workspace's own
+        // scroll edge -- no scroller of its own between it and the root -- was
+        // clearing something above the workspace, and everything above the
+        // workspace is hidden now. Its offset becomes the root's padding, so a
+        // stuck column keeps the margin it has at rest. One inside an inner
+        // scroller is measured against that scroller and is left alone.
+        //
+        // An inline style, because the theme's declaration carries !important
+        // on an id and nothing in a stylesheet outranks that reliably; the
+        // value it replaces is recorded exactly and put back on the way out.
+        const inset = paddingTop(root);
+        visitLaidOut(root, (node) => {
+            const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+            if (!style || style.position !== "sticky") return;
+            const top = parseFloat(style.top);
+            if (!(top > inset)) return;
+            if (scrollsBetween(node, root)) return;
+            context.stuck.push({node,
+                                value: node.style.getPropertyValue("top"),
+                                priority: node.style.getPropertyPriority("top")});
+            node.style.setProperty("top", inset + "px", "important");
+        });
 
         // The safety valve, and the reason it is here: the rule that hides the
         // chrome is written against a shape this code cannot see -- somebody
@@ -305,7 +395,8 @@
             console.info("Forge Assistant: focus on #" + id
                 + (context.degraded ? " (chrome left in place)" : "")
                 + ", " + context.path.length + " ancestors marked, "
-                + context.hidden.length + " tab bars hidden"
+                + context.hidden.length + " tab bars hidden, "
+                + context.stuck.length + " sticky offsets closed"
                 + (context.note ? ", note: " + context.note : ""));
         } catch (error) { /* a console that cannot be written to */ }
         // The note travels out with the success. A containing-block trap is
