@@ -5665,49 +5665,79 @@
     min-width: 44px;
 }
 
-/* The workspace row, which is what the panel is while the conversation is
+/* The workspace strip, which is what the panel is while the conversation is
    collapsed.
    =========================================================================
 
-   Collapsed, this panel was a header and a closed accordion -- four controls,
+   Collapsed, this panel was a header and a folded accordion -- four controls,
    none of which did anything without opening something else first. The one
    thing it is well placed to be in that state is a tab bar, so that is what
    it is now.
 
-   `width: max-content` on the panel is what puts the workspaces side by side:
-   the panel asks for the width its row would take unwrapped, and `max-width`
-   stops it at the screen, at which point the row wraps rather than the panel
-   overflowing. `placeNow` leaves the width alone while collapsed for the same
-   reason -- a stated column width would cap a tab bar at 360px and wrap it
-   into four lines.
+   It was briefly a bar that grew to its contents, bounded only by the window.
+   On an installation with a dozen tabs that is a panel most of the way across
+   the screen, which is a control covering the thing it controls. So the panel
+   keeps its own width -- the one `placeNow` writes, collapsed or not -- and
+   the strip is one line inside it that scrolls. `nowrap` is what makes it a
+   line rather than a block; `overflow-x` is what makes the rest reachable.
 
-   24px is `WIDE_GAP`, the gutter the anchor arithmetic already leaves around
-   a docked panel; the two have to agree or the panel is placed against an
-   edge it is too wide to sit inside. */
-.forge-assistant-panel.forge-assistant-collapsed {
-    width: max-content;
-    max-width: calc(100vw - 2 * 24px);
+   `touch-action: pan-x` hands touch and pen to the browser, which pans
+   natively. A mouse gets `startStrip`, which drags it. Vertical is excluded
+   deliberately: a strip that swallowed an upward swipe would be a strip you
+   could not scroll the page past on a phone. */
+.forge-assistant-workspaces {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.35em;
+    padding: 0.4em 0.6em;
+    overflow-x: auto;
+    overflow-y: hidden;
+    touch-action: pan-x;
+    /* A flick that runs off the end must not become the browser's back
+       gesture, which would leave the page. */
+    overscroll-behavior-x: contain;
+    cursor: grab;
+    /* Hidden, not absent: the fade below says the same thing without costing
+       the panel eight pixels of height. */
+    scrollbar-width: none;
 }
 
-/* Collapsed, the width is the row's and not a remembered number, so there is
-   nothing for the handle to set. It is hidden rather than left inert: a
-   resize cursor on an edge that does not resize is worse than no handle. */
-.forge-assistant-panel.forge-assistant-collapsed .forge-assistant-resize {
+.forge-assistant-workspaces::-webkit-scrollbar {
     display: none;
 }
 
-/* No rule of its own: the header above it already draws the separator, and a
-   border here would be a second hairline along the panel's bottom edge --
-   collapsed, this row is the last thing in the panel. */
-.forge-assistant-workspaces {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35em;
-    padding: 0.4em 0.6em;
+.forge-assistant-workspaces.forge-assistant-strip-dragging {
+    cursor: grabbing;
+    /* Text selection during a drag turns the row blue and leaves a selection
+       behind when it ends. */
+    user-select: none;
+}
+
+/* The cut edge, faded, so a strip that continues looks like it continues.
+   `markOverflow` names the side; the value is "none" when it all fits, and
+   then no mask is applied at all. */
+.forge-assistant-workspaces[data-overflow="end"] {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2em), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 2em), transparent);
+}
+
+.forge-assistant-workspaces[data-overflow="start"] {
+    -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2em), transparent);
+    mask-image: linear-gradient(to left, #000 calc(100% - 2em), transparent);
+}
+
+.forge-assistant-workspaces[data-overflow="both"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 2em,
+                                        #000 calc(100% - 2em), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 2em,
+                                #000 calc(100% - 2em), transparent);
 }
 
 /* Same target size as everything else here: 44px is the smallest thing a
-   thumb hits reliably, and this is the row most likely to be used with one. */
+   thumb hits reliably, and this is the row most likely to be used with one.
+   `flex-shrink: 0` is what keeps them their own size rather than being
+   squeezed to fit -- being squeezed to fit is the thing the strip exists to
+   avoid. */
 .forge-assistant-workspace {
     flex: 0 0 auto;
     min-height: 44px;
@@ -5729,13 +5759,6 @@
 .forge-assistant-workspace[disabled] {
     opacity: 0.5;
     cursor: default;
-}
-
-/* On a phone the panel is a sheet: full width already, and a row that tried
-   to be wider than it would push the sheet off the screen. */
-.forge-assistant-panel.forge-assistant-sheet.forge-assistant-collapsed {
-    width: auto;
-    max-width: none;
 }
 
 /* The way out of a menu and the mode toggle above it, both set slightly apart

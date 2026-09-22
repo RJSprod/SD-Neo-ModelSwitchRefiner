@@ -632,7 +632,17 @@
         this.nodes.body.hidden = !open;
         this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open);
         this.nodes.workspaces.hidden = open;
-        if (!open) this.renderWorkspaces();
+        // The header's Workspace menu and the row are the same list. Collapsed
+        // the row is right there under it, so the menu is a press that buys
+        // nothing; it goes, and like the body it leaves the tab order rather
+        // than merely stopping being painted. If it is open at the moment it
+        // is hidden, it closes -- a menu whose button is gone cannot be
+        // dismissed by pressing that button again.
+        this.nodes.picker.hidden = !open;
+        if (!open) {
+            if (this.nodes.menu.dataset.which === "workspaces") this.closeMenu();
+            this.renderWorkspaces();
+        }
         // The panel is sized to its content while collapsed, so the row
         // appearing or going changes how wide it is and therefore where its
         // anchor puts it.
@@ -672,6 +682,90 @@
             });
             row.appendChild(button);
         });
+        this.markOverflow();
+    };
+
+    /** Which edge of the strip has row behind it.
+     *
+     * The strip is one line, narrower than its contents, and the stylesheet
+     * fades whichever side is cut off -- so a row that continues looks like it
+     * continues rather than like it ends there. The scrollbar is hidden
+     * because it would cost the panel eight pixels of height to say the same
+     * thing less clearly.
+     */
+    Shell.prototype.markOverflow = function () {
+        const row = this.nodes.workspaces;
+        if (!row) return;
+        const slack = (row.scrollWidth || 0) - (row.clientWidth || 0);
+        const at = row.scrollLeft || 0;
+        // A pixel of slack is rounding, not room.
+        const side = slack <= 1 ? "none"
+            : (at <= 1 ? "end"
+               : (at >= slack - 1 ? "start" : "both"));
+        row.setAttribute("data-overflow", side);
+    };
+
+    // -- dragging the workspace strip --------------------------------------- //
+    //
+    // The strip holds more tabs than the panel is wide, and the panel is kept
+    // to its own width on purpose -- a row that grew to the screen was a row
+    // that covered the screen. So it scrolls, and on a mouse it scrolls by
+    // being dragged: a horizontal scrollbar under a tab row is eight pixels
+    // spent on a control nobody aims at, and a trackpad gesture is not
+    // something every pointer has.
+    //
+    // Touch and pen are not driven from here. `touch-action: pan-x` hands
+    // those to the browser, which pans natively and then cancels this
+    // pointer; running both would fight the native gesture with a frame of
+    // lag and lose.
+
+    Shell.prototype.startStrip = function (event) {
+        const row = this.nodes.workspaces;
+        // Cleared on every press: a gesture that moved and then ended over a
+        // gap leaves no click to consume the flag, and a stale one would eat
+        // somebody's next real press.
+        this.stripMoved = false;
+        if (this.strip || !row || row.hidden) return;
+        if (event.button !== undefined && event.button !== 0) return;
+        if (!event.isPrimary) return;
+        if (event.pointerType && event.pointerType !== "mouse") return;
+        this.strip = {pointerId: event.pointerId, startX: event.clientX,
+                      from: row.scrollLeft || 0, moved: false};
+    };
+
+    Shell.prototype.moveStrip = function (event) {
+        const strip = this.strip;
+        if (!strip || event.pointerId !== strip.pointerId) return;
+        const dx = event.clientX - strip.startX;
+        if (!strip.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
+        const row = this.nodes.workspaces;
+        if (!strip.moved) {
+            strip.moved = true;
+            row.classList.add("forge-assistant-strip-dragging");
+            try {
+                row.setPointerCapture(event.pointerId);
+            } catch (error) { /* capture is an optimisation, not a requirement */ }
+        }
+        // Content follows the hand: drag left and the row behind the right
+        // edge comes in.
+        row.scrollLeft = strip.from - dx;
+        this.markOverflow();
+    };
+
+    Shell.prototype.endStrip = function (event, cancelled) {
+        const strip = this.strip;
+        if (!strip || (event && event.pointerId !== strip.pointerId)) return;
+        // Cleared first, for the same reason `endDrag` does it: a late
+        // `lostpointercapture` must find nothing to undo.
+        this.strip = null;
+        const row = this.nodes.workspaces;
+        row.classList.remove("forge-assistant-strip-dragging");
+        // The click that follows a gesture which actually moved is the tail of
+        // that gesture, not a choice of tab.
+        this.stripMoved = !cancelled && strip.moved;
+        try {
+            row.releasePointerCapture(strip.pointerId);
+        } catch (error) { /* never held, or already released */ }
     };
 
     // -- placing ----------------------------------------------------------- //
@@ -710,17 +804,16 @@
         this.nodes.panel.classList.remove("forge-assistant-sheet");
         this.nodes.panel.removeAttribute("aria-modal");
         this.nodes.panel.setAttribute("role", "complementary");
-        if (open && this.state.conversationExpanded) {
+        if (open) {
+            // One width, collapsed or not. The workspace row is kept inside it
+            // rather than allowed to set it: a row that grew to its contents
+            // reached the far side of the screen on an installation with a
+            // dozen tabs, which is a panel covering the page it is a control
+            // for. It scrolls instead -- see `startStrip`.
             const width = Math.min(Math.max(this.state.panelWidth || NOMINAL_WIDTH,
                                             MIN_WIDTH),
                                    Math.min(MAX_WIDTH, view.width - 32));
             node.style.width = width + "px";
-        } else if (open) {
-            // Collapsed the panel is a row of workspaces, and what it wants is
-            // the width of that row -- up to the screen, where the stylesheet
-            // stops it and the row wraps. A column width stated here would cap
-            // it at 360px and wrap a tab bar into four lines.
-            node.style.width = "";
         }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
@@ -863,6 +956,29 @@
         this.on(window, "pointermove", (event) => this.moveDrag(event));
         this.on(window, "pointerup", (event) => this.endDrag(event, false));
         this.on(window, "pointercancel", (event) => this.endDrag(event, true));
+
+        // The workspace strip scrolls by being dragged. Its pointer stream is
+        // separate from the panel's: the row is not in the header, so the two
+        // gestures cannot both start, and neither needs to know about the
+        // other.
+        this.on(nodes.workspaces, "pointerdown", (event) => this.startStrip(event));
+        this.on(window, "pointermove", (event) => this.moveStrip(event));
+        this.on(window, "pointerup", (event) => this.endStrip(event, false));
+        this.on(window, "pointercancel", (event) => this.endStrip(event, true));
+        // Capture, so the press is stopped before it reaches the button it
+        // landed on. `detail` is 0 for a keyboard activation, which is never
+        // the tail of a drag and must not be swallowed by a stale flag.
+        this.on(nodes.workspaces, "click", (event) => {
+            if (!this.stripMoved) return;
+            this.stripMoved = false;
+            if (!event.detail) return;
+            event.stopPropagation();
+            event.preventDefault();
+        }, true);
+        // Native panning -- touch, pen, a trackpad, the keyboard inside the
+        // row -- moves the strip without going through `moveStrip`, and the
+        // fade has to follow it.
+        this.on(nodes.workspaces, "scroll", () => this.markOverflow());
 
         this.on(nodes.launcher, "click", (event) => {
             if (this.suppressClick) {

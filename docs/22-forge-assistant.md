@@ -787,49 +787,94 @@ and disagree with the page as soon as anybody used a tab button — the same
 mistake the picker was written to avoid, and the reason the navigation
 subscriber has its own test.
 
-**The width is the row's.** This is the part that had to change outside this
-function. `placeNow` wrote `panelWidth` — 360 by default — on the panel
-whenever it was open. A tab bar under a 360-pixel cap is a tab bar in four
-lines, which is not what "side by side" means, so collapsed it now writes no
-width at all and the stylesheet decides:
+**The width was the row's, for one round.** `placeNow` wrote `panelWidth` — 360
+by default — whenever the panel was open, and a tab bar under a 360-pixel cap
+is a tab bar in four lines, so collapsed it wrote no width at all and the
+stylesheet took over with `width: max-content` bounded by the viewport.
+
+That is not what it should have been, and the screenshot that came back said so
+plainly: eleven tabs, a panel most of the way across a 1900-pixel window, two
+wrapped lines of it. A control that covers the page it is a control for is
+worse than a control with one press too many in it.
+
+> "That didnt work out how i hoped. this is too wide. […] make the tab buttons
+> in the collapsed view constrained in width. i like the width of the original
+> flyout. what i want is the ability to drag the tab buttons."
+
+So the panel is a column in both states again — one branch in `placeNow`, not
+two — and the strip is one line inside it that scrolls:
 
 ```css
-.forge-assistant-panel.forge-assistant-collapsed {
-    width: max-content;
-    max-width: calc(100vw - 2 * 24px);
+.forge-assistant-workspaces {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    touch-action: pan-x;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
 }
 ```
 
-`max-content` is what puts them in a line: the panel asks for the width its row
-would take unwrapped. `max-width` is the bound the request asked for, and at
-that bound the row wraps rather than the panel overflowing. 24 is `WIDE_GAP`,
-the gutter the anchor arithmetic already leaves around a docked panel; the two
-have to agree or the panel is placed against an edge it is too wide to sit
-inside.
+`nowrap` is what makes it a line. `overflow-x` is what keeps the rest
+reachable. `flex: 0 0 auto` on the buttons is the half that is easy to lose:
+shrinkable buttons fit eleven tabs into 360 pixels by making every label
+unreadable, and then nothing overflows and there is nothing to scroll.
 
-Measured in headless Chromium at 1280×800, because a stub DOM cannot compute
-`max-content`: four workspaces give a 401-pixel panel on one row; sixteen give
-1232 — `1280 − 48`, exactly the bound — on two rows, with no horizontal
-overflow on the document.
+**`overflow-y: hidden` and `pan-x` are both about not stealing the page.** A
+strip that took a vertical swipe would be a strip you could not scroll past on
+a phone, and `overscroll-behavior-x: contain` stops a flick off the end
+becoming the browser's back gesture, which leaves the page entirely.
 
-**Two things went with the column width.** The resize handle is hidden while
-collapsed: `placeNow` no longer writes a width there, so a resize cursor on
-that edge would be an edge that does not resize. And the row draws no border of
-its own — the header above it already draws the separator, and collapsed this
-row is the last thing in the panel, so a second hairline would land on the
-panel's own bottom edge.
+**A mouse drags it.** Touch has a swipe and `pan-x` gives it to the browser;
+a mouse has neither that nor — with the scrollbar hidden — anything to aim at.
+`startStrip`/`moveStrip`/`endStrip` are the panel's own drag machine cut down:
+the same six-pixel threshold, the same pointer capture, the same
+clear-before-release ordering so a late `lostpointercapture` finds nothing to
+undo. Four decisions in it matter:
 
-On a phone the panel is a sheet, full width already, and a row that tried to be
-wider would push it off the screen; the sheet rule overrides both properties
-back to `auto`/`none`.
+*It declines every pointer that is not a mouse.* `touch-action: pan-x` means
+the browser pans touch and pen itself and then sends `pointercancel`; running
+both would fight the native gesture with a frame of lag and lose.
 
-**The header's workspace menu stays.** Collapsed there are now two ways to
-switch, and that is deliberate: the header is the same five controls in both
-states, and a button that disappears when you fold the conversation is a button
-you have to learn the rule for. It also stays the better of the two on a phone,
-where the same sixteen workspaces measure six wrapped lines and 305 of a
-390×780 sheet's 780 pixels — usable, but a list is the shape for that, and the
-menu is a list.
+*A gesture that moved swallows the click that ends it.* Otherwise letting go
+over a button switches to it, and a strip you cannot drag without changing tab
+is a strip you cannot drag. The guard is a capture-phase listener on the row,
+so the press is stopped before it reaches the button.
+
+*The flag is cleared on the next press, not only by the click.* Let go between
+two buttons and no click follows at all; a flag left standing would eat
+somebody's next real press instead, which is the same bug one interaction
+later.
+
+*A keyboard activation is never swallowed.* `detail` is 0 for one, and it is
+never the tail of a drag.
+
+**The scrollbar is hidden and the cut edge is faded instead.** A horizontal
+scrollbar under a tab row costs eight pixels of panel height to say something
+the fade says in none. `markOverflow` writes `data-overflow` as `none`, `start`,
+`end` or `both` from `scrollLeft` against `scrollWidth − clientWidth`, and the
+stylesheet masks that side. There is deliberately no rule for `none`: when it
+all fits there is no gradient at all, because a row that ends where it looks
+like it ends needs no explaining.
+
+**The header's Workspace menu goes while collapsed.** It and the strip are the
+same list, and with the strip directly under it the menu is a press that buys
+nothing. It is `hidden`, so it leaves the tab order too, and if it happens to
+be open at the moment it is hidden it closes — a menu whose button is gone
+cannot be dismissed by pressing that button again. Only that menu: the **⋯**
+menu's button is still there, and closing it would be closing somebody's open
+menu for them.
+
+The resize handle comes back, since there is a width for it to set again.
+
+**Measured in headless Chromium at 1280×800, driven with a real mouse**, because
+none of this is arithmetic a stub DOM can check. Eleven tabs: panel 360 wide,
+one line, 1338 pixels of row inside a 358-pixel window, no horizontal overflow
+on the document, Workspace button hidden, resize handle back. A drag left
+scrolls 280 and the fade goes `end` → `both`; dragging to the far end reaches
+it and the fade goes `start`. A drag released squarely on *img2img* switches
+nothing — and the very next genuine click on that same button switches to it
+and closes the panel.
 
 ---
 

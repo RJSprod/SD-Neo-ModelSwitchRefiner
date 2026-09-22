@@ -578,7 +578,8 @@ class TestTheStylesheetCanHideThings:
         assert hidden <= {"panel", "launcher", "menu", "body", "chip", "jump", "stop",
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
-                          "launcherLabel", "input", "ghost", "workspaces"}, hidden
+                          "launcherLabel", "input", "ghost", "workspaces",
+                          "picker"}, hidden
 
 
 class TestOpeningAndClosing:
@@ -2724,21 +2725,53 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
             shell.nodes.heading = document.createElement("button");
             shell.nodes.body = document.createElement("div");
             shell.nodes.panel = document.createElement("div");
+            shell.nodes.picker = document.createElement("button");
+            shell.nodes.menu = document.createElement("div");
+            shell.nodes.menu.dataset.which = "";
             const seen = [];
             [false, true].forEach((open) => {
                 shell.state.conversationExpanded = open;
                 shell.applyAccordion();
                 seen.push({open, hidden: shell.nodes.workspaces.hidden,
-                           drawn: shell.nodes.workspaces.children.length});
+                           drawn: shell.nodes.workspaces.children.length,
+                           menuButton: shell.nodes.picker.hidden});
             });
             console.log(JSON.stringify({seen}));
         """, sources=("shell",))
 
         assert found["seen"] == [
-            {"open": False, "hidden": False, "drawn": 3},
-            {"open": True, "hidden": True, "drawn": 3},
-        ], ("collapsed the row is there and populated; expanded it is out of "
-            "the accessibility tree, and what it still holds is not painted")
+            {"open": False, "hidden": False, "drawn": 3, "menuButton": True},
+            {"open": True, "hidden": True, "drawn": 3, "menuButton": False},
+        ], ("collapsed the strip is there and populated and the header's "
+            "Workspace menu -- the same list, one press further away -- is "
+            "not; expanded it is the other way round, and what the strip "
+            "still holds is out of the accessibility tree rather than merely "
+            "unpainted")
+
+    def test_collapsing_closes_a_workspace_menu_that_is_open(self):
+        """Its button is about to be hidden, and a menu whose button is gone
+        cannot be dismissed by pressing that button again."""
+        found = run(ROW + """
+            const shell = rowShell(TABS, "tab_txt2img");
+            shell.nodes.heading = document.createElement("button");
+            shell.nodes.body = document.createElement("div");
+            shell.nodes.panel = document.createElement("div");
+            shell.nodes.picker = document.createElement("button");
+            shell.nodes.menu = document.createElement("div");
+            shell.closed = [];
+            shell.closeMenu = () => { shell.closed.push(shell.nodes.menu.dataset.which); };
+            const seen = [];
+            ["workspaces", "utilities"].forEach((which) => {
+                shell.nodes.menu.dataset.which = which;
+                shell.state.conversationExpanded = false;
+                shell.applyAccordion();
+            });
+            console.log(JSON.stringify({closed: shell.closed}));
+        """, sources=("shell",))
+
+        assert found["closed"] == ["workspaces"], (
+            "only the one this replaces; the ⋯ menu's button is still there "
+            "and closing it would be closing somebody's open menu for them")
 
     def test_every_workspace_gets_a_button_and_the_active_one_is_marked(self):
         found = run(ROW + """
@@ -2799,21 +2832,24 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
             "drawn once at collapse and never again, the highlight would sit "
             "on whichever tab was open when the panel folded")
 
-    def test_collapsed_the_panel_is_left_to_size_itself_to_the_row(self):
-        """A stated column width caps it at 360px and wraps a tab bar into
-        four lines; the ask was the width of the screen."""
+    def test_the_panel_keeps_its_own_width_collapsed_or_not(self):
+        """Grown to its contents the row reached most of the way across the
+        screen on an installation with a dozen tabs -- a control covering the
+        page it is a control for. The panel is a column in both states now and
+        the strip scrolls inside it."""
         found = run("""
             const shell = Object.create(NS.Shell.prototype);
             shell.state = {panelOpen: true, panelWidth: 360, freeFloat: false,
                            floatAt: null, anchorOverride: "bottom-right"};
             shell.settings = {defaultAnchor: "bottom-right"};
-            const panel = document.createElement("div");
-            panel.style.width = "360px";
-            shell.nodes = {root: document.createElement("div"), panel,
-                           launcher: document.createElement("button")};
             shell.placeMenu = () => {};
             const seen = [];
             [true, false].forEach((open) => {
+                // A fresh panel each time. Reusing one lets the previous pass's
+                // width stand in for a width this pass never wrote.
+                const panel = document.createElement("div");
+                shell.nodes = {root: document.createElement("div"), panel,
+                               launcher: document.createElement("button")};
                 shell.state.conversationExpanded = open;
                 shell.placeNow();
                 seen.push(panel.style.width);
@@ -2821,31 +2857,198 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
             console.log(JSON.stringify({seen}));
         """, sources=("shell",))
 
-        assert found["seen"] == ["360px", ""], (
-            "expanded it is the remembered column; collapsed the stylesheet "
-            "and the content decide")
+        assert found["seen"] == ["360px", "360px"]
 
-    def test_the_stylesheet_bounds_the_row_by_the_screen_and_nothing_else(self):
+    def test_the_strip_is_one_line_that_scrolls_rather_than_wrapping(self):
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
-        rule = css.split(".forge-assistant-panel.forge-assistant-collapsed {", 1)[1] \
-                  .split("}", 1)[0]
-
-        assert "width: max-content" in rule, (
-            "the panel has to grow to the row rather than the row to the panel")
-        assert "100vw" in rule, "and stop at the screen"
         row = css.split(".forge-assistant-workspaces {", 1)[1].split("}", 1)[0]
-        assert "flex-wrap: wrap" in row, (
-            "at the screen's edge it wraps; it does not scroll sideways or clip")
 
-    def test_the_resize_handle_goes_with_the_column_width(self):
-        """`placeNow` stops writing a width while collapsed, so the handle has
-        nothing left to set. A resize cursor on an edge that does not resize
-        is worse than no handle."""
+        assert "flex-wrap: nowrap" in row, (
+            "wrapped, a dozen tabs are six lines and the panel is a wall")
+        assert "overflow-x: auto" in row, "and the rest has to stay reachable"
+        assert "touch-action: pan-x" in row, (
+            "touch pans natively; `startStrip` declines every pointer that is "
+            "not a mouse on the strength of this")
+        assert "overflow-y: hidden" in row
+        assert "overscroll-behavior-x: contain" in row, (
+            "a flick off the end must not become the browser's back gesture")
+
+    def test_the_buttons_keep_their_size_instead_of_being_squeezed(self):
+        """`flex: 0 0 auto` is the half of the scrolling that is easy to lose:
+        shrinkable buttons fit twelve tabs into 360px by making every label
+        unreadable, and nothing ever overflows to scroll."""
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
-        rule = css.split(
-            ".forge-assistant-panel.forge-assistant-collapsed "
-            ".forge-assistant-resize {", 1)[1].split("}", 1)[0]
+        rule = css.split(".forge-assistant-workspace {", 1)[1].split("}", 1)[0]
 
-        assert "display: none" in rule
+        assert "flex: 0 0 auto" in rule
+        assert "white-space: nowrap" in rule
+
+
+class TestDraggingTheWorkspaceStrip:
+    """Asked for: the strip stays the panel's width and you drag it sideways to
+    reach the rest. Touch pans natively; a mouse has neither a swipe nor,
+    without a scrollbar, anything to aim at -- so a mouse drags it."""
+
+    @staticmethod
+    def shell():
+        return """
+            const shell = Object.create(NS.Shell.prototype);
+            const row = document.createElement("div");
+            row.hidden = false;
+            row.scrollLeft = 0;
+            row.scrollWidth = 900;
+            row.clientWidth = 340;
+            row.setPointerCapture = () => { row.captured = true; };
+            row.releasePointerCapture = () => { row.released = true; };
+            shell.nodes = {workspaces: row};
+            shell.strip = null;
+            const press = (over) => ({pointerId: 1, button: 0, isPrimary: true,
+                                     pointerType: "mouse", clientX: 100,
+                                     ...(over || {})});
+        """
+
+    def test_a_drag_scrolls_the_strip_the_way_the_hand_goes(self):
+        found = run(self.shell() + """
+            shell.startStrip(press());
+            shell.moveStrip(press({clientX: 40}));
+            const dragged = row.scrollLeft;
+            shell.endStrip(press({clientX: 40}), false);
+            console.log(JSON.stringify({dragged, captured: !!row.captured,
+                                        released: !!row.released,
+                                        idle: shell.strip === null}));
+        """, sources=("shell",))
+
+        assert found["dragged"] == 60, (
+            "drag left by 60 and the row behind the right edge comes in")
+        assert found["captured"] is True, (
+            "without capture the gesture dies the moment the pointer leaves "
+            "the strip, which for a strip this short is immediately")
+        assert found["released"] is True
+        assert found["idle"] is True
+
+    def test_a_press_that_barely_moved_is_a_press(self):
+        """Six pixels is the threshold everything else here uses. Under it the
+        strip must not move and the click must go through, or a tab would take
+        two attempts on any hand that is not perfectly still."""
+        found = run(self.shell() + """
+            shell.startStrip(press());
+            shell.moveStrip(press({clientX: 97}));
+            const scrolled = row.scrollLeft;
+            shell.endStrip(press({clientX: 97}), false);
+            console.log(JSON.stringify({scrolled, suppress: shell.stripMoved}));
+        """, sources=("shell",))
+
+        assert found["scrolled"] == 0
+        assert found["suppress"] is False
+
+    def test_the_click_that_ends_a_real_drag_does_not_choose_a_tab(self):
+        found = run(self.shell() + """
+            shell.startStrip(press());
+            shell.moveStrip(press({clientX: 40}));
+            shell.endStrip(press({clientX: 40}), false);
+            console.log(JSON.stringify({suppress: shell.stripMoved}));
+        """, sources=("shell",))
+
+        assert found["suppress"] is True
+
+    def test_a_cancelled_gesture_suppresses_nothing(self):
+        """`pointercancel` is the browser taking the gesture over -- the strip
+        did not end anywhere, and there is no trailing click to swallow."""
+        found = run(self.shell() + """
+            shell.startStrip(press());
+            shell.moveStrip(press({clientX: 40}));
+            shell.endStrip(press({clientX: 40}), true);
+            console.log(JSON.stringify({suppress: shell.stripMoved}));
+        """, sources=("shell",))
+
+        assert found["suppress"] is False
+
+    def test_a_drag_that_ends_over_a_gap_does_not_eat_the_next_press(self):
+        """Let go between two buttons and no click follows, so nothing
+        consumes the flag. The next press clears it, or the tab after this one
+        silently would not switch."""
+        found = run(self.shell() + """
+            shell.startStrip(press());
+            shell.moveStrip(press({clientX: 40}));
+            shell.endStrip(press({clientX: 40}), false);
+            const stale = shell.stripMoved;
+            shell.startStrip(press({pointerId: 2}));
+            console.log(JSON.stringify({stale, cleared: shell.stripMoved}));
+        """, sources=("shell",))
+
+        assert found["stale"] is True
+        assert found["cleared"] is False
+
+    def test_touch_and_pen_are_left_to_the_browser(self):
+        """`touch-action: pan-x` means the browser pans them and then cancels
+        this pointer. Driving both fights the native gesture with a frame of
+        lag."""
+        found = run(self.shell() + """
+            const seen = {};
+            ["touch", "pen", "mouse"].forEach((kind) => {
+                shell.strip = null;
+                shell.startStrip(press({pointerType: kind}));
+                seen[kind] = shell.strip !== null;
+            });
+            console.log(JSON.stringify(seen));
+        """, sources=("shell",))
+
+        assert found == {"touch": False, "pen": False, "mouse": True}
+
+    def test_a_secondary_button_does_not_start_one(self):
+        found = run(self.shell() + """
+            shell.startStrip(press({button: 2}));
+            const right = shell.strip === null;
+            shell.startStrip(press({isPrimary: false}));
+            const second = shell.strip === null;
+            console.log(JSON.stringify({right, second}));
+        """, sources=("shell",))
+
+        assert found["right"] is True
+        assert found["second"] is True
+
+    def test_nothing_starts_while_the_strip_is_not_there(self):
+        """Expanded, the row is hidden and the panel's own drag owns the
+        pointer. A strip gesture starting under the conversation would scroll
+        something nobody can see."""
+        found = run(self.shell() + """
+            row.hidden = true;
+            shell.startStrip(press());
+            console.log(JSON.stringify({idle: shell.strip === null}));
+        """, sources=("shell",))
+
+        assert found["idle"] is True
+
+    def test_the_faded_edge_is_the_one_with_row_behind_it(self):
+        found = run(self.shell() + """
+            const seen = [];
+            [[0, 900], [280, 900], [560, 900], [0, 340]].forEach(([at, wide]) => {
+                row.scrollLeft = at;
+                row.scrollWidth = wide;
+                shell.markOverflow();
+                seen.push(row.getAttribute("data-overflow"));
+            });
+            console.log(JSON.stringify({seen}));
+        """, sources=("shell",))
+
+        assert found["seen"] == ["end", "both", "start", "none"], (
+            "at the left there is row to the right; in the middle both; at the "
+            "right only behind; and when it all fits, neither")
+
+    def test_the_stylesheet_fades_only_when_there_is_something_to_fade(self):
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+
+        for side in ("end", "start", "both"):
+            rule = css.split(
+                f'.forge-assistant-workspaces[data-overflow="{side}"] {{',
+                1)[1].split("}", 1)[0]
+            # Spelled out, because "mask-image" alone is satisfied by the
+            # vendor-prefixed line and would not notice the standard one going.
+            assert "\n    mask-image:" in rule, side
+            assert "\n    -webkit-mask-image:" in rule, side
+        assert '[data-overflow="none"]' not in css, (
+            "it all fits, so there is no mask at all -- a rule here would be a "
+            "gradient over a row that ends where it looks like it ends")
