@@ -65,6 +65,11 @@
     const MENU_EDGE = 8;
     const MENU_FLOOR = 120;
 
+    // What another extension on this page says when a dialog of its own takes
+    // over, and gives way again. Mini Paint NEO publishes it for its Send to
+    // WanGP popup; see `yieldTo`.
+    const FOREIGN_OVERLAY = "minipaint:overlay";
+
     // -- geometry ---------------------------------------------------------- //
 
     function viewport() {
@@ -870,6 +875,8 @@
         this.on(window, "pageshow", () => this.store.reconcile());
         this.on(window, "pagehide", () => this.store.flushDrafts());
         this.on(document, "keydown", (event) => this.documentKey(event), true);
+        // Another extension's dialog has taken the page. See `yieldTo`.
+        this.on(document, FOREIGN_OVERLAY, (event) => this.yieldTo(event));
 
         this.disposers.push(this.store.subscribeState((view) => this.render(view)));
         this.disposers.push(this.host.subscribeNavigation((active) => {
@@ -1261,6 +1268,34 @@
             event.preventDefault();
             this.send();
         }
+    };
+
+    // Get out of the way of somebody else's dialog.
+    //
+    // Reported against Mini Paint NEO's Send to WanGP popup: the assistant's
+    // launcher sat on top of it, and in focus mode the focused workspace
+    // covered it outright. Both were stacking order -- that popup drew at
+    // `z-index: 60` against this extension's 1100 and 1200 -- and it is fixed
+    // on that side, where the number belongs. What is left is the part only
+    // this side can do: a panel covering a dialog is still covering it,
+    // whatever the numbers say, so the panel puts itself away.
+    //
+    // Back to the launcher, not gone: the launcher is small, it is what the
+    // panel is minimised to by its own ✕, and it leaves the way back exactly
+    // where it always is. Nothing is reopened when the dialog closes -- a
+    // panel that springs back over the page somebody has returned to is the
+    // same complaint from the other end.
+    //
+    // Focus mode is deliberately untouched. The dialog draws above it now, so
+    // there is nothing to leave, and a workspace that emptied itself every
+    // time a popup opened would be worse than the bug.
+    Shell.prototype.yieldTo = function (event) {
+        const detail = (event && event.detail) || {};
+        if (!detail.open) return false;
+        if (!this.state.panelOpen) return false;
+        this.closeMenu();
+        this.close();
+        return true;
     };
 
     Shell.prototype.documentKey = function (event) {

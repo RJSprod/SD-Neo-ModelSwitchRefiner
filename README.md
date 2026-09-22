@@ -3177,6 +3177,13 @@ stops working while it is open. On a phone it becomes a sheet anchored to the
 half the docking says, and *that* is modal, because a sheet the page scrolls
 behind is a sheet you lose.
 
+**It gets out of the way of a dialog.** Mini Paint NEO's *Send to WanGP* popup
+publishes an event when it takes the page; the panel puts itself back to its
+launcher for it and stays there, so the popup is unobstructed. It does not come
+back on its own when the popup closes, and it does not turn focus mode off —
+that popup is drawn above focus mode now. Nothing else changes: no subscription
+drops, no reply is cancelled.
+
 **The workspace picker** lists the tabs this installation actually has and
 activates the host's own tab button. It works in focus mode: focus lifts for
 the switch and settles on the workspace you asked for, and if the switch does
