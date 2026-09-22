@@ -5757,11 +5757,24 @@
 }
 
 /* Reachable without hover, always: a control that only appears on hover is a
-   control a touch screen does not have. */
+   control a touch screen does not have.
+
+   Sized as a target rather than as text, because these carry a glyph now and
+   not a word. 44px square is the smallest thing a thumb hits reliably, and
+   three of them sit on one row at panel width -- where the eight labelled
+   buttons this replaced wrapped onto three rows under every bubble. The glyph
+   is a little larger than the body text and centred, and `line-height: 1`
+   keeps it on the middle of the square whatever the theme's leading is. */
 .forge-assistant-action {
-    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0.15em 0.4em;
-    font-size: 0.8em;
+    font-size: 1.05em;
+    line-height: 1;
+    text-align: center;
 }
 
 .forge-assistant-status {
@@ -5841,6 +5854,13 @@
 
 .forge-assistant-menu-item {
     text-align: left;
+}
+
+/* The way out of a menu, set slightly apart from the entries that choose
+   something -- it is the one item in the list that does nothing. */
+.forge-assistant-cancel {
+    margin-top: 0.3em;
+    opacity: 0.85;
 }
 
 .forge-assistant-menu-item[aria-current="true"] {

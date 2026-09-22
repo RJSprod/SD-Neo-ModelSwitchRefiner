@@ -3166,14 +3166,19 @@ half the docking says, and *that* is modal, because a sheet the page scrolls
 behind is a sheet you lose.
 
 **The workspace picker** lists the tabs this installation actually has and
-activates the host's own tab button. The menu closes on the press. Which tab is
+activates the host's own tab button. It works in focus mode: focus lifts for
+the switch and settles on the workspace you asked for, and if the switch does
+not happen it goes back where it was. The menu closes on the press, and it ends
+with **Cancel** — every menu here does, because a phone has no Escape key and a
+menu you cannot leave without committing is a menu people learn not to open. Which tab is
 highlighted follows the host's selection, not the press — so a switch made by a
 header button, or by another extension's "send to img2img", moves the highlight
 too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
-**The utility menu** — the **⋯** beside Focus — has two entries, and both of
-them are the same request: *I need this card back, now.*
+**The utility menu** — the **⋯** beside Focus — has two entries and a
+**Cancel**, and both entries are the same request: *I need this card back,
+now.*
 
 | | |
 | --- | --- |
@@ -3237,11 +3242,20 @@ is never a blank page. The status line says which one you got.
 choose another thread there — or start one, or branch — and the panel moves with
 it. A new panel opens on the conversation Conversation was last left on, and
 from then on the window owns its own selection, so two windows can deliberately
-sit on different threads. Every action the tab has is here: edit, regenerate, continue, send again from here, branch, the version
-pager, delete, delete from here, and Listen. Each action carries the message it
-was pointing at *and the revision the thread was at when you pressed it*, so an
-action aimed at message four is refused if the thread moved rather than being
-quietly re-aimed at whatever is at four now.
+sit on different threads. Under the newest message are three icons — **edit**,
+**regenerate** and **delete** — and regenerate only where the newest message is
+a reply, because an unanswered message of yours has nothing to ask again. Each
+carries its word as a tooltip and to a screen reader. Each also carries the
+message it was pointing at *and the revision the thread was at when you pressed
+it*, so an action aimed at a message is refused if the thread moved rather than
+being quietly re-aimed at whatever is in that place now.
+
+That is the panel, not the conversation. Branching, continuing, sending again
+from a point, truncating and the version pager are all still there in the
+Conversation tab, which has the room to say what they are about to do; the
+panel offers the three you want on the thing you just said or just read. So a
+reply you regenerate in the panel keeps the one it replaced — you go to the tab
+to page back to it.
 
 Both composers on a page share one draft per thread, so a message half-typed in
 the tab is there in the panel and back again, and switching thread stores and
