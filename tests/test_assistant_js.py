@@ -578,7 +578,7 @@ class TestTheStylesheetCanHideThings:
         assert hidden <= {"panel", "launcher", "menu", "body", "chip", "jump", "stop",
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
-                          "launcherLabel", "input", "ghost"}, hidden
+                          "launcherLabel", "input", "ghost", "workspaces"}, hidden
 
 
 class TestOpeningAndClosing:
@@ -2498,7 +2498,10 @@ class TestTheHeaderIsOneRow:
             shell.nodes = {root: {appendChild() {}}};
             shell.disposers = [];
             shell.menuHandle = {close() {}};
-            shell.host = {registerMenu: () => () => undefined};
+            shell.host = {registerMenu: () => () => undefined,
+                          getActiveWorkspace: () => "tab_txt2img",
+                          listWorkspaces: () => []};
+            shell.place = () => undefined;
             shell.buildPanel();
             const header = shell.nodes.header;
             console.log(JSON.stringify({
@@ -2526,7 +2529,10 @@ class TestTheHeaderIsOneRow:
             shell.nodes = {root: {appendChild() {}}};
             shell.disposers = [];
             shell.menuHandle = {close() {}};
-            shell.host = {registerMenu: () => () => undefined};
+            shell.host = {registerMenu: () => () => undefined,
+                          getActiveWorkspace: () => "tab_txt2img",
+                          listWorkspaces: () => []};
+            shell.place = () => undefined;
             shell.buildPanel();
             console.log(JSON.stringify({
                 tag: shell.nodes.grip.tagName,
@@ -2672,3 +2678,174 @@ class TestGivingWayToAForeignDialog:
             assert layer < 2000, (
                 "a dialog another extension owns is drawn at 2000; this one has to "
                 f"stay under it, and {layer} does not")
+
+
+ROW = """
+// A shell built far enough to draw the workspace row. `renderWorkspaces`
+// reaches the host for the list and the selection, and pressing an entry goes
+// through `close` and `switchWorkspace`, so all three are watched here rather
+// than stubbed away.
+function rowShell(workspaces, active) {
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = {panelOpen: true, conversationExpanded: false,
+                   focusEnabled: false, focusWorkspaceId: null};
+    shell.closed = 0;
+    shell.switched = [];
+    shell.close = () => { shell.closed += 1; };
+    shell.switchWorkspace = (id) => { shell.switched.push(id); };
+    shell.place = () => {};
+    shell.nodes = {workspaces: document.createElement("div")};
+    shell.nodes.workspaces.hidden = false;
+    shell.host = {
+        getActiveWorkspace: () => active,
+        listWorkspaces: () => workspaces,
+    };
+    return shell;
+}
+const TABS = [
+    {id: "tab_txt2img", label: "Txt2Img", available: true},
+    {id: "tab_img2img", label: "Img2Img", available: true},
+    {id: "tab_extras", label: "Extras", available: false},
+];
+"""
+
+
+class TestTheCollapsedPanelIsARowOfWorkspaces:
+    """Asked for: collapsed, the flyout was a header and nothing else. It now
+    carries every workspace side by side, and a press both switches and puts
+    the panel away."""
+
+    def test_the_row_is_drawn_only_while_the_conversation_is_collapsed(self):
+        """Expanded, the panel is the conversation and the picker in the
+        header is how you move; the row would be duplicate chrome eating the
+        transcript's height."""
+        found = run(ROW + """
+            const shell = rowShell(TABS, "tab_txt2img");
+            shell.nodes.heading = document.createElement("button");
+            shell.nodes.body = document.createElement("div");
+            shell.nodes.panel = document.createElement("div");
+            const seen = [];
+            [false, true].forEach((open) => {
+                shell.state.conversationExpanded = open;
+                shell.applyAccordion();
+                seen.push({open, hidden: shell.nodes.workspaces.hidden,
+                           drawn: shell.nodes.workspaces.children.length});
+            });
+            console.log(JSON.stringify({seen}));
+        """, sources=("shell",))
+
+        assert found["seen"] == [
+            {"open": False, "hidden": False, "drawn": 3},
+            {"open": True, "hidden": True, "drawn": 3},
+        ], ("collapsed the row is there and populated; expanded it is out of "
+            "the accessibility tree, and what it still holds is not painted")
+
+    def test_every_workspace_gets_a_button_and_the_active_one_is_marked(self):
+        found = run(ROW + """
+            const shell = rowShell(TABS, "tab_img2img");
+            shell.renderWorkspaces();
+            const row = shell.nodes.workspaces;
+            console.log(JSON.stringify({
+                labels: row.children.map((c) => c.textContent),
+                current: row.children.map((c) => c.getAttribute("aria-current")),
+                disabled: row.children.map((c) => !!c.disabled),
+                grouped: row.children.every((c) => c.type === "button"),
+            }));
+        """, sources=("shell",))
+
+        assert found["labels"] == ["Txt2Img", "Img2Img", "Extras"]
+        assert found["current"] == ["false", "true", "false"], (
+            "the mark follows the host's selection, not the last press here")
+        assert found["disabled"] == [False, False, True]
+        assert found["grouped"] is True, (
+            "inside a form a bare <button> submits it")
+
+    def test_a_press_switches_and_puts_the_panel_away(self):
+        """The ask was that it goes back to being a button after a choice, and
+        the order matters: away first, so the page is not switching underneath
+        a panel that is on its way out."""
+        found = run(ROW + """
+            const shell = rowShell(TABS, "tab_txt2img");
+            shell.renderWorkspaces();
+            const order = [];
+            shell.close = () => order.push("close");
+            shell.switchWorkspace = (id) => order.push("switch:" + id);
+            shell.nodes.workspaces.children[1].handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({order}));
+        """, sources=("shell",))
+
+        assert found["order"] == ["close", "switch:tab_img2img"]
+
+    def test_a_page_with_no_workspaces_says_so_rather_than_drawing_nothing(self):
+        found = run(ROW + """
+            const shell = rowShell([], "");
+            shell.renderWorkspaces();
+            const row = shell.nodes.workspaces;
+            console.log(JSON.stringify({
+                text: row.children.map((c) => c.textContent),
+            }));
+        """, sources=("shell",))
+
+        assert found["text"] == ["No workspaces on this page."]
+
+    def test_the_row_follows_a_switch_made_anywhere_else_on_the_page(self):
+        """Pressing a tab in the page's own bar has to move the highlight
+        here; the subscriber that redraws the header picker redraws this too."""
+        shell = SHELL.read_text(encoding="utf-8")
+        subscriber = shell.split("subscribeNavigation((active)", 1)[1] \
+            .split("}));", 1)[0]
+
+        assert "this.renderWorkspaces();" in subscriber, (
+            "drawn once at collapse and never again, the highlight would sit "
+            "on whichever tab was open when the panel folded")
+
+    def test_collapsed_the_panel_is_left_to_size_itself_to_the_row(self):
+        """A stated column width caps it at 360px and wraps a tab bar into
+        four lines; the ask was the width of the screen."""
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.state = {panelOpen: true, panelWidth: 360, freeFloat: false,
+                           floatAt: null, anchorOverride: "bottom-right"};
+            shell.settings = {defaultAnchor: "bottom-right"};
+            const panel = document.createElement("div");
+            panel.style.width = "360px";
+            shell.nodes = {root: document.createElement("div"), panel,
+                           launcher: document.createElement("button")};
+            shell.placeMenu = () => {};
+            const seen = [];
+            [true, false].forEach((open) => {
+                shell.state.conversationExpanded = open;
+                shell.placeNow();
+                seen.push(panel.style.width);
+            });
+            console.log(JSON.stringify({seen}));
+        """, sources=("shell",))
+
+        assert found["seen"] == ["360px", ""], (
+            "expanded it is the remembered column; collapsed the stylesheet "
+            "and the content decide")
+
+    def test_the_stylesheet_bounds_the_row_by_the_screen_and_nothing_else(self):
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        rule = css.split(".forge-assistant-panel.forge-assistant-collapsed {", 1)[1] \
+                  .split("}", 1)[0]
+
+        assert "width: max-content" in rule, (
+            "the panel has to grow to the row rather than the row to the panel")
+        assert "100vw" in rule, "and stop at the screen"
+        row = css.split(".forge-assistant-workspaces {", 1)[1].split("}", 1)[0]
+        assert "flex-wrap: wrap" in row, (
+            "at the screen's edge it wraps; it does not scroll sideways or clip")
+
+    def test_the_resize_handle_goes_with_the_column_width(self):
+        """`placeNow` stops writing a width while collapsed, so the handle has
+        nothing left to set. A resize cursor on an edge that does not resize
+        is worse than no handle."""
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        rule = css.split(
+            ".forge-assistant-panel.forge-assistant-collapsed "
+            ".forge-assistant-resize {", 1)[1].split("}", 1)[0]
+
+        assert "display: none" in rule

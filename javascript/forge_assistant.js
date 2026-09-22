@@ -497,6 +497,24 @@
         panel.appendChild(menu);
         this.nodes.menu = menu;
 
+        // The workspaces, as a row, for when the conversation is collapsed.
+        //
+        // Collapsed, this panel was a header and a closed accordion: four
+        // controls, none of which did anything without opening something else
+        // first. The one thing it is well placed to be in that state is a tab
+        // bar -- so that is what it is. Every workspace side by side, one
+        // press each, and the panel puts itself away afterwards because a
+        // switch is the whole of what somebody opened it for.
+        //
+        // Hidden rather than absent when the conversation is open: the panel
+        // has the workspace menu in its header there, and two ways to change
+        // workspace on one screen is one too many.
+        const workspaces = element("div", "forge-assistant-workspaces");
+        workspaces.setAttribute("role", "group");
+        workspaces.setAttribute("aria-label", "Workspaces");
+        panel.appendChild(workspaces);
+        this.nodes.workspaces = workspaces;
+
         // The accordion heading owns the ENTIRE conversation body. Collapsed,
         // all of it leaves the layout and the accessibility tree -- a body that
         // is only visually hidden is a body a screen reader still reads out.
@@ -613,6 +631,47 @@
         // not merely stop being painted.
         this.nodes.body.hidden = !open;
         this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open);
+        this.nodes.workspaces.hidden = open;
+        if (!open) this.renderWorkspaces();
+        // The panel is sized to its content while collapsed, so the row
+        // appearing or going changes how wide it is and therefore where its
+        // anchor puts it.
+        this.place();
+    };
+
+    /** The workspace row: every tab this installation has, one press each.
+     *
+     * Rebuilt rather than patched. It is a handful of buttons drawn when the
+     * conversation is collapsed and when the host's selection moves, and a
+     * diff of that would be more code than it saves.
+     */
+    Shell.prototype.renderWorkspaces = function () {
+        const row = this.nodes.workspaces;
+        if (!row || row.hidden) return;
+        const active = this.host.getActiveWorkspace();
+        const found = this.host.listWorkspaces();
+        row.innerHTML = "";
+        if (!found.length) {
+            row.appendChild(element("p", "forge-assistant-menu-empty",
+                                    "No workspaces on this page."));
+            return;
+        }
+        found.forEach((workspace) => {
+            const button = element("button", "forge-assistant-workspace", workspace.label);
+            button.type = "button";
+            // The highlight follows the host's own selection, not this press,
+            // so a switch made anywhere else moves it too.
+            button.setAttribute("aria-current", String(workspace.id === active));
+            button.disabled = !workspace.available;
+            button.addEventListener("click", () => {
+                // Away first, so the page is not switching underneath a panel
+                // that is about to stop being there. A failed switch is
+                // reported in the status line of the panel that comes back.
+                this.close();
+                this.switchWorkspace(workspace.id);
+            });
+            row.appendChild(button);
+        });
     };
 
     // -- placing ----------------------------------------------------------- //
@@ -651,11 +710,17 @@
         this.nodes.panel.classList.remove("forge-assistant-sheet");
         this.nodes.panel.removeAttribute("aria-modal");
         this.nodes.panel.setAttribute("role", "complementary");
-        if (open) {
+        if (open && this.state.conversationExpanded) {
             const width = Math.min(Math.max(this.state.panelWidth || NOMINAL_WIDTH,
                                             MIN_WIDTH),
                                    Math.min(MAX_WIDTH, view.width - 32));
             node.style.width = width + "px";
+        } else if (open) {
+            // Collapsed the panel is a row of workspaces, and what it wants is
+            // the width of that row -- up to the screen, where the stylesheet
+            // stops it and the row wraps. A column width stated here would cap
+            // it at 360px and wrap a tab bar into four lines.
+            node.style.width = "";
         }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
@@ -882,6 +947,7 @@
         this.disposers.push(this.host.subscribeNavigation((active) => {
             this.activeWorkspace = active;
             this.applySuppression();
+            this.renderWorkspaces();
             if (this.state.focusEnabled && active && this.focus.isActive()
                 && active !== this.focus.activeWorkspace()) {
                 const moved = this.focus.moveTo(active, this.host);

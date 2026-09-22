@@ -753,6 +753,86 @@ look like anything but a z-index.
 
 ---
 
+## 3.14 The collapsed panel had nothing in it
+
+> "I like how the flyout looks when expanded, but when its collapsed, its
+> useless. Lets make is useful in this view. When conversation is collapsed, i
+> should see all the options of workspace side by side as a button row, only
+> bounded by the width of the screen. After i select, the flyout to turn back
+> into a button (as if i closed it)."
+
+Accurate. Collapsed, the panel was a header and a folded accordion: four
+controls, none of which did anything without opening something else first. It
+was strictly worse than the launcher it came from, which at least took one
+press to get somewhere.
+
+The one thing a small always-on-top panel is well placed to be is a tab bar, so
+that is what it is now. `renderWorkspaces` draws every entry `listWorkspaces`
+returns into a row under the header, and `applyAccordion` shows that row
+exactly when the conversation is hidden.
+
+**Rebuilt, not patched.** It is a handful of buttons redrawn on two events —
+the accordion closing, and the host's selection moving — and a diff of that
+would be more code than it saves.
+
+**The press closes first and switches second.** Either order switches the tab;
+this one does not leave the page changing underneath a panel that is on its way
+out. A switch that fails still reports, in the status line of the panel that
+comes back.
+
+**The mark is the host's, not the press's.** `aria-current` is set from
+`getActiveWorkspace()` on every draw, and the navigation subscriber redraws.
+Set from the press instead, it would sit on whichever tab was last pressed here
+and disagree with the page as soon as anybody used a tab button — the same
+mistake the picker was written to avoid, and the reason the navigation
+subscriber has its own test.
+
+**The width is the row's.** This is the part that had to change outside this
+function. `placeNow` wrote `panelWidth` — 360 by default — on the panel
+whenever it was open. A tab bar under a 360-pixel cap is a tab bar in four
+lines, which is not what "side by side" means, so collapsed it now writes no
+width at all and the stylesheet decides:
+
+```css
+.forge-assistant-panel.forge-assistant-collapsed {
+    width: max-content;
+    max-width: calc(100vw - 2 * 24px);
+}
+```
+
+`max-content` is what puts them in a line: the panel asks for the width its row
+would take unwrapped. `max-width` is the bound the request asked for, and at
+that bound the row wraps rather than the panel overflowing. 24 is `WIDE_GAP`,
+the gutter the anchor arithmetic already leaves around a docked panel; the two
+have to agree or the panel is placed against an edge it is too wide to sit
+inside.
+
+Measured in headless Chromium at 1280×800, because a stub DOM cannot compute
+`max-content`: four workspaces give a 401-pixel panel on one row; sixteen give
+1232 — `1280 − 48`, exactly the bound — on two rows, with no horizontal
+overflow on the document.
+
+**Two things went with the column width.** The resize handle is hidden while
+collapsed: `placeNow` no longer writes a width there, so a resize cursor on
+that edge would be an edge that does not resize. And the row draws no border of
+its own — the header above it already draws the separator, and collapsed this
+row is the last thing in the panel, so a second hairline would land on the
+panel's own bottom edge.
+
+On a phone the panel is a sheet, full width already, and a row that tried to be
+wider would push it off the screen; the sheet rule overrides both properties
+back to `auto`/`none`.
+
+**The header's workspace menu stays.** Collapsed there are now two ways to
+switch, and that is deliberate: the header is the same five controls in both
+states, and a button that disappears when you fold the conversation is a button
+you have to learn the rule for. It also stays the better of the two on a phone,
+where the same sixteen workspaces measure six wrapped lines and 305 of a
+390×780 sheet's 780 pixels — usable, but a list is the shape for that, and the
+menu is a list.
+
+---
+
 ## 4. Deliberate deviations
 
 **The panel offers three message actions, not all of them** (§3.11). The

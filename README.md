@@ -3171,7 +3171,20 @@ it. Collapsed, the transcript and the composer leave the layout and the
 accessibility tree rather than merely stopping being painted. The space between
 the **⋯** and the **✕** is what you drag the panel by; the buttons in that row
 stay buttons. **✕** puts the panel back to the launcher, at the same place;
-pressing the launcher brings it back there. The panel is an overlay: it never
+pressing the launcher brings it back there.
+
+**Collapsed, the panel is a tab bar.** Under the header it lists every
+workspace this installation has, side by side, one press each — a tab bar you
+can put wherever you want one, in focus mode as much as out of it. The panel
+grows to the row rather than the row to the panel, up to the width of the
+window, where the row wraps onto a second line rather than scrolling or being
+cut off. Pressing one switches and puts the panel away, back to the launcher:
+a collapsed panel is a thing you are passing through, not a thing you sit in.
+The workspace you are in is marked, and the mark follows the host's selection
+the same way the picker's does, so a switch made anywhere else on the page
+moves it too. A workspace the host cannot activate is shown and not pressable
+rather than hidden. The edge handle that sets the column width is not there
+while collapsed — there is no column to set. The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it
 stops working while it is open. On a phone it becomes a sheet anchored to the
 half the docking says, and *that* is modal, because a sheet the page scrolls
