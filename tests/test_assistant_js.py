@@ -663,28 +663,53 @@ class TestTheUtilityMenu:
         assert "settings_submit" not in utilities
 
 
+PICKER = """
+// A shell with just enough around it to press a menu item: the picker calls
+// into the host, into focus mode and into the status line, and a test that
+// stubbed only the host would pass or fail on whichever of the three it
+// happened to reach first.
+function picker(host, focus) {
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = {panelOpen: true, focusEnabled: false, focusWorkspaceId: null};
+    shell.closed = 0;
+    shell.said = [];
+    shell.closeMenu = () => { shell.closed += 1; };
+    shell.say = (text, tone) => shell.said.push({text, tone});
+    shell._save = () => {};
+    shell.place = () => {};
+    shell.nodes = {focusToggle: {setAttribute(name, value) { this[name] = value; }}};
+    shell.host = Object.assign({
+        getActiveWorkspace: () => "tab_txt2img",
+        listWorkspaces: () => [{id: "tab_img2img", label: "Img2Img", available: true}],
+        activateWorkspace: () => Promise.resolve("tab_img2img"),
+    }, host || {});
+    shell.focus = Object.assign({
+        calls: [],
+        on: "",
+        isActive() { return !!this.on; },
+        activeWorkspace() { return this.on; },
+        exit() { this.calls.push("exit:" + this.on); this.on = ""; return true; },
+        enter(id) {
+            this.calls.push("enter:" + id);
+            this.on = id;
+            return {ok: true, reason: "", note: ""};
+        },
+    }, focus || {});
+    return shell;
+}
+"""
+
+
 class TestTheWorkspacePicker:
     def test_the_menu_closes_on_the_press_not_on_the_confirmation(self):
         """Held open until the host confirmed, it stayed open for ever whenever
         the confirmation did not arrive -- and it did not, because the watchdog
         rejects after four seconds on any page whose tab bar this adapter reads
         differently from the way it expected to."""
-        found = run("""
-            const shell = Object.create(NS.Shell.prototype);
-            shell.state = {panelOpen: true};
-            let closed = 0;
-            shell.closeMenu = () => { closed += 1; };
-            shell.say = () => {};
-            shell.host = {
-                getActiveWorkspace: () => "somewhere_else",
-                listWorkspaces: () => [{id: "tab_txt2img", label: "Txt2Img",
-                                        available: true}],
-                // Never settles: the host has not confirmed and never will.
-                activateWorkspace: () => new Promise(() => {}),
-            };
-            const items = shell.workspaceItems();
-            items[0].handlers.click.forEach((fn) => fn());
-            console.log(JSON.stringify({closed}));
+        found = run(PICKER + """
+            const shell = picker({activateWorkspace: () => new Promise(() => {})});
+            shell.workspaceItems()[0].handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({closed: shell.closed}));
         """, sources=("shell",))
 
         assert found["closed"] == 1
@@ -1762,3 +1787,281 @@ class TestTheHostReadsForgesTabs:
         """, sources=("host",))
 
         assert found["pressed"] == [0, 1, 0]
+
+
+class TestEveryMenuHasAWayOut:
+    """Reported in use: once a menu was open there was no easy exit unless you
+    chose something from it.
+
+    Escape closes them, and so does opening the other one, and so would a press
+    on the button that opened it. None of that is any use to a thumb: a phone
+    has no Escape key, and the two header buttons are a small target beside a
+    menu that is covering them.
+    """
+
+    def test_every_menu_ends_with_cancel(self):
+        found = run(PICKER + """
+            const shell = picker();
+            shell.nodes.menu = {hidden: true, dataset: {}, items: [],
+                                set innerHTML(v) { if (!v) this.items.length = 0; },
+                                get innerHTML() { return ""; },
+                                appendChild(node) { this.items.push(node); }};
+            shell.nodes.picker = {setAttribute() {}};
+            shell.nodes.utilities = {setAttribute() {}};
+            shell.closeMenu = () => {};
+            shell.host.openOnly = () => {};
+            shell.host.listUtilities = () => [{id: "u", label: "Unload LLM",
+                                               enabled: true, kind: "unload", scope: "llm"}];
+            shell.store = {snapshot: () => ({conversation: {threads: []},
+                                             selection: {character: "", thread: ""}})};
+            const last = {};
+            ["workspaces", "threads", "utilities"].forEach((which) => {
+                shell.nodes.menu.dataset.which = "";
+                shell.toggleMenu(which);
+                const items = shell.nodes.menu.items;
+                last[which] = items[items.length - 1].textContent;
+            });
+            console.log(JSON.stringify(last));
+        """, sources=("shell",))
+
+        assert found == {"workspaces": "Cancel", "threads": "Cancel",
+                         "utilities": "Cancel"}
+
+    def test_cancel_closes_the_menu_and_chooses_nothing(self):
+        found = run(PICKER + """
+            const shell = picker();
+            let activated = 0;
+            shell.host.activateWorkspace = () => { activated += 1;
+                                                   return Promise.resolve(""); };
+            const cancel = shell.cancelItem();
+            cancel.handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({closed: shell.closed, activated,
+                                        role: cancel.getAttribute("role")}));
+        """, sources=("shell",))
+
+        assert found["closed"] == 1
+        assert found["activated"] == 0
+        assert found["role"] == "menuitem"
+
+    def test_the_way_out_is_added_where_a_new_menu_cannot_forget_it(self):
+        """In `toggleMenu`, not in each builder. A fourth menu added later gets
+        one without anybody remembering to."""
+        shell = SHELL.read_text(encoding="utf-8")
+        builders = [shell.split("Shell.prototype." + name + " = function", 1)[1]
+                    .split("Shell.prototype", 1)[0]
+                    for name in ("workspaceItems", "threadItems", "utilityItems")]
+
+        for body in builders:
+            assert "cancelItem" not in body, (
+                "the way out belongs in toggleMenu, once, not in every builder")
+        toggle = shell.split("Shell.prototype.toggleMenu = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+        assert "cancelItem" in toggle
+
+
+class TestSwitchingWorkspaceWhileFocused:
+    """Reported in use: the picker would not switch tabs until focus mode was
+    turned off.
+
+    Focus hides every panel but the one it is filling, with `display: none
+    !important` -- which beats the inline `display: block` Gradio writes on the
+    panel it has just switched to. So the destination stayed hidden, the old
+    workspace stayed fixed to the viewport, and `getActiveWorkspace()` went on
+    naming the focused one. The switch could not be observed, so the
+    confirmation watchdog timed out and said the workspace had not opened.
+    """
+
+    def test_focus_comes_off_for_the_switch_and_goes_on_at_the_destination(self):
+        found = run(PICKER + """
+            const shell = picker();
+            shell.focus.on = "tab_txt2img";
+            shell.state.focusEnabled = true;
+            shell.switchWorkspace("tab_img2img").then(() => {
+                console.log(JSON.stringify({
+                    calls: shell.focus.calls,
+                    on: shell.focus.activeWorkspace(),
+                    remembered: shell.state.focusWorkspaceId,
+                    pressed: shell.nodes.focusToggle["aria-pressed"],
+                }));
+            });
+        """, sources=("shell",))
+
+        assert found["calls"] == ["exit:tab_txt2img", "enter:tab_img2img"], (
+            "off before the host is asked to show a panel this code is hiding")
+        assert found["on"] == "tab_img2img"
+        assert found["remembered"] == "tab_img2img"
+        assert found["pressed"] == "true"
+
+    def test_the_host_is_asked_while_nothing_is_being_hidden(self):
+        """The order is the fix. Asked first and unfocused second, the host
+        would be switching to a panel that is still `display: none`."""
+        found = run(PICKER + """
+            const order = [];
+            const shell = picker({activateWorkspace: (id) => {
+                order.push("activate:" + id + " focus=" + (shell.focus.on || "none"));
+                return Promise.resolve(id);
+            }});
+            shell.focus.on = "tab_txt2img";
+            shell.state.focusEnabled = true;
+            shell.switchWorkspace("tab_img2img").then(() => {
+                console.log(JSON.stringify({order}));
+            });
+        """, sources=("shell",))
+
+        assert found["order"] == ["activate:tab_img2img focus=none"]
+
+    def test_a_switch_that_fails_does_not_also_cost_focus_mode(self):
+        found = run(PICKER + """
+            const shell = picker({
+                activateWorkspace: () => Promise.reject(new Error("did not open")),
+            });
+            shell.focus.on = "tab_txt2img";
+            shell.state.focusEnabled = true;
+            shell.switchWorkspace("tab_img2img").then(() => {
+                console.log(JSON.stringify({on: shell.focus.activeWorkspace(),
+                                            enabled: shell.state.focusEnabled,
+                                            said: shell.said.map((s) => s.text)}));
+            });
+        """, sources=("shell",))
+
+        assert found["on"] == "tab_txt2img", "put back where it was"
+        assert found["enabled"] is True
+        assert found["said"] == ["did not open"]
+
+    def test_a_switch_with_focus_off_never_touches_focus(self):
+        found = run(PICKER + """
+            const shell = picker();
+            shell.switchWorkspace("tab_img2img").then(() => {
+                console.log(JSON.stringify({calls: shell.focus.calls,
+                                            enabled: shell.state.focusEnabled}));
+            });
+        """, sources=("shell",))
+
+        assert found["calls"] == []
+        assert found["enabled"] is False
+
+    def test_a_destination_that_cannot_be_focused_says_so_and_stays_switched(self):
+        """The switch happened; only the mode could not follow. Reporting it as
+        a failed switch would be a lie about where the person now is."""
+        found = run(PICKER + """
+            const shell = picker({}, {
+                enter(id) { this.calls.push("enter:" + id);
+                            return {ok: false, reason: "No panel to fill with."}; },
+            });
+            shell.focus.on = "tab_txt2img";
+            shell.state.focusEnabled = true;
+            shell.switchWorkspace("tab_img2img").then(() => {
+                console.log(JSON.stringify({enabled: shell.state.focusEnabled,
+                                            pressed: shell.nodes.focusToggle["aria-pressed"],
+                                            said: shell.said.map((s) => s.text)}));
+            });
+        """, sources=("shell",))
+
+        assert found["enabled"] is False
+        assert found["pressed"] == "false"
+        assert found["said"] == ["No panel to fill with."]
+
+    def test_navigation_never_tries_to_move_focus_that_is_off(self):
+        """Between the exit and the re-entry above, focus is off. `moveTo`
+        refuses with "Focus is not on.", which would turn a working switch into
+        a warning and a lost mode."""
+        shell = SHELL.read_text(encoding="utf-8")
+        subscriber = shell.split("subscribeNavigation((active)", 1)[1] \
+            .split("}));", 1)[0]
+
+        assert "this.focus.isActive()" in subscriber, (
+            "only focus that is on can be moved")
+        assert "moveTo" in subscriber
+
+
+class TestThePerMessageActions:
+    """Reported in use: eight buttons and a version pager under every bubble,
+    wrapping onto three rows at panel width.
+
+    What is left is the three somebody wants on the thing they just said or
+    just read. Nothing here removes an action from the conversation -- the tab
+    keeps the whole set, and it has the room to explain what branching and
+    truncating are about to do.
+    """
+
+    @staticmethod
+    def bar(row, count, role="assistant"):
+        return PICKER + """
+            const shell = picker();
+            shell.settings = {bubbleWidth: 80};
+            const messages = [];
+            for (let i = 0; i < %d; i += 1) {
+                messages.push({index: i, role: "user", text: "m" + i, active: 0,
+                               versions: ["m" + i]});
+            }
+            const row = {index: %d, role: "%s", text: "hello", active: 0,
+                         versions: ["hello"]};
+            messages[%d] = row;
+            const view = {conversation: {conversation: {revision: 3}, messages}};
+            const bar = shell.actions(row, view);
+            console.log(JSON.stringify({
+                glyphs: bar.children.map((b) => b.textContent),
+                labels: bar.children.map((b) => b.getAttribute("aria-label")),
+                titles: bar.children.map((b) => b.title),
+            }));
+        """ % (count, row, role, row)
+
+    def test_only_the_last_message_carries_actions(self):
+        found = run(self.bar(2, 5), sources=("shell",))
+
+        assert found["glyphs"] == []
+
+    def test_the_last_reply_offers_edit_regenerate_and_delete(self):
+        found = run(self.bar(4, 5, "assistant"), sources=("shell",))
+
+        assert found["labels"] == ["Edit", "Regenerate", "Delete"]
+
+    def test_the_last_message_of_yours_has_nothing_to_ask_again(self):
+        """Regenerate is a reply's action. On an unanswered message of yours
+        there is no reply to replace."""
+        found = run(self.bar(4, 5, "user"), sources=("shell",))
+
+        assert found["labels"] == ["Edit", "Delete"]
+
+    def test_each_one_is_a_glyph_with_the_word_kept_for_the_reader(self):
+        """An icon with no accessible name is a button only sighted people
+        have, and it is the thing that goes wrong when labels come off."""
+        found = run(self.bar(4, 5, "assistant"), sources=("shell",))
+
+        for glyph, label, title in zip(found["glyphs"], found["labels"],
+                                       found["titles"]):
+            assert len(glyph) == 1, f"{label} is still a word: {glyph!r}"
+            assert glyph.isascii() is False
+            assert label and title == label
+
+    def test_regenerate_is_the_glyph_the_tab_already_draws(self):
+        """The same action in two views of one conversation. Two glyphs for it
+        would be two things to learn."""
+        shell = SHELL.read_text(encoding="utf-8")
+        studio = (JAVASCRIPT / "llm_studio.js").read_text(encoding="utf-8")
+
+        assert '"\\u21bb"' in shell
+        assert '"\\u21bb"' in studio
+
+    def test_the_actions_nobody_asked_for_are_gone_from_this_view(self):
+        """Branching, truncating and version paging are the heavy ones, and
+        they are the ones that want a screen to explain themselves on."""
+        shell = SHELL.read_text(encoding="utf-8")
+        bar = shell.split("Shell.prototype.actions = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+
+        for gone in ("branch", "delete_from", "resend_from_user", "select_version",
+                     "drop_version", "continue", "listen"):
+            assert gone not in bar, gone
+
+    def test_nothing_is_left_dispatching_an_action_no_button_sends(self):
+        """`act` special-cased Listen, a truncation confirm and the version
+        pager. With the buttons gone those branches are unreachable, and dead
+        code that looks live is how the next person concludes the panel still
+        does all of it."""
+        shell = SHELL.read_text(encoding="utf-8")
+        act = shell.split("Shell.prototype.act = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+
+        for gone in ("listen", "delete_from", "select_version", "confirm_count"):
+            assert gone not in act, gone

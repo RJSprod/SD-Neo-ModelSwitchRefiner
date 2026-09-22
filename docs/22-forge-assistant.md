@@ -123,7 +123,8 @@ Reported against the first build, on a running Forge. Two more followed against
 the second build (§3.6), two more against the third (§3.7), a fifth report
 finally produced the real diagnosis of all four focus-mode reports (§3.8), and
 one more came in once focus mode worked (§3.9). §3.10 is the tab's own
-transcript, which is a separate implementation and had a separate defect.
+transcript, which is a separate implementation and had a separate defect, and
+§3.11 is three asks against the panel once the whole of it worked.
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -551,9 +552,85 @@ requires a selector reaching into Gradio's classes to be scoped
 `#mc-llm-chat-transcript` instead, which that test does not look at. They are
 in scope now, and `flex-wrap` was added to the classes it checks.
 
+## 3.11 Three asks against the panel once it worked
+
+### A menu you could not leave
+
+Both header menus had no way out but to choose from them. Escape closes them,
+and so does opening the other, and so would a second press on the button that
+opened it — none of which is any use to a thumb: a phone has no Escape key, and
+those two buttons are a small target beside a menu that is covering them.
+
+Every menu ends with **Cancel** now, appended in `toggleMenu()` rather than in
+each builder, so a menu added later cannot forget one. The threads menu got it
+too, though only the other two were reported: it is the same menu with the same
+problem.
+
+### The picker would not switch while focused
+
+Focus hides every panel but the one it is filling, and it hides them with
+`display: none !important` — which beats the inline `display: block` Gradio
+writes on the panel it has just switched to. So with focus on, pressing a tab
+button changed the host's selection and changed nothing on screen: the
+destination stayed hidden, the old workspace stayed fixed to the viewport, and
+`getActiveWorkspace()` — which answers with the panel that is *showing* — went
+on naming the focused one. The switch could not even be **observed**, so
+`activateWorkspace`'s confirmation watchdog ran its four seconds out and
+reported that the workspace had not opened.
+
+`switchWorkspace()` takes focus off, asks the host, and puts focus on at the
+destination. Off first, because the host cannot show a panel this code is
+hiding. Back on afterwards, because somebody in focus mode who asks for another
+workspace is asking for that workspace, not for the end of focus mode. And back
+on at the *old* one if the switch fails, because a switch that did not happen
+should not cost the mode either.
+
+One interaction this introduced and closed in the same change: between the exit
+and the re-entry, focus is off, and the navigation subscriber's `moveTo` refuses
+with "Focus is not on." — which would have turned a working switch into a
+warning and a lost mode. The subscriber now only moves focus that is on, which
+is the correct condition on its own terms.
+
+`toggleFocus` and the picker share `refocus()`. Entering focus and moving it are
+one operation with the same three outcomes — refused, entered with a caveat,
+entered cleanly — and only one of the two callers used to report all three.
+
+### Eight buttons and a pager under every bubble
+
+At panel width that wrapped onto three rows under each message, so a thread was
+more chrome than conversation; and the actions aimed at a message in the
+*middle* of one were the heavy ones — branch, truncate, renumber — which want
+the room the tab has to explain themselves in.
+
+The panel offers three, as icons, on the newest message only: edit, regenerate
+(replies only — an unanswered message of yours has nothing to ask again), and
+delete. `\u21bb` is the glyph the tab already draws for regenerate, so the two
+views agree on what it means. Each carries `title` and `aria-label`, because an
+icon with no accessible name is a button only sighted people have, and that is
+exactly what goes wrong when labels come off.
+
+`act()` lost the branches nothing reaches any more — the Listen dispatch, the
+truncation confirm, the version-pager target rewriting. Dead code that looks
+live is how the next person concludes this view still does all of it.
+
+**This is a deliberate narrowing of specification §11's "every message
+action".** It is recorded in §4 with the rest of them. Nothing was removed from
+the conversation: the service still implements all sixteen actions, the tab
+still offers them, and the guarding is unchanged. What changed is one view's
+opinion about which of them belong on a phone-width panel.
+
 ---
 
 ## 4. Deliberate deviations
+
+**The panel offers three message actions, not all of them** (§3.11). The
+specification's shared conversation view carries every action the tab has. At
+the user's request the panel carries edit, regenerate and delete, as icons, on
+the newest message only. The service implements all sixteen and the tab offers
+them; this is one view's opinion about what belongs on a phone-width panel, not
+a change to the conversation. The cost is that alternate versions from a
+regenerate are browsable in the tab and not in the panel, which was accepted
+when it was asked for.
 
 **No `DataTransfer` adapter for the tab's image input.** The specification names
 it as a candidate for keeping the tab's visible chip in step with a pasted
@@ -597,7 +674,7 @@ rather than closed.
 | G8 `gr.Chatbot` row classes | **closed for Gradio 4.40, from its source (§3.10).** The three speculative selectors were the defect, not the risk: they constrained `.message`, the text box *inside* the bubble, so the bubble was never limited and the text wrapped at three quarters of its own box. The geometry is now stated against the real shape — `.message-row`, `.flex-wrap`, `.flex-wrap > .message` — with both halves keyed on `.flex-wrap` so a rename stops them matching together and leaves the component's own layout rather than half of ours. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,452 passing, 13 skipped. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,468 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---

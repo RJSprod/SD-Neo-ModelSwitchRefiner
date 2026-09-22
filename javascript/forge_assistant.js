@@ -754,7 +754,7 @@
         this.disposers.push(this.host.subscribeNavigation((active) => {
             this.activeWorkspace = active;
             this.applySuppression();
-            if (this.state.focusEnabled && active
+            if (this.state.focusEnabled && active && this.focus.isActive()
                 && active !== this.focus.activeWorkspace()) {
                 const moved = this.focus.moveTo(active, this.host);
                 if (!moved.ok) {
@@ -827,18 +827,35 @@
             this.place();
             return;
         }
-        const active = this.host.getActiveWorkspace();
-        const found = this.focus.enter(active, this.host);
+        this.refocus(this.host.getActiveWorkspace());
+    };
+
+    // Focus a workspace and do the bookkeeping: the toggle's pressed state,
+    // what the next session starts with, and the panel's own position, which
+    // is measured against the focused box.
+    //
+    // Shared with the workspace picker, because entering focus and moving it
+    // to another workspace are one operation with the same three outcomes --
+    // refused, entered with a caveat, entered cleanly -- and only one of the
+    // two used to report all three.
+    Shell.prototype.refocus = function (id) {
+        const found = this.focus.enter(id, this.host);
         if (!found.ok) {
+            this.state.focusEnabled = false;
+            this.state.focusWorkspaceId = null;
+            this.nodes.focusToggle.setAttribute("aria-pressed", "false");
             this.say(found.reason, "warn");
-            return;
+            this._save();
+            this.place();
+            return false;
         }
         if (found.note) this.say(found.note, "warn");
         this.state.focusEnabled = true;
-        this.state.focusWorkspaceId = active;
+        this.state.focusWorkspaceId = id;
         this.nodes.focusToggle.setAttribute("aria-pressed", "true");
         this._save();
         this.place();
+        return true;
     };
 
     // -- menus --------------------------------------------------------------- //
@@ -854,6 +871,7 @@
         const items = which === "workspaces" ? this.workspaceItems()
             : (which === "threads" ? this.threadItems() : this.utilityItems());
         items.forEach((item) => menu.appendChild(item));
+        menu.appendChild(this.cancelItem());
         menu.hidden = false;
         this.nodes.picker.setAttribute("aria-expanded",
                                        String(which === "workspaces"));
@@ -865,6 +883,27 @@
         // registering the shell itself would make "close the menus" close the
         // panel.
         this.host.openOnly(this.menuHandle);
+    };
+
+    // Every menu ends with a way out that chooses nothing.
+    //
+    // Escape closes them, and so does opening the other one, and so would a
+    // press on the button that opened it. None of that is any use to a thumb:
+    // a phone has no Escape key, and the two header buttons are a small target
+    // beside a menu that is covering them. So once a menu was open the only
+    // obvious way past it was to pick something from it, and a menu you cannot
+    // leave without committing is a menu people learn not to open.
+    //
+    // Added here rather than in each builder, so a menu added later cannot
+    // forget it.
+    Shell.prototype.cancelItem = function () {
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-cancel",
+                             "Cancel");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.addEventListener("click", () => this.closeMenu());
+        return item;
     };
 
     Shell.prototype.closeMenu = function () {
@@ -903,11 +942,42 @@
                 // that fails is visible in the picker next time it is opened,
                 // and it is reported in the status line here and now.
                 this.closeMenu();
-                this.host.activateWorkspace(workspace.id).catch((error) => {
-                    this.say(error.message || "That workspace did not open.", "warn");
-                });
+                this.switchWorkspace(workspace.id);
             });
             return item;
+        });
+    };
+
+    // Switching workspace, with focus mode taken into account.
+    //
+    // Focus hides every panel but the one it is filling, and it hides them
+    // with `display: none !important` -- which beats the inline
+    // `display: block` Gradio writes on the panel it has just switched to. So
+    // with focus on, pressing a tab button changed the host's selection and
+    // changed nothing on the screen: the destination stayed hidden, the old
+    // workspace stayed fixed to the viewport, and `getActiveWorkspace()` --
+    // which answers with the panel that is *showing* -- went on naming the
+    // focused one. The switch could not even be observed, so the confirmation
+    // watchdog ran its four seconds out and reported that the workspace had
+    // not opened. What that looked like is a picker that refuses to move until
+    // focus mode is turned off.
+    //
+    // So focus comes off for the switch and goes back on at the destination.
+    // Off first, because the host cannot show a panel this code is hiding;
+    // back on afterwards, because somebody in focus mode who asks for another
+    // workspace is asking for that workspace, not for the end of focus mode.
+    // And back on at the *old* one if the switch fails, because a switch that
+    // did not happen should not cost focus mode either.
+    Shell.prototype.switchWorkspace = function (id) {
+        const focused = this.focus.isActive() ? this.focus.activeWorkspace() : "";
+        if (focused) this.focus.exit();
+        return this.host.activateWorkspace(id).then(() => {
+            if (focused) this.refocus(id);
+            return id;
+        }).catch((error) => {
+            if (focused) this.refocus(focused);
+            this.say(error.message || "That workspace did not open.", "warn");
+            return "";
         });
     };
 
@@ -1436,64 +1506,62 @@
     // control per message. Each carries the (index, version, revision) captured
     // at the moment it was drawn -- a stale one is refused by the server rather
     // than quietly reinterpreted as the current last message.
+    // The three actions the panel offers, as icons, on the last message only.
+    //
+    // There were eight of them and a version pager, on every message. At panel
+    // width that wrapped onto three rows under every bubble, so a thread was
+    // more chrome than conversation, and the ones aimed at a message in the
+    // middle of it were the heavy ones -- branch, truncate, renumber -- which
+    // want the room the tab has to explain what they are about to do.
+    //
+    // What is left is what you want on the thing you just said or just read.
+    // The rest of the set is unchanged in the tab: nothing here removes an
+    // action from the conversation, only from this view of it.
+    //
+    // `\u21bb` is the same glyph the tab draws on a reply for the same action
+    // (`javascript/llm_studio.js`), so the two views agree on what it means.
+    const ACTIONS = [
+        {action: "edit_message", glyph: "\u270e", label: "Edit"},
+        {action: "regenerate", glyph: "\u21bb", label: "Regenerate", reply: true},
+        {action: "delete_message", glyph: "\u2715", label: "Delete"},
+    ];
+
     Shell.prototype.actions = function (row, view) {
         const bar = element("div", "forge-assistant-actions");
-        const revision = view.conversation && view.conversation.conversation
+        const messages = (view.conversation && view.conversation.messages) || [];
+        if (!messages.length || row.index !== messages.length - 1) return bar;
+        const revision = view.conversation.conversation
             && view.conversation.conversation.revision;
-        const last = view.conversation
-            && row.index === view.conversation.messages.length - 1;
         const reply = row.role === "assistant";
-        const add = (label, action, payload) => {
-            const button = element("button", "forge-assistant-action", label);
+        ACTIONS.forEach((spec) => {
+            // Regenerate is a reply's action. Offered on an unanswered message
+            // of yours it has nothing to ask again.
+            if (spec.reply && !reply) return;
+            const button = element("button", "forge-assistant-action", spec.glyph);
             button.type = "button";
-            button.addEventListener("click", () => this.act(action, row, revision, payload));
+            // An icon with no accessible name is a button only sighted people
+            // have. Both, because `title` is the hover and the long press and
+            // `aria-label` is what a screen reader reads.
+            button.title = spec.label;
+            button.setAttribute("aria-label", spec.label);
+            button.addEventListener("click", () => this.act(spec.action, row, revision));
             bar.appendChild(button);
-        };
-        add("Edit", "edit_message");
-        if (reply) add(last ? "Regenerate" : "Regenerate in a branch", "regenerate");
-        if (reply && row.text) add(last ? "Continue" : "Continue in a branch", "continue");
-        if (!reply) add("Send again from here", "resend_from_user");
-        add("Branch from here", "branch");
-        if ((row.versions || []).length > 1) {
-            add("◀", "select_version", {version: Math.max(0, (row.active || 0) - 1)});
-            bar.appendChild(element("span", "forge-assistant-pager",
-                                    (row.active + 1) + "/" + row.versions.length));
-            add("▶", "select_version",
-                {version: Math.min(row.versions.length - 1, (row.active || 0) + 1)});
-            add("Delete this version", "drop_version");
-        }
-        add("Delete message", "delete_message");
-        add("Delete from here", "delete_from",
-            {confirm_count: view.conversation.messages.length - row.index});
-        if (reply) add("Listen", "listen");
+        });
         return bar;
     };
 
-    Shell.prototype.act = function (action, row, revision, payload) {
-        if (action === "listen") {
-            if (NS.speech && typeof NS.speech.listen === "function") {
-                NS.speech.listen({index: row.index, version: row.active});
-            }
-            return;
-        }
+    Shell.prototype.act = function (action, row, revision) {
         if (action === "edit_message") {
             this.startEdit(row, revision);
             return;
         }
-        if (action === "delete_from" && !window.confirm(
-            "Delete " + (payload.confirm_count) + " message(s) from here?")) return;
         const envelope = this.store.envelope(action, {
             target: {index: row.index, version: row.active},
             expected_revision: revision === undefined || revision === null ? null
                 : (typeof revision === "number" ? {kind: "revision", value: revision}
                     : {kind: "legacy", fingerprint: String(revision)}),
         });
-        const wanted = Object.assign({}, payload || {});
-        if (action === "select_version") {
-            envelope.target.version = wanted.version;
-            delete wanted.version;
-        }
-        envelope.payload = wanted;
+        envelope.payload = {};
         this.store.send(envelope).then((outcome) => {
             if (outcome && !outcome.ok) {
                 this.say((outcome.error && outcome.error.message)
