@@ -65,9 +65,18 @@ function make(id, parent) {
         style: (function () {
             const camel = (name) => name.replace(/-([a-z])/g,
                                                  (m, letter) => letter.toUpperCase());
+            const priorities = {};
             const declaration = {
-                setProperty(name, value) { declaration[camel(name)] = value; },
-                removeProperty(name) { delete declaration[camel(name)]; },
+                setProperty(name, value, priority) {
+                    declaration[camel(name)] = value;
+                    priorities[name] = priority || "";
+                },
+                removeProperty(name) {
+                    delete declaration[camel(name)];
+                    delete priorities[name];
+                },
+                getPropertyValue(name) { return declaration[camel(name)] || ""; },
+                getPropertyPriority(name) { return priorities[name] || ""; },
             };
             return declaration;
         })(),
@@ -628,6 +637,106 @@ class TestEntering:
             assert matching, wanted + " is missing from the focus root"
             assert all("!important" in d for d in matching), (
                 wanted + " has to carry !important to beat Gradio's scoped rule")
+
+    def test_a_sticky_offset_measured_against_the_workspace_is_closed(self):
+        """Reported in use: a blank band above the gallery in focus mode, and
+        the gallery at the same place on the screen whether focus was on or
+        off.
+
+        Lobe's split previewer makes the results column `position: sticky;
+        top: 80px` -- its header's height and a margin -- so the picture stays
+        on screen while the prompt column scrolls. In focus mode the header is
+        gone and the workspace is its own scroll container, so the same 80px
+        is a gap. The offset becomes the root's padding, so a stuck column
+        keeps the margin it has at rest.
+        """
+        found = run("""
+            const results = make("txt2img_results", txt2img);
+            results.computed = {position: "sticky", top: "80px"};
+            txt2img.computed = {paddingTop: "8px"};
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify({
+                top: results.style.top,
+                priority: results.style.getPropertyPriority("top"),
+            }));
+        """)
+
+        assert found["top"] == "8px"
+        assert found["priority"] == "important", (
+            "the theme's declaration carries !important on an id; nothing less wins")
+
+    def test_the_offset_is_put_back_exactly_on_the_way_out(self):
+        found = run("""
+            const results = make("txt2img_results", txt2img);
+            results.computed = {position: "sticky", top: "80px"};
+            const own = make("own_offset", txt2img);
+            own.computed = {position: "sticky", top: "40px"};
+            own.style.setProperty("top", "40px", "important");
+            focus.enter("tab_txt2img", HOST);
+            focus.exit();
+            console.log(JSON.stringify({
+                results: results.style.getPropertyValue("top"),
+                own: own.style.getPropertyValue("top"),
+                ownPriority: own.style.getPropertyPriority("top"),
+            }));
+        """)
+
+        assert found["results"] == "", "it had no inline top, and has none again"
+        assert found["own"] == "40px"
+        assert found["ownPriority"] == "important"
+
+    def test_a_sticky_element_inside_its_own_scroller_is_left_alone(self):
+        """Its offset is measured against that scroller, not against the
+        workspace, and whatever it clears is still there."""
+        found = run("""
+            const scroller = make("inner_scroller", txt2img);
+            scroller.computed = {overflowY: "auto"};
+            const toolbar = make("inner_toolbar", scroller);
+            toolbar.computed = {position: "sticky", top: "24px"};
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify({top: toolbar.style.getPropertyValue("top")}));
+        """)
+
+        assert found["top"] == ""
+
+    def test_an_offset_no_larger_than_the_padding_is_not_an_offset_worth_closing(self):
+        found = run("""
+            const tidy = make("tidy", txt2img);
+            tidy.computed = {position: "sticky", top: "8px"};
+            txt2img.computed = {paddingTop: "8px"};
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify({top: tidy.style.getPropertyValue("top")}));
+        """)
+
+        assert found["top"] == ""
+
+    def test_the_valve_puts_sticky_offsets_back_too(self):
+        """Degrading to the plain overlay means every change comes off, not
+        only the classes -- an offset left closed on a page the theme still
+        draws its header over would put the gallery under that header."""
+        found = run("""
+            const results = make("txt2img_results", txt2img);
+            results.computed = {position: "sticky", top: "80px"};
+            txt2img.box = {width: 0, height: 0};
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify({top: results.style.getPropertyValue("top")}));
+        """)
+
+        assert found["top"] == ""
+
+    def test_a_hidden_subtree_is_not_walked(self):
+        """An inactive nested tab is a thousand elements nobody can see.
+        Skipping it whole is what keeps the toggle a toggle."""
+        found = run("""
+            const hiddenTab = make("txt2img_lora", txt2img);
+            hiddenTab.computed = {display: "none"};
+            const inside = make("inside_hidden", hiddenTab);
+            inside.computed = {position: "sticky", top: "80px"};
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify({top: inside.style.getPropertyValue("top")}));
+        """)
+
+        assert found["top"] == ""
 
     def test_the_stylesheet_has_a_rule_for_what_the_script_marks(self):
         css = (pathlib.Path(__file__).resolve().parent.parent

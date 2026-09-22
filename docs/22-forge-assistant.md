@@ -120,8 +120,9 @@ the executor starts.
 ## 3.5 Four defects found in use, and what they were
 
 Reported against the first build, on a running Forge. Two more followed against
-the second build (§3.6), two more against the third (§3.7), and a fifth report
-finally produced the real diagnosis of all four focus-mode reports (§3.8).
+the second build (§3.6), two more against the third (§3.7), a fifth report
+finally produced the real diagnosis of all four focus-mode reports (§3.8), and
+one more came in once focus mode worked (§3.9).
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -452,6 +453,39 @@ the adapter against it; `tests/test_assistant_focus_js.py` enters focus on it.
 how many ancestors it marked, how many bars it hid and whether it degraded.
 That line would have shortened this by three rounds.
 
+## 3.9 The gap above the gallery
+
+Reported once focus mode finally worked: a blank band above the Generate
+button and the gallery, with both sitting at the same place on the screen
+whether focus was on or off, while the prompt column moved up to fill the
+space.
+
+The header was gone; its *reservation* was not. Lobe's split previewer (from
+`src/styles/components/container.ts`) makes the results column
+`position: sticky; top: 80px !important` — 64px of header and a margin — so the
+picture stays on screen while the prompt column scrolls under it, and it moves
+the Generate button into that column. In focus mode the workspace is its own
+scroll container and there is no header inside it, so the same 80px is nothing
+but a gap. Because a sticky offset is measured from the top of the scroll
+container either way, the column lands at the same screen position with the
+header hidden as with it shown — which is the observation in the report.
+
+`enter()` now reasons about this generally rather than naming the theme's ids:
+a sticky element whose offset is measured against the workspace's own scroll
+edge — no scroller of its own between it and the root — was clearing something
+above the workspace, and everything above the workspace is hidden. Its offset
+becomes the root's padding, so a stuck column keeps the margin it has at rest.
+A sticky element inside an inner scroller is measured against that scroller
+and is left alone, and so is one whose offset is no larger than the padding.
+
+This is the one thing focus mode does with an **inline style**, and the reason
+is specificity again: the theme's declaration carries `!important` on an id,
+and nothing in a stylesheet outranks that reliably. The value it replaces —
+and its priority — is recorded exactly and put back on the way out, by the
+safety valve as well as by `exit()`. Hidden subtrees are skipped whole during
+the walk and there is a node budget, so a toggle stays a toggle on a page with
+thousands of elements in inactive nested tabs.
+
 ---
 
 ## 4. Deliberate deviations
@@ -498,7 +532,7 @@ rather than closed.
 | G8 `gr.Chatbot` row classes | **open, and the one thing here that can fail silently.** Three candidate selectors are used; a Gradio or theme upgrade can stop all three matching, which costs bubble width and nothing else. Add a visual check to the upgrade checklist. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,437 passing, 13 skipped. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,443 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---
