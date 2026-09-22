@@ -6059,22 +6059,79 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     }
 }
 
-/* Bubble width inside gr.Chatbot. CSS only, so it cannot break anything -- and
-   it CAN silently stop matching after a Gradio or theme upgrade, because the
-   row classes are Gradio's rather than ours. That is recorded in the
-   compatibility notes and there is a visual check on the upgrade checklist;
-   there is no way to do this without depending on them, short of replacing the
-   component, which is out of scope. */
-#mc-llm-chat-transcript .message-wrap .message,
-#mc-llm-chat-transcript .message-row .message,
-#mc-llm-chat-transcript .bubble-wrap .message {
+/* Bubble geometry inside gr.Chatbot.
+   =================================
+
+   Reported in use: user messages not aligned with each other, replies whose
+   cell ran the full width, and a two-word message wrapped onto two lines. All
+   three were one mistake -- these rules were constraining the wrong element --
+   and the shape of the component is the whole explanation. Gradio 4.40 renders
+
+       div.message-row.bubble.user-row      <- flex row, places the bubble
+         div.avatar-container
+         div.flex-wrap.user                 <- THE BUBBLE: border, radius, padding
+           div.message.user                 <- the text box
+             button > the markdown
+
+   with `.flex-wrap { width: 100% }`, `.message { width: calc(100% - xxl) }`,
+   a `max-width` on the *bot* row only, and none at all on the user row.
+
+   What was here set `max-width: 75%` on `.message` -- the text box inside the
+   bubble, not the bubble. So the bubble was never constrained (hence a reply
+   cell running the full width), and the text box was squeezed to 75% of a
+   bubble that had already been sized for 100% of the text: the text had to
+   wrap, at three quarters of the space it was given, which is why "hey there"
+   came back as two lines. The leftover quarter was visible, because
+   `.message.user` carries the accent stripe a few rules above -- it was
+   drawing 25% short of the bubble's edge rather than on it. And because the
+   user row is shrink-to-fit with a percentage-width child, its width was
+   content-dependent, so no two user messages agreed on where their right edge
+   was.
+
+   So: the row is stretched, and justifies its one bubble to its own side. The
+   bubble hugs its text up to its share of that row. The text box fills the
+   bubble, which is what makes a line wrap when the bubble is full and not
+   before. Nothing here touches the margins, the radius or the padding -- with
+   avatars on, Gradio's own gutters are already symmetric (two spacing units
+   outside each bubble) and they are the theme's business.
+
+   Both halves are keyed on `.flex-wrap`, deliberately. It is Gradio's class
+   rather than ours and an upgrade can rename it; keyed on the same class, the
+   two rules stop matching together and what is left is the component's own
+   layout rather than half of this one. */
+#mc-llm-studio .mc-llm-transcript .message-row {
+    /* Full width, so both sides measure their share against the same basis
+       instead of against whatever their own text happened to need. */
+    align-self: stretch;
+    width: auto;
+    max-width: none;
+}
+
+#mc-llm-studio .mc-llm-transcript .message-row.user-row {
+    justify-content: flex-end;
+}
+
+#mc-llm-studio .mc-llm-transcript .message-row.bot-row {
+    justify-content: flex-start;
+}
+
+#mc-llm-studio .mc-llm-transcript .message-row > .flex-wrap {
+    /* Hugs its text, never grows, and gives way before it overflows. */
+    flex: 0 1 auto;
+    width: fit-content;
+    min-width: 0;
     max-width: var(--forge-assistant-bubble, 75%);
 }
 
+#mc-llm-studio .mc-llm-transcript .flex-wrap > .message {
+    /* Fills the bubble it is in. This is the declaration that stops the text
+       wrapping early, and it is the one the old rule got backwards. */
+    width: auto;
+    max-width: none;
+}
+
 @media (max-width: 480px) {
-    #mc-llm-chat-transcript .message-wrap .message,
-    #mc-llm-chat-transcript .message-row .message,
-    #mc-llm-chat-transcript .bubble-wrap .message {
+    #mc-llm-studio .mc-llm-transcript .message-row > .flex-wrap {
         max-width: max(var(--forge-assistant-bubble, 75%), 90%);
     }
 }

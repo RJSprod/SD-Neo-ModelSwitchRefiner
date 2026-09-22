@@ -534,8 +534,11 @@ Under **Settings → Model Chain**:
   removes the panel and nothing else: the conversation, the guarding and the
   server-owned replies are not a panel and do not go with one.
 - **Message bubble width (%)** (default 75) — how much of the transcript's width
-  one message may take, in both views. Below 480 pixels wide at least 90% is
-  used whatever this says.
+  one message may take, in both views. A bubble is as wide as its text up to
+  that limit, so a short message is a short bubble and a line wraps when the
+  bubble is full rather than before it. Yours end on one edge and the
+  character's on the other, each on the same edge as every other. Below 480
+  pixels wide at least 90% is used whatever this says.
 - **Conversation column width** (default medium) — how wide the transcript and
   the composer are allowed to become in the Conversation tab. On a wide monitor
   a transcript stretched across the whole screen is one nobody can follow from
@@ -5043,9 +5046,11 @@ outside; both were one unlucky sequence away from being reported as something
 else entirely.
 
 What is left to a real browser and a real host is written down rather than
-implied. The tab's bubble styling reaches inside `gr.Chatbot` and therefore
-depends on class names Gradio generates, so it can stop matching silently after
-a Gradio or theme upgrade; the workspace picker and focus mode read Forge's own
+implied. The tab's bubble geometry reaches inside `gr.Chatbot` and therefore
+depends on class names Gradio writes rather than ones this extension owns, so
+it can stop matching after a Gradio or theme upgrade — deliberately all at
+once, so what is left is the component's own layout rather than half of this
+one; the workspace picker and focus mode read Forge's own
 tab registry, which is not in this checkout; and dictation from a phone needs a
 secure context, so a deployment served over plain HTTP has a keyboard and no
 microphone. Pasting a picture works there, because the paste event needs neither

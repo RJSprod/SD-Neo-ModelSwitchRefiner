@@ -122,7 +122,8 @@ the executor starts.
 Reported against the first build, on a running Forge. Two more followed against
 the second build (§3.6), two more against the third (§3.7), a fifth report
 finally produced the real diagnosis of all four focus-mode reports (§3.8), and
-one more came in once focus mode worked (§3.9).
+one more came in once focus mode worked (§3.9). §3.10 is the tab's own
+transcript, which is a separate implementation and had a separate defect.
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -486,6 +487,70 @@ safety valve as well as by `exit()`. Hidden subtrees are skipped whole during
 the walk and there is a node budget, so a toggle stays a toggle on a page with
 thousands of elements in inactive nested tabs.
 
+## 3.10 The tab's bubbles: three symptoms, one wrong element
+
+Reported in use, against the Conversation tab rather than the panel: user
+messages that did not line up with each other, replies whose cell ran the full
+width, and a two-word message — "hey there" — wrapped onto two lines.
+
+All three were one mistake, and it is invisible in the stylesheet unless you
+know what `gr.Chatbot` renders. Gradio 4.40's is
+
+```
+div.message-row.bubble.user-row      the flex row, which places the bubble
+  div.avatar-container
+  div.flex-wrap.user                 THE BUBBLE: border, radius, padding
+    div.message.user                 the text box
+      button > the markdown
+```
+
+with `.flex-wrap { width: 100% }`, `.message { width: calc(100% - xxl) }`, a
+`max-width` on the **bot** row only, and none at all on the user row.
+
+What was here set `max-width: 75%` on **`.message`** — the text box inside the
+bubble, not the bubble:
+
+- the bubble was never constrained, so a reply's cell ran to the row's own
+  limit, which is "the full width" in the report;
+- the text box was squeezed to 75% of a bubble that had already been sized for
+  100% of the text, so the text *had* to wrap — at three quarters of the space
+  it was given. That is the two-line "hey there";
+- the leftover quarter was visible, because `.message.user` carries the accent
+  stripe: it was drawing 25% short of the bubble's trailing edge rather than on
+  it. The stray vertical bars inside the bubbles in the report are that stripe,
+  and they are what confirmed the diagnosis before a line was changed;
+- and because Gradio shrink-wraps the user row to its content while its child
+  asks for a percentage of it, the row's width was content-dependent. No two
+  user messages agreed on where their right edge was.
+
+The refactor states the geometry against the real shape: the row is stretched
+and justifies its one bubble to its own side; the bubble hugs its text
+(`width: fit-content`) up to its share of that row; the text box fills the
+bubble (`width: auto; max-width: none`), which is the declaration that makes a
+line wrap when the bubble is full and not before. `min-width: 0` on the bubble
+so one unbreakable token cannot push the thread sideways.
+
+Nothing touches the margins, the radius or the padding. With avatars on,
+Gradio's own gutters are already symmetric — two spacing units outside each
+bubble on the side it sits against — so the outer edges line up without this
+file having an opinion about them, and those remain the theme's business. No
+`!important` anywhere: `#mc-llm-studio .mc-llm-transcript …` outranks every
+rule it needs to beat.
+
+Both halves are keyed on `.flex-wrap` deliberately. It is Gradio's class rather
+than ours and an upgrade can rename it; keyed on the same class the two rules
+stop matching **together**, and what is left is the component's own layout
+rather than a bubble this file has constrained around a text box it can no
+longer reach. That is what closes G8, which had this down as a silent-failure
+risk while the failure was already happening.
+
+One process note. These rules had escaped the convention the repository already
+had — `test_every_rule_that_names_a_gradio_class_names_no_generated_one`
+requires a selector reaching into Gradio's classes to be scoped
+`#mc-llm-studio .mc-llm-…` — because they were written against
+`#mc-llm-chat-transcript` instead, which that test does not look at. They are
+in scope now, and `flex-wrap` was added to the classes it checks.
+
 ---
 
 ## 4. Deliberate deviations
@@ -529,10 +594,10 @@ rather than closed.
 | G5 Hidden field value before its tab is selected | **open.** The capability is rendered into `mc-llm-chat-conversation-key` exactly as `mc-llm-chat-voice-key` is, which is the pattern already proven in this installation. If it turns out to be empty before the tab is selected, the fallback is a bootstrap route behind the host's own auth; the store already treats a missing key as "conversation unavailable" and keeps navigation and focus working. |
 | G6 Whether generation can run outside a Gradio worker | **closed enough to ship, in this checkout.** `mc_llm_sessions.conversation()` takes a request and a cancellation and yields events; the tests drive it from a plain thread. If a host turns out to need request context, the executor is the one place an adapter goes. |
 | G7 Gradio image input via DataTransfer | **not needed.** See §4. |
-| G8 `gr.Chatbot` row classes | **open, and the one thing here that can fail silently.** Three candidate selectors are used; a Gradio or theme upgrade can stop all three matching, which costs bubble width and nothing else. Add a visual check to the upgrade checklist. |
+| G8 `gr.Chatbot` row classes | **closed for Gradio 4.40, from its source (§3.10).** The three speculative selectors were the defect, not the risk: they constrained `.message`, the text box *inside* the bubble, so the bubble was never limited and the text wrapped at three quarters of its own box. The geometry is now stated against the real shape — `.message-row`, `.flex-wrap`, `.flex-wrap > .message` — with both halves keyed on `.flex-wrap` so a rename stops them matching together and leaves the component's own layout rather than half of ours. |
 | G9 Base path and secure context | **partly closed.** The base path is read from the document's own URL and the routes are registered under it, with a test. Secure context is a deployment fact: without HTTPS there is no microphone, and `voice_chat.js` already degrades cleanly. Image paste works either way. |
 | G10 Filesystem atomic replace and fsync | **closed for the write.** `atomic_write_json` fsyncs the file and renames; `mc_llm_conversation_store.fsync_directory()` is there for the rename, is never fatal, and is a no-op on hosts that do not support it. |
-| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,443 passing, 13 skipped. |
+| G11 Test environment | **closed.** `pip install pytest pillow numpy httpx` and the suite runs. Baseline at `78da206` was 6,113 passing, 13 skipped, zero failures; this work leaves it at 6,452 passing, 13 skipped. |
 | G12 Traces of send/regenerate/Stop/refresh under contention | **open.** Needs a GPU and a running host. |
 
 ---
