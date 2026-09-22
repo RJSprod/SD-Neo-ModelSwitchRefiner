@@ -125,7 +125,7 @@ finally produced the real diagnosis of all four focus-mode reports (§3.8), and
 one more came in once focus mode worked (§3.9). §3.10 is the tab's own
 transcript, which is a separate implementation and had a separate defect, and
 §3.11 is three asks against the panel once the whole of it worked, and §3.12
-three more against its own chrome.
+three more against its own chrome, and §3.13 is a cross-extension one.
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -703,6 +703,53 @@ theme's font makes the four controls wider than the panel.
 The dead `.forge-assistant-title` and `.forge-assistant-nav` rules went with
 them, with a test asserting their absence: CSS naming a class nothing emits is
 the next person's wrong picture of the panel.
+
+## 3.13 Getting out of another extension's way
+
+Reported from a page running Mini Paint NEO beside this one: its Send to WanGP
+popup could not be used with the assistant on screen.
+
+Two causes, and neither was in this file. The popup draws at `z-index: 60`,
+which is above everything that extension draws and below everything this one
+does — 1100 for a focused workspace, 1200 for the panel — so in focus mode it
+was covered outright and out of it the launcher sat on top. (It was also under
+Mini Paint's *own* canvas focus mode at 1000, and had been since both were
+written; the report came from here because this is what the user had open.)
+That half is fixed where the number belongs: `--minipaint-dialog-layer: 2000`
+in that repository, with the popup and its toast drawn on it.
+
+The half only this side can do is the panel. Stacking decides what covers what;
+it does not move 360 pixels of conversation off a dialog somebody is reading,
+and no number can. So Mini Paint publishes an event when its popup takes the
+page and when it gives it back —
+
+```js
+document.dispatchEvent(new CustomEvent("minipaint:overlay", {
+    detail: {name: "intercept", open: true, modal: true}
+}));
+```
+
+— and `Shell.prototype.yieldTo` puts the panel back to its launcher. Three
+decisions in it are worth keeping:
+
+*Only `open` acts.* The event fires both ways and only one direction is a
+request for room. Acting on the other closes the panel of somebody who has just
+dismissed a popup and gone back to work. The guard for this was masked at first
+by the already-closed guard, and it took a test with the panel open and a
+closing event to pin it.
+
+*Nothing reopens.* A panel that springs back over the page somebody has just
+returned to is the same complaint from the other end.
+
+*Focus mode is untouched.* The dialog draws above it now, so there is nothing to
+leave, and a workspace that emptied itself whenever a popup opened would be
+worse than the bug.
+
+Neither side imports the other or knows the other's class names. The whole
+contract is one event name and one number — and this repository carries a test
+asserting its own two layers stay below that number, because if either ever
+climbed past it the popup would go back under the page and the symptom would
+look like anything but a z-index.
 
 ---
 

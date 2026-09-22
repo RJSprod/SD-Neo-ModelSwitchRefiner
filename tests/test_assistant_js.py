@@ -2556,3 +2556,119 @@ class TestTheHeaderIsOneRow:
         assert ".forge-assistant-nav {" not in css
         # The button class the three menus share is still in use.
         assert ".forge-assistant-nav-button" in css
+
+
+class TestGivingWayToAForeignDialog:
+    """Reported in use: Mini Paint NEO's Send to WanGP popup could not be used
+    with the assistant on screen. Its launcher sat on top of it, and in focus
+    mode the focused workspace covered it outright.
+
+    Both were stacking order -- that popup drew at `z-index: 60` against this
+    extension's 1100 and 1200 -- and both are fixed in the extension that owns
+    the number. What is left is the half only this side can do: a panel
+    covering a dialog is still covering it, whatever the numbers say.
+    """
+
+    @staticmethod
+    def shell(open_panel=True):
+        return PICKER + """
+            const shell = picker();
+            shell.state.panelOpen = %s;
+            shell.closedPanel = 0;
+            shell.close = () => { shell.closedPanel += 1; shell.state.panelOpen = false; };
+        """ % ("true" if open_panel else "false")
+
+    def test_an_open_panel_puts_itself_away(self):
+        found = run(self.shell() + """
+            const yielded = shell.yieldTo({detail: {name: "intercept", open: true}});
+            console.log(JSON.stringify({yielded, closed: shell.closedPanel,
+                                        menu: shell.closed}));
+        """, sources=("shell",))
+
+        assert found["yielded"] is True
+        assert found["closed"] == 1
+        assert found["menu"] == 1, "a menu of ours over the dialog is the same problem"
+
+    def test_the_dialog_closing_does_not_bring_it_back(self):
+        """A panel that springs back over the page somebody has just returned
+        to is the same complaint from the other end."""
+        found = run(self.shell() + """
+            shell.yieldTo({detail: {name: "intercept", open: true}});
+            shell.showOpen = () => { shell.reopened = true; };
+            shell.yieldTo({detail: {name: "intercept", open: false}});
+            console.log(JSON.stringify({closed: shell.closedPanel,
+                                        reopened: !!shell.reopened,
+                                        open: shell.state.panelOpen}));
+        """, sources=("shell",))
+
+        assert found["closed"] == 1
+        assert found["reopened"] is False
+        assert found["open"] is False
+
+    def test_a_dialog_giving_way_is_not_a_reason_to_put_the_panel_away(self):
+        """The event is published in both directions, and only one of them is
+        a request for room. Acting on the other closes the panel of somebody
+        who has just dismissed a popup and gone back to what they were doing.
+        """
+        found = run(self.shell() + """
+            const yielded = shell.yieldTo({detail: {name: "intercept", open: false}});
+            console.log(JSON.stringify({yielded, closed: shell.closedPanel,
+                                        open: shell.state.panelOpen}));
+        """, sources=("shell",))
+
+        assert found["yielded"] is False
+        assert found["closed"] == 0
+        assert found["open"] is True
+
+    def test_a_panel_already_away_is_not_disturbed(self):
+        found = run(self.shell(open_panel=False) + """
+            const yielded = shell.yieldTo({detail: {name: "intercept", open: true}});
+            console.log(JSON.stringify({yielded, closed: shell.closedPanel}));
+        """, sources=("shell",))
+
+        assert found["yielded"] is False
+        assert found["closed"] == 0
+
+    def test_focus_mode_is_left_alone(self):
+        """The dialog draws above the focused workspace now, so there is
+        nothing to leave -- and a workspace that emptied itself every time a
+        popup opened would be worse than the bug."""
+        found = run(self.shell() + """
+            shell.focus.on = "tab_txt2img";
+            shell.state.focusEnabled = true;
+            shell.yieldTo({detail: {name: "intercept", open: true}});
+            console.log(JSON.stringify({calls: shell.focus.calls,
+                                        enabled: shell.state.focusEnabled}));
+        """, sources=("shell",))
+
+        assert found["calls"] == []
+        assert found["enabled"] is True
+
+    def test_it_listens_for_the_event_the_other_extension_publishes(self):
+        """The name is a contract between two repositories. Mini Paint NEO
+        dispatches it on `document` when its popup opens and closes; this is
+        the half that hears it."""
+        shell = SHELL.read_text(encoding="utf-8")
+
+        assert '"minipaint:overlay"' in shell
+        wiring = shell.split("Shell.prototype.wire = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+        assert "FOREIGN_OVERLAY" in wiring and "yieldTo" in wiring
+
+    def test_this_extension_stays_below_the_dialog_layer(self):
+        """The mirror of Mini Paint NEO's own check. Its dialog sits at 2000
+        so that it is above the focused workspace and the panel; if either of
+        these ever climbed past it, the popup would go back under the page and
+        the symptom would look like anything but a z-index."""
+        import re
+
+        css = (pathlib.Path(__file__).resolve().parent.parent
+               / "style.css").read_text(encoding="utf-8")
+        layers = [int(found) for found in
+                  re.findall(r"--forge-assistant-(?:layer|workspace-layer):\s*(\d+)", css)]
+
+        assert len(layers) == 2, layers
+        for layer in layers:
+            assert layer < 2000, (
+                "a dialog another extension owns is drawn at 2000; this one has to "
+                f"stay under it, and {layer} does not")
