@@ -3268,7 +3268,8 @@ does now:
   the page; with focus mode on, that left no way to another workspace.
 - Two presses on the launcher that land on something else reset the panel, and
   if the launcher is still covered in focus mode, focus mode is left so the
-  page's own tab bar is back. A dialog over the launcher is left alone.
+  page's own tab bar is back — and the browser's full screen with it, if focus
+  started one. A dialog over the launcher is left alone.
 - A handler that fails puts the panel back into a state it knows rather than
   leaving whatever it was doing half done. What was chosen — open, closed, focus
   mode, the draft — is kept.
@@ -3284,9 +3285,25 @@ does now:
 
 **Focus** gives the whole browser viewport to whichever workspace is open: the
 Forge tab bar, a theme's header and sidebars and the footer go, and the
-workspace takes the space they were using. It is not the browser's full-screen
-mode — that takes the browser's own chrome as well and needs a gesture every
-time.
+workspace takes the space they were using.
+
+The same press takes the browser full screen as well — its address bar and
+tabs, and on a phone the system bars — and pressing Focus again brings back
+both the tab bar and the browser's own chrome. It is the whole page that goes
+full screen, not the workspace, so the assistant, dialogs and popups stay on
+it. The two are kept in step:
+
+- If the browser leaves full screen by itself — Escape, Android's back
+  gesture, switching browser tabs — focus mode turns off with it.
+- Switching workspace from the assistant while in focus stays full screen.
+- Only a full screen the assistant started is ever ended by it: one that was
+  already there when focus was turned on (another extension's, a video) is left
+  alone, and so is a video made full screen on top while in focus.
+- Where a browser will not let a page go full screen — iPhone Safari allows it
+  only for videos, and a WebUI embedded in a frame may not be allowed it — focus
+  mode works exactly as before, without it.
+
+A reload starts outside both: a browser grants full screen only inside a press.
 
 They *go*, rather than being covered. Laying the workspace over the page works
 while the chrome is ordinary content and does not work at all under a theme
