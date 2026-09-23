@@ -3217,9 +3217,9 @@ header button, or by another extension's "send to img2img", moves the highlight
 too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
-**The utility menu** — the **⋯** beside Focus — has **Free Float**, two
-entries and a **Cancel**. The two entries are the same request: *I need this
-card back, now.*
+**The utility menu** — the **⋯** beside Focus — has **Free Float**,
+**Customize…**, two entries and a **Cancel**. The two entries are the same
+request: *I need this card back, now.*
 
 | | |
 | --- | --- |
@@ -3231,6 +3231,56 @@ machine that is mid-generation and will not give up the checkpoint still gets
 the twenty gigabytes back from llama-server — and what the status line says is
 what actually happened, not a tick. Neither is policy: the next request that
 needs a model loads it again exactly as it would have.
+
+**Customize…** restyles the launcher — the one control that is always on screen,
+and the way to every workspace once the panel is collapsed. It opens a dialog
+built for a finger: every control is at least 44 pixels, colours are swatches
+with the system picker for anything else, and on a phone it is the whole screen.
+Presets come first — *Classic*, *Neon*, *Toxic*, *Aurora*, *Sunset*, *Ember*,
+*Mono* and *Match progress bar* — and everything under them can be tuned: the
+title, an icon, the size, the text colour (with *Auto*, which picks black or
+white against the fill), a fill of one colour or a gradient of two, the border's
+colour and width, the corners (to a pill), a glow, and an animation.
+
+The animations are the progress bar's own — **Sheen**, **Pulse**, **Neon** and
+**Ooze** (whose bubbles are the progress bar's, on its keyframes) — plus an
+**Aurora** rim that turns, and **Match progress bar**, which follows whatever
+the progress bar has been set to in Settings, in its colour. Speed is Slow,
+Normal or Fast. Every one moves by transform and opacity alone, so the
+compositor runs it without the page laying out or painting anything, and it
+stops whenever the launcher is not displayed. A system that asks for reduced
+motion is honoured unless the dialog is told to animate anyway.
+
+Every change is drawn live on the preview *and* on the real launcher behind the
+dialog. **Save** keeps it; **Cancel**, **Escape** or a press outside put the look
+back as it was; **Reset** returns to the uncustomized launcher. A title that
+would be hard to read on the chosen fill says so, with the contrast ratio. The
+look is remembered in this browser, like Free Float; it is not shared with other
+devices.
+
+**It recovers on its own.** A few states used to need a reload, and none of them
+does now:
+
+- A drag whose release never arrives — a remote-desktop session dropping
+  mid-press, a finger lifted while the browser was elsewhere — is ended by the
+  next press, by the window losing focus, or by the page being hidden. It used to
+  leave the drag preview over the launcher, taking every press, for the life of
+  the page; with focus mode on, that left no way to another workspace.
+- Two presses on the launcher that land on something else reset the panel, and
+  if the launcher is still covered in focus mode, focus mode is left so the
+  page's own tab bar is back. A dialog over the launcher is left alone.
+- A handler that fails puts the panel back into a state it knows rather than
+  leaving whatever it was doing half done. What was chosen — open, closed, focus
+  mode, the draft — is kept.
+- A conversation stream that stops talking without closing (sleep, a VPN, a
+  network change) is replaced after 45 seconds of silence, or after 20 at the
+  moment the network or the page comes back.
+- A restarted server — new key, new process — is rejoined without a reload: the
+  key is read again from the WebUI's own page configuration, behind the WebUI's
+  own sign-in, and the session starts over. Drafts survive it. A message that was
+  in flight is not sent again, because the old server may already have written
+  it; its text stays in the composer and the conversation shows whether it
+  arrived.
 
 **Focus** gives the whole browser viewport to whichever workspace is open: the
 Forge tab bar, a theme's header and sidebars and the footer go, and the

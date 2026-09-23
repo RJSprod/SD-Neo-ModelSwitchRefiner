@@ -5602,6 +5602,516 @@
     white-space: nowrap;
 }
 
+/* The launcher's customized look.
+   =========================================================================
+
+   Everything here is keyed on `[data-look]`, which `forge_assistant_look.js`
+   sets, and every colour falls back to the theme's own when the look leaves
+   it unset -- so a launcher nobody has customized is pixel-for-pixel what it
+   was, and one with a look is still a theme-aware element underneath it.
+
+   The animations are the progress bar's -- sheen, pulse, neon, ooze -- plus
+   an aurora rim, and every one of them moves by `transform` and `opacity`
+   alone, on a layer of its own. The compositor runs them without the page
+   laying out or painting a thing, which is what makes "always playing" free
+   for a generation running on the same card. They stop whenever the launcher
+   is not displayed, which is whenever the panel is open.
+
+   Specificity: `#forge-assistant-root .forge-assistant-launcher[...]`, one id
+   and two classes' worth, so these beat the plain launcher rule above and the
+   theme's own button rules without an `!important` anywhere. */
+#forge-assistant-root .forge-assistant-launcher[data-look] {
+    background: var(--fa-look-fill, var(--background-fill-primary));
+    color: var(--fa-look-text, var(--body-text-color));
+    border: var(--fa-look-stroke-width, 1px) solid var(--fa-look-stroke, var(--border-color-primary));
+    border-radius: var(--fa-look-radius, var(--radius-lg, 10px));
+    /* Its own stacking context, so the decorations below can sit behind the
+       title at z-index -1 without going behind the page. */
+    isolation: isolate;
+}
+
+#forge-assistant-root .forge-assistant-launcher[data-look-size="compact"] {
+    padding: 0.3em 0.65em;
+    font-size: 0.85em;
+}
+
+#forge-assistant-root .forge-assistant-launcher[data-look-size="large"] {
+    padding: 0.5em 1.05em;
+    font-size: 1.1em;
+    font-weight: 600;
+}
+
+/* A static glow is painted once and composited from then on. */
+#forge-assistant-root .forge-assistant-launcher[data-look-glow="soft"] {
+    box-shadow: 0 0 10px 1px color-mix(in srgb, var(--fa-look-accent) 55%, transparent),
+                var(--shadow-drop-lg, 0 6px 24px rgba(0, 0, 0, 0.28));
+}
+
+#forge-assistant-root .forge-assistant-launcher[data-look-glow="strong"] {
+    box-shadow: 0 0 8px 1px color-mix(in srgb, var(--fa-look-accent) 85%, transparent),
+                0 0 24px 4px color-mix(in srgb, var(--fa-look-accent) 55%, transparent),
+                var(--shadow-drop-lg, 0 6px 24px rgba(0, 0, 0, 0.28));
+}
+
+/* The two layers the animations draw on, both behind the title. The clip
+   layer is cut to the button's shape, for what must stay inside it; the air
+   layer is not, for what escapes it. Neither ever takes a press. */
+.forge-assistant-look-clip,
+.forge-assistant-look-air {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+}
+
+.forge-assistant-look-clip {
+    overflow: hidden;
+}
+
+/* -- sheen: a highlight that crosses the button, then rests ---------------- */
+.forge-assistant-launcher[data-look-motion~="sheen"] .forge-assistant-look-clip::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 45%;
+    background: linear-gradient(100deg, transparent 0%, rgb(255 255 255 / 40%) 50%,
+                                transparent 100%);
+    transform: translateX(-120%);
+    animation: fa-look-sheen calc(3.2s * var(--fa-look-speed, 1)) ease-in-out infinite;
+}
+
+@keyframes fa-look-sheen {
+    0% { transform: translateX(-120%); }
+    55%, 100% { transform: translateX(340%); }
+}
+
+/* -- pulse: a halo that breathes -------------------------------------------
+   The shadow is drawn once on the halo's own layer; only its opacity and
+   scale change, which the compositor does without repainting it. */
+.forge-assistant-look-halo {
+    position: absolute;
+    inset: -2px;
+    border-radius: inherit;
+    box-shadow: 0 0 14px 3px color-mix(in srgb, var(--fa-look-accent) 75%, transparent);
+    opacity: 0.3;
+    animation: fa-look-pulse calc(2.4s * var(--fa-look-speed, 1)) ease-in-out infinite;
+}
+
+@keyframes fa-look-pulse {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.05); }
+}
+
+/* Neon's lettering glows too. Static: a text shadow is not animated. */
+#forge-assistant-root .forge-assistant-launcher[data-look-motion~="lit"] {
+    text-shadow: 0 0 6px color-mix(in srgb, var(--fa-look-accent) 80%, transparent);
+}
+
+/* -- ooze: the progress bar's sludge, with its own bubbles -----------------
+   The body is a still gradient; the surface skin travels by translating a
+   strip twice as wide as the button, whose pattern repeats every 38px, so the
+   loop is seamless and nothing is repainted. The bubbles are the progress
+   bar's own `.mc-ooze-bubble`, on its own `mc-ooze-rise` keyframes, starting
+   just under the button's top edge -- the same animation, in the same colour
+   when the look follows the progress bar. */
+.forge-assistant-launcher[data-look-motion~="ooze"] {
+    --mc-progress-fill: var(--fa-look-accent);
+    --mc-ooze-surface: 100%;
+    text-shadow: 0 1px 3px rgb(0 0 0 / 70%);
+}
+
+.forge-assistant-launcher[data-look-motion~="ooze"] .forge-assistant-look-clip {
+    background: linear-gradient(180deg,
+        color-mix(in srgb, var(--fa-look-accent) 72%, white) 0%,
+        var(--fa-look-accent) 48%,
+        color-mix(in srgb, var(--fa-look-accent) 55%, black) 100%);
+}
+
+.forge-assistant-launcher[data-look-motion~="ooze"] .forge-assistant-look-clip::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: calc(100% + 38px);
+    height: 100%;
+    background: radial-gradient(ellipse 19px 3px at 50% 0,
+        color-mix(in srgb, var(--fa-look-accent) 55%, white) 0 55%, transparent 58%);
+    background-size: 38px 100%;
+    background-repeat: repeat-x;
+    animation: fa-look-skin calc(0.75s * var(--fa-look-speed, 1)) linear infinite;
+}
+
+@keyframes fa-look-skin {
+    from { transform: translateX(-38px); }
+    to { transform: translateX(0); }
+}
+
+.forge-assistant-look-air .mc-ooze-bubble {
+    animation-duration: calc(var(--dur) * var(--mc-ooze-slow) * var(--fa-look-speed, 1));
+}
+
+/* -- aurora: a rainbow rim that turns --------------------------------------
+   A conic gradient three times the button's width, rotated behind it, and a
+   cover inset by the rim's width in the button's own fill. Only the rotation
+   moves. The border is made transparent and the layers reach under it, so the
+   rim is where the border was. */
+#forge-assistant-root .forge-assistant-launcher[data-look-motion~="aurora"] {
+    border-color: transparent;
+}
+
+.forge-assistant-launcher[data-look-motion~="aurora"] .forge-assistant-look-clip {
+    inset: calc(-1 * var(--fa-look-stroke-width, 1px));
+}
+
+.forge-assistant-launcher[data-look-motion~="aurora"] .forge-assistant-look-clip::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 300%;
+    aspect-ratio: 1;
+    translate: -50% -50%;
+    background: conic-gradient(from 0deg, #ff0080, #ff8c00, #ffe600, #40ff00, #00e5ff,
+                               #7a00ff, #ff0080);
+    animation: fa-look-spin calc(4s * var(--fa-look-speed, 1)) linear infinite;
+}
+
+.forge-assistant-launcher[data-look-motion~="aurora"] .forge-assistant-look-clip::after {
+    content: "";
+    position: absolute;
+    inset: max(2px, var(--fa-look-stroke-width, 1px));
+    border-radius: inherit;
+    background: var(--fa-look-fill, var(--background-fill-primary));
+}
+
+@keyframes fa-look-spin {
+    to { rotate: 360deg; }
+}
+
+/* Reduced motion is honoured unless the dialog was told otherwise. Stopped
+   bubbles read as a rendering fault, so they are not left standing still. */
+@media (prefers-reduced-motion: reduce) {
+    .forge-assistant-launcher[data-look-motion]:not([data-look-anyway]) .forge-assistant-look-clip::before,
+    .forge-assistant-launcher[data-look-motion]:not([data-look-anyway]) .forge-assistant-look-clip::after,
+    .forge-assistant-launcher[data-look-motion]:not([data-look-anyway]) .forge-assistant-look-halo {
+        animation: none;
+    }
+
+    .forge-assistant-launcher[data-look-motion]:not([data-look-anyway]) .forge-assistant-look-bubble {
+        display: none;
+    }
+}
+
+/* The customize dialog.
+   =========================================================================
+
+   A native modal <dialog>: the browser supplies the backdrop, focus
+   containment and the top layer. Built for a finger first -- every control is
+   at least 44px, colours are swatches rather than a picker, and on a phone it
+   is the whole screen. The preview stays at the top while the choices
+   scroll. */
+.forge-assistant-look-dialog {
+    box-sizing: border-box;
+    width: min(560px, calc(100vw - 24px));
+    max-width: none;
+    max-height: min(92vh, 920px);
+    margin: auto;
+    padding: 0;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 16px;
+    background: var(--background-fill-primary);
+    color: var(--body-text-color);
+    box-shadow: var(--shadow-drop-lg, 0 12px 40px rgba(0, 0, 0, 0.45));
+    overflow: hidden;
+    pointer-events: auto;
+}
+
+/* A veil in the theme's own background colour rather than a black of this
+   stylesheet's: it dims a light theme to grey and a dark one to darker, and
+   the theme contract below every section holds colours to the host's own. */
+.forge-assistant-look-dialog::backdrop {
+    background: color-mix(in srgb, var(--background-fill-primary, Canvas) 60%, transparent);
+    backdrop-filter: none;
+}
+
+.forge-assistant-look-sheet {
+    display: flex;
+    flex-direction: column;
+    max-height: inherit;
+}
+
+.forge-assistant-look-top {
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--border-color-primary);
+}
+
+.forge-assistant-look-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5em;
+    padding: 0.5em 0.6em 0 1em;
+}
+
+.forge-assistant-look-heading {
+    margin: 0;
+    font-size: 1.1em;
+}
+
+/* A stage with room around the button, so a glow, a halo and escaping
+   bubbles all have somewhere to be seen. */
+.forge-assistant-look-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 110px;
+    padding: 1.4em 1em 1.1em;
+    background:
+        radial-gradient(circle at 50% 60%, rgb(255 255 255 / 6%), transparent 60%),
+        var(--background-fill-secondary, transparent);
+}
+
+/* The previews are launchers in every way the stylesheet cares about except
+   where they sit. */
+#forge-assistant-root .forge-assistant-look-preview {
+    position: relative;
+    max-width: 100%;
+    cursor: default;
+    touch-action: auto;
+}
+
+.forge-assistant-look-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.4em 1em 1em;
+}
+
+.forge-assistant-look-section {
+    padding: 0.6em 0;
+    border-bottom: 1px solid var(--border-color-primary);
+}
+
+.forge-assistant-look-section:last-of-type {
+    border-bottom: 0;
+}
+
+.forge-assistant-look-label {
+    margin: 0 0 0.4em;
+    font-size: 0.8em;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 0.75;
+}
+
+.forge-assistant-look-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    margin: 0.45em 0;
+}
+
+.forge-assistant-look-caption {
+    font-size: 0.9em;
+}
+
+.forge-assistant-look-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4em;
+}
+
+.forge-assistant-look-chip,
+.forge-assistant-look-action {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.3em 0.9em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.forge-assistant-look-chip[aria-pressed="true"] {
+    border-color: var(--color-accent, #2563eb);
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
+    font-weight: 600;
+}
+
+.forge-assistant-look-swatch {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 2px solid var(--border-color-primary);
+    border-radius: 50%;
+    background: var(--swatch);
+    cursor: pointer;
+}
+
+.forge-assistant-look-swatch[aria-pressed="true"] {
+    border-color: var(--color-accent, #2563eb);
+    box-shadow: 0 0 0 3px var(--background-fill-primary),
+                0 0 0 5px var(--color-accent, #2563eb);
+}
+
+.forge-assistant-look-custom {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    min-height: 44px;
+    padding: 0 0.7em 0 0.3em;
+    border: 1px dashed var(--border-color-primary);
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.forge-assistant-look-custom input {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: none;
+    cursor: pointer;
+}
+
+/* A grid rather than the flex row the other groups are, so the cards line
+   up; `stretch` because the group rule centres, and a card whose name wraps
+   would otherwise stand taller than the rest of its row. */
+.forge-assistant-look-presets {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    align-items: stretch;
+    gap: 0.5em;
+}
+
+.forge-assistant-look-preset {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.45em;
+    min-height: 92px;
+    padding: 0.9em 0.5em 0.6em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 12px;
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.forge-assistant-look-preset .forge-assistant-look-preview {
+    pointer-events: none;
+    font-size: 0.85em;
+}
+
+.forge-assistant-look-preset-name {
+    font-size: 0.85em;
+}
+
+.forge-assistant-look-title {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 44px;
+    padding: 0.4em 0.8em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 10px;
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    /* 16px or more, or iOS zooms the page when the field takes focus. */
+    font: inherit;
+    font-size: max(16px, 1em);
+}
+
+/* A range input with a thumb a finger can find. */
+.forge-assistant-look-range {
+    flex: 1 1 200px;
+    min-height: 44px;
+    accent-color: var(--color-accent, #2563eb);
+}
+
+.forge-assistant-look-range::-webkit-slider-thumb {
+    width: 28px;
+    height: 28px;
+}
+
+.forge-assistant-look-value {
+    min-width: 3.5em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.forge-assistant-look-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    min-height: 44px;
+    cursor: pointer;
+}
+
+.forge-assistant-look-toggle input {
+    width: 24px;
+    height: 24px;
+}
+
+.forge-assistant-look-note,
+.forge-assistant-look-warning {
+    margin: 0.3em 0 0;
+    font-size: 0.9em;
+    opacity: 0.85;
+}
+
+.forge-assistant-look-warning {
+    padding: 0.5em 0.7em;
+    border-radius: 8px;
+    background: color-mix(in srgb, #f59e0b 18%, transparent);
+    opacity: 1;
+}
+
+.forge-assistant-look-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5em;
+    flex: 0 0 auto;
+    padding: 0.6em 1em calc(0.6em + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border-color-primary);
+}
+
+.forge-assistant-look-foot .forge-assistant-look-action:first-child {
+    margin-right: auto;
+}
+
+/* The theme's primary button, fill and text as the pair it promises are
+   legible together. */
+.forge-assistant-look-save {
+    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
+    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
+    color: var(--button-primary-text-color, white);
+    font-weight: 600;
+}
+
+/* A phone gets the whole screen. */
+@media (max-width: 639px) {
+    .forge-assistant-look-dialog {
+        width: 100vw;
+        height: 100dvh;
+        max-height: 100dvh;
+        border: 0;
+        border-radius: 0;
+    }
+
+    .forge-assistant-look-sheet {
+        height: 100%;
+    }
+}
+
 .forge-assistant-unread {
     min-width: 1.4em;
     padding: 0 0.35em;
@@ -5975,7 +6485,15 @@
     opacity: 0.6;
 }
 
-.forge-assistant-ghost {
+/* The drag preview. `pointer-events: none` on the class alone was never in
+   force: the root's own `#forge-assistant-root > * { pointer-events: auto }`
+   is an id selector and outranks it, and the preview is a direct child of the
+   root. So the preview took presses -- which mattered exactly when a drag
+   never ended, because then it sat over the launcher's resting place for the
+   life of the page and every press on the launcher landed on it instead.
+   Stated at the same weight as the rule it has to beat. */
+.forge-assistant-ghost,
+#forge-assistant-root > .forge-assistant-ghost {
     position: fixed;
     border: 2px dashed var(--border-color-primary);
     border-radius: var(--radius-lg, 10px);
@@ -5991,6 +6509,10 @@
     left: 0;
     width: 8px;
     cursor: ew-resize;
+    /* A finger on the edge is a resize, not a pan. Without this the browser
+       claims a horizontal touch as a scroll and cancels the pointer, which is
+       the gesture ending in a way the old handler never heard. */
+    touch-action: none;
 }
 
 .forge-assistant-jump {

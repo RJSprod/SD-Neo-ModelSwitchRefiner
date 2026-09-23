@@ -160,7 +160,11 @@
             && !(bar && (panel === bar.strip || panel.contains(bar.strip))));
     };
 
-    Host.prototype.listWorkspaces = function () {
+    // The pairing, and nothing that costs a style read. Every hot path -- the
+    // navigation observer, the confirmation watchdog that runs once a frame,
+    // resolving a root -- needs to know which panel goes with which button
+    // and never whether each one could be focused.
+    Host.prototype.pairs = function () {
         const bar = this.bar();
         const panels = this.panels();
         if (!bar) return [];
@@ -184,17 +188,32 @@
             const panel = pick(button, order);
             if (panel) taken.add(panel);
             const id = (panel && panel.id) || ("tab-" + order);
-            const capability = this.focusCapability(id, panel);
             return {
                 id,
                 label: (button.textContent || "").trim() || id,
                 order,
                 available: !button.disabled,
-                focusCapability: capability.ok,
-                reason: capability.reason,
                 button,
                 panel,
             };
+        });
+    };
+
+    // The full description, for the moments something is going to show it.
+    // Whether a workspace can be focused is a walk up its ancestors reading
+    // computed styles, so it is answered when it is asked and not before --
+    // it used to be computed for every tab on every attribute change anywhere
+    // under `#tabs`, which during a generation is several times a second.
+    Host.prototype.listWorkspaces = function () {
+        return this.pairs().map((item) => {
+            let capability = null;
+            const read = () => capability
+                || (capability = this.focusCapability(item.id, item.panel));
+            Object.defineProperties(item, {
+                focusCapability: {enumerable: true, get: () => read().ok},
+                reason: {enumerable: true, get: () => read().reason},
+            });
+            return item;
         });
     };
 
@@ -207,7 +226,7 @@
     };
 
     Host.prototype.getActiveWorkspace = function () {
-        const workspaces = this.listWorkspaces();
+        const workspaces = this.pairs();
         if (!workspaces.length) return "";
         // The authority is which *panel* is showing, not which button looks
         // selected: a theme is free to restyle the button and several do.
@@ -219,13 +238,13 @@
     };
 
     Host.prototype.resolveWorkspaceRoot = function (id) {
-        const paired = this.listWorkspaces().find((item) => item.id === id);
+        const paired = this.pairs().find((item) => item.id === id);
         if (paired && paired.panel) return paired.panel;
         return this.panels().find((panel) => panel.id === id) || null;
     };
 
     Host.prototype.activateWorkspace = function (id) {
-        const wanted = this.listWorkspaces().find((item) => item.id === id);
+        const wanted = this.pairs().find((item) => item.id === id);
         if (!wanted || !wanted.button) {
             return Promise.reject(new Error("That workspace is not on this page."));
         }
@@ -264,8 +283,22 @@
         return () => this.listeners.delete(listener);
     };
 
-    Host.prototype.notify = function () {
+    // What a listener can show: which workspace is active, which one a switch
+    // is waiting on, and the bar's own buttons -- their names and whether they
+    // can be pressed. Nothing else about the page is any of their business,
+    // so a change to nothing else calls none of them.
+    Host.prototype.signature = function (active) {
+        const bar = this.bar();
+        const buttons = bar ? bar.buttons.map((button) =>
+            (button.disabled ? "!" : "") + (button.textContent || "").trim()) : [];
+        return [active, this.pending].concat(buttons).join("\u0000");
+    };
+
+    Host.prototype.notify = function (force) {
         const active = this.getActiveWorkspace();
+        const signature = this.signature(active);
+        if (!force && signature === this.lastSignature) return;
+        this.lastSignature = signature;
         this.listeners.forEach((listener) => {
             try {
                 listener(active, this.pending);
@@ -275,16 +308,44 @@
         });
     };
 
+    // Watching the host's own selection rather than our own clicks, so a
+    // switch made anywhere -- a header button, another extension's "Send to
+    // img2img" -- moves the highlight too.
+    //
+    // What is watched is exactly what decides the selection: each top-level
+    // panel's own attributes (Gradio shows and hides a tab by the panel's
+    // inline `display`), and the top-level bar's buttons. It used to be every
+    // `class` and `style` change anywhere under `#tabs` -- which is the whole
+    // application, and which during a generation means every progress tick,
+    // every preview frame and every status flip, each one re-reading every
+    // tab with forced style recalculation. A third observer notices panels
+    // coming and going and moves the other two onto the new set.
     Host.prototype.watch = function () {
         if (this.observer || typeof MutationObserver !== "function") return;
         const tabs = app().querySelector("#tabs");
         if (!tabs) return;
-        // Watching the host's own selection rather than our own clicks, so a
-        // switch made anywhere -- a header button, another extension's
-        // "Send to img2img" -- moves the highlight too.
         this.observer = new MutationObserver(() => this.notify());
-        this.observer.observe(tabs, {attributes: true, subtree: true,
-                                     attributeFilter: ["class", "style", "aria-selected"]});
+        this.structure = new MutationObserver(() => {
+            this.bind();
+            this.notify();
+        });
+        this.structure.observe(tabs, {childList: true});
+        this.bind();
+    };
+
+    Host.prototype.bind = function () {
+        if (!this.observer) return;
+        this.observer.disconnect();
+        const bar = this.bar();
+        if (bar) {
+            this.observer.observe(bar.strip, {attributes: true, subtree: true,
+                                              attributeFilter: ["class", "aria-selected",
+                                                                "disabled"]});
+        }
+        this.panels().forEach((panel) => {
+            this.observer.observe(panel, {attributes: true,
+                                          attributeFilter: ["class", "style", "hidden"]});
+        });
     };
 
     // -- the header's utilities -------------------------------------------- //
@@ -359,6 +420,10 @@
         if (this.observer) {
             this.observer.disconnect();
             this.observer = null;
+        }
+        if (this.structure) {
+            this.structure.disconnect();
+            this.structure = null;
         }
         window.clearTimeout(this.watchdog);
         this.listeners.clear();
