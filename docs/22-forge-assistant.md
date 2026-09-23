@@ -878,6 +878,236 @@ and closes the panel.
 
 ---
 
+## 3.15 A launcher that stopped answering
+
+> "I had one time webui showed me a disconnect message but i was still able to
+> send image prompt request and see them render in gallery, but the fly out
+> button would not respond. I could not switch tabs because i was in focus
+> mode, so i had to reload my web page entirely. ... at one point in time i
+> access my webui from a remote session before i saw the issue."
+
+There were no logs from the occasion, so this started as speculation. It
+stopped being speculation once one chain of events could be reproduced in a
+real browser against the real scripts, and every link in it turned out to be a
+defect in its own right.
+
+### What the disconnect message was, and was not
+
+Gradio 4.40 says "Connection errored out" or "Lost connection due to leaving
+page" in a toast, top right, for a few seconds. It is not an overlay and it
+covers nothing near a launcher; generation carrying on afterwards is ordinary
+for Gradio, which opens a new stream per request. So the message was a
+coincidence of cause, not the cause: whatever broke Gradio's stream -- a
+machine asleep, a network changing hands, a remote-desktop session connecting
+or disconnecting -- was the same event that broke things here.
+
+### The launcher: a gesture that could not end
+
+Reproduced in headless Chromium with the real scripts: a touch drag on the
+launcher, a short slide past the threshold, and no touch-end -- which is what a
+remote-desktop client delivers when its session drops or changes hands in the
+middle of a press. Then three mouse clicks on the launcher. Nothing opened.
+
+Three defects, each necessary:
+
+1. **The drag preview took presses.** `.forge-assistant-ghost {
+   pointer-events: none }` never applied: the root's own
+   `#forge-assistant-root > * { pointer-events: auto }` is an id selector and
+   outranks a class, and the preview is a direct child of the root. The element
+   under the launcher's centre was measured as the preview, with computed
+   `pointer-events: auto`.
+2. **A touch drag could never end.** `endDrag` ignores every pointer but the
+   one that started the drag, and every later touch has a new id. The drag -- and
+   the preview over the launcher -- lasted the life of the page. With a mouse the
+   next click happened to end it; a touch never could.
+3. **Focus mode's only way out was the launcher.** Escape works, and nobody
+   knows that.
+
+And beside them, one of the same family: the edge resize handle added a window
+`pointermove` and `pointerup` listener per gesture and removed them only on
+`pointerup`, with no pointer id and no capture. A gesture that ended any other
+way -- a touch the browser cancelled, which the handle's missing `touch-action`
+made likely -- left them there, and from then on every pointer movement
+anywhere on the page resized the panel and forced a layout doing it.
+
+What changed:
+
+- `supersede`, on `pointerdown` in the capture phase on the window: a new
+  *primary* pointer going down means every earlier gesture has ended, whether
+  or not its end arrived -- a mouse cannot press while pressed, and a new
+  primary touch exists only once every finger has lifted. It ends them, and
+  clears the click flags nobody consumed.
+- Every gesture also ends on `lostpointercapture`, on the window losing focus,
+  on the page being hidden and on `pagehide`; a mouse that moves with no button
+  down is not dragging.
+- The preview's rule is stated at the weight of the rule it has to beat.
+- The resize handle is the same state machine as the other two gestures: one
+  set of listeners for the life of the shell, a pointer id, capture, every way
+  out reaching its end, placement once a frame, and `touch-action: none`.
+- Only a drag of the launcher sets the flag that swallows the launcher's next
+  click; a panel dragged by its header used to eat the next real press on it.
+- **A safety net for whatever this list has missed.** Every listener is added
+  through `Shell.on`, which now guards it: a handler that throws is logged once
+  and `recover` runs, putting the shell back into a state it knows -- gestures
+  ended, preview away, root back on the page if something took it off, exactly
+  one of launcher and panel drawn -- while keeping what was *chosen*: open or
+  closed, focus mode, the draft. And two presses on the launcher's box that land
+  on something else, close together, reset the shell; if the launcher is still
+  covered after that and focus mode is on, focus mode is left so the host's own
+  tab bar is back. A dialog over the launcher is exempt -- it is meant to be
+  there -- and what was lying over it is named in the console.
+
+Measured after the change, same reproduction: the first mouse click opens the
+panel and clears the stale drag.
+
+### The conversation: two dead ends
+
+Neither of these makes a launcher unresponsive, but both were on the same path
+-- a network or process event while the page was away -- and both ended in
+"reload the page".
+
+**A stream that dies without closing was never replaced.** `silent()` could
+always tell a dead stream from a quiet one; nothing asked it except a returning
+tab, and even then it only flagged the stream, it did not let go of it. A
+half-open connection -- a laptop lid, a VPN, a proxy that drops without a FIN --
+is a `reader.read()` that never settles. A fifteen-second watchdog now asks, and
+`restream` aborts the fetch and goes through the reconnect ladder. At the
+moments things come back -- `online`, a page restored from the back-forward
+cache, Chrome's `resume` after freezing a tab -- one missed heartbeat is enough
+rather than three.
+
+**A restarted server was the end of the conversation.** The server's key is
+minted per process (`_token = secrets.token_urlsafe(24)`, "Regenerated by a
+restart"), and the page reads it from a hidden Gradio field that nothing
+redraws. After a restart every request is refused, and the page answered with
+"Reload the page" every two seconds for as long as it stayed open; an event
+from the new process's epoch was met with "The server restarted. Reload the
+page to carry on."
+
+Now a refused request renews the key from Gradio's own `/config` -- the
+component tree Gradio serves the page from, behind Gradio's own `login_check`,
+which is exactly as privileged as loading the page was. An endpoint of our own
+would have handed the key to anyone who could reach the server, since routes
+added to the app are not behind Gradio's auth. A renewed key means a new
+process, so the session starts over from the bootstrap (`restarted`). Drafts
+survive. Operations do not, and a send that was in flight is deliberately *not*
+retried: the old process may have written it before it went, and a retry into
+a registry that has never heard of it is how one message becomes two. Its text
+is still in the draft, and the conversation that comes back shows whether it
+arrived. A renewal that finds the same key is not repeated until something
+succeeds -- the config is megabytes, and a refusal the key does not explain is
+not worth fetching it every ten seconds for.
+
+Measured end to end against a stand-in server that can go silent and restart:
+the old store sat on the dead stream indefinitely and, after a restart, polled
+with the stale key for ever; the new one replaces the silent stream after the
+limit and not before, and rejoins a restarted server with one config fetch.
+
+---
+
+## 3.16 The performance review
+
+> "Please review the overall implementation of the fly to ensure it does not
+> introduce performance degradation to the webui. We want the safe options,
+> please ask me first if you need to reduce our existing experience for
+> performance."
+
+Nothing had to be reduced. Everything that changed costs nothing visible.
+
+**The finding that mattered: the navigation observer watched the whole
+application.** To notice a tab switch it observed every `class` and `style`
+change anywhere under `#tabs`, which is everything the WebUI draws. During a
+generation that is every progress tick, preview frame and status flip, and each
+one re-read every tab -- with an ancestor walk reading computed styles per tab to
+ask whether it could be focused, which nothing on that path ever used -- called
+every listener, and rebuilt the collapsed panel's tab strip. Measured in
+Chromium over five seconds of simulated generation with the strip open:
+
+| | before | after |
+| --- | --- | --- |
+| active-tab lookups | 606 | 2 |
+| full tab descriptions | 909 | 0 |
+| listener calls | 303 | 1 |
+| strip rebuilds | 303 | 0 |
+| main-thread time in them | 330 ms | ~0 ms |
+
+-- the two and the one being the real switch at the end, which is still seen.
+What is observed now is exactly what decides the selection: each top-level
+panel's own attributes and the top-level bar's buttons, with a third observer
+rebinding them when panels come and go. Listeners hear only a change they could
+show: the active tab, the pending switch, a button renamed or disabled. The hot
+paths use a pairing that reads no styles; whether a tab can be focused is asked
+lazily, when something reads it. The strip is rebuilt only when its tabs change,
+and otherwise re-marked, so a keyboard focus or a drag on it survives a switch.
+
+**A streamed reply redrew the panel on every token.** Renders from the store are
+now drawn once per animation frame with the latest view: markdown, fingerprint
+and a layout read, once a frame instead of several times a frame, and not at all
+in a hidden tab until it is looked at.
+
+**The resize handle forced a layout per pointer event**, and leaked (§3.15). It
+places once a frame now.
+
+What was looked at and left: the three window `pointermove` listeners (a
+comparison each and a return), the placement on `visualViewport` scroll (needed
+to follow a pinch; once a frame), focus mode's bounded walk on entering (once
+per toggle), the store's fifteen-second watchdog, and the focus mode resize
+observer (a no-op for every workspace but those with a canvas to refit).
+
+---
+
+## 3.17 Customize
+
+> "In the '…' menu, add a customize menu. It should open a pop up with
+> customize options ... Background color, title, corner radius, font color,
+> stroke, the same animation that we have for our custom progress bar
+> animation always playing on the button ... Cool things that are exciting and
+> can catch your eye because now this the primary controller."
+
+`forge_assistant_look.js`, on its own so that it costs nothing until opened and
+can be tested alone. A **look** is a complete, validated set of choices: title,
+icon, size, text colour (or Auto), fill (or a two-stop gradient and its
+angle), border colour and width, radius (or a pill), glow, the colour effects
+are drawn in, an animation and its speed, and whether to animate despite a
+reduced-motion preference. Presets are looks.
+
+**Stored, so checked.** In `localStorage`, per browser, like Free Float. On the
+way back in every field is held to what it can be: colours are six-digit hex or
+nothing -- not a name, not `url()`, not `var()` -- numbers are clamped, choices
+are checked against their lists, the title loses control characters and is cut
+at forty characters (by character, never half way through one), and a version
+this build does not know is the default rather than a guess. Nothing from
+storage is ever written as markup.
+
+**The animations are the progress bar's.** Sheen, Pulse, Neon and Ooze -- Ooze's
+bubbles are `.mc-ooze-bubble` on `mc-ooze-rise`, the progress bar's own class
+and keyframes, not a copy that can drift -- plus Aurora, a conic rainbow turning
+behind a cover inset by the rim's width. *Match progress bar* reads
+`model_chain_style_theme` (and the Custom toggles) at the moment the look is
+applied, and draws in the progress bar's colour. **Every keyframe animates
+transform and opacity only** -- the sheen band translates, the halo's pre-drawn
+shadow fades and scales, Ooze's surface skin is a strip twice as wide translated
+by its own period, Aurora rotates -- so the compositor runs them with no layout
+and no paint, and a test holds every `fa-look-*` keyframe to that. They stop
+when the launcher is not displayed.
+
+**Legibility is checked against what is really behind the title.** The first
+Toxic preset put lime text on a dark fill, and Ooze then painted bright sludge
+over the fill: 1.4 to 1. The contrast check, and Auto, now measure against the
+sludge for Ooze; the dialog warns under 3 to 1, and a test holds every preset to
+4.5.
+
+**The dialog** is a native modal `<dialog>`, built on first use: the browser
+supplies the backdrop, focus containment and the top layer, which is above focus
+mode and above another extension's dialog layer. The panel steps back to its
+launcher first, because the launcher is the thing being customized and it takes
+each change live behind the backdrop. Escape is the dialog's cancel -- the shell's
+own Escape handling stands aside while it is open, where it would otherwise have
+left focus mode behind the dialog. Verified in Chromium: no control under 44
+pixels, eight live previews, the phone sheet exactly the screen.
+
+---
+
 ## 4. Deliberate deviations
 
 **The panel offers three message actions, not all of them** (§3.11). The

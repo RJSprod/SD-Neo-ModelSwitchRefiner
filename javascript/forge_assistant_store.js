@@ -58,6 +58,28 @@
     const POLL_IDLE = 10000;
     const RETRY_STREAM_AFTER = 30000;
 
+    // How often the open stream is asked whether it is still alive. `silent()`
+    // could always tell a dead one from a quiet one; nothing ever asked it
+    // except a returning tab, so a connection that died without closing -- a
+    // laptop lid, a VPN reconnect, a remote-desktop session changing hands --
+    // stayed "open" and delivered nothing until the page was reloaded.
+    const WATCHDOG = 15000;
+
+    // At a moment the network or the page has just come back, a stream that
+    // has been quiet for longer than one heartbeat and some slack is presumed
+    // dead rather than waited on for the full SILENCE.
+    const STALE = 20000;
+
+    // The Gradio component that carries this process's capability, and where
+    // Gradio publishes every component's initial value. A restarted server
+    // mints a new key; the page keeps the old one in the DOM for ever, and
+    // every request it makes is refused. `/config` is behind Gradio's own
+    // login check, so reading the new key from it is exactly as privileged as
+    // loading the page was -- which is why this does not add an endpoint of
+    // its own that would not be.
+    const CONFIG = "/config";
+    const RENEW_COOLDOWN = 10000;
+
     const DRAFT_DEBOUNCE = 250;
     const MAX_CACHED_THREADS = 10;
 
@@ -154,6 +176,13 @@
         this._reconnect = null;
         this._pollTimer = null;
         this._abort = null;
+        this._watchdog = null;
+        this._retryStream = null;
+        this._renewing = null;
+        this._renewedAt = 0;
+        this._renewFutile = false;
+        this._keyOverride = null;
+        this._restarting = false;
         this._restoreDrafts();
     }
 
@@ -216,13 +245,69 @@
 
     // -- the capability -------------------------------------------------- //
 
-    Store.prototype.key = function () {
+    function keyInput() {
         const field = document.getElementById(KEY_FIELD);
-        if (!field) return "";
-        const input = field.tagName === "TEXTAREA" || field.tagName === "INPUT"
+        if (!field) return null;
+        return field.tagName === "TEXTAREA" || field.tagName === "INPUT"
             ? field
             : field.querySelector("textarea, input");
-        return (input && input.value) || "";
+    }
+
+    Store.prototype.key = function () {
+        const input = keyInput();
+        const found = (input && input.value) || "";
+        // A renewed key stands in for the one it replaced and nothing else. If
+        // the field ever changes to something else, that is newer than both.
+        const override = this._keyOverride;
+        if (override && (found === override.stale || !found)) return override.fresh;
+        return found;
+    };
+
+    /** Ask Gradio for this process's key, when the one on the page is refused.
+     *
+     * Resolves true when a different key was found and adopted. One request
+     * at a time, and not more often than RENEW_COOLDOWN: a server that keeps
+     * refusing a fresh key is refusing for a reason this cannot fix, and a
+     * page that fetched the whole Gradio config in a loop would be a worse
+     * problem than the one it was solving.
+     */
+    Store.prototype.renewKey = function () {
+        if (this._renewing) return this._renewing;
+        // Once per episode. A renewal that found the key the page already had
+        // means the refusal is about something else, and asking again every
+        // ten seconds would be a multi-megabyte config fetched for ever. Any
+        // request that succeeds ends the episode.
+        if (this._renewFutile) return Promise.resolve(false);
+        if (Date.now() - this._renewedAt < RENEW_COOLDOWN) return Promise.resolve(false);
+        this._renewedAt = Date.now();
+        const stale = this.key();
+        this._renewing = fetch(basePath() + CONFIG, {credentials: "same-origin"})
+            .then((response) => (response.ok ? response.json() : null))
+            .then((config) => {
+                const components = (config && config.components) || [];
+                const holder = components.find((item) => item && item.props
+                    && item.props.elem_id === KEY_FIELD);
+                const fresh = holder && typeof holder.props.value === "string"
+                    ? holder.props.value : "";
+                if (!fresh || fresh === stale) {
+                    this._renewFutile = true;
+                    return false;
+                }
+                this._keyOverride = {stale, fresh};
+                // Into the field as well, so anything else that reads it is
+                // current. No event is dispatched: nothing on the Python side
+                // listens to this field, and a synthetic `input` would be a
+                // Gradio change nobody asked for.
+                const input = keyInput();
+                if (input) input.value = fresh;
+                return true;
+            })
+            .catch(() => false)
+            .then((renewed) => {
+                this._renewing = null;
+                return renewed;
+            });
+        return this._renewing;
     };
 
     Store.prototype.headers = function (extra) {
@@ -243,10 +328,27 @@
                     error.status = response.status;
                     error.code = body.error && body.error.code;
                     error.body = body;
+                    if (response.status === 401) this.refused();
                     throw error;
                 });
             }
+            this._renewFutile = false;
             return response.json();
+        });
+    };
+
+    /** A request was refused for its key.
+     *
+     * That happens for one reason in practice: the server restarted, minted a
+     * new key, and this page is still holding the old one. It used to be the
+     * end of the conversation until a reload -- "Reload the page", every two
+     * seconds, for as long as the tab stayed open. Now the key is renewed and,
+     * because a new key means a new process, the session is started over.
+     * The refused request still fails; everything it was part of is rebuilt.
+     */
+    Store.prototype.refused = function () {
+        this.renewKey().then((renewed) => {
+            if (renewed) this.restarted();
         });
     };
 
@@ -278,10 +380,19 @@
                                       epoch: uuid()};
                 }
                 this.announce();
+                this.watch();
                 return this.connect();
             })
             .catch((error) => {
                 this.ready = false;
+                // A refused bootstrap is a stale key, and `refused` is already
+                // renewing it; saying the host cannot hold a conversation
+                // would be wrong for the few hundred milliseconds that takes.
+                if (error && error.status === 401) {
+                    this.error = "";
+                    this.announce();
+                    return;
+                }
                 this.error = "Conversation unavailable on this host version.";
                 console.warn("Forge Assistant: could not start a conversation session",
                              error);
@@ -402,7 +513,8 @@
             });
         };
         this._pollTimer = window.setTimeout(tick, POLL_ACTIVE);
-        window.setTimeout(() => {
+        window.clearTimeout(this._retryStream);
+        this._retryStream = window.setTimeout(() => {
             // Try the stream again, without giving up the fallback until one
             // actually opens. A page that stopped polling to try a stream that
             // fails again is a page that showed nothing for thirty seconds.
@@ -413,9 +525,81 @@
         }, RETRY_STREAM_AFTER);
     };
 
-    Store.prototype.silent = function () {
-        return this.connected && this.lastTraffic
-            && Date.now() - this.lastTraffic > SILENCE;
+    Store.prototype.silent = function (limit) {
+        return !!(this.connected && this.lastTraffic
+            && Date.now() - this.lastTraffic > (limit || SILENCE));
+    };
+
+    /** Tear the current stream down and go through the reconnect ladder.
+     *
+     * The abort is what makes this different from `dropped` on its own: a
+     * stream that died without closing is a `reader.read()` that will never
+     * settle, and nothing short of aborting the fetch lets go of it. The
+     * AbortError that follows is swallowed by `stream`, so the drop is counted
+     * once, here.
+     */
+    Store.prototype.restream = function () {
+        this.connected = false;
+        if (this._abort) {
+            try {
+                this._abort.abort();
+            } catch (error) { /* already gone */ }
+            this._abort = null;
+        }
+        this.dropped();
+    };
+
+    // One timer, every fifteen seconds, doing one subtraction. It re-arms
+    // itself for the life of the page; `dispose` is what stops it.
+    Store.prototype.watch = function () {
+        window.clearTimeout(this._watchdog);
+        this._watchdog = window.setTimeout(() => {
+            if (this.silent()) this.restream();
+            this.watch();
+        }, WATCHDOG);
+    };
+
+    /** The process behind this page is a different one now.
+     *
+     * Nothing the page holds about the old one means anything to the new one
+     * -- not the feed, not the cursor, not an operation id -- and the old
+     * answer to that was a sentence: "Reload the page to carry on". This is
+     * the reload without the page: the session is started again from the
+     * bootstrap. Drafts survive it, because they were never the server's.
+     *
+     * A send that was in flight is *not* retried. The old process may have
+     * written it before it went, and a retry into a registry that has never
+     * heard of it is how one message becomes two. Its text is still in the
+     * draft, because a draft is only cleared by an acknowledged send, and the
+     * conversation as it comes back shows whether it arrived.
+     */
+    Store.prototype.restarted = function () {
+        if (this._restarting) return this._starting || Promise.resolve();
+        this._restarting = true;
+        window.clearTimeout(this._reconnect);
+        window.clearTimeout(this._pollTimer);
+        window.clearTimeout(this._retryStream);
+        if (this._abort) {
+            try {
+                this._abort.abort();
+            } catch (error) { /* already gone */ }
+            this._abort = null;
+        }
+        this.serverEpoch = "";
+        this.feed = "";
+        this.generation = "";
+        this.cursor = 0;
+        this.connected = false;
+        this.polling = false;
+        this.failures = 0;
+        this.operations.clear();
+        this._pending = null;
+        this.error = "";
+        this._starting = null;
+        this.announce();
+        return this.start().finally(() => {
+            this._restarting = false;
+        });
     };
 
     // -- the reducer ------------------------------------------------------- //
@@ -424,11 +608,9 @@
         if (!event || event.protocol_version !== PROTOCOL_VERSION) return false;
         if (this.serverEpoch && event.server_epoch !== this.serverEpoch) {
             // The process restarted. Nothing this page holds means anything to
-            // it -- not cursors, not operation ids -- so it is told rather than
-            // quietly reconciled into a state neither side believes.
-            this.error = "The server restarted. Reload the page to carry on.";
-            this.connected = false;
-            this.announce();
+            // it -- not cursors, not operation ids -- so none of it is
+            // reconciled: the session is started again. See `restarted`.
+            this.restarted();
             return false;
         }
         const cursor = Number(event.stream_cursor || 0);
@@ -826,11 +1008,15 @@
         });
     };
 
-    Store.prototype.reconcile = function () {
-        if (this.silent()) {
-            this.connected = false;
-            this.announce();
-        }
+    /** Check the session at a moment something may have changed under it.
+     *
+     * `eager` is for the moments the network or the page has just come back
+     * -- `online`, a page restored from the back-forward cache, a tab the
+     * browser froze and resumed. The stream is presumed dead after one missed
+     * heartbeat rather than three, because at those moments it usually is.
+     */
+    Store.prototype.reconcile = function (eager) {
+        if (this.silent(eager ? STALE : SILENCE)) this.restream();
         return this.refresh();
     };
 
@@ -838,6 +1024,8 @@
         window.clearTimeout(this._reconnect);
         window.clearTimeout(this._pollTimer);
         window.clearTimeout(this._draftTimer);
+        window.clearTimeout(this._watchdog);
+        window.clearTimeout(this._retryStream);
         this.flushDrafts();
         this.polling = false;
         if (this._abort) {

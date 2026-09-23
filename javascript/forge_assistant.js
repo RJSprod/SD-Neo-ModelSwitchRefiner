@@ -53,6 +53,15 @@
     const NARROW_GAP = 16;
     const NARROW_VIEWPORT = 640;
     const DRAG_THRESHOLD = 6;
+
+    // How often `recover` may run. A handler that fails on every pointermove
+    // must not turn into a forced layout on every pointermove as well.
+    const RECOVER_COOLDOWN = 1000;
+
+    // Two presses on the launcher that land on something else, this close
+    // together, are somebody trying to use it and being stopped. One is a
+    // press near it.
+    const COVERED_WINDOW = 4000;
     const MIN_WIDTH = 320;
     const MAX_WIDTH = 640;
     const NOMINAL_WIDTH = 360;
@@ -242,6 +251,17 @@
 
     // -- the shell --------------------------------------------------------- //
 
+    // A covering element, named well enough to find it in the inspector.
+    function describe(node) {
+        if (!node || !node.tagName) return String(node);
+        let text = node.tagName.toLowerCase();
+        if (node.id) text += "#" + node.id;
+        if (node.className && typeof node.className === "string") {
+            text += "." + node.className.trim().split(/\s+/).join(".");
+        }
+        return text;
+    }
+
     function element(tag, className, text) {
         const node = document.createElement(tag);
         if (className) node.className = className;
@@ -428,6 +448,30 @@
         launcher.appendChild(this.nodes.unread);
         this.nodes.root.appendChild(launcher);
         this.applyAppearance();
+        this.applyLook();
+    };
+
+    /** The launcher's customized look, over what Settings says about it.
+     *
+     * `look` is a draft while the customize dialog is open, and the saved one
+     * otherwise. Without the look module this does nothing and the launcher
+     * is exactly what Settings makes it. A new look can change the launcher's
+     * size, so it is placed again.
+     */
+    Shell.prototype.applyLook = function (look) {
+        if (!NS.look || !this.nodes.launcher) return null;
+        const found = NS.look.apply(this.nodes.launcher, look || NS.look.load(),
+                                    {label: this.settings.label,
+                                     appearance: this.settings.appearance},
+                                    {label: this.nodes.launcherLabel,
+                                     icon: this.nodes.launcherIcon});
+        if (found) {
+            // The accessible name follows the title that is actually drawn.
+            this.nodes.launcher.setAttribute("aria-label", found.label);
+            this.nodes.launcher.title = found.label;
+        }
+        this.place();
+        return found;
     };
 
     Shell.prototype.applyAppearance = function () {
@@ -651,15 +695,29 @@
 
     /** The workspace row: every tab this installation has, one press each.
      *
-     * Rebuilt rather than patched. It is a handful of buttons drawn when the
-     * conversation is collapsed and when the host's selection moves, and a
-     * diff of that would be more code than it saves.
+     * Rebuilt when the set of tabs changes, and otherwise only re-marked.
+     * While the navigation observer fired on every attribute change in the
+     * application, this rebuilt a dozen buttons on every progress tick of a
+     * generation -- DOM churn nobody could see, and a keyboard focus on one of
+     * those buttons dropped back to the page each time. Re-marking keeps the
+     * same buttons, so focus, hover and a drag in progress survive a switch.
      */
     Shell.prototype.renderWorkspaces = function () {
         const row = this.nodes.workspaces;
         if (!row || row.hidden) return;
         const active = this.host.getActiveWorkspace();
-        const found = this.host.listWorkspaces();
+        const found = this.host.pairs ? this.host.pairs() : this.host.listWorkspaces();
+        const shape = found.map((workspace) => workspace.id + "\u0000" + workspace.label
+            + "\u0000" + (workspace.available ? 1 : 0)).join("\u0001");
+        if (found.length && shape === row.dataset.shape
+            && row.children.length === found.length) {
+            found.forEach((workspace, index) => {
+                row.children[index].setAttribute("aria-current",
+                                                 String(workspace.id === active));
+            });
+            return;
+        }
+        row.dataset.shape = shape;
         row.innerHTML = "";
         if (!found.length) {
             row.appendChild(element("p", "forge-assistant-menu-empty",
@@ -840,9 +898,12 @@
     // threshold -- a press that moved two pixels is a click, not a drag.
 
     Shell.prototype.startDrag = function (event, node) {
-        if (this.drag) return;
         if (event.button !== undefined && event.button !== 0) return;
         if (!event.isPrimary) return;
+        // `supersede` has already ended any drag whose release never came, so
+        // one still here is this same press arriving twice (the launcher and
+        // the header are both handles); the first one stands.
+        if (this.drag) return;
         const target = event.target;
         if (target && target !== node && target.closest
             && target.closest("button, a, input, textarea, select")
@@ -869,6 +930,14 @@
     Shell.prototype.moveDrag = function (event) {
         const drag = this.drag;
         if (!drag || event.pointerId !== drag.pointerId) return;
+        // The button came up somewhere this page never heard about -- outside
+        // the window, in another application, across a remote-desktop session
+        // that changed hands. Without this the panel follows the cursor until
+        // the next click, which then lands as the end of a drag.
+        if (event.pointerType === "mouse" && event.buttons === 0) {
+            this.endDrag(null, true);
+            return;
+        }
         const dx = event.clientX - drag.startX;
         const dy = event.clientY - drag.startY;
         if (!drag.moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) {
@@ -927,7 +996,10 @@
             } else {
                 this.state.anchorOverride = drag.anchor;
             }
-            this.suppressClick = true;
+            // Only the launcher's own click is the tail of this gesture. A
+            // panel dragged by its header leaves no click on the launcher, and
+            // a flag set for one used to eat the next real press on it.
+            if (drag.node === this.nodes.launcher) this.suppressClick = true;
             this._save();
         }
         drag.node.style.left = "";
@@ -940,13 +1012,192 @@
 
     // -- wiring ------------------------------------------------------------- //
 
+    // Every listener this shell adds goes through here, and every one of them
+    // is guarded. A handler that throws used to leave whatever it was half way
+    // through exactly as it was -- a drag begun and never ended, a menu open
+    // with nothing to close it -- and the page kept that state until it was
+    // reloaded. Now the exception is logged and the shell is put back into a
+    // state it knows: see `recover`.
     Shell.prototype.on = function (node, type, handler, options) {
-        node.addEventListener(type, handler, options);
-        this.disposers.push(() => node.removeEventListener(type, handler, options));
+        const guarded = (event) => {
+            try {
+                return handler(event);
+            } catch (error) {
+                this.fault(error);
+                return undefined;
+            }
+        };
+        node.addEventListener(type, guarded, options);
+        this.disposers.push(() => node.removeEventListener(type, guarded, options));
+    };
+
+    Shell.prototype.fault = function (error) {
+        // Once per distinct failure: a handler that fails on every pointermove
+        // would otherwise bury the console as well as the page. Distinct means
+        // the message and the line that threw -- not the whole stack, whose
+        // callers differ from one dispatch to the next.
+        const stack = String((error && error.stack) || "").split("\n");
+        const text = String((error && error.message) || error) + "|" + (stack[1] || "");
+        this.faults = this.faults || new Set();
+        if (!this.faults.has(text)) {
+            this.faults.add(text);
+            console.error("Forge Assistant: a handler failed; the panel was reset", error);
+        }
+        this.recover();
+    };
+
+    /** Put the shell back into a state it knows, keeping everything that
+     *  matters.
+     *
+     * Every gesture ends, every flag a gesture owns is cleared, the preview is
+     * put away, and exactly one of the launcher and the panel is drawn again
+     * where it belongs. The conversation, the draft, the open/closed state and
+     * focus mode are left exactly as they were -- this undoes a *stuck*
+     * interaction, never a chosen one. Rate-limited, and it cannot throw.
+     */
+    Shell.prototype.recover = function () {
+        const now = Date.now();
+        if (this.recoveredAt && now - this.recoveredAt < RECOVER_COOLDOWN) return false;
+        this.recoveredAt = now;
+        try {
+            this.cancelGestures();
+            const root = this.nodes.root;
+            if (!root) return false;
+            // A theme that rebuilds the body takes this root out with it. The
+            // shell is still alive and still holds its nodes; they only need
+            // putting back.
+            if (!root.isConnected && document.body) document.body.appendChild(root);
+            if (this.frame) {
+                window.cancelAnimationFrame(this.frame);
+                this.frame = 0;
+            }
+            this.showOpen(this.state.panelOpen);
+            return true;
+        } catch (error) {
+            console.error("Forge Assistant: the panel could not be reset", error);
+            return false;
+        }
+    };
+
+    /** End every gesture in progress, as a cancellation.
+     *
+     * For the moments nobody can still be mid-gesture: the window lost focus,
+     * the page was hidden, a new primary pointer went down. A drag returns to
+     * where it came from; a resize keeps the width it had reached, because
+     * that is what was on screen when the hand came off.
+     */
+    Shell.prototype.cancelGestures = function () {
+        if (this.drag) this.endDrag(null, true);
+        if (this.strip) this.endStrip(null, true);
+        if (this.resizing) this.endResize(null, true);
+        this.suppressClick = false;
+        this.stripMoved = false;
+        const root = this.nodes.root;
+        if (root) root.classList.remove("forge-assistant-dragging");
+        if (this.nodes.ghost) this.nodes.ghost.hidden = true;
+    };
+
+    /** A primary pointer went down, anywhere on the page.
+     *
+     * Which means every gesture before it is over, whether or not its end was
+     * ever delivered: a mouse has one pointer and cannot press again while it
+     * is still pressed, and a new primary touch only exists once every earlier
+     * finger has lifted. The case this is for is a release that never arrives
+     * -- a remote-desktop session dropping mid-drag is the classic one -- which
+     * used to leave the drag running for the life of the page. For a touch it
+     * could never end at all, because every later touch has a different id.
+     *
+     * Runs in the capture phase on the window, before anything else sees the
+     * press, and costs two comparisons when nothing is stuck.
+     */
+    Shell.prototype.supersede = function (event) {
+        if (!event || !event.isPrimary) return;
+        if (this.drag || this.strip || this.resizing) this.cancelGestures();
+        this.suppressClick = false;
+        this.stripMoved = false;
+        this.noticeCover(event);
+    };
+
+    /** Somebody pressed where the launcher is, and the press went elsewhere.
+     *
+     * The belt to `supersede`'s braces. Whatever is lying over the launcher --
+     * something of ours left behind, or something of somebody else's -- the
+     * person pressing it is stuck, and in focus mode the launcher is their
+     * only way to another workspace. Two such presses close together reset the
+     * shell; if the launcher is *still* covered after that and focus mode is
+     * on, focus mode is left, so the host's own tab bar is back. Nothing is
+     * done about a dialog: a dialog over the launcher is meant to be there.
+     */
+    Shell.prototype.noticeCover = function (event) {
+        const launcher = this.nodes.launcher;
+        const root = this.nodes.root;
+        if (!launcher || launcher.hidden || !root || this.state.panelOpen) return;
+        const target = event.target;
+        if (target && root.contains(target)) {
+            this.coveredAt = 0;
+            return;
+        }
+        if (target && target.closest && target.closest(
+            "dialog, [role=\"dialog\"], [aria-modal=\"true\"], #lightboxModal")) return;
+        const box = launcher.getBoundingClientRect();
+        const x = event.clientX;
+        const y = event.clientY;
+        if (!(x >= box.left && x <= box.right && y >= box.top && y <= box.bottom)) return;
+        const now = Date.now();
+        if (!this.coveredAt || now - this.coveredAt > COVERED_WINDOW) {
+            this.coveredAt = now;
+            return;
+        }
+        this.coveredAt = 0;
+        console.warn("Forge Assistant: something is lying over the launcher",
+                     describe(target));
+        this.recoveredAt = 0;
+        this.recover();
+        if (this.focus.isActive() && !this.reachable()) {
+            this.focus.exit();
+            this.state.focusEnabled = false;
+            this.state.focusWorkspaceId = null;
+            if (this.nodes.focusToggle) this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+            this._save();
+            this.say("Focus mode was turned off: something was covering the assistant.",
+                     "warn");
+        }
+    };
+
+    /** Is the visible control the thing a press at its centre would reach? */
+    Shell.prototype.reachable = function () {
+        const node = this.state.panelOpen ? this.nodes.header : this.nodes.launcher;
+        if (!node || typeof document.elementFromPoint !== "function") return true;
+        const box = node.getBoundingClientRect();
+        if (!box.width || !box.height) return false;
+        const hit = document.elementFromPoint(box.left + box.width / 2,
+                                              box.top + box.height / 2);
+        return !!(hit && this.nodes.root.contains(hit));
+    };
+
+    /** The page came back: visible again, restored, resumed, refocused.
+     *
+     * Gestures are not touched here -- they were cancelled on the way out
+     * (`blur`, `visibilitychange`, `pagehide`), and a window that regains
+     * focus because somebody pressed the launcher from inside an iframe is in
+     * the middle of starting one. What is checked is the shell itself: still
+     * on the page, and not waiting on a frame that a hidden page never drew.
+     */
+    Shell.prototype.heal = function () {
+        const root = this.nodes.root;
+        if (root && !root.isConnected && document.body) document.body.appendChild(root);
+        if (this.frame) {
+            window.cancelAnimationFrame(this.frame);
+            this.frame = 0;
+        }
+        this.place();
     };
 
     Shell.prototype.wire = function () {
         const nodes = this.nodes;
+
+        // Before anything else sees a press. See `supersede`.
+        this.on(window, "pointerdown", (event) => this.supersede(event), true);
 
         [nodes.launcher, nodes.header].forEach((handle) => {
             this.on(handle, "pointerdown", (event) => {
@@ -956,6 +1207,13 @@
         this.on(window, "pointermove", (event) => this.moveDrag(event));
         this.on(window, "pointerup", (event) => this.endDrag(event, false));
         this.on(window, "pointercancel", (event) => this.endDrag(event, true));
+        // Capture taken away without a release -- the element was hidden, or
+        // the browser decided the gesture was its own. `endDrag` clears the
+        // drag before it releases capture itself, so its own release lands
+        // here and finds nothing to do.
+        [nodes.launcher, nodes.panel].forEach((node) => {
+            this.on(node, "lostpointercapture", (event) => this.endDrag(event, true));
+        });
 
         // The workspace strip scrolls by being dragged. Its pointer stream is
         // separate from the panel's: the row is not in the header, so the two
@@ -1042,6 +1300,10 @@
         }, true);
         this.on(nodes.resize, "keydown", (event) => this.resizeKey(event));
         this.on(nodes.resize, "pointerdown", (event) => this.startResize(event));
+        this.on(window, "pointermove", (event) => this.moveResize(event));
+        this.on(window, "pointerup", (event) => this.endResize(event, false));
+        this.on(window, "pointercancel", (event) => this.endResize(event, true));
+        this.on(nodes.resize, "lostpointercapture", (event) => this.endResize(event, true));
 
         this.on(window, "resize", () => this.place());
         if (window.visualViewport) {
@@ -1049,17 +1311,61 @@
             this.on(window.visualViewport, "scroll", () => this.place());
         }
         this.on(window, "orientationchange", () => this.place());
+        // Nobody is mid-gesture across a hidden page or an unfocused window,
+        // and a release that happened while we were not looking is never
+        // coming. Coming back, the shell is checked over as well as the
+        // conversation.
         this.on(document, "visibilitychange", () => {
-            if (!document.hidden) this.store.reconcile();
+            if (document.hidden) {
+                this.cancelGestures();
+                return;
+            }
+            this.heal();
+            this.store.reconcile(false);
         });
-        this.on(window, "online", () => this.store.reconcile());
-        this.on(window, "pageshow", () => this.store.reconcile());
-        this.on(window, "pagehide", () => this.store.flushDrafts());
+        this.on(window, "blur", () => this.cancelGestures());
+        this.on(window, "focus", () => this.heal());
+        this.on(window, "online", () => this.store.reconcile(true));
+        this.on(window, "pageshow", (event) => {
+            this.heal();
+            // Restored from the back-forward cache: every connection the page
+            // had was closed when it went in.
+            this.store.reconcile(!!(event && event.persisted));
+        });
+        // Chrome freezes background tabs and thaws them later; a frozen page's
+        // stream is as good as gone. `resume` is its word for "thawed".
+        this.on(document, "resume", () => {
+            this.heal();
+            this.store.reconcile(true);
+        });
+        this.on(window, "pagehide", () => {
+            this.cancelGestures();
+            this.store.flushDrafts();
+        });
         this.on(document, "keydown", (event) => this.documentKey(event), true);
         // Another extension's dialog has taken the page. See `yieldTo`.
         this.on(document, FOREIGN_OVERLAY, (event) => this.yieldTo(event));
 
-        this.disposers.push(this.store.subscribeState((view) => this.render(view)));
+        // Drawn once a frame, with the latest view. A streamed reply announces
+        // every token, and each announcement used to redraw the panel on the
+        // spot -- markdown, fingerprint, a layout read -- several times per
+        // frame the screen could only show once. A hidden tab draws nothing
+        // until it is looked at again.
+        this.disposers.push(this.store.subscribeState((view) => {
+            this.pendingView = view;
+            if (this.viewFrame) return;
+            this.viewFrame = window.requestAnimationFrame(() => {
+                this.viewFrame = 0;
+                const latest = this.pendingView;
+                this.pendingView = null;
+                if (!latest) return;
+                try {
+                    this.render(latest);
+                } catch (error) {
+                    this.fault(error);
+                }
+            });
+        }));
         this.disposers.push(this.host.subscribeNavigation((active) => {
             this.activeWorkspace = active;
             this.applySuppression();
@@ -1366,7 +1672,9 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        return [this.floatItem()].concat(this.host.listUtilities().map((utility) => {
+        const own = [this.floatItem()];
+        if (NS.look) own.push(this.customizeItem());
+        return own.concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
             item.type = "button";
             item.setAttribute("role", "menuitem");
@@ -1397,6 +1705,22 @@
         item.addEventListener("click", () => {
             this.closeMenu();
             this.setFreeFloat(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.customizeItem = function () {
+        const item = element("button", "forge-assistant-menu-item", "Customize\u2026");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "dialog");
+        item.title = "Colours, title, corners and animation for the button";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            // Back to the launcher first: it is the thing being customized,
+            // and it takes each change live behind the dialog.
+            if (this.state.panelOpen) this.close();
+            NS.look.editor(this).open();
         });
         return item;
     };
@@ -1482,6 +1806,9 @@
 
     Shell.prototype.documentKey = function (event) {
         if (event.key !== "Escape") return;
+        // The customize dialog's Escape is its own: it cancels the edit. Taken
+        // here it would have left focus mode instead, behind the dialog.
+        if (this.lookEditor && this.lookEditor.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,
@@ -1511,22 +1838,52 @@
         this.placeNow();
     };
 
+    // The edge handle. It used to add a pointermove and a pointerup listener
+    // to the window per gesture and take them off only on pointerup -- so a
+    // gesture that ended any other way (a touch the browser cancelled, a
+    // release outside the window) left them there, and from then on every
+    // pointer movement anywhere on the page resized the panel and forced a
+    // layout doing it. Now it is the same machine as the other two: one set of
+    // listeners for the life of the shell, a pointer id, capture, and an end
+    // that every way out reaches.
     Shell.prototype.startResize = function (event) {
-        const start = event.clientX;
-        const from = this.state.panelWidth || this.nodes.panel.offsetWidth || NOMINAL_WIDTH;
-        const move = (moved) => {
-            const width = from + (start - moved.clientX);
-            this.state.panelWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
-            this.placeNow();
+        if (event.button !== undefined && event.button !== 0) return;
+        if (!event.isPrimary) return;
+        this.resizing = {
+            pointerId: event.pointerId,
+            start: event.clientX,
+            from: this.state.panelWidth || this.nodes.panel.offsetWidth || NOMINAL_WIDTH,
         };
-        const finish = () => {
-            window.removeEventListener("pointermove", move);
-            window.removeEventListener("pointerup", finish);
-            this._save();
-        };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", finish);
+        try {
+            this.nodes.resize.setPointerCapture(event.pointerId);
+        } catch (error) { /* capture is an optimisation, not a requirement */ }
         event.preventDefault();
+    };
+
+    Shell.prototype.moveResize = function (event) {
+        const resizing = this.resizing;
+        if (!resizing || event.pointerId !== resizing.pointerId) return;
+        const width = resizing.from + (resizing.start - event.clientX);
+        this.state.panelWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
+        // Once a frame, not once an event: a pointer reports far more often
+        // than the screen draws, and every placement reads the panel's size.
+        this.place();
+    };
+
+    Shell.prototype.endResize = function (event, cancelled) {
+        const resizing = this.resizing;
+        if (!resizing || (event && event.pointerId !== resizing.pointerId)) return;
+        // Cleared before capture is released, so the `lostpointercapture` that
+        // releasing causes finds nothing to end.
+        this.resizing = null;
+        try {
+            this.nodes.resize.releasePointerCapture(resizing.pointerId);
+        } catch (error) { /* never held, or already released */ }
+        // A cancelled resize keeps the width it reached: it was on screen the
+        // whole time, and snapping back would be the surprise.
+        void cancelled;
+        this._save();
+        this.placeNow();
     };
 
     // -- attachments ---------------------------------------------------------- //

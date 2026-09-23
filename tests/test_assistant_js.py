@@ -35,6 +35,7 @@ import pytest
 
 JAVASCRIPT = pathlib.Path(__file__).resolve().parent.parent / "javascript"
 SHELL = JAVASCRIPT / "forge_assistant.js"
+LOOK = JAVASCRIPT / "forge_assistant_look.js"
 HOST = JAVASCRIPT / "forge_assistant_host.js"
 STORE = JAVASCRIPT / "forge_assistant_store.js"
 
@@ -176,7 +177,7 @@ def run(scenario: str, viewport=None, insets=None, sources=("shell",)) -> dict:
     Written to a file rather than passed with ``node -e``: a single argument is
     capped at 128 KiB on Linux and the harness plus the sources is past that.
     """
-    order = {"shell": SHELL, "host": HOST, "store": STORE}
+    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK}
     body = "\n".join(order[name].read_text(encoding="utf-8") for name in sources)
     # The scalars first and the sources last, deliberately. The sources contain
     # the word VIEWPORT (in ``NARROW_VIEWPORT``), so substituting them first
@@ -739,18 +740,27 @@ class TestTheStore:
         assert found["same"] is False
 
     def test_an_event_from_another_epoch_is_refused(self):
+        """Never applied: nothing from another process means anything to this
+        page. What the page does about it changed -- it used to stop with
+        "Reload the page to carry on", and now it starts the session over
+        (see test_assistant_recovery_js) -- so that is what is observed."""
         found = run("""
             const store = new NS.Store();
+            let started = 0;
+            store.start = () => { started += 1; return Promise.resolve(); };
             store.serverEpoch = "this-process";
             const applied = store.apply({protocol_version: 2, server_epoch: "another",
                                          stream_cursor: 1, kind: "conversation_changed"});
-            console.log(JSON.stringify({applied, error: store.error,
+            console.log(JSON.stringify({applied, error: store.error, started,
+                                        epoch: store.serverEpoch,
                                         connected: store.connected}));
         """, sources=("store",))
 
         assert found["applied"] is False
-        assert "restarted" in found["error"]
         assert found["connected"] is False
+        assert found["epoch"] == "", "the old process's epoch is let go of"
+        assert found["started"] == 1
+        assert "Reload" not in found["error"]
 
     def test_a_duplicate_or_older_cursor_cannot_regress_the_view(self):
         """T03. Reordered, duplicated and old events are the ordinary weather
