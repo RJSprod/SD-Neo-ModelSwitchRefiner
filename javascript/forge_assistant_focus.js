@@ -3,9 +3,12 @@
 // Focus makes one workspace take the whole browser window: the Forge Neo tab
 // bar, a theme's sidebars, the footer -- none of it is visible until the person
 // leaves focus mode, by the control on the assistant or by pressing Escape. It
-// is not the Fullscreen API: that takes the browser's own chrome as well, needs
-// a gesture every time, and cannot be entered for one element without the page
-// losing the ability to draw anything outside it.
+// is not the Fullscreen API, and does not use it: an element in full screen is
+// the only thing the browser draws, so a workspace made full screen would take
+// the assistant -- the way back out -- off the screen with everything else. The
+// browser's full screen that the Focus toggle asks for alongside this is the
+// whole document's, and belongs to the shell: see `enterScreen` in
+// forge_assistant.js.
 //
 // It does not hide, remove or restyle the host's tab bar, and it never touches
 // the host's DOM. The tab bar is still there, underneath; this extension's own

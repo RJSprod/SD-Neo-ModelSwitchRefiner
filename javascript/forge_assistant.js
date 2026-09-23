@@ -62,6 +62,10 @@
     // together, are somebody trying to use it and being stopped. One is a
     // press near it.
     const COVERED_WINDOW = 4000;
+    // How long a request for the browser's full screen is waited on before
+    // the next press may ask again. Browsers answer within a frame or two;
+    // this is for one that never answers at all.
+    const SCREEN_WAIT = 5000;
     const MIN_WIDTH = 320;
     const MAX_WIDTH = 640;
     const NOMINAL_WIDTH = 360;
@@ -1155,9 +1159,7 @@
         this.recover();
         if (this.focus.isActive() && !this.reachable()) {
             this.focus.exit();
-            this.state.focusEnabled = false;
-            this.state.focusWorkspaceId = null;
-            if (this.nodes.focusToggle) this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+            this.focusOff();
             this._save();
             this.say("Focus mode was turned off: something was covering the assistant.",
                      "warn");
@@ -1343,6 +1345,15 @@
             this.store.flushDrafts();
         });
         this.on(document, "keydown", (event) => this.documentKey(event), true);
+        // The browser's full screen, which focus asks for and the browser can
+        // end without asking anybody. Both names: Safari's are prefixed. See
+        // `enterScreen`.
+        ["fullscreenchange", "webkitfullscreenchange"].forEach((type) => {
+            this.on(document, type, () => this.screenChanged());
+        });
+        ["fullscreenerror", "webkitfullscreenerror"].forEach((type) => {
+            this.on(document, type, (event) => this.screenRefused(event));
+        });
         // Another extension's dialog has taken the page. See `yieldTo`.
         this.on(document, FOREIGN_OVERLAY, (event) => this.yieldTo(event));
 
@@ -1374,9 +1385,7 @@
                 && active !== this.focus.activeWorkspace()) {
                 const moved = this.focus.moveTo(active, this.host);
                 if (!moved.ok) {
-                    this.state.focusEnabled = false;
-                    this.state.focusWorkspaceId = null;
-                    this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+                    this.focusOff();
                     this.say(moved.reason, "warn");
                     this._save();
                 } else if (moved.note) {
@@ -1433,17 +1442,32 @@
         else this.open();
     };
 
+    // One press, both ways: focus and the browser's full screen go on
+    // together and come off together. See `enterScreen`.
     Shell.prototype.toggleFocus = function () {
         if (this.focus.isActive()) {
             this.focus.exit();
-            this.state.focusEnabled = false;
-            this.state.focusWorkspaceId = null;
-            this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+            this.focusOff();
             this._save();
             this.place();
             return;
         }
-        this.refocus(this.host.getActiveWorkspace());
+        if (this.refocus(this.host.getActiveWorkspace())) this.enterScreen();
+    };
+
+    /** Focus mode is off, whichever way it came to be.
+     *
+     * The toggle, Escape, a switch that could land nowhere, a covered
+     * launcher, the browser leaving full screen: each used to write these
+     * three lines itself. They are one place now because there is a fourth
+     * -- the full screen that came with focus goes with it -- and a path that
+     * forgot it would leave the browser full screen with the tab bar back.
+     */
+    Shell.prototype.focusOff = function () {
+        this.state.focusEnabled = false;
+        this.state.focusWorkspaceId = null;
+        if (this.nodes.focusToggle) this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+        this.leaveScreen();
     };
 
     // Focus a workspace and do the bookkeeping: the toggle's pressed state,
@@ -1457,9 +1481,7 @@
     Shell.prototype.refocus = function (id) {
         const found = this.focus.enter(id, this.host);
         if (!found.ok) {
-            this.state.focusEnabled = false;
-            this.state.focusWorkspaceId = null;
-            this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+            this.focusOff();
             this.say(found.reason, "warn");
             this._save();
             this.place();
@@ -1472,6 +1494,148 @@
         this._save();
         this.place();
         return true;
+    };
+
+    // -- the browser's full screen, with focus ------------------------------ //
+    //
+    // Focus takes the page's own chrome away -- the tab bar, a theme's header
+    // and footer. Asked for alongside it: the browser's chrome as well, from
+    // the same press. So the Focus toggle asks the browser for full screen
+    // when it turns focus on, and ends it when it turns focus off.
+    //
+    // What goes full screen is the whole document, never the workspace. An
+    // element in full screen is the only thing the browser draws -- the
+    // assistant, a dialog, a toast, anything outside it would be gone, and
+    // with the assistant gone so is the way out of focus. The document in
+    // full screen is just the page with the browser's bars taken away, and
+    // focus inside it works exactly as it does without.
+    //
+    // Only a full screen this shell asked for is ever ended by it. F11, a
+    // video somebody made full screen, another extension's own: none of them
+    // are its to end. And when the browser ends ours by its own means --
+    // Escape, Android's back gesture, a switch of browser tab -- focus comes
+    // off with it, so the toggle never says one thing while the screen shows
+    // another.
+    //
+    // Where the page cannot have it -- iPhone Safari gives full screen to
+    // videos and nothing else; a frame without `allowfullscreen` gives it to
+    // nobody -- nothing is said and focus is what it always was.
+
+    /** What is full screen now, under either of the API's names. */
+    function screenElement() {
+        return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
+
+    function screenExit() {
+        const leave = document.exitFullscreen || document.webkitExitFullscreen;
+        if (typeof leave !== "function") return;
+        try {
+            const left = leave.call(document);
+            if (left && typeof left.catch === "function") left.catch(() => undefined);
+        } catch (error) { /* the browser had already left it */ }
+    }
+
+    /** Ask for full screen, from inside the press that turned focus on.
+     *
+     * It has to be inside the press: a browser grants full screen only to a
+     * page somebody has just interacted with, which is also why a reload
+     * cannot bring it back. A reload has never brought focus back either, so
+     * the two still start together.
+     */
+    Shell.prototype.enterScreen = function () {
+        // Already ours, or already asked for and not yet answered. An answer
+        // that never came -- a browser that neither granted nor refused -- is
+        // not waited on for ever.
+        if (this.screenOwned) return false;
+        if (this.screenPending && Date.now() - this.screenPending < SCREEN_WAIT) return false;
+        const page = document.documentElement;
+        if (!page || !(document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+            return false;
+        }
+        // Something else is full screen already -- F11 is not counted by the
+        // API, so this is a video, or another extension's. Left alone, and
+        // not claimed: turning focus off must not end it.
+        if (screenElement()) return false;
+        const request = page.requestFullscreen || page.webkitRequestFullscreen;
+        if (typeof request !== "function") return false;
+        let asked;
+        try {
+            // The unprefixed call takes options; Safari's prefixed one takes a
+            // number, so it is given nothing. "hide" asks Android to put its
+            // navigation bar away too -- the most of the screen it will give.
+            asked = request === page.requestFullscreen
+                ? request.call(page, {navigationUI: "hide"})
+                : request.call(page);
+        } catch (error) {
+            return false;
+        }
+        this.screenPending = Date.now();
+        if (asked && typeof asked.then === "function") {
+            // The answer is read off the page rather than taken from the
+            // promise, the same way the change event's is, so the two cannot
+            // disagree about which of them came first. Settled either way,
+            // it is no longer pending: a grant that was over before it was
+            // read must not leave the next press waiting on it.
+            asked.then(() => {
+                this.screenChanged();
+                this.screenPending = 0;
+            }, () => this.screenRefused());
+        }
+        return true;
+    };
+
+    /** The browser said no: a frame without `allowfullscreen`, a press it did
+     *  not count, a setting. Focus stands on its own.
+     *
+     * The error event is fired at whichever element asked, and bubbles: a
+     * video's refusal is the video's, and must not cancel a request of ours
+     * that is still waiting for its answer.
+     */
+    Shell.prototype.screenRefused = function (event) {
+        const target = event && event.target;
+        if (target && target !== document && target !== document.documentElement) return;
+        this.screenPending = 0;
+    };
+
+    /** End the full screen that came with focus -- if it is still ours. */
+    Shell.prototype.leaveScreen = function () {
+        // A request still in flight is dealt with when it is answered: see
+        // `screenChanged`, which finds focus off and gives the screen back.
+        if (!this.screenOwned) return;
+        // Cleared first, so the change this causes is not taken for the
+        // browser ending it.
+        this.screenOwned = false;
+        // Something is full screen on top of the page -- a video -- and ending
+        // it would end the thing being watched. The page's full screen goes
+        // when that one does, by the browser's own means.
+        if (screenElement() !== document.documentElement) return;
+        screenExit();
+    };
+
+    /** The browser's full screen changed: granted, ended, or stacked on. */
+    Shell.prototype.screenChanged = function () {
+        const now = screenElement();
+        const page = document.documentElement;
+        if (this.screenPending && now === page) {
+            this.screenPending = 0;
+            if (this.state.focusEnabled) {
+                this.screenOwned = true;
+                return;
+            }
+            // Focus came off while the browser was deciding. The answer is to
+            // a question nobody is asking any more.
+            screenExit();
+            return;
+        }
+        if (now || !this.screenOwned) return;
+        // Ended by the browser -- Escape, a back gesture, a switch of tab.
+        // Focus follows it off, so the toggle and the screen agree.
+        this.screenOwned = false;
+        if (!this.state.focusEnabled) return;
+        this.focus.exit();
+        this.focusOff();
+        this._save();
+        this.place();
     };
 
     // -- menus --------------------------------------------------------------- //

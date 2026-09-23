@@ -1106,6 +1106,82 @@ own Escape handling stands aside while it is open, where it would otherwise have
 left focus mode behind the dialog. Verified in Chromium: no control under 44
 pixels, eight live previews, the phone sheet exactly the screen.
 
+## 3.18 Focus takes the browser full screen too
+
+> "When focus mode is turned on for the flyout, the tab bar goes away, but i
+> would like for this to trigger the browsers to go into full page view as
+> well. One press of the toggle = tabbar hidden & browser goes full screen
+> view... press toggle again = tabbar returns & exit full page browser view."
+
+Focus was built as deliberately *not* the Fullscreen API -- the header of
+`forge_assistant_focus.js` said so, and so did the README: full screen
+takes the browser's own chrome as well, it needs a gesture every time, and an
+element in full screen is the only thing the browser draws. The first of those
+is now what is asked for, and the other two decide how it is done rather than
+whether.
+
+**The document goes full screen, never the workspace.** Focus itself is
+unchanged -- it is still the transaction in `forge_assistant_focus.js`, a class
+on and a class off. What the toggle adds is `document.documentElement` full
+screen: the page with the browser's bars taken away, inside which focus works
+exactly as it does without, and the assistant, the dialogs and the toasts are
+all still drawn. The workspace in full screen would have taken the assistant
+off the screen, and with it the way back out.
+
+**Inside the press.** A browser grants full screen only to a page somebody has
+just interacted with, so the request is made from the Focus toggle's own click,
+after focus has been entered successfully -- a refused focus asks for nothing.
+A reload cannot bring full screen back, which already matched focus: a reload
+has always started outside it.
+
+**One press, both ways, and never out of step.**
+
+| What happens | Focus | Full screen |
+|---|---|---|
+| Focus pressed on | on | asked for (`navigationUI: "hide"`) |
+| Focus pressed off, or Escape reaches the page | off | ended, if it is ours |
+| The browser ends it: Escape, Android's back gesture, a switch of tab | turned off to match | already gone |
+| A switch of workspace inside focus | off and back on (§3.11) | kept |
+| A workspace that cannot be refocused, a covered launcher | off | ended, if it is ours |
+| A video made full screen on top | on | the video's, then ours again |
+
+Every path that turns focus off now goes through one function, `focusOff`,
+because there were five of them writing the same three lines and a sixth
+concern -- the full screen -- would have been forgotten by at least one. A test
+holds the source to a single `focusEnabled = false`.
+
+**Only its own.** Something already full screen when focus is turned on -- the
+page made full screen by something else, a video -- is neither claimed nor
+ended when focus goes off. F11 is not full screen as far as the API is
+concerned, so it neither blocks the request nor is ended by the exit. A video
+stacked on top of our full screen is left playing when focus goes off.
+
+**Every answer the browser can give.** Granted: ours. Refused (a frame without
+`allowfullscreen`, a setting): focus stands on its own, and the next press may
+ask again. Granted after focus has already gone off -- two quick presses -- the
+screen is given straight back. Granted and already over by the time it is
+read: not left pending. Never answered at all: not waited on after five
+seconds. Another element's refusal: not ours, although the error event bubbles
+to the same document. Safari's prefixed names -- iPadOS, and Safari before
+16.4 -- are enough on their own.
+
+**Where there is none.** iPhone Safari gives full screen to videos and nothing
+else. There the toggle does exactly what it did before, and says nothing about
+it.
+
+**The other extension on the page.** Mini Paint's View Outputs player took any
+full screen for its own: with the page full screen, its button "left" the
+page's instead of entering the stage's, and closing the view or picking another
+output ended the page's -- and with this change, focus mode with it. Fixed on
+Mini Paint's side in the same round: its full screen is its stage's, and
+stacked on the page's it comes off by itself.
+
+Verified in Chromium with real presses: one press, the page full screen and
+the tab bar gone; a second, both back; the page's full screen ended by script,
+focus off; a switch to img2img inside focus, still full screen; a stage made
+full screen on top and taken off again, still focus and still ours; the real
+Escape key, both off.
+
 ---
 
 ## 4. Deliberate deviations
