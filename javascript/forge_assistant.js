@@ -62,6 +62,13 @@
     // together, are somebody trying to use it and being stopped. One is a
     // press near it.
     const COVERED_WINDOW = 4000;
+    // Quick actions on the launcher: two presses go back to the workspace
+    // before this one, three turn focus on or off. A press belongs to the
+    // same gesture when it lands within this long of the one before it --
+    // a double-click's pace, so two unhurried presses stay two presses and a
+    // fast pair is never missed. A single press waits this long to be sure it
+    // is single before the panel opens.
+    const TAP_WINDOW = 300;
     // How long a request for the browser's full screen is waited on before
     // the next press may ask again. Browsers answer within a frame or two;
     // this is for one that never answers at all.
@@ -1096,6 +1103,7 @@
         if (this.resizing) this.endResize(null, true);
         this.suppressClick = false;
         this.stripMoved = false;
+        this.resetTaps();
         const root = this.nodes.root;
         if (root) root.classList.remove("forge-assistant-dragging");
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
@@ -1240,16 +1248,7 @@
         // fade has to follow it.
         this.on(nodes.workspaces, "scroll", () => this.markOverflow());
 
-        this.on(nodes.launcher, "click", (event) => {
-            if (this.suppressClick) {
-                // Only this gesture's click, and only once. A later keyboard
-                // activation must not be swallowed by a drag that has finished.
-                this.suppressClick = false;
-                event.preventDefault();
-                return;
-            }
-            this.open();
-        });
+        this.on(nodes.launcher, "click", (event) => this.launcherClick(event));
         this.on(nodes.minimize, "click", () => this.close());
         this.on(nodes.heading, "click", () => {
             this.state.conversationExpanded = !this.state.conversationExpanded;
@@ -1378,7 +1377,7 @@
             });
         }));
         this.disposers.push(this.host.subscribeNavigation((active) => {
-            this.activeWorkspace = active;
+            this.noteWorkspace(active);
             this.applySuppression();
             this.renderWorkspaces();
             if (this.state.focusEnabled && active && this.focus.isActive()
@@ -1435,6 +1434,91 @@
         // and leaves focus on the document is a panel a keyboard user has to
         // tab back to from the top of the page.
         this.nodes.launcher.focus();
+    };
+
+    Shell.prototype.launcherClick = function (event) {
+        if (this.suppressClick) {
+            // Only this gesture's click, and only once. A later keyboard
+            // activation must not be swallowed by a drag that has finished.
+            // A drag also ends any press count it interrupted.
+            this.suppressClick = false;
+            this.resetTaps();
+            event.preventDefault();
+            return;
+        }
+        this.tapLauncher(event);
+    };
+
+    /** The host's selection moved: remember the workspace it replaced, for
+     * the launcher's double press. Only a move from one real workspace to
+     * another counts -- a blank between two reads is not somewhere anybody
+     * was.
+     */
+    Shell.prototype.noteWorkspace = function (active) {
+        if (active) {
+            if (this.lastWorkspace && active !== this.lastWorkspace) {
+                this.previousWorkspace = this.lastWorkspace;
+            }
+            this.lastWorkspace = active;
+        }
+        this.activeWorkspace = active;
+    };
+
+    /** A press on the launcher, counted.
+     *
+     * One press opens the panel, two go back to the previous workspace, three
+     * toggle focus. The count is ours rather than the click's `detail`,
+     * because `detail` follows the system's double-click setting and does not
+     * count taps the same way on every touchscreen.
+     *
+     * Three acts at once, inside the press, because entering focus asks for
+     * the browser's full screen and a browser grants that only to a press
+     * that is still being handled. One and two cannot act until the window
+     * has passed with no further press, since either may still become more.
+     */
+    Shell.prototype.tapLauncher = function (event) {
+        // A keyboard activation is one press, and nobody pressing Enter
+        // expects to wait to find out whether they pressed it again.
+        if (!event || !event.detail) {
+            this.resetTaps();
+            this.open();
+            return;
+        }
+        const taps = (this.taps || 0) + 1;
+        this.resetTaps();
+        if (taps >= 3) {
+            this.toggleFocus();
+            return;
+        }
+        this.taps = taps;
+        this.tapTimer = window.setTimeout(() => {
+            const counted = this.taps;
+            this.resetTaps();
+            try {
+                if (counted === 2) this.backToPrevious();
+                else this.open();
+            } catch (error) {
+                this.fault(error);
+            }
+        }, TAP_WINDOW);
+    };
+
+    /** Forget a half-counted launcher gesture. */
+    Shell.prototype.resetTaps = function () {
+        if (this.tapTimer) window.clearTimeout(this.tapTimer);
+        this.tapTimer = 0;
+        this.taps = 0;
+    };
+
+    /** Back to the workspace before this one -- and, pressed again, forward to
+     * the one just left, because that is now the one before. Through
+     * `switchWorkspace`, so focus mode follows the switch rather than hiding
+     * it. With nowhere to go back to yet, nothing happens.
+     */
+    Shell.prototype.backToPrevious = function () {
+        const back = this.previousWorkspace;
+        if (!back) return Promise.resolve("");
+        return this.switchWorkspace(back);
     };
 
     Shell.prototype.toggle = function () {
@@ -2585,6 +2669,7 @@
     };
 
     Shell.prototype.dispose = function () {
+        this.resetTaps();
         this.disposers.forEach((off) => {
             try {
                 off();

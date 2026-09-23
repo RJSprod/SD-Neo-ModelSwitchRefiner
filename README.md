@@ -3173,6 +3173,20 @@ the **⋯** and the **✕** is what you drag the panel by; the buttons in that r
 stay buttons. **✕** puts the panel back to the launcher, at the same place;
 pressing the launcher brings it back there.
 
+**The launcher has two quick actions.** Press it twice to go back to the
+workspace you were in before this one; press it twice again and you are back
+where you started, so two workspaces can be flipped between without opening
+anything. Until you have been in a second workspace there is nowhere to go back
+to, and a double press does nothing. Press it three times to turn focus mode on
+or off, the same as the panel's **Focus** button. Presses count as one gesture
+when each follows the last within 300 ms — a double-click's pace — so two
+unhurried presses are still two ordinary presses. The cost is that a single
+press waits those 300 ms before the panel opens, to be sure no second press is
+coming. A keyboard press (Enter or Space) is always a single press and opens
+the panel at once, and a drag of the launcher is never counted as a press. With
+focus on, going back takes focus with it to the other workspace, as the picker
+does.
+
 **Collapsed, the panel is a tab bar.** Under the header it lists every
 workspace this installation has, one press each — a tab bar you can put
 wherever you want one, in focus mode as much as out of it. Pressing one
