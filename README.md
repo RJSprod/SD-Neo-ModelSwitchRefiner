@@ -3173,7 +3173,10 @@ it. Collapsed, the transcript and the composer leave the layout and the
 accessibility tree rather than merely stopping being painted. The space between
 the **⋯** and the **✕** is what you drag the panel by; the buttons in that row
 stay buttons. **✕** puts the panel back to the launcher, at the same place;
-pressing the launcher brings it back there.
+pressing the launcher brings it back there. As the conversation grows — a reply
+arriving, a picture loading, a message's actions opening — the panel is placed
+again, so one docked along the bottom grows upwards and its composer never goes
+off the window.
 
 **The launcher has two quick actions.** Press it twice to go back to the
 workspace you were in before this one; press it twice again and you are back
@@ -3233,9 +3236,9 @@ header button, or by another extension's "send to img2img", moves the highlight
 too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
-**The utility menu** — the **⋯** beside Focus — has **Free Float**,
-**Customize…**, two entries and a **Cancel**. The two entries are the same
-request: *I need this card back, now.*
+**The utility menu** — the **⋯** beside Focus — has **Free Float**, **Auto
+Attach**, **Customize…**, two entries and a **Cancel**. The two entries are the
+same request: *I need this card back, now.*
 
 | | |
 | --- | --- |
@@ -3247,6 +3250,31 @@ machine that is mid-generation and will not give up the checkpoint still gets
 the twenty gigabytes back from llama-server — and what the status line says is
 what actually happened, not a tick. Neither is policy: the next request that
 needs a model loads it again exactly as it would have.
+
+**Auto Attach** sends the picture you are looking at with your message, so you
+do not have to attach it yourself. While it is on — the paperclip is lit to say
+so — pressing Send in the panel takes the picture showing in the gallery of the
+image tab you are on, txt2img or img2img: the one you clicked, or the first
+when you have not clicked one, which is the rule Forge's own *Send to img2img*
+buttons use. It is uploaded exactly as a picture attached with the paperclip is,
+and appears on your message the same way. Like Free Float it is remembered in
+this browser.
+
+Nothing is attached when you are on any other tab, when the gallery is empty, or
+when you have attached a picture yourself — yours is the one sent. Three more
+cases send your words without the picture and say why in the status line:
+
+- the model running cannot see pictures, so the message would be refused;
+- the picture could not be read or uploaded;
+- it is the same picture Auto Attach sent last time in this conversation, and
+  the thread still carries it. The model already keeps up to four pictures from
+  the thread in view, so a second copy costs context and changes nothing. Make
+  a new picture and it is attached as usual.
+
+A picture in a format the upload does not take, or larger than it takes, is
+redrawn as a JPEG first (no more than 2048 pixels on its long edge — the model
+looks at far fewer than that). Forge's live preview of a generation still
+running is never taken for the picture.
 
 **Customize…** restyles the launcher — the one control that is always on screen,
 and the way to every workspace once the panel is collapsed. It opens a dialog
@@ -3366,18 +3394,55 @@ is never a blank page. The status line says which one you got.
 choose another thread there — or start one, or branch — and the panel moves with
 it. A new panel opens on the conversation Conversation was last left on, and
 from then on the window owns its own selection, so two windows can deliberately
-sit on different threads. Under the newest message are three icons — **edit**,
-**regenerate** and **delete** — and regenerate only where the newest message is
-a reply, because an unanswered message of yours has nothing to ask again. Each
-carries its word as a tooltip and to a screen reader. Each also carries the
-message it was pointing at *and the revision the thread was at when you pressed
-it*, so an action aimed at a message is refused if the thread moved rather than
-being quietly re-aimed at whatever is in that place now.
+sit on different threads.
+
+**Tap a message to see what you can do with it.** Nothing is drawn under the
+messages until you do; the message you tapped gets an outline and a row of
+icons, and a second tap on it, or a press anywhere else, puts them away. One
+message at a time. A tap on a link in a message follows the link, and selecting
+text is reading, not tapping. With a keyboard, a message is focusable and Enter
+or Space does what a tap does.
+
+| On | Icons |
+| --- | --- |
+| The newest message, a reply | **✎ Edit**, **↻ Regenerate**, **✕ Delete**, **➤ Send to prompt** |
+| The newest message, yours | **✎ Edit**, **✕ Delete**, **↪ Send again** |
+| An older reply | **➤ Send to prompt** |
+| An older message of yours | nothing |
+
+**Send to prompt** puts the reply into the positive prompt of the image tab you
+are on — txt2img's from anywhere else — and generates nothing. Everything in the
+prompt is replaced except what this extension already refuses to let a language
+model rewrite: every literal command (`[[…]]`, `+[[…]]`, `-[[…]]`, exactly as
+typed) and every `<lora:…>`, `<lyco:…>` and `<hypernet:…>` tag outside one. Those
+follow the reply on a line of their own, in their original order:
+
+```
+before:  portrait of a woman, <lora:detail:0.5> blue hat -[[__lighting__]]
+reply:   A misty harbour at dawn, 35mm
+after:   A misty harbour at dawn, 35mm
+         <lora:detail:0.5> -[[__lighting__]]
+```
+
+The reply goes in as written; nothing guesses which of its sentences is "the
+prompt". The Positive and Negative Literal boxes are separate and are not
+touched.
+
+**Send again** is for a thread that ends with you — after you delete a reply, or
+one was stopped or failed. It asks for an answer to that message as it reads now,
+edited or not, and the answer arrives in the same thread: your message is not
+written a second time and no copy of the thread is made.
+
+Every icon carries its word as a tooltip and to a screen reader, and every one
+that changes the conversation carries the message it was pointing at *and the
+revision the thread was at when you pressed it*, so an action aimed at a message
+is refused if the thread moved rather than being quietly re-aimed at whatever
+is in that place now.
 
 That is the panel, not the conversation. Branching, continuing, sending again
-from a point, truncating and the version pager are all still there in the
-Conversation tab, which has the room to say what they are about to do; the
-panel offers the three you want on the thing you just said or just read. So a
+from an earlier message, truncating and the version pager are all still there
+in the Conversation tab, which has the room to say what they are about to do;
+the panel offers what you want on the thing you just said or just read. So a
 reply you regenerate in the panel keeps the one it replaced — you go to the tab
 to page back to it.
 
@@ -3394,7 +3459,8 @@ button offers to take you back to it, saying whether there is something new
 down there or just the end of what you were already reading.
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
-paperclip. One per message, and a second one asks whether to replace the first.
+paperclip — or attached for you by **Auto Attach**, above. One per message, and
+a second one asks whether to replace the first.
 A picture is uploaded, decoded, checked and re-encoded before Send will go — so
 "the upload finished" is something the server knows rather than something a
 timer guessed — and Send says which of those it is waiting for. Paste works over
@@ -3406,6 +3472,19 @@ mode — what you said lands in the box for you to look at — whatever the
 auto-send preference says, and it never changes that preference. The words go to
 the thread you were in when you started talking, not the one you switched to
 while the browser was asking for the microphone.
+
+**Read aloud** — the speaker in the composer — is Voice Chat's *Speak replies
+automatically*, one setting for both views, and it shows which it is: a lit
+speaker when replies are read aloud, a grey speaker struck through when they are
+not (a plain speaker, briefly, until the panel has asked). It is read from the
+server whenever the panel looks, so a change made in LLM Studio or on the
+Settings page shows the next time you open the panel. Pressing it changes the
+setting on the server and, turning it off, silences the page at once and stops
+the reply being spoken. And while it is off, every reply the panel asks for is
+asked for without speech, so the server starts no voice work for it at all —
+no engine warmed, nothing synthesised — even if changing the setting had
+failed. (The server may still note, at most once every ten minutes, that
+replies are not being read aloud; that line is a note, not audio work.)
 
 **When something is happening** the panel says which thing: waiting for
 resources, preparing the model, generating, saving. Never "Ready" while a reply
@@ -5190,6 +5269,16 @@ hides the chrome is asserted against the stylesheet itself, because the class
 and the rule that reads it are each half of the mechanism and either one alone
 does nothing — and one test asserts a rule is *absent*, because the rule it
 names looked like a free safety net and hid a whole page.
+
+`test_assistant_v2_js.py` is the panel's second round, one class per ask. The
+read-aloud switch is drawn through the panel's own `render` rather than called
+directly, because a switch drawn by a function nothing calls was the defect;
+and the `voice: false` on a command that asks for a reply is checked on the
+envelope that is actually sent, including that a retry is never restamped.
+Send to prompt's keep rule is pinned to the same literal-command and LoRA cases
+the Python modules are tested with, because it is a JavaScript copy of them.
+Auto Attach is tested for each way it leaves a picture out as well as the way
+it attaches one. Every decision in the file was checked by reverting it.
 
 Every guard in this work was checked by removing it. Take out the revision
 comparison, the exclusive name reservation, the branch that replaced the
