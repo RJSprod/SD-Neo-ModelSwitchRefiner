@@ -35,12 +35,15 @@ once -- a filter LoRA they always want, a phrase they always append -- and a
 restart that quietly emptied them would change what the next generation
 produces without saying so.
 
-That cuts both ways, which is why :func:`active_note` exists. A value that is
-still in effect while its row is off screen is exactly the invisible active
-state this extension keeps warning itself about, so the Prompt row of the Image
-Pipeline says how many there are whenever the row is hidden and they are not
-empty. Section 3.3 of the design intent asks for that sentence, and it is the
-price of persistence rather than a nicety on top of it.
+That cuts both ways. A value that is still in effect while nobody can see it
+is exactly the invisible active state this extension keeps warning itself
+about. The row used to hide whenever Creative and Spatial were both off -- while
+its values went on reaching every generation -- and :func:`active_note` was the
+sentence that made up for it. The row is always on screen now, which answers
+section 3.3 the direct way: what is in effect is what is in front of you. The
+note stays as the fallback for a page where the row still ends up out of
+sight -- a theme that hides it, a move that went wrong -- and is empty
+otherwise.
 """
 
 from __future__ import annotations
@@ -111,9 +114,10 @@ def count(positive="", negative="") -> int:
 def active_note(positive="", negative="") -> str:
     """``2 literals active``, or "" when neither field carries anything.
 
-    Section 3.3. Shown on the Prompt row of the Image Pipeline while the fields
-    are off screen, because a value that still reaches the next generation and
-    cannot be seen is the kind of state somebody spends an afternoon on.
+    Section 3.3. Shown on the Prompt row of the Image Pipeline if the fields
+    are ever off screen, because a value that still reaches the next generation
+    and cannot be seen is the kind of state somebody spends an afternoon on. The
+    row is always drawn now, so on an ordinary page this says nothing.
     """
     found = count(positive, negative)
     if not found:

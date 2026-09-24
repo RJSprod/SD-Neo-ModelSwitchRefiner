@@ -83,7 +83,7 @@ values answering instead. `panel_values()` in the literal tests can build that
 older shape on purpose, so the compatibility is exercised rather than asserted.
 
 
-## 4. §3.3 — hidden, persisted, and therefore announced
+## 4. §3.3 — persisted, and therefore always on screen
 
 The two values persist as preferences, for the reason the Spatial canvas does:
 a filter LoRA somebody always wants is configured once, and a restart that
@@ -91,16 +91,27 @@ quietly emptied it would change what the next generation produces without
 saying so.
 
 That cuts both ways. A value still in effect while its row is off screen is
-exactly the invisible active state this extension keeps warning itself about, so
-the Prompt row of the Image Pipeline says `2 literals active` whenever the row
-is hidden and the boxes are not empty. The announcement is the price of the
-persistence, not a nicety on top of it — and it is why
-`test_the_panel_has_no_hidden_plumbing_for_the_browser` accepts the row by name.
+exactly the invisible active state this extension keeps warning itself about.
+
+The first answer was an announcement. The row was on screen only while Creative
+or Spatial was on, and the Prompt row of the Image Pipeline said `2 literals
+active` whenever it was hidden and the boxes were not empty. That turned out to
+mean hidden on every page load: `ui()` disarms both stages on a fresh page (a
+stage is armed for a session, never inherited from one), so the row was out of
+sight until somebody armed one, while its values went on reaching every
+generation. It was asked for back — "i want positive and negative literal
+prompt to always be there" — and the direct answer to §3.3 is the one taken
+now: the row is always built on screen and neither stage switch touches it. The
+announcement stays as the fallback for a page where the row still ends up out
+of sight (a theme hiding it, a move that failed), and on an ordinary page it
+says nothing. `test_the_panel_has_no_hidden_plumbing_for_the_browser` no longer
+accepts the row by name, so a build that hides it again fails there, and
+`TestTheRowIsAlwaysOnScreen` fails if a switch is given the row as an output.
 
 The merge happens **before** the "neither feature is on" check in
 `before_process`. A field that only worked while Creative or Spatial was running
-would be a field whose row is hidden exactly when it stops working, which is the
-opposite of what §3.3 asks for. Protection here is about delivery, not about
+would be a box on screen that silently did nothing whenever they were off, which
+is the opposite of what §3.3 asks for. Protection here is about delivery, not about
 anything having been protected from.
 
 

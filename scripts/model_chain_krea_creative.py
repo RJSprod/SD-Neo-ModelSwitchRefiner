@@ -272,8 +272,8 @@ def _literals_for(values) -> tuple[str, str]:
 
     A caller with no panel -- the API, or a build whose UI could not be
     assembled -- gets the saved values, which is also what makes section 3.3
-    work: the fields keep affecting generations while their row is off screen,
-    and they are off screen precisely when this extension's features are off.
+    work: the fields keep affecting generations whether or not Creative or
+    Spatial is on, and whether or not their row made it onto the screen.
     """
     _, _, _, fields, _ = _split(values)
     stored = mc_literal_prompts.settings()
@@ -458,8 +458,7 @@ def _toggled(enabled, spatial_enabled, serialized, mode):
                             creative=bool(enabled), mode=mode),
             mc_pipeline_panel.card_summary("creative", _creative_line(bool(enabled))),
             mc_pipeline_panel.card_summary(
-                "spatial", _spatial_line(serialized, bool(spatial_enabled), mode)),
-            _literal_row(enabled, spatial_enabled, other=spatial_enabled))
+                "spatial", _spatial_line(serialized, bool(spatial_enabled), mode)))
 
 
 def _remember_creativity(value):
@@ -1092,8 +1091,7 @@ def _spatial_toggled(enabled, serialized, creative, mode):
     return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
             mc_pipeline_panel.card_summary(
-                "spatial", _spatial_line(serialized, bool(enabled), mode)),
-            _literal_row(creative, enabled, other=creative))
+                "spatial", _spatial_line(serialized, bool(enabled), mode)))
 
 
 def _spatial_mode(mode, serialized, enabled, creative):
@@ -1146,32 +1144,6 @@ def _spatial_scenes(record):
 # --------------------------------------------------------------------------- #
 # The two pipeline rows this script owns
 # --------------------------------------------------------------------------- #
-
-
-def _literal_row(creative, spatial, other=None):
-    """Whether the Literal Prompt row is on screen. Section 5, and only that.
-
-    Visible when either owned prompt-transforming feature is on, hidden when
-    neither is. It is a statement about *relevance*, not about execution: the
-    boxes are the place you go when a language model is about to rewrite your
-    prompt, and the row would otherwise be two more things to scroll past on a
-    tab where nothing is rewriting anything.
-
-    What it is emphatically not is a switch. The values keep travelling with
-    every generation while the row is hidden -- see :func:`_literals_for` --
-    which is why :func:`mc_literal_prompts.active_note` exists and why the
-    Prompt row of the Image Pipeline says how many are in effect.
-
-    ``other`` is the stage that did *not* just change, and giving it turns this
-    into "say something only if the answer moved". The row is visible when
-    either stage is on, so flipping one of them changes the answer only when
-    the other is off -- and re-sending a visibility Gradio already has is a
-    component torn down and rebuilt for nothing, in the middle of the prompt
-    area, which is a whole page reflowing so that nothing can change.
-    """
-    if other is not None and bool(other):
-        return gr.update()
-    return gr.update(visible=bool(creative) or bool(spatial))
 
 
 def _neutralize_line(enabled=False) -> str:
@@ -2149,9 +2121,18 @@ class ScriptKreaCreative(scripts.Script):
         # Label and field, and nothing else: no `info=` copy and no
         # instructional placeholder. This sits in the prompt area, where four
         # boxes of explanatory prose is three too many.
+        #
+        # Always on screen. The row used to appear only while Creative or
+        # Spatial was on, on the theory that protecting text from a rewriter
+        # is only on anybody's mind while one is running. The values never
+        # followed that theory -- they reach every generation either way, see
+        # `_literals_for` -- so the row was hidden exactly while it went on
+        # working, and it was asked for back: "i want positive and negative
+        # literal prompt to always be there". No toggle touches it any more,
+        # which also means no toggle tears it down and rebuilds it in the
+        # middle of the prompt area.
         literal = mc_literal_prompts.settings()
         with gr.Column(elem_id=ident("literal", "row"),
-                       visible=bool(stored["enabled"]) or bool(spatial["enabled"]),
                        elem_classes=["mc-literal-row"]) as literal_row:
             literal_positive = gr.Textbox(
                 label="Positive Literal", lines=2, max_lines=4,
@@ -2347,8 +2328,7 @@ class ScriptKreaCreative(scripts.Script):
                                self.components["spatial_compose"]],
                        outputs=[status, self.components["spatial_status"],
                                 self.components["creative_line"],
-                                self.components["spatial_line"],
-                                self.components["literal_row"]],
+                                self.components["spatial_line"]],
                        queue=False, show_progress=False)
 
         # The slider moves what the brief costs as well as what it says, and the
@@ -2428,7 +2408,7 @@ class ScriptKreaCreative(scripts.Script):
         spatial_enabled.change(
             fn=_spatial_toggled,
             inputs=[spatial_enabled, spatial_state, creative_enabled, spatial_compose],
-            outputs=[spatial_status, line, self.components["literal_row"]],
+            outputs=[spatial_status, line],
             queue=False, show_progress=False)
         spatial_compose.change(
             fn=_spatial_mode,

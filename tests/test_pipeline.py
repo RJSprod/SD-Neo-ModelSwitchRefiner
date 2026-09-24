@@ -1079,23 +1079,22 @@ class TestTheePanelDoesNotFlicker:
                     continue
                 assert "show_progress=False" in call, (name, at, call[:120])
 
-    def test_a_stage_toggle_only_moves_the_prompt_area_when_it_has_to(self, store):
-        """The Literal Prompt row is visible when either stage is on, so
-        flipping one of them changes that only when the other is off. Re-sending
-        a visibility Gradio already has is a component torn down and rebuilt for
-        nothing, in the middle of the prompt area -- a whole page reflowing so
-        that nothing can change."""
+    @pytest.mark.parametrize("on", [True, False])
+    def test_a_stage_toggle_never_moves_the_prompt_area(self, store, on):
+        """The Literal Prompt row used to follow the two stage switches, so a
+        toggle could tear it down and rebuild it in the middle of the prompt
+        area -- a whole page reflowing under somebody's cursor. The row is
+        always on screen now, and neither switch's handler answers with a
+        visibility for anything, in either direction or with the other stage in
+        either state."""
         import scripts.model_chain_krea_creative as creative_script
 
-        # The other stage is on, so the row was visible and stays visible.
-        assert creative_script._literal_row(True, True, other=True) == {}
-        assert creative_script._literal_row(False, True, other=True) == {}
-
-        # The other stage is off, so this toggle is the one that decides.
-        assert creative_script._literal_row(
-            True, False, other=False)["visible"] is True
-        assert creative_script._literal_row(
-            False, False, other=False)["visible"] is False
+        for other in (True, False):
+            for made in (creative_script._toggled(on, other, "", "direct"),
+                         creative_script._spatial_toggled(on, "", other, "direct")):
+                shown = [update for update in made
+                         if isinstance(update, dict) and "visible" in update]
+                assert shown == [], (on, other, shown)
 
     def test_a_description_repaint_is_a_label_and_not_a_component(self):
         """The line most often repainted is the description in the card header,

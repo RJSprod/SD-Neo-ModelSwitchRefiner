@@ -1764,7 +1764,7 @@ There are two ways to say so, and they do exactly the same thing.
 
 #### The boxes
 
-Under the native Negative Prompt, whenever Creative or Spatial is on:
+Under the native Negative Prompt, always:
 
 ```
 Positive Prompt     portrait of a woman
@@ -1807,11 +1807,13 @@ load into `<LLM data root>/logs/model_chain.log`, beside the managed LLM's own
 log, so if completion is missing the reason is a line in a file rather than
 something to go looking for in the browser's developer tools.
 
-**Hidden does not mean inactive.** The row appears when Creative or Spatial is
-on and is hidden when neither is, because that is when protecting text from a
-rewriter is a thing anyone is thinking about. The values keep working while it
-is hidden, and the Prompt row of the Image Pipeline says `2 literals active` so
-that never comes as a surprise.
+**Always on screen, always in effect.** The row is there whether or not
+Creative or Spatial is on, and what is in it goes into every generation either
+way — what is in effect is what you can see. It used to appear only while one
+of them was armed, which on a fresh page (both come up off) meant it was hidden
+until you armed one, while its values went on working out of sight. If a theme
+or a layout ever does keep the row off screen, the Prompt row of the Image
+Pipeline says `2 literals active`, so that still never comes as a surprise.
 
 #### The brackets
 
@@ -4837,7 +4839,7 @@ three minutes, which buried the line that explained it.
 mc_arch.py            architecture detection + per-architecture geometry
 mc_pipeline_panel.py  the Image Pipeline shell: four stage rows, the drawer
                       every disclosure is made with, and the slots they offer
-mc_literal_prompts.py the two Literal Prompt boxes, and the note when they hide
+mc_literal_prompts.py the two Literal Prompt boxes, and the out-of-sight note
 mc_profile_state.py   loaded / modified / not saved, said one way for all three
 mc_memory.py          image model residency / cache management
 mc_plan.py            the generation's execution plan and the VRAM budget from it
