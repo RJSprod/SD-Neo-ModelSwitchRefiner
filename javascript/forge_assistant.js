@@ -2890,20 +2890,7 @@
         text.innerHTML = renderMarkdown(row.text);
         node.appendChild(text);
         if (row.provisional) node.classList.add("forge-assistant-provisional");
-        if (row.attachment) {
-            const figure = element("figure", "forge-assistant-attachment");
-            if (row.attachment.url && row.attachment.available) {
-                const image = element("img");
-                image.src = NS.basePath() + row.attachment.url;
-                image.alt = row.attachment.name || "Attached image";
-                figure.appendChild(image);
-            }
-            figure.appendChild(element("figcaption", "",
-                                       row.attachment.available
-                                           ? (row.attachment.name || "Image")
-                                           : "This picture is no longer on disk."));
-            node.appendChild(figure);
-        }
+        if (row.attachment) node.appendChild(this.figure(row.attachment));
         const bar = this.actions(row, view);
         node.appendChild(bar);
         // A bubble with anything to offer is something you tap. Reachable by
@@ -2914,6 +2901,48 @@
             node.setAttribute("aria-expanded", "false");
         }
         return node;
+    };
+
+    /** A message's picture -- or, where there is none to show, a placeholder.
+     *
+     * Never the file's name. The picture used to be an <img> pointed straight
+     * at its ticket, which the route refuses without the page's key, so it
+     * never loaded: the browser drew the alternative text -- the name -- and a
+     * caption under it said the name again. The store fetches it with the key
+     * (`Store.picture`); until it arrives the frame is empty, and if it cannot
+     * arrive, or the file is gone, the frame says so without naming anything.
+     */
+    Shell.prototype.figure = function (attachment) {
+        const figure = element("figure", "forge-assistant-attachment");
+        let image = null;
+        // Once: a fetch that fails and a picture that will not decode can both
+        // report, and the frame says it once.
+        const missing = () => {
+            if (figure.classList.contains("forge-assistant-attachment-missing")) return;
+            if (image) {
+                try {
+                    figure.removeChild(image);
+                } catch (error) { /* not in the frame */ }
+                image = null;
+            }
+            figure.classList.add("forge-assistant-attachment-missing");
+            figure.appendChild(element("span", "forge-assistant-attachment-note",
+                                       "\u{1F5BC} Picture unavailable"));
+        };
+        const store = this.store;
+        if (!attachment.url || !attachment.available || !store
+            || typeof store.picture !== "function") {
+            missing();
+            return figure;
+        }
+        image = element("img");
+        image.alt = "Attached picture";
+        image.addEventListener("error", missing);
+        figure.appendChild(image);
+        store.picture(attachment.url).then((made) => {
+            if (image) image.src = made;
+        }, missing);
+        return figure;
     };
 
     Shell.prototype.updateBubble = function (node, row) {

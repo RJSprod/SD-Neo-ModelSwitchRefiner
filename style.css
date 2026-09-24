@@ -6394,6 +6394,34 @@
     margin-top: 0.4em;
 }
 
+/* A message's picture. It had no rule at all, so a picture at its own size ran
+   out of the bubble; it is held to the bubble's width and a height a thread can
+   scroll past. Where there is no picture to show, the frame says so -- a
+   placeholder, never the file's name. */
+.forge-assistant-attachment {
+    margin: 0.4em 0 0;
+}
+
+.forge-assistant-attachment img {
+    display: block;
+    max-width: 100%;
+    max-height: 240px;
+    object-fit: contain;
+    border-radius: var(--radius-sm, 6px);
+}
+
+.forge-assistant-attachment-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 64px;
+    padding: 0.5em 0.75em;
+    border: 1px dashed var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
 /* A message with actions is tapped to show them, and says so: a pointer over
    it, a ring when the keyboard is on it, and the accent on its border while
    its row is open -- so which message a button belongs to is never a guess.

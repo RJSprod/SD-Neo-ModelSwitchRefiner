@@ -189,6 +189,7 @@
         this.drafts = new Map();         // conversationKey -> draft
         this.operations = new Map();     // operation id -> operation
         this.unread = new Map();         // conversationKey -> count
+        this.pictures = new Map();       // picture address -> Promise of a blob URL
         this.listeners = new Set();
         this.speech = {playing: false, owner: "", operation: ""};
         // Whether replies are read aloud: Voice Chat's "Speak replies
@@ -1133,6 +1134,55 @@
                 || "That picture could not be used."), {body});
             return body;
         }));
+    };
+
+    // -- pictures in messages ----------------------------------------------- //
+    //
+    // A message's picture is served by ticket from a route behind the same
+    // capability as every other route here, and the capability travels in a
+    // header -- which an <img> cannot send. So the address was never loadable
+    // as an image source: every picture in the flyout failed, and the browser
+    // drew the <img>'s alternative text, the file's name, above a caption that
+    // was the file's name as well. The picture is fetched with the header and
+    // shown from a blob URL instead, once per picture per page.
+
+    // How many pictures are kept, newest-used last. Past it the oldest blob URL
+    // is let go; a bubble drawn again after that simply fetches it again.
+    const PICTURES_KEPT = 48;
+
+    Store.prototype.picture = function (address) {
+        const key = String(address || "");
+        if (!key) return Promise.reject(new Error("There is no picture to show."));
+        let found = this.pictures.get(key);
+        if (found) {
+            this.pictures.delete(key);
+            this.pictures.set(key, found);
+            return found;
+        }
+        found = fetch(basePath() + key, {credentials: "same-origin",
+                                         headers: this.headers()})
+            .then((response) => {
+                if (!response.ok) throw new Error("The picture answered " + response.status);
+                return response.blob();
+            })
+            .then((blob) => URL.createObjectURL(blob));
+        // A failure is not remembered: the next time the bubble is drawn it
+        // asks again, and a server that restarted in between has new tickets.
+        found.catch(() => {
+            if (this.pictures.get(key) === found) this.pictures.delete(key);
+        });
+        this.pictures.set(key, found);
+        while (this.pictures.size > PICTURES_KEPT) {
+            const oldest = this.pictures.keys().next().value;
+            const gone = this.pictures.get(oldest);
+            this.pictures.delete(oldest);
+            gone.then((made) => {
+                try {
+                    URL.revokeObjectURL(made);
+                } catch (error) { /* already let go */ }
+            }, () => undefined);
+        }
+        return found;
     };
 
     Store.prototype.resolveResult = function (operationId, decision) {
