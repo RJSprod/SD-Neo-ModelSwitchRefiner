@@ -1295,3 +1295,49 @@ class TestAPictureTheServerWouldRefuse:
         assert avif["same"] is False
         assert avif["type"] == "image/jpeg"
         assert avif["drawn"] == [[2048, 1024]]
+
+
+class TestAPanelThatGrowsStaysOnTheWindow:
+    """Found driving the flyout in Chromium: a panel docked along the bottom is
+    placed from its own height, and grew downwards off the window as messages
+    arrived -- and as a tap opened a message's actions -- taking the composer
+    and Send with it. It is placed again whenever its height changes."""
+
+    def test_a_change_of_height_places_it_again_and_nothing_else_does(self):
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.state = {panelOpen: true};
+            shell.nodes = {panel: {offsetHeight: 300}};
+            let placed = 0;
+            shell.place = () => { placed += 1; };
+            shell.placedHeight = 300;
+            const same = shell.resized();
+            shell.nodes.panel.offsetHeight = 420;
+            const grew = shell.resized();
+            shell.state.panelOpen = false;
+            shell.nodes.panel.offsetHeight = 500;
+            const closed = shell.resized();
+            console.log(JSON.stringify({same, grew, closed, placed}));
+        """)
+
+        assert found == {"same": False, "grew": True, "closed": False, "placed": 1}
+
+    def test_placing_it_records_the_height_it_was_placed_at(self):
+        from test_assistant_js import PANEL
+
+        found = run(PANEL + """
+            const shell = panel({state: {panelOpen: true, conversationExpanded: true}});
+            shell.placeNow();
+            console.log(JSON.stringify(shell.placedHeight));
+        """)
+
+        assert found == 140
+
+    def test_the_panel_s_own_size_is_what_is_watched(self):
+        shell = SHELL.read_text(encoding="utf-8")
+        wire = shell.split("Shell.prototype.wire = function", 1)[1] \
+            .split("Shell.prototype.grow", 1)[0]
+
+        assert "new ResizeObserver(() => this.resized())" in wire
+        assert "watched.observe(nodes.panel);" in wire
+        assert "watched.disconnect()" in wire

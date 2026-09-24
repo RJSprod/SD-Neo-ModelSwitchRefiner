@@ -919,6 +919,7 @@
         }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
+        if (open) this.placedHeight = node.offsetHeight;
         // Free float does not apply to the phone sheet above: a sheet is
         // anchored to a half of the screen and covers it, and there is nothing
         // for a floating position to mean.
@@ -940,6 +941,21 @@
     // capture is released, so a late `lostpointercapture` cannot undo it, and
     // the click is suppressed only if the gesture actually exceeded the
     // threshold -- a press that moved two pixels is a click, not a drag.
+
+    /** The panel changed size. Placed again if it changed height.
+     *
+     * Only height: `placeNow` writes the panel's width itself, and a callback
+     * that answered its own write would be an observer loop. A width that
+     * reflowed the text into another height is a height change, and placed
+     * once; the second pass finds the height it placed and stops.
+     */
+    Shell.prototype.resized = function () {
+        const panel = this.nodes.panel;
+        if (!panel || !this.state.panelOpen) return false;
+        if (panel.offsetHeight === this.placedHeight) return false;
+        this.place();
+        return true;
+    };
 
     Shell.prototype.startDrag = function (event, node) {
         if (event.button !== undefined && event.button !== 0) return;
@@ -1351,6 +1367,19 @@
             this.on(window.visualViewport, "scroll", () => this.place());
         }
         this.on(window, "orientationchange", () => this.place());
+        // The panel is placed from its own height, and its height changes with
+        // nobody placing it: a message arrives, a picture in a bubble loads, a
+        // tap opens a message's actions. Placed only on the events above, a
+        // panel docked along the bottom grew downwards off the window, taking
+        // the composer and Send with it. Observed rather than re-placed on
+        // every render: a ResizeObserver reports after layout and only when
+        // the box changed, so a reply streaming into a transcript that is
+        // already at its full height and scrolling costs nothing.
+        if (typeof ResizeObserver === "function") {
+            const watched = new ResizeObserver(() => this.resized());
+            watched.observe(nodes.panel);
+            this.disposers.push(() => watched.disconnect());
+        }
         // Nobody is mid-gesture across a hidden page or an unfocused window,
         // and a release that happened while we were not looking is never
         // coming. Coming back, the shell is checked over as well as the
