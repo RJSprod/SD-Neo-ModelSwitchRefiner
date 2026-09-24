@@ -520,6 +520,9 @@ class TestADeadStreamIsReplaced:
     def test_the_watchdog_tears_down_a_stream_gone_silent(self):
         found = run(STORE_SETUP + """
             let aborted = 0;
+            // An open feed, which it only is while a reply is on its way.
+            store.sleeping = false;
+            store.operations.set("op", {id: "op", key: "", terminal: false});
             store.connected = true;
             store.lastTraffic = Date.now() - 50000;
             store._abort = {abort() { aborted += 1; }};
@@ -540,6 +543,7 @@ class TestADeadStreamIsReplaced:
     def test_a_quiet_stream_inside_the_limit_is_left_alone(self):
         found = run(STORE_SETUP + """
             let aborted = 0;
+            store.sleeping = false;
             store.connected = true;
             store.lastTraffic = Date.now() - 30000;
             store._abort = {abort() { aborted += 1; }};
@@ -556,6 +560,7 @@ class TestADeadStreamIsReplaced:
         dead."""
         found = run(STORE_SETUP + """
             let aborted = 0;
+            store.sleeping = false;
             store.connected = true;
             store.lastTraffic = Date.now() - 25000;
             store._abort = {abort() { aborted += 1; }};
@@ -579,135 +584,246 @@ class TestADeadStreamIsReplaced:
                          r'this\.store\.reconcile\(true\);', wiring)
 
 
-class TestNothingIsHeldOpenInTheBackground:
-    """Reported from use: a tab left in the background for half an hour or
-    more came back with its connections half-dead -- open as far as the page
-    could tell, and silent -- and everything on it hung. A feed that is not
-    held across the absence cannot come back that way, so it is let go on the
-    way out and caught up from scratch on the way back."""
+class TestTheFeedOpensOnlyWhileSomethingIsComing:
+    """Reported from use: a tab left for half an hour or more came back with
+    its connections half-dead -- open as far as the page could tell, and
+    silent -- and everything on it hung. The rule since: a live connection is
+    for a known boundary. The feed opens when a reply is asked for (or a
+    snapshot shows one on its way), stays while it is written and while it
+    is read aloud, and closes at the end. Everything else is read when the
+    panel opens, when the page comes back and when the workspace changes."""
 
-    def test_going_to_the_background_lets_the_feed_go_without_a_failure(self):
-        found = run(STORE_SETUP + """
+    READY = STORE_SETUP + """
+        store.ready = true;
+        const paths = () => calls.map((c) => c.split("?")[0].replace(/^.*conversation.v2/, ""));
+    """
+
+    def test_the_feed_starts_closed_and_start_opens_none(self):
+        found = run(self.READY + """
+            answers = {"/bootstrap": [200, {capabilities: {}, characters: [],
+                                            selection: {character: "c", thread_id: "t"}}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store.ready = false;
+            store.start().then(settle).then(() => console.log(JSON.stringify({
+                paths: paths(), idle: store.snapshot().idle, connected: store.connected})));
+        """, sources=("store",))
+
+        assert found["paths"] == ["/bootstrap", "/snapshot"], found["paths"]
+        assert found["idle"] is True and found["connected"] is False
+
+    def test_asking_for_a_reply_opens_the_feed_before_the_request(self):
+        found = run(self.READY + """
+            // The server's snapshot lists every reply that has not finished,
+            // so the one just asked for is in it.
+            answers = {"/subscribe": [200, {feed: "f", stream_cursor: 1}],
+                       "/snapshot": [200, {operation: {operation_id: "op1", status: "queued"}, messages: []}],
+                       "/commands": [200, {ok: true, operation_id: "op1", phase: "queued",
+                                           resulting_conversation: {character: "c", thread_id: "t"}}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            const envelope = store.envelope("send");
+            store.send(envelope).then(settle).then(() => console.log(JSON.stringify({
+                paths: paths(), idle: store.snapshot().idle})));
+        """, sources=("store",))
+
+        assert found["paths"].index("/subscribe") < found["paths"].index("/commands"), found["paths"]
+        assert found["idle"] is False, "and it stays open while the reply is being written"
+
+    def test_a_command_that_asks_for_no_reply_opens_nothing(self):
+        found = run(self.READY + """
+            answers = {"/commands": [200, {ok: true}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            store.send(store.envelope("rename_thread")).then(settle).then(() => console.log(JSON.stringify({
+                paths: paths(), idle: store.snapshot().idle})));
+        """, sources=("store",))
+
+        assert "/subscribe" not in found["paths"] and "/events" not in found["paths"], found["paths"]
+        assert found["idle"] is True
+
+    def test_the_end_of_the_reply_closes_the_feed(self):
+        found = run(self.READY + """
             let aborted = 0;
+            store.sleeping = false;
             store.connected = true;
-            store.everConnected = true;
+            store.cursor = 4;
             store._abort = {abort() { aborted += 1; }};
-            store.sleep();
-            console.log(JSON.stringify({aborted, connected: store.connected,
-                                        sleeping: store.sleeping, failures: store.failures,
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.refresh = () => Promise.resolve(null);
+            store.apply({protocol_version: 2, stream_cursor: 5, kind: "operation_terminal",
+                         operation_id: "op1", operation_seq: 2, conversation: {},
+                         payload: {phase: "done"}});
+            console.log(JSON.stringify({aborted, idle: store.sleeping, failures: store.failures}));
+        """, sources=("store",))
+
+        assert found == {"aborted": 1, "idle": True, "failures": 0}
+
+    def test_read_aloud_keeps_it_open_until_the_speech_ends(self):
+        """The reply's text is done, but it is still being spoken: the panel's
+        Stop is driven by speech_state, so the feed stays until that says
+        playback stopped."""
+        found = run(self.READY + """
+            let aborted = 0;
+            store.sleeping = false;
+            store.connected = true;
+            store.cursor = 4;
+            store._abort = {abort() { aborted += 1; }};
+            store.refresh = () => Promise.resolve(null);
+            store.apply({protocol_version: 2, stream_cursor: 5, kind: "speech_state",
+                         operation_id: "op1", conversation: {}, payload: {playing: true}});
+            const during = {aborted, idle: store.sleeping};
+            store.apply({protocol_version: 2, stream_cursor: 6, kind: "speech_state",
+                         operation_id: "op1", conversation: {}, payload: {playing: false}});
+            console.log(JSON.stringify({during, after: {aborted, idle: store.sleeping}}));
+        """, sources=("store",))
+
+        assert found["during"] == {"aborted": 0, "idle": False}
+        assert found["after"] == {"aborted": 1, "idle": True}
+
+    def test_a_reply_found_in_a_snapshot_opens_the_feed(self):
+        """Started in LLM Studio, or in another window: the panel learns of it
+        when it looks, and follows it from there."""
+        found = run(self.READY + """
+            answers = {"/subscribe": [200, {feed: "f", stream_cursor: 1}],
+                       "/snapshot": [200, {operation: {operation_id: "op9", status: "generating"},
+                                           messages: []}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            store.refresh().then(settle).then(() => console.log(JSON.stringify({
+                paths: paths(), idle: store.snapshot().idle, replying: store.replying()})));
+        """, sources=("store",))
+
+        assert "/subscribe" in found["paths"], found["paths"]
+        assert found["idle"] is False and found["replying"] is True
+
+    def test_a_reply_the_server_has_finished_does_not_hold_the_feed(self):
+        """A terminal event that never arrived cannot keep the feed open: the
+        next snapshot that shows no reply marks it finished."""
+        found = run(self.READY + """
+            let aborted = 0;
+            answers = {"/snapshot": [200, {operation: null, messages: []}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            store.sleeping = false;
+            store.connected = true;
+            store._abort = {abort() { aborted += 1; }};
+            store.operations.set("op1", {id: "op1", key: NS.conversationKey("c", "t"), terminal: false});
+            store.refresh().then(settle).then(() => console.log(JSON.stringify({
+                aborted, idle: store.sleeping, replying: store.replying()})));
+        """, sources=("store",))
+
+        assert found == {"aborted": 1, "idle": True, "replying": False}
+
+    def test_a_feed_that_drops_with_nothing_coming_stays_closed(self):
+        found = run(self.READY + """
+            store.sleeping = false;
+            store.connected = true;
+            store.dropped();
+            console.log(JSON.stringify({idle: store.sleeping, failures: store.failures,
                                         ladder: timers.some((t) => t.ms >= 1000 && t.ms <= 15400)}));
         """, sources=("store",))
 
-        assert found["aborted"] == 1
-        assert found["sleeping"] is True and found["connected"] is False
-        assert found["failures"] == 0, "letting go on purpose is not a dropped feed"
-        assert found["ladder"] is False, "and nothing climbs the reconnect ladder for it"
+        assert found == {"idle": True, "failures": 0, "ladder": False}
 
-    def test_the_feed_it_let_go_is_not_reopened_while_away(self):
-        found = run(STORE_SETUP + """
-            store.feed = "f";
+    def test_going_to_the_background_mid_reply_holds_it_until_it_ends(self):
+        found = run(self.READY + """
+            let aborted = 0;
+            store.sleeping = false;
             store.connected = true;
-            store._abort = {abort() {}};
+            store.cursor = 4;
+            store._abort = {abort() { aborted += 1; }};
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.sleep();
+            const held = {aborted, idle: store.sleeping, timer: timers.some((t) => t.ms === 600000)};
+            store.refresh = () => Promise.resolve(null);
+            store.apply({protocol_version: 2, stream_cursor: 5, kind: "operation_terminal",
+                         operation_id: "op1", operation_seq: 2, conversation: {},
+                         payload: {phase: "done"}});
+            console.log(JSON.stringify({held, after: {aborted, idle: store.sleeping}}));
+        """, sources=("store",))
+
+        assert found["held"] == {"aborted": 0, "idle": False, "timer": True}
+        assert found["after"] == {"aborted": 1, "idle": True}
+
+    def test_a_reply_that_never_ends_is_not_held_for_ever_in_the_background(self):
+        found = run(self.READY + """
+            let aborted = 0;
+            store.sleeping = false;
+            store.connected = true;
+            store._abort = {abort() { aborted += 1; }};
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.sleep();
+            timers.find((t) => t.ms === 600000).fn();
+            store.review();
+            console.log(JSON.stringify({aborted, idle: store.sleeping, calls}));
+        """, sources=("store",))
+
+        assert found == {"aborted": 1, "idle": True, "calls": []}, "and not reopened while away"
+
+    def test_nothing_is_asked_for_while_away(self):
+        found = run(self.READY + """
+            store.feed = "f";
             store.refresh = () => { calls.push("refresh"); return Promise.resolve(null); };
             store.sleep();
             store.dropped();
             store.stream();
             store.connect();
             store.reconcile(true);
+            store.check();
             settle().then(() => console.log(JSON.stringify({calls, failures: store.failures})));
         """, sources=("store",))
 
         assert found == {"calls": [], "failures": 0}
 
-    def test_the_return_catches_up_from_scratch(self):
-        found = run(STORE_SETUP + """
-            answers = {"/subscribe": [200, {feed: "f2", subscription_generation: "g",
-                                            stream_cursor: 7}]};
-            store.connected = true;
-            store.everConnected = true;
-            store._abort = {abort() {}};
-            store.refresh = () => { calls.push("refresh"); return Promise.resolve(null); };
-            store.sleep();
-            const status = [];
-            store.announce = () => status.push(store.snapshot().catchingUp);
-            store.wake();
-            settle().then(() => console.log(JSON.stringify({
-                calls: calls.map((c) => c.split("?")[0].replace(/^.*conversation.v2/, "")),
-                sleeping: store.sleeping, catchingUp: status[0]})));
-        """, sources=("store",))
-
-        assert found["sleeping"] is False
-        assert found["calls"][:3] == ["/subscribe", "refresh", "/events"], found["calls"]
-        assert found["catchingUp"] is True, "and says it is catching up, not reconnecting"
-
-    def test_a_reply_being_written_is_held_until_it_ends(self):
-        """A question asked just before switching away is still answered --
-        and read aloud, if that is on -- while the page is away."""
-        found = run(STORE_SETUP + """
-            let aborted = 0;
-            store.connected = true;
-            store.cursor = 4;
-            store._abort = {abort() { aborted += 1; }};
-            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
-            store.sleep();
-            const held = {aborted, sleeping: store.sleeping,
-                          timer: timers.some((t) => t.ms === 600000)};
-            store.refresh = () => Promise.resolve(null);
-            store.apply({protocol_version: 2, stream_cursor: 5, kind: "operation_terminal",
-                         operation_id: "op1", operation_seq: 2, conversation: {},
-                         payload: {phase: "done"}});
-            console.log(JSON.stringify({held, after: {aborted, sleeping: store.sleeping}}));
-        """, sources=("store",))
-
-        assert found["held"] == {"aborted": 0, "sleeping": False, "timer": True}
-        assert found["after"] == {"aborted": 1, "sleeping": True}
-
-    def test_a_reply_that_never_ends_is_not_held_for_ever(self):
-        found = run(STORE_SETUP + """
-            let aborted = 0;
-            store.connected = true;
-            store._abort = {abort() { aborted += 1; }};
-            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
-            store.sleep();
-            timers.find((t) => t.ms === 600000).fn();
-            console.log(JSON.stringify({aborted, sleeping: store.sleeping}));
-        """, sources=("store",))
-
-        assert found == {"aborted": 1, "sleeping": True}
-
-    def test_a_catch_up_that_fails_says_reconnecting(self):
-        found = run(STORE_SETUP + """
-            store.connected = true;
-            store.everConnected = true;
-            store._abort = {abort() {}};
+    def test_the_return_looks_and_opens_a_feed_only_for_a_reply(self):
+        found = run(self.READY + """
+            answers = {"/bootstrap": [200, {selection: {character: "c", thread_id: "t"}}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
             store.sleep();
             store.wake();
-            settle().then(() => console.log(JSON.stringify({
-                catchingUp: store.catchingUp, failures: store.failures})));
+            settle().then(() => console.log(JSON.stringify({paths: paths(), idle: store.sleeping})));
         """, sources=("store",))
 
-        assert found == {"catchingUp": False, "failures": 1}
+        assert found["paths"] == ["/bootstrap", "/snapshot"], found["paths"]
+        assert found["idle"] is True
 
-    def test_the_shell_sleeps_and_wakes_the_store_with_the_page(self):
+    def test_looking_follows_the_conversation_llm_studio_is_on(self):
+        """What the feed's character_changed used to carry live, read when the
+        panel looks."""
+        found = run(self.READY + """
+            answers = {"/bootstrap": [200, {selection: {character: "c2", thread_id: "t2"}}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            store.check().then(settle).then(() => console.log(JSON.stringify({
+                selection: [store.selection.character, store.selection.thread]})));
+        """, sources=("store",))
+
+        assert found["selection"] == ["c2", "t2"]
+
+    def test_the_shell_looks_when_the_panel_opens_and_the_workspace_changes(self):
         shell = SHELL.read_text(encoding="utf-8")
+        opened = shell.split("Shell.prototype.open = function", 1)[1].split("};", 1)[0]
+        noted = shell.split("Shell.prototype.noteWorkspace = function", 1)[1].split("};", 1)[0]
         wiring = shell.split("Shell.prototype.wire = function", 1)[1] \
             .split("Shell.prototype.grow = function", 1)[0]
         handler = wiring.split('this.on(document, "visibilitychange"', 1)[1].split("});", 1)[0]
 
+        assert "this.store.check();" in opened
+        assert "this.store.check();" in noted
         assert "this.store.sleep();" in handler.split("return;", 1)[0]
         assert "this.store.wake();" in handler.split("return;", 1)[1]
 
-    def test_the_status_line_says_catching_up(self):
+    def test_a_closed_feed_is_not_a_connection_problem_on_screen(self):
         found = run("""
             const shell = Object.create(NS.Shell.prototype);
             shell.said = [];
             shell.say = (text) => shell.said.push(text);
-            shell.renderStatus({ready: true, connected: false, everConnected: true,
-                                catchingUp: true, polling: false, error: ""});
+            shell.renderStatus({ready: true, connected: false, everConnected: false,
+                                idle: true, polling: false, error: "",
+                                characters: ["x"], selection: {character: "x", thread: "t"},
+                                conversation: {}});
             console.log(JSON.stringify({said: shell.said}));
         """, sources=("shell",))
 
-        assert found == {"said": ["Catching up…"]}
+        assert found["said"] and not any("onnect" in line for line in found["said"]), found["said"]
 
 
 class TestARestartedServerIsRejoined:

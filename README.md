@@ -3456,19 +3456,24 @@ None of this is a setting and none of it can be turned off. Turning the Forge
 Assistant off removes a panel; it does not put a conversation back in reach of
 the last writer.
 
-**Nothing is held open while the tab is in the background.** The panel follows
-the conversation over one live connection. It used to keep that connection open
-for as long as the page existed, including while the tab sat unseen for an
-hour, and a connection kept open across a long absence is the one that comes
-back half-dead: open as far as the page can tell, and silent. So when the tab
-goes to the background the connection is closed, and when you come back the
-panel catches up — it asks for the conversation as it is now, then opens a
-fresh connection — and says **Catching up…** while it does. The one exception
-is a reply that is still being written when you switch away: the connection is
-kept until that reply finishes (at most ten minutes), so it still arrives, and
-is still read aloud if that is on, while you are elsewhere. The only visible
-difference otherwise is that the unread badge updates when you come back
-rather than while you are away.
+**The panel holds a live connection only while a reply is on its way.** It
+follows the conversation over one live connection, and that connection used to
+be held for as long as the page existed - including while the tab sat unseen
+for an hour - which is the connection that came back half-dead, open as far as
+the page could tell and silent. Now it opens only for a known boundary: when
+you press Send (or Regenerate, Continue, Resend) it opens *before* the request
+goes, so the reply streams in word by word as before; it stays while the reply
+is written and while it is being read aloud; and it closes when the reply and
+the speech are done. A reply started somewhere else - in LLM Studio, or another
+window - is found the next time the panel looks, and followed from there. The
+panel looks when you open it, when you come back to the page and when you
+switch workspace; that is also when it picks up which conversation LLM Studio
+is on, threads made or deleted elsewhere, and unread counts, which it no longer
+hears about live. A tab switched away mid-reply keeps the connection until that
+reply finishes (at most ten minutes). A closed connection is its resting state,
+so the status line never calls it a problem. Voice Chat's own speech stream
+works the same way already: it opens for one reply's speech and closes when
+that speech ends.
 
 Implementation notes, the gates that still need a running Forge, and what to do
 when adding a workspace adapter or a message action are in
