@@ -3023,6 +3023,7 @@ drop-down at the top of it — *Talking to* — is only ever the first:
 | **Edit** | Opens the editor on the character you are talking to. Saving writes it back; changing the name renames it, and its picture moves with it. |
 | **New** | Clears the editor for a character that does not exist yet, and resets the Advanced generation settings with it. It does **not** touch the character you are talking to. |
 | **↻ Refresh** | Re-reads the characters folder, for a `.yaml` copied in from an oobabooga install while the tab was open. |
+| **⤢ System prompt** | Opens the character's system prompt on a page of its own — see *The system prompt editor* below. |
 | **Save character** | Creates when the editor is on a new character and edits when it is on an existing one. Creating over a name already taken is refused rather than writing over it. |
 | **Delete this character** | Removes it and its picture, and lands you on whichever character is left. |
 | **Import a character card** | A `.yaml`, `.json`, or a `.png` V2/V3 card with its JSON inside. |
@@ -3040,6 +3041,42 @@ visible before it is saved. **Edit this system prompt** copies what is showing
 into the override box below it, where it becomes this character's own and is
 saved with them; empty it again and the character goes back to the common
 default. It never overwrites an override already written.
+
+#### The system prompt editor
+
+**⤢ System prompt** opens the character in *Talking to* on a page of its own:
+the whole window, most of it the prompt, in the shape of Mini Paint NEO's system
+prompt editor. The Forge Assistant's **⋯** menu opens the same editor
+(**System prompt…**). It opens on what the character is told now — its override
+if it has one, otherwise the prompt built from its Context and your persona —
+and the line under the box says which:
+
+- **Default** for Ada, built from Ada's Context and your persona. Edit and
+  Apply override to replace it.
+- **Override saved** for Ada. Restore default forgets it.
+
+| | |
+| --- | --- |
+| **Apply override** | Saves the box as the character's own system prompt. It is the override the character editor's box holds, so it is used wherever the character is talked to — here and in the Forge Assistant. |
+| **Restore default** | Forgets the override. The character goes back to the built prompt. |
+| **Reload** | Reads the saved prompt again. |
+| **Close** | Puts the editor away; so do **×** and Escape. |
+
+Applying the built prompt untouched keeps no override, and neither does applying
+an empty box: the character goes on following its Context and your persona,
+which a frozen copy of today's prompt would silently stop doing. `{{char}}` and
+`{{user}}` work as they do in the override box. Close, Escape and Reload ask
+before an edit that has not been applied is thrown away, and nothing can be
+applied until the prompt has been read — an empty box applied would be
+*restore the default*. When the character editor above is open on the same
+character, its override box is updated to match, so its **Save** does not put
+the old prompt back.
+
+The editor is drawn above everything, focus mode included, and fills what is
+actually on the screen rather than the page's layout: on a phone showing a page
+wider than itself, the second is wider and taller than the glass, and an editor
+sized to it had its buttons off the edge. It follows the screen as it changes —
+a rotation, a phone's keyboard coming up — so the buttons stay in reach.
 
 ### Conversation, per message
 
@@ -3237,8 +3274,8 @@ too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
 **The utility menu** — the **⋯** beside Focus — has **Free Float**, **Auto
-Attach**, **Customize…**, two entries and a **Cancel**. The two entries are the
-same request: *I need this card back, now.*
+Attach**, **New thread**, **System prompt…**, **Customize…**, two entries and a
+**Cancel**. The two entries are the same request: *I need this card back, now.*
 
 | | |
 | --- | --- |
@@ -3251,9 +3288,20 @@ the twenty gigabytes back from llama-server — and what the status line says is
 what actually happened, not a tick. Neither is policy: the next request that
 needs a model loads it again exactly as it would have.
 
+**New thread** starts a fresh thread with the character the panel is talking
+to — made and greeted exactly as the tab's New thread makes one — and moves the
+panel onto it, opening the conversation if it was collapsed. The tab stays on
+the thread it is on, as it does when you choose a thread in the panel.
+**System prompt…** opens the full-page system prompt editor on that character,
+the one LLM Studio's **⤢ System prompt** opens (see *The system prompt editor*);
+the panel is where you left it when you close it. Both are greyed out until the
+panel is on a conversation.
+
 **Auto Attach** sends the picture you are looking at with your message, so you
 do not have to attach it yourself. While it is on — the paperclip is lit to say
-so — pressing Send in the panel takes the picture showing in the gallery of the
+so, the same way the read-aloud speaker is: a tint of the theme's accent with a
+ring of it, which keeps the glyph readable under a light theme and a dark one
+alike — pressing Send in the panel takes the picture showing in the gallery of the
 image tab you are on, txt2img or img2img: the one you clicked, or the first
 when you have not clicked one, which is the rule Forge's own *Send to img2img*
 buttons use. It is uploaded exactly as a picture attached with the paperclip is,
@@ -3450,6 +3498,16 @@ Both composers on a page share one draft per thread, so a message half-typed in
 the tab is there in the panel and back again, and switching thread stores and
 restores exactly. Drafts survive a reload; an attachment does not.
 
+Enter sends from the panel and Shift+Enter starts a new line. Once the message
+has gone, the box is empty — however it was sent — unless you typed more while it
+was sending, which stays; a message the server refuses stays in the box to be
+sent again.
+
+**The conversation is a window onto the thread, not the thread.** With it open,
+the panel is at most about half the window high — the thread scrolls inside
+it — so the workspace behind stays in view; the header, the status line and
+the composer keep their size, and only the transcript gives up the room.
+
 **A thread opens at its latest message**, and every thread opens at its own —
 scrolling up in one does not open the next one halfway up. While you are at the
 end of a thread it stays at the end as replies arrive, including the picture in
@@ -3460,7 +3518,10 @@ down there or just the end of what you were already reading.
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip — or attached for you by **Auto Attach**, above. One per message, and
-a second one asks whether to replace the first.
+a second one asks whether to replace the first. A message's picture shows on it
+in the panel, fetched with the page's key like every other request the panel
+makes; one that has gone, or cannot be fetched, is a placeholder that says
+*Picture unavailable*. The file's name is never shown.
 A picture is uploaded, decoded, checked and re-encoded before Send will go — so
 "the upload finished" is something the server knows rather than something a
 timer guessed — and Send says which of those it is waiting for. Paste works over
