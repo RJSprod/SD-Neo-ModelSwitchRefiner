@@ -1117,6 +1117,32 @@
             .catch(() => null);
     };
 
+    /** Start a fresh thread with a character, and move this page onto it.
+     *
+     * The service's own create_thread -- the one the tab's New thread sends --
+     * so the thread is made, named and greeted exactly as it is from there.
+     * Nothing is compared, because there is nothing yet to compare against.
+     * This page moves to the new thread; the tab stays where it is, the same
+     * way a thread chosen here does not move the tab.
+     */
+    Store.prototype.createThread = function (character) {
+        const who = String(character || this.selection.character || "");
+        if (!who) {
+            return Promise.resolve({ok: false,
+                                    error: {message: "Choose a conversation first."}});
+        }
+        const envelope = this.envelope("create_thread", {
+            conversation: {character: who, thread_id: ""},
+            expected_revision: null,
+        });
+        envelope.payload = {};
+        return this.send(envelope).then((outcome) => {
+            const made = outcome && outcome.ok && outcome.resulting_conversation;
+            if (!made || !made.thread_id) return outcome;
+            return this.select(made.character || who, made.thread_id).then(() => outcome);
+        });
+    };
+
     Store.prototype.stop = function (operationId) {
         const envelope = this.envelope("stop", {expected_revision: null});
         envelope.payload = {operation_id: operationId};

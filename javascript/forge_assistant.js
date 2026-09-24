@@ -1998,7 +1998,7 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        const own = [this.floatItem(), this.autoAttachItem()];
+        const own = [this.floatItem(), this.autoAttachItem(), this.newThreadItem()];
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
@@ -2052,6 +2052,44 @@
             this.setAutoAttach(!on);
         });
         return item;
+    };
+
+    /** "Add the ability to start a new thread directly from the fly out menu.
+     *  It should start a fresh thread with the character." */
+    Shell.prototype.newThreadItem = function () {
+        const character = this.store.snapshot().selection.character;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-new-thread",
+                             "New thread");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.disabled = !character;
+        item.title = character ? "Start a fresh thread with " + character
+            : "Choose a conversation first";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.startThread(character);
+        });
+        return item;
+    };
+
+    Shell.prototype.startThread = function (character) {
+        this.tell("Starting a new thread with " + character + "\u2026", "info");
+        return this.store.createThread(character).then((outcome) => {
+            if (!outcome || !outcome.ok) {
+                this.tell((outcome && outcome.error && outcome.error.message)
+                    || "A new thread could not be started.", "warn");
+                return false;
+            }
+            // Somebody who asked for a new thread is about to write in it.
+            if (!this.state.conversationExpanded) {
+                this.state.conversationExpanded = true;
+                this.applyAccordion();
+                this._save();
+            }
+            this.tell("New thread with " + character + ".", "info");
+            return true;
+        });
     };
 
     Shell.prototype.setAutoAttach = function (on) {

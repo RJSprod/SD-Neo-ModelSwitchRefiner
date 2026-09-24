@@ -369,3 +369,108 @@ class TestALitButtonKeepsItsGlyphReadable:
                 if "background" in line and "--color-accent-soft" in line:
                     offenders.append(match.group(1).strip())
         assert offenders == []
+
+
+# --------------------------------------------------------------------------- #
+# 1. New thread from the ⋯ menu
+# --------------------------------------------------------------------------- #
+
+THREADS = """
+function threadStore(answer) {
+    const store = new NS.Store();
+    store.selection = {character: "Ada", thread: "t1", epoch: "e1"};
+    store.sent = [];
+    store.send = (envelope) => { store.sent.push(envelope); return Promise.resolve(answer); };
+    store.selected = [];
+    store.select = (character, thread) => {
+        store.selected.push([character, thread]);
+        store.selection = {character, thread, epoch: "e2"};
+        return Promise.resolve(null);
+    };
+    return store;
+}
+const MADE = {ok: true, operation_id: "op", phase: "completed",
+              resulting_conversation: {character: "Ada", thread_id: "t9"}};
+"""
+
+
+class TestANewThreadFromTheMenu:
+    """"Add the ability to start a new thread directly from the fly out menu.
+    It should start a fresh thread with the character.\""""
+
+    def test_it_asks_the_service_for_a_thread_with_this_character(self):
+        found = run_both(THREADS + """
+            const store = threadStore(MADE);
+            store.createThread().then(() => {
+                const sent = store.sent[0];
+                console.log(JSON.stringify({action: sent.action,
+                                            conversation: sent.conversation,
+                                            expected: sent.expected_revision}));
+            });
+        """)
+
+        assert found == {"action": "create_thread",
+                         "conversation": {"character": "Ada", "thread_id": ""},
+                         "expected": None}
+
+    def test_the_panel_moves_onto_the_new_thread(self):
+        found = run_both(THREADS + """
+            const store = threadStore(MADE);
+            store.createThread().then(() => console.log(JSON.stringify(store.selected)));
+        """)
+
+        assert found == [["Ada", "t9"]]
+
+    def test_a_refusal_moves_nothing(self):
+        found = run_both(THREADS + """
+            const store = threadStore({ok: false, error: {message: "No."}});
+            store.createThread().then((outcome) => console.log(JSON.stringify(
+                {selected: store.selected, ok: outcome.ok})));
+        """)
+
+        assert found == {"selected": [], "ok": False}
+
+    def test_with_no_character_nothing_is_sent(self):
+        found = run_both(THREADS + """
+            const store = threadStore(MADE);
+            store.selection = {character: "", thread: "", epoch: "e1"};
+            store.createThread().then((outcome) => console.log(JSON.stringify(
+                {sent: store.sent.length, ok: outcome.ok})));
+        """)
+
+        assert found == {"sent": 0, "ok": False}
+
+    def test_the_menu_item_starts_one_and_opens_the_conversation(self):
+        found = run_both(THREADS + """
+            const shell = Object.create(NS.Shell.prototype);
+            shell.store = threadStore(MADE);
+            shell.state = {conversationExpanded: false};
+            shell.nodes = {status: {dataset: {}, textContent: ""}};
+            let closed = 0;
+            shell.closeMenu = () => { closed += 1; };
+            shell.applyAccordion = () => { shell.accordion = shell.state.conversationExpanded; };
+            shell._save = () => undefined;
+            const item = shell.newThreadItem();
+            item.handlers.click.forEach((fn) => fn());
+            setImmediate(() => setImmediate(() => console.log(JSON.stringify({
+                label: item.textContent, disabled: item.disabled, closed,
+                selected: shell.store.selected, opened: shell.accordion,
+                said: shell.nodes.status.textContent}))));
+        """)
+
+        assert found["label"] == "New thread" and found["disabled"] is False
+        assert found["closed"] == 1
+        assert found["selected"] == [["Ada", "t9"]]
+        assert found["opened"] is True
+        assert found["said"] == "New thread with Ada."
+
+    def test_with_no_conversation_the_item_is_there_and_not_pressable(self):
+        found = run_both(THREADS + """
+            const shell = Object.create(NS.Shell.prototype);
+            shell.store = threadStore(MADE);
+            shell.store.selection = {character: "", thread: "", epoch: "e1"};
+            const item = shell.newThreadItem();
+            console.log(JSON.stringify({disabled: item.disabled, title: item.title}));
+        """)
+
+        assert found == {"disabled": True, "title": "Choose a conversation first"}

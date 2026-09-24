@@ -683,6 +683,8 @@ function picker(host, focus) {
     shell._save = () => {};
     shell.place = () => {};
     shell.nodes = {focusToggle: {setAttribute(name, value) { this[name] = value; }}};
+    // The ⋯ menu's conversation entries ask which conversation is on screen.
+    shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
     shell.host = Object.assign({
         getActiveWorkspace: () => "tab_txt2img",
         listWorkspaces: () => [{id: "tab_img2img", label: "Img2Img", available: true}],
@@ -2311,8 +2313,8 @@ class TestFreeFloat:
 
         # Auto Attach follows it: the other mode in this menu, and a mode is
         # not what anybody should hit on the way to giving a card back.
-        assert found["labels"] == ["Free Float", "Auto Attach", "Unload All Models",
-                                   "Unload LLM"]
+        assert found["labels"] == ["Free Float", "Auto Attach", "New thread",
+                                   "Unload All Models", "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")
