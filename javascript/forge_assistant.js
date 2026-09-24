@@ -298,6 +298,7 @@
             focusEnabled: false,
             focusWorkspaceId: null,
             showAnyway: false,
+            autoAttach: false,
         };
         this.settings = {
             enabled: true,
@@ -321,6 +322,10 @@
         this.settling = false;
         this._restore();
         this._restoreFloat();
+        this._restoreAutoAttach();
+        // Which picture Auto Attach last sent, per conversation. See
+        // `autoAttachable`.
+        this.autoSent = new Map();
     }
 
     Shell.prototype.anchor = function () {
@@ -406,6 +411,27 @@
             window.localStorage.setItem(this._floatKey(), JSON.stringify(
                 {freeFloat: this.state.freeFloat, floatAt: this.state.floatAt}));
         } catch (error) { /* memory only; the panel still works */ }
+    };
+
+    // Auto Attach is a preference about how the composer works, answered once
+    // -- remembered across sessions like Free Float, under a key of its own.
+    Shell.prototype._autoAttachKey = function () {
+        return "forge-assistant-auto-attach:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreAutoAttach = function () {
+        try {
+            this.state.autoAttach = window.localStorage.getItem(this._autoAttachKey()) === "on";
+        } catch (error) {
+            this.state.autoAttach = false;
+        }
+    };
+
+    Shell.prototype._saveAutoAttach = function () {
+        try {
+            window.localStorage.setItem(this._autoAttachKey(),
+                                        this.state.autoAttach ? "on" : "off");
+        } catch (error) { /* memory only; the mode still works */ }
     };
 
     Shell.prototype._save = function () {
@@ -636,7 +662,8 @@
         input.setAttribute("aria-label", "Message");
         input.placeholder = "Message…";
         const toolbar = element("div", "forge-assistant-toolbar");
-        const attach = element("button", "forge-assistant-icon-button", "\u{1F4CE}");
+        const attach = element("button", "forge-assistant-icon-button forge-assistant-attach",
+                               "\u{1F4CE}");
         attach.type = "button";
         attach.setAttribute("aria-label", "Attach an image");
         const dictate = element("button", "forge-assistant-icon-button", "\u{1F3A4}");
@@ -1942,7 +1969,7 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        const own = [this.floatItem()];
+        const own = [this.floatItem(), this.autoAttachItem()];
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
@@ -1977,6 +2004,49 @@
             this.setFreeFloat(!on);
         });
         return item;
+    };
+
+    Shell.prototype.autoAttachItem = function () {
+        const on = !!this.state.autoAttach;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-auto-attach",
+                             "Auto Attach");
+        item.type = "button";
+        // A mode, like Free Float above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Stop attaching the picture showing in txt2img or img2img"
+            : "Attach the picture showing in txt2img or img2img to each message";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setAutoAttach(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.setAutoAttach = function (on) {
+        this.state.autoAttach = !!on;
+        this._saveAutoAttach();
+        this.renderAutoAttach();
+        this.tell(on ? "Auto Attach is on: the picture showing in txt2img or img2img "
+            + "goes with your next message." : "Auto Attach is off.", "info");
+        return this.state.autoAttach;
+    };
+
+    /** The paperclip says when Auto Attach is on, so nobody is surprised by a
+     *  picture on a message they did not attach one to. */
+    Shell.prototype.renderAutoAttach = function () {
+        const attach = this.nodes.attach;
+        if (!attach) return;
+        const on = !!this.state.autoAttach;
+        attach.dataset.auto = on ? "on" : "off";
+        const title = on
+            ? "Attach an image (Auto Attach is on: the picture showing in txt2img or "
+              + "img2img goes with each message)"
+            : "Attach an image";
+        attach.title = title;
+        attach.setAttribute("aria-label", title);
     };
 
     Shell.prototype.customizeItem = function () {
@@ -2207,7 +2277,39 @@
         const view = this.store.snapshot();
         if (!this.canSend(view)) return;
         this.store.setDraftText(this.nodes.input.value);
+        const picked = this.autoAttachable(this.store.snapshot());
+        if (picked.note) this.tell(picked.note, picked.kind);
+        if (!picked.picture) {
+            this.submitDraft(null);
+            return;
+        }
+        // The picture first, then the message -- through the same upload the
+        // paperclip uses, so it arrives exactly as one attached by hand does.
+        // Send is disabled while it uploads (an attachment that is not ready
+        // cannot be sent), so a second press cannot send the words without it.
+        const key = NS.conversationKey(view.selection.character, view.selection.thread);
+        const epoch = view.selection.epoch;
+        this.attachShowing(picked.picture, key).then((attached) => {
+            if (this.store.snapshot().selection.epoch !== epoch) {
+                this.tell("The conversation changed while the picture was attaching. "
+                          + "It is in that conversation's draft; press Send there.", "warn");
+                return;
+            }
+            if (!attached) {
+                this.tell("Auto Attach could not attach the picture from "
+                          + picked.picture.label + (this.attachFailure
+                          ? " (" + this.attachFailure + ")" : "")
+                          + ". Sent without it.", "warn");
+            }
+            this.submitDraft(attached ? picked.picture : null);
+        });
+    };
+
+    Shell.prototype.submitDraft = function (picture) {
+        const view = this.store.snapshot();
+        const key = NS.conversationKey(view.selection.character, view.selection.thread);
         this.store.submit().then((outcome) => {
+            if (outcome && outcome.ok && picture) this.autoSent.set(key, picture.src);
             if (outcome && outcome.lost) {
                 this.say("Checking whether your message was sent…", "warn");
                 this.store.checkPending().then((found) => {
@@ -2221,6 +2323,162 @@
                 this.say((outcome.error && outcome.error.message)
                     || "That could not be sent.", "warn");
             }
+        });
+    };
+
+    // -- Auto Attach ---------------------------------------------------------- //
+    //
+    // "When conversation mode is open, I want an option to enable the current
+    // visible image in the text to image or image to image tab (which ever is
+    // open at the time) to be an automatic input to the next LLM prompt ... If
+    // i am not on either of those tabs, or gallery is empty, then nothing
+    // should be attached."
+    //
+    // "Visible" is Forge's own answer to "which picture", the one its Send to
+    // img2img buttons use: the picture you clicked in the gallery, and the
+    // first one when you have not clicked any. Read off the gallery rather than
+    // asked of Python, because which thumbnail is selected is a fact only the
+    // page knows.
+    //
+    // Three reasons a picture is left out even with the mode on, each said:
+    //
+    // * a picture of your own is already attached -- that one is sent;
+    // * the model running cannot see pictures -- the server refuses any
+    //   message carrying one, so every message would bounce;
+    // * it is the same picture Auto Attach sent last time in this conversation
+    //   and the conversation still has a picture in it. The model keeps up to
+    //   four pictures of a thread's history in view (`prompt_master/chat/
+    //   prompt.py`, MAX_IMAGES), so a second copy of the same one is context
+    //   spent on nothing. A new picture in the gallery is attached as usual.
+
+    const GALLERIES = {
+        tab_txt2img: {id: "txt2img_gallery", label: "txt2img"},
+        tab_img2img: {id: "img2img_gallery", label: "img2img"},
+    };
+
+    // In order: Gradio's preview of the selected picture, the selected
+    // thumbnail, the first thumbnail, and -- for a theme that renames all of
+    // those -- the first picture in the gallery that is not Forge's live
+    // preview of a generation still running.
+    const SHOWING = [".preview img[data-testid=\"detailed-image\"]",
+                     ".preview .media-button img",
+                     ".thumbnail-item.selected img",
+                     ".thumbnail-item img"];
+
+    function showingIn(gallery) {
+        for (let at = 0; at < SHOWING.length; at += 1) {
+            const found = gallery.querySelector(SHOWING[at]);
+            if (found) return found;
+        }
+        const all = typeof gallery.querySelectorAll === "function"
+            ? gallery.querySelectorAll("img") : [];
+        return Array.prototype.find.call(all, (image) =>
+            !(typeof image.closest === "function" && image.closest(".livePreview"))) || null;
+    }
+
+    function fileNameOf(src) {
+        const path = String(src || "").split(/[?#]/)[0];
+        const last = path.slice(path.lastIndexOf("/") + 1);
+        let name = last;
+        try {
+            name = decodeURIComponent(last);
+        } catch (error) { /* a name that is not valid percent-encoding stays as it is */ }
+        name = name.replace(/^file=/, "");
+        name = name.slice(name.lastIndexOf("/") + 1);
+        return name || "image.png";
+    }
+
+    /** The picture showing in this workspace's gallery, or null. */
+    function showingPicture(workspace) {
+        const where = GALLERIES[workspace];
+        if (!where) return null;
+        const gallery = hostElement(where.id);
+        if (!gallery || typeof gallery.querySelector !== "function") return null;
+        const image = showingIn(gallery);
+        const src = image && (image.currentSrc || image.src
+            || (typeof image.getAttribute === "function" ? image.getAttribute("src") : ""));
+        if (!src) return null;
+        return {src: String(src), label: where.label, name: fileNameOf(src)};
+    }
+
+    /** What Auto Attach would do with this send: `{picture}` to attach one,
+     *  and a `note` whenever it leaves one out for a reason worth saying. */
+    Shell.prototype.autoAttachable = function (view) {
+        if (!this.state.autoAttach) return {};
+        if (view.draft && view.draft.attachment) return {};
+        const picture = showingPicture(this.host.getActiveWorkspace());
+        if (!picture) return {};
+        if (view.capabilities && view.capabilities.vision === false) {
+            return {note: "Auto Attach left the picture out: the model running cannot "
+                          + "see pictures.", kind: "warn"};
+        }
+        const key = NS.conversationKey(view.selection.character, view.selection.thread);
+        const messages = (view.conversation && view.conversation.messages) || [];
+        if (this.autoSent.get(key) === picture.src
+            && messages.some((message) => message.attachment)) {
+            return {note: "Same picture as last time, so it was not attached again.",
+                    kind: "info"};
+        }
+        return {picture};
+    };
+
+    // What the server takes as it is, and how large. Anything else -- a format
+    // Forge was told to save in that staging does not read, or an upscale past
+    // the limit -- is drawn onto a canvas and sent as a JPEG instead: the model
+    // sees a few hundred pixels of it whatever it is sent.
+    const STAGEABLE = /^image\/(png|jpeg|webp)$/;
+    const STAGE_LIMIT = 19 * 1024 * 1024;
+    const REENCODE_EDGE = 2048;
+
+    function stageable(blob) {
+        if (STAGEABLE.test(blob.type || "") && blob.size <= STAGE_LIMIT) {
+            return Promise.resolve(blob);
+        }
+        if (typeof createImageBitmap !== "function") return Promise.resolve(blob);
+        return createImageBitmap(blob).then((bitmap) => {
+            const scale = Math.min(1, REENCODE_EDGE / Math.max(bitmap.width, bitmap.height, 1));
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            return new Promise((resolve) => {
+                canvas.toBlob((made) => resolve(made || blob), "image/jpeg", 0.92);
+            });
+        }).catch(() => blob);
+    }
+
+    /** Fetch the showing picture and stage it as this draft's attachment.
+     *
+     * Resolves true when it is ready to send. The chip shows it the whole
+     * way, marked with where it came from. A picture removed from the chip
+     * while it was uploading stays removed.
+     */
+    Shell.prototype.attachShowing = function (picture, key) {
+        const localId = NS.uuid();
+        const mark = {localId, name: picture.name, preview: picture.src, from: picture.label};
+        this.attachFailure = "";
+        this.store.setAttachment(Object.assign({state: "uploading"}, mark), key);
+        const still = () => {
+            const current = this.store.draft(key).attachment;
+            return !!current && current.localId === localId;
+        };
+        return fetch(picture.src, {credentials: "same-origin"}).then((response) => {
+            if (!response.ok) throw new Error("the gallery answered " + response.status);
+            return response.blob();
+        }).then(stageable).then((blob) => {
+            const name = /jpeg/.test(blob.type || "") && !/\.jpe?g$/i.test(picture.name)
+                ? picture.name.replace(/\.[^.]*$/, "") + ".jpg" : picture.name;
+            return this.store.upload(new File([blob], name, {type: blob.type || "image/png"}));
+        }).then((found) => {
+            if (!still()) return false;
+            this.store.setAttachment(Object.assign({state: "ready", token: found.token},
+                                                   mark, {name: found.name || picture.name}),
+                                     key);
+            return true;
+        }).catch((error) => {
+            this.attachFailure = (error && error.message) || "";
+            if (still()) this.store.setAttachment(null, key);
+            return false;
         });
     };
 
@@ -2343,9 +2601,10 @@
      * `say` alone is overwritten by the next render, and a press that changes
      * the store *causes* the next render -- a frame later the line is back to
      * "Ready." and the answer to the press was never seen. This holds the
-     * line over the idle sentences for TOLD_FOR. Anything the line has to say
-     * about the conversation itself -- an error, a reply on its way, a lost
-     * connection -- still takes it at once.
+     * line over the idle sentences for TOLD_FOR, and a warning over the
+     * progress of a reply as well -- the press that left a picture out is
+     * usually the press that started the reply. An error from the server and
+     * a lost connection still take the line at once.
      */
     Shell.prototype.tell = function (text, kind) {
         this.told = {text, kind: kind || "info", at: Date.now()};
@@ -2391,6 +2650,7 @@
         }
         this.renderSelector(view);
         this.renderChip(view.draft.attachment);
+        this.renderAutoAttach();
         this.renderReadAloud(view);
         this.renderTranscript(view);
         this.renderStatus(view);
@@ -2430,8 +2690,10 @@
         }
         const states = {uploading: "Uploading…", processing: "Preparing…",
                         ready: "Ready", failed: attachment.reason || "Failed"};
+        const said = states[attachment.state] || attachment.state;
         chip.appendChild(element("span", "forge-assistant-chip-state",
-                                 states[attachment.state] || attachment.state));
+                                 attachment.from ? "From " + attachment.from + " \u00b7 " + said
+                                     : said));
         const remove = element("button", "forge-assistant-icon-button", "✕");
         remove.type = "button";
         remove.setAttribute("aria-label", "Remove the attached image");
@@ -3005,12 +3267,20 @@
                 : "Reconnecting… Your draft is safe.", "warn");
             return;
         }
+        // A warning about a press -- a picture left out, a prompt with nowhere
+        // to go -- is read before the progress of the reply that press started,
+        // or it is on screen for one frame. See `tell`.
+        const fresh = this.told && Date.now() - this.told.at < TOLD_FOR;
+        if (fresh && this.told.kind === "warn") {
+            this.say(this.told.text, "warn");
+            return;
+        }
         if (view.operation && !view.operation.terminal) {
             this.say(view.operation.status || "Generating…", "info");
             return;
         }
         // The answer to a press, while it is fresh. See `tell`.
-        if (this.told && Date.now() - this.told.at < TOLD_FOR) {
+        if (fresh) {
             this.say(this.told.text, this.told.kind);
             return;
         }
@@ -3116,6 +3386,9 @@
     NS.nearestAnchor = nearestAnchor;
     NS.renderMarkdown = renderMarkdown;
     NS.promptFrom = promptFrom;
+    NS.showingPicture = showingPicture;
+    NS.fileNameOf = fileNameOf;
+    NS.stageable = stageable;
     NS.keptFromPrompt = keptFromPrompt;
     NS.safeUrl = safeUrl;
     NS.ANCHORS = ANCHORS;

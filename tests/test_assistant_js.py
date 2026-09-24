@@ -2309,7 +2309,10 @@ class TestFreeFloat:
             }));
         """, sources=("shell",))
 
-        assert found["labels"] == ["Free Float", "Unload All Models", "Unload LLM"]
+        # Auto Attach follows it: the other mode in this menu, and a mode is
+        # not what anybody should hit on the way to giving a card back.
+        assert found["labels"] == ["Free Float", "Auto Attach", "Unload All Models",
+                                   "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")

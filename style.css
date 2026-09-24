@@ -6196,6 +6196,15 @@
     filter: grayscale(1);
 }
 
+/* The paperclip while Auto Attach is on, lit the same way: the picture
+   showing in txt2img or img2img goes with each message, and a picture on a
+   message you did not attach one to should never be a surprise. */
+.forge-assistant-attach[data-auto="on"] {
+    border-color: var(--color-accent, #2563eb);
+    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
+}
+
 /* The workspace strip, which is what the panel is while the conversation is
    collapsed.
    =========================================================================

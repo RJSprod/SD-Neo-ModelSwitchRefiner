@@ -834,3 +834,464 @@ class TestSendAgain:
         store = (SHELL.parent / "forge_assistant_store.js").read_text(encoding="utf-8")
 
         assert re.search(r'const GENERATING = \[[^\]]*"resend_from_user"', store)
+
+
+# --------------------------------------------------------------------------- #
+# Auto Attach
+# --------------------------------------------------------------------------- #
+
+GALLERY = """
+// Forge's galleries as Gradio 4.40 draws them, reduced to what is asked of
+// them: `querySelector` by the selectors Auto Attach tries, in order, and
+// `querySelectorAll("img")` for the last resort.
+function picture(src, live) {
+    const image = document.createElement("img");
+    image.src = src;
+    image.closest = (selector) => (live && selector === ".livePreview") ? {} : null;
+    return image;
+}
+function gallery(id, bySelector, all) {
+    const node = {tagName: "DIV",
+                  querySelector: (selector) => bySelector[selector] || null,
+                  querySelectorAll: (selector) => selector === "img" ? (all || []) : []};
+    const previous = document.getElementById;
+    document.getElementById = (wanted) => wanted === id ? node : previous(wanted);
+    return node;
+}
+const PREVIEW = ".preview img[data-testid=\\"detailed-image\\"]";
+const SELECTED = ".thumbnail-item.selected img";
+const FIRST = ".thumbnail-item img";
+globalThis.localStorage = {
+    store: {},
+    getItem(key) { return this.store[key] === undefined ? null : this.store[key]; },
+    setItem(key, value) { this.store[key] = String(value); },
+};
+"""
+
+
+class TestWhichPictureIsShowing:
+    """Forge's own answer, the one its Send to img2img buttons use: the picture
+    you clicked, and the first when you have not clicked one."""
+
+    def showing(self, setup, workspace="tab_txt2img"):
+        return run(GALLERY + setup + """
+            console.log(JSON.stringify(NS.showingPicture("%s")));
+        """ % workspace)
+
+    def test_the_picture_open_in_the_preview_wins(self):
+        found = self.showing("""
+            gallery("txt2img_gallery", {[PREVIEW]: picture("/file=/out/2.png"),
+                                        [FIRST]: picture("/file=/out/1.png")});
+        """)
+
+        assert found == {"src": "/file=/out/2.png", "label": "txt2img", "name": "2.png"}
+
+    def test_then_the_selected_thumbnail_then_the_first(self):
+        selected = self.showing("""
+            gallery("txt2img_gallery", {[SELECTED]: picture("/file=/out/3.png"),
+                                        [FIRST]: picture("/file=/out/1.png")});
+        """)
+        first = self.showing("""
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/1.png")});
+        """)
+
+        assert selected["src"] == "/file=/out/3.png"
+        assert first["src"] == "/file=/out/1.png"
+
+    def test_the_live_preview_of_a_running_generation_is_not_the_picture(self):
+        found = self.showing("""
+            gallery("txt2img_gallery", {},
+                    [picture("/live.png", true), picture("/file=/out/done.png")]);
+        """)
+
+        assert found["src"] == "/file=/out/done.png"
+
+    def test_an_empty_gallery_has_nothing_showing(self):
+        assert self.showing('gallery("txt2img_gallery", {}, []);') is None
+
+    def test_img2img_reads_its_own_gallery(self):
+        found = self.showing("""
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/t.png")});
+            gallery("img2img_gallery", {[FIRST]: picture("/file=/out/i.png")});
+        """, workspace="tab_img2img")
+
+        assert found == {"src": "/file=/out/i.png", "label": "img2img", "name": "i.png"}
+
+    def test_any_other_workspace_has_nothing_to_attach(self):
+        found = self.showing("""
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/t.png")});
+        """, workspace="tab_extras")
+
+        assert found is None
+
+    def test_a_file_name_is_read_out_of_gradio_s_address(self):
+        found = run("""
+            console.log(JSON.stringify([
+                NS.fileNameOf("https://forge:7860/file=/tmp/gradio/ab12/00012-123.png"),
+                NS.fileNameOf("/file=C%3A%5Cout%5Cgrid%20one.webp?t=5"),
+                NS.fileNameOf(""),
+            ]));
+        """)
+
+        assert found == ["00012-123.png", "C:\\out\\grid one.webp", "image.png"]
+
+
+AUTO = GALLERY + """
+function autoShell(options) {
+    options = options || {};
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = {autoAttach: options.on !== false};
+    shell.autoSent = new Map();
+    shell.nodes = {status: {dataset: {}, textContent: ""},
+                   attach: document.createElement("button"),
+                   input: {value: options.text || "what do you think?"}};
+    shell.host = {getActiveWorkspace: () => options.workspace || "tab_txt2img"};
+    const drafts = {};
+    const store = {
+        selection: {character: "Ada", thread: "t1", epoch: "e1"},
+        submitted: [],
+        uploaded: [],
+        capabilities: options.capabilities || {vision: true},
+        messages: options.messages || [],
+        draft(key) {
+            const at = key || NS.conversationKey(this.selection.character, this.selection.thread);
+            return drafts[at] || (drafts[at] = {text: "", attachment: null});
+        },
+        snapshot() {
+            const draft = this.draft();
+            return {ready: true, selection: Object.assign({}, this.selection),
+                    capabilities: this.capabilities, draft,
+                    conversation: {messages: this.messages}, operation: null};
+        },
+        setDraftText(text) { this.draft().text = text; },
+        setAttachment(attachment, key) { this.draft(key).attachment = attachment; },
+        upload(file) {
+            this.uploaded.push({name: file.name, type: file.type});
+            if (options.refuseUpload) return Promise.reject(new Error("too large"));
+            return Promise.resolve({token: "tok-" + this.uploaded.length, name: file.name});
+        },
+        submit() {
+            const draft = this.draft();
+            this.submitted.push({text: draft.text, attachment: draft.attachment
+                ? {token: draft.attachment.token, from: draft.attachment.from} : null});
+            return Promise.resolve({ok: true});
+        },
+    };
+    shell.store = store;
+    shell.canSend = () => true;
+    globalThis.fetch = (url) => {
+        store.fetched = url;
+        if (options.fetchFails) return Promise.resolve({ok: false, status: 404});
+        return Promise.resolve({ok: true,
+                                blob: () => Promise.resolve(new Blob(["png"], {type: "image/png"}))});
+    };
+    return shell;
+}
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+"""
+
+
+def run_auto(scenario):
+    """The shell with the store beside it: conversation keys and the base
+    path the preference is stored under are the store's."""
+    return run(scenario, sources=("shell", "store"))
+
+
+class TestAutoAttachSends:
+    def test_the_showing_picture_goes_with_the_message(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell();
+            shell.send();
+            settle().then(settle).then(settle).then(() => {
+                console.log(JSON.stringify({fetched: shell.store.fetched,
+                                            uploaded: shell.store.uploaded,
+                                            submitted: shell.store.submitted,
+                                            remembered: shell.autoSent.get(
+                                                NS.conversationKey("Ada", "t1"))}));
+            });
+        """)
+
+        assert found["fetched"] == "/file=/out/7.png"
+        assert found["uploaded"] == [{"name": "7.png", "type": "image/png"}]
+        assert found["submitted"] == [{"text": "what do you think?",
+                                       "attachment": {"token": "tok-1", "from": "txt2img"}}]
+        assert found["remembered"] == "/file=/out/7.png"
+
+    def test_off_attaches_nothing(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell({on: false});
+            shell.send();
+            settle().then(settle).then(() => {
+                console.log(JSON.stringify({fetched: shell.store.fetched || null,
+                                            submitted: shell.store.submitted}));
+            });
+        """)
+
+        assert found == {"fetched": None,
+                         "submitted": [{"text": "what do you think?", "attachment": None}]}
+
+    def test_not_on_an_image_tab_attaches_nothing(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell({workspace: "tab_llm_studio"});
+            shell.send();
+            settle().then(settle).then(() => {
+                console.log(JSON.stringify({fetched: shell.store.fetched || null,
+                                            attachment: shell.store.submitted[0].attachment}));
+            });
+        """)
+
+        assert found == {"fetched": None, "attachment": None}
+
+    def test_an_empty_gallery_attaches_nothing(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {}, []);
+            const shell = autoShell();
+            shell.send();
+            settle().then(settle).then(() => {
+                console.log(JSON.stringify({attachment: shell.store.submitted[0].attachment}));
+            });
+        """)
+
+        assert found == {"attachment": None}
+
+    def test_a_picture_attached_by_hand_is_the_one_sent(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell();
+            shell.store.draft().attachment = {localId: "mine", state: "ready", token: "hand"};
+            shell.send();
+            settle().then(settle).then(() => {
+                console.log(JSON.stringify({fetched: shell.store.fetched || null,
+                                            attachment: shell.store.submitted[0].attachment}));
+            });
+        """)
+
+        assert found == {"fetched": None, "attachment": {"token": "hand"}}
+
+    def test_a_model_that_cannot_see_is_sent_the_words_and_you_are_told(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell({capabilities: {vision: false}});
+            shell.send();
+            settle().then(settle).then(() => {
+                console.log(JSON.stringify({fetched: shell.store.fetched || null,
+                                            submitted: shell.store.submitted.length,
+                                            said: shell.nodes.status.textContent,
+                                            kind: shell.nodes.status.dataset.kind}));
+            });
+        """)
+
+        assert found["fetched"] is None
+        assert found["submitted"] == 1
+        assert found["kind"] == "warn" and "cannot see" in found["said"]
+
+    def test_the_same_picture_is_not_sent_twice_while_the_thread_still_has_one(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell({messages: [{role: "user", attachment: {name: "7.png"}}]});
+            shell.autoSent.set(NS.conversationKey("Ada", "t1"), "/file=/out/7.png");
+            shell.send();
+            settle().then(settle).then(() => {
+                console.log(JSON.stringify({fetched: shell.store.fetched || null,
+                                            attachment: shell.store.submitted[0].attachment,
+                                            said: shell.nodes.status.textContent}));
+            });
+        """)
+
+        assert found["fetched"] is None
+        assert found["attachment"] is None
+        assert "Same picture" in found["said"]
+
+    def test_the_same_picture_is_sent_again_once_the_thread_has_none(self):
+        """The message that carried it was deleted: the model no longer has it."""
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell({messages: [{role: "user", text: "no picture here"}]});
+            shell.autoSent.set(NS.conversationKey("Ada", "t1"), "/file=/out/7.png");
+            shell.send();
+            settle().then(settle).then(settle).then(() => {
+                console.log(JSON.stringify(shell.store.submitted[0].attachment));
+            });
+        """)
+
+        assert found == {"token": "tok-1", "from": "txt2img"}
+
+    def test_a_new_picture_in_the_gallery_is_sent(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/8.png")});
+            const shell = autoShell({messages: [{role: "user", attachment: {name: "7.png"}}]});
+            shell.autoSent.set(NS.conversationKey("Ada", "t1"), "/file=/out/7.png");
+            shell.send();
+            settle().then(settle).then(settle).then(() => {
+                console.log(JSON.stringify(shell.store.submitted[0].attachment));
+            });
+        """)
+
+        assert found == {"token": "tok-1", "from": "txt2img"}
+
+    @staticmethod
+    def failing(option):
+        return run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell({%s: true});
+            shell.send();
+            settle().then(settle).then(settle).then(() => {
+                console.log(JSON.stringify({submitted: shell.store.submitted,
+                                            said: shell.nodes.status.textContent,
+                                            kind: shell.nodes.status.dataset.kind,
+                                            remembered: shell.autoSent.size}));
+            });
+        """ % option)
+
+    def test_a_picture_that_cannot_be_read_is_left_out_and_said(self):
+        found = self.failing("fetchFails")
+
+        assert found["submitted"] == [{"text": "what do you think?", "attachment": None}]
+        assert found["kind"] == "warn" and "Sent without it" in found["said"]
+        assert found["remembered"] == 0
+
+    def test_a_picture_the_server_refuses_is_left_out_and_said(self):
+        found = self.failing("refuseUpload")
+
+        assert found["submitted"] == [{"text": "what do you think?", "attachment": None}]
+        assert "too large" in found["said"]
+
+    def test_a_conversation_changed_mid_upload_is_not_sent_to(self):
+        found = run_auto(AUTO + """
+            gallery("txt2img_gallery", {[FIRST]: picture("/file=/out/7.png")});
+            const shell = autoShell();
+            const upload = shell.store.upload.bind(shell.store);
+            shell.store.upload = (file) => {
+                shell.store.selection = {character: "Ada", thread: "t2", epoch: "e2"};
+                return upload(file);
+            };
+            shell.send();
+            settle().then(settle).then(settle).then(() => {
+                const kept = shell.store.draft(NS.conversationKey("Ada", "t1")).attachment;
+                console.log(JSON.stringify({submitted: shell.store.submitted.length,
+                                            kept: kept && kept.token,
+                                            kind: shell.nodes.status.dataset.kind}));
+            });
+        """)
+
+        assert found == {"submitted": 0, "kept": "tok-1", "kind": "warn"}
+
+
+class TestTheAutoAttachSwitch:
+    def test_it_is_a_mode_in_the_menu_that_reports_its_state(self):
+        found = run_auto(AUTO + """
+            const shell = autoShell({on: false});
+            shell.closeMenu = () => undefined;
+            const item = shell.autoAttachItem();
+            const before = {role: item.getAttribute("role"),
+                            checked: item.getAttribute("aria-checked"),
+                            label: item.textContent};
+            item.handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({before, on: shell.state.autoAttach,
+                                        again: shell.autoAttachItem().getAttribute("aria-checked"),
+                                        paperclip: shell.nodes.attach.dataset.auto,
+                                        said: shell.nodes.status.textContent}));
+        """)
+
+        assert found["before"] == {"role": "menuitemcheckbox", "checked": "false",
+                                   "label": "Auto Attach"}
+        assert found["on"] is True and found["again"] == "true"
+        assert found["paperclip"] == "on"
+        assert "Auto Attach is on" in found["said"]
+
+    def test_it_is_remembered_in_this_browser(self):
+        found = run_auto(AUTO + """
+            const shell = autoShell({on: false});
+            shell.setAutoAttach(true);
+            const fresh = Object.create(NS.Shell.prototype);
+            fresh.state = {autoAttach: false};
+            fresh._restoreAutoAttach();
+            console.log(JSON.stringify({restored: fresh.state.autoAttach,
+                                        stored: Object.values(localStorage.store)}));
+        """)
+
+        assert found == {"restored": True, "stored": ["on"]}
+
+    def test_storage_that_throws_leaves_it_off_and_working(self):
+        found = run_auto(AUTO + """
+            globalThis.localStorage = {getItem() { throw new Error("blocked"); },
+                                       setItem() { throw new Error("blocked"); }};
+            const fresh = Object.create(NS.Shell.prototype);
+            fresh.state = {};
+            fresh._restoreAutoAttach();
+            const shell = autoShell({on: false});
+            shell.setAutoAttach(true);
+            console.log(JSON.stringify({restored: fresh.state.autoAttach,
+                                        on: shell.state.autoAttach}));
+        """)
+
+        assert found == {"restored": False, "on": True}
+
+    def test_the_menu_offers_it_beside_free_float(self):
+        found = run_auto(AUTO + """
+            const shell = autoShell();
+            shell.closeMenu = () => undefined;
+            shell.host.listUtilities = () => [];
+            console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
+        """)
+
+        assert found[:2] == ["Free Float", "Auto Attach"]
+
+    def test_the_paperclip_is_lit_while_it_is_on(self):
+        on = rule('.forge-assistant-attach[data-auto="on"]')
+
+        assert "background" in on and "border-color" in on
+
+    def test_the_chip_says_where_an_automatic_picture_came_from(self):
+        found = run_auto(AUTO + """
+            const shell = autoShell();
+            shell.nodes.chip = document.createElement("div");
+            shell.renderChip({localId: "a", state: "uploading", name: "7.png",
+                              preview: "/file=/out/7.png", from: "img2img"});
+            const said = shell.nodes.chip.children.find(
+                (child) => child.className === "forge-assistant-chip-state");
+            console.log(JSON.stringify(said.textContent));
+        """)
+
+        assert found == "From img2img \u00b7 Uploading…"
+
+
+class TestAPictureTheServerWouldRefuse:
+    """Forge can be told to save in a format staging does not read, and an
+    upscale can pass its size limit. Those are drawn onto a canvas and sent as
+    a JPEG; anything staging takes is sent exactly as it is."""
+
+    SCENARIO = """
+        globalThis.createImageBitmap = (blob) => Promise.resolve({width: 4096, height: 2048});
+        const drawn = [];
+        const makeElement = document.createElement;
+        document.createElement = (tag) => {
+            const node = makeElement(tag);
+            if (tag === "canvas") {
+                node.getContext = () => ({drawImage: (b, x, y, w, h) => drawn.push([w, h])});
+                node.toBlob = (done, type) => done(new Blob(["jpg"], {type}));
+            }
+            return node;
+        };
+        const check = (blob) => NS.stageable(blob).then((out) => ({
+            same: out === blob, type: out.type, drawn: drawn.slice()}));
+        Promise.all([
+            check(new Blob(["png"], {type: "image/png"})),
+            check(new Blob(["avif"], {type: "image/avif"})),
+        ]).then((found) => console.log(JSON.stringify(found)));
+    """
+
+    def test_what_staging_reads_is_sent_as_it_is(self):
+        png, _ = run(self.SCENARIO)
+
+        assert png == {"same": True, "type": "image/png", "drawn": []}
+
+    def test_anything_else_is_redrawn_as_a_jpeg_no_larger_than_it_needs_to_be(self):
+        _, avif = run(self.SCENARIO)
+
+        assert avif["same"] is False
+        assert avif["type"] == "image/jpeg"
+        assert avif["drawn"] == [[2048, 1024]]
