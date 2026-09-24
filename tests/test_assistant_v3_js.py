@@ -219,3 +219,86 @@ class TestAPictureOnAMessageShows:
         assert "max-width: 100%" in image
         assert "max-height" in image
         assert "min-height" in rule(".forge-assistant-attachment-missing")
+
+
+# --------------------------------------------------------------------------- #
+# 3. Enter-to-send empties the box
+# --------------------------------------------------------------------------- #
+
+COMPOSER = """
+// The composer with focus in it -- which is what Enter means -- and the real
+// store's submit, answered by a stubbed send.
+function composerShell(answerWith) {
+    const shell = Object.create(NS.Shell.prototype);
+    const store = new NS.Store();
+    store.selection = {character: "Ada", thread: "t1", epoch: "e1"};
+    store.ready = true;
+    store.snapshots.set(NS.conversationKey("Ada", "t1"), {conversation: {revision: 1},
+                                                           messages: []});
+    let settle = null;
+    store.send = () => new Promise((resolve) => { settle = () => resolve(answerWith); });
+    store.refresh = () => Promise.resolve(null);
+    shell.store = store;
+    shell.state = {autoAttach: false};
+    shell.autoSent = new Map();
+    const input = document.createElement("textarea");
+    input.style = {};
+    shell.nodes = {input, status: {dataset: {}, textContent: ""}};
+    shell.grow = () => undefined;
+    document.activeElement = input;
+    return {shell, input, store, answer: () => settle()};
+}
+const typeAndEnter = (shell, input, text) => {
+    input.value = text;
+    shell.store.setDraftText(text);
+    shell.composerKey({key: "Enter", shiftKey: false, preventDefault() {}});
+};
+const later = () => new Promise((resolve) => setImmediate(resolve));
+"""
+
+
+class TestEnterEmptiesTheBox:
+    """"if i hit enter on my keyboard when submitting prompt for flyout menu,
+    the prompt stays in the input field." Enter leaves focus in the box, and
+    the panel never rewrites a focused box -- so the store emptied the draft
+    and the box went on showing it."""
+
+    def test_a_message_sent_with_enter_leaves_the_box_empty(self):
+        found = run_both(COMPOSER + """
+            const {shell, input, answer} = composerShell({ok: true, phase: "completed",
+                resulting_conversation: {character: "Ada", thread_id: "t1"}});
+            typeAndEnter(shell, input, "make it top down view");
+            later().then(() => { answer(); return later(); }).then(later).then(() => {
+                console.log(JSON.stringify({box: input.value,
+                                            focused: document.activeElement === input}));
+            });
+        """)
+
+        assert found == {"box": "", "focused": True}
+
+    def test_words_typed_while_it_was_sending_stay(self):
+        found = run_both(COMPOSER + """
+            const {shell, input, answer} = composerShell({ok: true, phase: "completed",
+                resulting_conversation: {character: "Ada", thread_id: "t1"}});
+            typeAndEnter(shell, input, "first");
+            later().then(() => {
+                input.value = "first, and more";
+                shell.store.setDraftText("first, and more");
+                answer();
+                return later();
+            }).then(later).then(() => console.log(JSON.stringify(input.value)));
+        """)
+
+        assert found == "first, and more"
+
+    def test_a_message_that_was_refused_stays_in_the_box(self):
+        found = run_both(COMPOSER + """
+            const {shell, input, answer} = composerShell({ok: false,
+                error: {message: "Refused."}});
+            typeAndEnter(shell, input, "keep me");
+            later().then(() => { answer(); return later(); }).then(later).then(() => {
+                console.log(JSON.stringify(input.value));
+            });
+        """)
+
+        assert found == "keep me"

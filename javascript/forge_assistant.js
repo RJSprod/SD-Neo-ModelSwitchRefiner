@@ -2342,6 +2342,7 @@
         const key = NS.conversationKey(view.selection.character, view.selection.thread);
         this.store.submit().then((outcome) => {
             if (outcome && outcome.ok && picture) this.autoSent.set(key, picture.src);
+            if (outcome && outcome.ok) this.emptyComposer(key);
             if (outcome && outcome.lost) {
                 this.say("Checking whether your message was sent…", "warn");
                 this.store.checkPending().then((found) => {
@@ -2356,6 +2357,27 @@
                     || "That could not be sent.", "warn");
             }
         });
+    };
+
+    /** The box, emptied once what was in it has been sent.
+     *
+     * `render` never rewrites the box while it has focus -- a redraw arriving
+     * while somebody types must not take their words away -- and a message
+     * sent with Enter is a message sent from a box that still has focus. So
+     * the store emptied the draft and the box went on showing it: "if i hit
+     * enter ... the prompt stays in the input field". Send by the button moved
+     * focus to the button first, which is why that way worked.
+     *
+     * Emptied only when the store emptied the draft, which it does only if
+     * nothing was typed while the send was in flight: anything typed then is
+     * newer than the send, and stays.
+     */
+    Shell.prototype.emptyComposer = function (key) {
+        const input = this.nodes.input;
+        if (!input || this.store.draft(key).text) return false;
+        input.value = "";
+        this.grow();
+        return true;
     };
 
     // -- Auto Attach ---------------------------------------------------------- //
