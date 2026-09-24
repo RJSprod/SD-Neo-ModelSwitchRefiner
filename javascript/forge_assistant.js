@@ -2069,6 +2069,9 @@
         const attach = this.nodes.attach;
         if (!attach) return;
         const on = !!this.state.autoAttach;
+        // Every render calls this, a streamed reply once a frame: written only
+        // when it changed.
+        if (attach.dataset.auto === (on ? "on" : "off")) return;
         attach.dataset.auto = on ? "on" : "off";
         const title = on
             ? "Attach an image (Auto Attach is on: the picture showing in txt2img or "
