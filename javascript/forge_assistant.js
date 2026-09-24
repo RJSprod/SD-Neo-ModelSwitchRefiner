@@ -85,6 +85,10 @@
     const MENU_EDGE = 8;
     const MENU_FLOOR = 120;
 
+    // How long the answer to a press holds the status line against "Ready.".
+    // See `tell`.
+    const TOLD_FOR = 6000;
+
     // What another extension on this page says when a dialog of its own takes
     // over, and gives way again. Mini Paint NEO publishes it for its Send to
     // WanGP popup; see `yieldTo`.
@@ -638,10 +642,12 @@
         const dictate = element("button", "forge-assistant-icon-button", "\u{1F3A4}");
         dictate.type = "button";
         dictate.setAttribute("aria-label", "Dictate a message");
-        const readAloud = element("button", "forge-assistant-icon-button", "\u{1F50A}");
+        // Drawn from the setting by `renderReadAloud`, never assumed: see
+        // there for why the two states look nothing alike.
+        const readAloud = element("button",
+                                  "forge-assistant-icon-button forge-assistant-read-aloud");
         readAloud.type = "button";
         readAloud.setAttribute("role", "switch");
-        readAloud.setAttribute("aria-checked", "false");
         readAloud.setAttribute("aria-label", "Read replies aloud");
         const send = element("button", "forge-assistant-send", "Send");
         send.type = "button";
@@ -2260,12 +2266,61 @@
                                   mode: "review"});
     };
 
+    /** The read-aloud switch, pressed.
+     *
+     * It used to flip its own attribute and press Voice Chat's checkbox in the
+     * LLM Studio tab -- and start out reading "off" whatever that checkbox
+     * said. Pressed while speech was on, it turned on something already on;
+     * pressed where the checkbox was not on the page, it changed nothing at
+     * all. Either way the replies went on being spoken and synthesised.
+     *
+     * Now the server is told (`Store.setReadAloud`) and the switch shows what
+     * the server says. Off also silences this page at once, before the round
+     * trip, and tells the server to stop the reply being spoken. The tab's
+     * checkbox is brought into line afterwards, so the two views agree.
+     */
     Shell.prototype.toggleReadAloud = function () {
-        const on = this.nodes.readAloud.getAttribute("aria-checked") === "true";
-        this.nodes.readAloud.setAttribute("aria-checked", String(!on));
-        if (NS.speech && typeof NS.speech.setAutomaticReadAloud === "function") {
-            NS.speech.setAutomaticReadAloud(!on);
+        const view = this.store.snapshot();
+        const on = view.readAloud !== true;
+        if (!on && NS.speech && typeof NS.speech.stopPlayback === "function") {
+            NS.speech.stopPlayback({origin: "any"});
         }
+        return this.store.setReadAloud(on).then((stored) => {
+            if (NS.speech && typeof NS.speech.setAutomaticReadAloud === "function") {
+                NS.speech.setAutomaticReadAloud(stored);
+            }
+            this.tell(stored ? "Replies will be read aloud." : "Replies will not be read aloud.",
+                      "info");
+            return stored;
+        }).catch((error) => {
+            this.tell((error && error.message) || "Read aloud could not be changed.", "warn");
+            return null;
+        });
+    };
+
+    /** On and off, so that nobody has to guess which.
+     *
+     * A different glyph for each -- a speaker, and a speaker struck through --
+     * and the stylesheet lights the on state with the accent and takes the
+     * colour out of the off one, because the report was a switch that "does
+     * not change state when i click it": an attribute nothing drew is not a
+     * state anybody can see.
+     * The words are in the tooltip and the accessible name as well, for
+     * whoever the glyphs say nothing to. Unknown -- the server has not said
+     * yet -- is drawn as unknown rather than as off.
+     */
+    Shell.prototype.renderReadAloud = function (view) {
+        const button = this.nodes.readAloud;
+        if (!button) return;
+        const known = view.readAloud === true || view.readAloud === false;
+        const on = view.readAloud === true;
+        const state = known ? (on ? "on" : "off") : "unknown";
+        if (button.dataset.state === state) return;
+        button.dataset.state = state;
+        button.setAttribute("aria-checked", String(on));
+        button.textContent = on ? "\u{1F50A}" : (known ? "\u{1F507}" : "\u{1F508}");
+        button.title = known ? "Read replies aloud: " + (on ? "On" : "Off")
+            : "Read replies aloud";
     };
 
     // -- rendering ---------------------------------------------------------------- //
@@ -2275,6 +2330,20 @@
         if (!status) return;
         status.textContent = text;
         status.dataset.kind = kind || "info";
+    };
+
+    /** Say something about a press, and keep it on screen long enough to read.
+     *
+     * `say` alone is overwritten by the next render, and a press that changes
+     * the store *causes* the next render -- a frame later the line is back to
+     * "Ready." and the answer to the press was never seen. This holds the
+     * line over the idle sentences for TOLD_FOR. Anything the line has to say
+     * about the conversation itself -- an error, a reply on its way, a lost
+     * connection -- still takes it at once.
+     */
+    Shell.prototype.tell = function (text, kind) {
+        this.told = {text, kind: kind || "info", at: Date.now()};
+        this.say(text, kind);
     };
 
     Shell.prototype.applySuppression = function () {
@@ -2316,6 +2385,7 @@
         }
         this.renderSelector(view);
         this.renderChip(view.draft.attachment);
+        this.renderReadAloud(view);
         this.renderTranscript(view);
         this.renderStatus(view);
         nodes.send.disabled = !this.canSend(view);
@@ -2666,6 +2736,11 @@
         }
         if (view.operation && !view.operation.terminal) {
             this.say(view.operation.status || "Generating…", "info");
+            return;
+        }
+        // The answer to a press, while it is fresh. See `tell`.
+        if (this.told && Date.now() - this.told.at < TOLD_FOR) {
+            this.say(this.told.text, this.told.kind);
             return;
         }
         // Connected, with nothing chosen to show. Worth saying: an empty

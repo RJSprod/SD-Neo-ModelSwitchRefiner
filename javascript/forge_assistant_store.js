@@ -191,6 +191,10 @@
         this.unread = new Map();         // conversationKey -> count
         this.listeners = new Set();
         this.speech = {playing: false, owner: "", operation: ""};
+        // Whether replies are read aloud: Voice Chat's "Speak replies
+        // automatically", as the server last said. `null` until it has said,
+        // because "off" is a claim -- see `setReadAloud`.
+        this.readAloud = null;
         this.error = "";
         this._pending = null;
         this._draftTimer = null;
@@ -262,6 +266,7 @@
             unreadTotal: Array.from(this.unread.values())
                 .reduce((total, count) => total + count, 0),
             speech: Object.assign({}, this.speech),
+            readAloud: this.readAloud,
             storageAvailable: this.storageAvailable,
         };
     };
@@ -394,6 +399,7 @@
                 this.capabilities = found.capabilities || {};
                 this.characters = found.characters || [];
                 this.mode = found.mode || this.mode;
+                this.noteReadAloud(found);
                 this.error = "";
                 // WHICH CONVERSATION. Without this the panel opened on an empty
                 // character and an empty thread, `refresh()` returned early
@@ -920,6 +926,66 @@
         }
     };
 
+    // -- reading aloud ----------------------------------------------------- //
+    //
+    // One setting, Voice Chat's "Speak replies automatically", shared with the
+    // tab. The flyout's switch used to be a button that started "off" whatever
+    // that setting said, never asked, and changed it by pressing the tab's
+    // checkbox from here -- so a first press often turned on something that
+    // was already on, and replies went on being synthesised while the switch
+    // said otherwise. Now the server says what it is (the bootstrap), and the
+    // server is what is told (`setReadAloud`).
+
+    /** Take the setting from a bootstrap, when it carries one. */
+    Store.prototype.noteReadAloud = function (found) {
+        if (found && typeof found.read_aloud === "boolean") {
+            this.readAloud = found.read_aloud;
+        }
+    };
+
+    /** Turn reading aloud on or off. Resolves with what the server stored.
+     *
+     * Drawn at once, because a switch that waits for a round trip before it
+     * moves reads as a switch that did not hear the press -- and put back if
+     * the server refuses, because a switch left showing a state the server
+     * does not hold is the defect this replaces.
+     */
+    Store.prototype.setReadAloud = function (on) {
+        const before = this.readAloud;
+        this.readAloud = !!on;
+        this.announce();
+        return this.request("/read-aloud", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({read_aloud: !!on}),
+        }).then((found) => {
+            this.noteReadAloud(found);
+            this.announce();
+            return this.readAloud;
+        }).catch((error) => {
+            this.readAloud = before;
+            this.announce();
+            throw error;
+        });
+    };
+
+    /** Say, on a command that asks for a reply, whether it may be spoken.
+     *
+     * Off is `voice: false`, and the server then starts no speech for that
+     * reply at all -- no voice engine warmed, nothing synthesised -- whatever
+     * the shared setting says. That is what makes the switch mean off even if
+     * writing the setting failed.
+     *
+     * Written once per envelope and never rewritten: a retry sends the same
+     * envelope, and a payload that changed between two sends of one operation
+     * id is refused by the server as a different request.
+     */
+    Store.prototype.stampVoice = function (envelope) {
+        const payload = envelope.payload || (envelope.payload = {});
+        if (Object.prototype.hasOwnProperty.call(payload, "voice")) return;
+        payload.voice = this.readAloud !== false;
+    };
+
     // -- commands ---------------------------------------------------------- //
 
     Store.prototype.expected = function () {
@@ -951,6 +1017,7 @@
         // so the reply lands on a feed that is already there. Anything else is
         // sent with no feed at all.
         const generating = !!envelope && GENERATING.indexOf(envelope.action) >= 0;
+        if (generating) this.stampVoice(envelope);
         if (generating) this._expecting += 1;
         const settle = () => {
             if (!generating) return;
@@ -1220,6 +1287,7 @@
                 this.capabilities = found.capabilities || this.capabilities;
                 this.characters = found.characters || this.characters;
                 this.mode = found.mode || this.mode;
+                this.noteReadAloud(found);
                 const seed = found.selection || {};
                 if (seed.thread_id && (String(seed.character || "") !== this.selection.character
                                        || String(seed.thread_id) !== this.selection.thread)) {

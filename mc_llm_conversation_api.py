@@ -70,10 +70,11 @@ ATTACHMENT_ROUTE = f"{PREFIX}/attachments/{{token}}"
 WORKSPACES_ROUTE = f"{PREFIX}/workspaces"
 SERVED_ROUTE = f"{PREFIX}/attachment/{{ticket}}"
 UNLOAD_ROUTE = f"{PREFIX}/unload"
+READ_ALOUD_ROUTE = f"{PREFIX}/read-aloud"
 
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
-          WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE)
+          WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -397,6 +398,31 @@ def _release_image_cache() -> bool:
         return False
 
 
+def read_aloud(wanted) -> tuple[dict, int]:
+    """Turn reading replies aloud on or off. Answers with what is stored.
+
+    The flyout's switch, and the same setting as Voice Chat's "Speak replies
+    automatically" -- one switch, two views, and off in either is off in both.
+    Off also stops a reply that is being spoken, on the server's side; the page
+    stops its own speaker.
+
+    It used to be done by pressing that checkbox from the browser, in a tab the
+    flyout is usually not on. When the press did not land, the setting stayed
+    on and every reply went on being synthesised -- for up to half a minute each
+    even with nobody listening -- while the flyout's switch said otherwise.
+    """
+    if not isinstance(wanted, bool):
+        return {"ok": False, "error": {"code": service.INVALID_INPUT,
+                                       "message": "read_aloud must be true or false.",
+                                       "retryable": False}}, 400
+    import mc_voice_ui
+
+    stored = mc_voice_ui.apply_auto_speak(wanted)
+    logger.info("Model Chain: the Forge Assistant turned reading replies aloud %s",
+                "on" if stored else "off")
+    return {"ok": True, "read_aloud": stored, "server_epoch": service.SERVER_EPOCH}, 200
+
+
 def _unload_host_models() -> bool:
     """Ask the host to put its own checkpoint down, the way its own button does.
 
@@ -630,6 +656,19 @@ def install(_demo=None, app=None) -> bool:
         except Exception:
             return _failed("could not unload the models", "Nothing could be unloaded.")
 
+    async def read_aloud_route(request: Request):
+        try:
+            checked(request)
+            body = await _body(request)
+        except Refused as exc:
+            return _refusal(exc)
+        try:
+            payload, status = read_aloud(body.get("read_aloud"))
+            return _json(payload, status)
+        except Exception:
+            return _failed("could not change reading replies aloud",
+                           "Read aloud could not be changed.")
+
     async def workspaces_route(request: Request):
         try:
             checked(request)
@@ -676,6 +715,7 @@ def install(_demo=None, app=None) -> bool:
                 (ATTACHMENT_ROUTE, attachment_delete_route, ["DELETE"]),
                 (WORKSPACES_ROUTE, workspaces_route, ["GET"]),
                 (UNLOAD_ROUTE, unload_route, ["POST"]),
+                (READ_ALOUD_ROUTE, read_aloud_route, ["POST"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

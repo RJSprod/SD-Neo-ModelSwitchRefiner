@@ -6175,6 +6175,27 @@
     min-width: 44px;
 }
 
+/* The read-aloud switch, in two states nobody has to guess between.
+
+   Reported as a button that "does not change state when i click it", and it
+   did not, visibly: it set `aria-checked` and nothing in this file drew it.
+   On is lit -- the accent's border, fill and an inner ring, the look of a
+   pressed toggle -- and carries a speaker. Off is an ordinary button carrying
+   a speaker struck through, with the colour taken out of the glyph. Off is
+   deliberately *not* dimmed: a faded control reads as a disabled one, and
+   this one is always pressable. `data-state` rather than `aria-checked`,
+   because there is a third state -- the server has not said yet -- that is
+   neither, and is drawn as a plain speaker with no claim either way. */
+.forge-assistant-read-aloud[data-state="on"] {
+    border-color: var(--color-accent, #2563eb);
+    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
+}
+
+.forge-assistant-read-aloud[data-state="off"] {
+    filter: grayscale(1);
+}
+
 /* The workspace strip, which is what the panel is while the conversation is
    collapsed.
    =========================================================================
