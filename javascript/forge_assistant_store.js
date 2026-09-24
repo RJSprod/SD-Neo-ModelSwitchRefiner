@@ -1143,6 +1143,27 @@
         });
     };
 
+    /** A character's system prompt, as the full-page editor opens on it:
+     *  `{character, text, source, default}`, where `source` is "override" or
+     *  "default". Not a command -- nothing in the conversation changes, so
+     *  there is no revision to compare and no operation id to latch. */
+    Store.prototype.systemPrompt = function (character) {
+        return this.request("/system-prompt?character="
+                            + encodeURIComponent(String(character || "")));
+    };
+
+    /** Apply an override (`{text}`) or restore the default (`{restore: true}`).
+     *  Answers with the same view as `systemPrompt`, plus the sentence saying
+     *  what happened. */
+    Store.prototype.saveSystemPrompt = function (character, change) {
+        return this.request("/system-prompt", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(Object.assign({}, change || {},
+                                               {character: String(character || "")})),
+        });
+    };
+
     Store.prototype.stop = function (operationId) {
         const envelope = this.envelope("stop", {expected_revision: null});
         envelope.payload = {operation_id: operationId};

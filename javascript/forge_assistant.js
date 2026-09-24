@@ -1999,6 +1999,7 @@
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
         const own = [this.floatItem(), this.autoAttachItem(), this.newThreadItem()];
+        if (NS.systemEditor) own.push(this.systemPromptItem());
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
@@ -2069,6 +2070,29 @@
         item.addEventListener("click", () => {
             this.closeMenu();
             this.startThread(character);
+        });
+        return item;
+    };
+
+    /** "For flyout, put this option to open this view in the '...' menu": the
+     *  full-page editor for the character's system prompt, the one LLM
+     *  Studio's character screen opens too. The panel stays where it is --
+     *  the editor is over everything, and closing it is back to the
+     *  conversation. */
+    Shell.prototype.systemPromptItem = function () {
+        const character = this.store.snapshot().selection.character;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-system-prompt",
+                             "System prompt\u2026");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "dialog");
+        item.disabled = !character;
+        item.title = character ? "Edit what " + character + " is told before every conversation"
+            : "Choose a conversation first";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            NS.systemEditor.open(character);
         });
         return item;
     };
@@ -2217,8 +2241,11 @@
     Shell.prototype.documentKey = function (event) {
         if (event.key !== "Escape") return;
         // The customize dialog's Escape is its own: it cancels the edit. Taken
-        // here it would have left focus mode instead, behind the dialog.
+        // here it would have left focus mode instead, behind the dialog. The
+        // system prompt editor's is its own for the same reason: it asks
+        // before an unapplied edit is thrown away.
         if (this.lookEditor && this.lookEditor.isOpen()) return;
+        if (NS.systemEditor && NS.systemEditor.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,

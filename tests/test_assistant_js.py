@@ -38,6 +38,7 @@ SHELL = JAVASCRIPT / "forge_assistant.js"
 LOOK = JAVASCRIPT / "forge_assistant_look.js"
 HOST = JAVASCRIPT / "forge_assistant_host.js"
 STORE = JAVASCRIPT / "forge_assistant_store.js"
+SYSTEM = JAVASCRIPT / "forge_assistant_system.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 
@@ -177,7 +178,7 @@ def run(scenario: str, viewport=None, insets=None, sources=("shell",)) -> dict:
     Written to a file rather than passed with ``node -e``: a single argument is
     capped at 128 KiB on Linux and the harness plus the sources is past that.
     """
-    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK}
+    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK, "system": SYSTEM}
     body = "\n".join(order[name].read_text(encoding="utf-8") for name in sources)
     # The scalars first and the sources last, deliberately. The sources contain
     # the word VIEWPORT (in ``NARROW_VIEWPORT``), so substituting them first

@@ -6112,6 +6112,154 @@
     }
 }
 
+/* The system prompt editor.
+   =========================================================================
+
+   Mini Paint's shape: the whole window, most of it the box being edited, a
+   line saying whose prompt it is and where it came from, and a row of
+   buttons. A native modal <dialog> for the customize dialog's reasons -- the
+   top layer, focus containment, Escape -- and the whole window at every
+   width, because a system prompt is a page of prose.
+
+   No rule here sets the dialog's `display`. An author `display` beats the
+   browser's `dialog:not([open]) { display: none }`, and a closed editor would
+   stay on the page; the column is the sheet inside it. */
+.forge-assistant-system {
+    box-sizing: border-box;
+    position: fixed;
+    /* Sized by its edges, not by 100vw: a viewport unit reaches under the
+       page's scrollbar, and the way out is in the top right. */
+    inset: 0;
+    z-index: 2100;              /* only without showModal: the top layer ignores it */
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: var(--background-fill-primary, Canvas);
+    color: var(--body-text-color, CanvasText);
+    overflow: hidden;
+}
+
+.forge-assistant-system::backdrop {
+    background: var(--background-fill-primary, Canvas);
+}
+
+.forge-assistant-system-sheet {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+.forge-assistant-system-top {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5em;
+}
+
+.forge-assistant-system-heading {
+    margin: 0;
+    font-size: 1.15em;
+    overflow-wrap: anywhere;
+}
+
+.forge-assistant-system-hint,
+.forge-assistant-system-state,
+.forge-assistant-system-note {
+    flex: 0 0 auto;
+    margin: 0;
+    font-size: 0.9em;
+}
+
+.forge-assistant-system-hint,
+.forge-assistant-system-state {
+    color: var(--body-text-color-subdued, inherit);
+}
+
+/* Mostly the box. It takes what the lines and the buttons leave, which on
+   any ordinary window is most of it; the floor is for a short one. 16px so a
+   phone does not zoom the page when the box is tapped. */
+.forge-assistant-system-text {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 30vh;
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 8px;
+    background: var(--input-background-fill, var(--background-fill-secondary, transparent));
+    color: var(--body-text-color, inherit);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-size: max(16px, 1em);
+    line-height: 1.5;
+    resize: none;
+    overflow-y: auto;
+}
+
+.forge-assistant-system-text:focus {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: -1px;
+}
+
+.forge-assistant-system-text:read-only {
+    opacity: 0.7;
+}
+
+.forge-assistant-system-note {
+    min-height: 1.4em;
+}
+
+.forge-assistant-system-note[data-kind="error"] {
+    color: var(--error-text-color, #dc2626);
+}
+
+.forge-assistant-system-foot {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+
+.forge-assistant-system-action {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.3em 1em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.forge-assistant-system-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* The theme's primary button, fill and text as the pair it promises are
+   legible together -- the customize dialog's Save. */
+.forge-assistant-system-apply {
+    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
+    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
+    color: var(--button-primary-text-color, white);
+    font-weight: 600;
+}
+
+/* Close at the far end, away from the button that keeps the edit. */
+.forge-assistant-system-foot .forge-assistant-system-close {
+    margin-left: auto;
+}
+
 /* The unread count on the launcher. Its fill was the theme's soft accent too,
    under body text -- light on light under Lobe, the defect the lit buttons
    had -- and it is the same tint of the accent over the neutral surface. */

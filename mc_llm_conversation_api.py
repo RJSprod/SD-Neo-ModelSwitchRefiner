@@ -71,10 +71,12 @@ WORKSPACES_ROUTE = f"{PREFIX}/workspaces"
 SERVED_ROUTE = f"{PREFIX}/attachment/{{ticket}}"
 UNLOAD_ROUTE = f"{PREFIX}/unload"
 READ_ALOUD_ROUTE = f"{PREFIX}/read-aloud"
+SYSTEM_PROMPT_ROUTE = f"{PREFIX}/system-prompt"
 
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
-          WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE)
+          WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE,
+          SYSTEM_PROMPT_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -423,6 +425,34 @@ def read_aloud(wanted) -> tuple[dict, int]:
     return {"ok": True, "read_aloud": stored, "server_epoch": service.SERVER_EPOCH}, 200
 
 
+def system_prompt(character) -> tuple[dict, int]:
+    """One character's system prompt, as the full-page editor opens on it."""
+    try:
+        return service.system_prompt(character), 200
+    except service.Refused as refusal:
+        return {"ok": False, "error": refusal.payload()}, refusal.status
+
+
+def set_system_prompt(body: dict) -> tuple[dict, int]:
+    """Apply an override, or restore the default: the editor's two buttons.
+
+    ``{"character": "Ada", "text": "..."}`` applies; ``{"character": "Ada",
+    "restore": true}`` restores. ``restore`` has to be a real boolean for the
+    reason ``read_aloud`` gives: ``"false"`` is truthy, and a route that took
+    ``bool()`` of it would throw an override away when asked to keep it.
+    """
+    restore = body.get("restore", False)
+    if not isinstance(restore, bool):
+        return {"ok": False, "error": {"code": service.INVALID_INPUT,
+                                       "message": "restore must be true or false.",
+                                       "retryable": False}}, 400
+    try:
+        return service.set_system_prompt(body.get("character"), body.get("text"),
+                                         restore=restore), 200
+    except service.Refused as refusal:
+        return {"ok": False, "error": refusal.payload()}, refusal.status
+
+
 def _unload_host_models() -> bool:
     """Ask the host to put its own checkpoint down, the way its own button does.
 
@@ -669,6 +699,22 @@ def install(_demo=None, app=None) -> bool:
             return _failed("could not change reading replies aloud",
                            "Read aloud could not be changed.")
 
+    async def system_prompt_route(request: Request):
+        try:
+            checked(request)
+            body = await _body(request) if request.method == "POST" else None
+        except Refused as exc:
+            return _refusal(exc)
+        try:
+            if body is None:
+                payload, status = system_prompt(request.query_params.get("character") or "")
+            else:
+                payload, status = set_system_prompt(body)
+            return _json(payload, status)
+        except Exception:
+            return _failed("could not read or write a system prompt",
+                           "The system prompt could not be read or saved.")
+
     async def workspaces_route(request: Request):
         try:
             checked(request)
@@ -716,6 +762,7 @@ def install(_demo=None, app=None) -> bool:
                 (WORKSPACES_ROUTE, workspaces_route, ["GET"]),
                 (UNLOAD_ROUTE, unload_route, ["POST"]),
                 (READ_ALOUD_ROUTE, read_aloud_route, ["POST"]),
+                (SYSTEM_PROMPT_ROUTE, system_prompt_route, ["GET", "POST"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

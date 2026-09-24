@@ -474,3 +474,537 @@ class TestANewThreadFromTheMenu:
         """)
 
         assert found == {"disabled": True, "title": "Choose a conversation first"}
+
+
+# --------------------------------------------------------------------------- #
+# 2. The system prompt editor
+# --------------------------------------------------------------------------- #
+
+SYSTEM_JS = SHELL.parent / "forge_assistant_system.js"
+
+EDITOR = """
+// Dialogs that open and close the way the browser's do, a store that answers
+// the two routes as the scenario says, and a confirm that says what it is told.
+const created = document.createElement;
+document.createElement = (tag) => {
+    const node = created(tag);
+    if (node.tagName === "DIALOG") {
+        node.open = false;
+        node.showModal = () => { node.open = true; node.modal = true; };
+        node.close = () => { node.open = false; };
+    }
+    return node;
+};
+const BUILT = "You are Ada. Stay in character as Ada.";
+const sent = [];
+const held = [];
+let hold = false;
+let refuse = null;
+function view(source, text, message, who) {
+    return {ok: true, character: who || "Ada", source, text, default: BUILT, message};
+}
+function reply(value) {
+    if (hold) return new Promise((resolve, reject) => held.push({resolve: () => resolve(value), reject}));
+    if (refuse) return Promise.reject(refuse);
+    return Promise.resolve(value);
+}
+let stored = "";
+const fake = {
+    systemPrompt(who) {
+        sent.push({read: who});
+        const canonical = who.charAt(0).toUpperCase() + who.slice(1);
+        return reply(stored ? view("override", stored, undefined, canonical)
+                            : view("default", BUILT, undefined, canonical));
+    },
+    saveSystemPrompt(who, change) {
+        sent.push({save: who, change});
+        if (change.restore || !change.text.trim() || change.text.trim() === BUILT) {
+            stored = "";
+            return reply(view("default", BUILT, "Back to the default for Ada."));
+        }
+        stored = change.text.trim();
+        return reply(view("override", stored, "Override saved for Ada."));
+    },
+};
+NS.store = () => fake;
+const asked = [];
+let agree = true;
+globalThis.confirm = (text) => { asked.push(text); return agree; };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const editor = NS.systemEditor.editor();
+function type(text) {
+    editor.controls.text.value = text;
+    editor.controls.text.handlers.input.forEach((fn) => fn());
+}
+function press(name) {
+    editor.controls[name].handlers.click.forEach((fn) => fn());
+}
+function seen() {
+    const c = editor.controls;
+    return {open: editor.isOpen(), text: c.text.value, readOnly: c.text.readOnly,
+            apply: !c.apply.disabled, restore: !c.restore.disabled,
+            state: c.lead.textContent + c.rest.textContent,
+            note: c.note.textContent, kind: c.note.dataset.kind,
+            heading: c.heading.textContent};
+}
+"""
+
+
+def run_editor(scenario, sources=("system",)):
+    return run(EDITOR + scenario, sources=sources)
+
+
+class TestTheStoreSpeaksTheRoute:
+    """The editor's two requests, with the page's key like every other."""
+
+    ROUTE = """
+    const keyField = {tagName: "TEXTAREA", value: "the-key"};
+    const previousLookup = document.getElementById;
+    document.getElementById = (id) => id === "mc-llm-chat-conversation-key"
+        ? keyField : previousLookup(id);
+    const asked = [];
+    globalThis.fetch = (url, options) => {
+        asked.push({url, method: (options && options.method) || "GET",
+                    key: options.headers["x-mc-conversation-key"],
+                    type: options.headers["Content-Type"] || "",
+                    body: options.body ? JSON.parse(options.body) : null});
+        return Promise.resolve({ok: true, json: () => Promise.resolve({ok: true})});
+    };
+    const store = new NS.Store();
+    """
+
+    def test_reading_names_the_character_in_the_address(self):
+        found = run(self.ROUTE + """
+            store.systemPrompt("Chiharu Yamada").then(() => console.log(JSON.stringify(asked)));
+        """, sources=("store",))
+
+        assert found == [{"url": "/model-chain/conversation/v2/system-prompt"
+                                 "?character=Chiharu%20Yamada",
+                          "method": "GET", "key": "the-key", "type": "", "body": None}]
+
+    def test_applying_and_restoring_post_the_character_and_the_change(self):
+        found = run(self.ROUTE + """
+            store.saveSystemPrompt("Ada", {text: "Be brief."})
+                .then(() => store.saveSystemPrompt("Ada", {restore: true, character: "Bob"}))
+                .then(() => console.log(JSON.stringify(asked)));
+        """, sources=("store",))
+
+        assert [entry["method"] for entry in found] == ["POST", "POST"]
+        assert {entry["url"] for entry in found} == {"/model-chain/conversation/v2/system-prompt"}
+        assert all(entry["key"] == "the-key" for entry in found)
+        assert all(entry["type"] == "application/json" for entry in found)
+        assert found[0]["body"] == {"text": "Be brief.", "character": "Ada"}
+        assert found[1]["body"] == {"restore": True, "character": "Ada"}, \
+            "the character asked for, whatever the change carries"
+
+
+class TestTheSystemPromptEditor:
+    """Mini Paint's editor, for a character: "a full page editor for system
+    prompt, with option to restore default"."""
+
+    def test_it_opens_on_what_the_character_is_told(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => console.log(JSON.stringify(Object.assign(seen(), {sent}))));
+        """)
+
+        assert found["open"] is True
+        assert found["heading"] == "System prompt — Ada"
+        assert found["text"] == "You are Ada. Stay in character as Ada."
+        assert found["state"].startswith("Default for Ada, built from Ada’s Context")
+        assert found["apply"] is True and found["restore"] is True
+        assert found["readOnly"] is False
+        assert found["sent"] == [{"read": "Ada"}]
+
+    def test_the_heading_spells_the_name_the_way_the_file_does(self):
+        found = run_editor("""
+            editor.open("ada");
+            settle().then(() => console.log(JSON.stringify(seen())));
+        """)
+
+        assert found["heading"] == "System prompt \u2014 Ada"
+        assert found["state"].startswith("Default for Ada,")
+
+    def test_an_override_is_shown_as_one(self):
+        found = run_editor("""
+            stored = "You are {{char}}. Be brief.";
+            editor.open("Ada");
+            settle().then(() => console.log(JSON.stringify(seen())));
+        """)
+
+        assert found["text"] == "You are {{char}}. Be brief."
+        assert found["state"] == "Override saved for Ada. Restore default forgets it."
+
+    def test_nothing_can_be_applied_before_the_prompt_is_read(self):
+        """An empty box applied is "go back to the default". A press that
+        landed before the read answered would wipe an override."""
+        found = run_editor("""
+            hold = true;
+            editor.open("Ada");
+            console.log(JSON.stringify(seen()));
+        """)
+
+        assert found["apply"] is False and found["restore"] is False
+        assert found["readOnly"] is True
+        assert found["note"] == "Reading Ada’s system prompt…"
+
+    def test_a_read_that_failed_leaves_nothing_to_press_but_reload(self):
+        found = run_editor("""
+            refuse = new Error("There is no character called Ada.");
+            editor.open("Ada");
+            settle().then(() => {
+                const c = editor.controls;
+                press("apply");
+                console.log(JSON.stringify(Object.assign(seen(), {
+                    reload: !c.reload.disabled, sent: sent.length})));
+            });
+        """)
+
+        assert found["apply"] is False and found["restore"] is False
+        assert found["reload"] is True
+        assert found["note"] == "There is no character called Ada."
+        assert found["kind"] == "error"
+        assert found["sent"] == 1, "the read, and nothing after it"
+
+    def test_apply_sends_the_box_and_shows_what_was_kept(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("You are {{char}}. Answer in one line.  ");
+                press("apply");
+                return settle();
+            }).then(() => console.log(JSON.stringify(Object.assign(seen(), {sent}))));
+        """)
+
+        assert found["sent"][1] == {"save": "Ada",
+                                    "change": {"text": "You are {{char}}. Answer in one line.  "}}
+        assert found["text"] == "You are {{char}}. Answer in one line.", "what the server kept"
+        assert found["note"] == "Override saved for Ada."
+        assert found["state"].startswith("Override saved for Ada.")
+
+    def test_restore_default_asks_the_server_to_forget_the_override(self):
+        found = run_editor("""
+            stored = "Be brief.";
+            editor.open("Ada");
+            settle().then(() => { press("restore"); return settle(); })
+                .then(() => console.log(JSON.stringify(Object.assign(seen(), {sent}))));
+        """)
+
+        assert found["sent"][1] == {"save": "Ada", "change": {"restore": True}}
+        assert found["text"] == "You are Ada. Stay in character as Ada."
+        assert found["state"].startswith("Default for Ada")
+        assert found["note"] == "Back to the default for Ada."
+
+    def test_typing_says_it_is_not_applied_yet(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type(BUILT + " More.");
+                const typed = [editor.controls.note.textContent, editor.dialog.dataset.dirty];
+                type(BUILT);
+                const back = [editor.controls.note.textContent, editor.dialog.dataset.dirty];
+                console.log(JSON.stringify({typed, back}));
+            });
+        """)
+
+        assert found["typed"] == ["Not applied yet.", "true"]
+        assert found["back"] == ["", "false"]
+
+    def test_close_with_an_unapplied_edit_asks_first(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Something new.");
+                agree = false;
+                press("close");
+                const kept = editor.isOpen();
+                agree = true;
+                press("close");
+                console.log(JSON.stringify({kept, closed: !editor.isOpen(), asked}));
+            });
+        """)
+
+        assert found["kept"] is True
+        assert found["closed"] is True
+        assert found["asked"] == ["Discard your changes to Ada’s system prompt?"] * 2
+
+    def test_close_with_nothing_to_lose_does_not_ask(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                press("dismiss");
+                console.log(JSON.stringify({closed: !editor.isOpen(), asked}));
+            });
+        """)
+
+        assert found == {"closed": True, "asked": []}
+
+    def test_escape_is_taken_over_so_it_can_ask(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Something new.");
+                agree = false;
+                let prevented = false;
+                editor.dialog.handlers.cancel.forEach((fn) => fn({preventDefault() { prevented = true; }}));
+                console.log(JSON.stringify({prevented, open: editor.isOpen(), asked: asked.length}));
+            });
+        """)
+
+        assert found == {"prevented": True, "open": True, "asked": 1}
+
+    def test_reload_with_an_unapplied_edit_asks_before_reading_again(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Something new.");
+                agree = false;
+                press("reload");
+                const declined = sent.length;
+                agree = true;
+                press("reload");
+                return settle().then(() => console.log(JSON.stringify(
+                    {declined, accepted: sent.length, text: editor.controls.text.value})));
+            });
+        """)
+
+        assert found["declined"] == 1
+        assert found["accepted"] == 2
+        assert found["text"] == "You are Ada. Stay in character as Ada."
+
+    def test_a_second_press_on_the_way_in_keeps_the_edit(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Something new.");
+                editor.open("Ada");
+                return settle();
+            }).then(() => console.log(JSON.stringify(
+                {text: editor.controls.text.value, reads: sent.length, asked})));
+        """)
+
+        assert found == {"text": "Something new.", "reads": 1, "asked": []}
+
+    def test_an_answer_for_a_page_that_has_moved_on_is_not_drawn(self):
+        found = run_editor("""
+            hold = true;
+            editor.open("Ada");
+            editor.close(true);
+            hold = false;
+            stored = "Bob's own.";
+            editor.open("Bob");
+            settle().then(() => {
+                held[0].resolve();
+                return settle();
+            }).then(() => console.log(JSON.stringify(
+                {text: editor.controls.text.value, heading: editor.controls.heading.textContent})));
+        """)
+
+        assert found == {"text": "Bob's own.", "heading": "System prompt — Bob"}
+
+    def test_with_no_character_it_says_so_and_asks_nothing(self):
+        found = run_editor("""
+            const opened = editor.open("");
+            console.log(JSON.stringify(Object.assign(seen(), {opened, sent})));
+        """)
+
+        assert found["opened"] is False
+        assert found["note"] == "Choose a character first."
+        assert found["apply"] is False
+        assert found["sent"] == []
+
+    def test_it_is_a_modal_dialog_that_focus_mode_leaves_alone(self):
+        """Focus mode hides what sits beside the focused workspace unless it
+        says it is a dialog, and a native <dialog> only implies it."""
+        found = run_editor("""
+            editor.open("Ada");
+            const dialog = editor.dialog;
+            console.log(JSON.stringify({
+                modal: !!dialog.modal, role: dialog.getAttribute("role"),
+                ariaModal: dialog.getAttribute("aria-modal"),
+                inBody: document.body.children.includes(dialog)}));
+        """)
+
+        assert found == {"modal": True, "role": "dialog", "ariaModal": "true", "inBody": True}
+
+    def test_it_fills_what_is_on_the_screen(self):
+        """A phone whose page is wider than the screen widens the layout
+        viewport to the page, and a fixed dialog filled that: off the right
+        edge, its buttons below the fold. The visual viewport is the glass."""
+        found = run_editor("""
+            const moved = {};
+            globalThis.visualViewport = {offsetLeft: 96, offsetTop: 0, width: 412, height: 915,
+                addEventListener(kind, fn) { moved[kind] = fn; },
+                removeEventListener(kind) { delete moved[kind]; }};
+            editor.open("Ada");
+            const style = editor.dialog.style;
+            const opened = [style.left, style.top, style.width, style.height];
+            // The keyboard comes up.
+            visualViewport.height = 480;
+            moved.resize();
+            const typing = style.height;
+            const following = Object.keys(moved).sort();
+            editor.close(true);
+            console.log(JSON.stringify({opened, typing, following,
+                                        after: Object.keys(moved)}));
+        """)
+
+        assert found["opened"] == ["96px", "0px", "412px", "915px"]
+        assert found["typing"] == "480px"
+        assert found["following"] == ["resize", "scroll"]
+        assert found["after"] == [], "nothing is left listening once it is closed"
+
+    def test_a_name_is_put_on_the_page_as_text(self):
+        found = run_editor("""
+            editor.open("<img src=x onerror=alert(1)>");
+            console.log(JSON.stringify({heading: editor.controls.heading.textContent,
+                                        markup: editor.controls.heading.innerHTML}));
+        """)
+
+        assert found["heading"] == "System prompt — <img src=x onerror=alert(1)>"
+        assert found["markup"] == ""
+
+
+class TestTheEditorAndLLMStudioAgree:
+    """LLM Studio's character editor holds the same field in its override
+    box. Open on the same character, it has to hear about a save, or its next
+    Save writes the old prompt back."""
+
+    STUDIO = """
+    const name = document.createElement("textarea");
+    const box = document.createElement("textarea");
+    const previousLookup = document.getElementById;
+    document.getElementById = (id) => ({"mc-llm-chat-name": name,
+                                        "mc-llm-chat-system": box})[id] || previousLookup(id);
+    const told = [];
+    globalThis.updateInput = (target) => told.push(target === box ? "system" : "other");
+    """
+
+    def test_an_override_saved_here_is_written_into_its_box(self):
+        found = run_editor(self.STUDIO + """
+            name.value = "Ada";
+            editor.open("Ada");
+            settle().then(() => { type("Be brief."); press("apply"); return settle(); })
+                .then(() => console.log(JSON.stringify({box: box.value, told})));
+        """)
+
+        assert found == {"box": "Be brief.", "told": ["system"]}
+
+    def test_restoring_the_default_empties_its_box(self):
+        found = run_editor(self.STUDIO + """
+            name.value = "Ada";
+            box.value = "Be brief.";
+            stored = "Be brief.";
+            editor.open("Ada");
+            settle().then(() => { press("restore"); return settle(); })
+                .then(() => console.log(JSON.stringify({box: box.value, told})));
+        """)
+
+        assert found == {"box": "", "told": ["system"]}
+
+    def test_a_studio_editor_on_another_character_is_left_alone(self):
+        found = run_editor(self.STUDIO + """
+            name.value = "Bob";
+            box.value = "Bob's own.";
+            editor.open("Ada");
+            settle().then(() => { type("Be brief."); press("apply"); return settle(); })
+                .then(() => console.log(JSON.stringify({box: box.value, told})));
+        """)
+
+        assert found == {"box": "Bob's own.", "told": []}
+
+    def test_the_ids_are_the_ones_the_tab_gives_its_boxes(self):
+        import mc_llm_ui as ui
+
+        source = SYSTEM_JS.read_text(encoding="utf-8")
+
+        assert f'const STUDIO_NAME = "{ui.ident("chat", "name")}";' in source
+        assert f'const STUDIO_SYSTEM = "{ui.ident("chat", "system")}";' in source
+
+
+class TestTheMenuOpensTheEditor:
+    """"For flyout, put this option to open this view in the '...' menu.\""""
+
+    MENU = """
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = {freeFloat: false};
+    shell.host = {listUtilities: () => []};
+    shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
+    """
+
+    def test_it_is_in_the_menu_after_new_thread(self):
+        found = run(self.MENU + """
+            console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
+        """, sources=("shell", "system"))
+
+        assert found[:4] == ["Free Float", "Auto Attach", "New thread", "System prompt…"]
+
+    def test_pressing_it_puts_the_menu_away_and_opens_the_character(self):
+        found = run(self.MENU + """
+            const order = [];
+            shell.closeMenu = () => order.push("menu");
+            NS.systemEditor.open = (who) => order.push("editor:" + who);
+            const item = shell.utilityItems().find((i) => i.textContent === "System prompt\\u2026");
+            item.handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({order, popup: item["aria-haspopup"]}));
+        """, sources=("shell", "system"))
+
+        assert found == {"order": ["menu", "editor:Ada"], "popup": "dialog"}
+
+    def test_with_no_conversation_it_is_there_and_not_pressable(self):
+        found = run(self.MENU + """
+            shell.store = {snapshot: () => ({selection: {character: "", thread: ""}})};
+            const item = shell.systemPromptItem();
+            console.log(JSON.stringify({disabled: item.disabled, title: item.title}));
+        """, sources=("shell", "system"))
+
+        assert found == {"disabled": True, "title": "Choose a conversation first"}
+
+    def test_without_the_editor_the_menu_does_not_offer_it(self):
+        found = run(self.MENU + """
+            console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
+        """, sources=("shell",))
+
+        assert "System prompt…" not in found
+
+    def test_escape_in_the_editor_does_not_leave_focus_mode(self):
+        """The editor's Escape asks before an unapplied edit goes. Taken by
+        the panel, it would have left focus mode behind the dialog instead."""
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            let toggled = 0;
+            shell.toggleFocus = () => { toggled += 1; };
+            shell.nodes = {root: {contains: () => true}, menu: {hidden: true}};
+            shell.focus = {isActive: () => true};
+            NS.hostInDialog = () => false;
+            NS.escapeOrder = () => "exit-focus";
+            NS.systemEditor.isOpen = () => true;
+            let stopped = false;
+            shell.documentKey({key: "Escape", preventDefault() {}, stopPropagation() { stopped = true; }});
+            console.log(JSON.stringify({toggled, stopped}));
+        """, sources=("shell", "system"))
+
+        assert found == {"toggled": 0, "stopped": False}
+
+
+class TestTheEditorIsTheWholeWindow:
+    def test_nothing_sets_the_dialog_s_own_display(self):
+        """An author `display` beats the browser's `dialog:not([open])`, and a
+        closed editor would sit on the page. The column is the sheet's."""
+        assert "display" not in rule(".forge-assistant-system")
+        assert "display: flex" in rule(".forge-assistant-system-sheet")
+
+    def test_the_box_takes_what_the_rest_leaves(self):
+        text = rule(".forge-assistant-system-text")
+
+        assert "flex: 1 1 auto" in text
+        assert "resize: none" in text
+        assert "max(16px" in text, "or a phone zooms the page when the box is tapped"
+
+    def test_it_is_sized_by_its_edges_and_not_by_the_viewport_width(self):
+        """100vw reaches under the page's scrollbar, where the way out is."""
+        dialog = rule(".forge-assistant-system")
+
+        assert "inset: 0" in dialog
+        assert "100vw" not in dialog
+        assert "max-width: none" in dialog and "max-height: none" in dialog
