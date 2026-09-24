@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from test_assistant_js import SHELL, run
+from test_assistant_js import SHELL, TRANSCRIPT, run
 
 CSS = (SHELL.parent.parent / "style.css").read_text(encoding="utf-8")
 
@@ -341,3 +341,496 @@ class TestTheAnswerToAPressStaysReadable:
         assert found["busy"] == "Generating…", "a reply on its way must still show"
         assert found["failed"] == "Gone.", "an error must still show"
         assert found["later"] == "Ready."
+
+
+# --------------------------------------------------------------------------- #
+# Tap to reveal
+# --------------------------------------------------------------------------- #
+
+TAPS = """
+// Real bubbles from the real `bubble()`, in a transcript the tests can walk,
+// with `closest` and `contains` -- the two things the tap handler asks of the
+// DOM -- answered from the parent links the stub keeps. The harness's stub
+// keeps `className` and `classList` apart; a browser keeps them one, and the
+// code under test reads `classList`, so here they are one as well.
+const makeElement = document.createElement;
+document.createElement = (tag) => {
+    const node = makeElement(tag);
+    let name = "";
+    Object.defineProperty(node, "className", {
+        get() { return name; },
+        set(value) {
+            name = String(value || "");
+            name.split(/\\s+/).filter(Boolean).forEach((one) => node.classList.add(one));
+        },
+    });
+    return node;
+};
+function tapShell(roles) {
+    const shell = Object.create(NS.Shell.prototype);
+    shell.settings = {bubbleWidth: 80};
+    const transcript = document.createElement("div");
+    shell.nodes = {transcript, status: {dataset: {}, textContent: ""}};
+    const messages = roles.map((role, index) => ({index, role, text: "m" + index,
+                                                   active: 0, versions: ["m" + index]}));
+    const view = {conversation: {conversation: {revision: 7}, messages}};
+    const link = (parent, child) => { child.parentNode = parent; return child; };
+    const within = (node, target) => {
+        for (let at = target; at; at = at.parentNode) if (at === node) return true;
+        return false;
+    };
+    messages.forEach((row) => {
+        const node = shell.bubble(row, view);
+        node.dataset.key = "k" + row.index;
+        link(transcript, node);
+        node.children.forEach((child) => {
+            link(node, child);
+            (child.children || []).forEach((grand) => link(child, grand));
+        });
+        node.contains = (target) => within(node, target);
+        transcript.children.push(node);
+    });
+    const tagOf = (node) => String(node.tagName || "").toLowerCase();
+    [transcript].concat(transcript.children).forEach((node) => {
+        const all = [node].concat(node.children || []);
+        all.forEach((item) => {
+            item.closest = (selector) => {
+                for (let at = item; at; at = at.parentNode) {
+                    const names = at.classList ? Array.from(at.classList.names) : [];
+                    const wanted = selector.split(",").map((part) => part.trim());
+                    if (wanted.some((one) => (one.startsWith(".")
+                        ? names.indexOf(one.slice(1)) >= 0 : one === tagOf(at)))) return at;
+                }
+                return null;
+            };
+            (item.children || []).forEach((grand) => { grand.closest = item.closest.bind(grand); });
+        });
+    });
+    return {shell, transcript, view};
+}
+const openRows = (transcript) => transcript.children
+    .filter((node) => node.dataset.actions)
+    .map((node) => [node.dataset.key,
+                    node.children.find((c) => c.classList.contains("forge-assistant-actions"))
+                        .hidden === false,
+                    node.getAttribute("aria-expanded")]);
+const textOf = (node) => node.children[0];
+"""
+
+
+class TestTheActionsWaitForATap:
+    """"i want these buttons to only show up when i tap on the reply."""
+
+    def test_nothing_is_drawn_until_a_message_is_tapped(self):
+        found = run(TAPS + """
+            const {transcript} = tapShell(["user", "assistant", "user", "assistant"]);
+            console.log(JSON.stringify({rows: openRows(transcript),
+                                        tappable: transcript.children.map(
+                                            (node) => node.getAttribute("tabindex"))}));
+        """)
+
+        # Older reply (Send to prompt) and the newest reply are tappable; an
+        # older message of yours has nothing to offer and is not.
+        assert found["tappable"] == [None, "0", None, "0"]
+        assert all(shown is False for _, shown, _ in found["rows"])
+        assert all(expanded == "false" for _, _, expanded in found["rows"])
+
+    def test_a_tap_shows_that_message_s_actions_and_a_second_hides_them(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["user", "assistant"]);
+            const reply = transcript.children[1];
+            shell.tapBubble({target: textOf(reply)});
+            const opened = openRows(transcript);
+            shell.tapBubble({target: textOf(reply)});
+            console.log(JSON.stringify({opened, closed: openRows(transcript),
+                                        revealed: reply.classList.contains(
+                                            "forge-assistant-revealed")}));
+        """)
+
+        assert found["opened"] == [["k1", True, "true"]]
+        assert found["closed"] == [["k1", False, "false"]]
+        assert found["revealed"] is False
+
+    def test_only_one_message_is_open_at_a_time(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["assistant", "user", "assistant"]);
+            const [older, , newest] = transcript.children;
+            shell.tapBubble({target: textOf(older)});
+            // The press that opens the newest lands first on the window.
+            shell.dismissActions({target: textOf(newest)});
+            shell.tapBubble({target: textOf(newest)});
+            console.log(JSON.stringify(openRows(transcript)));
+        """)
+
+        assert found == [["k0", False, "false"], ["k2", True, "true"]]
+
+    def test_a_press_anywhere_else_puts_them_away(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["assistant"]);
+            shell.tapBubble({target: textOf(transcript.children[0])});
+            const kept = shell.dismissActions({target: textOf(transcript.children[0])});
+            const away = shell.dismissActions({target: document.createElement("div")});
+            console.log(JSON.stringify({kept, away, rows: openRows(transcript)}));
+        """)
+
+        assert found["kept"] is False, "a press on the open message closed it early"
+        assert found["away"] is True
+        assert found["rows"] == [["k0", False, "false"]]
+
+    def test_a_press_on_a_link_or_a_button_is_that_control_s(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["assistant"]);
+            const reply = transcript.children[0];
+            const anchor = document.createElement("a");
+            anchor.parentNode = textOf(reply);
+            anchor.closest = (selector) => selector.indexOf("a") >= 0 ? anchor : null;
+            const viaLink = shell.tapBubble({target: anchor});
+            console.log(JSON.stringify({viaLink, rows: openRows(transcript)}));
+        """)
+
+        assert found == {"viaLink": False, "rows": [["k0", False, "false"]]}
+
+    def test_selecting_text_is_reading_not_tapping(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["assistant"]);
+            const reply = transcript.children[0];
+            globalThis.getSelection = () => ({isCollapsed: false, anchorNode: textOf(reply)});
+            const toggled = shell.tapBubble({target: textOf(reply)});
+            console.log(JSON.stringify({toggled, rows: openRows(transcript)}));
+        """)
+
+        assert found == {"toggled": False, "rows": [["k0", False, "false"]]}
+
+    def test_the_keyboard_can_do_what_a_tap_does(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["assistant"]);
+            const reply = transcript.children[0];
+            let prevented = 0;
+            const key = (name) => ({key: name, target: reply,
+                                    preventDefault() { prevented += 1; }});
+            shell.bubbleKey(key("a"));
+            const ignored = openRows(transcript);
+            shell.bubbleKey(key("Enter"));
+            const entered = openRows(transcript);
+            shell.bubbleKey(key(" "));
+            console.log(JSON.stringify({ignored, entered, spaced: openRows(transcript),
+                                        prevented}));
+        """)
+
+        assert found["ignored"] == [["k0", False, "false"]]
+        assert found["entered"] == [["k0", True, "true"]]
+        assert found["spaced"] == [["k0", False, "false"]]
+        assert found["prevented"] == 2
+
+    def test_pressing_an_action_puts_the_row_away(self):
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["user", "assistant"]);
+            const reply = transcript.children[1];
+            const acted = [];
+            shell.act = (action) => acted.push(action);
+            shell.tapBubble({target: textOf(reply)});
+            const bar = reply.children.find((c) => c.classList.contains("forge-assistant-actions"));
+            bar.children[bar.children.length - 1].handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({acted, rows: openRows(transcript)}));
+        """)
+
+        assert found["acted"] == ["send_prompt"]
+        assert found["rows"] == [["k1", False, "false"]]
+
+    def test_the_open_row_survives_a_redraw_and_goes_with_its_message(self):
+        """A reply streaming in redraws the transcript once a frame; a row that
+        closed on every word could not be used while a reply was arriving."""
+        found = run(TAPS + """
+            const {shell, transcript} = tapShell(["user", "assistant"]);
+            shell.tapBubble({target: textOf(transcript.children[1])});
+            // A redraw that kept the node: the key is still on the page.
+            shell.reveal(shell.revealed);
+            const kept = openRows(transcript);
+            // A redraw after the thread moved: the key is gone.
+            transcript.children[1].dataset.key = "k1-after";
+            shell.reveal(shell.revealed);
+            console.log(JSON.stringify({kept, after: openRows(transcript),
+                                        remembered: shell.revealed}));
+        """)
+
+        assert found["kept"] == [["k1", True, "true"]]
+        assert found["after"] == [["k1-after", False, "false"]]
+        assert found["remembered"] == ""
+
+    def test_a_message_drawn_again_comes_back_open(self):
+        """Through the real `renderTranscript`: a snapshot that arrives without
+        its conversation empties the transcript, and when the conversation
+        comes back its bubbles are new nodes. The row somebody had open is
+        opened again on the new one."""
+        found = run(TAPS + TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.bubble = NS.Shell.prototype.bubble;
+            shell.updateBubble = () => undefined;
+            const messages = [{index: 0, role: "user", text: "q", active: 0, versions: ["q"]},
+                              {index: 1, role: "assistant", text: "a", active: 0,
+                               versions: ["a"]}];
+            const view = {conversation: {conversation: {revision: 3}, messages},
+                          selection: {epoch: "e1"}, unread: 0, operation: null};
+            shell.renderTranscript(view);
+            const reply = transcript.children[1];
+            shell.reveal(reply.dataset.key);
+            shell.renderTranscript({conversation: null, selection: {epoch: "e1"}});
+            shell.renderTranscript(view);
+            const again = transcript.children[1];
+            const bar = again.children.find((c) => c.classList.contains("forge-assistant-actions"));
+            console.log(JSON.stringify({rebuilt: again !== reply, open: bar.hidden === false}));
+        """)
+
+        assert found == {"rebuilt": True, "open": True}
+
+    def test_a_reply_still_being_written_offers_nothing(self):
+        found = run(TAPS + """
+            const shell = Object.create(NS.Shell.prototype);
+            shell.settings = {bubbleWidth: 80};
+            const row = {index: 1, role: "assistant", text: "half a", active: 0,
+                         versions: ["half a"], provisional: true};
+            const view = {conversation: {conversation: {revision: 1},
+                                         messages: [{index: 0, role: "user", text: "q"}]}};
+            const node = shell.bubble(row, view);
+            console.log(JSON.stringify({actions: node.dataset.actions || null,
+                                        tabindex: node.getAttribute("tabindex")}));
+        """)
+
+        assert found == {"actions": None, "tabindex": None}
+
+    def test_the_stylesheet_marks_what_can_be_tapped_and_what_is_open(self):
+        assert "cursor: pointer" in rule(".forge-assistant-bubble[data-actions]")
+        assert "border-color" in rule(".forge-assistant-revealed")
+
+    def test_the_transcript_listens_for_the_tap(self):
+        """Delegated from the transcript: bubbles are rebuilt whenever the
+        thread moves, and a listener bound to each would be lost with it."""
+        shell = SHELL.read_text(encoding="utf-8")
+        wire = shell.split("Shell.prototype.wire = function", 1)[1] \
+            .split("Shell.prototype.grow", 1)[0]
+
+        assert 'this.on(nodes.transcript, "click", (event) => this.tapBubble(event));' in wire
+        assert 'this.on(window, "pointerdown", (event) => this.dismissActions(event), true);' \
+            in wire
+
+
+# --------------------------------------------------------------------------- #
+# Send to prompt
+# --------------------------------------------------------------------------- #
+
+
+def prompt_from(reply, current):
+    return run("""
+        console.log(JSON.stringify(NS.promptFrom(%s, %s)));
+    """ % (json_string(reply), json_string(current)))
+
+
+def json_string(text):
+    import json
+
+    return json.dumps(text)
+
+
+class TestWhatSendToPromptKeeps:
+    """"remove everything not in literal or lora, and prepend the LLM prompt
+    following by a new line for separation." """
+
+    def test_the_reply_replaces_the_prose_and_the_tags_follow_it(self):
+        found = prompt_from("a lighthouse at dusk, volumetric fog",
+                            "portrait of a woman, <lora:detail:0.5> blue hat")
+
+        assert found == "a lighthouse at dusk, volumetric fog\n<lora:detail:0.5>"
+
+    def test_every_literal_command_is_kept_exactly_as_typed(self):
+        found = prompt_from("new scene",
+                            "[[<lora:realfilter:1>]] old words +[[ A ]] more -[[__light__]]")
+
+        assert found == "new scene\n[[<lora:realfilter:1>]] +[[ A ]] -[[__light__]]"
+
+    def test_what_is_kept_keeps_its_order(self):
+        found = prompt_from("x", "-[[D]] <lora:b:1> words +[[A]] <LyCo:c:0.3> [[B]]")
+
+        assert found == "x\n-[[D]] <lora:b:1> +[[A]] <LyCo:c:0.3> [[B]]"
+
+    def test_a_tag_inside_a_literal_is_kept_once(self):
+        found = prompt_from("x", "[[<lora:inside:1>]] and <hypernet:net:1>")
+
+        assert found == "x\n[[<lora:inside:1>]] <hypernet:net:1>"
+
+    def test_only_the_three_extra_network_kinds_are_tags(self):
+        """The closed list extra_networks.py protects, for its reason: an open
+        `<word:...>` shape would keep somebody else's syntax by accident."""
+        found = prompt_from("x", "<lora:a:1> <embedding:b> <wildcard:c> <HYPERNET:d:1>")
+
+        assert found == "x\n<lora:a:1> <HYPERNET:d:1>"
+
+    def test_an_empty_or_unclosed_literal_is_not_a_literal(self):
+        """The grammar's own answers: an empty command carries nothing, and one
+        never closed is ordinary text -- so it goes, as text does. A LoRA tag
+        in that text is still a LoRA tag, and stays."""
+        found = prompt_from("x", "words [[]] more [[never closed <lora:after:1>")
+
+        assert found == "x\n<lora:after:1>"
+
+    def test_the_first_close_closes(self):
+        found = prompt_from("x", "[[a [[b]] c]] <lora:z:1>")
+
+        assert found == "x\n[[a [[b]] <lora:z:1>"
+
+    def test_with_nothing_to_keep_it_is_just_the_reply(self):
+        found = prompt_from("  a prompt with room around it \n", "all prose, nothing kept")
+
+        assert found == "a prompt with room around it"
+
+    def test_the_reply_goes_in_as_written(self):
+        """Guessing which of a reply's sentences is "the prompt" is how a
+        sentence somebody wanted disappears."""
+        reply = "Here you go:\n\nA **misty** harbour, 35mm"
+        found = prompt_from(reply, "")
+
+        assert found == reply
+
+    def test_a_keeper_is_never_mistaken_for_a_plus_sign_in_prose(self):
+        """Only a sign *immediately* before `[[` is a sign -- the grammar's
+        rule, which is why nobody has to escape arithmetic."""
+        found = prompt_from("x", "2 + [[B]] and 3 -[[C]]")
+
+        assert found == "x\n[[B]] -[[C]]"
+
+
+PROMPTS = """
+// The two prompt boxes Forge draws, as Gradio draws them: a wrapper carrying
+// the id, and a textarea inside it.
+const typed = [];
+function promptBoxes() {
+    const boxes = {};
+    ["txt2img_prompt", "img2img_prompt"].forEach((id) => {
+        const holder = document.createElement("div");
+        holder.id = id;
+        const area = document.createElement("textarea");
+        area.tagName = "TEXTAREA";
+        area.value = "old words <lora:keep:1>";
+        area.dispatchEvent = (event) => { typed.push(id + ":" + event.type); return true; };
+        holder.querySelector = (selector) => selector === "textarea" ? area : null;
+        boxes[id] = area;
+    });
+    const byId = Object.assign({}, ...Object.keys(boxes).map((id) => ({[id]: {
+        tagName: "DIV", querySelector: (s) => s === "textarea" ? boxes[id] : null}})));
+    const previous = document.getElementById;
+    document.getElementById = (id) => byId[id] || previous(id);
+    return boxes;
+}
+function promptShell(workspace) {
+    const shell = Object.create(NS.Shell.prototype);
+    shell.nodes = {status: {dataset: {}, textContent: ""}};
+    shell.host = {getActiveWorkspace: () => workspace};
+    return shell;
+}
+const reply = {index: 3, role: "assistant", text: "a quiet harbour", active: 0};
+"""
+
+
+class TestWhereSendToPromptWrites:
+    def send(self, workspace):
+        return run(PROMPTS + """
+            const boxes = promptBoxes();
+            const shell = promptShell("%s");
+            const done = shell.sendToPrompt(reply);
+            console.log(JSON.stringify({done, typed,
+                                        t2i: boxes.txt2img_prompt.value,
+                                        i2i: boxes.img2img_prompt.value,
+                                        said: shell.nodes.status.textContent}));
+        """ % workspace)
+
+    def test_on_txt2img_it_writes_txt2img_s_prompt(self):
+        found = self.send("tab_txt2img")
+
+        assert found["t2i"] == "a quiet harbour\n<lora:keep:1>"
+        assert found["i2i"] == "old words <lora:keep:1>"
+        assert found["said"] == "Prompt sent to txt2img."
+
+    def test_on_img2img_it_writes_img2img_s_prompt(self):
+        found = self.send("tab_img2img")
+
+        assert found["i2i"] == "a quiet harbour\n<lora:keep:1>"
+        assert found["t2i"] == "old words <lora:keep:1>"
+        assert found["said"] == "Prompt sent to img2img."
+
+    def test_from_anywhere_else_it_writes_txt2img_s(self):
+        found = self.send("tab_llm_studio")
+
+        assert found["t2i"] == "a quiet harbour\n<lora:keep:1>"
+        assert found["said"] == "Prompt sent to txt2img."
+
+    def test_gradio_is_told_and_nothing_is_pressed(self):
+        """Typing, as far as the page can tell: an input event, which is what
+        Gradio stores a textbox's value from. No click on anything -- "it
+        should not cause an image to be auto generated"."""
+        found = self.send("tab_txt2img")
+
+        assert found["typed"] == ["txt2img_prompt:input"]
+
+    def test_forge_s_own_helper_is_used_where_there_is_one(self):
+        found = run(PROMPTS + """
+            const boxes = promptBoxes();
+            const helped = [];
+            globalThis.updateInput = (element) => helped.push(element === boxes.txt2img_prompt);
+            promptShell("tab_txt2img").sendToPrompt(reply);
+            console.log(JSON.stringify({helped, typed}));
+        """)
+
+        assert found == {"helped": [True], "typed": []}
+
+    def test_a_page_without_the_prompt_says_so(self):
+        found = run(PROMPTS + """
+            const shell = promptShell("tab_txt2img");
+            const done = shell.sendToPrompt(reply);
+            console.log(JSON.stringify({done, said: shell.nodes.status.textContent,
+                                        kind: shell.nodes.status.dataset.kind}));
+        """)
+
+        assert found["done"] is False
+        assert found["kind"] == "warn"
+        assert "txt2img" in found["said"]
+
+    def test_the_action_is_the_panel_s_own_and_sends_no_command(self):
+        found = run(PROMPTS + """
+            promptBoxes();
+            const shell = promptShell("tab_txt2img");
+            const sent = [];
+            shell.store = {envelope: () => ({}), send: (e) => { sent.push(e); return Promise.resolve({ok: true}); }};
+            shell.act("send_prompt", reply, 7);
+            console.log(JSON.stringify({sent: sent.length,
+                                        said: shell.nodes.status.textContent}));
+        """)
+
+        assert found == {"sent": 0, "said": "Prompt sent to txt2img."}
+
+
+class TestSendAgain:
+    def test_it_asks_the_server_to_answer_that_message(self):
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.nodes = {status: {dataset: {}, textContent: ""}};
+            const store = new NS.Store();
+            store.selection = {character: "Ada", thread: "t", epoch: "x"};
+            const sent = [];
+            store.send = (envelope) => { sent.push(envelope); return Promise.resolve({ok: true}); };
+            shell.store = store;
+            shell.act("resend_from_user", {index: 4, role: "user", text: "ask", active: 0}, 9);
+            const envelope = sent[0];
+            console.log(JSON.stringify({action: envelope.action, target: envelope.target,
+                                        expected: envelope.expected_revision}));
+        """, sources=("shell", "store"))
+
+        assert found == {"action": "resend_from_user",
+                         "target": {"index": 4, "version": 0},
+                         "expected": {"kind": "revision", "value": 9}}
+
+    def test_it_is_a_command_that_opens_the_feed_for_its_reply(self):
+        """The store's list of commands that anticipate a reply: without it,
+        Send again's answer would arrive on no feed at all."""
+        store = (SHELL.parent / "forge_assistant_store.js").read_text(encoding="utf-8")
+
+        assert re.search(r'const GENERATING = \[[^\]]*"resend_from_user"', store)

@@ -6385,6 +6385,24 @@
     margin-top: 0.4em;
 }
 
+/* A message with actions is tapped to show them, and says so: a pointer over
+   it, a ring when the keyboard is on it, and the accent on its border while
+   its row is open -- so which message a button belongs to is never a guess.
+   The row itself is shown and hidden with `hidden`, which the root's own rule
+   above makes stick. */
+.forge-assistant-bubble[data-actions] {
+    cursor: pointer;
+}
+
+.forge-assistant-bubble[data-actions]:focus-visible {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: 2px;
+}
+
+.forge-assistant-revealed {
+    border-color: var(--color-accent, #2563eb);
+}
+
 /* Reachable without hover, always: a control that only appears on hover is a
    control a touch screen does not have.
 

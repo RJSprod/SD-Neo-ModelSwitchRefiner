@@ -1214,6 +1214,9 @@
 
         // Before anything else sees a press. See `supersede`.
         this.on(window, "pointerdown", (event) => this.supersede(event), true);
+        // And before a press lands, a message's open actions go if the press
+        // is not on that message. See `dismissActions`.
+        this.on(window, "pointerdown", (event) => this.dismissActions(event), true);
 
         [nodes.launcher, nodes.header].forEach((handle) => {
             this.on(handle, "pointerdown", (event) => {
@@ -1299,6 +1302,9 @@
             if (this.following) nodes.jump.hidden = true;
             else if (this.settled) nodes.jump.hidden = false;
         });
+        // A tap on a message shows its actions. See `tapBubble`.
+        this.on(nodes.transcript, "click", (event) => this.tapBubble(event));
+        this.on(nodes.transcript, "keydown", (event) => this.bubbleKey(event));
         // A picture in a bubble arrives after the bubble does and grows it,
         // which moves the bottom out from under a reader who was at it. Caught
         // in the capture phase because `load` does not bubble.
@@ -2529,6 +2535,7 @@
         transcript.innerHTML = "";
         wanted.forEach((node) => transcript.appendChild(node));
         this.lastRendered = fingerprint;
+        if (this.revealed) this.reveal(this.revealed);
 
         if (wasFollowing) {
             this.toBottom();
@@ -2603,7 +2610,15 @@
                                            : "This picture is no longer on disk."));
             node.appendChild(figure);
         }
-        node.appendChild(this.actions(row, view));
+        const bar = this.actions(row, view);
+        node.appendChild(bar);
+        // A bubble with anything to offer is something you tap. Reachable by
+        // keyboard too: focusable, and Enter or Space does what a tap does.
+        if (bar.children.length) {
+            node.dataset.actions = String(bar.children.length);
+            node.setAttribute("tabindex", "0");
+            node.setAttribute("aria-expanded", "false");
+        }
         return node;
     };
 
@@ -2613,41 +2628,68 @@
         node.classList.toggle("forge-assistant-provisional", !!row.provisional);
     };
 
-    // Every action, reachable without hover, with a visible keyboard-focusable
-    // control per message. Each carries the (index, version, revision) captured
-    // at the moment it was drawn -- a stale one is refused by the server rather
-    // than quietly reinterpreted as the current last message.
-    // The three actions the panel offers, as icons, on the last message only.
+    // The actions the panel offers, and which message each belongs on.
     //
     // There were eight of them and a version pager, on every message. At panel
     // width that wrapped onto three rows under every bubble, so a thread was
     // more chrome than conversation, and the ones aimed at a message in the
     // middle of it were the heavy ones -- branch, truncate, renumber -- which
-    // want the room the tab has to explain what they are about to do.
+    // want the room the tab has to explain what they are about to do. So the
+    // panel keeps what you want on the thing you just said or just read. The
+    // rest of the set is unchanged in the tab: nothing here removes an action
+    // from the conversation, only from this view of it.
     //
-    // What is left is what you want on the thing you just said or just read.
-    // The rest of the set is unchanged in the tab: nothing here removes an
-    // action from the conversation, only from this view of it.
+    // And none of them is drawn until you ask. They sat under the newest
+    // message all the time, which was asked to stop: "i want these buttons to
+    // only show up when i tap on the reply". A tap on a message shows its row;
+    // a tap anywhere else, or on the message again, puts it away. See
+    // `tapBubble`.
     //
-    // `\u21bb` is the same glyph the tab draws on a reply for the same action
+    // `newest` is the newest message only; `role` is the kind of message.
+    //
+    // * Edit, Regenerate and Delete are the newest message's, as they were.
+    //   Regenerate is a reply's: on an unanswered message of yours there is no
+    //   reply to ask for again.
+    // * Send to prompt is every reply's. It changes nothing in the conversation
+    //   -- it writes the reply into the image prompt -- so there is no reason
+    //   to keep it off an older one. See `sendToPrompt`.
+    // * Send again is your own newest message's: the state a deleted, stopped
+    //   or failed reply leaves, where the thread ends with you and the only
+    //   useful thing left is to ask again. The server answers that message in
+    //   place (`_plan_resend`); further up the thread it would branch, and the
+    //   tab is where branching is explained.
+    //
+    // `\u21bb` is the same glyph the tab draws on a reply for Regenerate
     // (`javascript/llm_studio.js`), so the two views agree on what it means.
+    // `\u27a4` is the send arrow asked for ("just looks like a send icon on a
+    // button"); Send again's hooked arrow is a send that goes round again.
     const ACTIONS = [
-        {action: "edit_message", glyph: "\u270e", label: "Edit"},
-        {action: "regenerate", glyph: "\u21bb", label: "Regenerate", reply: true},
-        {action: "delete_message", glyph: "\u2715", label: "Delete"},
+        {action: "edit_message", glyph: "\u270e", label: "Edit", newest: true},
+        {action: "regenerate", glyph: "\u21bb", label: "Regenerate", newest: true,
+         role: "assistant"},
+        {action: "delete_message", glyph: "\u2715", label: "Delete", newest: true},
+        {action: "send_prompt", glyph: "\u27a4", label: "Send to prompt",
+         role: "assistant"},
+        {action: "resend_from_user", glyph: "\u21aa", label: "Send again", newest: true,
+         role: "user"},
     ];
 
+    // Each button carries the (index, version, revision) captured at the moment
+    // it was drawn -- a stale one is refused by the server rather than quietly
+    // reinterpreted as the current last message. A reply still being written
+    // has nothing to offer yet.
     Shell.prototype.actions = function (row, view) {
         const bar = element("div", "forge-assistant-actions");
+        bar.hidden = true;
+        if (row.provisional) return bar;
         const messages = (view.conversation && view.conversation.messages) || [];
-        if (!messages.length || row.index !== messages.length - 1) return bar;
-        const revision = view.conversation.conversation
+        const newest = messages.length > 0 && row.index === messages.length - 1;
+        const revision = view.conversation && view.conversation.conversation
             && view.conversation.conversation.revision;
-        const reply = row.role === "assistant";
+        const role = row.role === "assistant" ? "assistant" : "user";
         ACTIONS.forEach((spec) => {
-            // Regenerate is a reply's action. Offered on an unanswered message
-            // of yours it has nothing to ask again.
-            if (spec.reply && !reply) return;
+            if (spec.newest && !newest) return;
+            if (spec.role && spec.role !== role) return;
             const button = element("button", "forge-assistant-action", spec.glyph);
             button.type = "button";
             // An icon with no accessible name is a button only sighted people
@@ -2655,15 +2697,244 @@
             // `aria-label` is what a screen reader reads.
             button.title = spec.label;
             button.setAttribute("aria-label", spec.label);
-            button.addEventListener("click", () => this.act(spec.action, row, revision));
+            button.addEventListener("click", () => {
+                // Pressed is chosen: the row goes away, whatever the action
+                // does next.
+                this.reveal("");
+                this.act(spec.action, row, revision);
+            });
             bar.appendChild(button);
         });
         return bar;
     };
 
+    function actionsOf(node) {
+        return Array.prototype.find.call(node.children || [], (child) =>
+            child.classList && child.classList.contains("forge-assistant-actions")) || null;
+    }
+
+    /** A tap on the transcript: show a message's actions, or put them away.
+     *
+     * Delegated from the transcript rather than bound per bubble, because
+     * bubbles are rebuilt whenever the thread moves and a listener on each is a
+     * listener to lose. A press on a control or a link inside the bubble is
+     * that control's, and text being selected is somebody reading, not
+     * tapping -- neither toggles anything.
+     */
+    Shell.prototype.tapBubble = function (event) {
+        const target = event && event.target;
+        if (!target || typeof target.closest !== "function") return false;
+        if (target.closest("button, a, input, textarea, select")) return false;
+        const node = target.closest(".forge-assistant-bubble");
+        if (!node || !node.dataset || !node.dataset.actions) return false;
+        const selection = typeof window.getSelection === "function"
+            ? window.getSelection() : null;
+        if (selection && !selection.isCollapsed && selection.anchorNode
+            && typeof node.contains === "function" && node.contains(selection.anchorNode)) {
+            return false;
+        }
+        const key = node.dataset.key || "";
+        this.reveal(this.revealed === key ? "" : key);
+        return true;
+    };
+
+    /** Enter or Space on a focused message does what a tap does. */
+    Shell.prototype.bubbleKey = function (event) {
+        if (!event || (event.key !== "Enter" && event.key !== " ")) return false;
+        const node = event.target;
+        if (!node || !node.dataset || !node.dataset.actions) return false;
+        if (!node.classList || !node.classList.contains("forge-assistant-bubble")) return false;
+        event.preventDefault();
+        const key = node.dataset.key || "";
+        this.reveal(this.revealed === key ? "" : key);
+        return true;
+    };
+
+    /** A press anywhere but on the open message puts its actions away.
+     *
+     * In the capture phase, so it runs before the press lands: a tap on
+     * another message closes this one here and opens that one in `tapBubble`,
+     * and a tap on the open message itself is left to `tapBubble` to close.
+     */
+    Shell.prototype.dismissActions = function (event) {
+        if (!this.revealed) return false;
+        const transcript = this.nodes.transcript;
+        const open = transcript && Array.prototype.find.call(transcript.children || [],
+            (node) => node.dataset && node.dataset.key === this.revealed);
+        const target = event && event.target;
+        if (open && target && typeof open.contains === "function" && open.contains(target)) {
+            return false;
+        }
+        this.reveal("");
+        return true;
+    };
+
+    /** Show the actions of the message with this key, and nobody else's.
+     *
+     * Kept as a key rather than as a node, and applied again after every
+     * redraw: a reply arriving token by token redraws the transcript once a
+     * frame, and a row that closed whenever a word arrived could not be used
+     * while a reply was being written. A key that is no longer on the page --
+     * the thread moved, the action ran -- shows nothing and is forgotten.
+     */
+    Shell.prototype.reveal = function (key) {
+        this.revealed = key || "";
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        let found = null;
+        Array.prototype.forEach.call(transcript.children || [], (node) => {
+            if (!node.dataset || !node.dataset.actions) return;
+            const open = !!this.revealed && node.dataset.key === this.revealed;
+            if (open) found = node;
+            const bar = actionsOf(node);
+            if (bar && bar.hidden === open) bar.hidden = !open;
+            if (node.classList) node.classList.toggle("forge-assistant-revealed", open);
+            if (node.getAttribute && node.getAttribute("aria-expanded") !== String(open)) {
+                node.setAttribute("aria-expanded", String(open));
+            }
+        });
+        if (!found) {
+            this.revealed = "";
+            return;
+        }
+        // A row opened under the last message would open below the fold.
+        if (typeof found.getBoundingClientRect === "function"
+            && typeof transcript.getBoundingClientRect === "function") {
+            const box = found.getBoundingClientRect();
+            const edge = transcript.getBoundingClientRect();
+            if (box.bottom > edge.bottom) transcript.scrollTop += box.bottom - edge.bottom;
+        }
+    };
+
+    // -- Send to prompt --------------------------------------------------------- //
+    //
+    // "The send prompt button ... should take that reply, and automatically
+    // replace the current prompt in the positive prompt field. It should
+    // replace everything except lora or content inside a literal command ...
+    // prepend the LLM prompt following by a new line for separation. Pressing
+    // the SEND PROMPT button should just apply the text work, it should not
+    // cause an image to be auto generated."
+    //
+    // What is kept is what this extension already refuses to let a language
+    // model rewrite, read the same way:
+    //
+    // * a literal command -- `[[...]]`, `+[[...]]` or `-[[...]]` -- exactly as
+    //   typed. The grammar is `prompt_master/krea/literals.py`'s: the first
+    //   `]]` closes, an empty one carries nothing, and one never closed is
+    //   ordinary text (so it goes, like any other text);
+    // * an extra-network tag -- `<lora:...>`, `<lyco:...>`, `<hypernet:...>`,
+    //   any case -- outside a literal command. The closed list is
+    //   `prompt_master/krea/extra_networks.py`'s, and for its reason: an open
+    //   `<word:...>` shape would keep other people's syntax by accident.
+    //
+    // Kept in the order they were in, one space apart, on a line after the
+    // reply. The reply goes in as written: it is the reply you chose, and
+    // guessing which of its sentences are "the prompt" is how a sentence you
+    // wanted disappears.
+
+    const LITERAL_OPEN = "[[";
+    const LITERAL_CLOSE = "]]";
+    const EXTRA_NETWORK = /<(?:lora|lyco|hypernet):[^<>]*>/gi;
+
+    function keptFromPrompt(prompt) {
+        const source = String(prompt || "");
+        const kept = [];
+        const spans = [];
+        let position = 0;
+        for (;;) {
+            const start = source.indexOf(LITERAL_OPEN, position);
+            if (start < 0) break;
+            const end = source.indexOf(LITERAL_CLOSE, start + LITERAL_OPEN.length);
+            if (end < 0) break;
+            const signed = start > 0 && (source[start - 1] === "+" || source[start - 1] === "-");
+            const from = signed ? start - 1 : start;
+            const to = end + LITERAL_CLOSE.length;
+            if (source.slice(start + LITERAL_OPEN.length, end).trim()) {
+                kept.push({at: from, text: source.slice(from, to)});
+            }
+            spans.push([from, to]);
+            position = to;
+        }
+        EXTRA_NETWORK.lastIndex = 0;
+        let match = EXTRA_NETWORK.exec(source);
+        while (match) {
+            const at = match.index;
+            if (!spans.some((span) => at >= span[0] && at < span[1])) {
+                kept.push({at, text: match[0]});
+            }
+            match = EXTRA_NETWORK.exec(source);
+        }
+        kept.sort((a, b) => a.at - b.at);
+        return kept.map((item) => item.text);
+    }
+
+    function promptFrom(reply, current) {
+        const body = String(reply || "").trim();
+        const kept = keptFromPrompt(current);
+        if (!kept.length) return body;
+        return body ? body + "\n" + kept.join(" ") : kept.join(" ");
+    }
+
+    // Which prompt: the image tab you are on, and txt2img from anywhere else.
+    const PROMPT_TARGETS = {
+        tab_img2img: {id: "img2img_prompt", label: "img2img"},
+    };
+    const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img"};
+
+    function promptTarget(workspace) {
+        return PROMPT_TARGETS[workspace] || DEFAULT_PROMPT_TARGET;
+    }
+
+    function hostElement(id) {
+        const app = typeof gradioApp === "function" ? gradioApp() : null;
+        return (app && typeof app.querySelector === "function"
+            && app.querySelector("#" + id)) || document.getElementById(id);
+    }
+
+    function promptBox(id) {
+        const holder = hostElement(id);
+        if (!holder) return null;
+        if (holder.tagName === "TEXTAREA") return holder;
+        return typeof holder.querySelector === "function"
+            ? holder.querySelector("textarea") : null;
+    }
+
+    // Gradio binds to the input event, so setting `value` alone changes the
+    // page and tells Gradio nothing -- the next Generate would send the old
+    // prompt. Forge ships `updateInput` for exactly this; the fallback is what
+    // it does. Nothing here presses anything: an input event is typing.
+    function publish(box, value) {
+        box.value = value;
+        if (typeof updateInput === "function") {
+            updateInput(box);
+            return;
+        }
+        box.dispatchEvent(new Event("input", {bubbles: true}));
+    }
+
+    Shell.prototype.sendToPrompt = function (row) {
+        const target = promptTarget(this.host.getActiveWorkspace());
+        const box = promptBox(target.id);
+        if (!box) {
+            this.tell("There is no " + target.label + " prompt on this page.", "warn");
+            return false;
+        }
+        if (!String(row.text || "").trim()) {
+            this.tell("That reply has no words to send.", "warn");
+            return false;
+        }
+        publish(box, promptFrom(row.text, box.value));
+        this.tell("Prompt sent to " + target.label + ".", "info");
+        return true;
+    };
+
     Shell.prototype.act = function (action, row, revision) {
         if (action === "edit_message") {
             this.startEdit(row, revision);
+            return;
+        }
+        if (action === "send_prompt") {
+            this.sendToPrompt(row);
             return;
         }
         const envelope = this.store.envelope(action, {
@@ -2675,7 +2946,7 @@
         envelope.payload = {};
         this.store.send(envelope).then((outcome) => {
             if (outcome && !outcome.ok) {
-                this.say((outcome.error && outcome.error.message)
+                this.tell((outcome.error && outcome.error.message)
                     || "That could not be done.", "warn");
             }
         });
@@ -2844,6 +3115,8 @@
     NS.anchorPoint = anchorPoint;
     NS.nearestAnchor = nearestAnchor;
     NS.renderMarkdown = renderMarkdown;
+    NS.promptFrom = promptFrom;
+    NS.keptFromPrompt = keptFromPrompt;
     NS.safeUrl = safeUrl;
     NS.ANCHORS = ANCHORS;
     NS.Shell = Shell;
