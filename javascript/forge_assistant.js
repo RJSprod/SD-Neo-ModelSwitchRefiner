@@ -1425,6 +1425,9 @@
 
     Shell.prototype.open = function () {
         this.showOpen(true);
+        // One of the moments the panel looks, because nothing is pushed to it
+        // while no reply is on its way. See `Store.check`.
+        this.store.check();
         this.store.clearUnread();
         const input = this.nodes.input;
         if (input && !input.hidden) input.focus();
@@ -1457,6 +1460,11 @@
      * was.
      */
     Shell.prototype.noteWorkspace = function (active) {
+        // Changing workspace is another of the moments the panel looks.
+        if (active && this.activeWorkspace && active !== this.activeWorkspace
+            && this.store && typeof this.store.check === "function") {
+            this.store.check();
+        }
         if (active) {
             if (this.lastWorkspace && active !== this.lastWorkspace) {
                 this.previousWorkspace = this.lastWorkspace;
@@ -2640,13 +2648,9 @@
             this.say(view.error, "warn");
             return;
         }
-        if (!view.connected && view.catchingUp) {
-            // The feed was let go on purpose while the page was away. Nothing
-            // dropped, so nothing is "reconnecting".
-            this.say("Catching up…", "info");
-            return;
-        }
-        if (!view.connected) {
+        // The feed is closed on purpose whenever nothing is coming, which is
+        // most of the time. That is not a connection problem and says nothing.
+        if (!view.connected && !view.idle) {
             // "Reconnecting" is only true the second time. Saying it on a feed
             // that has never opened describes a drop that never happened, and
             // it was the first thing on screen when the panel came up with

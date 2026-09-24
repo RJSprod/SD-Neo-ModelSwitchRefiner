@@ -70,14 +70,26 @@
     // dead rather than waited on for the full SILENCE.
     const STALE = 20000;
 
-    // A page in the background holds no feed open. One kept open across a long
-    // absence is the connection that came back half-dead -- open as far as the
-    // page could tell, and silent -- so it is let go on the way out and the
-    // return catches up with a snapshot and a fresh feed. The one exception is
-    // a reply still being written: that is held until it ends, or for this
-    // long at most, so a question asked just before switching away is still
-    // answered while the page is away.
+    // THE FEED IS OPEN ONLY WHILE SOMETHING IS COMING.
+    //
+    // It used to be held for the life of the page, and a connection held open
+    // while it waits on nothing is the one that came back half-dead -- open as
+    // far as the page could tell, and silent -- in every incident that locked
+    // the page up. So it opens for a known boundary and closes at its end: a
+    // reply being written (from the moment one is asked for until its terminal
+    // event), and its read-aloud while it plays. Everything else -- which
+    // thread LLM Studio is on, threads made or deleted elsewhere, unread counts
+    // -- is read when the panel is opened, when the page comes back and when
+    // the workspace changes. See `review`.
+    //
+    // A page in the background that is still holding a reply keeps it until
+    // the reply ends, or for this long at most.
     const HOLD_FOR_REPLY = 600000;
+
+    // The four actions that end in a model being asked for words (the
+    // server's GENERATING). Only these anticipate a reply, so only these open
+    // the feed before they are sent.
+    const GENERATING = ["send", "regenerate", "continue", "resend_from_user"];
 
     // The Gradio component that carries this process's capability, and where
     // Gradio publishes every component's initial value. A restarted server
@@ -192,12 +204,15 @@
         this._renewFutile = false;
         this._keyOverride = null;
         this._restarting = false;
-        // `asleep` is the page being in the background; `sleeping` is the feed
-        // actually let go for it. They differ while a reply is being held.
+        // `asleep` is the page being in the background. `sleeping` is the feed
+        // closed on purpose -- which is its resting state: it starts closed
+        // and opens only while something is coming. See `review`.
         this.asleep = false;
-        this.sleeping = false;
-        this.catchingUp = false;
+        this.sleeping = true;
         this._sleepTimer = null;
+        this._heldTooLong = false;
+        this._expecting = 0;
+        this._connecting = null;
         this._restoreDrafts();
     }
 
@@ -231,7 +246,7 @@
             connected: this.connected,
             everConnected: this.everConnected,
             polling: this.polling,
-            catchingUp: this.catchingUp,
+            idle: this.sleeping,
             error: this.error,
             capabilities: Object.assign({}, this.capabilities),
             selection: Object.assign({}, this.selection),
@@ -397,7 +412,9 @@
                 }
                 this.announce();
                 this.watch();
-                return this.connect();
+                // No feed: one is opened only if the snapshot shows a reply
+                // on its way. See `review`.
+                return this.refresh();
             })
             .catch((error) => {
                 this.ready = false;
@@ -427,7 +444,10 @@
             this.feed = found.feed || "";
             this.generation = found.subscription_generation || "";
             this.cursor = found.stream_cursor || 0;
-            return this.refresh().then(() => this.stream());
+            // Resolved here, on the subscription, not when the stream ends: a
+            // send waits for this so that the reply it asks for lands on a
+            // feed that already exists.
+            this.refresh().then(() => this.stream());
         }).catch((error) => {
             console.warn("Forge Assistant: could not open the conversation feed", error);
             this.dropped();
@@ -454,7 +474,6 @@
             this.failures = 0;
             this.lastTraffic = Date.now();
             this.error = "";
-            this.catchingUp = false;
             this.announce();
             return this.readStream(response.body.getReader());
         }).catch((error) => {
@@ -505,8 +524,14 @@
         // A feed let go on purpose is not a failure, and nothing climbs the
         // ladder for it: the return opens a new one.
         if (this.sleeping) return;
+        if (!this.needsFeed()) {
+            // Nothing is coming, so a feed that ended is not a failure to
+            // recover from: it stays closed.
+            this.letGo();
+            this.announce();
+            return;
+        }
         this.connected = false;
-        this.catchingUp = false;
         this.failures += 1;
         this.announce();
         if (this.failures >= FAILURES_BEFORE_POLLING) {
@@ -676,8 +701,6 @@
             this.phase(event, key, true);
             if (!mine || !this.atBottom) this.mark(key);
             if (mine) this.refresh();
-            // The reply a page in the background was holding its feed for.
-            if (this.asleep && !this.sleeping && !this.replying()) this.letGo();
             break;
         case "result_conflict":
             this.phase(event, key, true);
@@ -707,6 +730,12 @@
             break;
         }
         this.announce();
+        // A reply ending, or its read-aloud stopping, is the end of the
+        // boundary the feed was opened for.
+        if (event.kind === "operation_terminal" || event.kind === "result_conflict"
+            || event.kind === "speech_state") {
+            this.review();
+        }
         return true;
     };
 
@@ -772,10 +801,12 @@
             // thread they are looking at now.
             const key = conversationKey(character, thread);
             this.remember(key, found);
+            this.noteOperation(key, found);
             if (epoch === this.selection.epoch) {
                 this.error = (found.error && found.error.message) || "";
                 this.announce();
             }
+            this.review();
             return found;
         }).catch((error) => {
             console.warn("Forge Assistant: could not read the conversation", error);
@@ -807,11 +838,11 @@
     Store.prototype.follow = function (payload) {
         const character = String(payload.character || "");
         const thread = String(payload.thread_id || "");
-        if (!thread) return;
+        if (!thread) return Promise.resolve(null);
         if (character === this.selection.character && thread === this.selection.thread) {
-            return;
+            return Promise.resolve(null);
         }
-        this.select(character, thread);
+        return this.select(character, thread);
     };
 
     Store.prototype.select = function (character, thread) {
@@ -916,14 +947,27 @@
     };
 
     Store.prototype.send = function (envelope) {
-        return this.request("/commands", {
+        // A reply is being asked for: the feed opens before the request goes,
+        // so the reply lands on a feed that is already there. Anything else is
+        // sent with no feed at all.
+        const generating = !!envelope && GENERATING.indexOf(envelope.action) >= 0;
+        if (generating) this._expecting += 1;
+        const settle = () => {
+            if (!generating) return;
+            this._expecting = Math.max(0, this._expecting - 1);
+            this.review();
+        };
+        const ready = generating ? this.ensureFeed() : Promise.resolve();
+        return ready.then(() => this.request("/commands", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify(envelope),
-        }).then((outcome) => {
+        })).then((outcome) => {
             this.after(outcome);
+            settle();
             return outcome;
         }).catch((error) => {
+            settle();
             if (error && error.body) {
                 this.after(error.body);
                 return error.body;
@@ -1040,23 +1084,85 @@
      * heartbeat rather than three, because at those moments it usually is.
      */
     Store.prototype.reconcile = function (eager) {
-        if (this.sleeping) return Promise.resolve();
+        if (this.sleeping) return this.check();
         if (this.silent(eager ? STALE : SILENCE)) this.restream();
         return this.refresh();
     };
 
-    /** The page went to the background: let the feed go, unless a reply is
-     * being written, in which case once it has ended. */
+    /** Whether anything is coming that the feed is for: a reply being asked
+     * for, a reply being written, or a reply being read aloud. */
+    Store.prototype.needsFeed = function () {
+        return this._expecting > 0 || this.replying()
+            || !!(this.speech && this.speech.playing);
+    };
+
+    /** Open the feed if something is coming, close it if nothing is. Called
+     * after every moment that could change the answer: a snapshot, a send, a
+     * reply ending, speech stopping, the page going away or coming back. */
+    Store.prototype.review = function () {
+        if (!this.ready) return;
+        if (this.needsFeed()) {
+            // A page in the background that already held a reply for as long
+            // as it may does not open another feed for it until it is back.
+            if (this.asleep && this._heldTooLong) return;
+            this.ensureFeed();
+            return;
+        }
+        if (!this.sleeping) this.letGo();
+    };
+
+    /** The feed, opened if it is closed. Resolves once the subscription
+     * exists, which is what a send waits for. */
+    Store.prototype.ensureFeed = function () {
+        if (!this.sleeping) return this._connecting || Promise.resolve();
+        this.sleeping = false;
+        this._connecting = this.connect().then(() => { this._connecting = null; });
+        return this._connecting;
+    };
+
+    /** What a snapshot says about the reply in this conversation. One in
+     * flight that this page did not know about -- started in LLM Studio, or
+     * in another window -- is taken in, so the feed opens for it; one this
+     * page thought was still running but the server has finished is marked
+     * finished, so a missed terminal event cannot hold the feed open. */
+    Store.prototype.noteOperation = function (key, found) {
+        const running = found && found.operation;
+        if (running && running.operation_id) {
+            const known = this.operations.get(running.operation_id);
+            if (!known) {
+                this.operations.set(running.operation_id, {
+                    id: running.operation_id, key, seq: -1, terminal: false, provisional: true,
+                    phase: running.status || "", status: running.status || "",
+                    text: running.final_text || "",
+                });
+            }
+            return;
+        }
+        if (!found || found.error) return;
+        this.operations.forEach((operation) => {
+            if (operation && operation.key === key && !operation.terminal
+                && !(this._pending && this._pending.operationId === operation.id)) {
+                operation.terminal = true;
+                operation.provisional = false;
+            }
+        });
+    };
+
+    /** The page went to the background. Nothing is coming: the feed is
+     * already closed. A reply is coming: it is held until it ends, or for
+     * HOLD_FOR_REPLY at most. */
     Store.prototype.sleep = function () {
         this.asleep = true;
         if (this.sleeping) return;
-        if (!this.replying()) {
+        if (!this.needsFeed()) {
             this.letGo();
             return;
         }
         window.clearTimeout(this._sleepTimer);
         this._sleepTimer = window.setTimeout(() => {
-            if (this.asleep) this.letGo();
+            if (!this.asleep) return;
+            this._heldTooLong = true;
+            this.letGo();
         }, HOLD_FOR_REPLY);
     };
 
@@ -1078,6 +1184,7 @@
         this.connected = false;
         this.failures = 0;
         this.polling = false;
+        this._connecting = null;
         window.clearTimeout(this._reconnect);
         window.clearTimeout(this._pollTimer);
         window.clearTimeout(this._retryStream);
@@ -1089,18 +1196,38 @@
         }
     };
 
-    /** Back on screen. A feed that was let go is caught up from scratch --
-     * subscribe, snapshot, a fresh stream -- rather than trusted; one that was
-     * held for a reply is checked the way any return checks it. */
+    /** Back on screen. A feed that is open is checked the way any return
+     * checks it; with none open, the conversation is read, and a feed opened
+     * only if the snapshot shows a reply on its way. */
     Store.prototype.wake = function () {
         this.asleep = false;
+        this._heldTooLong = false;
         window.clearTimeout(this._sleepTimer);
         this._sleepTimer = null;
         if (!this.sleeping) return this.reconcile(false);
-        this.sleeping = false;
-        this.catchingUp = true;
-        this.announce();
-        return this.connect();
+        return this.check();
+    };
+
+    /** One look at what changed while nothing was open: which conversation
+     * LLM Studio is on (followed, as the feed's character_changed was), the
+     * characters and capabilities, and the conversation itself -- whose
+     * snapshot decides whether a feed is needed. The moments for it are the
+     * panel opening, the page coming back and the workspace changing. */
+    Store.prototype.check = function () {
+        if (!this.ready || this.asleep) return Promise.resolve(null);
+        return this.request("/bootstrap?page=" + encodeURIComponent(this.pageId))
+            .then((found) => {
+                this.capabilities = found.capabilities || this.capabilities;
+                this.characters = found.characters || this.characters;
+                this.mode = found.mode || this.mode;
+                const seed = found.selection || {};
+                if (seed.thread_id && (String(seed.character || "") !== this.selection.character
+                                       || String(seed.thread_id) !== this.selection.thread)) {
+                    return this.follow(seed);
+                }
+                return this.refresh();
+            })
+            .catch(() => this.refresh());
     };
 
     Store.prototype.dispose = function () {
