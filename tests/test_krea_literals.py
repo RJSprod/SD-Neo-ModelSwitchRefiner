@@ -1281,41 +1281,43 @@ class TestPastingOneBack:
         assert again.prompt == first.prompt
 
 
-class TestWhenTheRowIsOnScreen:
-    """Section 5. Visibility is presentation and never execution.
+class TestTheRowIsAlwaysOnScreen:
+    """Section 5, as it was asked for the second time: always there.
 
-    The row appears when either prompt-transforming feature is on, because that
-    is when protecting text from one is a thing somebody is thinking about. It
-    is emphatically not a switch, and the tests that matter are the ones showing
-    the values still work while it is hidden.
+    The row used to appear only while Creative or Spatial was on and hide when
+    both were off -- while its values went on reaching every generation, which
+    is the one combination section 3.3 warns about. It was asked for back: "i
+    want positive and negative literal prompt to always be there". So it is
+    built on screen whatever the two switches say, and neither switch touches
+    it afterwards.
     """
 
-    def visible(self, creative, spatial) -> bool:
-        import model_chain_krea_creative as creative_script
+    def test_a_fresh_page_has_it_on_screen(self, built):
+        """Every page comes up with Creative and Spatial off -- `ui()` disarms
+        both, because a stage is armed for a session and never inherited from
+        one -- which under the old rule meant the row was hidden on *every* page
+        load until a stage was armed. That is the report, and this is the case
+        it came from."""
+        row = built.components["literal_row"]
 
-        return creative_script._literal_row(creative, spatial)["visible"]
+        assert getattr(row, "visible", True) is not False
 
-    def test_creative_alone_shows_it(self):
-        assert self.visible(True, False) is True
+    def test_no_switch_shows_or_hides_it(self, built):
+        """A toggle that sent the row a visibility would put the old rule back
+        one press later -- and every one it sent was a component torn down and
+        rebuilt in the middle of the prompt area."""
+        row = built.components["literal_row"]
 
-    def test_spatial_alone_shows_it(self):
-        """Either feature, not both. Spatial composes a structured prompt around
-        the user's words with no writer involved at all, and a LoRA tag needs
-        protecting from the compositor just the same."""
-        assert self.visible(False, True) is True
+        offenders = [(name, kind)
+                     for name, component in built.components.items()
+                     for kind, kwargs in getattr(component, "_callbacks", [])
+                     if any(output is row for output in kwargs.get("outputs") or [])]
 
-    def test_both_off_hides_it(self):
-        assert self.visible(False, False) is False
+        assert offenders == []
 
-    def test_both_on_shows_it(self):
-        assert self.visible(True, True) is True
-
-    def test_hiding_it_does_not_stop_it_working(self, script, store, host):
-        """The whole of section 3.3 in one assertion: the row is hidden exactly
-        when both features are off, which is exactly the generation this proves
-        still applies the fields."""
-        assert self.visible(False, False) is False
-
+    def test_with_both_switches_off_it_still_works(self, script, store, host):
+        """The whole of section 3.3 in one assertion: what is in the boxes goes
+        into the image with Creative and Spatial both off."""
         p = generate(script, "a quiet street", enabled=False,
                      literal_positive="<lora:still:1>")
 

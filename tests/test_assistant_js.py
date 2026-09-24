@@ -1992,10 +1992,12 @@ class TestThePerMessageActions:
     """Reported in use: eight buttons and a version pager under every bubble,
     wrapping onto three rows at panel width.
 
-    What is left is the three somebody wants on the thing they just said or
-    just read. Nothing here removes an action from the conversation -- the tab
-    keeps the whole set, and it has the room to explain what branching and
-    truncating are about to do.
+    What is left is what somebody wants on the thing they just said or just
+    read -- Edit, Regenerate and Delete on the newest message, Send to prompt on
+    a reply, Send again on an unanswered message of yours -- and none of it is
+    drawn until the message is tapped (`test_assistant_v2_js.py`). Nothing here
+    removes an action from the conversation -- the tab keeps the whole set, and
+    it has the room to explain what branching and truncating are about to do.
     """
 
     @staticmethod
@@ -2020,22 +2022,26 @@ class TestThePerMessageActions:
             }));
         """ % (count, row, role, row)
 
-    def test_only_the_last_message_carries_actions(self):
-        found = run(self.bar(2, 5), sources=("shell",))
+    def test_an_older_message_carries_nothing_but_a_reply_s_send_to_prompt(self):
+        """Edit, Regenerate and Delete are the newest message's. Send to prompt
+        changes nothing in the conversation, so an older reply has it too."""
+        reply = run(self.bar(2, 5, "assistant"), sources=("shell",))
+        mine = run(self.bar(2, 5, "user"), sources=("shell",))
 
-        assert found["glyphs"] == []
+        assert reply["labels"] == ["Send to prompt"]
+        assert mine["labels"] == []
 
-    def test_the_last_reply_offers_edit_regenerate_and_delete(self):
+    def test_the_last_reply_offers_edit_regenerate_delete_and_send_to_prompt(self):
         found = run(self.bar(4, 5, "assistant"), sources=("shell",))
 
-        assert found["labels"] == ["Edit", "Regenerate", "Delete"]
+        assert found["labels"] == ["Edit", "Regenerate", "Delete", "Send to prompt"]
 
-    def test_the_last_message_of_yours_has_nothing_to_ask_again(self):
+    def test_the_last_message_of_yours_is_sent_again_rather_than_regenerated(self):
         """Regenerate is a reply's action. On an unanswered message of yours
-        there is no reply to replace."""
+        there is no reply to replace -- what there is to do is ask again."""
         found = run(self.bar(4, 5, "user"), sources=("shell",))
 
-        assert found["labels"] == ["Edit", "Delete"]
+        assert found["labels"] == ["Edit", "Delete", "Send again"]
 
     def test_each_one_is_a_glyph_with_the_word_kept_for_the_reader(self):
         """An icon with no accessible name is a button only sighted people
@@ -2059,14 +2065,22 @@ class TestThePerMessageActions:
 
     def test_the_actions_nobody_asked_for_are_gone_from_this_view(self):
         """Branching, truncating and version paging are the heavy ones, and
-        they are the ones that want a screen to explain themselves on."""
-        shell = SHELL.read_text(encoding="utf-8")
-        bar = shell.split("Shell.prototype.actions = function", 1)[1] \
-            .split("Shell.prototype", 1)[0]
+        they are the ones that want a screen to explain themselves on.
 
-        for gone in ("branch", "delete_from", "resend_from_user", "select_version",
-                     "drop_version", "continue", "listen"):
-            assert gone not in bar, gone
+        Send again is back, and only in the shape that needs no explaining: on
+        your own last message, which the server answers in place rather than
+        in a branch."""
+        shell = SHELL.read_text(encoding="utf-8")
+        table = shell.split("const ACTIONS = [", 1)[1].split("];", 1)[0]
+        bar = shell.split("Shell.prototype.actions = function", 1)[1] \
+            .split("function actionsOf", 1)[0]
+        offered = re.findall(r'action: "([a-z_]+)"', table)
+
+        assert offered == ["edit_message", "regenerate", "delete_message",
+                           "send_prompt", "resend_from_user"]
+        for gone in ("branch", "delete_from", "select_version", "drop_version",
+                     "continue", "listen"):
+            assert gone not in table + bar, gone
 
     def test_nothing_is_left_dispatching_an_action_no_button_sends(self):
         """`act` special-cased Listen, a truncation confirm and the version
@@ -2295,7 +2309,10 @@ class TestFreeFloat:
             }));
         """, sources=("shell",))
 
-        assert found["labels"] == ["Free Float", "Unload All Models", "Unload LLM"]
+        # Auto Attach follows it: the other mode in this menu, and a mode is
+        # not what anybody should hit on the way to giving a card back.
+        assert found["labels"] == ["Free Float", "Auto Attach", "Unload All Models",
+                                   "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")

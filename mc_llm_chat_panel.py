@@ -2351,6 +2351,10 @@ def _resend(who, identifier, index, temperature, top_p, reply_tokens, seed,
     So it branches, exactly as a mid-thread Regenerate does: the thread up to
     and including your message is copied, the new answer is written in the copy,
     and the conversation it came from keeps every word of what followed.
+
+    Your *last* message has nothing following it to keep, so that one is
+    answered in place -- the thread stays the thread, as the Forge Assistant's
+    SEND AGAIN expects. See ``mc_llm_conversation_ops._plan_resend``.
     """
     import mc_llm_conversation_service as service
 
@@ -2449,10 +2453,11 @@ def _follow(outcome, who, identifier, typed="", clearing: bool = False):
 def _follow_thread(outcome, who, identifier, filter_text=""):
     """:func:`_follow`, for the three actions that can land in another thread.
 
-    Regenerate mid-thread, Continue on an earlier reply and Send again from
-    here all branch, so the panel has to move with the reply: a thread list
-    still pointing at the conversation it came from would apply the next action
-    to the wrong one.
+    Regenerate mid-thread, Continue on an earlier reply and Send again from an
+    earlier message all branch, so the panel has to move with the reply: a
+    thread list still pointing at the conversation it came from would apply the
+    next action to the wrong one. Send again from the *last* message answers in
+    place, lands where it started, and moves nothing.
     """
     landed = (outcome.get("resulting_conversation") or {}).get("thread_id") or identifier
     if outcome.get("ok") and landed != identifier:

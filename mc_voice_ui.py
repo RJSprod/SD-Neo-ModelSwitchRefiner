@@ -660,9 +660,25 @@ def set_auto_speak(value):
     was created without speech and cannot grow it, and starting mid-answer would
     speak from the middle of a sentence.
     """
+    return gr.update(value=apply_auto_speak(value))
+
+
+def apply_auto_speak(value) -> bool:
+    """The whole of :func:`set_auto_speak`, without the Gradio answer.
+
+    The Forge Assistant's read-aloud switch writes the same setting from a
+    route rather than from this tab's checkbox -- it used to press that
+    checkbox from the browser, and a switch that only works while a hidden
+    component in another tab is on the page is a switch that sometimes does
+    nothing. One function for both, so turning it off stops the reply being
+    spoken whichever of them turned it off.
+
+    Returns what the store holds afterwards, not what was asked for: a write
+    the host refused reads as the switch staying where it was.
+    """
     if not value:
         cancel_speech("auto speak off")
-    return _remember(auto_speak=bool(value), key="auto_speak")
+    return bool(state.remember(auto_speak=bool(value))["auto_speak"])
 
 
 def _remember(*, key: str, **values):

@@ -125,6 +125,93 @@ class TestSendAgainFromHereBranches:
         assert outcome["error"]["code"] == service.INVALID_INPUT
 
 
+@pytest.fixture
+def unanswered(chats, thread):
+    """A thread whose last reply was deleted: yours is the last word.
+
+    The state the flyout's SEND AGAIN is for, and the one a stopped or failed
+    reply leaves behind as well.
+    """
+    thread.delete(len(thread.messages) - 1)
+    chats.save(thread)
+    return chats.load("Ada", thread.identifier)
+
+
+class TestSendingAgainTheLastMessageAnswersInPlace:
+    """Nothing follows the last message, so there is nothing for a branch to
+    protect -- and a copy of the whole thread to answer it was a second thread
+    nobody asked for, holding the conversation somebody was in the middle of.
+    "SEND AGAIN will take the latest response ... and send it again to continue
+    the conversation."
+    """
+
+    def test_the_reply_lands_in_the_same_thread(self, chats, unanswered, monkeypatch):
+        replies(monkeypatch)
+
+        outcome = run("resend_from_user", unanswered, index=4)
+
+        assert outcome["ok"] is True
+        assert outcome["resulting_conversation"]["thread_id"] == unanswered.identifier
+        assert [message.text for message in
+                chats.load("Ada", unanswered.identifier).messages] == [
+            "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "A new reply"]
+
+    def test_no_second_thread_is_made(self, chats, unanswered, monkeypatch):
+        replies(monkeypatch)
+        before = {entry.identifier for entry in chats.listing("Ada")}
+
+        run("resend_from_user", unanswered, index=4)
+
+        assert {entry.identifier for entry in chats.listing("Ada")} == before
+
+    def test_your_message_is_not_written_twice(self, chats, unanswered, monkeypatch):
+        """Send appends your words and then the answer. This has your words
+        already, so the acceptance writes nothing and the thread gains exactly
+        one message: the reply."""
+        replies(monkeypatch)
+
+        outcome = run("resend_from_user", unanswered, index=4)
+
+        assert outcome["persisted"] is False
+        texts = [message.text for message in
+                 chats.load("Ada", unanswered.identifier).messages]
+        assert texts.count("ask 2") == 1
+
+    def test_the_message_as_it_reads_now_is_what_is_answered(self, chats, unanswered,
+                                                              monkeypatch):
+        """Edited first, then sent again: the model is asked the edited words."""
+        asked = []
+        events = [sessions.Event(sessions.CHUNK, "ok"), sessions.Event(sessions.DONE, "ok")]
+
+        def conversation(request, cancel):
+            asked.append(request)
+            return iter(events)
+
+        monkeypatch.setattr(sessions, "conversation", conversation)
+        run("edit_message", unanswered, index=4, payload={"text": "ask 2, edited"},
+            operation_id="op-edit")
+        edited = chats.load("Ada", unanswered.identifier)
+
+        run("resend_from_user", edited, index=4, operation_id="op-again")
+
+        last = asked[-1].messages[-1]
+        spoken = last["content"] if isinstance(last["content"], str) else str(last["content"])
+        assert last["role"] == "user"
+        assert "ask 2, edited" in spoken
+
+    def test_a_message_with_replies_after_it_still_branches(self, chats, thread,
+                                                             monkeypatch):
+        """Only the last message is answered in place. One further up has
+        replies under it, and those are what the branch exists to keep."""
+        replies(monkeypatch)
+
+        outcome = run("resend_from_user", thread, index=4)
+
+        assert outcome["resulting_conversation"]["thread_id"] != thread.identifier
+        assert [message.text for message in
+                chats.load("Ada", thread.identifier).messages][-1] == "reply 2"
+
+
 class TestContinueOnAnEarlierReplyBranches:
     """Specification S8, second half. Continuing in place mutated a message
     with descendants, and nothing recorded that it had changed."""

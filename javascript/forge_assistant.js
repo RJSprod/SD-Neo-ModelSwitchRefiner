@@ -85,6 +85,10 @@
     const MENU_EDGE = 8;
     const MENU_FLOOR = 120;
 
+    // How long the answer to a press holds the status line against "Ready.".
+    // See `tell`.
+    const TOLD_FOR = 6000;
+
     // What another extension on this page says when a dialog of its own takes
     // over, and gives way again. Mini Paint NEO publishes it for its Send to
     // WanGP popup; see `yieldTo`.
@@ -294,6 +298,7 @@
             focusEnabled: false,
             focusWorkspaceId: null,
             showAnyway: false,
+            autoAttach: false,
         };
         this.settings = {
             enabled: true,
@@ -317,6 +322,10 @@
         this.settling = false;
         this._restore();
         this._restoreFloat();
+        this._restoreAutoAttach();
+        // Which picture Auto Attach last sent, per conversation. See
+        // `autoAttachable`.
+        this.autoSent = new Map();
     }
 
     Shell.prototype.anchor = function () {
@@ -402,6 +411,27 @@
             window.localStorage.setItem(this._floatKey(), JSON.stringify(
                 {freeFloat: this.state.freeFloat, floatAt: this.state.floatAt}));
         } catch (error) { /* memory only; the panel still works */ }
+    };
+
+    // Auto Attach is a preference about how the composer works, answered once
+    // -- remembered across sessions like Free Float, under a key of its own.
+    Shell.prototype._autoAttachKey = function () {
+        return "forge-assistant-auto-attach:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreAutoAttach = function () {
+        try {
+            this.state.autoAttach = window.localStorage.getItem(this._autoAttachKey()) === "on";
+        } catch (error) {
+            this.state.autoAttach = false;
+        }
+    };
+
+    Shell.prototype._saveAutoAttach = function () {
+        try {
+            window.localStorage.setItem(this._autoAttachKey(),
+                                        this.state.autoAttach ? "on" : "off");
+        } catch (error) { /* memory only; the mode still works */ }
     };
 
     Shell.prototype._save = function () {
@@ -632,16 +662,19 @@
         input.setAttribute("aria-label", "Message");
         input.placeholder = "Message…";
         const toolbar = element("div", "forge-assistant-toolbar");
-        const attach = element("button", "forge-assistant-icon-button", "\u{1F4CE}");
+        const attach = element("button", "forge-assistant-icon-button forge-assistant-attach",
+                               "\u{1F4CE}");
         attach.type = "button";
         attach.setAttribute("aria-label", "Attach an image");
         const dictate = element("button", "forge-assistant-icon-button", "\u{1F3A4}");
         dictate.type = "button";
         dictate.setAttribute("aria-label", "Dictate a message");
-        const readAloud = element("button", "forge-assistant-icon-button", "\u{1F50A}");
+        // Drawn from the setting by `renderReadAloud`, never assumed: see
+        // there for why the two states look nothing alike.
+        const readAloud = element("button",
+                                  "forge-assistant-icon-button forge-assistant-read-aloud");
         readAloud.type = "button";
         readAloud.setAttribute("role", "switch");
-        readAloud.setAttribute("aria-checked", "false");
         readAloud.setAttribute("aria-label", "Read replies aloud");
         const send = element("button", "forge-assistant-send", "Send");
         send.type = "button";
@@ -886,6 +919,7 @@
         }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
+        if (open) this.placedHeight = node.offsetHeight;
         // Free float does not apply to the phone sheet above: a sheet is
         // anchored to a half of the screen and covers it, and there is nothing
         // for a floating position to mean.
@@ -907,6 +941,21 @@
     // capture is released, so a late `lostpointercapture` cannot undo it, and
     // the click is suppressed only if the gesture actually exceeded the
     // threshold -- a press that moved two pixels is a click, not a drag.
+
+    /** The panel changed size. Placed again if it changed height.
+     *
+     * Only height: `placeNow` writes the panel's width itself, and a callback
+     * that answered its own write would be an observer loop. A width that
+     * reflowed the text into another height is a height change, and placed
+     * once; the second pass finds the height it placed and stops.
+     */
+    Shell.prototype.resized = function () {
+        const panel = this.nodes.panel;
+        if (!panel || !this.state.panelOpen) return false;
+        if (panel.offsetHeight === this.placedHeight) return false;
+        this.place();
+        return true;
+    };
 
     Shell.prototype.startDrag = function (event, node) {
         if (event.button !== undefined && event.button !== 0) return;
@@ -1208,6 +1257,9 @@
 
         // Before anything else sees a press. See `supersede`.
         this.on(window, "pointerdown", (event) => this.supersede(event), true);
+        // And before a press lands, a message's open actions go if the press
+        // is not on that message. See `dismissActions`.
+        this.on(window, "pointerdown", (event) => this.dismissActions(event), true);
 
         [nodes.launcher, nodes.header].forEach((handle) => {
             this.on(handle, "pointerdown", (event) => {
@@ -1293,6 +1345,9 @@
             if (this.following) nodes.jump.hidden = true;
             else if (this.settled) nodes.jump.hidden = false;
         });
+        // A tap on a message shows its actions. See `tapBubble`.
+        this.on(nodes.transcript, "click", (event) => this.tapBubble(event));
+        this.on(nodes.transcript, "keydown", (event) => this.bubbleKey(event));
         // A picture in a bubble arrives after the bubble does and grows it,
         // which moves the bottom out from under a reader who was at it. Caught
         // in the capture phase because `load` does not bubble.
@@ -1312,6 +1367,19 @@
             this.on(window.visualViewport, "scroll", () => this.place());
         }
         this.on(window, "orientationchange", () => this.place());
+        // The panel is placed from its own height, and its height changes with
+        // nobody placing it: a message arrives, a picture in a bubble loads, a
+        // tap opens a message's actions. Placed only on the events above, a
+        // panel docked along the bottom grew downwards off the window, taking
+        // the composer and Send with it. Observed rather than re-placed on
+        // every render: a ResizeObserver reports after layout and only when
+        // the box changed, so a reply streaming into a transcript that is
+        // already at its full height and scrolling costs nothing.
+        if (typeof ResizeObserver === "function") {
+            const watched = new ResizeObserver(() => this.resized());
+            watched.observe(nodes.panel);
+            this.disposers.push(() => watched.disconnect());
+        }
         // Nobody is mid-gesture across a hidden page or an unfocused window,
         // and a release that happened while we were not looking is never
         // coming. Coming back, the shell is checked over as well as the
@@ -1930,7 +1998,7 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        const own = [this.floatItem()];
+        const own = [this.floatItem(), this.autoAttachItem()];
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
@@ -1965,6 +2033,52 @@
             this.setFreeFloat(!on);
         });
         return item;
+    };
+
+    Shell.prototype.autoAttachItem = function () {
+        const on = !!this.state.autoAttach;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-auto-attach",
+                             "Auto Attach");
+        item.type = "button";
+        // A mode, like Free Float above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Stop attaching the picture showing in txt2img or img2img"
+            : "Attach the picture showing in txt2img or img2img to each message";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setAutoAttach(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.setAutoAttach = function (on) {
+        this.state.autoAttach = !!on;
+        this._saveAutoAttach();
+        this.renderAutoAttach();
+        this.tell(on ? "Auto Attach is on: the picture showing in txt2img or img2img "
+            + "goes with your next message." : "Auto Attach is off.", "info");
+        return this.state.autoAttach;
+    };
+
+    /** The paperclip says when Auto Attach is on, so nobody is surprised by a
+     *  picture on a message they did not attach one to. */
+    Shell.prototype.renderAutoAttach = function () {
+        const attach = this.nodes.attach;
+        if (!attach) return;
+        const on = !!this.state.autoAttach;
+        // Every render calls this, a streamed reply once a frame: written only
+        // when it changed.
+        if (attach.dataset.auto === (on ? "on" : "off")) return;
+        attach.dataset.auto = on ? "on" : "off";
+        const title = on
+            ? "Attach an image (Auto Attach is on: the picture showing in txt2img or "
+              + "img2img goes with each message)"
+            : "Attach an image";
+        attach.title = title;
+        attach.setAttribute("aria-label", title);
     };
 
     Shell.prototype.customizeItem = function () {
@@ -2195,7 +2309,39 @@
         const view = this.store.snapshot();
         if (!this.canSend(view)) return;
         this.store.setDraftText(this.nodes.input.value);
+        const picked = this.autoAttachable(this.store.snapshot());
+        if (picked.note) this.tell(picked.note, picked.kind);
+        if (!picked.picture) {
+            this.submitDraft(null);
+            return;
+        }
+        // The picture first, then the message -- through the same upload the
+        // paperclip uses, so it arrives exactly as one attached by hand does.
+        // Send is disabled while it uploads (an attachment that is not ready
+        // cannot be sent), so a second press cannot send the words without it.
+        const key = NS.conversationKey(view.selection.character, view.selection.thread);
+        const epoch = view.selection.epoch;
+        this.attachShowing(picked.picture, key).then((attached) => {
+            if (this.store.snapshot().selection.epoch !== epoch) {
+                this.tell("The conversation changed while the picture was attaching. "
+                          + "It is in that conversation's draft; press Send there.", "warn");
+                return;
+            }
+            if (!attached) {
+                this.tell("Auto Attach could not attach the picture from "
+                          + picked.picture.label + (this.attachFailure
+                          ? " (" + this.attachFailure + ")" : "")
+                          + ". Sent without it.", "warn");
+            }
+            this.submitDraft(attached ? picked.picture : null);
+        });
+    };
+
+    Shell.prototype.submitDraft = function (picture) {
+        const view = this.store.snapshot();
+        const key = NS.conversationKey(view.selection.character, view.selection.thread);
         this.store.submit().then((outcome) => {
+            if (outcome && outcome.ok && picture) this.autoSent.set(key, picture.src);
             if (outcome && outcome.lost) {
                 this.say("Checking whether your message was sent…", "warn");
                 this.store.checkPending().then((found) => {
@@ -2209,6 +2355,162 @@
                 this.say((outcome.error && outcome.error.message)
                     || "That could not be sent.", "warn");
             }
+        });
+    };
+
+    // -- Auto Attach ---------------------------------------------------------- //
+    //
+    // "When conversation mode is open, I want an option to enable the current
+    // visible image in the text to image or image to image tab (which ever is
+    // open at the time) to be an automatic input to the next LLM prompt ... If
+    // i am not on either of those tabs, or gallery is empty, then nothing
+    // should be attached."
+    //
+    // "Visible" is Forge's own answer to "which picture", the one its Send to
+    // img2img buttons use: the picture you clicked in the gallery, and the
+    // first one when you have not clicked any. Read off the gallery rather than
+    // asked of Python, because which thumbnail is selected is a fact only the
+    // page knows.
+    //
+    // Three reasons a picture is left out even with the mode on, each said:
+    //
+    // * a picture of your own is already attached -- that one is sent;
+    // * the model running cannot see pictures -- the server refuses any
+    //   message carrying one, so every message would bounce;
+    // * it is the same picture Auto Attach sent last time in this conversation
+    //   and the conversation still has a picture in it. The model keeps up to
+    //   four pictures of a thread's history in view (`prompt_master/chat/
+    //   prompt.py`, MAX_IMAGES), so a second copy of the same one is context
+    //   spent on nothing. A new picture in the gallery is attached as usual.
+
+    const GALLERIES = {
+        tab_txt2img: {id: "txt2img_gallery", label: "txt2img"},
+        tab_img2img: {id: "img2img_gallery", label: "img2img"},
+    };
+
+    // In order: Gradio's preview of the selected picture, the selected
+    // thumbnail, the first thumbnail, and -- for a theme that renames all of
+    // those -- the first picture in the gallery that is not Forge's live
+    // preview of a generation still running.
+    const SHOWING = [".preview img[data-testid=\"detailed-image\"]",
+                     ".preview .media-button img",
+                     ".thumbnail-item.selected img",
+                     ".thumbnail-item img"];
+
+    function showingIn(gallery) {
+        for (let at = 0; at < SHOWING.length; at += 1) {
+            const found = gallery.querySelector(SHOWING[at]);
+            if (found) return found;
+        }
+        const all = typeof gallery.querySelectorAll === "function"
+            ? gallery.querySelectorAll("img") : [];
+        return Array.prototype.find.call(all, (image) =>
+            !(typeof image.closest === "function" && image.closest(".livePreview"))) || null;
+    }
+
+    function fileNameOf(src) {
+        const path = String(src || "").split(/[?#]/)[0];
+        const last = path.slice(path.lastIndexOf("/") + 1);
+        let name = last;
+        try {
+            name = decodeURIComponent(last);
+        } catch (error) { /* a name that is not valid percent-encoding stays as it is */ }
+        name = name.replace(/^file=/, "");
+        name = name.slice(name.lastIndexOf("/") + 1);
+        return name || "image.png";
+    }
+
+    /** The picture showing in this workspace's gallery, or null. */
+    function showingPicture(workspace) {
+        const where = GALLERIES[workspace];
+        if (!where) return null;
+        const gallery = hostElement(where.id);
+        if (!gallery || typeof gallery.querySelector !== "function") return null;
+        const image = showingIn(gallery);
+        const src = image && (image.currentSrc || image.src
+            || (typeof image.getAttribute === "function" ? image.getAttribute("src") : ""));
+        if (!src) return null;
+        return {src: String(src), label: where.label, name: fileNameOf(src)};
+    }
+
+    /** What Auto Attach would do with this send: `{picture}` to attach one,
+     *  and a `note` whenever it leaves one out for a reason worth saying. */
+    Shell.prototype.autoAttachable = function (view) {
+        if (!this.state.autoAttach) return {};
+        if (view.draft && view.draft.attachment) return {};
+        const picture = showingPicture(this.host.getActiveWorkspace());
+        if (!picture) return {};
+        if (view.capabilities && view.capabilities.vision === false) {
+            return {note: "Auto Attach left the picture out: the model running cannot "
+                          + "see pictures.", kind: "warn"};
+        }
+        const key = NS.conversationKey(view.selection.character, view.selection.thread);
+        const messages = (view.conversation && view.conversation.messages) || [];
+        if (this.autoSent.get(key) === picture.src
+            && messages.some((message) => message.attachment)) {
+            return {note: "Same picture as last time, so it was not attached again.",
+                    kind: "info"};
+        }
+        return {picture};
+    };
+
+    // What the server takes as it is, and how large. Anything else -- a format
+    // Forge was told to save in that staging does not read, or an upscale past
+    // the limit -- is drawn onto a canvas and sent as a JPEG instead: the model
+    // sees a few hundred pixels of it whatever it is sent.
+    const STAGEABLE = /^image\/(png|jpeg|webp)$/;
+    const STAGE_LIMIT = 19 * 1024 * 1024;
+    const REENCODE_EDGE = 2048;
+
+    function stageable(blob) {
+        if (STAGEABLE.test(blob.type || "") && blob.size <= STAGE_LIMIT) {
+            return Promise.resolve(blob);
+        }
+        if (typeof createImageBitmap !== "function") return Promise.resolve(blob);
+        return createImageBitmap(blob).then((bitmap) => {
+            const scale = Math.min(1, REENCODE_EDGE / Math.max(bitmap.width, bitmap.height, 1));
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            return new Promise((resolve) => {
+                canvas.toBlob((made) => resolve(made || blob), "image/jpeg", 0.92);
+            });
+        }).catch(() => blob);
+    }
+
+    /** Fetch the showing picture and stage it as this draft's attachment.
+     *
+     * Resolves true when it is ready to send. The chip shows it the whole
+     * way, marked with where it came from. A picture removed from the chip
+     * while it was uploading stays removed.
+     */
+    Shell.prototype.attachShowing = function (picture, key) {
+        const localId = NS.uuid();
+        const mark = {localId, name: picture.name, preview: picture.src, from: picture.label};
+        this.attachFailure = "";
+        this.store.setAttachment(Object.assign({state: "uploading"}, mark), key);
+        const still = () => {
+            const current = this.store.draft(key).attachment;
+            return !!current && current.localId === localId;
+        };
+        return fetch(picture.src, {credentials: "same-origin"}).then((response) => {
+            if (!response.ok) throw new Error("the gallery answered " + response.status);
+            return response.blob();
+        }).then(stageable).then((blob) => {
+            const name = /jpeg/.test(blob.type || "") && !/\.jpe?g$/i.test(picture.name)
+                ? picture.name.replace(/\.[^.]*$/, "") + ".jpg" : picture.name;
+            return this.store.upload(new File([blob], name, {type: blob.type || "image/png"}));
+        }).then((found) => {
+            if (!still()) return false;
+            this.store.setAttachment(Object.assign({state: "ready", token: found.token},
+                                                   mark, {name: found.name || picture.name}),
+                                     key);
+            return true;
+        }).catch((error) => {
+            this.attachFailure = (error && error.message) || "";
+            if (still()) this.store.setAttachment(null, key);
+            return false;
         });
     };
 
@@ -2260,12 +2562,61 @@
                                   mode: "review"});
     };
 
+    /** The read-aloud switch, pressed.
+     *
+     * It used to flip its own attribute and press Voice Chat's checkbox in the
+     * LLM Studio tab -- and start out reading "off" whatever that checkbox
+     * said. Pressed while speech was on, it turned on something already on;
+     * pressed where the checkbox was not on the page, it changed nothing at
+     * all. Either way the replies went on being spoken and synthesised.
+     *
+     * Now the server is told (`Store.setReadAloud`) and the switch shows what
+     * the server says. Off also silences this page at once, before the round
+     * trip, and tells the server to stop the reply being spoken. The tab's
+     * checkbox is brought into line afterwards, so the two views agree.
+     */
     Shell.prototype.toggleReadAloud = function () {
-        const on = this.nodes.readAloud.getAttribute("aria-checked") === "true";
-        this.nodes.readAloud.setAttribute("aria-checked", String(!on));
-        if (NS.speech && typeof NS.speech.setAutomaticReadAloud === "function") {
-            NS.speech.setAutomaticReadAloud(!on);
+        const view = this.store.snapshot();
+        const on = view.readAloud !== true;
+        if (!on && NS.speech && typeof NS.speech.stopPlayback === "function") {
+            NS.speech.stopPlayback({origin: "any"});
         }
+        return this.store.setReadAloud(on).then((stored) => {
+            if (NS.speech && typeof NS.speech.setAutomaticReadAloud === "function") {
+                NS.speech.setAutomaticReadAloud(stored);
+            }
+            this.tell(stored ? "Replies will be read aloud." : "Replies will not be read aloud.",
+                      "info");
+            return stored;
+        }).catch((error) => {
+            this.tell((error && error.message) || "Read aloud could not be changed.", "warn");
+            return null;
+        });
+    };
+
+    /** On and off, so that nobody has to guess which.
+     *
+     * A different glyph for each -- a speaker, and a speaker struck through --
+     * and the stylesheet lights the on state with the accent and takes the
+     * colour out of the off one, because the report was a switch that "does
+     * not change state when i click it": an attribute nothing drew is not a
+     * state anybody can see.
+     * The words are in the tooltip and the accessible name as well, for
+     * whoever the glyphs say nothing to. Unknown -- the server has not said
+     * yet -- is drawn as unknown rather than as off.
+     */
+    Shell.prototype.renderReadAloud = function (view) {
+        const button = this.nodes.readAloud;
+        if (!button) return;
+        const known = view.readAloud === true || view.readAloud === false;
+        const on = view.readAloud === true;
+        const state = known ? (on ? "on" : "off") : "unknown";
+        if (button.dataset.state === state) return;
+        button.dataset.state = state;
+        button.setAttribute("aria-checked", String(on));
+        button.textContent = on ? "\u{1F50A}" : (known ? "\u{1F507}" : "\u{1F508}");
+        button.title = known ? "Read replies aloud: " + (on ? "On" : "Off")
+            : "Read replies aloud";
     };
 
     // -- rendering ---------------------------------------------------------------- //
@@ -2275,6 +2626,21 @@
         if (!status) return;
         status.textContent = text;
         status.dataset.kind = kind || "info";
+    };
+
+    /** Say something about a press, and keep it on screen long enough to read.
+     *
+     * `say` alone is overwritten by the next render, and a press that changes
+     * the store *causes* the next render -- a frame later the line is back to
+     * "Ready." and the answer to the press was never seen. This holds the
+     * line over the idle sentences for TOLD_FOR, and a warning over the
+     * progress of a reply as well -- the press that left a picture out is
+     * usually the press that started the reply. An error from the server and
+     * a lost connection still take the line at once.
+     */
+    Shell.prototype.tell = function (text, kind) {
+        this.told = {text, kind: kind || "info", at: Date.now()};
+        this.say(text, kind);
     };
 
     Shell.prototype.applySuppression = function () {
@@ -2316,6 +2682,8 @@
         }
         this.renderSelector(view);
         this.renderChip(view.draft.attachment);
+        this.renderAutoAttach();
+        this.renderReadAloud(view);
         this.renderTranscript(view);
         this.renderStatus(view);
         nodes.send.disabled = !this.canSend(view);
@@ -2354,8 +2722,10 @@
         }
         const states = {uploading: "Uploading…", processing: "Preparing…",
                         ready: "Ready", failed: attachment.reason || "Failed"};
+        const said = states[attachment.state] || attachment.state;
         chip.appendChild(element("span", "forge-assistant-chip-state",
-                                 states[attachment.state] || attachment.state));
+                                 attachment.from ? "From " + attachment.from + " \u00b7 " + said
+                                     : said));
         const remove = element("button", "forge-assistant-icon-button", "✕");
         remove.type = "button";
         remove.setAttribute("aria-label", "Remove the attached image");
@@ -2459,6 +2829,7 @@
         transcript.innerHTML = "";
         wanted.forEach((node) => transcript.appendChild(node));
         this.lastRendered = fingerprint;
+        if (this.revealed) this.reveal(this.revealed);
 
         if (wasFollowing) {
             this.toBottom();
@@ -2533,7 +2904,15 @@
                                            : "This picture is no longer on disk."));
             node.appendChild(figure);
         }
-        node.appendChild(this.actions(row, view));
+        const bar = this.actions(row, view);
+        node.appendChild(bar);
+        // A bubble with anything to offer is something you tap. Reachable by
+        // keyboard too: focusable, and Enter or Space does what a tap does.
+        if (bar.children.length) {
+            node.dataset.actions = String(bar.children.length);
+            node.setAttribute("tabindex", "0");
+            node.setAttribute("aria-expanded", "false");
+        }
         return node;
     };
 
@@ -2543,41 +2922,68 @@
         node.classList.toggle("forge-assistant-provisional", !!row.provisional);
     };
 
-    // Every action, reachable without hover, with a visible keyboard-focusable
-    // control per message. Each carries the (index, version, revision) captured
-    // at the moment it was drawn -- a stale one is refused by the server rather
-    // than quietly reinterpreted as the current last message.
-    // The three actions the panel offers, as icons, on the last message only.
+    // The actions the panel offers, and which message each belongs on.
     //
     // There were eight of them and a version pager, on every message. At panel
     // width that wrapped onto three rows under every bubble, so a thread was
     // more chrome than conversation, and the ones aimed at a message in the
     // middle of it were the heavy ones -- branch, truncate, renumber -- which
-    // want the room the tab has to explain what they are about to do.
+    // want the room the tab has to explain what they are about to do. So the
+    // panel keeps what you want on the thing you just said or just read. The
+    // rest of the set is unchanged in the tab: nothing here removes an action
+    // from the conversation, only from this view of it.
     //
-    // What is left is what you want on the thing you just said or just read.
-    // The rest of the set is unchanged in the tab: nothing here removes an
-    // action from the conversation, only from this view of it.
+    // And none of them is drawn until you ask. They sat under the newest
+    // message all the time, which was asked to stop: "i want these buttons to
+    // only show up when i tap on the reply". A tap on a message shows its row;
+    // a tap anywhere else, or on the message again, puts it away. See
+    // `tapBubble`.
     //
-    // `\u21bb` is the same glyph the tab draws on a reply for the same action
+    // `newest` is the newest message only; `role` is the kind of message.
+    //
+    // * Edit, Regenerate and Delete are the newest message's, as they were.
+    //   Regenerate is a reply's: on an unanswered message of yours there is no
+    //   reply to ask for again.
+    // * Send to prompt is every reply's. It changes nothing in the conversation
+    //   -- it writes the reply into the image prompt -- so there is no reason
+    //   to keep it off an older one. See `sendToPrompt`.
+    // * Send again is your own newest message's: the state a deleted, stopped
+    //   or failed reply leaves, where the thread ends with you and the only
+    //   useful thing left is to ask again. The server answers that message in
+    //   place (`_plan_resend`); further up the thread it would branch, and the
+    //   tab is where branching is explained.
+    //
+    // `\u21bb` is the same glyph the tab draws on a reply for Regenerate
     // (`javascript/llm_studio.js`), so the two views agree on what it means.
+    // `\u27a4` is the send arrow asked for ("just looks like a send icon on a
+    // button"); Send again's hooked arrow is a send that goes round again.
     const ACTIONS = [
-        {action: "edit_message", glyph: "\u270e", label: "Edit"},
-        {action: "regenerate", glyph: "\u21bb", label: "Regenerate", reply: true},
-        {action: "delete_message", glyph: "\u2715", label: "Delete"},
+        {action: "edit_message", glyph: "\u270e", label: "Edit", newest: true},
+        {action: "regenerate", glyph: "\u21bb", label: "Regenerate", newest: true,
+         role: "assistant"},
+        {action: "delete_message", glyph: "\u2715", label: "Delete", newest: true},
+        {action: "send_prompt", glyph: "\u27a4", label: "Send to prompt",
+         role: "assistant"},
+        {action: "resend_from_user", glyph: "\u21aa", label: "Send again", newest: true,
+         role: "user"},
     ];
 
+    // Each button carries the (index, version, revision) captured at the moment
+    // it was drawn -- a stale one is refused by the server rather than quietly
+    // reinterpreted as the current last message. A reply still being written
+    // has nothing to offer yet.
     Shell.prototype.actions = function (row, view) {
         const bar = element("div", "forge-assistant-actions");
+        bar.hidden = true;
+        if (row.provisional) return bar;
         const messages = (view.conversation && view.conversation.messages) || [];
-        if (!messages.length || row.index !== messages.length - 1) return bar;
-        const revision = view.conversation.conversation
+        const newest = messages.length > 0 && row.index === messages.length - 1;
+        const revision = view.conversation && view.conversation.conversation
             && view.conversation.conversation.revision;
-        const reply = row.role === "assistant";
+        const role = row.role === "assistant" ? "assistant" : "user";
         ACTIONS.forEach((spec) => {
-            // Regenerate is a reply's action. Offered on an unanswered message
-            // of yours it has nothing to ask again.
-            if (spec.reply && !reply) return;
+            if (spec.newest && !newest) return;
+            if (spec.role && spec.role !== role) return;
             const button = element("button", "forge-assistant-action", spec.glyph);
             button.type = "button";
             // An icon with no accessible name is a button only sighted people
@@ -2585,15 +2991,244 @@
             // `aria-label` is what a screen reader reads.
             button.title = spec.label;
             button.setAttribute("aria-label", spec.label);
-            button.addEventListener("click", () => this.act(spec.action, row, revision));
+            button.addEventListener("click", () => {
+                // Pressed is chosen: the row goes away, whatever the action
+                // does next.
+                this.reveal("");
+                this.act(spec.action, row, revision);
+            });
             bar.appendChild(button);
         });
         return bar;
     };
 
+    function actionsOf(node) {
+        return Array.prototype.find.call(node.children || [], (child) =>
+            child.classList && child.classList.contains("forge-assistant-actions")) || null;
+    }
+
+    /** A tap on the transcript: show a message's actions, or put them away.
+     *
+     * Delegated from the transcript rather than bound per bubble, because
+     * bubbles are rebuilt whenever the thread moves and a listener on each is a
+     * listener to lose. A press on a control or a link inside the bubble is
+     * that control's, and text being selected is somebody reading, not
+     * tapping -- neither toggles anything.
+     */
+    Shell.prototype.tapBubble = function (event) {
+        const target = event && event.target;
+        if (!target || typeof target.closest !== "function") return false;
+        if (target.closest("button, a, input, textarea, select")) return false;
+        const node = target.closest(".forge-assistant-bubble");
+        if (!node || !node.dataset || !node.dataset.actions) return false;
+        const selection = typeof window.getSelection === "function"
+            ? window.getSelection() : null;
+        if (selection && !selection.isCollapsed && selection.anchorNode
+            && typeof node.contains === "function" && node.contains(selection.anchorNode)) {
+            return false;
+        }
+        const key = node.dataset.key || "";
+        this.reveal(this.revealed === key ? "" : key);
+        return true;
+    };
+
+    /** Enter or Space on a focused message does what a tap does. */
+    Shell.prototype.bubbleKey = function (event) {
+        if (!event || (event.key !== "Enter" && event.key !== " ")) return false;
+        const node = event.target;
+        if (!node || !node.dataset || !node.dataset.actions) return false;
+        if (!node.classList || !node.classList.contains("forge-assistant-bubble")) return false;
+        event.preventDefault();
+        const key = node.dataset.key || "";
+        this.reveal(this.revealed === key ? "" : key);
+        return true;
+    };
+
+    /** A press anywhere but on the open message puts its actions away.
+     *
+     * In the capture phase, so it runs before the press lands: a tap on
+     * another message closes this one here and opens that one in `tapBubble`,
+     * and a tap on the open message itself is left to `tapBubble` to close.
+     */
+    Shell.prototype.dismissActions = function (event) {
+        if (!this.revealed) return false;
+        const transcript = this.nodes.transcript;
+        const open = transcript && Array.prototype.find.call(transcript.children || [],
+            (node) => node.dataset && node.dataset.key === this.revealed);
+        const target = event && event.target;
+        if (open && target && typeof open.contains === "function" && open.contains(target)) {
+            return false;
+        }
+        this.reveal("");
+        return true;
+    };
+
+    /** Show the actions of the message with this key, and nobody else's.
+     *
+     * Kept as a key rather than as a node, and applied again after every
+     * redraw: a reply arriving token by token redraws the transcript once a
+     * frame, and a row that closed whenever a word arrived could not be used
+     * while a reply was being written. A key that is no longer on the page --
+     * the thread moved, the action ran -- shows nothing and is forgotten.
+     */
+    Shell.prototype.reveal = function (key) {
+        this.revealed = key || "";
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        let found = null;
+        Array.prototype.forEach.call(transcript.children || [], (node) => {
+            if (!node.dataset || !node.dataset.actions) return;
+            const open = !!this.revealed && node.dataset.key === this.revealed;
+            if (open) found = node;
+            const bar = actionsOf(node);
+            if (bar && bar.hidden === open) bar.hidden = !open;
+            if (node.classList) node.classList.toggle("forge-assistant-revealed", open);
+            if (node.getAttribute && node.getAttribute("aria-expanded") !== String(open)) {
+                node.setAttribute("aria-expanded", String(open));
+            }
+        });
+        if (!found) {
+            this.revealed = "";
+            return;
+        }
+        // A row opened under the last message would open below the fold.
+        if (typeof found.getBoundingClientRect === "function"
+            && typeof transcript.getBoundingClientRect === "function") {
+            const box = found.getBoundingClientRect();
+            const edge = transcript.getBoundingClientRect();
+            if (box.bottom > edge.bottom) transcript.scrollTop += box.bottom - edge.bottom;
+        }
+    };
+
+    // -- Send to prompt --------------------------------------------------------- //
+    //
+    // "The send prompt button ... should take that reply, and automatically
+    // replace the current prompt in the positive prompt field. It should
+    // replace everything except lora or content inside a literal command ...
+    // prepend the LLM prompt following by a new line for separation. Pressing
+    // the SEND PROMPT button should just apply the text work, it should not
+    // cause an image to be auto generated."
+    //
+    // What is kept is what this extension already refuses to let a language
+    // model rewrite, read the same way:
+    //
+    // * a literal command -- `[[...]]`, `+[[...]]` or `-[[...]]` -- exactly as
+    //   typed. The grammar is `prompt_master/krea/literals.py`'s: the first
+    //   `]]` closes, an empty one carries nothing, and one never closed is
+    //   ordinary text (so it goes, like any other text);
+    // * an extra-network tag -- `<lora:...>`, `<lyco:...>`, `<hypernet:...>`,
+    //   any case -- outside a literal command. The closed list is
+    //   `prompt_master/krea/extra_networks.py`'s, and for its reason: an open
+    //   `<word:...>` shape would keep other people's syntax by accident.
+    //
+    // Kept in the order they were in, one space apart, on a line after the
+    // reply. The reply goes in as written: it is the reply you chose, and
+    // guessing which of its sentences are "the prompt" is how a sentence you
+    // wanted disappears.
+
+    const LITERAL_OPEN = "[[";
+    const LITERAL_CLOSE = "]]";
+    const EXTRA_NETWORK = /<(?:lora|lyco|hypernet):[^<>]*>/gi;
+
+    function keptFromPrompt(prompt) {
+        const source = String(prompt || "");
+        const kept = [];
+        const spans = [];
+        let position = 0;
+        for (;;) {
+            const start = source.indexOf(LITERAL_OPEN, position);
+            if (start < 0) break;
+            const end = source.indexOf(LITERAL_CLOSE, start + LITERAL_OPEN.length);
+            if (end < 0) break;
+            const signed = start > 0 && (source[start - 1] === "+" || source[start - 1] === "-");
+            const from = signed ? start - 1 : start;
+            const to = end + LITERAL_CLOSE.length;
+            if (source.slice(start + LITERAL_OPEN.length, end).trim()) {
+                kept.push({at: from, text: source.slice(from, to)});
+            }
+            spans.push([from, to]);
+            position = to;
+        }
+        EXTRA_NETWORK.lastIndex = 0;
+        let match = EXTRA_NETWORK.exec(source);
+        while (match) {
+            const at = match.index;
+            if (!spans.some((span) => at >= span[0] && at < span[1])) {
+                kept.push({at, text: match[0]});
+            }
+            match = EXTRA_NETWORK.exec(source);
+        }
+        kept.sort((a, b) => a.at - b.at);
+        return kept.map((item) => item.text);
+    }
+
+    function promptFrom(reply, current) {
+        const body = String(reply || "").trim();
+        const kept = keptFromPrompt(current);
+        if (!kept.length) return body;
+        return body ? body + "\n" + kept.join(" ") : kept.join(" ");
+    }
+
+    // Which prompt: the image tab you are on, and txt2img from anywhere else.
+    const PROMPT_TARGETS = {
+        tab_img2img: {id: "img2img_prompt", label: "img2img"},
+    };
+    const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img"};
+
+    function promptTarget(workspace) {
+        return PROMPT_TARGETS[workspace] || DEFAULT_PROMPT_TARGET;
+    }
+
+    function hostElement(id) {
+        const app = typeof gradioApp === "function" ? gradioApp() : null;
+        return (app && typeof app.querySelector === "function"
+            && app.querySelector("#" + id)) || document.getElementById(id);
+    }
+
+    function promptBox(id) {
+        const holder = hostElement(id);
+        if (!holder) return null;
+        if (holder.tagName === "TEXTAREA") return holder;
+        return typeof holder.querySelector === "function"
+            ? holder.querySelector("textarea") : null;
+    }
+
+    // Gradio binds to the input event, so setting `value` alone changes the
+    // page and tells Gradio nothing -- the next Generate would send the old
+    // prompt. Forge ships `updateInput` for exactly this; the fallback is what
+    // it does. Nothing here presses anything: an input event is typing.
+    function publish(box, value) {
+        box.value = value;
+        if (typeof updateInput === "function") {
+            updateInput(box);
+            return;
+        }
+        box.dispatchEvent(new Event("input", {bubbles: true}));
+    }
+
+    Shell.prototype.sendToPrompt = function (row) {
+        const target = promptTarget(this.host.getActiveWorkspace());
+        const box = promptBox(target.id);
+        if (!box) {
+            this.tell("There is no " + target.label + " prompt on this page.", "warn");
+            return false;
+        }
+        if (!String(row.text || "").trim()) {
+            this.tell("That reply has no words to send.", "warn");
+            return false;
+        }
+        publish(box, promptFrom(row.text, box.value));
+        this.tell("Prompt sent to " + target.label + ".", "info");
+        return true;
+    };
+
     Shell.prototype.act = function (action, row, revision) {
         if (action === "edit_message") {
             this.startEdit(row, revision);
+            return;
+        }
+        if (action === "send_prompt") {
+            this.sendToPrompt(row);
             return;
         }
         const envelope = this.store.envelope(action, {
@@ -2605,7 +3240,7 @@
         envelope.payload = {};
         this.store.send(envelope).then((outcome) => {
             if (outcome && !outcome.ok) {
-                this.say((outcome.error && outcome.error.message)
+                this.tell((outcome.error && outcome.error.message)
                     || "That could not be done.", "warn");
             }
         });
@@ -2664,8 +3299,21 @@
                 : "Reconnecting… Your draft is safe.", "warn");
             return;
         }
+        // A warning about a press -- a picture left out, a prompt with nowhere
+        // to go -- is read before the progress of the reply that press started,
+        // or it is on screen for one frame. See `tell`.
+        const fresh = this.told && Date.now() - this.told.at < TOLD_FOR;
+        if (fresh && this.told.kind === "warn") {
+            this.say(this.told.text, "warn");
+            return;
+        }
         if (view.operation && !view.operation.terminal) {
             this.say(view.operation.status || "Generating…", "info");
+            return;
+        }
+        // The answer to a press, while it is fresh. See `tell`.
+        if (fresh) {
+            this.say(this.told.text, this.told.kind);
             return;
         }
         // Connected, with nothing chosen to show. Worth saying: an empty
@@ -2769,6 +3417,11 @@
     NS.anchorPoint = anchorPoint;
     NS.nearestAnchor = nearestAnchor;
     NS.renderMarkdown = renderMarkdown;
+    NS.promptFrom = promptFrom;
+    NS.showingPicture = showingPicture;
+    NS.fileNameOf = fileNameOf;
+    NS.stageable = stageable;
+    NS.keptFromPrompt = keptFromPrompt;
     NS.safeUrl = safeUrl;
     NS.ANCHORS = ANCHORS;
     NS.Shell = Shell;

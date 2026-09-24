@@ -407,6 +407,120 @@ class TestTheFeed:
         assert page.poll()[0]["server_epoch"] == service.SERVER_EPOCH
 
 
+class TestReadingAloud:
+    """The flyout's read-aloud switch, and the one setting behind it.
+
+    It started "off" whatever Voice Chat's "Speak replies automatically" said,
+    never asked, and changed that setting by pressing a checkbox in a tab the
+    flyout is usually not on. A first press on a switch reading off turned on
+    something already on, and every reply went on being synthesised -- for up
+    to half a minute each even with nobody listening. So the switch is drawn
+    from the setting, and written through a route of its own.
+    """
+
+    def test_the_bootstrap_says_whether_replies_are_read_aloud(self):
+        import mc_voice_state
+
+        mc_voice_state.remember(auto_speak=True)
+        on = api.bootstrap("page-1")["read_aloud"]
+        mc_voice_state.remember(auto_speak=False)
+        off = api.bootstrap("page-1")["read_aloud"]
+
+        assert (on, off) == (True, False)
+
+    def test_a_setting_that_cannot_be_read_is_not_reported_as_off(self, monkeypatch):
+        """Off is a claim. A switch drawn off from a setting nobody could read
+        is the switch this replaces."""
+        import mc_voice_state
+
+        def broken():
+            raise RuntimeError("no host")
+
+        monkeypatch.setattr(mc_voice_state, "auto_speak", broken)
+
+        assert api.bootstrap("page-1")["read_aloud"] is None
+
+    @pytest.mark.parametrize("wanted", [True, False])
+    def test_it_writes_the_setting_the_tab_reads(self, wanted):
+        import mc_voice_state
+
+        mc_voice_state.remember(auto_speak=not wanted)
+
+        payload, status = api.read_aloud(wanted)
+
+        assert status == 200
+        assert payload["read_aloud"] is wanted
+        assert mc_voice_state.auto_speak() is wanted
+
+    def test_off_stops_the_reply_being_spoken(self, monkeypatch):
+        import mc_voice_ui
+
+        stopped = []
+        monkeypatch.setattr(mc_voice_ui, "cancel_speech",
+                            lambda reason="user": stopped.append(reason) or True)
+
+        api.read_aloud(False)
+
+        assert stopped == ["auto speak off"]
+
+    def test_on_leaves_the_reply_in_flight_alone(self, monkeypatch):
+        """A reply accepted without speech cannot grow it, and starting in the
+        middle of an answer would speak from the middle of a sentence."""
+        import mc_voice_ui
+
+        stopped = []
+        monkeypatch.setattr(mc_voice_ui, "cancel_speech",
+                            lambda reason="user": stopped.append(reason) or True)
+
+        api.read_aloud(True)
+
+        assert stopped == []
+
+    @pytest.mark.parametrize("wanted", ["false", 0, 1, None, "off"])
+    def test_anything_but_true_or_false_is_refused_and_writes_nothing(self, wanted):
+        """"false" is truthy. A route that took bool() of what it was sent would
+        turn reading aloud *on* when asked to turn it off."""
+        import mc_voice_state
+
+        mc_voice_state.remember(auto_speak=True)
+
+        payload, status = api.read_aloud(wanted)
+
+        assert status == 400
+        assert payload["error"]["code"] == service.INVALID_INPUT
+        assert mc_voice_state.auto_speak() is True
+
+    def test_the_answer_is_what_was_stored_not_what_was_asked(self, monkeypatch):
+        """A host that refused the write leaves the switch where it was, and
+        the flyout has to be told so rather than told what it hoped."""
+        import mc_voice_state
+
+        monkeypatch.setattr(mc_voice_state, "remember",
+                            lambda **values: {"auto_send": False, "auto_speak": True})
+
+        payload, _ = api.read_aloud(False)
+
+        assert payload["read_aloud"] is True
+
+    def test_the_tab_s_checkbox_and_the_route_are_one_function(self, monkeypatch):
+        """Two copies of "turn it off" is two places to forget the half that
+        stops the speaker."""
+        import mc_voice_ui
+
+        calls = []
+        monkeypatch.setattr(mc_voice_ui, "apply_auto_speak",
+                            lambda value: calls.append(value) or bool(value))
+
+        mc_voice_ui.set_auto_speak(False)
+        api.read_aloud(True)
+
+        assert calls == [False, True]
+
+    def test_it_is_one_of_the_routes_this_extension_registers(self):
+        assert api.READ_ALOUD_ROUTE in api.ROUTES
+        assert api.READ_ALOUD_ROUTE.startswith(api.PREFIX + "/")
+
+
 class TestWorkspaces:
     def test_it_describes_the_tab_this_extension_owns(self, monkeypatch):
         found = api.workspaces()

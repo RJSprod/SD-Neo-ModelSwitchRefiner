@@ -125,7 +125,9 @@ finally produced the real diagnosis of all four focus-mode reports (§3.8), and
 one more came in once focus mode worked (§3.9). §3.10 is the tab's own
 transcript, which is a separate implementation and had a separate defect, and
 §3.11 is three asks against the panel once the whole of it worked, and §3.12
-three more against its own chrome, and §3.13 is a cross-extension one.
+three more against its own chrome, and §3.13 is a cross-extension one. §3.19 is
+the second round of asks: read aloud, tap to reveal, Send to prompt, Send again
+and Auto Attach.
 
 ### The panel could not be minimised, and the workspace menu would not close
 
@@ -1184,16 +1186,184 @@ Escape key, both off.
 
 ---
 
+## 3.19 The second round: read aloud, tap to reveal, Send to prompt, Send again, Auto Attach
+
+> "The goal: When conversation mode is open, I want an option to enable the
+> current visible image in the text to image or image to image tab ... to be an
+> automatic input to the next LLM prompt ... Make this a toggle in the '...'
+> menu 'Auto Attach' ... the buttons are always there for EDIT, RETRY, and
+> DELETE. I want these buttons to only show up when i tap on the reply ... a new
+> button there for SEND PROMPT ... a new button for SEND AGAIN ... the TTS mode
+> seems to not turn off in flyout mode. The button does not change state when i
+> click it, and i seems to always see TTS activity in my console."
+
+Asked for together, as a "V2 flyout menu update". Three decisions were put to
+the user before any of it was built, and accepted as proposed: Auto Attach does
+not attach the same picture twice while the thread still carries it; Send again
+on your last message answers in place, in the tab as well; Send to prompt writes
+to txt2img from any tab that is not an image tab.
+
+### The read-aloud switch was three defects
+
+1. **It never asked.** `aria-checked` started `false` whatever Voice Chat's
+   *Speak replies automatically* said, and nothing ever set it from the
+   setting. With speech on, the first press "turned it on" and changed nothing.
+2. **It wrote by pressing somebody else's control.** `setAutomaticReadAloud`
+   clicks the LLM Studio checkbox. Where that press did not land, the setting
+   did not move.
+3. **Nothing drew it.** No rule in `style.css` named its state, so on and off
+   looked identical -- the report, word for word.
+
+Behind them, the cost the user was seeing: with the setting on, the acceptance
+path (`mc_llm_conversation_ops` calling `mc_voice_ui.begin_speech`) creates a
+speech turn for every reply, and a turn warms the voice worker and synthesises
+from the first segment whether or not a page ever opens its stream -- it gives
+up only after `mc_voice_turn.CLIENT_WAIT`, thirty seconds.
+
+What replaced it:
+
+- `bootstrap()` carries `read_aloud` -- the setting, or `None` when it cannot
+  be read, because "off" is a claim. The store keeps it (`noteReadAloud`, on
+  both bootstraps) and every render draws the switch from it: `data-state` on,
+  off or unknown; a lit speaker, a greyed speaker struck through, a plain
+  speaker. Off is greyed and deliberately not faded: a faded control reads as a
+  disabled one.
+- `POST …/v2/read-aloud` writes it. It shares `mc_voice_ui.apply_auto_speak`
+  with the tab's checkbox, so off cancels the turn being spoken from either,
+  and it answers with what the store holds, so a refused write reads as the
+  switch staying put. It refuses anything but a boolean: `"false"` is truthy.
+- The store moves the switch at once and puts it back if the route refuses.
+- **The part that makes off mean off:** `Store.stampVoice` writes
+  `voice: false` into every GENERATING envelope the panel sends while the
+  switch is off, and the server then never calls `begin_speech` for that
+  reply. Written once per envelope and never rewritten, because a retry is the
+  same envelope and one operation id arriving with two payloads is refused as a
+  different request.
+- Off also silences the page on the press (`speech.stopPlayback`), and the
+  facade's `setAutomaticReadAloud` is still called afterwards -- with what the
+  server stored -- so the tab's checkbox agrees.
+
+Found on the way and left alone: `capabilities().voice` calls
+`mc_voice_state.enabled()`, which does not exist, so it is always `False`.
+Nothing reads it.
+
+### Tap to reveal
+
+`ACTIONS` is a table with `newest` and `role` on each entry, so which message
+gets which icon is one list rather than a chain of conditions: Edit, Regenerate
+and Delete on the newest message (Regenerate only on a reply), Send to prompt
+on every reply, Send again on your own newest message. A reply still being
+written offers nothing.
+
+The row is built `hidden` and shown by `reveal(key)`. Four details:
+
+- **Delegated.** One click listener on the transcript (`tapBubble`), because
+  bubbles are rebuilt whenever the thread moves. A press on a link or a control
+  inside the bubble is that control's; a selection inside it is reading.
+- **Kept by key, re-applied after a redraw.** A reply arriving token by token
+  redraws once a frame, and a row that closed on every token could not be used
+  while a reply was arriving. A key no longer on the page is forgotten.
+- **Put away before a press lands.** `dismissActions` runs on the window's
+  `pointerdown` in the capture phase, beside `supersede`: a press on another
+  message closes this one there and opens that one in `tapBubble`.
+- **Keyboard.** A bubble with actions is focusable, and Enter and Space toggle
+  it.
+
+Driving it in Chromium found the one layout problem in this round, and it was
+older than the round: the panel is placed from its own height, and nothing
+placed it again when the height changed. Docked along the bottom it grew
+downwards off the window as messages arrived -- and now as a tap opened a
+message's actions -- taking the composer with it (bottom at 993px in an 800px
+window). A `ResizeObserver` on the panel places it again when its height
+changes; width is ignored because `placeNow` writes the width itself.
+
+### Send to prompt
+
+`keptFromPrompt` reads the prompt with `prompt_master/krea/literals.py`'s
+grammar -- `[[…]]`, a sign only immediately before `[[`, the first `]]` closes,
+an empty command carries nothing, an unclosed one is ordinary text -- and with
+`extra_networks.KINDS` (`lora`, `lyco`, `hypernet`, any case, `[^<>]*`) for tags
+outside a command. What it keeps, it keeps verbatim and in source order; the
+new prompt is the trimmed reply, a newline, and those joined by spaces. It is a
+JavaScript copy of rules that live in Python, so its tests pin it to the same
+cases the Python modules are tested with.
+
+It writes the textarea inside `#txt2img_prompt` or `#img2img_prompt` and tells
+Gradio through Forge's `updateInput` where it exists (an `input` event where it
+does not) -- the pattern `model_chain_spatial_krea.js` already uses. Nothing is
+pressed.
+
+### Send again
+
+`_plan_resend` answers a *last* message in place: `APPEND` at
+`len(messages)`, the history as it stands, `persisted=False` and the current
+revision as the accepted one -- the shape Regenerate's final-reply path already
+has. The completion's own check (`index == len(messages)`) and the revision
+guard keep it honest. Earlier messages still branch (S8). The tab's *Send again
+from here* goes through the same planner, so it changed the same way, and
+`_follow_thread` already handled a result that lands in the thread it started
+in.
+
+### Auto Attach
+
+Which picture is Forge's own answer -- `extract_image_from_gallery` takes the
+selected thumbnail, else the first -- read off Gradio 4.40's gallery in order:
+the preview's `detailed-image`, the selected thumbnail, the first thumbnail,
+and, for a theme that renames all of those, the first `img` that is not inside
+Forge's `.livePreview`. The picture is fetched from its `/file=` address and
+goes through `Store.upload`, the paperclip's route, so the server stages it
+exactly as a picture attached by hand.
+
+The rule against sending the same picture twice is "the same `src` as the last
+one Auto Attach sent in this conversation, *and* the thread still has a message
+with a picture". The second half is what makes deleting that message enough to
+have it attached again. Formats staging refuses, and pictures past its size
+limit, are redrawn onto a canvas as JPEG, no more than 2048 pixels on the long
+edge.
+
+A send with Auto Attach waits for the upload, and Send is disabled meanwhile by
+a rule it already had (an attachment that is not ready cannot be sent). If the
+selection moved during the upload, nothing is sent -- the picture stays in that
+conversation's draft.
+
+### The status line holds
+
+`say` is overwritten by the next render, and a press that changes the store
+causes one, so the answer to a press was on screen for a frame. `tell` holds the
+line for six seconds over the idle sentences, and a *warning* over the progress
+of a reply -- the press that left a picture out is usually the press that
+started the reply. An error from the server and a lost connection still take the
+line at once.
+
+### Verified in Chromium
+
+Against a stand-in server, with the real scripts and stylesheet, a Forge-shaped
+tab bar and a gallery built the way Gradio 4.40 builds it (nested buttons and
+all), driven with real clicks. Twenty-two checks: the switch starts from the
+server's answer, writes through the route and looks different in each state;
+there is no action row before a tap, a tap shows it, and a second tap or a
+press elsewhere hides it; Send to prompt writes the expected text, fires
+`input` and sends no command; Auto Attach lights the paperclip, uploads the
+gallery's PNG and sends its token with `voice: false`; the picture shows on the
+message; your last message offers Send again, which sends `resend_from_user`
+at the right index; the panel stays on the window as it grows and as a row
+opens; the same picture is not attached twice; no script error. It is not a
+Forge: the gallery's shape is from Gradio's source, and the first run on the
+real host is the gate still open.
+
+---
+
 ## 4. Deliberate deviations
 
-**The panel offers three message actions, not all of them** (§3.11). The
-specification's shared conversation view carries every action the tab has. At
-the user's request the panel carries edit, regenerate and delete, as icons, on
-the newest message only. The service implements all sixteen and the tab offers
-them; this is one view's opinion about what belongs on a phone-width panel, not
-a change to the conversation. The cost is that alternate versions from a
-regenerate are browsable in the tab and not in the panel, which was accepted
-when it was asked for.
+**The panel offers a few message actions, not all of them** (§3.11, §3.19).
+The specification's shared conversation view carries every action the tab has.
+At the user's request the panel carries edit, regenerate and delete on the
+newest message, Send to prompt on replies and Send again on your own newest
+message -- as icons, and only once the message is tapped. The service implements
+all sixteen and the tab offers them; this is one view's opinion about what
+belongs on a phone-width panel, not a change to the conversation. The cost is
+that alternate versions from a regenerate are browsable in the tab and not in
+the panel, which was accepted when it was asked for.
 
 **No `DataTransfer` adapter for the tab's image input.** The specification names
 it as a candidate for keeping the tab's visible chip in step with a pasted

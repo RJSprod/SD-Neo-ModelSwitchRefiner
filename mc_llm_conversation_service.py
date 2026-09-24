@@ -1067,7 +1067,29 @@ def bootstrap(page_id: str = "") -> dict:
             "page_id": page_id or uuid.uuid4().hex, "actions": list(ACTIONS),
             "selection": remembered_selection(),
             "characters": character_names(),
-            "mode": remembered_mode()}
+            "mode": remembered_mode(),
+            "read_aloud": read_aloud()}
+
+
+def read_aloud():
+    """Whether replies are read aloud: Voice Chat's "Speak replies
+    automatically", the one setting both views share. ``None`` if it cannot be
+    read.
+
+    The flyout's switch is drawn from this. It used to start "off" whatever the
+    setting was and never ask, so a first press on a switch that read off
+    turned on something already on -- and the replies went on being spoken.
+    ``None`` rather than ``False`` when unreadable, because "off" is a claim and
+    a switch that makes one it cannot back is the bug this replaces.
+    """
+    try:
+        import mc_voice_state
+
+        return bool(mc_voice_state.auto_speak())
+    except Exception:
+        logger.debug("Model Chain: could not read whether replies are read aloud",
+                     exc_info=True)
+        return None
 
 
 def remembered_selection() -> dict:

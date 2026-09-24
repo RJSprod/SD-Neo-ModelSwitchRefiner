@@ -6175,6 +6175,36 @@
     min-width: 44px;
 }
 
+/* The read-aloud switch, in two states nobody has to guess between.
+
+   Reported as a button that "does not change state when i click it", and it
+   did not, visibly: it set `aria-checked` and nothing in this file drew it.
+   On is lit -- the accent's border, fill and an inner ring, the look of a
+   pressed toggle -- and carries a speaker. Off is an ordinary button carrying
+   a speaker struck through, with the colour taken out of the glyph. Off is
+   deliberately *not* dimmed: a faded control reads as a disabled one, and
+   this one is always pressable. `data-state` rather than `aria-checked`,
+   because there is a third state -- the server has not said yet -- that is
+   neither, and is drawn as a plain speaker with no claim either way. */
+.forge-assistant-read-aloud[data-state="on"] {
+    border-color: var(--color-accent, #2563eb);
+    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
+}
+
+.forge-assistant-read-aloud[data-state="off"] {
+    filter: grayscale(1);
+}
+
+/* The paperclip while Auto Attach is on, lit the same way: the picture
+   showing in txt2img or img2img goes with each message, and a picture on a
+   message you did not attach one to should never be a surprise. */
+.forge-assistant-attach[data-auto="on"] {
+    border-color: var(--color-accent, #2563eb);
+    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
+}
+
 /* The workspace strip, which is what the panel is while the conversation is
    collapsed.
    =========================================================================
@@ -6362,6 +6392,24 @@
     flex-wrap: wrap;
     gap: 0.25em;
     margin-top: 0.4em;
+}
+
+/* A message with actions is tapped to show them, and says so: a pointer over
+   it, a ring when the keyboard is on it, and the accent on its border while
+   its row is open -- so which message a button belongs to is never a guess.
+   The row itself is shown and hidden with `hidden`, which the root's own rule
+   above makes stick. */
+.forge-assistant-bubble[data-actions] {
+    cursor: pointer;
+}
+
+.forge-assistant-bubble[data-actions]:focus-visible {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: 2px;
+}
+
+.forge-assistant-revealed {
+    border-color: var(--color-accent, #2563eb);
 }
 
 /* Reachable without hover, always: a control that only appears on hover is a

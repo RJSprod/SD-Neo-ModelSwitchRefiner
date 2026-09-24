@@ -1421,17 +1421,14 @@ class TestTheTxt2imgSurface:
                 # tests/test_krea_spatial_js.py is where that is checked rather
                 # than asserted.
                 #
-                # "literal_row" is the third kind again, and the one worth
-                # naming carefully: it is hidden when neither Creative nor
-                # Spatial is on, and its two boxes still reach the next
-                # generation while it is. That is deliberate -- section 3.3 of
-                # the Literal Prompts intent, where hidden explicitly does not
-                # mean inactive -- so what makes it acceptable is not that it is
-                # reachable but that it is *reported*: the Image Pipeline's
-                # Prompt row says how many literals are active whenever this row
-                # is off screen and its boxes are not empty.
+                # "literal_row" is deliberately NOT in this list any more. It
+                # used to be hidden while neither Creative nor Spatial was on,
+                # with its two boxes still reaching every generation, and was
+                # allowed here because the Image Pipeline reported it. It was
+                # asked for back on screen for good, so a build that hides it
+                # again fails here.
                 assert (name in ("creativity", "status", "controls", "name_row",
-                                 "spatial_group", "spatial_state", "literal_row")
+                                 "spatial_group", "spatial_state")
                         or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):
