@@ -579,6 +579,137 @@ class TestADeadStreamIsReplaced:
                          r'this\.store\.reconcile\(true\);', wiring)
 
 
+class TestNothingIsHeldOpenInTheBackground:
+    """Reported from use: a tab left in the background for half an hour or
+    more came back with its connections half-dead -- open as far as the page
+    could tell, and silent -- and everything on it hung. A feed that is not
+    held across the absence cannot come back that way, so it is let go on the
+    way out and caught up from scratch on the way back."""
+
+    def test_going_to_the_background_lets_the_feed_go_without_a_failure(self):
+        found = run(STORE_SETUP + """
+            let aborted = 0;
+            store.connected = true;
+            store.everConnected = true;
+            store._abort = {abort() { aborted += 1; }};
+            store.sleep();
+            console.log(JSON.stringify({aborted, connected: store.connected,
+                                        sleeping: store.sleeping, failures: store.failures,
+                                        ladder: timers.some((t) => t.ms >= 1000 && t.ms <= 15400)}));
+        """, sources=("store",))
+
+        assert found["aborted"] == 1
+        assert found["sleeping"] is True and found["connected"] is False
+        assert found["failures"] == 0, "letting go on purpose is not a dropped feed"
+        assert found["ladder"] is False, "and nothing climbs the reconnect ladder for it"
+
+    def test_the_feed_it_let_go_is_not_reopened_while_away(self):
+        found = run(STORE_SETUP + """
+            store.feed = "f";
+            store.connected = true;
+            store._abort = {abort() {}};
+            store.refresh = () => { calls.push("refresh"); return Promise.resolve(null); };
+            store.sleep();
+            store.dropped();
+            store.stream();
+            store.connect();
+            store.reconcile(true);
+            settle().then(() => console.log(JSON.stringify({calls, failures: store.failures})));
+        """, sources=("store",))
+
+        assert found == {"calls": [], "failures": 0}
+
+    def test_the_return_catches_up_from_scratch(self):
+        found = run(STORE_SETUP + """
+            answers = {"/subscribe": [200, {feed: "f2", subscription_generation: "g",
+                                            stream_cursor: 7}]};
+            store.connected = true;
+            store.everConnected = true;
+            store._abort = {abort() {}};
+            store.refresh = () => { calls.push("refresh"); return Promise.resolve(null); };
+            store.sleep();
+            const status = [];
+            store.announce = () => status.push(store.snapshot().catchingUp);
+            store.wake();
+            settle().then(() => console.log(JSON.stringify({
+                calls: calls.map((c) => c.split("?")[0].replace(/^.*conversation.v2/, "")),
+                sleeping: store.sleeping, catchingUp: status[0]})));
+        """, sources=("store",))
+
+        assert found["sleeping"] is False
+        assert found["calls"][:3] == ["/subscribe", "refresh", "/events"], found["calls"]
+        assert found["catchingUp"] is True, "and says it is catching up, not reconnecting"
+
+    def test_a_reply_being_written_is_held_until_it_ends(self):
+        """A question asked just before switching away is still answered --
+        and read aloud, if that is on -- while the page is away."""
+        found = run(STORE_SETUP + """
+            let aborted = 0;
+            store.connected = true;
+            store.cursor = 4;
+            store._abort = {abort() { aborted += 1; }};
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.sleep();
+            const held = {aborted, sleeping: store.sleeping,
+                          timer: timers.some((t) => t.ms === 600000)};
+            store.refresh = () => Promise.resolve(null);
+            store.apply({protocol_version: 2, stream_cursor: 5, kind: "operation_terminal",
+                         operation_id: "op1", operation_seq: 2, conversation: {},
+                         payload: {phase: "done"}});
+            console.log(JSON.stringify({held, after: {aborted, sleeping: store.sleeping}}));
+        """, sources=("store",))
+
+        assert found["held"] == {"aborted": 0, "sleeping": False, "timer": True}
+        assert found["after"] == {"aborted": 1, "sleeping": True}
+
+    def test_a_reply_that_never_ends_is_not_held_for_ever(self):
+        found = run(STORE_SETUP + """
+            let aborted = 0;
+            store.connected = true;
+            store._abort = {abort() { aborted += 1; }};
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.sleep();
+            timers.find((t) => t.ms === 600000).fn();
+            console.log(JSON.stringify({aborted, sleeping: store.sleeping}));
+        """, sources=("store",))
+
+        assert found == {"aborted": 1, "sleeping": True}
+
+    def test_a_catch_up_that_fails_says_reconnecting(self):
+        found = run(STORE_SETUP + """
+            store.connected = true;
+            store.everConnected = true;
+            store._abort = {abort() {}};
+            store.sleep();
+            store.wake();
+            settle().then(() => console.log(JSON.stringify({
+                catchingUp: store.catchingUp, failures: store.failures})));
+        """, sources=("store",))
+
+        assert found == {"catchingUp": False, "failures": 1}
+
+    def test_the_shell_sleeps_and_wakes_the_store_with_the_page(self):
+        shell = SHELL.read_text(encoding="utf-8")
+        wiring = shell.split("Shell.prototype.wire = function", 1)[1] \
+            .split("Shell.prototype.grow = function", 1)[0]
+        handler = wiring.split('this.on(document, "visibilitychange"', 1)[1].split("});", 1)[0]
+
+        assert "this.store.sleep();" in handler.split("return;", 1)[0]
+        assert "this.store.wake();" in handler.split("return;", 1)[1]
+
+    def test_the_status_line_says_catching_up(self):
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.said = [];
+            shell.say = (text) => shell.said.push(text);
+            shell.renderStatus({ready: true, connected: false, everConnected: true,
+                                catchingUp: true, polling: false, error: ""});
+            console.log(JSON.stringify({said: shell.said}));
+        """, sources=("shell",))
+
+        assert found == {"said": ["Catching up…"]}
+
+
 class TestARestartedServerIsRejoined:
     def test_a_refused_key_is_renewed_from_gradios_config(self):
         found = run(STORE_SETUP + """

@@ -70,6 +70,15 @@
     // dead rather than waited on for the full SILENCE.
     const STALE = 20000;
 
+    // A page in the background holds no feed open. One kept open across a long
+    // absence is the connection that came back half-dead -- open as far as the
+    // page could tell, and silent -- so it is let go on the way out and the
+    // return catches up with a snapshot and a fresh feed. The one exception is
+    // a reply still being written: that is held until it ends, or for this
+    // long at most, so a question asked just before switching away is still
+    // answered while the page is away.
+    const HOLD_FOR_REPLY = 600000;
+
     // The Gradio component that carries this process's capability, and where
     // Gradio publishes every component's initial value. A restarted server
     // mints a new key; the page keeps the old one in the DOM for ever, and
@@ -183,6 +192,12 @@
         this._renewFutile = false;
         this._keyOverride = null;
         this._restarting = false;
+        // `asleep` is the page being in the background; `sleeping` is the feed
+        // actually let go for it. They differ while a reply is being held.
+        this.asleep = false;
+        this.sleeping = false;
+        this.catchingUp = false;
+        this._sleepTimer = null;
         this._restoreDrafts();
     }
 
@@ -216,6 +231,7 @@
             connected: this.connected,
             everConnected: this.everConnected,
             polling: this.polling,
+            catchingUp: this.catchingUp,
             error: this.error,
             capabilities: Object.assign({}, this.capabilities),
             selection: Object.assign({}, this.selection),
@@ -402,6 +418,7 @@
     };
 
     Store.prototype.connect = function () {
+        if (this.sleeping) return Promise.resolve();
         return this.request("/subscribe", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
@@ -420,7 +437,7 @@
     // -- the stream -------------------------------------------------------- //
 
     Store.prototype.stream = function () {
-        if (!this.feed || this.polling) return Promise.resolve();
+        if (!this.feed || this.polling || this.sleeping) return Promise.resolve();
         const controller = typeof AbortController === "function" ? new AbortController()
             : null;
         this._abort = controller;
@@ -437,6 +454,7 @@
             this.failures = 0;
             this.lastTraffic = Date.now();
             this.error = "";
+            this.catchingUp = false;
             this.announce();
             return this.readStream(response.body.getReader());
         }).catch((error) => {
@@ -484,7 +502,11 @@
     };
 
     Store.prototype.dropped = function () {
+        // A feed let go on purpose is not a failure, and nothing climbs the
+        // ladder for it: the return opens a new one.
+        if (this.sleeping) return;
         this.connected = false;
+        this.catchingUp = false;
         this.failures += 1;
         this.announce();
         if (this.failures >= FAILURES_BEFORE_POLLING) {
@@ -654,6 +676,8 @@
             this.phase(event, key, true);
             if (!mine || !this.atBottom) this.mark(key);
             if (mine) this.refresh();
+            // The reply a page in the background was holding its feed for.
+            if (this.asleep && !this.sleeping && !this.replying()) this.letGo();
             break;
         case "result_conflict":
             this.phase(event, key, true);
@@ -1016,11 +1040,71 @@
      * heartbeat rather than three, because at those moments it usually is.
      */
     Store.prototype.reconcile = function (eager) {
+        if (this.sleeping) return Promise.resolve();
         if (this.silent(eager ? STALE : SILENCE)) this.restream();
         return this.refresh();
     };
 
+    /** The page went to the background: let the feed go, unless a reply is
+     * being written, in which case once it has ended. */
+    Store.prototype.sleep = function () {
+        this.asleep = true;
+        if (this.sleeping) return;
+        if (!this.replying()) {
+            this.letGo();
+            return;
+        }
+        window.clearTimeout(this._sleepTimer);
+        this._sleepTimer = window.setTimeout(() => {
+            if (this.asleep) this.letGo();
+        }, HOLD_FOR_REPLY);
+    };
+
+    /** Whether a reply is in flight: one this page sent, or one it is being
+     * told about. */
+    Store.prototype.replying = function () {
+        if (this._pending) return true;
+        let live = false;
+        this.operations.forEach((operation) => {
+            if (operation && !operation.terminal) live = true;
+        });
+        return live;
+    };
+
+    Store.prototype.letGo = function () {
+        window.clearTimeout(this._sleepTimer);
+        this._sleepTimer = null;
+        this.sleeping = true;
+        this.connected = false;
+        this.failures = 0;
+        this.polling = false;
+        window.clearTimeout(this._reconnect);
+        window.clearTimeout(this._pollTimer);
+        window.clearTimeout(this._retryStream);
+        if (this._abort) {
+            try {
+                this._abort.abort();
+            } catch (error) { /* already gone */ }
+            this._abort = null;
+        }
+    };
+
+    /** Back on screen. A feed that was let go is caught up from scratch --
+     * subscribe, snapshot, a fresh stream -- rather than trusted; one that was
+     * held for a reply is checked the way any return checks it. */
+    Store.prototype.wake = function () {
+        this.asleep = false;
+        window.clearTimeout(this._sleepTimer);
+        this._sleepTimer = null;
+        if (!this.sleeping) return this.reconcile(false);
+        this.sleeping = false;
+        this.catchingUp = true;
+        this.announce();
+        return this.connect();
+    };
+
     Store.prototype.dispose = function () {
+        window.clearTimeout(this._sleepTimer);
         window.clearTimeout(this._reconnect);
         window.clearTimeout(this._pollTimer);
         window.clearTimeout(this._draftTimer);

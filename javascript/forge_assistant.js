@@ -1319,10 +1319,12 @@
         this.on(document, "visibilitychange", () => {
             if (document.hidden) {
                 this.cancelGestures();
+                // Nothing held open while away: see `Store.sleep`.
+                this.store.sleep();
                 return;
             }
             this.heal();
-            this.store.reconcile(false);
+            this.store.wake();
         });
         this.on(window, "blur", () => this.cancelGestures());
         this.on(window, "focus", () => this.heal());
@@ -2636,6 +2638,12 @@
         }
         if (view.error) {
             this.say(view.error, "warn");
+            return;
+        }
+        if (!view.connected && view.catchingUp) {
+            // The feed was let go on purpose while the page was away. Nothing
+            // dropped, so nothing is "reconnecting".
+            this.say("Catching up…", "info");
             return;
         }
         if (!view.connected) {
