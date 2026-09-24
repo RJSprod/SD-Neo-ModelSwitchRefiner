@@ -3456,6 +3456,20 @@ None of this is a setting and none of it can be turned off. Turning the Forge
 Assistant off removes a panel; it does not put a conversation back in reach of
 the last writer.
 
+**Nothing is held open while the tab is in the background.** The panel follows
+the conversation over one live connection. It used to keep that connection open
+for as long as the page existed, including while the tab sat unseen for an
+hour, and a connection kept open across a long absence is the one that comes
+back half-dead: open as far as the page can tell, and silent. So when the tab
+goes to the background the connection is closed, and when you come back the
+panel catches up — it asks for the conversation as it is now, then opens a
+fresh connection — and says **Catching up…** while it does. The one exception
+is a reply that is still being written when you switch away: the connection is
+kept until that reply finishes (at most ten minutes), so it still arrives, and
+is still read aloud if that is on, while you are elsewhere. The only visible
+difference otherwise is that the unread badge updates when you come back
+rather than while you are away.
+
 Implementation notes, the gates that still need a running Forge, and what to do
 when adding a workspace adapter or a message action are in
 [`docs/22-forge-assistant.md`](docs/22-forge-assistant.md).
