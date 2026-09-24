@@ -1351,6 +1351,178 @@ opens; the same picture is not attached twice; no script error. It is not a
 Forge: the gallery's shape is from Gradio's source, and the first run on the
 real host is the gate still open.
 
+## 3.20 The third round: New thread, the system prompt editor, and four repairs
+
+> "1. Add the ability to 'start a new thread' directly from the fly out menu
+> ... 2. ... I like the idea of a full page editor for system prompt, with
+> option to restore default ... in LLM studio character menu, i just want a
+> button that opens a full page editor like this ... For flyout, put this
+> option to open this view in the '...' menu 3. ... if i hit 'enter' ... the
+> prompt stays in the input field ... 4. The height of the flyout conversation
+> mode is too tall. Lets reduce it by 1/3 ... 5. ... the 'image attached' and
+> 'on state' for TTS ... looks bad and low contrast. 6. ... the image is not
+> attached, and its name is listed twice ... I should never see the file name."
+
+Six clean-ups asked for together, each its own commit. The reference for the
+editor was Mini Paint NEO's system prompt editor, without its model and
+enhancer choices.
+
+### New thread
+
+`Store.createThread` sends the service's own `create_thread` -- the command the
+tab's New thread sends -- with `expected_revision: null` (there is nothing yet
+to compare against) and an empty payload, then selects the thread it made. So
+the thread is named and greeted exactly as from the tab, and the panel moves
+while the tab stays put, as a thread chosen in the panel always has. The item
+opens a collapsed conversation, since whoever asked for a thread is about to
+write in it, and is disabled until the panel is on a conversation.
+
+The menu reading the selection broke two Customize tests whose stand-in shell
+had no store. They failed before asserting anything; the setup gained the stub
+and the tests kept their intent. It was found when the whole suite ran, which
+is the argument for running it.
+
+### The system prompt editor
+
+**What it edits.** The character's `system` field, the override LLM Studio's
+character editor already writes and `prompt_master.chat.prompt.system_text`
+already reads. One prompt per character and two places to change it, not two
+prompts. `GET …/v2/system-prompt?character=` answers `{character, text, source,
+default}`: `text` is the override exactly as stored (`{{char}}` and all) or the
+prompt built from the Context and the persona -- built with `ops._persona()`,
+the function replies use, so the default shown is the one a reply gets. `POST`
+takes `{character, text}` or `{character, restore: true}`.
+
+**The rule it adds.** Text that *is* the built prompt, give or take the white
+space at its ends, is not an override, and neither is empty text. The editor
+opens on the built prompt, so Mini Paint's semantics -- Apply saves whatever is
+in the box -- would have turned a press on an untouched page into a frozen copy
+that stops following the Context and the persona, with nothing on screen to
+say it had. Mini Paint's defaults are shipped text and cannot drift; a
+character's are built and do.
+
+The rest is the service's usual shape: an unknown character is `NOT_FOUND`
+(404), no character or a missing `text` is `INVALID_INPUT` (400) -- missing is
+not empty -- a prompt past `MAX_TEXT_BYTES` is refused rather than cut, a
+failed write is `SAVE_FAILED` and retryable, and `restore` must be a real
+boolean for `read_aloud`'s reason: `"false"` is truthy. The same text applied
+twice writes once. Nothing is published: `character_changed` means "the tab
+moved to another conversation", and a panel told that would follow it.
+
+**Why it is not a Gradio panel, as Mini Paint's is.** Mini Paint's editor lives
+in its own tab and is a column the stylesheet promotes to fill the window. This
+one has to open from the flyout on any workspace as well as from LLM Studio, and
+a Gradio component belongs to one tab. So it is one DOM editor,
+`javascript/forge_assistant_system.js`, and LLM Studio's **⤢ System prompt** is
+a js-only Gradio event (`fn=None`, the dropdown as its one input) that hands it
+the character -- no round trip through the queue. The flyout's item is the same
+call.
+
+**How it behaves.**
+
+- A native modal `<dialog>`: the top layer, above focus mode, the panel and
+  Mini Paint's dialog layer, with focus contained and Escape arriving as
+  `cancel`. It is appended to the body and says `role="dialog"
+  aria-modal="true"` out loud, because focus mode's path rule spares what
+  carries those; in Chromium the path rule never reaches the body's own
+  children anyway, since the body is not its own descendant, so the attributes
+  are the second line, not the first. The shell's `documentKey` stands aside
+  while it is open, as it does for Customize.
+- The dialog's own `display` is never set -- an author `display` beats the
+  browser's `dialog:not([open])` -- and the column is its sheet's.
+- Apply and Restore are not pressable until the prompt has been read. An empty
+  box applied is "restore the default"; a failed read must not become a press
+  that wipes an override. Reload always is.
+- Close, **×**, Escape and Reload ask (`confirm`) while the box holds something
+  unapplied; typing says *Not applied yet.* A second press on the way in, on
+  the same character, keeps the edit rather than re-reading over it.
+- A counter drops answers for a page that has moved on: a read that lands after
+  the editor was closed and opened on someone else is not drawn. A save that
+  lands then still reaches LLM Studio, because the server has it.
+- When LLM Studio's editor is open on the same character (its Name box says so,
+  compared without case), the override box is written and told with
+  `updateInput`, the way a person typing would -- or its next Save writes the
+  old prompt back. Its preview follows, because that box's `change` rebuilds it.
+- Names go on the page as text, never as markup: a character is called what its
+  file says, and a file can say anything.
+
+**Found in Chromium: the phone layout.** On a 412 by 915 phone showing a page
+508 pixels wide, the browser widens the *layout* viewport to 508 by 1129, and
+`position: fixed` -- the top layer's too -- is placed in that. The editor filled
+it: its right edge was off the glass, focusing its **×** panned the view 96
+pixels sideways, and its buttons were 200 pixels below the fold, while every
+check that compared it with `innerWidth` passed. It is now fitted to the visual
+viewport when it opens and refitted on the visual viewport's `resize` and
+`scroll` while open, which is also the viewport a phone's keyboard shrinks. The
+check now compares with the visual viewport and asserts the page really is
+wider than the phone.
+
+### Enter left the message in the box
+
+`render()` never rewrites a focused input -- it would fight the person typing --
+and Enter leaves focus where it is, so after an Enter the draft was cleared in
+the store and the words stayed on screen (a press on Send moved focus, which is
+why only Enter showed it). `emptyComposer(key)` runs after an accepted send and
+empties the box only when that conversation's draft is empty: words typed while
+the message was sending are a new draft and stay, and a refused send keeps its
+text to be sent again.
+
+### A third shorter
+
+The panel's chrome -- header, selector, status line, composer -- measured 268
+pixels at every window size tried, so the transcript alone gives up the third:
+`max-height: max(120px, calc(32vh - 89px))` in place of `48vh`. In Chromium the
+open panel went from 652 to 435 pixels at 1280 by 800, from 787 to 525 at 1920
+by 1080, and from 708 to 472 on a 412 by 915 phone -- two thirds, each time.
+Scrolling and following the newest message are unchanged.
+
+### The lit buttons
+
+Both lit states filled from `--color-accent-soft`, which the Lobe theme sets
+nearly white: a white paperclip button under a dark theme, and a pale speaker
+the glyph could barely be seen on. The earlier fix to LLM Studio's transcript
+records the same property doing the same thing. One rule now draws both: the
+accent as border and inset ring over a 22 % tint of the accent in the button's
+own neutral surface (`color-mix`), so the glyph keeps the contrast it has when
+off. Measured: Lobe dark, lit (46, 42, 77) against (28, 28, 28) off, ring
+(109, 93, 252); light, lit (198, 212, 243) against (244, 244, 245). The unread
+count on the launcher had the same fill and has the same cure at 35 %. A test
+holds that no rule of the panel's fills from the soft accent.
+
+### The picture and its name, twice
+
+The served-picture route requires the page's key, and an `<img src>` cannot
+send a header, so every picture was refused. The browser then drew the
+image's alternative text, which was the file name, above a `figcaption` that
+was the file name again -- the screenshot's "tmpsocax_1o.png" twice.
+`Store.picture` now fetches with the key and hands the image a blob URL,
+remembering the last 48 and revoking what it lets go; a failure is not
+remembered, so it is asked again next time. The figure has no caption, its
+alternative text is "Attached picture", and a picture that is unavailable or
+cannot be fetched or decoded is a placeholder, "Picture unavailable". Nothing
+on it carries the name.
+
+### Verified in Chromium
+
+Against the stand-in server, extended with a picture route that refuses a
+request without the key, the system prompt route and `create_thread`, and a
+page carrying LLM Studio's Name and override boxes and the ⤢ button run the way
+Gradio runs a js-only event, from the Python module's own string. Thirty-three
+checks: the picture is fetched with the key and decoded, the placeholder shows,
+no file name anywhere in the transcript's text or attributes; Enter sends and
+empties the box; the menu reads Free Float, Auto Attach, New thread, System
+prompt…; the editor is modal, covers the window without reaching under the
+scrollbar, is mostly its box, lands focus on **×**, opens on the default,
+keeps no override when the default is applied untouched, saves an override and
+writes LLM Studio's box with an input event, asks before Close throws an edit
+away, restores the default and empties LLM Studio's box, closes on Escape and
+is then off the page, opens from LLM Studio's button on the character, stays
+on top and pressable in real focus mode and leaves focus mode on when its
+Escape closes it; New thread sends `create_thread` for the character and moves
+the panel onto the greeting; on a phone the editor is the glass, buttons on
+it, text 16 pixels; no script error. The phone was Chromium's emulation, not a
+phone.
+
 ---
 
 ## 4. Deliberate deviations

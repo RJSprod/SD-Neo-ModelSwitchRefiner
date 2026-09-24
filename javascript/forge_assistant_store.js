@@ -189,6 +189,7 @@
         this.drafts = new Map();         // conversationKey -> draft
         this.operations = new Map();     // operation id -> operation
         this.unread = new Map();         // conversationKey -> count
+        this.pictures = new Map();       // picture address -> Promise of a blob URL
         this.listeners = new Set();
         this.speech = {playing: false, owner: "", operation: ""};
         // Whether replies are read aloud: Voice Chat's "Speak replies
@@ -1116,6 +1117,53 @@
             .catch(() => null);
     };
 
+    /** Start a fresh thread with a character, and move this page onto it.
+     *
+     * The service's own create_thread -- the one the tab's New thread sends --
+     * so the thread is made, named and greeted exactly as it is from there.
+     * Nothing is compared, because there is nothing yet to compare against.
+     * This page moves to the new thread; the tab stays where it is, the same
+     * way a thread chosen here does not move the tab.
+     */
+    Store.prototype.createThread = function (character) {
+        const who = String(character || this.selection.character || "");
+        if (!who) {
+            return Promise.resolve({ok: false,
+                                    error: {message: "Choose a conversation first."}});
+        }
+        const envelope = this.envelope("create_thread", {
+            conversation: {character: who, thread_id: ""},
+            expected_revision: null,
+        });
+        envelope.payload = {};
+        return this.send(envelope).then((outcome) => {
+            const made = outcome && outcome.ok && outcome.resulting_conversation;
+            if (!made || !made.thread_id) return outcome;
+            return this.select(made.character || who, made.thread_id).then(() => outcome);
+        });
+    };
+
+    /** A character's system prompt, as the full-page editor opens on it:
+     *  `{character, text, source, default}`, where `source` is "override" or
+     *  "default". Not a command -- nothing in the conversation changes, so
+     *  there is no revision to compare and no operation id to latch. */
+    Store.prototype.systemPrompt = function (character) {
+        return this.request("/system-prompt?character="
+                            + encodeURIComponent(String(character || "")));
+    };
+
+    /** Apply an override (`{text}`) or restore the default (`{restore: true}`).
+     *  Answers with the same view as `systemPrompt`, plus the sentence saying
+     *  what happened. */
+    Store.prototype.saveSystemPrompt = function (character, change) {
+        return this.request("/system-prompt", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(Object.assign({}, change || {},
+                                               {character: String(character || "")})),
+        });
+    };
+
     Store.prototype.stop = function (operationId) {
         const envelope = this.envelope("stop", {expected_revision: null});
         envelope.payload = {operation_id: operationId};
@@ -1133,6 +1181,55 @@
                 || "That picture could not be used."), {body});
             return body;
         }));
+    };
+
+    // -- pictures in messages ----------------------------------------------- //
+    //
+    // A message's picture is served by ticket from a route behind the same
+    // capability as every other route here, and the capability travels in a
+    // header -- which an <img> cannot send. So the address was never loadable
+    // as an image source: every picture in the flyout failed, and the browser
+    // drew the <img>'s alternative text, the file's name, above a caption that
+    // was the file's name as well. The picture is fetched with the header and
+    // shown from a blob URL instead, once per picture per page.
+
+    // How many pictures are kept, newest-used last. Past it the oldest blob URL
+    // is let go; a bubble drawn again after that simply fetches it again.
+    const PICTURES_KEPT = 48;
+
+    Store.prototype.picture = function (address) {
+        const key = String(address || "");
+        if (!key) return Promise.reject(new Error("There is no picture to show."));
+        let found = this.pictures.get(key);
+        if (found) {
+            this.pictures.delete(key);
+            this.pictures.set(key, found);
+            return found;
+        }
+        found = fetch(basePath() + key, {credentials: "same-origin",
+                                         headers: this.headers()})
+            .then((response) => {
+                if (!response.ok) throw new Error("The picture answered " + response.status);
+                return response.blob();
+            })
+            .then((blob) => URL.createObjectURL(blob));
+        // A failure is not remembered: the next time the bubble is drawn it
+        // asks again, and a server that restarted in between has new tickets.
+        found.catch(() => {
+            if (this.pictures.get(key) === found) this.pictures.delete(key);
+        });
+        this.pictures.set(key, found);
+        while (this.pictures.size > PICTURES_KEPT) {
+            const oldest = this.pictures.keys().next().value;
+            const gone = this.pictures.get(oldest);
+            this.pictures.delete(oldest);
+            gone.then((made) => {
+                try {
+                    URL.revokeObjectURL(made);
+                } catch (error) { /* already let go */ }
+            }, () => undefined);
+        }
+        return found;
     };
 
     Store.prototype.resolveResult = function (operationId, decision) {

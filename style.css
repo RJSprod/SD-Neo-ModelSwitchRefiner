@@ -6112,11 +6112,163 @@
     }
 }
 
+/* The system prompt editor.
+   =========================================================================
+
+   Mini Paint's shape: the whole window, most of it the box being edited, a
+   line saying whose prompt it is and where it came from, and a row of
+   buttons. A native modal <dialog> for the customize dialog's reasons -- the
+   top layer, focus containment, Escape -- and the whole window at every
+   width, because a system prompt is a page of prose.
+
+   No rule here sets the dialog's `display`. An author `display` beats the
+   browser's `dialog:not([open]) { display: none }`, and a closed editor would
+   stay on the page; the column is the sheet inside it. */
+.forge-assistant-system {
+    box-sizing: border-box;
+    position: fixed;
+    /* Sized by its edges, not by 100vw: a viewport unit reaches under the
+       page's scrollbar, and the way out is in the top right. */
+    inset: 0;
+    z-index: 2100;              /* only without showModal: the top layer ignores it */
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: var(--background-fill-primary, Canvas);
+    color: var(--body-text-color, CanvasText);
+    overflow: hidden;
+}
+
+.forge-assistant-system::backdrop {
+    background: var(--background-fill-primary, Canvas);
+}
+
+.forge-assistant-system-sheet {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+.forge-assistant-system-top {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5em;
+}
+
+.forge-assistant-system-heading {
+    margin: 0;
+    font-size: 1.15em;
+    overflow-wrap: anywhere;
+}
+
+.forge-assistant-system-hint,
+.forge-assistant-system-state,
+.forge-assistant-system-note {
+    flex: 0 0 auto;
+    margin: 0;
+    font-size: 0.9em;
+}
+
+.forge-assistant-system-hint,
+.forge-assistant-system-state {
+    color: var(--body-text-color-subdued, inherit);
+}
+
+/* Mostly the box. It takes what the lines and the buttons leave, which on
+   any ordinary window is most of it; the floor is for a short one. 16px so a
+   phone does not zoom the page when the box is tapped. */
+.forge-assistant-system-text {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 30vh;
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 8px;
+    background: var(--input-background-fill, var(--background-fill-secondary, transparent));
+    color: var(--body-text-color, inherit);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-size: max(16px, 1em);
+    line-height: 1.5;
+    resize: none;
+    overflow-y: auto;
+}
+
+.forge-assistant-system-text:focus {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: -1px;
+}
+
+.forge-assistant-system-text:read-only {
+    opacity: 0.7;
+}
+
+.forge-assistant-system-note {
+    min-height: 1.4em;
+}
+
+.forge-assistant-system-note[data-kind="error"] {
+    color: var(--error-text-color, #dc2626);
+}
+
+.forge-assistant-system-foot {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+
+.forge-assistant-system-action {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.3em 1em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.forge-assistant-system-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* The theme's primary button, fill and text as the pair it promises are
+   legible together -- the customize dialog's Save. */
+.forge-assistant-system-apply {
+    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
+    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
+    color: var(--button-primary-text-color, white);
+    font-weight: 600;
+}
+
+/* Close at the far end, away from the button that keeps the edit. */
+.forge-assistant-system-foot .forge-assistant-system-close {
+    margin-left: auto;
+}
+
+/* The unread count on the launcher. Its fill was the theme's soft accent too,
+   under body text -- light on light under Lobe, the defect the lit buttons
+   had -- and it is the same tint of the accent over the neutral surface. */
 .forge-assistant-unread {
     min-width: 1.4em;
     padding: 0 0.35em;
     border-radius: 999px;
-    background: var(--color-accent-soft, var(--background-fill-secondary));
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 35%,
+                          var(--background-fill-secondary, #444));
     color: var(--body-text-color);
     font-size: 0.75em;
     line-height: 1.6;
@@ -6179,16 +6331,26 @@
 
    Reported as a button that "does not change state when i click it", and it
    did not, visibly: it set `aria-checked` and nothing in this file drew it.
-   On is lit -- the accent's border, fill and an inner ring, the look of a
-   pressed toggle -- and carries a speaker. Off is an ordinary button carrying
-   a speaker struck through, with the colour taken out of the glyph. Off is
-   deliberately *not* dimmed: a faded control reads as a disabled one, and
-   this one is always pressable. `data-state` rather than `aria-checked`,
-   because there is a third state -- the server has not said yet -- that is
-   neither, and is drawn as a plain speaker with no claim either way. */
-.forge-assistant-read-aloud[data-state="on"] {
+   On is lit -- the accent's border and an inner ring, over a tint of it --
+   and carries a speaker. Off is an ordinary button carrying a speaker struck
+   through, with the colour taken out of the glyph. Off is deliberately *not*
+   dimmed: a faded control reads as a disabled one, and this one is always
+   pressable. `data-state` rather than `aria-checked`, because there is a third
+   state -- the server has not said yet -- that is neither, and is drawn as a
+   plain speaker with no claim either way.
+
+   The tint is the accent mixed into the button's *own* background, never the
+   theme's "soft accent". That was the first fill, and Lobe's soft accent is
+   nearly white -- the same finding as the LLM Studio transcript's rule above,
+   where it emptied the user bubbles -- so both lit buttons became white tiles
+   with their glyphs lost on them, reported with a screenshot. Mixed into the
+   button's background it stays dark on a dark theme and light on a light one,
+   and the ring is what says "on". */
+.forge-assistant-read-aloud[data-state="on"],
+.forge-assistant-attach[data-auto="on"] {
     border-color: var(--color-accent, #2563eb);
-    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 22%,
+                          var(--background-fill-secondary, transparent));
     box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
 }
 
@@ -6196,14 +6358,9 @@
     filter: grayscale(1);
 }
 
-/* The paperclip while Auto Attach is on, lit the same way: the picture
-   showing in txt2img or img2img goes with each message, and a picture on a
-   message you did not attach one to should never be a surprise. */
-.forge-assistant-attach[data-auto="on"] {
-    border-color: var(--color-accent, #2563eb);
-    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
-    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
-}
+/* The paperclip while Auto Attach is on is lit by the rule above, the same
+   way: the picture showing in txt2img or img2img goes with each message, and a
+   picture on a message you did not attach one to should never be a surprise. */
 
 /* The workspace strip, which is what the panel is while the conversation is
    collapsed.
@@ -6343,12 +6500,22 @@
     padding: 0 0.6em 0.6em;
 }
 
+/* A third shorter, asked for: "The height of the flyout conversation mode is
+   too tall. Lets reduce it by 1/3 but shrinking the conversation view."
+
+   The third is off the whole panel, and all of it comes out of the transcript.
+   Measured in Chromium the rest of the panel -- header, heading, selector,
+   status line, composer -- is 268px at every window size, and the transcript
+   was 48vh, so two thirds of the panel it was leaves the transcript
+   32vh - 89px: 167px of messages in an 800px window, 257px in 1080. The floor
+   is for a short window, where a third off would leave a slot. It scrolls and
+   follows the latest message exactly as before. */
 .forge-assistant-transcript {
     display: flex;
     flex-direction: column;
     gap: 0.5em;
     min-height: 0;
-    max-height: 48vh;
+    max-height: max(120px, calc(32vh - 89px));
     overflow-y: auto;
     overscroll-behavior: contain;
 }
@@ -6392,6 +6559,34 @@
     flex-wrap: wrap;
     gap: 0.25em;
     margin-top: 0.4em;
+}
+
+/* A message's picture. It had no rule at all, so a picture at its own size ran
+   out of the bubble; it is held to the bubble's width and a height a thread can
+   scroll past. Where there is no picture to show, the frame says so -- a
+   placeholder, never the file's name. */
+.forge-assistant-attachment {
+    margin: 0.4em 0 0;
+}
+
+.forge-assistant-attachment img {
+    display: block;
+    max-width: 100%;
+    max-height: 240px;
+    object-fit: contain;
+    border-radius: var(--radius-sm, 6px);
+}
+
+.forge-assistant-attachment-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 64px;
+    padding: 0.5em 0.75em;
+    border: 1px dashed var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    font-size: 0.85em;
+    opacity: 0.85;
 }
 
 /* A message with actions is tapped to show them, and says so: a pointer over

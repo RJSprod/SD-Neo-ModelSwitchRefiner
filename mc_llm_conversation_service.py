@@ -46,7 +46,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import mc_llm_conversation_store as store_module
 from mc_llm_conversation_store import Key, Receipt, StoreRefusal
@@ -1133,6 +1133,109 @@ def threads(character: str) -> list:
         logger.debug("Model Chain: could not list threads for %s", character,
                      exc_info=True)
         return []
+
+
+# --------------------------------------------------------------------------- #
+# A character's system prompt
+# --------------------------------------------------------------------------- #
+#
+# The full-page editor's two sentences: "show me what this character is told",
+# and "tell it this instead" (or "go back to what it was told before"). The
+# same field LLM Studio's character editor calls the override, written to the
+# same file the same way -- there is one system prompt per character and two
+# places to change it, not two prompts.
+
+
+def system_prompt(character) -> dict:
+    """What the character is told, and whether that is its own text.
+
+    ``text`` is what the editor opens on: the override exactly as it is stored
+    (``{{char}}`` and all), or else the prompt built from the character's
+    Context and the persona. Built rather than described, because the only
+    honest answer to "what is it now?" is the thing itself. ``default`` is
+    always the built one, so the page can tell a box that still holds it from
+    one that has been edited.
+    """
+    loaded = _character(character)
+    default = _built_prompt(loaded)
+    own = bool(loaded.system.strip())
+    return {"ok": True, "character": loaded.name,
+            "source": "override" if own else "default",
+            "text": loaded.system if own else default, "default": default}
+
+
+def set_system_prompt(character, text=None, restore: bool = False) -> dict:
+    """Give a character its own system prompt, or put the built one back.
+
+    Text that *is* the built prompt is not an override, and neither is empty
+    text. The editor opens on the built prompt, so Apply pressed on a page
+    nobody edited would otherwise freeze today's Context and persona into the
+    character, and it would silently stop following either. An empty override
+    already means "none" everywhere it is read (``system_text``), so storing
+    one would be storing nothing under a new name.
+
+    Answers with :func:`system_prompt`'s view as it now stands, and a sentence
+    saying what happened, because four different things can.
+    """
+    loaded = _character(character)
+    if restore:
+        wanted, reason = "", "restore"
+    else:
+        if not isinstance(text, str):
+            raise Refused(INVALID_INPUT, "Send the text of the system prompt, or ask "
+                                         "for the default back.")
+        wanted = _text(text, "The system prompt", MAX_TEXT_BYTES).strip()
+        reason = "empty" if not wanted else "text"
+        if wanted and wanted == _built_prompt(loaded).strip():
+            wanted, reason = "", "default"
+    had = bool(loaded.system.strip())
+    saved = wanted != loaded.system.strip()
+    if saved:
+        try:
+            _characters().save(replace(loaded, system=wanted))
+        except Exception as exc:
+            logger.warning("Model Chain: could not save %s's system prompt", loaded.name,
+                           exc_info=True)
+            raise Refused(SAVE_FAILED, f"{loaded.name} could not be saved.") from exc
+        logger.info("Model Chain: %s's system prompt %s from the editor", loaded.name,
+                    "override saved" if wanted else "put back to the default")
+    found = system_prompt(loaded.name)
+    found["saved"] = saved
+    found["message"] = _system_said(loaded.name, reason, had, bool(wanted))
+    return found
+
+
+def _character(character):
+    """The named character, loaded, or the refusal a person can read."""
+    name = _text(character, "character", 1024).strip()
+    if not name:
+        raise Refused(INVALID_INPUT, "Choose a character first.")
+    try:
+        return _characters().load(name)
+    except FileNotFoundError:
+        raise Refused(NOT_FOUND, f"There is no character called {name}.") from None
+
+
+def _built_prompt(loaded) -> str:
+    """The prompt this character is given when it has no override of its own."""
+    from prompt_master.chat.prompt import system_text
+
+    import mc_llm_conversation_ops as ops
+
+    return system_text(replace(loaded, system=""), ops._persona())
+
+
+def _system_said(name: str, reason: str, had: bool, kept: bool) -> str:
+    if kept:
+        return f"Override saved for {name}. Every reply from now on uses it."
+    if reason == "restore":
+        return (f"Back to the default for {name}." if had
+                else f"There was no override; {name} uses the default.")
+    if reason == "empty":
+        return (f"An empty prompt is no override, so {name} is back to the default." if had
+                else f"An empty prompt is no override; {name} uses the default.")
+    return (f"That is the default, so {name}'s override is gone and the default is back."
+            if had else f"That is already the default for {name}. Edit it to override it.")
 
 
 # --------------------------------------------------------------------------- #

@@ -525,6 +525,8 @@ class TestTheShellsSide:
             const shell = Object.create(NS.Shell.prototype);
             shell.state = {freeFloat: false};
             shell.host = {listUtilities: () => []};
+            // The menu's New thread item reads the selection.
+            shell.store = {snapshot: () => ({selection: {character: "", thread: ""}})};
             const labels = () => shell.utilityItems().map((item) => item.textContent);
             const with_ = labels();
             const look = NS.look;
@@ -544,6 +546,7 @@ class TestTheShellsSide:
             const shell = Object.create(NS.Shell.prototype);
             shell.state = {freeFloat: false, panelOpen: true};
             shell.host = {listUtilities: () => []};
+            shell.store = {snapshot: () => ({selection: {character: "", thread: ""}})};
             const order = [];
             shell.closeMenu = () => order.push("menu");
             shell.close = () => order.push("panel");

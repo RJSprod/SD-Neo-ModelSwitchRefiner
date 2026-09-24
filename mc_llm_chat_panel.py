@@ -119,6 +119,20 @@ logger = logging.getLogger("model_chain")
 NO_SELECTION = -1
 """What ``selected`` holds when the action sheet applies to nothing."""
 
+OPEN_SYSTEM_EDITOR = """(who) => {
+    const editor = window.forgeAssistant && window.forgeAssistant.systemEditor;
+    if (editor) editor.open(who || "");
+    else console.warn("Model Chain: the system prompt editor is not on this page");
+    return [];
+}"""
+"""The character screen's ⤢ System prompt, run in the browser and nowhere else.
+
+The full-page editor is ``javascript/forge_assistant_system.js``, shared with
+the Forge Assistant's ⋯ menu; this hands it the character in "Talking to". A
+Gradio round trip would add nothing: the editor reads and writes through the
+assistant's routes itself.
+"""
+
 SCREENS = ("threads", "character", "persona", "voice")
 """The overlay surfaces, in the order :func:`_screens` returns them.
 
@@ -519,6 +533,12 @@ def build() -> dict:
                 edit_character = gr.Button("Edit", size="sm")
                 new_character = gr.Button("New", size="sm")
                 refresh_characters = gr.Button("↻ Refresh", size="sm")
+                # The character's system prompt on a page of its own: the
+                # editor the Forge Assistant's ⋯ menu opens, over the whole
+                # window. Browser-only -- it reads and writes through the
+                # assistant's routes -- so the press never reaches the queue.
+                system_open = gr.Button("⤢ System prompt", size="sm",
+                                        elem_id=ui.ident("chat", "system-open"))
             # Choosing, editing and creating a character are three things done
             # to the same object, so they are one screen: the drop-down is who
             # you are talking to, and the editor under it is that same
@@ -555,7 +575,11 @@ def build() -> dict:
                     info="Built from the name, the Context and your persona. Read-only — "
                          "press Edit this to take a copy into the box below.")
                 edit_system = gr.Button("Edit this system prompt", size="sm")
+                # Named, because the full-page editor writes this box when it
+                # saves the character this editor is open on -- otherwise the
+                # next Save here would put the old prompt back.
                 system = gr.Textbox(label="System prompt override", lines=6,
+                                    elem_id=ui.ident("chat", "system"),
                                     placeholder="Leave empty to use the built prompt above.",
                                     info="Set, this replaces the built prompt entirely and "
                                          "stops following the Context and the persona.")
@@ -754,6 +778,8 @@ def build() -> dict:
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
                              outputs=[character, status], queue=False)
+    system_open.click(fn=None, inputs=[character], outputs=None, js=OPEN_SYSTEM_EDITOR,
+                      queue=False)
     close_editor.click(fn=_cancel_character, inputs=[character], outputs=editor, queue=False)
     # The preview follows what is being typed rather than what is on disk, so
     # the three boxes it is built from all refresh it.

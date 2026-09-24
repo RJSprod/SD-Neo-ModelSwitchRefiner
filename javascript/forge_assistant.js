@@ -1998,7 +1998,8 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        const own = [this.floatItem(), this.autoAttachItem()];
+        const own = [this.floatItem(), this.autoAttachItem(), this.newThreadItem()];
+        if (NS.systemEditor) own.push(this.systemPromptItem());
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
@@ -2052,6 +2053,67 @@
             this.setAutoAttach(!on);
         });
         return item;
+    };
+
+    /** "Add the ability to start a new thread directly from the fly out menu.
+     *  It should start a fresh thread with the character." */
+    Shell.prototype.newThreadItem = function () {
+        const character = this.store.snapshot().selection.character;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-new-thread",
+                             "New thread");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.disabled = !character;
+        item.title = character ? "Start a fresh thread with " + character
+            : "Choose a conversation first";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.startThread(character);
+        });
+        return item;
+    };
+
+    /** "For flyout, put this option to open this view in the '...' menu": the
+     *  full-page editor for the character's system prompt, the one LLM
+     *  Studio's character screen opens too. The panel stays where it is --
+     *  the editor is over everything, and closing it is back to the
+     *  conversation. */
+    Shell.prototype.systemPromptItem = function () {
+        const character = this.store.snapshot().selection.character;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-system-prompt",
+                             "System prompt\u2026");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "dialog");
+        item.disabled = !character;
+        item.title = character ? "Edit what " + character + " is told before every conversation"
+            : "Choose a conversation first";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            NS.systemEditor.open(character);
+        });
+        return item;
+    };
+
+    Shell.prototype.startThread = function (character) {
+        this.tell("Starting a new thread with " + character + "\u2026", "info");
+        return this.store.createThread(character).then((outcome) => {
+            if (!outcome || !outcome.ok) {
+                this.tell((outcome && outcome.error && outcome.error.message)
+                    || "A new thread could not be started.", "warn");
+                return false;
+            }
+            // Somebody who asked for a new thread is about to write in it.
+            if (!this.state.conversationExpanded) {
+                this.state.conversationExpanded = true;
+                this.applyAccordion();
+                this._save();
+            }
+            this.tell("New thread with " + character + ".", "info");
+            return true;
+        });
     };
 
     Shell.prototype.setAutoAttach = function (on) {
@@ -2179,8 +2241,11 @@
     Shell.prototype.documentKey = function (event) {
         if (event.key !== "Escape") return;
         // The customize dialog's Escape is its own: it cancels the edit. Taken
-        // here it would have left focus mode instead, behind the dialog.
+        // here it would have left focus mode instead, behind the dialog. The
+        // system prompt editor's is its own for the same reason: it asks
+        // before an unapplied edit is thrown away.
         if (this.lookEditor && this.lookEditor.isOpen()) return;
+        if (NS.systemEditor && NS.systemEditor.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,
@@ -2342,6 +2407,7 @@
         const key = NS.conversationKey(view.selection.character, view.selection.thread);
         this.store.submit().then((outcome) => {
             if (outcome && outcome.ok && picture) this.autoSent.set(key, picture.src);
+            if (outcome && outcome.ok) this.emptyComposer(key);
             if (outcome && outcome.lost) {
                 this.say("Checking whether your message was sent…", "warn");
                 this.store.checkPending().then((found) => {
@@ -2356,6 +2422,27 @@
                     || "That could not be sent.", "warn");
             }
         });
+    };
+
+    /** The box, emptied once what was in it has been sent.
+     *
+     * `render` never rewrites the box while it has focus -- a redraw arriving
+     * while somebody types must not take their words away -- and a message
+     * sent with Enter is a message sent from a box that still has focus. So
+     * the store emptied the draft and the box went on showing it: "if i hit
+     * enter ... the prompt stays in the input field". Send by the button moved
+     * focus to the button first, which is why that way worked.
+     *
+     * Emptied only when the store emptied the draft, which it does only if
+     * nothing was typed while the send was in flight: anything typed then is
+     * newer than the send, and stays.
+     */
+    Shell.prototype.emptyComposer = function (key) {
+        const input = this.nodes.input;
+        if (!input || this.store.draft(key).text) return false;
+        input.value = "";
+        this.grow();
+        return true;
     };
 
     // -- Auto Attach ---------------------------------------------------------- //
@@ -2890,20 +2977,7 @@
         text.innerHTML = renderMarkdown(row.text);
         node.appendChild(text);
         if (row.provisional) node.classList.add("forge-assistant-provisional");
-        if (row.attachment) {
-            const figure = element("figure", "forge-assistant-attachment");
-            if (row.attachment.url && row.attachment.available) {
-                const image = element("img");
-                image.src = NS.basePath() + row.attachment.url;
-                image.alt = row.attachment.name || "Attached image";
-                figure.appendChild(image);
-            }
-            figure.appendChild(element("figcaption", "",
-                                       row.attachment.available
-                                           ? (row.attachment.name || "Image")
-                                           : "This picture is no longer on disk."));
-            node.appendChild(figure);
-        }
+        if (row.attachment) node.appendChild(this.figure(row.attachment));
         const bar = this.actions(row, view);
         node.appendChild(bar);
         // A bubble with anything to offer is something you tap. Reachable by
@@ -2914,6 +2988,48 @@
             node.setAttribute("aria-expanded", "false");
         }
         return node;
+    };
+
+    /** A message's picture -- or, where there is none to show, a placeholder.
+     *
+     * Never the file's name. The picture used to be an <img> pointed straight
+     * at its ticket, which the route refuses without the page's key, so it
+     * never loaded: the browser drew the alternative text -- the name -- and a
+     * caption under it said the name again. The store fetches it with the key
+     * (`Store.picture`); until it arrives the frame is empty, and if it cannot
+     * arrive, or the file is gone, the frame says so without naming anything.
+     */
+    Shell.prototype.figure = function (attachment) {
+        const figure = element("figure", "forge-assistant-attachment");
+        let image = null;
+        // Once: a fetch that fails and a picture that will not decode can both
+        // report, and the frame says it once.
+        const missing = () => {
+            if (figure.classList.contains("forge-assistant-attachment-missing")) return;
+            if (image) {
+                try {
+                    figure.removeChild(image);
+                } catch (error) { /* not in the frame */ }
+                image = null;
+            }
+            figure.classList.add("forge-assistant-attachment-missing");
+            figure.appendChild(element("span", "forge-assistant-attachment-note",
+                                       "\u{1F5BC} Picture unavailable"));
+        };
+        const store = this.store;
+        if (!attachment.url || !attachment.available || !store
+            || typeof store.picture !== "function") {
+            missing();
+            return figure;
+        }
+        image = element("img");
+        image.alt = "Attached picture";
+        image.addEventListener("error", missing);
+        figure.appendChild(image);
+        store.picture(attachment.url).then((made) => {
+            if (image) image.src = made;
+        }, missing);
+        return figure;
     };
 
     Shell.prototype.updateBubble = function (node, row) {

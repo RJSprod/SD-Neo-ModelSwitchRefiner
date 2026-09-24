@@ -38,6 +38,7 @@ SHELL = JAVASCRIPT / "forge_assistant.js"
 LOOK = JAVASCRIPT / "forge_assistant_look.js"
 HOST = JAVASCRIPT / "forge_assistant_host.js"
 STORE = JAVASCRIPT / "forge_assistant_store.js"
+SYSTEM = JAVASCRIPT / "forge_assistant_system.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 
@@ -177,7 +178,7 @@ def run(scenario: str, viewport=None, insets=None, sources=("shell",)) -> dict:
     Written to a file rather than passed with ``node -e``: a single argument is
     capped at 128 KiB on Linux and the harness plus the sources is past that.
     """
-    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK}
+    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK, "system": SYSTEM}
     body = "\n".join(order[name].read_text(encoding="utf-8") for name in sources)
     # The scalars first and the sources last, deliberately. The sources contain
     # the word VIEWPORT (in ``NARROW_VIEWPORT``), so substituting them first
@@ -683,6 +684,8 @@ function picker(host, focus) {
     shell._save = () => {};
     shell.place = () => {};
     shell.nodes = {focusToggle: {setAttribute(name, value) { this[name] = value; }}};
+    // The ⋯ menu's conversation entries ask which conversation is on screen.
+    shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
     shell.host = Object.assign({
         getActiveWorkspace: () => "tab_txt2img",
         listWorkspaces: () => [{id: "tab_img2img", label: "Img2Img", available: true}],
@@ -2311,8 +2314,8 @@ class TestFreeFloat:
 
         # Auto Attach follows it: the other mode in this menu, and a mode is
         # not what anybody should hit on the way to giving a card back.
-        assert found["labels"] == ["Free Float", "Auto Attach", "Unload All Models",
-                                   "Unload LLM"]
+        assert found["labels"] == ["Free Float", "Auto Attach", "New thread",
+                                   "Unload All Models", "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")
