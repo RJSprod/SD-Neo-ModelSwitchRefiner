@@ -302,3 +302,70 @@ class TestEnterEmptiesTheBox:
         """)
 
         assert found == "keep me"
+
+
+# --------------------------------------------------------------------------- #
+# 4. A third shorter
+# --------------------------------------------------------------------------- #
+
+
+class TestTheConversationIsAThirdShorter:
+    """"The height of the flyout conversation mode is too tall. Lets reduce it
+    by 1/3 but shrinking the conversation view." Measured in Chromium: the
+    rest of the panel is 268px at every size and the transcript was 48vh, so
+    two thirds of the old panel is a transcript of 32vh - 89px -- 652px became
+    435px at 800 tall, 787px became 525px at 1080, 708px became 472px on a
+    phone."""
+
+    def test_the_transcript_is_what_gives_up_the_third(self):
+        transcript = rule(".forge-assistant-transcript")
+
+        assert "max-height: max(120px, calc(32vh - 89px));" in transcript
+        assert "48vh" not in transcript
+
+    def test_it_still_scrolls_and_follows(self):
+        """"Keep the same rules for its behavior, just not as tall.\""""
+        transcript = rule(".forge-assistant-transcript")
+
+        assert "overflow-y: auto" in transcript
+        assert "overscroll-behavior: contain" in transcript
+        assert "min-height: 0" in transcript
+
+
+# --------------------------------------------------------------------------- #
+# 5. Lit buttons that stay readable
+# --------------------------------------------------------------------------- #
+
+
+class TestALitButtonKeepsItsGlyphReadable:
+    """Reported with a screenshot: the lit paperclip a white tile with nothing
+    on it, the lit speaker pale on pale. Both were filled with the theme's soft
+    accent, which Lobe makes nearly white. Checked in Chromium under a dark
+    theme with a white soft accent: the lit fill is dark indigo beside a
+    near-black plain button (1.26:1 between the two fills), and light blue
+    beside a light one in a light theme."""
+
+    def test_both_lit_buttons_share_one_rule(self):
+        lit = rule('.forge-assistant-read-aloud[data-state="on"]')
+
+        assert lit == rule('.forge-assistant-attach[data-auto="on"]')
+
+    def test_the_fill_is_a_tint_of_the_button_s_own_background(self):
+        lit = rule('.forge-assistant-read-aloud[data-state="on"]')
+
+        assert "color-mix(in srgb, var(--color-accent" in lit
+        assert "var(--background-fill-secondary" in lit
+        assert "border-color: var(--color-accent" in lit
+
+    def test_no_part_of_the_panel_takes_a_fill_from_the_soft_accent(self):
+        """The whole class of the defect, not the two buttons: the launcher's
+        unread count had the same fill under body text, light on light."""
+        bare = re.sub(r"/\*.*?\*/", "", CSS, flags=re.DOTALL)
+        offenders = []
+        for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", bare):
+            if "forge-assistant" not in match.group(1):
+                continue
+            for line in match.group(2).splitlines():
+                if "background" in line and "--color-accent-soft" in line:
+                    offenders.append(match.group(1).strip())
+        assert offenders == []

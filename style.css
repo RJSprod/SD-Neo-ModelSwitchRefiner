@@ -6112,11 +6112,15 @@
     }
 }
 
+/* The unread count on the launcher. Its fill was the theme's soft accent too,
+   under body text -- light on light under Lobe, the defect the lit buttons
+   had -- and it is the same tint of the accent over the neutral surface. */
 .forge-assistant-unread {
     min-width: 1.4em;
     padding: 0 0.35em;
     border-radius: 999px;
-    background: var(--color-accent-soft, var(--background-fill-secondary));
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 35%,
+                          var(--background-fill-secondary, #444));
     color: var(--body-text-color);
     font-size: 0.75em;
     line-height: 1.6;
@@ -6179,16 +6183,26 @@
 
    Reported as a button that "does not change state when i click it", and it
    did not, visibly: it set `aria-checked` and nothing in this file drew it.
-   On is lit -- the accent's border, fill and an inner ring, the look of a
-   pressed toggle -- and carries a speaker. Off is an ordinary button carrying
-   a speaker struck through, with the colour taken out of the glyph. Off is
-   deliberately *not* dimmed: a faded control reads as a disabled one, and
-   this one is always pressable. `data-state` rather than `aria-checked`,
-   because there is a third state -- the server has not said yet -- that is
-   neither, and is drawn as a plain speaker with no claim either way. */
-.forge-assistant-read-aloud[data-state="on"] {
+   On is lit -- the accent's border and an inner ring, over a tint of it --
+   and carries a speaker. Off is an ordinary button carrying a speaker struck
+   through, with the colour taken out of the glyph. Off is deliberately *not*
+   dimmed: a faded control reads as a disabled one, and this one is always
+   pressable. `data-state` rather than `aria-checked`, because there is a third
+   state -- the server has not said yet -- that is neither, and is drawn as a
+   plain speaker with no claim either way.
+
+   The tint is the accent mixed into the button's *own* background, never the
+   theme's "soft accent". That was the first fill, and Lobe's soft accent is
+   nearly white -- the same finding as the LLM Studio transcript's rule above,
+   where it emptied the user bubbles -- so both lit buttons became white tiles
+   with their glyphs lost on them, reported with a screenshot. Mixed into the
+   button's background it stays dark on a dark theme and light on a light one,
+   and the ring is what says "on". */
+.forge-assistant-read-aloud[data-state="on"],
+.forge-assistant-attach[data-auto="on"] {
     border-color: var(--color-accent, #2563eb);
-    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 22%,
+                          var(--background-fill-secondary, transparent));
     box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
 }
 
@@ -6196,14 +6210,9 @@
     filter: grayscale(1);
 }
 
-/* The paperclip while Auto Attach is on, lit the same way: the picture
-   showing in txt2img or img2img goes with each message, and a picture on a
-   message you did not attach one to should never be a surprise. */
-.forge-assistant-attach[data-auto="on"] {
-    border-color: var(--color-accent, #2563eb);
-    background: var(--color-accent-soft, rgba(37, 99, 235, 0.18));
-    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
-}
+/* The paperclip while Auto Attach is on is lit by the rule above, the same
+   way: the picture showing in txt2img or img2img goes with each message, and a
+   picture on a message you did not attach one to should never be a surprise. */
 
 /* The workspace strip, which is what the panel is while the conversation is
    collapsed.
@@ -6343,12 +6352,22 @@
     padding: 0 0.6em 0.6em;
 }
 
+/* A third shorter, asked for: "The height of the flyout conversation mode is
+   too tall. Lets reduce it by 1/3 but shrinking the conversation view."
+
+   The third is off the whole panel, and all of it comes out of the transcript.
+   Measured in Chromium the rest of the panel -- header, heading, selector,
+   status line, composer -- is 268px at every window size, and the transcript
+   was 48vh, so two thirds of the panel it was leaves the transcript
+   32vh - 89px: 167px of messages in an 800px window, 257px in 1080. The floor
+   is for a short window, where a third off would leave a slot. It scrolls and
+   follows the latest message exactly as before. */
 .forge-assistant-transcript {
     display: flex;
     flex-direction: column;
     gap: 0.5em;
     min-height: 0;
-    max-height: 48vh;
+    max-height: max(120px, calc(32vh - 89px));
     overflow-y: auto;
     overscroll-behavior: contain;
 }
