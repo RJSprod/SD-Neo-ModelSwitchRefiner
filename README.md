@@ -3052,7 +3052,7 @@ composer, so neither of them moves:
 | **Edit** | Rewrite it in place, at any position in the thread, yours or the character's alike — the version showing is the one changed. The picture it carries is kept unless you take it off, and the replies under it are left exactly as they are. |
 | **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
 | **Continue** | Carry a reply on from exactly where it stopped. On the last reply in a thread that happens in place. On an earlier one it **branches** first, because continuing a reply that has messages under it would leave them answering a paragraph that no longer says what they were answering. |
-| **Send again from here** | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. |
+| **Send again from here** | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. Your *last* message has nothing after it to keep, so that one is answered in place, in the same thread. |
 | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
 

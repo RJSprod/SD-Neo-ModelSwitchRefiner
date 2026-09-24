@@ -672,6 +672,15 @@ def _plan_resend(store, envelope) -> dict:
     It is the same defect ``_regenerate`` was fixed for and the fix was never
     applied here. The original thread is now untouched and the new attempt
     happens in a copy.
+
+    Except for the last message. A message of yours with nothing after it --
+    the state a deleted, stopped or failed reply leaves -- has no replies for a
+    branch to protect, and copying the whole thread to answer it was a second
+    thread nobody asked for, holding the conversation somebody was in the
+    middle of. So it is answered in place, the way Send answers: nothing is
+    written at acceptance, and the reply is appended under the same revision
+    guard every completion has. This is what the flyout's SEND AGAIN is, and
+    the tab's "Send again from here" on a last message does the same.
     """
     from prompt_master.chat.history import USER
 
@@ -690,6 +699,12 @@ def _plan_resend(store, envelope) -> dict:
         raise service.Refused(service.INVALID_INPUT,
                               "Send again from here applies to one of your own messages. "
                               "For a reply, use Regenerate.")
+
+    if index == len(conversation.messages) - 1:
+        return _capture(envelope, envelope.conversation, len(conversation.messages),
+                        APPEND, 0, current, list(conversation.messages),
+                        conversation.response_prefix, persisted=False,
+                        result_revision=int(conversation.revision or 0))
 
     made, revision = _branched(store, envelope, index)
     return _capture(envelope, _key_of(made), len(made.messages), APPEND, 0, revision,
