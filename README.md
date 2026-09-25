@@ -3274,8 +3274,10 @@ too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
 **The utility menu** — the **⋯** beside Focus — has **Free Float**, **Auto
-Attach**, **New thread**, **System prompt…**, **Customize…**, two entries and a
-**Cancel**. The two entries are the same request: *I need this card back, now.*
+Attach**, **Send to Generate**, **New thread**, **System prompt…**,
+**Customize…**, two entries and a **Cancel**. The first three are switches, and
+a switch that is on has a ✓ beside it; the labels stay lined up either way. The
+two entries are the same request: *I need this card back, now.*
 
 | | |
 | --- | --- |
@@ -3476,10 +3478,35 @@ The reply goes in as written; nothing guesses which of its sentences is "the
 prompt". The Positive and Negative Literal boxes are separate and are not
 touched.
 
+**Send to Generate**, a switch in the **⋯** menu, makes the same button generate
+as well. While it is on the button is a **▶ Send to Generate**, and a press
+writes the prompt exactly as above and then presses that tab's own **Generate**
+— so every setting on the page applies, the literal boxes included, as if you
+had pressed it. From any tab that is not txt2img or img2img it goes to txt2img
+and switches you there first, so you see the generation start. It waits for the
+page to take the new prompt before pressing, and it never presses while that tab
+is already generating: the prompt is left in place and the status line says to
+press Generate when the run finishes. It is off until you turn it on, and
+remembered in this browser like Auto Attach.
+
 **Send again** is for a thread that ends with you — after you delete a reply, or
 one was stopped or failed. It asks for an answer to that message as it reads now,
 edited or not, and the answer arrives in the same thread: your message is not
 written a second time and no copy of the thread is made.
+
+**Edit** puts the message into the panel's own box and turns the box into an
+editor for it, so it is plain that you are changing that message and not sending
+a new one: a strip above the box says *✎ Editing your message* — or *✎ Editing
+Ada's reply* for a reply — with **Cancel**, the box is outlined and glows, the message being
+changed is outlined in the thread, and **Send** becomes **Save**. **Save** — or
+Enter — replaces the message's words where it is and does nothing else; no new
+reply is asked for (**Send again** or **Regenerate** will). Shift+Enter starts a
+new line, and Escape or **Cancel** leaves it as it was. The box grows taller for
+a long prompt and scrolls past that. Whatever you had half-typed before pressing
+Edit is back afterwards. While you edit, the paperclip and the microphone stand
+aside, and a picture already on the message is kept. If the thread changed in
+the meantime the save is refused, your edit stays in the box, and the status
+line says why; moving to another conversation puts the edit away.
 
 Every icon carries its word as a tooltip and to a screen reader, and every one
 that changes the conversation carries the message it was pointing at *and the
