@@ -581,7 +581,7 @@ class TestTheStylesheetCanHideThings:
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
                           "launcherLabel", "input", "ghost", "workspaces",
-                          "picker"}, hidden
+                          "picker", "editBar"}, hidden
 
 
 class TestOpeningAndClosing:
@@ -1104,6 +1104,7 @@ function bottom(node) {
 
 function shellWith(transcript) {
     const shell = Object.create(NS.Shell.prototype);
+    shell.state = {};
     shell.nodes = {transcript, jump: {hidden: true, textContent: ""}};
     shell.settings = {bubbleWidth: 80};
     shell.following = true;
@@ -2312,10 +2313,11 @@ class TestFreeFloat:
             }));
         """, sources=("shell",))
 
-        # Auto Attach follows it: the other mode in this menu, and a mode is
-        # not what anybody should hit on the way to giving a card back.
-        assert found["labels"] == ["Free Float", "Auto Attach", "New thread",
-                                   "Unload All Models", "Unload LLM"]
+        # Auto Attach and Send to Generate follow it: the other modes in this
+        # menu, and a mode is not what anybody should hit on the way to giving
+        # a card back.
+        assert found["labels"] == ["Free Float", "Auto Attach", "Send to Generate",
+                                   "New thread", "Unload All Models", "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")

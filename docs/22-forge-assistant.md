@@ -1523,6 +1523,132 @@ the panel onto the greeting; on a phone the editor is the glass, buttons on
 it, text 16 pixels; no script error. The phone was Chromium's emulation, not a
 phone.
 
+## 3.21 The fourth round: editing in the panel, checked switches, Send to Generate
+
+> "This is what happens when i try to edit a prompt in the flyout view. Please
+> update so that the input field becomes the normal input box ... make sure it
+> feels clear that I am editing a previous message, not simply submitting a new
+> one ... That image is what my browser threw me to edit. It sucks. I dont want
+> the browser doing this, i need UI in our flyout ... i want the menu items to be
+> state wise ... I want a toggle that enhances the "send to prompt" with a "Send
+> to Generate" ... pressing the button under a reply would send the prompt in to
+> replace the current, and invoke a generation as if user pressed the button."
+
+Asked for together as a V4. Two choices were left to this side and one pair of
+defaults was put to the user and accepted: edit in the composer rather than in
+the bubble; a check beside a switch that is on; Send to Generate goes to txt2img
+from a tab that is not an image tab, and does not queue behind a run.
+
+### Editing in the panel
+
+`startEdit` was `window.prompt`: one line of the browser's chrome, no room for a
+long prompt, and on a phone a dialog over everything. It is now an editing state
+of the composer.
+
+**Why the composer and not the bubble.** Bubbles are rebuilt whenever the thread
+moves (`renderTranscript` keys them by epoch, revision and index), and an editor
+inside one would have to survive every redraw with its caret and selection; the
+transcript is a third of the window since §3.20, too little room to edit a long
+prompt. The composer already has the keyboard -- a phone's included -- and the
+growing, and it is where somebody expects to type.
+
+**How it says it is an edit.** Four things at once, all from `--color-accent`
+and never from the soft accent (§3.20's lesson): a strip above the box naming
+the message (*✎ Editing your message*, *✎ Editing Ada's reply*) with Cancel; an
+outline and glow on the box; the same outline on the message in the thread,
+re-applied after every redraw (`markEditTarget`); Send reading Save in the
+theme's primary colours. Measured under the Lobe palette in Chromium: the
+strip's text about 12:1 on its tint, Save's white on the accent 4.54:1.
+
+**What it keeps apart.** While the box holds an edit it is not the draft:
+`typed()` -- the input handler, named so it can be tested -- does not write the
+store's draft, the ordinary draft sync in `render` stands aside, and
+`finishEdit` puts the conversation's draft back. Moving to another conversation
+ends the edit and shows *that* conversation's draft, even with the box focused,
+where the ordinary sync would leave the old one on screen to be typed into the
+new thread. The save's envelope names the conversation the edit began in, so a
+selection that moves before the redraw cannot re-aim it.
+
+**What Save does.** `edit_message` with the index, version and revision the
+Edit was pressed on, `image_action: "keep"` -- the words change and nothing
+else, as `_edit` has always done; no reply is asked for. An unchanged edit
+sends nothing and ends; an empty one is not saved; a second press while saving
+sends nothing more; a refusal (or a request that throws) leaves the edit in the
+box with the reason and "Your edit is still in the box." The paperclip and
+microphone stand aside, and a pasted picture is refused rather than staged into
+a draft nobody can see. Escape cancels only when focus is inside the panel: an
+Escape in Forge's own prompt box is that box's.
+
+**Found in Chromium.** Send is disabled over an empty draft, and the edit
+inherited that: Save was greyed out over a message full of words until
+something was typed. The edit now sets Save's own state when it starts.
+
+### Checked switches
+
+Free Float was drawn with an accent border when on and Auto Attach with nothing.
+One rule now draws every `menuitemcheckbox` in the ⋯ menu: a check in a column
+of its own, from `aria-checked`, so what a screen reader hears and what is on
+screen are one fact and a later switch gets it by being a switch. It is
+generated content -- the label's text stays the label -- declared as `"\2713"`
+and then `"\2713" / ""` (decoration to a screen reader), in that order, so an
+engine that cannot read the second form keeps the first. Every entry keeps the
+column, so the labels line up whether a switch is on or not.
+
+### Send to Generate
+
+A switch after Auto Attach, off by default and remembered in `localStorage`
+under its own key. Off, nothing changes. On, the reply's ➤ is drawn as ▶︎
+(U+25B6 with U+FE0E, so it stays a glyph and not a coloured emoji) named Send to
+Generate -- bubbles are kept across renders, so `renderSendMode` redraws the
+ones on the page when the switch moves -- and a press does four things:
+
+1. **Where.** The image tab you are on; from any other, txt2img, reached with
+   `switchWorkspace` first (focus mode comes along). A switch that fails still
+   generates, and the status line says where.
+2. **What.** The prompt exactly as Send to prompt writes it: `promptFrom` keeps
+   LoRA tags and literal commands, written with Forge's `updateInput`.
+3. **When.** Gradio reads a component's value from its own state, not the DOM.
+   The press waits two animation frames (or a quarter of a second in a tab the
+   browser is not painting), then checks the box still holds what was written,
+   and only then clicks.
+4. **Not twice.** Forge's `setSubmitButtonsVisibility` shows Interrupt and Skip
+   over Generate while a run is on, and Interrupting... while one is stopping.
+   Any of those showing (computed style: idle, the stylesheet hides them), or
+   Generate itself hidden or disabled, and nothing is pressed; the prompt is left
+   in place and the status line says to press Generate when the run finishes.
+   Asked once, at the moment of the press -- a run can start during the wait.
+
+The press is `generate.click()` on the real button, so what Generate does with
+the page -- the pipeline, the literal boxes, everything -- happens because it
+is Generate. Nothing in this extension had pressed it before.
+
+### Verified in Chromium
+
+Against the stand-in, extended with Forge's generate box (Interrupt, Skip and
+Interrupting hidden until a run, shown for a second and a half after a press),
+a Gradio stand-in that takes a prompt's value a frame *after* its input event
+and whose Generate reads only that, working tabs, and `edit_message` on the
+server. Twenty-seven checks: Edit opens no browser dialog, puts the message in
+the box and marks it every way, Enter saves `edit_message` with
+`image_action: "keep"` and asks for no reply, the thread shows the new words,
+the draft comes back, Escape cancels, a forty-line edit gets the 292-pixel box
+and the panel stays on the window; no switch is checked while off, the labels
+line up, the one switched on is the one checked; the reply's button says Send to
+Generate, Generate is pressed once with the kept LoRA and literal, a second
+press during the run presses nothing, from Extras it switches to txt2img and
+generates there, on img2img it generates in img2img, and off again the button
+only writes; on a phone the strip and Save are on screen and Save is pressable
+from the start; no browser dialog and no script error anywhere.
+
+Two things it is not. The stand-in's Gradio is a model of the real one's
+timing, not the real one: the first run against Forge Neo is the gate still
+open for Send to Generate. And the stand-in's page had to be kept from
+overflowing a phone's width for the phone checks: on a page wider than the
+phone the browser widens the layout viewport, and the panel's bottom sheet --
+positioned against it, as it was before this round -- sat below the visible
+screen until the page was panned. That is older than this round and was left
+as it is.
+
 ---
 
 ## 4. Deliberate deviations
@@ -1551,10 +1677,12 @@ files of a branch can leave an empty file, never a corrupt one, and
 `mc_llm_conversation_startup` names any it finds in the log rather than deleting
 them — an empty file is somebody's conversation as far as that code can tell.
 
-**Message editing in the flyout uses the browser's own prompt.** A full in-panel
-edit buffer with Save/Cancel is specified (§13.4) and is the obvious next piece
-of work; what is there now is correct — it carries the same (index, version,
-revision) and is refused the same way — and visibly plainer than the tab's.
+**Message editing in the flyout is the composer in an editing state** (§3.21).
+The specification's in-panel edit buffer with Save/Cancel (§13.4) is not a
+second box: the panel's own input takes the message, says it is an edit and
+turns Send into Save. It carries the same (index, version, revision) as before
+and is refused the same way. It replaced the browser's own prompt, which the
+user rejected on sight.
 
 **`mc_llm_state.remember()` is left installation-wide.** As §23 says it should
 be. It seeds a page's initial selection once; live selection is page-local, so

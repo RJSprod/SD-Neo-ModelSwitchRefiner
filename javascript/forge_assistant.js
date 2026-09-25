@@ -299,6 +299,7 @@
             focusWorkspaceId: null,
             showAnyway: false,
             autoAttach: false,
+            sendToGenerate: false,
         };
         this.settings = {
             enabled: true,
@@ -323,6 +324,7 @@
         this._restore();
         this._restoreFloat();
         this._restoreAutoAttach();
+        this._restoreSendToGenerate();
         // Which picture Auto Attach last sent, per conversation. See
         // `autoAttachable`.
         this.autoSent = new Map();
@@ -432,6 +434,28 @@
             window.localStorage.setItem(this._autoAttachKey(),
                                         this.state.autoAttach ? "on" : "off");
         } catch (error) { /* memory only; the mode still works */ }
+    };
+
+    // Send to Generate, the same way: a preference about what one button does,
+    // remembered in this browser under a key of its own.
+    Shell.prototype._sendToGenerateKey = function () {
+        return "forge-assistant-send-to-generate:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreSendToGenerate = function () {
+        try {
+            this.state.sendToGenerate =
+                window.localStorage.getItem(this._sendToGenerateKey()) === "on";
+        } catch (error) {
+            this.state.sendToGenerate = false;
+        }
+    };
+
+    Shell.prototype._saveSendToGenerate = function () {
+        try {
+            window.localStorage.setItem(this._sendToGenerateKey(),
+                                        this.state.sendToGenerate ? "on" : "off");
+        } catch (error) { /* memory only; the switch still works */ }
     };
 
     Shell.prototype._save = function () {
@@ -655,6 +679,18 @@
         this.nodes.status = status;
 
         const composer = element("div", "forge-assistant-composer");
+        // Editing a message happens in this box, not in a dialog of the
+        // browser's: the strip says which message and is the way out. See
+        // `startEdit`.
+        const editBar = element("div", "forge-assistant-edit-bar");
+        editBar.hidden = true;
+        const editLabel = element("span", "forge-assistant-edit-label",
+                                  "Editing your message");
+        const editCancel = element("button", "forge-assistant-edit-cancel", "Cancel");
+        editCancel.type = "button";
+        editCancel.title = "Keep the message as it was";
+        editBar.appendChild(editLabel);
+        editBar.appendChild(editCancel);
         const chip = element("div", "forge-assistant-chip");
         chip.hidden = true;
         const input = element("textarea", "forge-assistant-input");
@@ -690,13 +726,15 @@
         toolbar.appendChild(readAloud);
         toolbar.appendChild(send);
         toolbar.appendChild(stop);
+        composer.appendChild(editBar);
         composer.appendChild(chip);
         composer.appendChild(input);
         composer.appendChild(toolbar);
         composer.appendChild(filePicker);
         body.appendChild(composer);
-        Object.assign(this.nodes, {composer, chip, input, toolbar, attach, dictate,
-                                   readAloud, send, stop, filePicker});
+        Object.assign(this.nodes, {composer, editBar, editLabel, editCancel, chip, input,
+                                   toolbar, attach, dictate, readAloud, send, stop,
+                                   filePicker});
 
         const handle = element("div", "forge-assistant-resize");
         handle.setAttribute("role", "separator");
@@ -1313,10 +1351,8 @@
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
         this.on(nodes.focusToggle, "click", () => this.toggleFocus());
 
-        this.on(nodes.input, "input", () => {
-            this.store.setDraftText(nodes.input.value);
-            this.grow();
-        });
+        this.on(nodes.input, "input", () => this.typed());
+        this.on(nodes.editCancel, "click", () => this.cancelEdit());
         this.on(nodes.input, "keydown", (event) => this.composerKey(event));
         this.on(nodes.input, "paste", (event) => this.paste(event));
         this.on(nodes.send, "click", () => this.send());
@@ -1464,11 +1500,28 @@
         }));
     };
 
+    /** The box was typed into. It is the draft -- unless it holds an edit,
+     *  and then it is the message: the draft is kept as it was and comes back
+     *  when the edit ends. */
+    Shell.prototype.typed = function () {
+        const nodes = this.nodes;
+        if (this.editing) {
+            this.grow();
+            nodes.send.disabled = !this.canSaveEdit(this.store.snapshot());
+            return;
+        }
+        this.store.setDraftText(nodes.input.value);
+        this.grow();
+    };
+
     Shell.prototype.grow = function () {
         const input = this.nodes.input;
         input.style.height = "auto";
         const lineHeight = 20;
-        const max = lineHeight * 6 + 12;
+        // Six lines for a message; more for an edit, because the prompt being
+        // edited is often long and the transcript above gives the room up
+        // (it is the panel's one part that shrinks). Past that, it scrolls.
+        const max = this.editing ? editHeight(lineHeight) : lineHeight * 6 + 12;
         input.style.height = Math.min(input.scrollHeight, max) + "px";
         input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
     };
@@ -1998,7 +2051,8 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        const own = [this.floatItem(), this.autoAttachItem(), this.newThreadItem()];
+        const own = [this.floatItem(), this.autoAttachItem(), this.sendToGenerateItem(),
+                     this.newThreadItem()];
         if (NS.systemEditor) own.push(this.systemPromptItem());
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
@@ -2053,6 +2107,35 @@
             this.setAutoAttach(!on);
         });
         return item;
+    };
+
+    Shell.prototype.sendToGenerateItem = function () {
+        const on = !!this.state.sendToGenerate;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-send-generate",
+                             "Send to Generate");
+        item.type = "button";
+        // A mode, like the two above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Make the send button under a reply only write the prompt"
+            : "Make the send button under a reply write the prompt and press Generate";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setSendToGenerate(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.setSendToGenerate = function (on) {
+        this.state.sendToGenerate = !!on;
+        this._saveSendToGenerate();
+        this.renderSendMode();
+        this.tell(on ? "Send to Generate is on: the button under a reply writes the prompt "
+            + "and presses Generate." : "Send to Generate is off: the button under a reply "
+            + "only writes the prompt.", "info");
+        return this.state.sendToGenerate;
     };
 
     /** "Add the ability to start a new thread directly from the fly out menu.
@@ -2253,7 +2336,11 @@
             insideAssistant: this.nodes.root
                 && this.nodes.root.contains(document.activeElement),
             assistantMenuOpen: this.nodes.menu && !this.nodes.menu.hidden,
-            assistantEditing: !!this.editing,
+            // Only from inside the panel: an Escape pressed in Forge's own
+            // prompt box is that box's, and taking it would drop an edit
+            // nobody was looking at.
+            assistantEditing: !!this.editing && !!(this.nodes.root
+                && this.nodes.root.contains(document.activeElement)),
             focusActive: this.focus.isActive(),
         };
         const action = NS.escapeOrder(event, context);
@@ -2331,6 +2418,13 @@
         const images = Array.prototype.filter.call(data.items, (item) =>
             item.kind === "file" && /^image\/(png|jpeg|webp)$/.test(item.type));
         if (!images.length) return;          // ordinary text paste, untouched
+        if (this.editing) {
+            // An edit changes the words. The picture on the message stays as
+            // it is, and one pasted now would land in the draft unseen.
+            event.preventDefault();
+            this.tell("A picture cannot be added while you edit a message.", "warn");
+            return;
+        }
         // Only the image half is intercepted. Text pasted alongside it still
         // lands in the box, because taking somebody's words away to keep their
         // picture is not a trade anybody asked for.
@@ -2371,6 +2465,10 @@
     // -- sending --------------------------------------------------------------- //
 
     Shell.prototype.send = function () {
+        if (this.editing) {
+            this.saveEdit();
+            return;
+        }
         const view = this.store.snapshot();
         if (!this.canSend(view)) return;
         this.store.setDraftText(this.nodes.input.value);
@@ -2763,7 +2861,17 @@
         nodes.unread.hidden = !view.unreadTotal;
         nodes.unread.textContent = String(view.unreadTotal || "");
 
-        if (nodes.input.value !== view.draft.text && document.activeElement !== nodes.input) {
+        if (this.editing && this.editing.key !== NS.conversationKey(
+            view.selection.character, view.selection.thread)) {
+            // The message being edited is in a conversation that is no longer
+            // on screen, and Save would be aimed at it from this one. The box
+            // takes the draft of the conversation that is -- even focused,
+            // which the ordinary sync below leaves alone.
+            this.finishEdit(view.draft.text || "");
+            this.tell("The conversation changed, so the edit was put away.", "warn");
+        }
+        if (!this.editing && nodes.input.value !== view.draft.text
+            && document.activeElement !== nodes.input) {
             nodes.input.value = view.draft.text || "";
             this.grow();
         }
@@ -2773,7 +2881,7 @@
         this.renderReadAloud(view);
         this.renderTranscript(view);
         this.renderStatus(view);
-        nodes.send.disabled = !this.canSend(view);
+        nodes.send.disabled = this.editing ? !this.canSaveEdit(view) : !this.canSend(view);
         const busy = !!(view.operation && !view.operation.terminal);
         nodes.stop.hidden = !(busy || view.speech.playing);
         this.applySuppression();
@@ -2917,6 +3025,7 @@
         wanted.forEach((node) => transcript.appendChild(node));
         this.lastRendered = fingerprint;
         if (this.revealed) this.reveal(this.revealed);
+        this.markEditTarget();
 
         if (wasFollowing) {
             this.toBottom();
@@ -3102,11 +3211,13 @@
             if (spec.role && spec.role !== role) return;
             const button = element("button", "forge-assistant-action", spec.glyph);
             button.type = "button";
+            button.dataset.action = spec.action;
             // An icon with no accessible name is a button only sighted people
             // have. Both, because `title` is the hover and the long press and
             // `aria-label` is what a screen reader reads.
             button.title = spec.label;
             button.setAttribute("aria-label", spec.label);
+            if (spec.action === "send_prompt") this.drawSendMode(button);
             button.addEventListener("click", () => {
                 // Pressed is chosen: the row goes away, whatever the action
                 // does next.
@@ -3116,6 +3227,37 @@
             bar.appendChild(button);
         });
         return bar;
+    };
+
+    // With Send to Generate on, the reply's send button says so -- a play
+    // glyph and its own name -- because the same press now starts a
+    // generation, and that should never be a surprise. U+FE0E keeps the glyph
+    // text rather than a coloured emoji.
+    const SEND_PROMPT = {glyph: "\u27a4", label: "Send to prompt"};
+    const SEND_GENERATE = {glyph: "\u25b6\ufe0e", label: "Send to Generate"};
+
+    Shell.prototype.drawSendMode = function (button) {
+        const mode = this.state.sendToGenerate ? SEND_GENERATE : SEND_PROMPT;
+        if (button.textContent !== mode.glyph) button.textContent = mode.glyph;
+        button.title = mode.label;
+        button.setAttribute("aria-label", mode.label);
+        button.dataset.generate = String(!!this.state.sendToGenerate);
+    };
+
+    /** Redraw every reply's send button: bubbles are kept across renders, so
+     *  the ones already on the page are told when the switch moves. */
+    Shell.prototype.renderSendMode = function () {
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        Array.prototype.forEach.call(transcript.children || [], (node) => {
+            const bar = actionsOf(node);
+            if (!bar) return;
+            Array.prototype.forEach.call(bar.children || [], (button) => {
+                if (button.dataset && button.dataset.action === "send_prompt") {
+                    this.drawSendMode(button);
+                }
+            });
+        });
     };
 
     function actionsOf(node) {
@@ -3287,9 +3429,18 @@
 
     // Which prompt: the image tab you are on, and txt2img from anywhere else.
     const PROMPT_TARGETS = {
-        tab_img2img: {id: "img2img_prompt", label: "img2img"},
+        tab_img2img: {id: "img2img_prompt", label: "img2img", tab: "tab_img2img",
+                      name: "img2img"},
     };
-    const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img"};
+    const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img",
+                                   tab: "tab_txt2img", name: "txt2img"};
+
+    function editHeight(lineHeight) {
+        const view = window.visualViewport;
+        const high = (view && view.height) || window.innerHeight || 800;
+        return Math.max(lineHeight * 6 + 12,
+                        Math.min(lineHeight * 14 + 12, Math.round(high * 0.4)));
+    }
 
     function promptTarget(workspace) {
         return PROMPT_TARGETS[workspace] || DEFAULT_PROMPT_TARGET;
@@ -3323,6 +3474,7 @@
     }
 
     Shell.prototype.sendToPrompt = function (row) {
+        if (this.state.sendToGenerate) return this.sendToGenerate(row);
         const target = promptTarget(this.host.getActiveWorkspace());
         const box = promptBox(target.id);
         if (!box) {
@@ -3337,6 +3489,116 @@
         this.tell("Prompt sent to " + target.label + ".", "info");
         return true;
     };
+
+    // -- Send to Generate -------------------------------------------------------- //
+    //
+    // "I want a toggle that enhances the "send to prompt" with a "Send to
+    // Generate" ... pressing the button under a reply would send the prompt in
+    // to replace the current, and invoke a generation as if user pressed the
+    // button. All the settings on the page still applied, just generated with
+    // the LLM reply as prompt (respecting our lora and literals)."
+    //
+    // The prompt is written exactly as Send to prompt writes it -- the reply,
+    // then what is kept of the old prompt -- and then the tab's own Generate
+    // is pressed. Pressed, not imitated: everything that button does with the
+    // page, the pipeline, the literal boxes and whatever else is on it happens
+    // because it is the button. Four details.
+    //
+    // * Where. The image tab you are on; from any other tab, txt2img, and the
+    //   panel switches there first so the generation is watched rather than
+    //   started out of sight. Focus mode comes along, as it does for the
+    //   workspace picker. A switch that fails still generates, and says where.
+    // * When. Gradio reads the prompt from its own state, which the input
+    //   event updates; the press waits for the page to paint twice, so the
+    //   generation is of the new prompt and never of the old one. If the box
+    //   no longer holds what was written by then, nothing is pressed.
+    // * Not twice. Forge covers Generate with Interrupt and Skip while a run
+    //   is on, so a person cannot press it then; neither does this. The
+    //   prompt is left in place and the status line says to press Generate
+    //   when the run ends.
+    // * Honest. Every way it stops short says so, and what it did do.
+
+    Shell.prototype.sendToGenerate = function (row) {
+        if (!String(row.text || "").trim()) {
+            this.tell("That reply has no words to send.", "warn");
+            return Promise.resolve(false);
+        }
+        const active = this.host.getActiveWorkspace();
+        const target = promptTarget(active);
+        const arrive = active === target.tab ? Promise.resolve(target.tab)
+            : this.switchWorkspace(target.tab);
+        return arrive.then((reached) => {
+            const box = promptBox(target.id);
+            if (!box) {
+                this.tell("There is no " + target.label + " prompt on this page.", "warn");
+                return false;
+            }
+            const wanted = promptFrom(row.text, box.value);
+            publish(box, wanted);
+            const generate = hostElement(target.name + "_generate");
+            if (!generate) {
+                this.tell("Prompt sent to " + target.label + ", but there is no Generate "
+                          + "button to press on this page.", "warn");
+                return false;
+            }
+            return afterPaint().then(() => {
+                if (box.value !== wanted) {
+                    this.tell("The " + target.label + " prompt changed before Generate "
+                              + "was pressed, so it was not pressed.", "warn");
+                    return false;
+                }
+                // Asked at the moment of the press, which is the moment that
+                // matters: a run can start in the frames just waited.
+                if (generating(target.name) || generate.disabled) {
+                    this.tell(target.label + " is already generating. The prompt is in "
+                              + "place: press Generate when it finishes.", "warn");
+                    return false;
+                }
+                generate.click();
+                this.tell(reached === target.tab || active === target.tab
+                    ? "Prompt sent to " + target.label + " and generating."
+                    : "Prompt sent to " + target.label + " and generating there -- its "
+                      + "tab could not be opened.", "info");
+                return true;
+            });
+        });
+    };
+
+    // A run is on while Forge shows Interrupt, Skip or Interrupting... over
+    // Generate (`setSubmitButtonsVisibility` writes their display), or has
+    // hidden Generate itself. Computed, not inline: idle, the stylesheet is
+    // what hides them.
+    function generating(name) {
+        const shown = (id) => {
+            const node = hostElement(id);
+            if (!node) return null;
+            const style = typeof window.getComputedStyle === "function"
+                ? window.getComputedStyle(node) : null;
+            const display = (style && style.display) || (node.style && node.style.display);
+            return display ? display !== "none" : null;
+        };
+        if (["_interrupt", "_skip", "_interrupting"].some((suffix) =>
+            shown(name + suffix) === true)) return true;
+        return shown(name + "_generate") === false;
+    }
+
+    // Two frames, or a quarter of a second in a tab the browser is not
+    // painting: long enough for Gradio to have taken the input event, short
+    // enough that the press still feels like the press.
+    function afterPaint() {
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                resolve();
+            };
+            if (typeof window.requestAnimationFrame === "function") {
+                window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+            }
+            setTimeout(finish, 250);
+        });
+    }
 
     Shell.prototype.act = function (action, row, revision) {
         if (action === "edit_message") {
@@ -3362,32 +3624,176 @@
         });
     };
 
+    // -- Editing a message ------------------------------------------------------ //
+    //
+    // "This is what happens when i try to edit a prompt in the flyout view ...
+    // I dont want the browser doing this, i need UI in our flyout ... make sure
+    // it feels clear that I am editing a previous message, not simply
+    // submitting a new one."
+    //
+    // It was `window.prompt`: one line, the browser's own chrome, no way to
+    // read a long prompt, and on a phone a dialog over everything. Now the
+    // message goes into the panel's own box, and the box says it is an edit:
+    // a strip above it naming the message, an outline and a glow on the box,
+    // the same outline on the message in the thread, and Send reading Save.
+    //
+    // The box rather than the bubble, and that was the decision asked for.
+    // Bubbles are rebuilt whenever the thread moves, and an editor inside one
+    // would have to survive every redraw; the transcript is a third of the
+    // window, too little room for a long prompt. The box already has the
+    // keyboard, the phone's keyboard and the growing, and it is where somebody
+    // expects to type.
+    //
+    // The draft is not touched: what was half-typed before Edit is kept in the
+    // store while the box holds the edit, and put back when the edit ends. And
+    // Save replaces the words and does nothing else -- no new reply, as the
+    // service's own `_edit` says (a rewritten question keeps the answer under
+    // it). A save the server refuses leaves the edit in the box, with why.
+
     Shell.prototype.startEdit = function (row, revision) {
-        this.editing = {index: row.index, version: row.active, revision,
-                        text: row.text};
-        const buffer = window.prompt("Edit this message", row.text);
-        if (buffer === null) {
-            this.editing = null;
+        const view = this.store.snapshot();
+        const character = view.selection.character;
+        const thread = view.selection.thread;
+        const key = NS.conversationKey(character, thread);
+        const current = this.editing;
+        if (current && current.key === key && current.index === row.index) {
+            this.nodes.input.focus();
             return;
         }
+        if (current) this.finishEdit();
+        const conversation = view.conversation && view.conversation.conversation;
+        this.editing = {key, character, thread, index: row.index, version: row.active,
+                        revision, text: String(row.text || ""), role: row.role,
+                        who: (conversation && conversation.character) || character,
+                        saving: false};
+        const input = this.nodes.input;
+        input.value = this.editing.text;
+        this.applyEditing();
+        // Save's own rule from the first moment: Send's was about the draft,
+        // and an empty draft left Save greyed out over a message full of words.
+        this.nodes.send.disabled = !this.canSaveEdit(view);
+        this.grow();
+        input.focus();
+        try {
+            input.setSelectionRange(input.value.length, input.value.length);
+        } catch (error) { /* a box that will not take a caret still takes the edit */ }
+        this.markEditTarget(true);
+    };
+
+    Shell.prototype.canSaveEdit = function (view) {
+        const editing = this.editing;
+        if (!editing || editing.saving) return false;
+        if (!view.ready || view.error || !view.conversation) return false;
+        if (view.operation && !view.operation.terminal) return false;
+        return !!this.nodes.input.value.trim();
+    };
+
+    Shell.prototype.saveEdit = function () {
+        const editing = this.editing;
+        if (!editing || editing.saving) return Promise.resolve(false);
+        const text = this.nodes.input.value;
+        if (!text.trim()) {
+            this.tell("Type the message's new words, or press Cancel to keep it.", "warn");
+            return Promise.resolve(false);
+        }
+        if (text.trim() === editing.text.trim()) {
+            this.finishEdit();
+            this.tell("Nothing was changed.", "info");
+            return Promise.resolve(false);
+        }
+        const revision = editing.revision;
         const envelope = this.store.envelope("edit_message", {
-            target: {index: row.index, version: row.active},
+            // The conversation the edit began in, whatever is selected by the
+            // time the request goes.
+            conversation: {character: editing.character, thread_id: editing.thread},
+            target: {index: editing.index, version: editing.version},
             expected_revision: typeof revision === "number"
                 ? {kind: "revision", value: revision}
                 : (revision ? {kind: "legacy", fingerprint: String(revision)} : null),
         });
-        envelope.payload = {text: buffer, image_action: "keep"};
-        this.editing = null;
-        this.store.send(envelope).then((outcome) => {
-            if (outcome && !outcome.ok) {
-                this.say((outcome.error && outcome.error.message)
-                    || "That edit was refused.", "warn");
+        envelope.payload = {text, image_action: "keep"};
+        editing.saving = true;
+        this.nodes.send.disabled = true;
+        this.say("Saving your edit\u2026", "info");
+        return this.store.send(envelope).then((outcome) => outcome, (error) => ({
+            ok: false, error: {message: (error && error.message) || ""},
+        })).then((outcome) => {
+            editing.saving = false;
+            if (this.editing !== editing) return !!(outcome && outcome.ok);
+            if (outcome && outcome.ok) {
+                this.finishEdit();
+                this.tell("Message edited.", "info");
+                return true;
             }
+            this.tell(((outcome && outcome.error && outcome.error.message)
+                       || "That edit was refused.") + " Your edit is still in the box.",
+                      "warn");
+            this.nodes.send.disabled = !this.canSaveEdit(this.store.snapshot());
+            return false;
         });
     };
 
-    Shell.prototype.cancelEdit = function () {
+    /** The edit is over, saved or not: the box is the draft's again --
+     *  the draft of the conversation the edit was in, unless told which. */
+    Shell.prototype.finishEdit = function (text) {
+        const editing = this.editing;
+        if (!editing) return false;
         this.editing = null;
+        const input = this.nodes.input;
+        input.value = typeof text === "string" ? text
+            : (this.store.draft(editing.key).text || "");
+        this.applyEditing();
+        this.grow();
+        this.markEditTarget();
+        this.nodes.send.disabled = !this.canSend(this.store.snapshot());
+        return true;
+    };
+
+    Shell.prototype.cancelEdit = function () {
+        if (!this.finishEdit()) return false;
+        this.tell("Edit cancelled. The message is as it was.", "info");
+        return true;
+    };
+
+    /** Everything that says the box holds an edit, drawn from `editing`. */
+    Shell.prototype.applyEditing = function () {
+        const nodes = this.nodes;
+        const editing = this.editing;
+        nodes.composer.classList.toggle("forge-assistant-editing", !!editing);
+        nodes.editBar.hidden = !editing;
+        if (editing) {
+            nodes.editLabel.textContent = editing.role === "assistant"
+                ? "\u270e Editing " + (editing.who || "the") + "\u2019s reply"
+                : "\u270e Editing your message";
+        }
+        nodes.send.textContent = editing ? "Save" : "Send";
+        nodes.send.title = editing ? "Replace the message with these words" : "";
+        nodes.input.setAttribute("aria-label", editing ? "Edit the message" : "Message");
+        nodes.input.placeholder = editing ? "The message\u2019s new words\u2026"
+            : "Message\u2026";
+        // An edit changes the words, so the tools that add to a message stand
+        // aside. The picture already on it is kept.
+        nodes.attach.disabled = !!editing;
+        nodes.dictate.disabled = !!editing;
+    };
+
+    /** Outline the message being edited, and bring it into view when asked. */
+    Shell.prototype.markEditTarget = function (show) {
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        const editing = this.editing;
+        let found = null;
+        Array.prototype.forEach.call(transcript.children || [], (node) => {
+            const on = !!editing && !!node.dataset
+                && node.dataset.index === String(editing.index);
+            if (on) found = node;
+            if (node.classList) node.classList.toggle("forge-assistant-edit-target", on);
+        });
+        if (show && found && typeof found.scrollIntoView === "function") {
+            try {
+                found.scrollIntoView({block: "nearest"});
+            } catch (error) { /* an older engine's scrollIntoView takes no options */ }
+        }
     };
 
     Shell.prototype.renderStatus = function (view) {
