@@ -6670,6 +6670,77 @@
     margin-left: auto;
 }
 
+/* Editing a message.
+   =========================================================================
+
+   "make sure it feels clear that I am editing a previous message, not simply
+   submitting a new one. Maybe a stroke outline or glow."
+
+   Four things say it at once: a strip above the box naming the message, an
+   outline and a glow on the box, the same outline on the message in the
+   thread, and Send reading Save in the theme's primary colours. All of it is
+   drawn from the accent itself and never from the soft accent, which a theme
+   may set nearly white -- the lit buttons' defect. */
+.forge-assistant-edit-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.2em 0.2em 0.2em 0.6em;
+    border-left: 3px solid var(--color-accent, #2563eb);
+    border-radius: var(--radius-sm, 6px);
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 16%,
+                          var(--background-fill-secondary, transparent));
+    font-size: 0.85em;
+}
+
+.forge-assistant-edit-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forge-assistant-edit-cancel {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: 0.2em 0.9em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-primary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.forge-assistant-editing .forge-assistant-input {
+    border-color: var(--color-accent, #2563eb);
+    box-shadow: 0 0 0 1px var(--color-accent, #2563eb),
+                0 0 12px 2px color-mix(in srgb, var(--color-accent, #2563eb) 45%, transparent);
+    outline: none;
+}
+
+/* The message being replaced, outlined the way the box is. */
+.forge-assistant-bubble.forge-assistant-edit-target {
+    border-color: var(--color-accent, #2563eb);
+    box-shadow: 0 0 0 1px var(--color-accent, #2563eb);
+}
+
+.forge-assistant-editing .forge-assistant-send {
+    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
+    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
+    color: var(--button-primary-text-color, white);
+    font-weight: 600;
+}
+
+/* The paperclip and the microphone stand aside while the box holds an edit,
+   and look it; so does Save with nothing in the box. */
+.forge-assistant-editing .forge-assistant-toolbar button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
 .forge-assistant-chip {
     display: flex;
     align-items: center;

@@ -581,7 +581,7 @@ class TestTheStylesheetCanHideThings:
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
                           "launcherLabel", "input", "ghost", "workspaces",
-                          "picker"}, hidden
+                          "picker", "editBar"}, hidden
 
 
 class TestOpeningAndClosing:

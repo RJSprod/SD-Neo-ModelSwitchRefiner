@@ -655,6 +655,18 @@
         this.nodes.status = status;
 
         const composer = element("div", "forge-assistant-composer");
+        // Editing a message happens in this box, not in a dialog of the
+        // browser's: the strip says which message and is the way out. See
+        // `startEdit`.
+        const editBar = element("div", "forge-assistant-edit-bar");
+        editBar.hidden = true;
+        const editLabel = element("span", "forge-assistant-edit-label",
+                                  "Editing your message");
+        const editCancel = element("button", "forge-assistant-edit-cancel", "Cancel");
+        editCancel.type = "button";
+        editCancel.title = "Keep the message as it was";
+        editBar.appendChild(editLabel);
+        editBar.appendChild(editCancel);
         const chip = element("div", "forge-assistant-chip");
         chip.hidden = true;
         const input = element("textarea", "forge-assistant-input");
@@ -690,13 +702,15 @@
         toolbar.appendChild(readAloud);
         toolbar.appendChild(send);
         toolbar.appendChild(stop);
+        composer.appendChild(editBar);
         composer.appendChild(chip);
         composer.appendChild(input);
         composer.appendChild(toolbar);
         composer.appendChild(filePicker);
         body.appendChild(composer);
-        Object.assign(this.nodes, {composer, chip, input, toolbar, attach, dictate,
-                                   readAloud, send, stop, filePicker});
+        Object.assign(this.nodes, {composer, editBar, editLabel, editCancel, chip, input,
+                                   toolbar, attach, dictate, readAloud, send, stop,
+                                   filePicker});
 
         const handle = element("div", "forge-assistant-resize");
         handle.setAttribute("role", "separator");
@@ -1313,10 +1327,8 @@
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
         this.on(nodes.focusToggle, "click", () => this.toggleFocus());
 
-        this.on(nodes.input, "input", () => {
-            this.store.setDraftText(nodes.input.value);
-            this.grow();
-        });
+        this.on(nodes.input, "input", () => this.typed());
+        this.on(nodes.editCancel, "click", () => this.cancelEdit());
         this.on(nodes.input, "keydown", (event) => this.composerKey(event));
         this.on(nodes.input, "paste", (event) => this.paste(event));
         this.on(nodes.send, "click", () => this.send());
@@ -1464,11 +1476,28 @@
         }));
     };
 
+    /** The box was typed into. It is the draft -- unless it holds an edit,
+     *  and then it is the message: the draft is kept as it was and comes back
+     *  when the edit ends. */
+    Shell.prototype.typed = function () {
+        const nodes = this.nodes;
+        if (this.editing) {
+            this.grow();
+            nodes.send.disabled = !this.canSaveEdit(this.store.snapshot());
+            return;
+        }
+        this.store.setDraftText(nodes.input.value);
+        this.grow();
+    };
+
     Shell.prototype.grow = function () {
         const input = this.nodes.input;
         input.style.height = "auto";
         const lineHeight = 20;
-        const max = lineHeight * 6 + 12;
+        // Six lines for a message; more for an edit, because the prompt being
+        // edited is often long and the transcript above gives the room up
+        // (it is the panel's one part that shrinks). Past that, it scrolls.
+        const max = this.editing ? editHeight(lineHeight) : lineHeight * 6 + 12;
         input.style.height = Math.min(input.scrollHeight, max) + "px";
         input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
     };
@@ -2253,7 +2282,11 @@
             insideAssistant: this.nodes.root
                 && this.nodes.root.contains(document.activeElement),
             assistantMenuOpen: this.nodes.menu && !this.nodes.menu.hidden,
-            assistantEditing: !!this.editing,
+            // Only from inside the panel: an Escape pressed in Forge's own
+            // prompt box is that box's, and taking it would drop an edit
+            // nobody was looking at.
+            assistantEditing: !!this.editing && !!(this.nodes.root
+                && this.nodes.root.contains(document.activeElement)),
             focusActive: this.focus.isActive(),
         };
         const action = NS.escapeOrder(event, context);
@@ -2331,6 +2364,13 @@
         const images = Array.prototype.filter.call(data.items, (item) =>
             item.kind === "file" && /^image\/(png|jpeg|webp)$/.test(item.type));
         if (!images.length) return;          // ordinary text paste, untouched
+        if (this.editing) {
+            // An edit changes the words. The picture on the message stays as
+            // it is, and one pasted now would land in the draft unseen.
+            event.preventDefault();
+            this.tell("A picture cannot be added while you edit a message.", "warn");
+            return;
+        }
         // Only the image half is intercepted. Text pasted alongside it still
         // lands in the box, because taking somebody's words away to keep their
         // picture is not a trade anybody asked for.
@@ -2371,6 +2411,10 @@
     // -- sending --------------------------------------------------------------- //
 
     Shell.prototype.send = function () {
+        if (this.editing) {
+            this.saveEdit();
+            return;
+        }
         const view = this.store.snapshot();
         if (!this.canSend(view)) return;
         this.store.setDraftText(this.nodes.input.value);
@@ -2763,7 +2807,17 @@
         nodes.unread.hidden = !view.unreadTotal;
         nodes.unread.textContent = String(view.unreadTotal || "");
 
-        if (nodes.input.value !== view.draft.text && document.activeElement !== nodes.input) {
+        if (this.editing && this.editing.key !== NS.conversationKey(
+            view.selection.character, view.selection.thread)) {
+            // The message being edited is in a conversation that is no longer
+            // on screen, and Save would be aimed at it from this one. The box
+            // takes the draft of the conversation that is -- even focused,
+            // which the ordinary sync below leaves alone.
+            this.finishEdit(view.draft.text || "");
+            this.tell("The conversation changed, so the edit was put away.", "warn");
+        }
+        if (!this.editing && nodes.input.value !== view.draft.text
+            && document.activeElement !== nodes.input) {
             nodes.input.value = view.draft.text || "";
             this.grow();
         }
@@ -2773,7 +2827,7 @@
         this.renderReadAloud(view);
         this.renderTranscript(view);
         this.renderStatus(view);
-        nodes.send.disabled = !this.canSend(view);
+        nodes.send.disabled = this.editing ? !this.canSaveEdit(view) : !this.canSend(view);
         const busy = !!(view.operation && !view.operation.terminal);
         nodes.stop.hidden = !(busy || view.speech.playing);
         this.applySuppression();
@@ -2917,6 +2971,7 @@
         wanted.forEach((node) => transcript.appendChild(node));
         this.lastRendered = fingerprint;
         if (this.revealed) this.reveal(this.revealed);
+        this.markEditTarget();
 
         if (wasFollowing) {
             this.toBottom();
@@ -3291,6 +3346,13 @@
     };
     const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img"};
 
+    function editHeight(lineHeight) {
+        const view = window.visualViewport;
+        const high = (view && view.height) || window.innerHeight || 800;
+        return Math.max(lineHeight * 6 + 12,
+                        Math.min(lineHeight * 14 + 12, Math.round(high * 0.4)));
+    }
+
     function promptTarget(workspace) {
         return PROMPT_TARGETS[workspace] || DEFAULT_PROMPT_TARGET;
     }
@@ -3362,32 +3424,173 @@
         });
     };
 
+    // -- Editing a message ------------------------------------------------------ //
+    //
+    // "This is what happens when i try to edit a prompt in the flyout view ...
+    // I dont want the browser doing this, i need UI in our flyout ... make sure
+    // it feels clear that I am editing a previous message, not simply
+    // submitting a new one."
+    //
+    // It was `window.prompt`: one line, the browser's own chrome, no way to
+    // read a long prompt, and on a phone a dialog over everything. Now the
+    // message goes into the panel's own box, and the box says it is an edit:
+    // a strip above it naming the message, an outline and a glow on the box,
+    // the same outline on the message in the thread, and Send reading Save.
+    //
+    // The box rather than the bubble, and that was the decision asked for.
+    // Bubbles are rebuilt whenever the thread moves, and an editor inside one
+    // would have to survive every redraw; the transcript is a third of the
+    // window, too little room for a long prompt. The box already has the
+    // keyboard, the phone's keyboard and the growing, and it is where somebody
+    // expects to type.
+    //
+    // The draft is not touched: what was half-typed before Edit is kept in the
+    // store while the box holds the edit, and put back when the edit ends. And
+    // Save replaces the words and does nothing else -- no new reply, as the
+    // service's own `_edit` says (a rewritten question keeps the answer under
+    // it). A save the server refuses leaves the edit in the box, with why.
+
     Shell.prototype.startEdit = function (row, revision) {
-        this.editing = {index: row.index, version: row.active, revision,
-                        text: row.text};
-        const buffer = window.prompt("Edit this message", row.text);
-        if (buffer === null) {
-            this.editing = null;
+        const view = this.store.snapshot();
+        const character = view.selection.character;
+        const thread = view.selection.thread;
+        const key = NS.conversationKey(character, thread);
+        const current = this.editing;
+        if (current && current.key === key && current.index === row.index) {
+            this.nodes.input.focus();
             return;
         }
+        if (current) this.finishEdit();
+        const conversation = view.conversation && view.conversation.conversation;
+        this.editing = {key, character, thread, index: row.index, version: row.active,
+                        revision, text: String(row.text || ""), role: row.role,
+                        who: (conversation && conversation.character) || character,
+                        saving: false};
+        const input = this.nodes.input;
+        input.value = this.editing.text;
+        this.applyEditing();
+        this.grow();
+        input.focus();
+        try {
+            input.setSelectionRange(input.value.length, input.value.length);
+        } catch (error) { /* a box that will not take a caret still takes the edit */ }
+        this.markEditTarget(true);
+    };
+
+    Shell.prototype.canSaveEdit = function (view) {
+        const editing = this.editing;
+        if (!editing || editing.saving) return false;
+        if (!view.ready || view.error || !view.conversation) return false;
+        if (view.operation && !view.operation.terminal) return false;
+        return !!this.nodes.input.value.trim();
+    };
+
+    Shell.prototype.saveEdit = function () {
+        const editing = this.editing;
+        if (!editing || editing.saving) return Promise.resolve(false);
+        const text = this.nodes.input.value;
+        if (!text.trim()) {
+            this.tell("Type the message's new words, or press Cancel to keep it.", "warn");
+            return Promise.resolve(false);
+        }
+        if (text.trim() === editing.text.trim()) {
+            this.finishEdit();
+            this.tell("Nothing was changed.", "info");
+            return Promise.resolve(false);
+        }
+        const revision = editing.revision;
         const envelope = this.store.envelope("edit_message", {
-            target: {index: row.index, version: row.active},
+            // The conversation the edit began in, whatever is selected by the
+            // time the request goes.
+            conversation: {character: editing.character, thread_id: editing.thread},
+            target: {index: editing.index, version: editing.version},
             expected_revision: typeof revision === "number"
                 ? {kind: "revision", value: revision}
                 : (revision ? {kind: "legacy", fingerprint: String(revision)} : null),
         });
-        envelope.payload = {text: buffer, image_action: "keep"};
-        this.editing = null;
-        this.store.send(envelope).then((outcome) => {
-            if (outcome && !outcome.ok) {
-                this.say((outcome.error && outcome.error.message)
-                    || "That edit was refused.", "warn");
+        envelope.payload = {text, image_action: "keep"};
+        editing.saving = true;
+        this.nodes.send.disabled = true;
+        this.say("Saving your edit\u2026", "info");
+        return this.store.send(envelope).then((outcome) => outcome, (error) => ({
+            ok: false, error: {message: (error && error.message) || ""},
+        })).then((outcome) => {
+            editing.saving = false;
+            if (this.editing !== editing) return !!(outcome && outcome.ok);
+            if (outcome && outcome.ok) {
+                this.finishEdit();
+                this.tell("Message edited.", "info");
+                return true;
             }
+            this.tell(((outcome && outcome.error && outcome.error.message)
+                       || "That edit was refused.") + " Your edit is still in the box.",
+                      "warn");
+            this.nodes.send.disabled = !this.canSaveEdit(this.store.snapshot());
+            return false;
         });
     };
 
-    Shell.prototype.cancelEdit = function () {
+    /** The edit is over, saved or not: the box is the draft's again --
+     *  the draft of the conversation the edit was in, unless told which. */
+    Shell.prototype.finishEdit = function (text) {
+        const editing = this.editing;
+        if (!editing) return false;
         this.editing = null;
+        const input = this.nodes.input;
+        input.value = typeof text === "string" ? text
+            : (this.store.draft(editing.key).text || "");
+        this.applyEditing();
+        this.grow();
+        this.markEditTarget();
+        this.nodes.send.disabled = !this.canSend(this.store.snapshot());
+        return true;
+    };
+
+    Shell.prototype.cancelEdit = function () {
+        if (!this.finishEdit()) return false;
+        this.tell("Edit cancelled. The message is as it was.", "info");
+        return true;
+    };
+
+    /** Everything that says the box holds an edit, drawn from `editing`. */
+    Shell.prototype.applyEditing = function () {
+        const nodes = this.nodes;
+        const editing = this.editing;
+        nodes.composer.classList.toggle("forge-assistant-editing", !!editing);
+        nodes.editBar.hidden = !editing;
+        if (editing) {
+            nodes.editLabel.textContent = editing.role === "assistant"
+                ? "\u270e Editing " + (editing.who || "the") + "\u2019s reply"
+                : "\u270e Editing your message";
+        }
+        nodes.send.textContent = editing ? "Save" : "Send";
+        nodes.send.title = editing ? "Replace the message with these words" : "";
+        nodes.input.setAttribute("aria-label", editing ? "Edit the message" : "Message");
+        nodes.input.placeholder = editing ? "The message\u2019s new words\u2026"
+            : "Message\u2026";
+        // An edit changes the words, so the tools that add to a message stand
+        // aside. The picture already on it is kept.
+        nodes.attach.disabled = !!editing;
+        nodes.dictate.disabled = !!editing;
+    };
+
+    /** Outline the message being edited, and bring it into view when asked. */
+    Shell.prototype.markEditTarget = function (show) {
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        const editing = this.editing;
+        let found = null;
+        Array.prototype.forEach.call(transcript.children || [], (node) => {
+            const on = !!editing && !!node.dataset
+                && node.dataset.index === String(editing.index);
+            if (on) found = node;
+            if (node.classList) node.classList.toggle("forge-assistant-edit-target", on);
+        });
+        if (show && found && typeof found.scrollIntoView === "function") {
+            try {
+                found.scrollIntoView({block: "nearest"});
+            } catch (error) { /* an older engine's scrollIntoView takes no options */ }
+        }
     };
 
     Shell.prototype.renderStatus = function (view) {
