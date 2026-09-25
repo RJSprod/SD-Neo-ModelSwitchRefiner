@@ -3669,6 +3669,9 @@
         const input = this.nodes.input;
         input.value = this.editing.text;
         this.applyEditing();
+        // Save's own rule from the first moment: Send's was about the draft,
+        // and an empty draft left Save greyed out over a message full of words.
+        this.nodes.send.disabled = !this.canSaveEdit(view);
         this.grow();
         input.focus();
         try {

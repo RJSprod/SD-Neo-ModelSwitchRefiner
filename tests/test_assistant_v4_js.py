@@ -143,6 +143,19 @@ class TestEditingHappensInThePanel:
         assert found["focused"] is True and found["caret"] == [21, 21]
         assert found["aria"] == "Edit the message"
 
+    def test_save_can_be_pressed_from_the_start(self):
+        """Found in Chromium: Send is disabled over an empty draft, and Save
+        kept that until something was typed -- a greyed-out Save over a
+        message full of words."""
+        found = run_edit("""
+            drafts[KEY] = {text: "", attachment: null};
+            shell.nodes.send.disabled = true;
+            shell.startEdit(MESSAGES[0], 7);
+            console.log(JSON.stringify({save: !shell.nodes.send.disabled}));
+        """)
+
+        assert found == {"save": True}
+
     def test_a_reply_says_whose_it_is(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[1], 7);
