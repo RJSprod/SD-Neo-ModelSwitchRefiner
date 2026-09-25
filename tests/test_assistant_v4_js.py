@@ -480,3 +480,371 @@ class TestTheEditLooksLikeAnEdit:
 
     def test_cancel_is_a_finger_wide(self):
         assert "min-height: 44px" in rule(".forge-assistant-edit-cancel")
+
+
+# --------------------------------------------------------------------------- #
+# 2. The ⋯ menu's switches say whether they are on
+# --------------------------------------------------------------------------- #
+
+MENU = """
+// The store's script supplies this on a real page; the key is all it is for.
+if (!NS.basePath) NS.basePath = () => "";
+const box = {};
+globalThis.localStorage = {getItem: (k) => box[k] === undefined ? null : box[k],
+                           setItem: (k, v) => { box[k] = String(v); }};
+const shell = Object.create(NS.Shell.prototype);
+shell.state = {freeFloat: true, autoAttach: false, sendToGenerate: true};
+shell.host = {listUtilities: () => []};
+shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
+shell.nodes = {status: {dataset: {}, textContent: ""}};
+shell.closeMenu = () => undefined;
+"""
+
+
+class TestTheMenuSaysWhatIsOn:
+    """"i want the menu items to be state wise. For example, today when i have
+    on free form, the state is not in the menu name. Maybe just add a check.\""""
+
+    def test_every_switch_reports_its_state_and_keeps_its_name(self):
+        found = run(MENU + """
+            console.log(JSON.stringify(shell.utilityItems()
+                .filter((item) => item.getAttribute("role") === "menuitemcheckbox")
+                .map((item) => [item.textContent, item.getAttribute("aria-checked")])));
+        """)
+
+        assert found == [["Free Float", "true"], ["Auto Attach", "false"],
+                         ["Send to Generate", "true"]]
+
+    def test_the_check_is_drawn_from_that_state(self):
+        on = rule('.forge-assistant-menu-item[role="menuitemcheckbox"]'
+                  '[aria-checked="true"]::before')
+        off = rule('.forge-assistant-menu-item[role="menuitemcheckbox"]::before')
+
+        assert 'content: "\\2713";' in on
+        # Decoration to a screen reader, which hears aria-checked already --
+        # and after the plain form, which is what an engine that cannot read
+        # the second keeps.
+        assert on.index('content: "\\2713";') < on.index('content: "\\2713" / "";')
+        assert 'content: "";' in off and "position: absolute" in off
+
+    def test_the_labels_line_up_whether_or_not_a_switch_is_on(self):
+        item = rule('.forge-assistant-menu[data-which="utilities"] .forge-assistant-menu-item')
+
+        assert "padding-left: 2em" in item and "position: relative" in item
+
+    def test_no_switch_has_a_look_of_its_own_any_more(self):
+        """Free Float was bordered and bold when on and Auto Attach was drawn
+        no differently at all: one rule, for every switch, is the cure."""
+        bare = re.sub(r"/\*.*?\*/", "", CSS, flags=re.DOTALL)
+
+        assert '.forge-assistant-float[aria-checked' not in bare
+
+
+# --------------------------------------------------------------------------- #
+# 3. Send to Generate
+# --------------------------------------------------------------------------- #
+
+GENERATE = """
+// A Forge-shaped page: each image tab's prompt box and its Generate, with
+// Interrupt/Skip/Interrupting beside it the way Forge draws them. A press on
+// Generate records the prompt it would have read.
+const box = {};
+globalThis.localStorage = {getItem: (k) => box[k] === undefined ? null : box[k],
+                           setItem: (k, v) => { box[k] = String(v); }};
+const log = [];
+const page = {};
+function control(id, tag) {
+    const node = document.createElement(tag || "button");
+    node.id = id;
+    page[id] = node;
+    return node;
+}
+function tab(name, prompt) {
+    const area = control(name + "_prompt_area", "textarea");
+    area.value = prompt;
+    const holder = control(name + "_prompt", "div");
+    holder.querySelector = () => area;
+    const generate = control(name + "_generate");
+    generate.pressed = [];
+    generate.click = () => { log.push("click:" + name); generate.pressed.push(area.value); };
+    control(name + "_interrupt");
+    control(name + "_skip");
+    control(name + "_interrupting");
+    return {area, generate};
+}
+const txt = tab("txt2img", "portrait of a woman, <lora:detail:0.5> blue hat -[[__lighting__]]");
+const img = tab("img2img", "img2img words");
+const previousLookup = document.getElementById;
+document.getElementById = (id) => page[id] || previousLookup(id);
+globalThis.updateInput = (target) => log.push("input:" + target.value.split("\\n")[0]);
+globalThis.requestAnimationFrame = (fn) => { log.push("frame"); fn(); return 1; };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const REPLY = {index: 1, role: "assistant", text: "A misty harbour at dawn, 35mm", active: 0};
+function generateShell(workspace, on) {
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = {sendToGenerate: on !== false};
+    shell.nodes = {status: {dataset: {}, textContent: ""}};
+    shell.host = {getActiveWorkspace: () => workspace};
+    shell.switched = [];
+    shell.switchWorkspace = (id) => { shell.switched.push(id); log.push("switch:" + id);
+                                      return Promise.resolve(id); };
+    return shell;
+}
+"""
+
+
+def run_generate(scenario):
+    return run(GENERATE + scenario, sources=("shell",))
+
+
+class TestSendToGenerate:
+    """"If "Send to Generate" is turned on, pressing the button under a reply
+    would send the prompt in to replace the current, and invoke a generation
+    as if user pressed the button ... If the send to generate is turned off,
+    then it just does what it does today which is prompt replacement.\""""
+
+    def test_it_is_a_switch_in_the_menu_remembered_in_this_browser(self):
+        found = run(MENU + """
+            shell.state.sendToGenerate = false;
+            const item = () => shell.utilityItems().find((i) => i.textContent === "Send to Generate");
+            const before = item().getAttribute("aria-checked");
+            item().handlers.click.forEach((fn) => fn());
+            const fresh = Object.create(NS.Shell.prototype);
+            fresh.state = {};
+            fresh._restoreSendToGenerate();
+            console.log(JSON.stringify({before, on: shell.state.sendToGenerate,
+                                        restored: fresh.state.sendToGenerate,
+                                        after: item().getAttribute("aria-checked"),
+                                        said: shell.nodes.status.textContent}));
+        """)
+
+        assert found["before"] == "false"
+        assert found["on"] is True and found["restored"] is True
+        assert found["after"] == "true"
+        assert found["said"].startswith("Send to Generate is on")
+
+    def test_it_starts_off(self):
+        found = run(MENU + """
+            const fresh = Object.create(NS.Shell.prototype);
+            fresh.state = {};
+            fresh._restoreSendToGenerate();
+            console.log(JSON.stringify({on: fresh.state.sendToGenerate}));
+        """)
+
+        assert found == {"on": False}
+
+    def test_off_the_button_only_writes_the_prompt(self):
+        found = run_generate("""
+            const shell = generateShell("tab_txt2img", false);
+            const wrote = shell.sendToPrompt(REPLY);
+            settle().then(() => console.log(JSON.stringify({wrote, log, prompt: txt.area.value})));
+        """)
+
+        assert found["wrote"] is True
+        assert found["log"] == ["input:A misty harbour at dawn, 35mm"]
+        assert found["prompt"] == ("A misty harbour at dawn, 35mm\n"
+                                   "<lora:detail:0.5> -[[__lighting__]]")
+
+    def test_on_it_writes_the_prompt_waits_for_the_page_and_presses_generate(self):
+        found = run_generate("""
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, log, generated: txt.generate.pressed,
+                said: shell.nodes.status.textContent})));
+        """)
+
+        assert found["pressed"] is True
+        assert found["log"] == ["input:A misty harbour at dawn, 35mm", "frame", "frame",
+                                "click:txt2img"]
+        assert found["generated"] == ["A misty harbour at dawn, 35mm\n"
+                                      "<lora:detail:0.5> -[[__lighting__]]"], \
+            "the reply, with the LoRA and the literal kept"
+        assert found["said"] == "Prompt sent to txt2img and generating."
+
+    def test_on_img2img_it_generates_in_img2img(self):
+        found = run_generate("""
+            const shell = generateShell("tab_img2img");
+            shell.sendToPrompt(REPLY).then(() => console.log(JSON.stringify({
+                img: img.generate.pressed, txt: txt.generate.pressed,
+                switched: shell.switched})));
+        """)
+
+        assert found == {"img": ["A misty harbour at dawn, 35mm"], "txt": [], "switched": []}
+
+    def test_from_any_other_tab_it_goes_to_txt2img_first(self):
+        found = run_generate("""
+            const shell = generateShell("tab_extras");
+            shell.sendToPrompt(REPLY).then(() => console.log(JSON.stringify({log,
+                switched: shell.switched})));
+        """)
+
+        assert found["switched"] == ["tab_txt2img"]
+        assert found["log"][0] == "switch:tab_txt2img", "the tab first, then the prompt"
+        assert found["log"][-1] == "click:txt2img"
+
+    def test_a_tab_that_would_not_open_still_generates_and_says_where(self):
+        found = run_generate("""
+            const shell = generateShell("tab_extras");
+            shell.switchWorkspace = () => Promise.resolve("");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, said: shell.nodes.status.textContent})));
+        """)
+
+        assert found["pressed"] is True
+        assert found["said"] == ("Prompt sent to txt2img and generating there -- its tab "
+                                 "could not be opened.")
+
+    def test_a_run_in_progress_is_not_pressed_again(self):
+        """Forge covers Generate with Interrupt and Skip while a run is on; a
+        person cannot press it then, and neither does this."""
+        found = run_generate("""
+            page.txt2img_interrupt.style.display = "block";
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, generated: txt.generate.pressed, prompt: txt.area.value,
+                said: shell.nodes.status.textContent, kind: shell.nodes.status.dataset.kind})));
+        """)
+
+        assert found["pressed"] is False
+        assert found["generated"] == []
+        assert found["prompt"].startswith("A misty harbour at dawn, 35mm"), "still written"
+        assert found["said"] == ("txt2img is already generating. The prompt is in place: "
+                                 "press Generate when it finishes.")
+        assert found["kind"] == "warn"
+
+    def test_an_interruption_under_way_is_a_run_in_progress(self):
+        found = run_generate("""
+            page.txt2img_interrupting.style.display = "block";
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({pressed})));
+        """)
+
+        assert found == {"pressed": False}
+
+    def test_a_hidden_generate_is_a_run_in_progress(self):
+        found = run_generate("""
+            txt.generate.style.display = "none";
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({pressed})));
+        """)
+
+        assert found == {"pressed": False}
+
+    def test_a_generate_that_cannot_be_pressed_is_not_pressed(self):
+        found = run_generate("""
+            txt.generate.disabled = true;
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, generated: txt.generate.pressed})));
+        """)
+
+        assert found == {"pressed": False, "generated": []}
+
+    def test_a_run_that_starts_during_the_wait_is_not_pressed_again(self):
+        found = run_generate("""
+            globalThis.requestAnimationFrame = (fn) => {
+                page.txt2img_skip.style.display = "block";
+                fn();
+                return 1;
+            };
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, generated: txt.generate.pressed})));
+        """)
+
+        assert found == {"pressed": False, "generated": []}
+
+    def test_a_prompt_changed_during_the_wait_is_not_generated(self):
+        found = run_generate("""
+            globalThis.requestAnimationFrame = (fn) => {
+                txt.area.value = "somebody typed";
+                fn();
+                return 1;
+            };
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, generated: txt.generate.pressed,
+                said: shell.nodes.status.textContent})));
+        """)
+
+        assert found["pressed"] is False and found["generated"] == []
+        assert found["said"] == ("The txt2img prompt changed before Generate was pressed, "
+                                 "so it was not pressed.")
+
+    def test_a_page_without_generate_says_so(self):
+        found = run_generate("""
+            delete page.txt2img_generate;
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(REPLY).then((pressed) => console.log(JSON.stringify({
+                pressed, said: shell.nodes.status.textContent})));
+        """)
+
+        assert found["pressed"] is False
+        assert found["said"] == ("Prompt sent to txt2img, but there is no Generate button "
+                                 "to press on this page.")
+
+    def test_a_reply_with_no_words_sends_nothing(self):
+        found = run_generate("""
+            const shell = generateShell("tab_txt2img");
+            shell.sendToPrompt(Object.assign({}, REPLY, {text: "  "})).then((pressed) =>
+                console.log(JSON.stringify({pressed, log})));
+        """)
+
+        assert found == {"pressed": False, "log": []}
+
+
+class TestTheReplyButtonSaysWhichItDoes:
+    """The same press starts a generation when the switch is on, so the button
+    says so -- it should never be a surprise."""
+
+    BUBBLE = """
+    // A browser keeps className and classList as one; the harness's stub does
+    // not, and the code under test reads classList.
+    const makeElement = document.createElement;
+    document.createElement = (tag) => {
+        const node = makeElement(tag);
+        let name = "";
+        Object.defineProperty(node, "className", {
+            get() { return name; },
+            set(value) {
+                name = String(value || "");
+                name.split(/\\s+/).filter(Boolean).forEach((one) => node.classList.add(one));
+            },
+        });
+        return node;
+    };
+    if (!NS.basePath) NS.basePath = () => "";
+    const shell = Object.create(NS.Shell.prototype);
+    shell.state = {sendToGenerate: true};
+    shell.settings = {bubbleWidth: 80};
+    shell.nodes = {transcript: document.createElement("div"),
+                   status: {dataset: {}, textContent: ""}};
+    const row = {index: 1, role: "assistant", text: "a", active: 0, versions: ["a"]};
+    const view = {conversation: {conversation: {revision: 3},
+                                 messages: [{index: 0, role: "user", text: "q"}, row]}};
+    const bubble = shell.bubble(row, view);
+    shell.nodes.transcript.appendChild(bubble);
+    const send = () => bubble.children.find((c) => c.classList.contains("forge-assistant-actions"))
+        .children.find((b) => b.dataset.action === "send_prompt");
+    const drawn = (b) => [b.textContent, b.title, b["aria-label"]];
+    """
+
+    def test_on_it_is_a_play_button_named_send_to_generate(self):
+        found = run(self.BUBBLE + """
+            console.log(JSON.stringify(drawn(send())));
+        """)
+
+        assert found == ["▶︎", "Send to Generate", "Send to Generate"]
+
+    def test_the_buttons_already_drawn_follow_the_switch(self):
+        """Bubbles are kept across renders, so the switch tells the ones on
+        the page rather than waiting for them to be rebuilt."""
+        found = run(self.BUBBLE + """
+            globalThis.localStorage = {setItem() {}, getItem() { return null; }};
+            const on = drawn(send());
+            shell.setSendToGenerate(false);
+            console.log(JSON.stringify({on, off: drawn(send())}));
+        """)
+
+        assert found["on"][1] == "Send to Generate"
+        assert found["off"] == ["➤", "Send to prompt", "Send to prompt"]

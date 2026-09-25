@@ -6458,11 +6458,40 @@
     cursor: default;
 }
 
-/* The way out of a menu and the mode toggle above it, both set slightly apart
-   from the entries that do something to the machine. */
-.forge-assistant-float[aria-checked="true"] {
-    border-color: var(--color-accent, #2563eb);
-    font-weight: 600;
+/* The ⋯ menu's switches say whether they are on.
+
+   "i want the menu items to be state wise. For example, today when i have on
+   free form, the state is not in the menu name. Maybe just add a check."
+
+   Free Float was drawn with an accent border when on and Auto Attach with
+   nothing at all. Now every switch has a check, in a column of its own on the
+   left, drawn from `aria-checked` -- so what a screen reader says and what is
+   on screen are the same fact, and a switch added later gets it by being a
+   switch. Every entry of the ⋯ menu keeps the column, so the labels line up
+   whether a switch is on or not.
+
+   The check is generated content, so the label's own text stays the label;
+   `/ ""` says it is decoration, and the plain declaration before it is what
+   an engine that does not read that form keeps. */
+.forge-assistant-menu[data-which="utilities"] .forge-assistant-menu-item {
+    position: relative;
+    padding-left: 2em;
+}
+
+.forge-assistant-menu-item[role="menuitemcheckbox"]::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 0.65em;
+    transform: translateY(-50%);
+    font-weight: 700;
+    line-height: 1;
+}
+
+.forge-assistant-menu-item[role="menuitemcheckbox"][aria-checked="true"]::before {
+    content: "\2713";
+    content: "\2713" / "";
+    color: var(--color-accent, #2563eb);
 }
 
 .forge-assistant-accordion {

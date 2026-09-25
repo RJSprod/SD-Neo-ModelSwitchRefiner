@@ -368,6 +368,7 @@ document.createElement = (tag) => {
 };
 function tapShell(roles) {
     const shell = Object.create(NS.Shell.prototype);
+    shell.state = {};
     shell.settings = {bubbleWidth: 80};
     const transcript = document.createElement("div");
     shell.nodes = {transcript, status: {dataset: {}, textContent: ""}};
@@ -723,6 +724,7 @@ function promptBoxes() {
 }
 function promptShell(workspace) {
     const shell = Object.create(NS.Shell.prototype);
+    shell.state = {};
     shell.nodes = {status: {dataset: {}, textContent: ""}};
     shell.host = {getActiveWorkspace: () => workspace};
     return shell;

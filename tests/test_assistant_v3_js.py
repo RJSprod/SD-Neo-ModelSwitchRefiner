@@ -937,7 +937,8 @@ class TestTheMenuOpensTheEditor:
             console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
         """, sources=("shell", "system"))
 
-        assert found[:4] == ["Free Float", "Auto Attach", "New thread", "System prompt…"]
+        assert found[:5] == ["Free Float", "Auto Attach", "Send to Generate", "New thread",
+                             "System prompt…"]
 
     def test_pressing_it_puts_the_menu_away_and_opens_the_character(self):
         found = run(self.MENU + """

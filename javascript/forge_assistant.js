@@ -299,6 +299,7 @@
             focusWorkspaceId: null,
             showAnyway: false,
             autoAttach: false,
+            sendToGenerate: false,
         };
         this.settings = {
             enabled: true,
@@ -323,6 +324,7 @@
         this._restore();
         this._restoreFloat();
         this._restoreAutoAttach();
+        this._restoreSendToGenerate();
         // Which picture Auto Attach last sent, per conversation. See
         // `autoAttachable`.
         this.autoSent = new Map();
@@ -432,6 +434,28 @@
             window.localStorage.setItem(this._autoAttachKey(),
                                         this.state.autoAttach ? "on" : "off");
         } catch (error) { /* memory only; the mode still works */ }
+    };
+
+    // Send to Generate, the same way: a preference about what one button does,
+    // remembered in this browser under a key of its own.
+    Shell.prototype._sendToGenerateKey = function () {
+        return "forge-assistant-send-to-generate:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreSendToGenerate = function () {
+        try {
+            this.state.sendToGenerate =
+                window.localStorage.getItem(this._sendToGenerateKey()) === "on";
+        } catch (error) {
+            this.state.sendToGenerate = false;
+        }
+    };
+
+    Shell.prototype._saveSendToGenerate = function () {
+        try {
+            window.localStorage.setItem(this._sendToGenerateKey(),
+                                        this.state.sendToGenerate ? "on" : "off");
+        } catch (error) { /* memory only; the switch still works */ }
     };
 
     Shell.prototype._save = function () {
@@ -2027,7 +2051,8 @@
         // anybody wants to hit by accident. It is the shell's own preference,
         // so it is added here rather than in the host's list of utilities,
         // which is about things the *host* can be asked to do.
-        const own = [this.floatItem(), this.autoAttachItem(), this.newThreadItem()];
+        const own = [this.floatItem(), this.autoAttachItem(), this.sendToGenerateItem(),
+                     this.newThreadItem()];
         if (NS.systemEditor) own.push(this.systemPromptItem());
         if (NS.look) own.push(this.customizeItem());
         return own.concat(this.host.listUtilities().map((utility) => {
@@ -2082,6 +2107,35 @@
             this.setAutoAttach(!on);
         });
         return item;
+    };
+
+    Shell.prototype.sendToGenerateItem = function () {
+        const on = !!this.state.sendToGenerate;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-send-generate",
+                             "Send to Generate");
+        item.type = "button";
+        // A mode, like the two above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Make the send button under a reply only write the prompt"
+            : "Make the send button under a reply write the prompt and press Generate";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setSendToGenerate(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.setSendToGenerate = function (on) {
+        this.state.sendToGenerate = !!on;
+        this._saveSendToGenerate();
+        this.renderSendMode();
+        this.tell(on ? "Send to Generate is on: the button under a reply writes the prompt "
+            + "and presses Generate." : "Send to Generate is off: the button under a reply "
+            + "only writes the prompt.", "info");
+        return this.state.sendToGenerate;
     };
 
     /** "Add the ability to start a new thread directly from the fly out menu.
@@ -3157,11 +3211,13 @@
             if (spec.role && spec.role !== role) return;
             const button = element("button", "forge-assistant-action", spec.glyph);
             button.type = "button";
+            button.dataset.action = spec.action;
             // An icon with no accessible name is a button only sighted people
             // have. Both, because `title` is the hover and the long press and
             // `aria-label` is what a screen reader reads.
             button.title = spec.label;
             button.setAttribute("aria-label", spec.label);
+            if (spec.action === "send_prompt") this.drawSendMode(button);
             button.addEventListener("click", () => {
                 // Pressed is chosen: the row goes away, whatever the action
                 // does next.
@@ -3171,6 +3227,37 @@
             bar.appendChild(button);
         });
         return bar;
+    };
+
+    // With Send to Generate on, the reply's send button says so -- a play
+    // glyph and its own name -- because the same press now starts a
+    // generation, and that should never be a surprise. U+FE0E keeps the glyph
+    // text rather than a coloured emoji.
+    const SEND_PROMPT = {glyph: "\u27a4", label: "Send to prompt"};
+    const SEND_GENERATE = {glyph: "\u25b6\ufe0e", label: "Send to Generate"};
+
+    Shell.prototype.drawSendMode = function (button) {
+        const mode = this.state.sendToGenerate ? SEND_GENERATE : SEND_PROMPT;
+        if (button.textContent !== mode.glyph) button.textContent = mode.glyph;
+        button.title = mode.label;
+        button.setAttribute("aria-label", mode.label);
+        button.dataset.generate = String(!!this.state.sendToGenerate);
+    };
+
+    /** Redraw every reply's send button: bubbles are kept across renders, so
+     *  the ones already on the page are told when the switch moves. */
+    Shell.prototype.renderSendMode = function () {
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        Array.prototype.forEach.call(transcript.children || [], (node) => {
+            const bar = actionsOf(node);
+            if (!bar) return;
+            Array.prototype.forEach.call(bar.children || [], (button) => {
+                if (button.dataset && button.dataset.action === "send_prompt") {
+                    this.drawSendMode(button);
+                }
+            });
+        });
     };
 
     function actionsOf(node) {
@@ -3342,9 +3429,11 @@
 
     // Which prompt: the image tab you are on, and txt2img from anywhere else.
     const PROMPT_TARGETS = {
-        tab_img2img: {id: "img2img_prompt", label: "img2img"},
+        tab_img2img: {id: "img2img_prompt", label: "img2img", tab: "tab_img2img",
+                      name: "img2img"},
     };
-    const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img"};
+    const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img",
+                                   tab: "tab_txt2img", name: "txt2img"};
 
     function editHeight(lineHeight) {
         const view = window.visualViewport;
@@ -3385,6 +3474,7 @@
     }
 
     Shell.prototype.sendToPrompt = function (row) {
+        if (this.state.sendToGenerate) return this.sendToGenerate(row);
         const target = promptTarget(this.host.getActiveWorkspace());
         const box = promptBox(target.id);
         if (!box) {
@@ -3399,6 +3489,116 @@
         this.tell("Prompt sent to " + target.label + ".", "info");
         return true;
     };
+
+    // -- Send to Generate -------------------------------------------------------- //
+    //
+    // "I want a toggle that enhances the "send to prompt" with a "Send to
+    // Generate" ... pressing the button under a reply would send the prompt in
+    // to replace the current, and invoke a generation as if user pressed the
+    // button. All the settings on the page still applied, just generated with
+    // the LLM reply as prompt (respecting our lora and literals)."
+    //
+    // The prompt is written exactly as Send to prompt writes it -- the reply,
+    // then what is kept of the old prompt -- and then the tab's own Generate
+    // is pressed. Pressed, not imitated: everything that button does with the
+    // page, the pipeline, the literal boxes and whatever else is on it happens
+    // because it is the button. Four details.
+    //
+    // * Where. The image tab you are on; from any other tab, txt2img, and the
+    //   panel switches there first so the generation is watched rather than
+    //   started out of sight. Focus mode comes along, as it does for the
+    //   workspace picker. A switch that fails still generates, and says where.
+    // * When. Gradio reads the prompt from its own state, which the input
+    //   event updates; the press waits for the page to paint twice, so the
+    //   generation is of the new prompt and never of the old one. If the box
+    //   no longer holds what was written by then, nothing is pressed.
+    // * Not twice. Forge covers Generate with Interrupt and Skip while a run
+    //   is on, so a person cannot press it then; neither does this. The
+    //   prompt is left in place and the status line says to press Generate
+    //   when the run ends.
+    // * Honest. Every way it stops short says so, and what it did do.
+
+    Shell.prototype.sendToGenerate = function (row) {
+        if (!String(row.text || "").trim()) {
+            this.tell("That reply has no words to send.", "warn");
+            return Promise.resolve(false);
+        }
+        const active = this.host.getActiveWorkspace();
+        const target = promptTarget(active);
+        const arrive = active === target.tab ? Promise.resolve(target.tab)
+            : this.switchWorkspace(target.tab);
+        return arrive.then((reached) => {
+            const box = promptBox(target.id);
+            if (!box) {
+                this.tell("There is no " + target.label + " prompt on this page.", "warn");
+                return false;
+            }
+            const wanted = promptFrom(row.text, box.value);
+            publish(box, wanted);
+            const generate = hostElement(target.name + "_generate");
+            if (!generate) {
+                this.tell("Prompt sent to " + target.label + ", but there is no Generate "
+                          + "button to press on this page.", "warn");
+                return false;
+            }
+            return afterPaint().then(() => {
+                if (box.value !== wanted) {
+                    this.tell("The " + target.label + " prompt changed before Generate "
+                              + "was pressed, so it was not pressed.", "warn");
+                    return false;
+                }
+                // Asked at the moment of the press, which is the moment that
+                // matters: a run can start in the frames just waited.
+                if (generating(target.name) || generate.disabled) {
+                    this.tell(target.label + " is already generating. The prompt is in "
+                              + "place: press Generate when it finishes.", "warn");
+                    return false;
+                }
+                generate.click();
+                this.tell(reached === target.tab || active === target.tab
+                    ? "Prompt sent to " + target.label + " and generating."
+                    : "Prompt sent to " + target.label + " and generating there -- its "
+                      + "tab could not be opened.", "info");
+                return true;
+            });
+        });
+    };
+
+    // A run is on while Forge shows Interrupt, Skip or Interrupting... over
+    // Generate (`setSubmitButtonsVisibility` writes their display), or has
+    // hidden Generate itself. Computed, not inline: idle, the stylesheet is
+    // what hides them.
+    function generating(name) {
+        const shown = (id) => {
+            const node = hostElement(id);
+            if (!node) return null;
+            const style = typeof window.getComputedStyle === "function"
+                ? window.getComputedStyle(node) : null;
+            const display = (style && style.display) || (node.style && node.style.display);
+            return display ? display !== "none" : null;
+        };
+        if (["_interrupt", "_skip", "_interrupting"].some((suffix) =>
+            shown(name + suffix) === true)) return true;
+        return shown(name + "_generate") === false;
+    }
+
+    // Two frames, or a quarter of a second in a tab the browser is not
+    // painting: long enough for Gradio to have taken the input event, short
+    // enough that the press still feels like the press.
+    function afterPaint() {
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                resolve();
+            };
+            if (typeof window.requestAnimationFrame === "function") {
+                window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+            }
+            setTimeout(finish, 250);
+        });
+    }
 
     Shell.prototype.act = function (action, row, revision) {
         if (action === "edit_message") {
