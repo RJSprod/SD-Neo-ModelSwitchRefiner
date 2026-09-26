@@ -2969,9 +2969,12 @@ A picture that has been sent is **kept**, and kept where you can find it:
 <LLM data root>/chat-images/<character>/<content hash>.jpg
 ```
 
-It is the same JPEG the model was shown, so a thread reopened next month shows
-exactly what was sent — inline, at a readable size, in the message it belongs
-to. Content-addressed inside the character's folder, so the same picture
+It is the same JPEG the model was shown — no larger than 768 pixels on its
+longer side, its shape kept, never enlarged — so a thread reopened next month
+shows exactly what was sent, inline, at a readable size, in the message it
+belongs to. That cap holds on every path to the model: a picture stored before
+it existed, or put into the folder by hand, is sized on the way out and the
+file on disk is left as it is. Content-addressed inside the character's folder, so the same picture
 attached twice is one file and a branch shares its parent's pictures rather than
 copying them.
 
@@ -2988,21 +2991,26 @@ file. Those are moved out the first time the thread is opened — once, per
 thread, without being asked — and the chat file gets smaller by however much
 base64 it was carrying.
 
-**What the model is shown.** Every picture stays in the thread, but the model
-is shown only the newest one: an older picture's message goes on the wire as
-its text under a note that a picture was there (`[image: name.jpg]`), and is
-never decoded for it. One still is what a conversation is usually about, and it
-is what keeps llama.cpp's prompt cache useful — a new picture rewrites only the
-previous picture's message, which is recent, so everything before it is resumed
-from the cache rather than read again. The window moves the same way: once a
-conversation no longer fits the context, its front moves in steps of a quarter
-of the window rather than by one message every turn. From one log, the old
-rules — one message off the front per turn, and every new picture taking the
-still off the *oldest* picture — read a prompt of five thousand tokens from its
-first token on every turn, which on an Intel GPU reading 25 to 50 tokens a
-second was three minutes of *Replying…* before a word appeared. What the new
-rules cost is a window at worst a quarter smaller right after a move, and the
-older pictures being described to the model rather than seen by it.
+**What the model is shown.** Every picture stays in the thread, but by default
+the model is shown only the newest one: an older picture's message goes on the
+wire as its text under a note that a picture was there (`[image: name.jpg]`),
+and is never decoded for it. One still is what a conversation is usually about,
+and it is what keeps llama.cpp's prompt cache useful — a new picture rewrites
+only the previous picture's message, which is recent, so everything before it
+is resumed from the cache rather than read again. **Settings → Model Chain →
+Show the model every picture in the conversation** sends every picture in the
+window as a still instead, the way it was before: each costs about 300 tokens
+of the context, so a thread full of pictures keeps fewer turns for them, and
+nothing is ever taken off a message, so the cache holds either way. The window
+moves the same way: once a conversation no longer fits the context, its front
+moves in steps of a quarter of the window rather than by one message every
+turn. From one log, the old rules — one message off the front per turn, and
+every new picture taking the still off the *oldest* picture — read a prompt of
+five thousand tokens from its first token on every turn, which on an Intel GPU
+reading 25 to 50 tokens a second was three minutes of *Replying…* before a word
+appeared. What the new rules cost is a window at worst a quarter smaller right
+after a move, and the older pictures being described to the model rather than
+seen by it.
 
 **Editing.** Every message is edited the same way, yours and the character's
 alike: pick it, change the words, change or remove the picture, Save. It edits
@@ -3563,8 +3571,10 @@ down there or just the end of what you were already reading.
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip — or attached for you by **Auto Attach**, above. One per message, and
 a second one asks whether to replace the first. Only the newest picture in a
-thread is shown to the model; the older ones stay in the thread and are named
-to it (see *Pictures in a conversation*). A message's picture shows on it
+thread is shown to the model unless **Show the model every picture in the
+conversation** is on in Settings; the older ones stay in the thread and are
+named to it, and no picture reaches the model larger than 768 pixels on its
+longer side (see *Pictures in a conversation*). A message's picture shows on it
 in the panel, fetched with the page's key like every other request the panel
 makes; one that has gone, or cannot be fetched, is a placeholder that says
 *Picture unavailable*. The file's name is never shown.

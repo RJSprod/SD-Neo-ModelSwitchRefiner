@@ -57,8 +57,20 @@ DIRNAME = "chat-images"
 
 SUFFIX = ".jpg"
 """What is written. One format because there is one encoder: every picture that
-reaches here has already been through the vendored preprocessor, which produces
-the sized JPEG that inference is sent."""
+reaches here goes through the vendored preprocessor, which produces the sized
+JPEG that inference is sent -- a decoded picture through :func:`jpeg_bytes`,
+bytes that arrive already encoded through :func:`fit_bytes`."""
+
+VISION_MAX_SIDE = 768
+"""The longest side a picture may have when it reaches the model.
+
+The preprocessor's own :data:`prompt_master.imaging.preprocess.MAX_SIDE`, named
+here because this module is where the promise is kept: :func:`store` sizes
+what it writes, :func:`adopt` sizes what it moves in from an old chat, and
+:func:`data_url` sizes what it reads back -- so a picture kept before the cap
+existed, or written by hand into the folder, is still shown to the model at
+no more than this. Aspect ratio is kept; nothing is ever enlarged.
+"""
 
 NAME_LENGTH = 32
 """How much of the SHA-256 names the file. Long enough that a collision is not
@@ -102,9 +114,10 @@ def store(picture, character: str) -> str:
     Idempotent by construction: the name is the hash of the bytes, so storing
     the same picture again finds the file already there and writes nothing.
     """
-    from prompt_master.imaging.preprocess import jpeg_bytes
+    from prompt_master.imaging.preprocess import fit_bytes, jpeg_bytes
 
-    raw = picture if isinstance(picture, (bytes, bytearray)) else jpeg_bytes(picture)
+    raw = (fit_bytes(bytes(picture)) if isinstance(picture, (bytes, bytearray))
+           else jpeg_bytes(picture))
     return _write(bytes(raw), character)
 
 
@@ -231,12 +244,37 @@ def data_url(recorded: str) -> str:
     if found is None:
         return ""
     try:
-        from prompt_master.imaging.preprocess import as_data_url
+        from prompt_master.imaging.preprocess import as_data_url, fit_bytes
 
-        return as_data_url(found.read_bytes())
+        stamp = found.stat()
+        key = (str(found), stamp.st_mtime_ns, stamp.st_size)
+        with _fitted_guard:
+            cached = _fitted.get(key)
+        if cached is not None:
+            return cached
+        # Sized on the way out, whatever is on disk: the cap is a promise about
+        # what the model is shown, not about what was written when.
+        url = as_data_url(fit_bytes(found.read_bytes()))
+        with _fitted_guard:
+            if len(_fitted) >= FITTED_KEPT:
+                _fitted.pop(next(iter(_fitted)))
+            _fitted[key] = url
+        return url
     except OSError:
         logger.warning("Model Chain: could not read the attachment at %s", found, exc_info=True)
         return ""
+
+
+FITTED_KEPT = 8
+"""How many read-back pictures are remembered, encoded and sized.
+
+Only the newest picture of a conversation is read for each request, and the
+same one on every turn until the next picture arrives; without this, a picture
+kept before the cap would be decoded and re-encoded on every turn. Keyed on the
+file's path, modification time and size, so a replaced file is read again.
+"""
+_fitted: dict = {}
+_fitted_guard = threading.Lock()
 
 
 def markup(recorded: str, alt: str = "") -> str:
@@ -463,6 +501,8 @@ def adopt(conversation, character: str = "") -> bool:
     """
     import base64
 
+    from prompt_master.imaging.preprocess import fit_bytes
+
     moved = False
     who = character or getattr(conversation, "character", "") or ""
     for message in getattr(conversation, "messages", None) or ():
@@ -471,7 +511,8 @@ def adopt(conversation, character: str = "") -> bool:
             continue
         _, _, encoded = str(inline).partition(",")
         try:
-            message.image_path = _write(base64.b64decode(encoded, validate=True), who)
+            message.image_path = _write(fit_bytes(base64.b64decode(encoded, validate=True)),
+                                        who)
         except Exception:
             logger.warning("Model Chain: could not move an attachment out of a conversation "
                            "and onto disk; it stays inside the chat file", exc_info=True)

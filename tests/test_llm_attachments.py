@@ -298,6 +298,17 @@ class TestTheRequestReadsThemBack:
         # The newest, because those are the ones a request keeps.
         assert all(message.image for message in messages[-MAX_IMAGES:])
 
+    def test_every_picture_is_read_when_the_setting_asks(self, root):
+        from prompt_master.chat.history import Message
+
+        messages = [Message(role="user", versions=[f"look {index}"],
+                            image_path=attachments.store(picture((index, 90, 200)), "Ada"))
+                    for index in range(4)]
+
+        mc_llm_chat_panel._with_pictures(messages, every_picture=True)
+
+        assert all(message.image for message in messages)
+
     def test_what_was_read_is_never_written_back(self, root):
         """The conversation on disk holds paths. A chat that saved the decoded
         copy beside the path would be exactly as large as it was before any of
@@ -310,6 +321,128 @@ class TestTheRequestReadsThemBack:
         mc_llm_chat_panel._with_pictures([message])
 
         assert "image" not in message.to_dict()
+
+
+def _decoded(url: str):
+    import io
+
+    from PIL import Image
+
+    _, _, encoded = url.partition(",")
+    return Image.open(io.BytesIO(base64.b64decode(encoded)))
+
+
+def _jpeg(size, colour=(40, 120, 60)) -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    picture(colour, size).save(buffer, "JPEG", quality=90)
+    return buffer.getvalue()
+
+
+class TestNothingLargerThanTheCapReachesTheModel:
+    """Every picture the model is shown fits inside 768 by 768, its shape
+    kept, and nothing is ever enlarged. The picker's path has sized pictures
+    since the folder existed; these are the paths that did not: bytes stored
+    as bytes, an old chat's inline picture moved onto disk, a picture that was
+    on disk before the cap or was put there by hand, and an inline picture the
+    move could not take."""
+
+    def test_the_cap_is_the_preprocessors(self):
+        from prompt_master.imaging.preprocess import MAX_SIDE
+
+        assert attachments.VISION_MAX_SIDE == MAX_SIDE == 768
+
+    def test_a_decoded_picture_is_sized_as_it_is_stored(self, root):
+        from PIL import Image
+
+        record = attachments.store(picture(size=(2000, 1000)), "Ada")
+
+        with Image.open(attachments.locate(record)) as kept:
+            assert kept.size == (768, 384)
+
+    def test_bytes_stored_as_bytes_are_sized_too(self, root):
+        from PIL import Image
+
+        record = attachments.store(_jpeg((1000, 2000)), "Ada")
+
+        with Image.open(attachments.locate(record)) as kept:
+            assert kept.size == (384, 768)
+
+    def test_a_small_picture_is_never_enlarged_and_its_bytes_are_its_own(self, root):
+        raw = _jpeg((500, 300))
+
+        record = attachments.store(raw, "Ada")
+
+        assert attachments.locate(record).read_bytes() == raw
+        assert _decoded(attachments.data_url(record)).size == (500, 300)
+
+    def test_a_picture_already_on_disk_is_sized_on_the_way_to_the_model(self, root):
+        """Kept before the cap existed, or put in the folder by hand: the file
+        is left as it is, and what the model is shown is not."""
+        raw = _jpeg((1600, 800))
+        import hashlib
+
+        destination = attachments.folder("Ada") / (hashlib.sha256(raw).hexdigest()[:32] + ".jpg")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(raw)
+        record = "Ada/" + destination.name
+
+        shown = _decoded(attachments.data_url(record))
+
+        assert shown.size == (768, 384)
+        assert destination.read_bytes() == raw, "the file on disk is not rewritten"
+
+    def test_the_sized_copy_is_remembered_for_the_next_turn(self, root, monkeypatch):
+        raw = _jpeg((1600, 800))
+        record = attachments.store(picture(size=(24, 18)), "Ada")
+        attachments.locate(record).write_bytes(raw)
+        import prompt_master.imaging.preprocess as preprocess
+
+        calls = []
+        real = preprocess.fit_bytes
+
+        def counted(data):
+            calls.append(len(data))
+            return real(data)
+
+        monkeypatch.setattr(preprocess, "fit_bytes", counted)
+        first = attachments.data_url(record)
+        second = attachments.data_url(record)
+
+        assert first == second and len(calls) == 1
+
+    def test_an_old_chats_picture_is_sized_as_it_moves_onto_disk(self, root):
+        from PIL import Image
+        from prompt_master.chat.history import ChatStore
+
+        chats = ChatStore(root / "chats")
+        conversation = chats.new("Ada")
+        conversation.append("user", "look")
+        conversation.messages[-1].image = ("data:image/jpeg;base64,"
+                                           + base64.b64encode(_jpeg((2000, 1000))).decode("ascii"))
+
+        assert attachments.adopt(conversation, "Ada")
+
+        with Image.open(attachments.locate(conversation.messages[-1].image_path)) as kept:
+            assert kept.size == (768, 384)
+
+    def test_an_inline_picture_the_move_could_not_take_is_sized_for_the_request(self, root):
+        from prompt_master.chat.history import Message
+
+        message = Message(role="user", versions=["look"],
+                          image="data:image/jpeg;base64,"
+                                + base64.b64encode(_jpeg((1000, 2000))).decode("ascii"))
+
+        mc_llm_chat_panel._with_pictures([message])
+
+        assert _decoded(message.image).size == (384, 768)
+
+    def test_something_that_is_not_a_picture_passes_through_the_guard(self):
+        from prompt_master.imaging.preprocess import fit_bytes, fit_data_url
+
+        assert fit_bytes(b"not a picture") == b"not a picture"
+        assert fit_data_url("data:text/plain,hello") == "data:text/plain,hello"
 
 
 class TestTheFacesBesideTheMessages:
