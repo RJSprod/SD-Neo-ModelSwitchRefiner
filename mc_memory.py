@@ -1766,6 +1766,7 @@ def forget_topology() -> None:
     with _topology_lock:
         _topology = None
     _smi_readings = (0.0, {})
+    _smi_totals.clear()
 
 
 def _physical_index_of(ordinal: int) -> int:
@@ -1835,13 +1836,22 @@ the negotiation ladder is a loop.
 
 _smi_readings: tuple[float, dict] = (0.0, {})
 
+_smi_totals: dict = {}
+"""Each physical card's total VRAM, from the same nvidia-smi reading.
 
-def physical_free_vram_bytes(physical_index: int) -> int:
-    """Free VRAM on a physical card this process cannot address, via nvidia-smi.
+Kept beside the free figures rather than inside them because it does not age:
+a card does not change size, so a total read once is a total for the session,
+and a caller that only wants the total should not pay for a fresh reading.
+"""
 
-    The slow path, and the only one there is for a card outside
-    ``CUDA_VISIBLE_DEVICES``: torch cannot report on a device it was not given,
-    and the driver can.
+
+def _smi_read(physical_index: int, what: str) -> dict:
+    """The per-card nvidia-smi figures, refreshed when the reading has aged.
+
+    Returns the free figures; the totals are filed in :data:`_smi_totals` on
+    the way past. ``what`` is only for the log line when the driver cannot be
+    asked, and an unaskable driver is an empty dict rather than an exception,
+    which every caller reads as "unknown".
     """
     global _smi_readings
 
@@ -1851,16 +1861,71 @@ def physical_free_vram_bytes(physical_index: int) -> int:
         try:
             from prompt_master.inference.device_detection import detect_gpus
 
+            cards = list(detect_gpus())
             readings = {int(card.physical_index): max(int(card.memory_free_mb), 0) * 1024 * 1024
-                        for card in detect_gpus()}
+                        for card in cards}
             _smi_readings = (now, readings)
+            # The total is a second question, and a card that cannot answer it
+            # has still answered the first: the free figure is never lost to a
+            # missing total.
+            for card in cards:
+                try:
+                    total = max(int(getattr(card, "memory_total_mb", 0) or 0), 0)
+                except (TypeError, ValueError):
+                    total = 0
+                if total > 0:
+                    _smi_totals[int(card.physical_index)] = total * 1024 * 1024
         except Exception:
-            logger.debug("Model Chain: could not ask nvidia-smi for free VRAM on GPU %s",
-                         physical_index, exc_info=True)
-            return 0
+            logger.debug("Model Chain: could not ask nvidia-smi for %s on GPU %s",
+                         what, physical_index, exc_info=True)
+            return {}
+    return readings
+
+
+def physical_free_vram_bytes(physical_index: int) -> int:
+    """Free VRAM on a physical card this process cannot address, via nvidia-smi.
+
+    The slow path, and the only one there is for a card outside
+    ``CUDA_VISIBLE_DEVICES``: torch cannot report on a device it was not given,
+    and the driver can.
+    """
+    readings = _smi_read(physical_index, "free VRAM")
     try:
         return int(readings.get(int(physical_index), 0))
     except (TypeError, ValueError):
+        return 0
+
+
+def physical_total_vram_bytes(physical_index: int) -> int:
+    """Total VRAM on physical card ``physical_index``, or 0 when it cannot be read.
+
+    The other half of the reading above, for a caller that has to know how much
+    of a card is *taken* rather than how much is free -- a subtraction from the
+    total, and only the driver has the total for a card this process may not be
+    able to address. nvidia-smi's figure first, because it comes without a CUDA
+    context; torch's for a card that is addressable from here when nvidia-smi is
+    not.
+    """
+    try:
+        index = int(physical_index)
+    except (TypeError, ValueError):
+        return 0
+    if index not in _smi_totals:
+        _smi_read(index, "total VRAM")
+    total = int(_smi_totals.get(index, 0))
+    if total > 0:
+        return total
+    ordinal = torch_ordinal_of(index)
+    if ordinal < 0:
+        return 0
+    try:
+        import torch
+
+        _free, total = torch.cuda.mem_get_info(torch.device("cuda", ordinal))
+        return int(total)
+    except Exception:
+        logger.debug("Model Chain: could not ask the driver for the size of GPU %s", index,
+                     exc_info=True)
         return 0
 
 

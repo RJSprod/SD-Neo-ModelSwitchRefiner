@@ -49,6 +49,7 @@ import mc_voice_device
 import mc_voice_engines
 import mc_voice_models
 import mc_voice_paths
+import mc_wangp
 import mc_voice_profile
 import mc_voice_registry
 import mc_voice_runtime
@@ -486,6 +487,45 @@ shared.options_templates.update(
                 "started on spec takes VRAM the image plan may be about to want. It loads "
                 "off the generation thread, which is the caveat on the experimental "
                 "setting above"
+            ),
+            mc_wangp.OPT_MODE: shared.OptionInfo(
+                mc_wangp.MODE_SHARE,
+                "WanGP on the other card",
+                gr.Radio,
+                {"choices": [label for _, label in mc_wangp.MODES]},
+            ).info(
+                "Mini Paint NEO's WanGP tab runs a video generator on a card of its own, and "
+                "its VRAM there is priority one: never taken for the LLM, never squeezed by "
+                "it. On the card WanGP is running on, llama-server is sized to what WanGP "
+                "has not needed — the most it has been seen holding this session, plus the "
+                "reserve below — and is stopped the moment WanGP grows into that reserve, "
+                "the moment WanGP's known peak leaves no room for it, or the moment WanGP "
+                "starts generating on a card whose needs have not been measured yet. A card "
+                "WanGP is not running on is the LLM's to use in full, and an LLM on any "
+                "other card costs WanGP nothing. Needs Mini Paint NEO; without it this "
+                "changes nothing"
+            ),
+            mc_wangp.OPT_RESERVE_GB: shared.OptionInfo(
+                mc_wangp.DEFAULT_RESERVE_GB,
+                "VRAM kept free for WanGP on its card (GB)",
+                gr.Number,
+            ).info(
+                "left free above the most WanGP has been seen holding, as room for its next "
+                "allocation: a generation grows in steps and the card is read every couple "
+                "of seconds, so this is the time between WanGP starting to grow and "
+                "llama-server being gone. Raise it if WanGP has ever run out of memory with "
+                "llama-server beside it"
+            ),
+            mc_wangp.OPT_THREADS: shared.OptionInfo(
+                0,
+                "Processor threads for llama-server while WanGP is running",
+                gr.Number,
+            ).info(
+                "a placement with weights in system RAM runs its arithmetic on the "
+                "processor, and llama.cpp takes every core for it by default — which "
+                "starved a WanGP generation for seven minutes in one log. While WanGP is "
+                "up, a start that touches the processor is held to this many threads; "
+                "0 means half the physical cores. A full offload is not affected"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,

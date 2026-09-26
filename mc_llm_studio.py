@@ -896,6 +896,18 @@ def _log_path() -> str:
         return "unknown"
 
 
+def _wangp_line() -> tuple:
+    """WanGP's line for the residency panel, or nothing. See :func:`mc_wangp.describe`."""
+    try:
+        import mc_wangp
+
+        said = mc_wangp.describe()
+    except Exception:
+        logger.debug("Model Chain: could not describe WanGP for the panel", exc_info=True)
+        return ()
+    return (f"<li>{ui.escape(said)}</li>",) if said else ()
+
+
 def _where(card: int | None) -> str:
     """A physical card as a display name, or ``""`` when there is nothing to name.
 
@@ -968,6 +980,10 @@ def _residency_table() -> str:
                  if status.llm_bytes_elsewhere > 0 else ())
     warm = (f"; {ui.gigabytes(status.image_warm_ram)} held as warm image cache"
             if status.image_warm_ram > 0 else "")
+    # The other card's owner, when there is one. Said only when Mini Paint's
+    # WanGP integration is in this process, because on every other installation
+    # the line would be a permanent sentence about a program that is not there.
+    wangp = _wangp_line()
     summary = [
         # First, and spelled out: the top bar's chip says "Loaded" and this is
         # where "loaded as what?" is answered. The chip's tooltip carries the
@@ -989,6 +1005,7 @@ def _residency_table() -> str:
         f"<li>VRAM owners{ui.escape(f' on {named}' if named else '')}: "
         f"{ui.escape(owners)}</li>",
         *elsewhere,
+        *wangp,
         f"<li>Host RAM: {ui.gigabytes(status.free_ram)} available, "
         f"{ui.gigabytes(status.ram_reserve)} reserved{warm}</li>",
         # A list, because two things really can be running at once now: an
@@ -1011,15 +1028,15 @@ def _residency_table() -> str:
     # The image card's, matching the free/total figures above it. Asking about
     # the machine and printing the answer under one card's heading is exactly
     # the mix-up section 21.1 asks the panel to stop making.
-    stray = mc_broker.unaccounted_bytes(
-        card=status.card if status.card is not None else mc_broker.ANY_CARD)
+    scope = status.card if status.card is not None else mc_broker.ANY_CARD
+    stray = mc_broker.unaccounted_bytes(card=scope)
     if stray > 0:
         # Named here as well as in the console, because this is the panel
         # somebody opens when a placement makes no sense, and VRAM held by
         # another process is the explanation that no row in the table below
         # can ever show.
         summary.append(f"<li><b>{ui.gigabytes(stray)}</b> "
-                       f"{ui.escape(mc_broker.stray_explanation())}.</li>")
+                       f"{ui.escape(mc_broker.stray_explanation(scope))}.</li>")
     if state.get("running") and state.get("backend") == "sycl":
         # Section 11.4 of the Intel design intent: a status view has to tell
         # unified memory apart from VRAM, because the table below has no row
