@@ -48,6 +48,48 @@ def as_data_url(raw: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
+def fit_bytes(raw: bytes) -> bytes:
+    """``raw`` as a JPEG no larger than :data:`MAX_SIDE` on either side.
+
+    The guard on the one path the sizing in :func:`jpeg_bytes` did not cover:
+    bytes that arrive already encoded -- a picture kept on disk before the cap,
+    an old chat's inline copy, a caller handing over a file's contents. Bytes
+    that are a JPEG within the cap come back untouched, so the content hash
+    that names a stored picture does not change under it; anything larger, or
+    in another format, is decoded once and sized and encoded the way every
+    other picture is. Bytes that are not a picture at all come back as they
+    were: refusing is the caller's decision, and this is not the place it is
+    made.
+    """
+    try:
+        with Image.open(io.BytesIO(raw)) as source:
+            width, height = source.size
+            if (source.format or "").upper() == "JPEG" and max(width, height) <= MAX_SIDE:
+                return bytes(raw)
+            source.load()
+            return jpeg_bytes(source)
+    except Exception:
+        return bytes(raw)
+
+
+def fit_data_url(url: str) -> str:
+    """A ``data:`` URL as one whose picture is within :data:`MAX_SIDE`.
+
+    For the picture a message still carries inline, from a chat written before
+    there was a folder to keep pictures in. Anything that is not a base64
+    data URL comes back unchanged.
+    """
+    head, _, encoded = str(url or "").partition(",")
+    if not encoded or ";base64" not in head:
+        return url
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return url
+    fitted = fit_bytes(raw)
+    return url if fitted is raw or fitted == raw else as_data_url(fitted)
+
+
 def encode(image: Image.Image) -> str:
     """One already-decoded picture, as ``data:image/jpeg;base64,…``.
 

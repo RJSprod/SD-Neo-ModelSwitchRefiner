@@ -61,28 +61,33 @@ CHARS_PER_TOKEN = 3.2
 # window that is at worst a quarter smaller right after a move.
 TRIM_STEP = 0.25
 
-# The model is shown the newest picture and no other. Every older picture
-# message keeps its text and says that an image was there -- and stays a
-# picture in the chat, which draws from the attachment and not from what the
-# prompt carried. One still is what a conversation is usually about, and it
-# is what keeps the prompt's prefix: the only message a new picture rewrites
-# is the previous picture's, which is recent, so everything before it stays
-# in llama.cpp's cache. A still taken off an *old* message, which the earlier
-# rule did on every new picture, threw the whole conversation out of it.
+# The model is shown the newest picture and no other, unless asked to see
+# every one. Every older picture message keeps its text and says that an
+# image was there -- and stays a picture in the chat, which draws from the
+# attachment and not from what the prompt carried. One still is what a
+# conversation is usually about, and it is what keeps the prompt's prefix: the
+# only message a new picture rewrites is the previous picture's, which is
+# recent, so everything before it stays in llama.cpp's cache. A still taken
+# off an *old* message, which the earlier rule did on every new picture, threw
+# the whole conversation out of it. With every picture shown, nothing is ever
+# taken off a message, so the prefix holds too; what it costs is the window,
+# at IMAGE_TOKENS a still.
 MAX_IMAGES = 1
 IMAGE_NOTE = "[image: {name}]"
 IMAGE_TOKENS = 300
 
 
-def stills_carried(pictures: int) -> int:
+def stills_carried(pictures: int, every: bool = False) -> int:
     """How many of the newest ``pictures`` picture messages keep their still.
 
-    :data:`MAX_IMAGES` of them, which is one: the newest. Shared with the
-    reader that loads the stills off disk, so the two never disagree about
-    which picture goes -- a builder dropping one the reader had loaded would
-    rewrite a message the cache had, for nothing.
+    :data:`MAX_IMAGES` of them, which is one: the newest -- or every one of
+    them when ``every`` is set, which is the *Show the model every picture*
+    setting. Shared with the reader that loads the stills off disk, so the two
+    never disagree about which picture goes -- a builder dropping one the
+    reader had loaded would rewrite a message the cache had, for nothing.
     """
-    return min(max(int(pictures), 0), MAX_IMAGES)
+    count = max(int(pictures), 0)
+    return count if every else min(count, MAX_IMAGES)
 
 
 def substitute(text: str, character: str, user: str) -> str:
@@ -124,17 +129,20 @@ def greeting_text(character: Character, persona: Persona) -> str:
 
 def build(character: Character, persona: Persona, messages: list[Message],
           context_size: int = 8192, reply_tokens: int = 512,
-          instruction: str | None = None) -> list[dict[str, Any]]:
+          instruction: str | None = None, every_picture: bool = False) -> list[dict[str, Any]]:
     """The request body's ``messages``, trimmed to fit.
 
     ``instruction`` is appended as a final user turn when the caller wants
     something other than the next reply — continuing the last one, or writing a
     message as the user. It is never stored in the history.
+
+    ``every_picture`` sends every picture in the window as a still rather than
+    the newest alone; see :func:`stills_carried`.
     """
     system = system_text(character, persona)
     budget = _budget(context_size, reply_tokens, system, instruction or "")
-    kept = _fit(messages, budget)
-    with_images = _limit_images(kept)
+    kept = _fit(messages, budget, every_picture)
+    with_images = _limit_images(kept, every_picture)
     wire: list[dict[str, Any]] = [{"role": "system", "content": system}]
     name, you = character.name.strip() or "the character", persona.display
     for message, keep_image in with_images:
@@ -235,18 +243,18 @@ def _cost(message: Message, still: bool = False) -> int:
     return len(message.text) + 32 + extra
 
 
-def _fit(messages: list[Message], budget: int) -> list[Message]:
+def _fit(messages: list[Message], budget: int, every: bool = False) -> list[Message]:
     """The newest messages that fit, oldest-first. The last one always does.
 
     A history that fits is sent whole. One that does not is cut at a front
     that moves in steps of :data:`TRIM_STEP` of the budget rather than by one
     message a turn -- see the module docstring for what a moving front costs.
-    Only the newest picture is charged as a still, because only it is sent as
-    one (:func:`_limit_images`).
+    Only the pictures sent as stills are charged as stills -- the newest, or
+    every one when ``every`` is set (:func:`_limit_images`).
     """
-    newest_picture = max((index for index, message in enumerate(messages) if message.image),
-                         default=-1)
-    costs = [_cost(message, still=index == newest_picture)
+    pictured = [index for index, message in enumerate(messages) if message.image]
+    stills = set(pictured[len(pictured) - stills_carried(len(pictured), every):])
+    costs = [_cost(message, still=index in stills)
              for index, message in enumerate(messages)]
     if sum(costs) <= budget:
         return list(messages)
@@ -269,9 +277,9 @@ def _fit(messages: list[Message], budget: int) -> list[Message]:
     return list(messages[front:])
 
 
-def _limit_images(messages: list[Message]) -> list[tuple[Message, bool]]:
+def _limit_images(messages: list[Message], every: bool = False) -> list[tuple[Message, bool]]:
     """Which of the kept messages still carry their still. See :func:`stills_carried`."""
-    allowance = stills_carried(sum(1 for message in messages if message.image))
+    allowance = stills_carried(sum(1 for message in messages if message.image), every)
     marked = []
     for message in reversed(messages):
         keep = bool(message.image) and allowance > 0

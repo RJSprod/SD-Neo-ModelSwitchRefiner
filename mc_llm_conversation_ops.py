@@ -762,8 +762,10 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
         resolved = draw_seed()
     asked = _whole(settings.get("seed"), RANDOM_SEED)
 
-    wire = build(character, persona, _with_pictures(list(history)),
-                 context_size=_context_size(), reply_tokens=tokens, instruction=instruction)
+    every = _every_picture()
+    wire = build(character, persona, _with_pictures(list(history), every),
+                 context_size=_context_size(), reply_tokens=tokens, instruction=instruction,
+                 every_picture=every)
     request = sessions.ChatRequest(
         messages=wire,
         needs_vision=needs_vision(wire),
@@ -1288,10 +1290,17 @@ def _context_size() -> int:
     return mc_llm_chat_panel._context_size()
 
 
-def _with_pictures(messages):
+def _with_pictures(messages, every_picture: bool = False):
     import mc_llm_chat_panel
 
-    return mc_llm_chat_panel._with_pictures(messages)
+    return mc_llm_chat_panel._with_pictures(messages, every_picture)
+
+
+def _every_picture() -> bool:
+    """The *Show the model every picture* setting, read at the moment of the reply."""
+    import mc_llm_vision
+
+    return mc_llm_vision.every_picture()
 
 
 def _spoken_tail(whole: str, opening: str) -> str:

@@ -72,6 +72,21 @@ def loaded_from_the_start() -> bool:
     """Whether a backbone with a projector starts with it, picture or no picture."""
     return projector_mode() == PROJECTOR_ALWAYS
 
+
+OPT_EVERY_PICTURE = "model_chain_llm_every_picture"
+"""Whether the model is shown every picture in a conversation, or the newest.
+
+Off by default: the newest picture is the still, older ones are named to the
+model and stay in the thread for the reader. On, every picture in the window
+goes as a still, which is what the builder did before the prompt's prefix was
+made to hold -- each still costs about 300 tokens of the window, and a thread
+full of pictures keeps fewer turns for them.
+"""
+
+
+def every_picture() -> bool:
+    return bool(mc_broker.option(OPT_EVERY_PICTURE, False))
+
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
 

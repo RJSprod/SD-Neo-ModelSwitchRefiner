@@ -89,6 +89,62 @@ def run(action, conversation, *, index=None, payload=None, operation_id="op-1"):
     return outcome
 
 
+class TestWhichPicturesAReplyIsShown:
+    """The reply operation reads the *Show the model every picture* setting
+    at the moment of the reply and hands it to both the reader that loads the
+    stills and the builder that keeps them, so the two agree."""
+
+    def _pictured(self, chats, store):
+        import mc_llm_attachments
+        from PIL import Image
+        from prompt_master.chat.history import ASSISTANT, USER
+
+        found = chats.new("Ada")
+        for index in range(3):
+            found.append(USER, f"look {index}")
+            found.messages[-1].image_path = mc_llm_attachments.store(
+                Image.new("RGB", (32, 24), (index * 40, 90, 200)), "Ada")
+            found.append(ASSISTANT, f"reply {index}")
+        chats.save(found)
+        return found
+
+    @staticmethod
+    def _stills(request) -> int:
+        return sum(1 for message in request.messages
+                   if isinstance(message.get("content"), list)
+                   and any(part.get("type") == "image_url" for part in message["content"]))
+
+    def test_the_newest_picture_alone_by_default(self, chats, store, monkeypatch):
+        asked = []
+        events = [sessions.Event(sessions.CHUNK, "ok"), sessions.Event(sessions.DONE, "ok")]
+        monkeypatch.setattr(sessions, "conversation",
+                            lambda request, cancel: (asked.append(request), iter(events))[1])
+        monkeypatch.setattr(ops, "_sees", lambda: True)
+        thread = self._pictured(chats, store)
+
+        outcome = run("send", thread, payload={"text": "and now?"}, operation_id="op-one")
+
+        assert outcome["ok"] is True, outcome
+        assert self._stills(asked[-1]) == 1
+
+    def test_every_picture_when_the_setting_asks(self, chats, store, monkeypatch):
+        import mc_llm_vision
+
+        asked = []
+        events = [sessions.Event(sessions.CHUNK, "ok"), sessions.Event(sessions.DONE, "ok")]
+        monkeypatch.setattr(sessions, "conversation",
+                            lambda request, cancel: (asked.append(request), iter(events))[1])
+        monkeypatch.setattr(mc_llm_vision, "every_picture", lambda: True)
+        monkeypatch.setattr(ops, "_sees", lambda: True)
+        thread = self._pictured(chats, store)
+
+        outcome = run("send", thread, payload={"text": "and now?"}, operation_id="op-all")
+
+        assert outcome["ok"] is True, outcome
+        assert self._stills(asked[-1]) == 3
+        assert asked[-1].needs_vision is True
+
+
 class TestSendAgainFromHereBranches:
     """Specification S8, first half. The original thread keeps every word.
 

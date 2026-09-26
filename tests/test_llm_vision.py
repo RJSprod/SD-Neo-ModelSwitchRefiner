@@ -385,6 +385,29 @@ class TestRuntimesAreIsolated:
 # --------------------------------------------------------------------------- #
 
 
+class TestShowingTheModelEveryPicture:
+    """Off by default: the newest picture is the still and older ones are
+    named. On, every picture in the window goes, as before the prefix was made
+    to hold."""
+
+    def test_off_by_default(self, host):
+        assert vision.every_picture() is False
+
+    def test_the_setting_turns_it_on(self, host):
+        host.shared.opts.set(vision.OPT_EVERY_PICTURE, True)
+        assert vision.every_picture() is True
+        host.shared.opts.set(vision.OPT_EVERY_PICTURE, False)
+        assert vision.every_picture() is False
+
+    def test_the_settings_page_offers_it(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        source = (root / "scripts" / "model_chain.py").read_text(encoding="utf-8")
+
+        assert "mc_llm_vision.OPT_EVERY_PICTURE: shared.OptionInfo(" in source
+
+
 class TestTheProjectorFromTheStart:
     """The default since the log that settled it: an unused projector costs no
     tokens per second, and a picture attached to a warm text server used to

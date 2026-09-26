@@ -137,6 +137,31 @@ class TestOnlyTheNewestPictureIsAStill:
 
         assert [message.image for message in messages] == [still(0), "", still(2)]
 
+    def test_every_picture_goes_when_the_setting_asks(self):
+        """The *Show the model every picture* setting: every still in the
+        window is sent, as the builder did before the prefix was made to
+        hold, and every still is charged to the window."""
+        messages = [turn(0, still(0)), turn(1), turn(2, still(2)), turn(3), turn(4, still(4))]
+
+        assert stills_carried(3, every=True) == 3
+        assert stills_carried(0, every=True) == 0
+        wire = build(C, P, messages, context_size=100000, every_picture=True)
+
+        stills = [message for message in wire[1:]
+                  if isinstance(message["content"], list)
+                  and message["content"][0]["type"] == "image_url"]
+        assert [message["content"][0]["image_url"]["url"] for message in stills] == [
+            still(0), still(2), still(4)]
+        assert not any(IMAGE_NOTE.format(name="picture-0.png") in str(message["content"])
+                       for message in wire), "no picture is named when every one is shown"
+        # Every still is charged: a window that held twelve pictures as notes
+        # does not hold twelve stills.
+        history = [turn(index, still(index)) for index in range(12)]
+        carried = builder._cost(turn(0, still(0)), still=True)
+        budget = cost(history[:-1]) + carried + 1
+        assert _fit(history, budget) == history
+        assert len(_fit(history, budget, every=True)) < 12
+
     def test_a_new_picture_rewrites_only_the_previous_pictures_message(self):
         """Everything before the previous picture is exactly what it was, so
         the cache resumes from there rather than from the first token."""

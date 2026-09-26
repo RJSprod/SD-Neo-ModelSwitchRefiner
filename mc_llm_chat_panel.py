@@ -2609,7 +2609,7 @@ def completed_reply(operation_id: str = "") -> str:
     return found.final_text
 
 
-def _with_pictures(messages):
+def _with_pictures(messages, every_picture: bool = False):
     """Read the attached stills back for the request about to be built.
 
     The conversation on disk holds paths; the vendored prompt builder wants the
@@ -2617,23 +2617,33 @@ def _with_pictures(messages):
     moment they are needed, and never written back -- a message that has an
     ``image_path`` never saves an inline copy beside it.
 
-    Only the newest, because that is all a request carries: the builder keeps
-    ``stills_carried(n)`` of the stills that survive trimming, and decoding
-    forty photographs to send one would be forty reads a message.
-    The same rule as the builder's, on the same count, so that the two never
-    disagree about which stills go -- the builder dropping one this read had
-    loaded would rewrite a message the cache had, for nothing.
+    Only the newest, unless ``every_picture`` (the *Show the model every
+    picture* setting) asks for all of them, because that is all a request
+    carries: the builder keeps ``stills_carried(n, every_picture)`` of the
+    stills that survive trimming, and decoding forty photographs to send one
+    would be forty reads a message. The same rule as the builder's, on the
+    same count, so that the two never disagree about which stills go -- the
+    builder dropping one this read had loaded would rewrite a message the
+    cache had, for nothing.
+
+    A picture a message still carries inline -- an old chat whose picture
+    could not be moved onto disk -- is sized here to the same cap as the rest,
+    so nothing larger than :data:`mc_llm_attachments.VISION_MAX_SIDE` reaches
+    the model by any route.
     """
     from prompt_master.chat.prompt import stills_carried
+    from prompt_master.imaging.preprocess import fit_data_url
 
-    allowance = stills_carried(sum(1 for message in (messages or ())
-                                   if getattr(message, "image_path", None)))
-    for message in reversed(messages or ()):
-        if not message.image_path or message.image:
-            continue
+    pictures = [message for message in (messages or ())
+                if getattr(message, "image_path", None) or getattr(message, "image", None)]
+    allowance = stills_carried(len(pictures), every_picture)
+    for message in reversed(pictures):
         if allowance <= 0:
             break
-        message.image = mc_llm_attachments.data_url(message.image_path)
+        if message.image_path and not message.image:
+            message.image = mc_llm_attachments.data_url(message.image_path)
+        elif message.image:
+            message.image = fit_data_url(message.image)
         allowance -= 1
     return messages
 

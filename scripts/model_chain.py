@@ -428,6 +428,16 @@ shared.options_templates.update(
                 "beside the weights, the second choice loads it only once a picture is "
                 "attached, at the price of one restart and a cold prompt cache then"
             ),
+            mc_llm_vision.OPT_EVERY_PICTURE: shared.OptionInfo(
+                False,
+                "Show the model every picture in the conversation",
+            ).info(
+                "off, the model is shown the newest picture and told the names of the older "
+                "ones, which stay in the thread for you; on, every picture in the window goes "
+                "to the model as before, each costing about 300 tokens of context, so a thread "
+                "full of pictures keeps fewer turns. Either way no picture reaches the model "
+                "larger than 768 pixels on its longer side"
+            ),
             mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(
                 mc_llm_runtime.FULL_WINDOW_AUTO,
                 "Key/value cache on a sliding-window model (Gemma)",
