@@ -9,7 +9,7 @@ A Forge / SD WebUI Neo extension. Four areas share one process and, critically, 
 
 `README.md` is long and acts as the behavioural specification. Treat it as authoritative for declared behaviour and update it when behaviour changes.
 
-The hard problem running through the whole codebase is **VRAM arbitration**: the image model and the language model want the same card, and most of the subtle bugs in this project's history come from that contention.
+The hard problem running through the whole codebase is **VRAM arbitration**: the image model and the language model want the same card, and most of the subtle bugs in this project's history come from that contention. Since handoff 28 there is a third party to it: Mini Paint NEO's WanGP, on a card of its own, which `mc_wangp.py` gives priority over the language model on that card.
 
 ---
 
@@ -19,7 +19,7 @@ Sessions from 2026-08-20 onward each published a detailed handoff as a **private
 
 **They are not loaded automatically.** To use them:
 
-1. `Artifact` tool, `action: "list"` — the handoffs appear as `Handoff 01` … `Handoff 27`
+1. `Artifact` tool, `action: "list"` — the handoffs appear as `Handoff 01` … `Handoff 28`
 2. `action: "read"` with the URL of the one you need
 
 **Read the relevant handoff before reopening an area it covers.** The index below tells you which one.
@@ -27,7 +27,7 @@ Sessions from 2026-08-20 onward each published a detailed handoff as a **private
 ### Coverage limits — read this before assuming
 
 - **Numbering gaps at 06 and 19 are not missing records.** Those sessions targeted other repositories (`SD-ForgeNeo-ExtendedLoraDetails` and `NEO-webui-auto-tls-https`); their handoffs live there.
-- **The handoffs do not cover the whole repository.** PRs #1–#44 predate the handoff record entirely, and PRs #82–#102 (prompt-box UX, QoL/UX refactor, pipeline header, design-intent spec review) fall between handoffs 14 and 15 with no handoff written. Absence from this index does **not** mean the work never happened — check `git log` before concluding anything is unimplemented.
+- **The handoffs do not cover the whole repository.** PRs #1–#44 predate the handoff record entirely; PRs #82–#102 (prompt-box UX, QoL/UX refactor, pipeline header, design-intent spec review) fall between handoffs 14 and 15 with no handoff written; and PRs #192–#223 (the Forge Assistant flyout, rounds one to four: read-aloud, message actions, auto-attach, literal prompt boxes, new thread, system-prompt editor, in-place edit, Send to Generate) fall between handoffs 27 and 28 with no handoff written — handoff 28 names them only in its state section. Absence from this index does **not** mean the work never happened — check `git log` before concluding anything is unimplemented.
 - **Handoff 01's internal date is wrong.** It states 2026-09-03; the work was 2026-08-20. Later handoffs carry correct dates.
 - **Sessions under-report their own PRs.** Several handoffs say "no PR opened" because the *user* opened it from the UI rather than the session. The PR numbers in the index below come from `git log` and are authoritative.
 
@@ -85,8 +85,9 @@ Dates are session start dates. PR ranges are from `git log`.
 | 25 | 09-01 | Image model VRAM perf; **`_arm_llm` removed** | `image-model-vram-perf-wrog01` | #171–#172 | merged |
 | 26 | 09-02 | Lava install compatibility; wheel closure hashing | `lava-install-compatibility-p9jp6m` | #173–#187 | merged |
 | 27 | 09-02 | Python crash investigation; Forge unload flag / warm-up | `python-crash-investigation-n5zovf` | #188–#191 | merged |
+| 28 | 09-26 | **WanGP-aware LLM placement**; `mc_wangp.py` (ceiling, watch, thread cap); Mini Paint NEO presence contract | `modest-thompson-cutso3` | #224 | open |
 
-Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across this period; a large drop is a signal something is wrong.
+Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28; a large drop is a signal something is wrong.
 
 ---
 

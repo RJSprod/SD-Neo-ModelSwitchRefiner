@@ -2069,8 +2069,12 @@ def _own_llm_context_bytes(card=ANY_CARD) -> int:
     return _DRIVER_OVERHEAD
 
 
-def stray_explanation() -> str:
+def stray_explanation(card=ANY_CARD) -> str:
     """What VRAM neither family is holding is, as a sentence about the card.
+
+    ``card`` names which card, when the caller knows: on the card WanGP is
+    running on the honest sentence is "WanGP has it, and has priority", not
+    "check nvidia-smi for a stray" -- see :mod:`mc_wangp`.
 
     Returned without the amount so that each caller can format its own -- the
     console writes a figure into a log line, LLM Studio bolds one in a list --
@@ -2084,6 +2088,16 @@ def stray_explanation() -> str:
     them looking for something that is not there, and the thing that would
     actually give those bytes back -- Unload -- is a button they already have.
     """
+    named = _card_index(card) if not isinstance(card, _AnyCard) else None
+    if named is not None:
+        try:
+            import mc_wangp
+
+            explained = mc_wangp.stray_explanation(named)
+        except Exception:
+            explained = ""
+        if explained:
+            return explained
     if _own_llm_running():
         return ("of the card is in use by something outside both families. The "
                 "llama-server this WebUI started keeps a CUDA context there even with "
@@ -2106,7 +2120,7 @@ def _unaccounted_note(card=ANY_CARD) -> str:
     stray = unaccounted_bytes(card=card)
     if stray <= 0:
         return ""
-    return f". {stray / _GB:.1f} GB {stray_explanation()}"
+    return f". {stray / _GB:.1f} GB {stray_explanation(card)}"
 
 
 def _victim_order(family: str) -> tuple[str, ...]:

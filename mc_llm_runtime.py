@@ -1258,7 +1258,7 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
     behind it -- this is exactly :func:`_free_vram`, which is the behaviour
     every path had before plans existed.
     """
-    free = _free_vram(already_ours, card)
+    free = _wangp_ceiling(_free_vram(already_ours, card), card, configuration)
     if not image_budget:
         # LLM priority, on the card the user gave it priority on. The plan's
         # budget is the *image* side's reservation, and overriding that
@@ -1303,6 +1303,26 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
     if learned > 0:
         free = min(free, learned)
     return max(free, 0)
+
+
+def _wangp_ceiling(free: int, card: int | None, configuration: "Config | None") -> int:
+    """``free``, capped by what WanGP leaves on its card. See :mod:`mc_wangp`.
+
+    Ahead of the plan's budget and the learned cap, and independent of both:
+    those are about the image side's claim on *its* card, and this is WanGP's
+    claim on the card it is rendering on. It applies under LLM priority too --
+    that setting releases image residency for the language model, and WanGP's
+    is not image residency and is not anybody's to release. Not applicable is
+    -1, and -1 leaves the figure exactly as it was.
+    """
+    try:
+        import mc_wangp
+
+        cap = mc_wangp.cap_bytes(card, configuration)
+    except Exception:
+        logger.debug("Model Chain: could not ask what WanGP leaves on the card", exc_info=True)
+        return free
+    return min(free, cap) if cap >= 0 else free
 
 
 def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0,
@@ -2453,13 +2473,34 @@ def _launch_flags(configuration: Config, placement: mc_llm_context.Placement,
     carry, rather than the two being concatenated and hoped about.
     """
     special = _with_runtime(configuration, plan.runtime if plan is not None else None)
-    flags = accelerator_flags(special, placement)
+    flags = accelerator_flags(special, placement) + _wangp_thread_flags(special, placement)
     if plan is None or not plan.flags:
         return flags
     extra = list(plan.flags)
     if FLASH_ATTENTION_FLAG in flags:
         extra = _without_flash_attention(extra)
     return flags + extra
+
+
+def _wangp_thread_flags(configuration: Config, placement: mc_llm_context.Placement) -> list[str]:
+    """The processor-thread cap a start takes while WanGP is up. See :mod:`mc_wangp`."""
+    try:
+        import mc_wangp
+
+        return list(mc_wangp.thread_flags(configuration, placement))
+    except Exception:
+        logger.debug("Model Chain: could not decide the thread cap for WanGP", exc_info=True)
+        return []
+
+
+def _watch_for_wangp() -> None:
+    """Have the WanGP watch read this server's card while it holds VRAM there."""
+    try:
+        import mc_wangp
+
+        mc_wangp.watch()
+    except Exception:
+        logger.debug("Model Chain: could not start the WanGP watch", exc_info=True)
 
 
 def _without_flash_attention(flags: list[str]) -> list[str]:
@@ -4629,6 +4670,10 @@ class Runtime:
             # it is recorded on *this runtime*, so a second server on a second
             # card cannot inherit or overwrite the boundary (section 8.3).
             self._note_placement()
+            # After the declaration, never before it: the watch reads the card
+            # and subtracts what is ours, and a server it has not been told
+            # about yet would be counted as WanGP growing.
+            _watch_for_wangp()
             prepared = self._client(configuration)
             _prime_prompt_cache(prepared)
             return prepared
@@ -5307,6 +5352,7 @@ class Runtime:
                           rank=mc_broker.RANK_HOT,
                           card=self._card if self._card is not None
                           else card_of(configuration))
+        _watch_for_wangp()
 
     def _new_process(self):
         from prompt_master.inference.llama_process import LlamaProcess

@@ -4052,6 +4052,92 @@ generation. `postprocess` is not called from a `finally`, so a generation that
 raised would leave the lock held and LLM Studio dead until the WebUI restarted —
 a far worse failure than the brief overlap the lock would have prevented.
 
+### WanGP on the other card
+
+[Mini Paint NEO](https://github.com/RJSprod/a1111-mini-paint-NEO)'s WanGP tab
+runs a video generator in a process of its own, on a card of its own — and the
+language model here can be configured onto either card. Every rule above is
+about the card Forge generates on: the image model keeps its VRAM, the LLM takes
+what is spare. Nothing knew the other card had an owner. From a user's log,
+llama-server was placed on WanGP's card in the room a generation had not yet
+taken, put twenty-one of sixty-five layers there and the rest in system RAM, and
+then ran the processor flat out for seven minutes — on the card WanGP was
+rendering with and the cores WanGP was feeding it from.
+
+The rule, stated once:
+
+> **WanGP's VRAM is priority one and is never taken from it.** The language
+> model may use what WanGP is not using, is stopped when WanGP grows into the
+> room kept for it, and is never a reason WanGP runs short. A card WanGP is not
+> running on is the language model's to claim in full, and a language model on
+> any other card costs WanGP nothing.
+
+**How it knows.** Mini Paint owns the WanGP child and answers for it in this
+same process — `minipaint_neo.wangp.presence.report()`, one plain dict with the
+card's UUID, whether the child is up, and (when its bridge has said) whether it
+is generating. It is looked up by name, only once the host has loaded that
+extension, and read at most once a second. Without Mini Paint, or with the
+setting off, none of this exists and every placement behaves exactly as it did
+before. A WanGP you started by hand, outside Mini Paint, is not seen: its VRAM
+still counts — it is not free, so the ladder places around it as always — but
+nothing here knows it has priority.
+
+Three mechanisms carry the rule, and each is small:
+
+| Mechanism | What it does |
+| --- | --- |
+| **A ceiling on WanGP's card** | While WanGP is running there, a placement on that card may spend at most *the card, less WanGP's footprint, less a reserve*. The footprint is the larger of what WanGP holds now and the most it has been seen holding this session — a video model is loaded and unloaded around every generation, so the idle reading is the one number never to size against. The same ladder then shrinks the context, moves the experts and drops blocks against the smaller figure, and lands in system RAM when nothing is spare. |
+| **A watch that stops the server when it is squeezed** | Nothing in WanGP asks this extension for memory; it allocates, and either gets it or fails. So while a llama-server of ours holds VRAM on WanGP's card, a thread reads that card every two seconds and stops the server the moment it holds more than the ceiling allows — WanGP has grown into the reserve, or WanGP's known peak leaves no room for it — or the moment WanGP goes from idle to generating on a card whose needs have never been measured. Stopping is the only surrender a process has, and the weights stay warm in the page cache; the next request places again against what WanGP now leaves. |
+| **Fewer processor threads while WanGP is up** | A placement with weights in system RAM runs its arithmetic on the processor, and llama.cpp takes every core for it by default. WanGP needs the processor too — to encode a prompt, move tensors, decode a frame — so while WanGP is running, any start that leaves part of the model on the processor is held to half the physical cores (`--threads` and `--threads-batch`, in the spelling the build advertises). A full offload is not touched, whichever card it is on. |
+
+**What is remembered.** WanGP's peak on its card, for the session. The first
+generation after Forge starts is the one whose needs are unknown, so if the LLM
+is on that card when WanGP goes from idle to generating, the whole card is given
+back rather than a guess being bet on; once a generation has been watched
+through, or has squeezed the server once, the peak is trusted and a server that
+fits under it stays put for every generation after. A server placed while a
+generation was already running was sized against that generation and is not
+sent away for it.
+
+**Settings**, under *Model Chain* in the Settings tab:
+
+| Setting | Default | What it decides |
+| --- | --- | --- |
+| **WanGP on the other card** | On WanGP's terms | Off makes WanGP invisible to placement, as before this existed. |
+| **VRAM kept free for WanGP on its card (GB)** | 4 | Room above WanGP's peak for its next allocation. It is the time between WanGP starting to grow and llama-server being gone; raise it if WanGP has ever run out of memory with llama-server beside it. |
+| **Processor threads for llama-server while WanGP is running** | 0 (half the physical cores) | How many cores a placement that touches the processor may take while WanGP is up. |
+
+**What the console says**, once per change rather than once per rung of the
+ladder:
+
+```
+Model Chain: WanGP is running on GPU 1 — it holds 12.0 GB there (peak 26.0 GB this
+             session) and 4.0 GB stays free for it, so the LLM may hold up to 2.0 GB
+             of the card's 32.0 GB
+Model Chain: WanGP is running, so this placement — which runs part of the model on
+             the processor — is held to 8 threads to leave WanGP the rest of the cores
+Model Chain: stopped llama-server on GPU 1 for WanGP — WanGP has grown into the 4.0 GB
+             kept for it on GPU 1 (2.3 GB free); the weights stay warm in the system
+             page cache, and the next request places again against what WanGP now leaves
+```
+
+LLM Studio's residency panel carries the same picture as one line — *WanGP:
+running on GPU 1 and idle — holds 12.0 GB (peak 26.0 GB this session); 4.0 GB
+stays free for it, so the LLM may hold up to 2.0 GB there* — and the VRAM that
+neither family accounts for, which on that card is WanGP's, is named as WanGP's
+rather than as a stray to go hunting for with `nvidia-smi`.
+
+**What it does not do.** It never asks WanGP to give anything up, and it never
+refuses a request: a language model that cannot fit beside WanGP goes to system
+RAM, capped in threads, and says so — the fallback contract everywhere else in
+this extension. The watch is a reading every two seconds, so a WanGP that
+allocates its whole model faster than that on a card the LLM was still holding
+can still run out before the server is gone; the reserve and the "unmeasured
+generation gives the whole card back" rule are what make that a first-time
+event rather than a repeating one. And LLM priority — the setting that lets the
+language model release *image* residency on its card — does not reach WanGP's:
+that is not image residency, and it is not anybody's to release.
+
 ### Intel Arc through SYCL
 
 An Intel GPU — the Arc built into a Meteor Lake processor, or a discrete Arc
