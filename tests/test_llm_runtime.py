@@ -1465,6 +1465,116 @@ class TestAskingTheBuildWhatItSupports:
         assert runtime.runtime_capabilities(configuration) == frozenset()
 
 
+
+class TestTheWindowOnTheIntelGPU:
+    """A sliding-window model's full cache is 5.6 GB of the Intel GPU's
+    memory against 1.5 GB for the window, on the 26B-A4B backbone at 8,192
+    tokens with six warm caches, and that memory is the system's. The build
+    this was measured on takes a checkpoint four tokens before the end of
+    every prompt, so a turn that continues the thread costs the same with the
+    window as with the full cache; what the window gives up is an edit far
+    back in the thread, which resumes from the nearest checkpoint. So the
+    window is kept on the Intel GPU by default, with llama.cpp's checkpoints
+    spaced so that "nearest" is at most two thousand tokens back, and the
+    full cache stays the rule on an NVIDIA card and the processor. Every test
+    here was checked against the change it guards by reverting it."""
+
+    LISTS_BOTH = "      --swa-full\n  -cms, --checkpoint-min-step N\n"
+
+    @pytest.fixture(autouse=True)
+    def forget(self, host):
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+        yield
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+
+    @pytest.fixture
+    def build(self, tmp_path, monkeypatch):
+        executable = tmp_path / "llama-server"
+        executable.write_text("")
+
+        def announce(text, device="CUDA0"):
+            monkeypatch.setattr(
+                runtime.subprocess, "run",
+                lambda *args, **kwargs: types.SimpleNamespace(stdout=text, stderr=""))
+            return runtime.Config(
+                runtime=executable, model=tmp_path / "model.gguf", mmproj=None,
+                gpu_index=0, device=device, gpu_layers="all", context_size=8192,
+                context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16",
+                kv_type_v="f16")
+
+        return announce
+
+    def test_the_intel_gpu_keeps_the_window_and_spaces_the_checkpoints(self, build):
+        configuration = build(self.LISTS_BOTH)
+
+        flags = runtime.accelerator_flags(configuration, ctx.Placement(uma=True))
+
+        assert runtime.FULL_ATTENTION_WINDOW_FLAG not in flags
+        assert flags[:2] == [runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
+
+    def test_the_device_name_alone_says_intel(self, build):
+        configuration = build(self.LISTS_BOTH, device="SYCL0")
+
+        flags = runtime.accelerator_flags(configuration, ctx.Placement(gpu_layers=20))
+
+        assert runtime.FULL_ATTENTION_WINDOW_FLAG not in flags
+        assert flags[:2] == [runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
+
+    def test_an_nvidia_card_and_the_processor_keep_the_full_cache(self, build):
+        configuration = build(self.LISTS_BOTH)
+
+        for placement in (ctx.Placement(gpu_layers=20),
+                          ctx.Placement(gpu_layers=ctx.NO_LAYERS),
+                          ctx.Placement(gpu_layers=20, on_gpu=False)):
+            assert runtime.accelerator_flags(configuration, placement) == [
+                runtime.FULL_ATTENTION_WINDOW_FLAG], placement
+
+    def test_always_puts_the_full_cache_back_on_intel(self, build, host):
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_ALWAYS)
+        configuration = build(self.LISTS_BOTH)
+
+        assert runtime.accelerator_flags(configuration, ctx.Placement(uma=True)) == [
+            runtime.FULL_ATTENTION_WINDOW_FLAG]
+
+    def test_never_takes_it_off_an_nvidia_card(self, build, host):
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_NEVER)
+        configuration = build(self.LISTS_BOTH)
+
+        assert runtime.accelerator_flags(configuration, ctx.Placement(gpu_layers=20)) == [
+            runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
+
+    def test_the_setting_resolves_either_half_of_its_pair(self, host):
+        label = dict(runtime.FULL_WINDOW_MODES)[runtime.FULL_WINDOW_NEVER]
+
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, label)
+        assert runtime.full_window_mode() == runtime.FULL_WINDOW_NEVER
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_ALWAYS)
+        assert runtime.full_window_mode() == runtime.FULL_WINDOW_ALWAYS
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, "")
+        assert runtime.full_window_mode() == runtime.FULL_WINDOW_AUTO
+
+    def test_a_build_without_the_spacing_flag_is_not_given_it(self, build):
+        configuration = build("      --swa-full\n")
+
+        assert runtime.accelerator_flags(configuration, ctx.Placement(uma=True)) == []
+
+    def test_the_spacing_flag_may_be_refused_without_blaming_the_model(self):
+        assert runtime.CHECKPOINT_SPACING_FLAG in runtime.OPTIONAL_FLAGS
+
+    def test_the_spacing_is_a_few_turns_and_not_the_context(self):
+        assert 512 <= int(runtime.CHECKPOINT_SPACING) <= 4096
+
+    def test_the_settings_page_offers_it(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        source = (root / "scripts" / "model_chain.py").read_text(encoding="utf-8")
+
+        assert "mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(" in source
+        assert "mc_llm_runtime.FULL_WINDOW_AUTO," in source
+
 class TestFlagsReachTheCommand:
     @pytest.fixture(autouse=True)
     def clean(self):

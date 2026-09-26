@@ -1947,7 +1947,90 @@ costs is the memory the window was saving -- which this extension has always
 budgeted for anyway, because :func:`mc_llm_context.estimate` sizes the cache at
 the full context for every block. So the reserve does not move; reality merely
 stops being cheaper than the arithmetic that placed it.
+
+*On the Intel GPU the window is kept, by default.* Its memory is the system's,
+and on the 26B-A4B backbone at 8,192 tokens with six warm caches the full cache
+is 5.6 GB of it against 1.5 GB for the window (the llama.cpp figures from one
+user's log: 510 + 5,100 MiB of key/value buffers). The seven seconds above
+were the checkpoints llama.cpp took in 2025; the build this was measured on
+takes one four tokens before the end of every prompt (and one 516 before it,
+and one at the start of the last user message), so a turn that continues the
+thread resumes where the full cache would have -- the common prefix ends four
+tokens before the previous prompt's end either way, at the assistant header --
+and costs the same. What the window gives up is an edit far back in the
+thread: the full cache resumes at the edit, the window at the nearest
+checkpoint before it, and with llama.cpp's default spacing of 8,192 tokens
+that checkpoint is the start of the thread. So :data:`CHECKPOINT_SPACING_FLAG`
+is passed with the window, and the re-read is then at most
+:data:`CHECKPOINT_SPACING` tokens more than the edit itself. The setting
+(:data:`OPT_FULL_WINDOW`) puts the full cache back on Intel, or takes it off an
+NVIDIA card whose VRAM is the scarcer thing.
 """
+
+CHECKPOINT_SPACING_FLAG = "--checkpoint-min-step"
+CHECKPOINT_SPACING = "2048"
+"""How far apart llama.cpp keeps its context checkpoints when the window is kept.
+
+A checkpoint is a copy of the sliding-window part of the cache -- about 160 MB
+for the 26B-A4B backbone with a q8_0 cache, twice that at f16 -- taken at the
+start of a user message when the last one is at least this many tokens behind,
+kept up to thirty-two deep, and the only place a sliding-window model can
+resume a cached prompt. llama.cpp's default spacing equals the context, so
+only the tail of the last prompt is ever resumable and an edit anywhere
+earlier re-reads the whole thread. At 2,048 tokens a thread that fills the
+context holds four or five of them, a gigabyte or so of system RAM on a slot,
+and an edit re-reads at most that far back.
+"""
+
+OPT_FULL_WINDOW = "model_chain_llm_full_window"
+
+FULL_WINDOW_AUTO = "auto"
+FULL_WINDOW_ALWAYS = "always"
+FULL_WINDOW_NEVER = "never"
+
+FULL_WINDOW_MODES = (
+    (FULL_WINDOW_AUTO, "Automatic — the full cache on an NVIDIA card and the processor, the "
+                       "window on the Intel GPU"),
+    (FULL_WINDOW_ALWAYS, "Always the full cache — any cached prompt resumes exactly, for the "
+                         "memory of the whole context on every block"),
+    (FULL_WINDOW_NEVER, "Always the window — llama.cpp resumes from its checkpoints, for a "
+                        "cache a quarter the size"),
+)
+"""Whether a sliding-window model runs with the full cache. See
+:data:`FULL_ATTENTION_WINDOW_FLAG` for what each choice costs."""
+
+
+def full_window_mode() -> str:
+    return mc_broker.resolve(mc_broker.option(OPT_FULL_WINDOW, FULL_WINDOW_AUTO),
+                             FULL_WINDOW_MODES, FULL_WINDOW_AUTO)
+
+
+def _on_intel(configuration: Config | None, placement) -> bool:
+    """Whether this placement runs in the Intel GPU's shared system memory."""
+    if getattr(placement, "uma", False):
+        return True
+    return str(getattr(configuration, "device", "") or "").upper().startswith("SYCL")
+
+
+def full_window_wanted(configuration: Config | None, placement) -> bool:
+    """Whether ``--swa-full`` is wanted for this placement, setting and card."""
+    mode = full_window_mode()
+    if mode == FULL_WINDOW_ALWAYS:
+        return True
+    if mode == FULL_WINDOW_NEVER:
+        return False
+    return not _on_intel(configuration, placement)
+
+
+def window_flags(configuration: Config, placement) -> list[str]:
+    """The full cache, or the window with its checkpoints spaced -- each only
+    when the build has the flag for it."""
+    if runtime_supports(FULL_ATTENTION_WINDOW_FLAG, configuration) \
+            and full_window_wanted(configuration, placement):
+        return [FULL_ATTENTION_WINDOW_FLAG]
+    if runtime_supports(CHECKPOINT_SPACING_FLAG, configuration):
+        return [CHECKPOINT_SPACING_FLAG, CHECKPOINT_SPACING]
+    return []
 
 LOG_VERBOSITY_FLAG = "--log-verbosity"
 LOAD_REPORT_VERBOSITY = "4"
@@ -1977,7 +2060,7 @@ _TRACE_SCALE = re.compile(r"--log-verbosity[\s\S]{0,900}?\b4\s*:\s*trace", re.IG
 OPTIONAL_FLAGS = frozenset({
     CPU_MOE_FLAG, N_CPU_MOE_FLAG, FLASH_ATTENTION_FLAG, NO_MMAP_FLAG,
     NO_KV_OFFLOAD_FLAG, OP_OFFLOAD_FLAG, FULL_ATTENTION_WINDOW_FLAG,
-    LOG_VERBOSITY_FLAG,
+    CHECKPOINT_SPACING_FLAG, LOG_VERBOSITY_FLAG,
     mc_llm_accel.SPEC_TYPE_FLAG, mc_llm_accel.SPEC_MAX_FLAG,
 })
 """Every flag this extension *chooses* to append, and none that it must.
@@ -2181,7 +2264,8 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     ``--swa-full`` is the only one that is not about the card, and it is added
     for every placement including a processor-only one, because what it buys is
     prompt *reuse* rather than throughput -- see
-    :data:`FULL_ATTENTION_WINDOW_FLAG`. It is also the only one that costs
+    :data:`FULL_ATTENTION_WINDOW_FLAG`, and :func:`window_flags` for the one
+    placement that keeps the window instead. It is also the only one that costs
     memory, and the estimator has always charged for it.
 
     ``--flash-attn`` is fused attention. It is a CUDA kernel, so it is added
@@ -2205,8 +2289,7 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     guesses this module has no way to verify from here.
     """
     flags: list[str] = list(verbosity_flags(configuration))
-    if runtime_supports(FULL_ATTENTION_WINDOW_FLAG, configuration):
-        flags.append(FULL_ATTENTION_WINDOW_FLAG)
+    flags.extend(window_flags(configuration, placement))
     flags.extend(conservative_flags(configuration))
     if not getattr(placement, "on_gpu", False):
         return flags
@@ -3102,6 +3185,14 @@ def with_backend_isolation(command, environ):
     logger.info("Model Chain: llama-server is starting on the Intel GPU through SYCL — "
                 "CUDA_VISIBLE_DEVICES is emptied so no NVIDIA card is picked up behind it, "
                 "and --device on the command line is the whole of the selection")
+    if FULL_ATTENTION_WINDOW_FLAG not in argv:
+        logger.info("Model Chain: the sliding-window cache is kept on the Intel GPU (Settings → "
+                    "Model Chain → Key/value cache on a sliding-window model): a turn that "
+                    "continues the thread resumes from llama.cpp's checkpoint and costs what "
+                    "it did with the full cache; an edit far back in the thread re-reads from "
+                    "the nearest checkpoint, at most %s tokens before it",
+                    f"{int(CHECKPOINT_SPACING):,}" if CHECKPOINT_SPACING_FLAG in argv
+                    else "the whole thread back, on a build without --checkpoint-min-step")
     return found
 
 

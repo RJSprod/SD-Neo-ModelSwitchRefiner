@@ -428,6 +428,22 @@ shared.options_templates.update(
                 "beside the weights, the second choice loads it only once a picture is "
                 "attached, at the price of one restart and a cold prompt cache then"
             ),
+            mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(
+                mc_llm_runtime.FULL_WINDOW_AUTO,
+                "Key/value cache on a sliding-window model (Gemma)",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.FULL_WINDOW_MODES]},
+            ).info(
+                "a sliding-window model keeps a 1,024-token window of its cache for most of "
+                "its blocks. The full cache lets llama.cpp resume any cached prompt exactly "
+                "and costs the whole context on every block — 5.6 GB against 1.5 GB for the "
+                "26B backbone at 8,192 tokens with six warm caches. The window relies on "
+                "llama.cpp's context checkpoints instead: a turn that continues the thread "
+                "costs the same either way, and an edit far back in it re-reads from the "
+                "nearest checkpoint, at most 2,048 tokens before the edit. Automatic keeps "
+                "the window on the Intel GPU, whose memory is the system's, and the full "
+                "cache everywhere else"
+            ),
             mc_broker.OPT_MODE: shared.OptionInfo(
                 mc_broker.MODE_HYBRID,
                 "VRAM residency mode",
