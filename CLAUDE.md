@@ -19,7 +19,7 @@ Sessions from 2026-08-20 onward each published a detailed handoff as a **private
 
 **They are not loaded automatically.** To use them:
 
-1. `Artifact` tool, `action: "list"` — the handoffs appear as `Handoff 01` … `Handoff 27`
+1. `Artifact` tool, `action: "list"` — the handoffs appear as `Handoff 01` … `Handoff 28`
 2. `action: "read"` with the URL of the one you need
 
 **Read the relevant handoff before reopening an area it covers.** The index below tells you which one.
