@@ -4297,19 +4297,41 @@ roughly ten times the memory bandwidth of a laptop's system memory.
 
 **Where the shared memory goes.** Two settings dominate it, and both are yours.
 Warm prompt caches multiply the whole cache, and `--swa-full` — which this
-extension passes so llama.cpp can resume a cached prompt exactly rather than at
-a checkpoint — holds the sliding-window layers at the full context instead of
+extension passes on an NVIDIA card and the processor so llama.cpp can resume a
+cached prompt exactly rather than at a checkpoint, and leaves off on the Intel
+GPU by default — holds the sliding-window layers at the full context instead of
 `n_swa + n_ubatch` cells. On the 26B-A4B backbone at 8,192 tokens:
 
 | Warm prompt caches | `--swa-full` | Key/value cache |
 | --- | --- | --- |
-| Six | on (as shipped) | 10.3 GB |
-| Six | off | 2.7 GB |
+| Six | on (NVIDIA and processor default) | 10.3 GB |
+| Six | off (Intel default) | 2.7 GB |
 | One | on | 1.7 GB |
 | One | off | 0.45 GB |
 
 If shared memory is tight, **Prompt caches** in Settings is the larger lever of
 the two.
+
+**What the window costs and what it saves.** The choice is **Settings → Model
+Chain → Key/value cache on a sliding-window model**: *Automatic* (the window on
+the Intel GPU, the full cache elsewhere), *Always the full cache*, or *Always the
+window*. The memory is the table above. The time before the first character is
+the same in the ordinary case: the llama.cpp build this was measured on takes a
+context checkpoint four tokens before the end of every prompt, and the next turn
+of a thread shares a prefix with the last one that ends exactly there, at the
+assistant header, so with the window llama.cpp resumes from that checkpoint and
+with the full cache from the same place. What the window gives up is an edit far
+back in the thread, a reply regenerated from long ago, or a branch taken from
+early on: the full cache resumes at the edit, the window at the nearest
+checkpoint before it. llama.cpp's own spacing puts that checkpoint at the start
+of the thread, so with the window this extension passes
+`--checkpoint-min-step 2048`, which keeps one every two thousand tokens — at
+about 160 MB of system RAM each with a q8_0 cache, twice that at f16 — and an
+edit then re-reads at most that far back plus the edit itself. Generation speed
+at a long context may improve with the window, because the window layers then
+attend over at most 1,536 cells rather than the whole context; that is the
+arithmetic, not a measurement, and the console line *Last reply: llama.cpp
+measured N tokens/s* is where to check it.
 
 **The launch.** The server is started with `--device SYCL0` and every layer on
 the device. `CUDA_VISIBLE_DEVICES` is emptied for that start — the number the
