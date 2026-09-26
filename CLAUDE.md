@@ -19,7 +19,7 @@ Sessions from 2026-08-20 onward each published a detailed handoff as a **private
 
 **They are not loaded automatically.** To use them:
 
-1. `Artifact` tool, `action: "list"` — the handoffs appear as `Handoff 01` … `Handoff 28`
+1. `Artifact` tool, `action: "list"` — the handoffs appear as `Handoff 01` … `Handoff 29`
 2. `action: "read"` with the URL of the one you need
 
 **Read the relevant handoff before reopening an area it covers.** The index below tells you which one.
@@ -85,9 +85,10 @@ Dates are session start dates. PR ranges are from `git log`.
 | 25 | 09-01 | Image model VRAM perf; **`_arm_llm` removed** | `image-model-vram-perf-wrog01` | #171–#172 | merged |
 | 26 | 09-02 | Lava install compatibility; wheel closure hashing | `lava-install-compatibility-p9jp6m` | #173–#187 | merged |
 | 27 | 09-02 | Python crash investigation; Forge unload flag / warm-up | `python-crash-investigation-n5zovf` | #188–#191 | merged |
-| 28 | 09-26 | **WanGP-aware LLM placement**; `mc_wangp.py` (ceiling, watch, thread cap); Mini Paint NEO presence contract | `modest-thompson-cutso3` | #224 | open |
+| 28 | 09-26 | **WanGP-aware LLM placement**; `mc_wangp.py` (ceiling, watch, thread cap); Mini Paint NEO presence contract | `modest-thompson-cutso3` | #224 | merged |
+| 29 | 09-26 | Vision projector **loaded from the start** (setting); prompt front moves in steps, **one still** (`TRIM_STEP`, `stills_carried`); flyout **asks after a reply until its first word**, deadlines on every request, idle looks | `modest-thompson-cutso3` (reset onto the merged default) | #225 | open |
 
-Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28; a large drop is a signal something is wrong.
+Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28 and 6,985 passed, 13 skipped at handoff 29; a large drop is a signal something is wrong.
 
 ---
 
