@@ -86,9 +86,9 @@ Dates are session start dates. PR ranges are from `git log`.
 | 26 | 09-02 | Lava install compatibility; wheel closure hashing | `lava-install-compatibility-p9jp6m` | #173–#187 | merged |
 | 27 | 09-02 | Python crash investigation; Forge unload flag / warm-up | `python-crash-investigation-n5zovf` | #188–#191 | merged |
 | 28 | 09-26 | **WanGP-aware LLM placement**; `mc_wangp.py` (ceiling, watch, thread cap); Mini Paint NEO presence contract | `modest-thompson-cutso3` | #224 | merged |
-| 29 | 09-26 | Vision projector **loaded from the start** (setting); prompt front moves in steps, **one still** (`TRIM_STEP`, `stills_carried`); flyout **asks after a reply until its first word**, deadlines on every request, idle looks | `modest-thompson-cutso3` (reset onto the merged default) | #225 | open |
+| 29 | 09-26 | Vision projector **loaded from the start** (setting); prompt front moves in steps, **one still** (`TRIM_STEP`, `stills_carried`); flyout **asks after a reply until its first word**, deadlines on every request, idle looks; sliding-window cache **kept on the Intel GPU** (setting, `--checkpoint-min-step 2048`) | `modest-thompson-cutso3` (reset onto the merged default) | #225 | open |
 
-Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28 and 6,985 passed, 13 skipped at handoff 29; a large drop is a signal something is wrong.
+Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28 and 6,995 passed, 13 skipped at handoff 29; a large drop is a signal something is wrong.
 
 ---
 
