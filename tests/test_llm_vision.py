@@ -105,6 +105,14 @@ def projectors(started: list) -> list:
 
 
 class TestTheCapabilityLifecycle:
+    @pytest.fixture(autouse=True)
+    def on_demand(self, host):
+        """The lifecycle these tests describe is the on-demand rule. It is a
+        setting now, and not the default: by default a backbone with a
+        projector starts with it (see TestTheProjectorFromTheStart), so the
+        upgrade these tests count never happens."""
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+
     def test_a_cold_text_start_omits_the_projector(self, placed, eyes, tmp_path, monkeypatch):
         """AT-1. The projector is a gigabyte and a third of a card the model is
         already filling, and a conversation that never attaches a picture must
@@ -214,6 +222,14 @@ class TestTheCapabilityLifecycle:
 
 
 class TestWhenVisionEnds:
+    @pytest.fixture(autouse=True)
+    def on_demand(self, host):
+        """The lifecycle these tests describe is the on-demand rule. It is a
+        setting now, and not the default: by default a backbone with a
+        projector starts with it (see TestTheProjectorFromTheStart), so the
+        upgrade these tests count never happens."""
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+
     def test_an_explicit_unload_drops_it(self, placed, eyes, tmp_path, monkeypatch):
         configure(monkeypatch, tmp_path)
         set_free(monkeypatch, 40)
@@ -278,6 +294,14 @@ class TestWhenVisionEnds:
 
 
 class TestPlacementDoesNotUndoIt:
+    @pytest.fixture(autouse=True)
+    def on_demand(self, host):
+        """The lifecycle these tests describe is the on-demand rule. It is a
+        setting now, and not the default: by default a backbone with a
+        projector starts with it (see TestTheProjectorFromTheStart), so the
+        upgrade these tests count never happens."""
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+
     def test_a_text_request_does_not_re_place_a_vision_loaded_server(
             self, placed, eyes, tmp_path, monkeypatch):
         """The subtle way the thrash could come back. A vision-loaded server is
@@ -301,6 +325,14 @@ class TestPlacementDoesNotUndoIt:
 
 
 class TestRuntimesAreIsolated:
+    @pytest.fixture(autouse=True)
+    def on_demand(self, host):
+        """The lifecycle these tests describe is the on-demand rule. It is a
+        setting now, and not the default: by default a backbone with a
+        projector starts with it (see TestTheProjectorFromTheStart), so the
+        upgrade these tests count never happens."""
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+
     def test_upgrading_one_runtime_leaves_the_others_alone(self, placed, tmp_path, monkeypatch):
         """AT-9. Vision state is not global (I-6): one llama-server acquiring a
         projector must not restart, reload, or rewrite the state of another."""
@@ -351,6 +383,123 @@ class TestRuntimesAreIsolated:
 # --------------------------------------------------------------------------- #
 # A backbone with no eyes at all
 # --------------------------------------------------------------------------- #
+
+
+class TestTheProjectorFromTheStart:
+    """The default since the log that settled it: an unused projector costs no
+    tokens per second, and a picture attached to a warm text server used to
+    cost a model load and the prompt cache. So a backbone with a projector on
+    disk starts with it, and the first picture is answered by the process
+    that is already up."""
+
+    def test_a_cold_text_start_loads_it(self, placed, eyes, tmp_path, monkeypatch):
+        configuration = configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+
+        server.client()
+
+        assert projectors(started) == [configuration.mmproj]
+        assert server.vision_loaded()
+
+    def test_the_first_picture_costs_no_restart(self, placed, eyes, tmp_path, monkeypatch):
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+
+        server.client()
+        first = server._process
+        server.client(needs_vision=True)
+        server.client()
+
+        assert len(started) == 1
+        assert server._process is first
+
+    def test_the_projectors_room_is_part_of_the_placement(self, placed, eyes, tmp_path,
+                                                          monkeypatch):
+        """Reserved before the start, as it always was for a picture: the
+        placement that is negotiated is the one the loaded projector fits."""
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+        asked = []
+        original = runtime.negotiate
+
+        def recording(*args, **kwargs):
+            asked.append(kwargs.get("vision"))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(runtime, "negotiate", recording)
+
+        server.client()
+
+        assert asked and asked[0] is True
+
+    def test_a_projector_not_on_disk_is_not_fetched_for_a_text_turn(self, placed, eyes,
+                                                                    tmp_path, monkeypatch):
+        """Only a projector that is there. A managed bundle whose projector
+        has not been downloaded is not repaired for a text turn -- that stays
+        the lazy repair the first picture makes -- and the text turn is not
+        refused for it either."""
+        configuration = configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+        Path(configuration.mmproj).unlink()
+
+        def never(*args, **kwargs):
+            raise AssertionError("a text turn reached the projector repair")
+
+        monkeypatch.setattr(vision, "ensure_projector", never)
+
+        server.client()
+
+        assert projectors(started) == [None]
+        assert not server.vision_loaded()
+
+    def test_a_backbone_with_no_projector_starts_text_only(self, placed, eyes, tmp_path,
+                                                            monkeypatch):
+        configure(monkeypatch, tmp_path, projector=False)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+
+        server.client()
+
+        assert projectors(started) == [None]
+
+    def test_the_setting_restores_the_old_rule(self, placed, eyes, tmp_path, monkeypatch,
+                                               host):
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+        configuration = configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+
+        server.client()
+        server.client(needs_vision=True)
+
+        assert projectors(started) == [None, configuration.mmproj]
+
+    def test_a_text_server_from_the_old_rule_is_upgraded_once(self, placed, eyes, tmp_path,
+                                                              monkeypatch, host):
+        """Switching the setting to the default with a text server up: the next
+        request replaces it with one that has the projector, and every
+        request after that reuses it."""
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+        configuration = configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 40)
+        server, started = eyes
+        server.client()
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ALWAYS)
+
+        server.client()
+        server.client()
+
+        assert projectors(started) == [None, configuration.mmproj]
+
+    def test_the_setting_resolves_either_half_of_its_label(self, host):
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_MODES[1][1])
+        assert vision.projector_mode() == vision.PROJECTOR_ON_DEMAND
+        host.shared.opts.set(vision.OPT_PROJECTOR, "nonsense")
+        assert vision.projector_mode() == vision.PROJECTOR_ALWAYS
 
 
 class TestABackboneWithNoProjector:
@@ -649,6 +798,13 @@ class TestRepairingAMissingProjector:
 
 
 class TestWhenTheUpgradeFails:
+    @pytest.fixture(autouse=True)
+    def on_demand(self, host):
+        """The upgrade -- a text server replaced by one with the projector --
+        only happens under the on-demand setting; by default the projector is
+        there from the first start and there is nothing to upgrade."""
+        host.shared.opts.set(vision.OPT_PROJECTOR, vision.PROJECTOR_ON_DEMAND)
+
     def test_a_start_that_fails_with_the_projector_does_not_serve_the_image_blind(
             self, placed, eyes, tmp_path, monkeypatch):
         """24.2 and 24.3. The request that needed vision fails. What must never

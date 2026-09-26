@@ -2953,8 +2953,9 @@ A *managed* backbone is the exception, and it is not a guess. The catalogue
 records which projector belongs to which backbone, by filename, revision and
 SHA-256, so choosing one of those keeps its projector associated however it was
 chosen — from the catalogue, from the model drop-down, or by pasting the path
-into Setup. Keeping the association is not the same as loading it: the projector
-is still read only when a request actually carries an image.
+into Setup. Keeping the association is not the same as loading it: whether the
+projector is read at every start or at the first picture is the setting
+described under *When it is slower than it should be*.
 
 ### Pictures in a conversation
 
@@ -2986,6 +2987,22 @@ Chats written before there was a folder carried their pictures inside the chat
 file. Those are moved out the first time the thread is opened — once, per
 thread, without being asked — and the chat file gets smaller by however much
 base64 it was carrying.
+
+**What the model is shown.** Every picture stays in the thread, but the model
+is shown only the newest one: an older picture's message goes on the wire as
+its text under a note that a picture was there (`[image: name.jpg]`), and is
+never decoded for it. One still is what a conversation is usually about, and it
+is what keeps llama.cpp's prompt cache useful — a new picture rewrites only the
+previous picture's message, which is recent, so everything before it is resumed
+from the cache rather than read again. The window moves the same way: once a
+conversation no longer fits the context, its front moves in steps of a quarter
+of the window rather than by one message every turn. From one log, the old
+rules — one message off the front per turn, and every new picture taking the
+still off the *oldest* picture — read a prompt of five thousand tokens from its
+first token on every turn, which on an Intel GPU reading 25 to 50 tokens a
+second was three minutes of *Replying…* before a word appeared. What the new
+rules cost is a window at worst a quarter smaller right after a move, and the
+older pictures being described to the model rather than seen by it.
 
 **Editing.** Every message is edited the same way, yours and the character's
 alike: pick it, change the words, change or remove the picture, Save. It edits
@@ -3545,7 +3562,9 @@ down there or just the end of what you were already reading.
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip — or attached for you by **Auto Attach**, above. One per message, and
-a second one asks whether to replace the first. A message's picture shows on it
+a second one asks whether to replace the first. Only the newest picture in a
+thread is shown to the model; the older ones stay in the thread and are named
+to it (see *Pictures in a conversation*). A message's picture shows on it
 in the panel, fetched with the page's key like every other request the panel
 makes; one that has gone, or cannot be fetched, is a placeholder that says
 *Picture unavailable*. The file's name is never shown.
@@ -3625,24 +3644,35 @@ None of this is a setting and none of it can be turned off. Turning the Forge
 Assistant off removes a panel; it does not put a conversation back in reach of
 the last writer.
 
-**The panel holds a live connection only while a reply is on its way.** It
+**The panel holds a live connection only while a reply is being written.** It
 follows the conversation over one live connection, and that connection used to
 be held for as long as the page existed - including while the tab sat unseen
 for an hour - which is the connection that came back half-dead, open as far as
-the page could tell and silent. Now it opens only for a known boundary: when
-you press Send (or Regenerate, Continue, Resend) it opens *before* the request
-goes, so the reply streams in word by word as before; it stays while the reply
-is written and while it is being read aloud; and it closes when the reply and
-the speech are done. A reply started somewhere else - in LLM Studio, or another
-window - is found the next time the panel looks, and followed from there. The
-panel looks when you open it, when you come back to the page and when you
-switch workspace; that is also when it picks up which conversation LLM Studio
-is on, threads made or deleted elsewhere, and unread counts, which it no longer
-hears about live. A tab switched away mid-reply keeps the connection until that
-reply finishes (at most ten minutes). A closed connection is its resting state,
-so the status line never calls it a problem. Voice Chat's own speech stream
-works the same way already: it opens for one reply's speech and closes when
-that speech ends.
+the page could tell and silent. It was then opened the moment you pressed Send,
+which still held it through the half of a reply in which the server has nothing
+to say - starting the model, waiting for the card, reading the prompt, which on
+a slow placement is minutes - and a connection that is open and silent for
+minutes cannot be told from a dead one. So a reply now has two halves and the
+panel treats them differently. Until the first word it *asks*: one short
+request every two seconds for the reply's phase and how long it has been going,
+and the status line shows the wait (`Replying… 1:35`) rather than a bare word,
+or says the server has stopped answering if it has. From the first word to the
+last the connection is open and the reply streams in as before; it stays while
+the reply is read aloud, and closes when both are done. A reply started
+somewhere else - in LLM Studio, or another window - is found the next time the
+panel looks, and asked after or followed from there. Every request the panel
+makes has a deadline - twenty seconds, two minutes for a picture upload - after
+which it is abandoned and said so; a Send whose answer was lost is not sent
+again, the panel asks whether it arrived. And while the panel is open with
+nothing on its way it looks every fifteen seconds, as well as when it opens,
+when the window is focused, when you come back to the page and when you switch
+workspace: that is how it picks up which conversation LLM Studio is on, threads
+made or deleted elsewhere, a reply started from the tab, and unread counts,
+none of which it hears about live. A tab switched away mid-reply keeps the
+connection until that reply finishes (at most ten minutes). A closed
+connection is its resting state, so the status line never calls it a problem.
+Voice Chat's own speech stream works the same way already: it opens for one
+reply's speech and closes when that speech ends.
 
 Implementation notes, the gates that still need a running Forge, and what to do
 when adding a workspace adapter or a message action are in
@@ -3713,13 +3743,22 @@ start and in Setup's residency panel:
 - **"Last reply: llama.cpp measured N tokens/s"** — the only number here that
   is a measurement rather than a plan.
 
-The vision projector is loaded only for a request that actually carries an
-image; it costs over a gigabyte of the same VRAM the weights want, and a
-text-only conversation should not pay it. Attaching a picture restarts the
-server once — *once*. After that the projector stays loaded until the server is
-stopped, so the text message after the picture is answered by the same process,
-with its prompt cache intact. Vision is a capability a server acquires, not a
-mode each message switches on and off:
+The vision projector is loaded from the start. A backbone that has one starts
+with it beside the weights, so attaching a picture never restarts the server:
+the first picture is answered by the same process as the text before it, with
+its prompt cache intact. An unused projector costs no tokens per second —
+llama.cpp runs it only over the image parts of a request, so a text turn is
+decoded exactly as it would be without one. (From one log: the same model on
+the same card, 7.2 to 8.1 tokens a second text-only against 7.3 to 7.6 with the
+projector loaded, the difference tracking context length and not the
+projector.) What it costs is over a gigabyte of the same VRAM the weights want,
+at start; placement counts it, so on a tight card the backbone may land with
+fewer layers on the GPU than it would text-only. **Settings → Model Chain →
+When the vision projector is loaded** keeps the old rule as a choice, *When a
+picture is attached*: text turns start without it, and the first picture
+restarts the server once with the projector, which then stays. Under either
+rule vision is a capability a server acquires, not a mode each message switches
+on and off:
 
 ```
     OFF  ->  TEXT_ONLY  ->  VISION_LOADED
@@ -3735,10 +3774,11 @@ Two llama-servers do not share this. If Creative and Spatial are configured onto
 separate processes, one of them loading a projector leaves the other exactly as
 it was; if they share a process, they share whatever that process can do.
 
-For a managed multimodal backbone none of this needs setting up. If the
-projector is missing from the bundle when a picture is finally attached, the
-exact catalogue artifact is downloaded and hash-verified first, the request is
-then sent with its image intact, and nobody is asked to go and find a file. If
+For a managed multimodal backbone none of this needs setting up. A projector
+that is not on disk yet is not fetched for a text-only start; if it is missing
+from the bundle when a picture is finally attached, the exact catalogue
+artifact is downloaded and hash-verified first, the request is then sent with
+its image intact, and nobody is asked to go and find a file. If
 that download cannot be completed the request fails and says so; the text model
 that was running is left running.
 

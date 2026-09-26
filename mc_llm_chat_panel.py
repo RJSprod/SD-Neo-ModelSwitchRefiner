@@ -2617,13 +2617,17 @@ def _with_pictures(messages):
     moment they are needed, and never written back -- a message that has an
     ``image_path`` never saves an inline copy beside it.
 
-    Only the newest few, because that is all a request can carry: the builder
-    keeps at most ``MAX_IMAGES`` of the stills that survive trimming, and
-    decoding forty photographs to send four would be forty reads a message.
+    Only the newest, because that is all a request carries: the builder keeps
+    ``stills_carried(n)`` of the stills that survive trimming, and decoding
+    forty photographs to send one would be forty reads a message.
+    The same rule as the builder's, on the same count, so that the two never
+    disagree about which stills go -- the builder dropping one this read had
+    loaded would rewrite a message the cache had, for nothing.
     """
-    from prompt_master.chat.prompt import MAX_IMAGES
+    from prompt_master.chat.prompt import stills_carried
 
-    allowance = MAX_IMAGES
+    allowance = stills_carried(sum(1 for message in (messages or ())
+                                   if getattr(message, "image_path", None)))
     for message in reversed(messages or ()):
         if not message.image_path or message.image:
             continue
