@@ -2093,7 +2093,18 @@ class TestTheProjectorIsNotFree:
     """A gigabyte and a third of a card the model is already filling, paid on
     every text-only turn — and where llama.cpp finds a gigabyte and a third it
     was not told about is by leaving part of the model in system RAM.
+
+    It is counted whenever it is loaded. When that is, is a setting: the two
+    tests about a text-only start not loading it are the *When a picture is
+    attached* rule, which they select; the default loads it from the start,
+    and `test_llm_vision.py` covers that side.
     """
+
+    @pytest.fixture(autouse=True)
+    def on_demand(self, host):
+        import mc_llm_vision
+
+        host.shared.opts.set(mc_llm_vision.OPT_PROJECTOR, mc_llm_vision.PROJECTOR_ON_DEMAND)
 
     def _with_projector(self, monkeypatch, tmp_path, configuration):
         projector = tmp_path / "mmproj.gguf"

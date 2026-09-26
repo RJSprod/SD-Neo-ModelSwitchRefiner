@@ -29,7 +29,48 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import mc_broker
 import mc_llm_paths
+
+OPT_PROJECTOR = "model_chain_llm_vision_projector"
+
+PROJECTOR_ALWAYS = "always"
+PROJECTOR_ON_DEMAND = "on_demand"
+
+PROJECTOR_MODES = (
+    (PROJECTOR_ALWAYS, "From the start — a backbone with a projector starts with it loaded, so "
+                       "attaching a picture never restarts the server"),
+    (PROJECTOR_ON_DEMAND, "When a picture is attached — text turns start without it; the first "
+                          "picture restarts the server once with the projector, and it stays"),
+)
+"""When a vision projector is loaded beside the model.
+
+From the start is the default, and the reason is what an unused projector
+costs, measured on the machine this was written for: nothing per token. The
+projector is a separate encoder that llama.cpp runs only over the image
+chunks of a prompt; a text-only prompt never touches it, and the decode path
+is the same graph with or without it. From one user's llama-server log, on
+the same Intel GPU with the same model, text-only servers wrote at 7.2, 8.1
+and 7.4 tokens a second and projector-loaded ones at 7.25 and 7.6 on their
+first replies, with every later difference tracking the length of the
+conversation and not the projector. What it does cost is VRAM -- a gigabyte
+and a third on the card for a 26B backbone's projector -- and a few seconds
+at every start, against which a picture attached to a warm text server used
+to cost a whole model load and the prompt cache with it.
+
+When a picture is attached is the old rule, kept for a card that has no
+gigabyte to spare beside the weights.
+"""
+
+
+def projector_mode() -> str:
+    return mc_broker.resolve(mc_broker.option(OPT_PROJECTOR, PROJECTOR_ALWAYS),
+                             PROJECTOR_MODES, PROJECTOR_ALWAYS)
+
+
+def loaded_from_the_start() -> bool:
+    """Whether a backbone with a projector starts with it, picture or no picture."""
+    return projector_mode() == PROJECTOR_ALWAYS
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""

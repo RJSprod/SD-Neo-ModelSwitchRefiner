@@ -4828,15 +4828,31 @@ class Runtime:
         back to a text-only identity, which the lines below then treat as the
         ordinary replacement it is rather than as a downgrade this request asked
         for.
+
+        And a start with nothing to inherit takes the projector anyway, by
+        default (:data:`mc_llm_vision.PROJECTOR_ALWAYS`): an unused projector
+        costs no tokens per second -- llama.cpp runs it only over image chunks
+        -- and a picture attached to a warm text server used to cost a whole
+        model load and the prompt cache. Only a projector that is on disk: a
+        managed bundle whose projector has not been fetched yet is not
+        downloaded for a text turn, and stays the lazy repair the first picture
+        makes. The old rule is a setting, for a card with no gigabyte to spare.
         """
         if needs_vision:
             return configuration.mmproj
-        loaded = self._projector if self._running else None
-        if loaded is None:
-            return None
         known = configuration.mmproj
-        if known is not None and Path(known) == Path(loaded) and Path(loaded).is_file():
-            return loaded
+        loaded = self._projector if self._running else None
+        if loaded is not None:
+            if known is not None and Path(known) == Path(loaded) and Path(loaded).is_file():
+                return loaded
+            if known is None:
+                return None
+        if known is not None and mc_llm_vision.loaded_from_the_start():
+            try:
+                if Path(known).is_file():
+                    return Path(known)
+            except OSError:
+                return None
         return None
 
     def vision_loaded(self) -> bool:

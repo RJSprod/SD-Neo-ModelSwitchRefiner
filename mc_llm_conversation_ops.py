@@ -255,7 +255,11 @@ class Operation:
                 "recovery_status": self.recovery or None,
                 "result_revision": self.result_revision or None,
                 "error": self.error or None,
-                "stop_requested": self.stop_requested}
+                "stop_requested": self.stop_requested,
+                # How long this has been going, from acceptance: what a panel
+                # can put beside "Replying…" so that three minutes of prompt
+                # reading looks like three minutes and not like a hang.
+                "elapsed": round(max(time.time() - self.started, 0.0), 1)}
 
 
 # --------------------------------------------------------------------------- #

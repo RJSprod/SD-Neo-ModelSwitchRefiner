@@ -520,9 +520,9 @@ class TestADeadStreamIsReplaced:
     def test_the_watchdog_tears_down_a_stream_gone_silent(self):
         found = run(STORE_SETUP + """
             let aborted = 0;
-            // An open feed, which it only is while a reply is on its way.
+            // An open feed, which it only is while a reply is being written.
             store.sleeping = false;
-            store.operations.set("op", {id: "op", key: "", terminal: false});
+            store.operations.set("op", {id: "op", key: "", terminal: false, phase: "generating"});
             store.connected = true;
             store.lastTraffic = Date.now() - 50000;
             store._abort = {abort() { aborted += 1; }};
@@ -588,10 +588,11 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
     """Reported from use: a tab left for half an hour or more came back with
     its connections half-dead -- open as far as the page could tell, and
     silent -- and everything on it hung. The rule since: a live connection is
-    for a known boundary. The feed opens when a reply is asked for (or a
-    snapshot shows one on its way), stays while it is written and while it
-    is read aloud, and closes at the end. Everything else is read when the
-    panel opens, when the page comes back and when the workspace changes."""
+    for a known boundary. The feed opens at a reply's first word (until then
+    the reply is asked after, see the class below), stays while it is written
+    and while it is read aloud, and closes at the end. Everything else is
+    read when the panel opens, when the page comes back, when the workspace
+    changes, and now and then while the panel is open."""
 
     READY = STORE_SETUP + """
         store.ready = true;
@@ -611,22 +612,29 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
         assert found["paths"] == ["/bootstrap", "/snapshot"], found["paths"]
         assert found["idle"] is True and found["connected"] is False
 
-    def test_asking_for_a_reply_opens_the_feed_before_the_request(self):
+    def test_asking_for_a_reply_opens_no_feed_until_its_first_word(self):
+        """The reply just asked for has no words yet -- the server is starting
+        a model, or reading the prompt, for seconds or minutes -- so nothing
+        is held open for it: the operation is asked after instead."""
         found = run(self.READY + """
-            // The server's snapshot lists every reply that has not finished,
-            // so the one just asked for is in it.
             answers = {"/subscribe": [200, {feed: "f", stream_cursor: 1}],
-                       "/snapshot": [200, {operation: {operation_id: "op1", status: "queued"}, messages: []}],
-                       "/commands": [200, {ok: true, operation_id: "op1", phase: "queued",
+                       "/snapshot": [200, {operation: {operation_id: "op1", phase: "accepted",
+                                                       status: "Accepted", operation_seq: 0,
+                                                       elapsed: 0.1},
+                                           messages: []}],
+                       "/commands": [200, {ok: true, operation_id: "op1", phase: "accepted",
                                            resulting_conversation: {character: "c", thread_id: "t"}}]};
             store.selection = {character: "c", thread: "t", epoch: "e"};
             const envelope = store.envelope("send");
             store.send(envelope).then(settle).then(() => console.log(JSON.stringify({
-                paths: paths(), idle: store.snapshot().idle})));
+                paths: paths(), idle: store.snapshot().idle, waiting: store.snapshot().waiting,
+                asking: timers.filter((t) => t.ms === 2000).length})));
         """, sources=("store",))
 
-        assert found["paths"].index("/subscribe") < found["paths"].index("/commands"), found["paths"]
-        assert found["idle"] is False, "and it stays open while the reply is being written"
+        assert "/subscribe" not in found["paths"] and "/events" not in found["paths"], found["paths"]
+        assert found["idle"] is True, "no feed for a reply that has no words yet"
+        assert found["waiting"] is True
+        assert found["asking"] == 1, "the operation is asked after instead"
 
     def test_a_command_that_asks_for_no_reply_opens_nothing(self):
         found = run(self.READY + """
@@ -647,7 +655,8 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
             store.connected = true;
             store.cursor = 4;
             store._abort = {abort() { aborted += 1; }};
-            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1,
+                                         phase: "generating"});
             store.refresh = () => Promise.resolve(null);
             store.apply({protocol_version: 2, stream_cursor: 5, kind: "operation_terminal",
                          operation_id: "op1", operation_seq: 2, conversation: {},
@@ -680,11 +689,14 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
         assert found["after"] == {"aborted": 1, "idle": True}
 
     def test_a_reply_found_in_a_snapshot_opens_the_feed(self):
-        """Started in LLM Studio, or in another window: the panel learns of it
-        when it looks, and follows it from there."""
+        """Started in LLM Studio, or in another window, and already being
+        written: the panel learns of it when it looks, and follows it from
+        there."""
         found = run(self.READY + """
             answers = {"/subscribe": [200, {feed: "f", stream_cursor: 1}],
-                       "/snapshot": [200, {operation: {operation_id: "op9", status: "generating"},
+                       "/snapshot": [200, {operation: {operation_id: "op9", phase: "generating",
+                                                       status: "Generating…", generated_text: "Once",
+                                                       operation_seq: 3, elapsed: 40},
                                            messages: []}]};
             store.selection = {character: "c", thread: "t", epoch: "e"};
             store.refresh().then(settle).then(() => console.log(JSON.stringify({
@@ -693,6 +705,25 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
 
         assert "/subscribe" in found["paths"], found["paths"]
         assert found["idle"] is False and found["replying"] is True
+
+    def test_a_reply_found_in_a_snapshot_before_its_first_word_is_asked_after(self):
+        found = run(self.READY + """
+            answers = {"/subscribe": [200, {feed: "f", stream_cursor: 1}],
+                       "/snapshot": [200, {operation: {operation_id: "op9", phase: "preparing",
+                                                       status: "Replying…", generated_text: "",
+                                                       operation_seq: 0, elapsed: 40},
+                                           messages: []}]};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            store.refresh().then(settle).then(() => console.log(JSON.stringify({
+                paths: paths(), idle: store.snapshot().idle, replying: store.replying(),
+                asking: timers.filter((t) => t.ms === 2000).length,
+                since: Date.now() - store.operations.get("op9").since})));
+        """, sources=("store",))
+
+        assert "/subscribe" not in found["paths"], found["paths"]
+        assert found["idle"] is True and found["replying"] is True
+        assert found["asking"] == 1
+        assert 39000 <= found["since"] <= 41500, "and how long it has been going is taken over"
 
     def test_a_reply_the_server_has_finished_does_not_hold_the_feed(self):
         """A terminal event that never arrived cannot keep the feed open: the
@@ -729,7 +760,8 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
             store.connected = true;
             store.cursor = 4;
             store._abort = {abort() { aborted += 1; }};
-            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1,
+                                         phase: "generating"});
             store.sleep();
             const held = {aborted, idle: store.sleeping, timer: timers.some((t) => t.ms === 600000)};
             store.refresh = () => Promise.resolve(null);
@@ -748,7 +780,8 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
             store.sleeping = false;
             store.connected = true;
             store._abort = {abort() { aborted += 1; }};
-            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1});
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1,
+                                         phase: "generating"});
             store.sleep();
             timers.find((t) => t.ms === 600000).fn();
             store.review();
@@ -824,6 +857,416 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
         """, sources=("shell",))
 
         assert found["said"] and not any("onnect" in line for line in found["said"]), found["said"]
+
+
+class TestAReplyIsAskedAfterUntilItsFirstWord:
+    """Reported from use: a message sent from the flyout said "Replying…" for
+    minutes, and the panel kept losing step with LLM Studio. Both had one
+    shape: a live connection, opened the moment a reply was asked for and held
+    through the minutes in which the server had nothing to say -- starting a
+    model, waiting for the card, reading the prompt -- which is the connection
+    that came back half-dead in every incident before it. The rule since:
+    while a reply has no words yet, the operation is *asked after*, one
+    bounded request every couple of seconds, each answered with its phase and
+    how long it has been going; the feed opens at the first word and closes
+    at the last."""
+
+    READY = STORE_SETUP + """
+        store.ready = true;
+        store.selection = {character: "c", thread: "t", epoch: "e"};
+        const paths = () => calls.map((c) => c.split("?")[0].replace(/^.*conversation.v2/, ""));
+        const asking = () => timers.filter((t) => t.ms === 2000).length;
+        const fire = (ms) => { timers.filter((t) => t.ms === ms).pop().fn(); };
+        const waiting = (phase) => store.operations.set("op1", {
+            id: "op1", key: NS.conversationKey("c", "t"), terminal: false, seq: 0,
+            phase: phase || "preparing", status: "Replying…", text: ""});
+    """
+
+    def test_the_feed_opens_at_the_first_word_and_not_before(self):
+        found = run(self.READY + """
+            waiting("preparing");
+            answers = {"/operations/op1": [200, {operation: {operation_id: "op1", phase: "preparing",
+                                                             status: "Replying…", operation_seq: 0,
+                                                             elapsed: 12}}],
+                       "/subscribe": [200, {feed: "f", stream_cursor: 1}],
+                       "/snapshot": [200, {operation: {operation_id: "op1", phase: "generating",
+                                                       status: "Generating…", generated_text: "Hel",
+                                                       operation_seq: 1, elapsed: 14},
+                                           messages: []}]};
+            store.review();
+            const armed = asking();
+            fire(2000);
+            settle().then(() => {
+                const before = {paths: paths(), idle: store.snapshot().idle, asking: asking(),
+                                writing: store.snapshot().writing,
+                                since: Date.now() - store.operations.get("op1").since};
+                answers["/operations/op1"] = [200, {operation: {operation_id: "op1",
+                                                                phase: "generating",
+                                                                status: "Generating…",
+                                                                generated_text: "Hel",
+                                                                operation_seq: 1, elapsed: 14}}];
+                fire(2000);
+                return settle().then(() => console.log(JSON.stringify({armed, before, after: {
+                    paths: paths(), idle: store.snapshot().idle, writing: store.snapshot().writing,
+                    text: store.operations.get("op1").text, asking: asking()}})));
+            });
+        """, sources=("store",))
+
+        assert found["armed"] == 1
+        assert found["before"]["paths"] == ["/operations/op1"], found["before"]
+        assert found["before"]["idle"] is True and found["before"]["writing"] is False
+        assert found["before"]["asking"] == 2, "no words yet: asked again"
+        assert 11000 <= found["before"]["since"] <= 13500, "the wait so far is the server's"
+        after = found["after"]
+        assert "/subscribe" in after["paths"] and "/events" in after["paths"], after["paths"]
+        assert after["idle"] is False and after["writing"] is True
+        assert after["text"] == "Hel", "the words the answer carried are not waited for again"
+        assert after["asking"] == 2, "and nothing is asked once the feed is open"
+
+    def test_a_reply_that_ended_while_it_was_asked_after_is_read(self):
+        found = run(self.READY + """
+            waiting("preparing");
+            answers = {"/operations/op1": [200, {operation: {operation_id: "op1", phase: "completed",
+                                                             status: "", generated_text: "Hello.",
+                                                             operation_seq: 5, elapsed: 3},
+                                                 outcome: {result_revision: 4}}],
+                       "/snapshot": [200, {operation: null,
+                                           messages: [{role: "assistant", text: "Hello."}]}]};
+            store.review();
+            fire(2000);
+            settle().then(() => console.log(JSON.stringify({
+                paths: paths(), replying: store.replying(), idle: store.snapshot().idle,
+                waiting: store.snapshot().waiting, asking: asking()})));
+        """, sources=("store",))
+
+        assert found["paths"] == ["/operations/op1", "/snapshot"], found["paths"]
+        assert found["replying"] is False and found["waiting"] is False
+        assert found["idle"] is True, "no feed was ever opened for it"
+        assert found["asking"] == 1, "and it is not asked after again"
+
+    def test_a_question_that_goes_unanswered_is_asked_again_and_said_so(self):
+        """The server not answering a question about the reply is not the
+        reply ending. It is asked again, and after two misses the status line
+        says the server has not been answering."""
+        found = run(self.READY + """
+            waiting("preparing");
+            answers = {};
+            store.review();
+            fire(2000);
+            settle().then(() => {
+                const once = {stalled: store.snapshot().stalled, asking: asking()};
+                fire(2000);
+                return settle().then(() => {
+                    const twice = {stalled: store.snapshot().stalled, asking: asking(),
+                                   replying: store.replying()};
+                    answers = {"/operations/op1": [200, {operation: {
+                        operation_id: "op1", phase: "preparing", status: "Replying…",
+                        operation_seq: 0, elapsed: 30}}]};
+                    fire(2000);
+                    return settle().then(() => console.log(JSON.stringify({once, twice, answered: {
+                        stalled: store.snapshot().stalled, asking: asking()}})));
+                });
+            });
+        """, sources=("store",))
+
+        assert found["once"] == {"stalled": False, "asking": 2}
+        assert found["twice"] == {"stalled": True, "asking": 3, "replying": True}
+        assert found["answered"] == {"stalled": False, "asking": 4}
+
+    def test_a_reply_the_server_has_no_record_of_is_over(self):
+        found = run(self.READY + """
+            waiting("preparing");
+            answers = {"/operations/op1": [404, {}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store.review();
+            fire(2000);
+            settle().then(() => console.log(JSON.stringify({
+                paths: paths(), replying: store.replying(), asking: asking()})));
+        """, sources=("store",))
+
+        assert found == {"paths": ["/operations/op1", "/snapshot"], "replying": False, "asking": 1}
+
+    def test_a_send_whose_answer_was_lost_is_settled_by_asking(self):
+        """The command's answer never came (a stalled connection, a deadline).
+        The message may or may not have arrived, and nothing is sent again to
+        find out: the operation id it was latched with is asked after. Found:
+        the send is settled and the reply followed. Not found: the send is
+        settled too, and Send may be pressed again."""
+        found = run(self.READY + """
+            answers = {"/operations/op7": [200, {operation: {operation_id: "op7", phase: "preparing",
+                                                             status: "Replying…", operation_seq: 0,
+                                                             elapsed: 2}}],
+                       "/operations/op8": [404, {}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store._pending = {operationId: "op7", key: NS.conversationKey("c", "t"),
+                              settled: false, envelope: {}};
+            store.review();
+            const asked = asking();
+            fire(2000);
+            settle().then(() => {
+                const arrived = {settled: store._pending.settled, paths: paths(),
+                                 phase: store.operations.get("op7").phase, asking: asking()};
+                store.stopWatching();
+                store.operations.clear();
+                store._pending = {operationId: "op8", key: NS.conversationKey("c", "t"),
+                                  settled: false, envelope: {}};
+                store.review();
+                fire(2000);
+                return settle().then(() => console.log(JSON.stringify({asked, arrived, missing: {
+                    settled: store._pending.settled, kept: store._pending !== null,
+                    waiting: store.snapshot().waiting, read: paths().slice(-1)[0]}})));
+            });
+        """, sources=("store",))
+
+        assert found["asked"] == 1
+        assert found["arrived"]["settled"] is True and found["arrived"]["phase"] == "preparing"
+        assert found["arrived"]["paths"] == ["/operations/op7"]
+        assert found["arrived"]["asking"] == 2, "and the reply it started is asked after"
+        assert found["missing"] == {"settled": True, "kept": True, "waiting": False,
+                                    "read": "/snapshot"}
+
+    def test_going_to_the_background_stops_the_asking_and_the_return_resumes_it(self):
+        found = run(self.READY + """
+            waiting("preparing");
+            answers = {"/bootstrap": [200, {selection: {character: "c", thread_id: "t"}}],
+                       "/snapshot": [200, {operation: {operation_id: "op1", phase: "preparing",
+                                                       status: "Replying…", operation_seq: 0,
+                                                       elapsed: 5},
+                                           messages: []}]};
+            store.review();
+            const before = store._watchTimer !== null;
+            store.sleep();
+            const away = {timer: store._watchTimer, calls: calls.length};
+            store.wake();
+            settle().then(() => console.log(JSON.stringify({before, away,
+                                                             back: store._watchTimer !== null})));
+        """, sources=("store",))
+
+        assert found["before"] is True
+        assert found["away"] == {"timer": None, "calls": 0}
+        assert found["back"] is True
+
+
+class TestEveryRequestHasADeadline:
+    """Under HTTP/2 the page has one connection to Forge and a stalled one
+    stalls every request on it. A request with no deadline then waits for
+    ever, and from the panel that is indistinguishable from a reply taking its
+    time. So every request is abandoned, and aborted, when it misses its
+    deadline; a send whose answer was lost asks what happened rather than
+    sending again; an upload gets longer; a feed that has not opened in time
+    is let go of."""
+
+    READY = STORE_SETUP + """
+        store.ready = true;
+        store.selection = {character: "c", thread: "t", epoch: "e"};
+        const signals = [];
+        const never = (url, options) => {
+            calls.push(String(url));
+            signals.push(options && options.signal);
+            return new Promise(() => {});
+        };
+        const fire = (ms) => { timers.filter((t) => t.ms === ms).pop().fn(); };
+        const armed = (ms) => timers.filter((t) => t.ms === ms).length;
+    """
+
+    def test_a_request_that_never_answers_is_abandoned_and_aborted(self):
+        found = run(self.READY + """
+            globalThis.fetch = never;
+            let failed = null;
+            store.request("/snapshot?character=c").catch((error) => { failed = error; });
+            const deadline = armed(20000);
+            fire(20000);
+            settle().then(() => console.log(JSON.stringify({
+                deadline, timeout: !!(failed && failed.timeout), code: failed && failed.code,
+                aborted: !!(signals[0] && signals[0].aborted)})));
+        """, sources=("store",))
+
+        assert found == {"deadline": 1, "timeout": True, "code": "TIMEOUT", "aborted": True}
+
+    def test_the_deadline_is_let_go_of_when_the_answer_comes(self):
+        found = run(self.READY + """
+            const cleared = [];
+            globalThis.clearTimeout = (id) => cleared.push(id);
+            answers = {"/snapshot": [200, {operation: null, messages: []}]};
+            store.request("/snapshot?character=c").then(settle).then(() => {
+                const deadline = timers.findIndex((t) => t.ms === 20000) + 1;
+                console.log(JSON.stringify({cleared: cleared.indexOf(deadline) >= 0}));
+            });
+        """, sources=("store",))
+
+        assert found == {"cleared": True}
+
+    def test_a_send_whose_answer_never_comes_asks_rather_than_sends_again(self):
+        found = run(self.READY + """
+            globalThis.fetch = never;
+            let outcome = null;
+            store.submit().then((found) => { outcome = found; });
+            fire(20000);
+            settle().then(() => {
+                const lost = {lost: !!(outcome && outcome.lost),
+                              sent: calls.filter((c) => c.indexOf("/commands") >= 0).length,
+                              asking: armed(2000),
+                              pending: !!(store._pending && !store._pending.settled)};
+                fire(2000);
+                return settle().then(() => console.log(JSON.stringify({lost, then: {
+                    asked: calls.filter((c) => c.indexOf("/operations/") >= 0).length,
+                    sent: calls.filter((c) => c.indexOf("/commands") >= 0).length}})));
+            });
+        """, sources=("store",))
+
+        assert found["lost"] == {"lost": True, "sent": 1, "asking": 1, "pending": True}
+        assert found["then"] == {"asked": 1, "sent": 1}
+
+    def test_a_feed_that_does_not_open_in_time_is_let_go_of(self):
+        found = run(self.READY + """
+            globalThis.fetch = never;
+            store.feed = "f";
+            store.sleeping = false;
+            store.operations.set("op1", {id: "op1", key: "", terminal: false, seq: 1,
+                                         phase: "generating"});
+            store.stream();
+            const opening = armed(20000);
+            fire(20000);
+            settle().then(() => console.log(JSON.stringify({
+                opening, failures: store.failures, connected: store.connected,
+                aborted: !!(signals[0] && signals[0].aborted),
+                ladder: timers.some((t) => t.ms >= 1000 && t.ms < 1400)})));
+        """, sources=("store",))
+
+        assert found == {"opening": 1, "failures": 1, "connected": False, "aborted": True,
+                         "ladder": True}
+
+    def test_an_upload_gets_longer(self):
+        found = run(self.READY + """
+            globalThis.fetch = never;
+            const file = new Blob(["x"], {type: "image/png"});
+            file.name = "x.png";
+            store.upload(file).catch(() => {});
+            console.log(JSON.stringify({long: armed(120000), plain: armed(20000)}));
+        """, sources=("store",))
+
+        assert found == {"long": 1, "plain": 0}
+
+
+class TestAnOpenPanelLooksNowAndThen:
+    """Nothing is pushed to a panel that is idle, so what LLM Studio does in
+    the tab -- another thread chosen, a message sent, a reply started --
+    reaches an open panel only by its own look. It looks when it opens, when
+    the page comes back, when the window is focused, when the workspace
+    changes, and every so often in between while it is on screen. A closed
+    panel looks when it opens."""
+
+    READY = STORE_SETUP + """
+        store.ready = true;
+        store.selection = {character: "c", thread: "t", epoch: "e"};
+        answers = {"/bootstrap": [200, {selection: {character: "c", thread_id: "t"}}],
+                   "/snapshot": [200, {operation: null, messages: []}]};
+        const paths = () => calls.map((c) => c.split("?")[0].replace(/^.*conversation.v2/, ""));
+        const looks = () => timers.filter((t) => t.ms === 15000).length;
+        const fire = (ms) => { timers.filter((t) => t.ms === ms).pop().fn(); };
+    """
+
+    def test_it_looks_every_so_often_while_shown_and_idle(self):
+        found = run(self.READY + """
+            store.setShown(true);
+            const armed = looks();
+            fire(15000);
+            settle().then(() => console.log(JSON.stringify({
+                armed, paths: paths(), again: looks(), watchdog: store._watchdog})));
+        """, sources=("store",))
+
+        assert found["watchdog"] is None, "the timers counted are looks, not the watchdog"
+        assert found["armed"] == 1
+        assert found["paths"] == ["/bootstrap", "/snapshot"], found["paths"]
+        assert found["again"] == 2, "and the next look is arranged after the last"
+
+    def test_a_hidden_panel_and_a_page_in_the_background_do_not(self):
+        found = run(self.READY + """
+            store.setShown(true);
+            const shown = store._lookTimer !== null;
+            store.setShown(false);
+            const hidden = store._lookTimer;
+            store.sleep();
+            store.setShown(true);
+            const away = store._lookTimer;
+            console.log(JSON.stringify({shown, hidden, away}));
+        """, sources=("store",))
+
+        assert found == {"shown": True, "hidden": None, "away": None}
+
+    def test_nothing_is_looked_at_while_a_reply_is_on_its_way(self):
+        found = run(self.READY + """
+            store.operations.set("op1", {id: "op1", key: NS.conversationKey("c", "t"),
+                                         terminal: false, seq: 0, phase: "preparing"});
+            store.setShown(true);
+            console.log(JSON.stringify({look: store._lookTimer,
+                                        asking: timers.filter((t) => t.ms === 2000).length}));
+        """, sources=("store",))
+
+        assert found == {"look": None, "asking": 1}
+
+    def test_a_look_is_not_repeated_within_moments(self):
+        found = run(self.READY + """
+            store.look();
+            store.look();
+            settle().then(() => console.log(JSON.stringify({
+                bootstraps: paths().filter((p) => p === "/bootstrap").length})));
+        """, sources=("store",))
+
+        assert found == {"bootstraps": 1}
+
+    def test_the_shell_says_when_the_panel_shows_and_looks_when_the_window_is_focused(self):
+        shell = SHELL.read_text(encoding="utf-8")
+        shown = shell.split("Shell.prototype.showOpen = function", 1)[1].split("};", 1)[0]
+        wiring = shell.split("Shell.prototype.wire = function", 1)[1] \
+            .split("Shell.prototype.grow = function", 1)[0]
+        focus = wiring.split('this.on(window, "focus"', 1)[1].split("});", 1)[0]
+
+        assert "this.store.setShown(!!open);" in shown
+        assert "this.store.look();" in focus
+
+
+class TestTheWaitIsShownWithItsLength:
+    """Three minutes of prompt reading should look like three minutes, not
+    like a hang: once a reply has been on its way for a while with no words
+    yet, the status line counts. While the words are coming they are the
+    progress. And when the server has stopped answering the questions about
+    the reply, the line says so."""
+
+    def test_the_line(self):
+        found = run("""
+            const since = Date.now() - 95000;
+            const line = (over) => NS.progressLine(Object.assign(
+                {operation: {status: "Replying…", since, terminal: false},
+                 writing: false, stalled: false}, over || {}));
+            console.log(JSON.stringify({
+                waited: line(),
+                writing: line({writing: true}),
+                young: line({operation: {status: "Preparing model…", terminal: false,
+                                         since: Date.now() - 4000}}),
+                stalled: line({stalled: true}),
+                bare: line({operation: {terminal: false}}),
+            }));
+        """, sources=("shell",))
+
+        assert found["waited"] == "Replying… 1:35"
+        assert found["writing"] == "Replying…", "words coming are the progress"
+        assert found["young"] == "Preparing model…", "a count under ten seconds reads as nerves"
+        assert found["stalled"] == "Replying… 1:35 The server has not answered lately; still asking."
+        assert found["bare"] == "Generating…"
+
+    def test_the_status_line_shows_it(self):
+        found = run("""
+            const shell = Object.create(NS.Shell.prototype);
+            shell.nodes = {status: {dataset: {}, textContent: ""}};
+            shell.renderStatus({ready: true, connected: false, idle: true, everConnected: false,
+                                selection: {thread: "t"}, characters: ["Ada"], writing: false,
+                                stalled: false, operation: {status: "Replying…", terminal: false,
+                                                            since: Date.now() - 95000}});
+            console.log(JSON.stringify({said: shell.nodes.status.textContent}));
+        """, sources=("shell",))
+
+        assert found == {"said": "Replying… 1:35"}
 
 
 class TestARestartedServerIsRejoined:

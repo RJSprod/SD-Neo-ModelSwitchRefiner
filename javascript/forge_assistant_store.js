@@ -58,6 +58,46 @@
     const POLL_IDLE = 10000;
     const RETRY_STREAM_AFTER = 30000;
 
+    // EVERY REQUEST HAS A DEADLINE.
+    //
+    // Under HTTP/2 the page has one connection to Forge and a stalled one
+    // stalls every request on it; a request with no deadline then waits for
+    // ever and looks, from the panel, exactly like a reply that is taking its
+    // time. So a plain request that has not answered in REQUEST_DEADLINE is
+    // abandoned and said so; an upload gets longer; a stream that has not sent
+    // its first byte in OPEN_DEADLINE is let go of. A request the deadline
+    // ends is not the server refusing anything: a send keeps its operation id
+    // and asks what happened rather than sending again.
+    const REQUEST_DEADLINE = 20000;
+    const UPLOAD_DEADLINE = 120000;
+    const OPEN_DEADLINE = 20000;
+
+    // WHILE A REPLY IS WAITED FOR, THE OPERATION IS ASKED, NOT LISTENED TO.
+    //
+    // A reply has two halves. First the server does things that produce no
+    // words -- starts llama-server, waits for the card, reads the prompt,
+    // which on a slow placement is minutes -- and then the words come. A live
+    // connection held open through the first half is the connection that
+    // came back half-dead in every incident that locked the page up: open as
+    // far as the page could tell, silent, and with nothing to say for
+    // minutes there is no way to tell it from a healthy one. So the first
+    // half is followed by asking: one bounded request for the operation every
+    // POLL_WAITING, each of which answers with the phase and how long it has
+    // been going. The stream opens at the first word and closes at the last.
+    const POLL_WAITING = 2000;
+    const WRITING = ["generating", "saving"];
+    const TERMINAL = ["completed", "stopped", "failed", "save_failed", "interrupted"];
+
+    // WHILE THE PANEL IS OPEN AND NOTHING IS COMING, IT LOOKS NOW AND THEN.
+    //
+    // Nothing is pushed to a panel that is idle, so what LLM Studio does in
+    // the tab -- another thread chosen, a message sent, a reply started --
+    // reaches an open panel by its own look: when it opens, when the page
+    // comes back, when the workspace changes, when the window is focused, and
+    // every IDLE_LOOK in between. A closed panel looks when it opens.
+    const IDLE_LOOK = 15000;
+    const LOOK_COOLDOWN = 3000;
+
     // How often the open stream is asked whether it is still alive. `silent()`
     // could always tell a dead one from a quiet one; nothing ever asked it
     // except a returning tab, so a connection that died without closing -- a
@@ -70,25 +110,26 @@
     // dead rather than waited on for the full SILENCE.
     const STALE = 20000;
 
-    // THE FEED IS OPEN ONLY WHILE SOMETHING IS COMING.
+    // THE FEED IS OPEN ONLY WHILE WORDS ARE COMING.
     //
-    // It used to be held for the life of the page, and a connection held open
-    // while it waits on nothing is the one that came back half-dead -- open as
-    // far as the page could tell, and silent -- in every incident that locked
-    // the page up. So it opens for a known boundary and closes at its end: a
-    // reply being written (from the moment one is asked for until its terminal
-    // event), and its read-aloud while it plays. Everything else -- which
-    // thread LLM Studio is on, threads made or deleted elsewhere, unread counts
-    // -- is read when the panel is opened, when the page comes back and when
-    // the workspace changes. See `review`.
+    // It used to be held for the life of the page, and then from the moment a
+    // reply was asked for; both are a connection held open while it waits on
+    // nothing, and that is the one that came back half-dead -- open as far as
+    // the page could tell, and silent -- in every incident that locked the
+    // page up. So it opens for a known boundary and closes at its end: a
+    // reply being *written* (from its first word until its terminal event),
+    // and its read-aloud while it plays. The wait before the first word is
+    // followed by asking (above). Everything else -- which thread LLM Studio
+    // is on, threads made or deleted elsewhere, unread counts -- is read when
+    // the panel looks. See `review`.
     //
     // A page in the background that is still holding a reply keeps it until
     // the reply ends, or for this long at most.
     const HOLD_FOR_REPLY = 600000;
 
     // The four actions that end in a model being asked for words (the
-    // server's GENERATING). Only these anticipate a reply, so only these open
-    // the feed before they are sent.
+    // server's GENERATING). Only these anticipate a reply, so only these are
+    // watched for one after they are sent.
     const GENERATING = ["send", "regenerate", "continue", "resend_from_user"];
 
     // The Gradio component that carries this process's capability, and where
@@ -118,6 +159,31 @@
 
     function route(name) {
         return basePath() + PREFIX + name;
+    }
+
+    /** `start(signal)` with a deadline: the promise it returns, or a rejection
+     * with `timeout` set once `ms` have passed. The request is aborted as
+     * well where the browser can, so the connection is really let go of;
+     * where it cannot, the page at least stops waiting. */
+    function bounded(start, ms, why, controller) {
+        const owned = controller || (typeof AbortController === "function"
+            ? new AbortController() : null);
+        let timer = null;
+        const expired = new Promise((resolve, reject) => {
+            timer = window.setTimeout(() => {
+                if (owned) {
+                    try {
+                        owned.abort();
+                    } catch (error) { /* already gone */ }
+                }
+                const error = new Error(why || "The server did not answer in time.");
+                error.code = "TIMEOUT";
+                error.timeout = true;
+                reject(error);
+            }, ms);
+        });
+        const request = start(owned ? owned.signal : undefined);
+        return Promise.race([request, expired]).finally(() => window.clearTimeout(timer));
     }
 
     function storageKey(name) {
@@ -218,6 +284,13 @@
         this._heldTooLong = false;
         this._expecting = 0;
         this._connecting = null;
+        // Whether the panel is on screen, as the shell reports it: the idle
+        // look happens only then.
+        this.shown = false;
+        this._watchTimer = null;
+        this._watchFailures = 0;
+        this._lookTimer = null;
+        this._looked = 0;
         this._restoreDrafts();
     }
 
@@ -252,6 +325,9 @@
             everConnected: this.everConnected,
             polling: this.polling,
             idle: this.sleeping,
+            waiting: this.waiting(),
+            writing: this.writing(),
+            stalled: this._watchFailures >= 2,
             error: this.error,
             capabilities: Object.assign({}, this.capabilities),
             selection: Object.assign({}, this.selection),
@@ -357,7 +433,12 @@
     Store.prototype.request = function (path, options) {
         const settings = Object.assign({credentials: "same-origin"}, options || {});
         settings.headers = this.headers(settings.headers);
-        return fetch(route(path), settings).then((response) => {
+        const deadline = settings.deadline || REQUEST_DEADLINE;
+        delete settings.deadline;
+        return bounded((signal) => {
+            if (signal) settings.signal = signal;
+            return fetch(route(path), settings);
+        }, deadline).then((response) => {
             if (!response.ok) {
                 return response.json().catch(() => ({})).then((body) => {
                     const error = new Error((body.error && body.error.message)
@@ -470,11 +551,15 @@
         this._abort = controller;
         const path = "/events?feed=" + encodeURIComponent(this.feed)
             + "&cursor=" + encodeURIComponent(String(this.cursor));
-        return fetch(route(path), {
+        // The deadline covers the opening only: once the first byte is here
+        // the silence watchdog takes over, and a reply's own quiet stretches
+        // are bridged by the server's heartbeat.
+        return bounded((signal) => fetch(route(path), {
             credentials: "same-origin",
             headers: this.headers(),
-            signal: controller ? controller.signal : undefined,
-        }).then((response) => {
+            signal,
+        }), OPEN_DEADLINE, "The conversation feed did not open in time.", controller)
+        .then((response) => {
             if (!response.ok || !response.body) throw new Error("no stream");
             this.connected = true;
             this.everConnected = true;
@@ -484,7 +569,9 @@
             this.announce();
             return this.readStream(response.body.getReader());
         }).catch((error) => {
-            if (error && error.name === "AbortError") return;
+            // An abort of our own -- restream, letGo -- is not a failure. One
+            // the open deadline caused is, and it says so.
+            if (error && error.name === "AbortError" && !(error && error.timeout)) return;
             console.warn("Forge Assistant: the conversation feed closed", error);
             this.dropped();
         });
@@ -757,6 +844,7 @@
         operation.targetIndex = event.payload && event.payload.target_index;
         operation.phase = (event.payload && event.payload.phase) || "generating";
         operation.provisional = true;
+        operation.since = operation.since || Date.now();
         this.operations.set(event.operation_id, operation);
         if (!mine) this.mark(key, 0);    // a badge, never the other thread's view
     };
@@ -775,6 +863,7 @@
         operation.error = (event.payload && event.payload.error) || "";
         operation.terminal = !!terminal;
         operation.provisional = !terminal;
+        operation.since = operation.since || Date.now();
         this.operations.set(event.operation_id, operation);
         if (terminal && this._pending && this._pending.operationId === event.operation_id) {
             this._pending = null;
@@ -1014,9 +1103,9 @@
     };
 
     Store.prototype.send = function (envelope) {
-        // A reply is being asked for: the feed opens before the request goes,
-        // so the reply lands on a feed that is already there. Anything else is
-        // sent with no feed at all.
+        // A reply is being asked for: no feed opens for it. The command is
+        // sent, and the operation it accepts is asked after until its first
+        // word, which is when the feed opens. See `review`.
         const generating = !!envelope && GENERATING.indexOf(envelope.action) >= 0;
         if (generating) this.stampVoice(envelope);
         if (generating) this._expecting += 1;
@@ -1025,12 +1114,11 @@
             this._expecting = Math.max(0, this._expecting - 1);
             this.review();
         };
-        const ready = generating ? this.ensureFeed() : Promise.resolve();
-        return ready.then(() => this.request("/commands", {
+        return this.request("/commands", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify(envelope),
-        })).then((outcome) => {
+        }).then((outcome) => {
             this.after(outcome);
             settle();
             return outcome;
@@ -1060,8 +1148,9 @@
         if (outcome.operation_id && outcome.phase && outcome.phase !== "completed") {
             this.operations.set(outcome.operation_id, {
                 id: outcome.operation_id, key, phase: outcome.phase, seq: 0,
-                text: "", terminal: false, provisional: true,
+                status: "", text: "", terminal: false, provisional: true,
                 targetIndex: outcome.target && outcome.target.index,
+                since: Date.now(),
             });
         }
         this.refresh();
@@ -1173,10 +1262,11 @@
     Store.prototype.upload = function (file) {
         const form = new FormData();
         form.append("file", file, file.name || "pasted-image");
-        return fetch(route("/attachments"), {
+        return bounded((signal) => fetch(route("/attachments"), {
             method: "POST", credentials: "same-origin",
-            headers: this.headers(), body: form,
-        }).then((response) => response.json().then((body) => {
+            headers: this.headers(), body: form, signal,
+        }), UPLOAD_DEADLINE, "The picture did not upload in time.")
+        .then((response) => response.json().then((body) => {
             if (!response.ok) throw Object.assign(new Error(body.reason
                 || "That picture could not be used."), {body});
             return body;
@@ -1253,19 +1343,61 @@
         return this.refresh();
     };
 
-    /** Whether anything is coming that the feed is for: a reply being asked
-     * for, a reply being written, or a reply being read aloud. */
+    /** Whether words are coming that the feed is for: a reply being written,
+     * or a reply being read aloud. */
     Store.prototype.needsFeed = function () {
-        return this._expecting > 0 || this.replying()
-            || !!(this.speech && this.speech.playing);
+        return this.writing() || !!(this.speech && this.speech.playing);
     };
 
-    /** Open the feed if something is coming, close it if nothing is. Called
-     * after every moment that could change the answer: a snapshot, a send, a
-     * reply ending, speech stopping, the page going away or coming back. */
+    /** Whether a reply is being written right now: words are arriving, or
+     * the last of them is being saved. */
+    Store.prototype.writing = function () {
+        let live = false;
+        this.operations.forEach((operation) => {
+            if (operation && !operation.terminal && WRITING.indexOf(operation.phase) >= 0) {
+                live = true;
+            }
+        });
+        return live;
+    };
+
+    /** Whether a reply is on its way that has no words yet: a command in
+     * flight, a send whose answer was lost, or an operation the server has
+     * accepted and is preparing for. That is what is asked after. */
+    Store.prototype.waiting = function () {
+        if (this._expecting > 0) return true;
+        if (this._pending && !this._pending.settled) return true;
+        return this.pendingOperation() !== null;
+    };
+
+    /** The operation to ask about: one known and not writing yet, or the
+     * latched send whose acceptance never arrived. */
+    Store.prototype.pendingOperation = function () {
+        let found = null;
+        this.operations.forEach((operation) => {
+            if (found) return;
+            if (operation && !operation.terminal && WRITING.indexOf(operation.phase) < 0) {
+                found = operation;
+            }
+        });
+        if (found) return found;
+        if (this._pending && !this._pending.settled) {
+            return {id: this._pending.operationId, key: this._pending.key, latched: true};
+        }
+        return null;
+    };
+
+    /** Open the feed if words are coming, ask after a reply that has none
+     * yet, look now and then if nothing is coming and the panel is open --
+     * and close what is not needed. Called after every moment that could
+     * change the answer: a snapshot, a send, an answer about an operation, a
+     * reply ending, speech stopping, the page going away or coming back, the
+     * panel opening or closing. */
     Store.prototype.review = function () {
         if (!this.ready) return;
         if (this.needsFeed()) {
+            this.stopWatching();
+            this.stopLooking();
             // A page in the background that already held a reply for as long
             // as it may does not open another feed for it until it is back.
             if (this.asleep && this._heldTooLong) return;
@@ -1273,6 +1405,145 @@
             return;
         }
         if (!this.sleeping) this.letGo();
+        if (this.waiting()) {
+            this.stopLooking();
+            if (!this.asleep) this.watchOperation();
+            return;
+        }
+        this.stopWatching();
+        if (this.shown && !this.asleep) this.lookLater();
+        else this.stopLooking();
+    };
+
+    // -- asking after a reply that has no words yet ------------------------ //
+
+    Store.prototype.watchOperation = function () {
+        if (this._watchTimer || this.asleep) return;
+        this._watchTimer = window.setTimeout(() => this.pollOperation(), POLL_WAITING);
+    };
+
+    Store.prototype.stopWatching = function () {
+        window.clearTimeout(this._watchTimer);
+        this._watchTimer = null;
+        this._watchFailures = 0;
+    };
+
+    /** One question about the reply on its way. What comes back decides what
+     * happens next, through `review`: words have started, so the feed opens;
+     * it is still being prepared, so the question is asked again; it has
+     * ended, so the conversation is read. */
+    Store.prototype.pollOperation = function () {
+        this._watchTimer = null;
+        if (!this.ready || this.asleep) return Promise.resolve(null);
+        const found = this.pendingOperation();
+        if (!found) {
+            // A command is in flight and has no id yet. Ask again shortly.
+            if (this.waiting()) this.watchOperation();
+            return Promise.resolve(null);
+        }
+        return this.request("/operations/" + encodeURIComponent(found.id)).then((answer) => {
+            this._watchFailures = 0;
+            const operation = answer && answer.operation;
+            if (operation && operation.operation_id) {
+                this.noteProgress(operation, found.key, !!(answer && answer.outcome));
+            } else if (!found.latched) {
+                found.terminal = true;
+                found.provisional = false;
+            }
+            if (found.latched && this._pending && this._pending.operationId === found.id) {
+                // The server has it: the send arrived, whatever happened to its
+                // answer. Nothing is sent again.
+                this._pending.settled = true;
+            }
+            this.error = "";
+            this.announce();
+            const known = this.operations.get(found.id) || found;
+            if (known.terminal) return this.refresh().finally(() => this.review());
+            this.review();
+            return answer;
+        }).catch((error) => {
+            if (error && error.status === 404) {
+                // No record of it. A latched send never arrived and is kept for
+                // the retry the shell offers; anything else ended in a process
+                // this page has since lost, and the conversation says how.
+                if (found.latched && this._pending && this._pending.operationId === found.id) {
+                    this._pending.settled = true;
+                } else {
+                    found.terminal = true;
+                    found.provisional = false;
+                }
+                this.announce();
+                return this.refresh().finally(() => this.review());
+            }
+            // Not answered, or not in time. The reply is not over because a
+            // question about it was not answered; it is asked again.
+            this._watchFailures += 1;
+            this.announce();
+            this.review();
+            return null;
+        });
+    };
+
+    /** What the server says about one operation, taken into the page's copy.
+     * Older than what the feed already said is ignored; newer replaces it. */
+    Store.prototype.noteProgress = function (found, key, ended) {
+        if (!found || !found.operation_id) return null;
+        const id = String(found.operation_id);
+        const known = this.operations.get(id)
+            || {id, key, seq: -1, terminal: false, provisional: true, text: ""};
+        const seq = Number(found.operation_seq || 0);
+        if (seq && known.seq > 0 && seq < known.seq) return known;
+        known.seq = Math.max(Number(known.seq) || 0, seq);
+        known.key = known.key || key;
+        known.phase = found.phase || known.phase || "";
+        known.status = found.status || known.status || "";
+        if (typeof found.generated_text === "string" && found.generated_text) {
+            known.text = found.generated_text;
+        }
+        known.error = found.error || "";
+        if (found.target_index !== undefined) known.targetIndex = found.target_index;
+        if (typeof found.elapsed === "number") {
+            known.since = Date.now() - Math.max(0, found.elapsed) * 1000;
+        }
+        known.since = known.since || Date.now();
+        known.terminal = !!ended || TERMINAL.indexOf(known.phase) >= 0;
+        known.provisional = !known.terminal;
+        this.operations.set(id, known);
+        if (known.terminal && this._pending && this._pending.operationId === id) {
+            this._pending = null;
+        }
+        return known;
+    };
+
+    // -- looking, while nothing is coming ---------------------------------- //
+
+    /** The shell says whether the panel is on screen. */
+    Store.prototype.setShown = function (shown) {
+        this.shown = !!shown;
+        this.review();
+    };
+
+    /** One look, not more often than LOOK_COOLDOWN: the panel opening, the
+     * window focused, the workspace changed. */
+    Store.prototype.look = function () {
+        if (!this.ready || this.asleep) return Promise.resolve(null);
+        const now = Date.now();
+        if (now - this._looked < LOOK_COOLDOWN) return Promise.resolve(null);
+        this._looked = now;
+        return this.check();
+    };
+
+    Store.prototype.lookLater = function () {
+        if (this._lookTimer || !this.shown || this.asleep) return;
+        this._lookTimer = window.setTimeout(() => {
+            this._lookTimer = null;
+            this.look().finally(() => this.review());
+        }, IDLE_LOOK);
+    };
+
+    Store.prototype.stopLooking = function () {
+        window.clearTimeout(this._lookTimer);
+        this._lookTimer = null;
     };
 
     /** The feed, opened if it is closed. Resolves once the subscription
@@ -1286,20 +1557,14 @@
 
     /** What a snapshot says about the reply in this conversation. One in
      * flight that this page did not know about -- started in LLM Studio, or
-     * in another window -- is taken in, so the feed opens for it; one this
-     * page thought was still running but the server has finished is marked
-     * finished, so a missed terminal event cannot hold the feed open. */
+     * in another window -- is taken in, so it is asked after or its feed
+     * opened; one this page thought was still running but the server has
+     * finished is marked finished, so a missed terminal event cannot hold
+     * anything open. */
     Store.prototype.noteOperation = function (key, found) {
         const running = found && found.operation;
         if (running && running.operation_id) {
-            const known = this.operations.get(running.operation_id);
-            if (!known) {
-                this.operations.set(running.operation_id, {
-                    id: running.operation_id, key, seq: -1, terminal: false, provisional: true,
-                    phase: running.status || "", status: running.status || "",
-                    text: running.final_text || "",
-                });
-            }
+            this.noteProgress(running, key, false);
             return;
         }
         if (!found || found.error) return;
@@ -1317,6 +1582,8 @@
      * HOLD_FOR_REPLY at most. */
     Store.prototype.sleep = function () {
         this.asleep = true;
+        this.stopWatching();
+        this.stopLooking();
         if (this.sleeping) return;
         if (!this.needsFeed()) {
             this.letGo();
@@ -1369,7 +1636,7 @@
         window.clearTimeout(this._sleepTimer);
         this._sleepTimer = null;
         if (!this.sleeping) return this.reconcile(false);
-        return this.check();
+        return this.check().finally(() => this.review());
     };
 
     /** One look at what changed while nothing was open: which conversation
@@ -1399,6 +1666,8 @@
         window.clearTimeout(this._sleepTimer);
         window.clearTimeout(this._reconnect);
         window.clearTimeout(this._pollTimer);
+        window.clearTimeout(this._watchTimer);
+        window.clearTimeout(this._lookTimer);
         window.clearTimeout(this._draftTimer);
         window.clearTimeout(this._watchdog);
         window.clearTimeout(this._retryStream);
@@ -1413,6 +1682,7 @@
     };
 
     NS.Store = Store;
+    NS.bounded = bounded;
     NS.conversationKey = conversationKey;
     NS.basePath = basePath;
     NS.route = route;

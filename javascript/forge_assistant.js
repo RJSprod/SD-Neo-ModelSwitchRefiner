@@ -1431,7 +1431,13 @@
             this.store.wake();
         });
         this.on(window, "blur", () => this.cancelGestures());
-        this.on(window, "focus", () => this.heal());
+        this.on(window, "focus", () => {
+            this.heal();
+            // Another of the moments the panel looks: coming back to this
+            // window after doing something in another one -- LLM Studio in a
+            // second tab, say. Rate-limited in the store.
+            if (this.store && typeof this.store.look === "function") this.store.look();
+        });
         this.on(window, "online", () => this.store.reconcile(true));
         this.on(window, "pageshow", (event) => {
             this.heal();
@@ -1542,6 +1548,10 @@
         if (!open) this.closeMenu();
         this._save();
         this.placeNow();
+        // The store looks now and then only while the panel is on screen.
+        if (this.store && typeof this.store.setShown === "function") {
+            this.store.setShown(!!open);
+        }
     };
 
     Shell.prototype.open = function () {
@@ -3796,6 +3806,32 @@
         }
     };
 
+    // How long a reply has to have been on its way, with no words yet, before
+    // the status line says for how long. Under this a count reads as nerves.
+    const PROGRESS_AFTER = 10000;
+
+    /** What the status line says about a reply on its way: its phase, and
+     * once it has been a while with no words yet, for how long -- three
+     * minutes of prompt reading should look like three minutes and not like
+     * a hang. While the words are coming they are the progress, so no count
+     * is kept beside them. `stalled` is the store saying the server has not
+     * been answering the questions it asks about the reply. */
+    function progressLine(view) {
+        const operation = (view && view.operation) || {};
+        let line = operation.status || "Generating…";
+        if (!(view && view.writing) && operation.since) {
+            const waited = Math.max(0, Math.round((Date.now() - operation.since) / 1000));
+            if (waited * 1000 >= PROGRESS_AFTER) {
+                const minutes = Math.floor(waited / 60);
+                const seconds = String(waited % 60).padStart(2, "0");
+                line += " " + minutes + ":" + seconds;
+            }
+        }
+        if (view && view.stalled) line += " The server has not answered lately; still asking.";
+        return line;
+    }
+    NS.progressLine = progressLine;
+
     Shell.prototype.renderStatus = function (view) {
         if (!view.ready) {
             this.say(view.error || "Connecting…", view.error ? "warn" : "info");
@@ -3830,7 +3866,9 @@
             return;
         }
         if (view.operation && !view.operation.terminal) {
-            this.say(view.operation.status || "Generating…", "info");
+            // The phase, and once it has been a while, for how long: three
+            // minutes of prompt reading should look like three minutes.
+            this.say(progressLine(view), "info");
             return;
         }
         // The answer to a press, while it is fresh. See `tell`.

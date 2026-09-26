@@ -32,6 +32,7 @@ import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_state
 import mc_llm_studio
+import mc_llm_vision
 import mc_logfile
 import mc_lora
 import mc_memory
@@ -412,6 +413,20 @@ shared.options_templates.update(
                 "the local-LLM workspace: LTX prompt generation, conversation and the "
                 "MiniMax H3 enhancer. Turn it off to keep this extension to its image "
                 "features — nothing about ordinary generation changes either way"
+            ),
+            mc_llm_vision.OPT_PROJECTOR: shared.OptionInfo(
+                mc_llm_vision.PROJECTOR_ALWAYS,
+                "When the vision projector is loaded",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_vision.PROJECTOR_MODES]},
+            ).info(
+                "an unused projector costs no tokens per second — llama.cpp runs it only over "
+                "the pictures in a prompt, and a text prompt never touches it — so a backbone "
+                "that has one starts with it loaded and a picture never restarts the server. "
+                "It does cost its VRAM (about a gigabyte and a third for a 26B backbone's) "
+                "and a few seconds at every start; on a card with no gigabyte to spare "
+                "beside the weights, the second choice loads it only once a picture is "
+                "attached, at the price of one restart and a cold prompt cache then"
             ),
             mc_broker.OPT_MODE: shared.OptionInfo(
                 mc_broker.MODE_HYBRID,

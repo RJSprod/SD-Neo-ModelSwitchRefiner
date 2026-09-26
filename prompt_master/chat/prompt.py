@@ -21,6 +21,21 @@ budget is measured in characters against the context size in the setup state,
 which is approximate on purpose: the exact figure is the model's tokenizer's to
 know, and being wrong by a few hundred tokens costs nothing where being wrong
 by thousands would.
+
+*The front moves in steps, not every turn.* llama-server keeps the previous
+prompt's key/value state and resumes the next prompt at their common prefix,
+so a turn costs what is new at the end -- unless something near the start
+changed, in which case everything after it is read again. Two things here used
+to change the start every turn once a conversation was long enough: the window
+dropped exactly one message from the front per turn, and each new picture took
+the still off the oldest picture message, rewriting it. From one user's
+llama-server log, on an Intel GPU reading 25 to 50 tokens a second, that was a
+prompt of five thousand tokens read from the first token every turn -- three
+minutes of "Replying…" before a word appeared, with only 92 or 335 tokens
+found in the cache. So the front now moves in steps of a quarter of the
+window rather than by one message a turn, and only the newest picture is
+carried as a still: a trim changes the front rarely, and a new picture
+rewrites only the previous picture's message, which is recent.
 """
 
 from __future__ import annotations
@@ -35,12 +50,39 @@ from .history import ASSISTANT, USER, Message
 # an underestimate overflows the window and truncates the character.
 CHARS_PER_TOKEN = 3.2
 
-# Vision costs the same whether the still is three turns old or thirty, so only
-# the most recent few are carried. Older messages keep their text and say that
-# an image was there.
-MAX_IMAGES = 4
+# Once the history no longer fits, the front of the window moves in steps of
+# this fraction of the budget rather than by one message every turn. The step
+# is measured in cost from the beginning of the conversation, which is where
+# the boundaries have to be for them to stay put as messages are appended;
+# the front rests on a boundary until the newest messages that fit have
+# walked past it, then jumps to the next. Every move of the front throws away
+# llama.cpp's cached prefix, so a quarter of the window is one whole read of
+# the prompt every several turns instead of every turn, at the price of a
+# window that is at worst a quarter smaller right after a move.
+TRIM_STEP = 0.25
+
+# The model is shown the newest picture and no other. Every older picture
+# message keeps its text and says that an image was there -- and stays a
+# picture in the chat, which draws from the attachment and not from what the
+# prompt carried. One still is what a conversation is usually about, and it
+# is what keeps the prompt's prefix: the only message a new picture rewrites
+# is the previous picture's, which is recent, so everything before it stays
+# in llama.cpp's cache. A still taken off an *old* message, which the earlier
+# rule did on every new picture, threw the whole conversation out of it.
+MAX_IMAGES = 1
 IMAGE_NOTE = "[image: {name}]"
 IMAGE_TOKENS = 300
+
+
+def stills_carried(pictures: int) -> int:
+    """How many of the newest ``pictures`` picture messages keep their still.
+
+    :data:`MAX_IMAGES` of them, which is one: the newest. Shared with the
+    reader that loads the stills off disk, so the two never disagree about
+    which picture goes -- a builder dropping one the reader had loaded would
+    rewrite a message the cache had, for nothing.
+    """
+    return min(max(int(pictures), 0), MAX_IMAGES)
 
 
 def substitute(text: str, character: str, user: str) -> str:
@@ -183,23 +225,53 @@ def _tokens(text: str) -> int:
     return int(len(text) / CHARS_PER_TOKEN) + 8
 
 
+def _cost(message: Message, still: bool = False) -> int:
+    """What a message costs the window, in characters. A still is charged
+    :data:`IMAGE_TOKENS`; a picture carried as a note costs its note."""
+    extra = 0
+    if message.image:
+        extra = int(IMAGE_TOKENS * CHARS_PER_TOKEN) if still \
+            else len(IMAGE_NOTE.format(name=message.image_name or "attached")) + 1
+    return len(message.text) + 32 + extra
+
+
 def _fit(messages: list[Message], budget: int) -> list[Message]:
-    """The newest messages that fit, oldest-first. The last one always does."""
-    kept: list[Message] = []
-    spent = 0
-    for message in reversed(messages):
-        cost = len(message.text) + 32 + (IMAGE_TOKENS * CHARS_PER_TOKEN if message.image else 0)
-        if kept and spent + cost > budget:
-            break
-        kept.append(message)
-        spent += int(cost)
-    kept.reverse()
-    return kept
+    """The newest messages that fit, oldest-first. The last one always does.
+
+    A history that fits is sent whole. One that does not is cut at a front
+    that moves in steps of :data:`TRIM_STEP` of the budget rather than by one
+    message a turn -- see the module docstring for what a moving front costs.
+    Only the newest picture is charged as a still, because only it is sent as
+    one (:func:`_limit_images`).
+    """
+    newest_picture = max((index for index, message in enumerate(messages) if message.image),
+                         default=-1)
+    costs = [_cost(message, still=index == newest_picture)
+             for index, message in enumerate(messages)]
+    if sum(costs) <= budget:
+        return list(messages)
+    # The newest messages that fit, the last of them whatever it costs.
+    front = len(messages) - 1
+    spent = costs[front]
+    while front > 0 and spent + costs[front - 1] <= budget:
+        front -= 1
+        spent += costs[front]
+    # Then on to the next boundary. Boundaries are multiples of the step in
+    # the cost of everything before the front, pictures counted as notes so
+    # that a picture growing old behind the front cannot move them.
+    step = int(budget * TRIM_STEP)
+    if step > 0:
+        behind = sum(_cost(message) for message in messages[:front])
+        boundary = -(-behind // step) * step
+        while front < len(messages) - 1 and behind < boundary:
+            behind += _cost(messages[front])
+            front += 1
+    return list(messages[front:])
 
 
 def _limit_images(messages: list[Message]) -> list[tuple[Message, bool]]:
-    """Which of the kept messages still carry their still."""
-    allowance = MAX_IMAGES
+    """Which of the kept messages still carry their still. See :func:`stills_carried`."""
+    allowance = stills_carried(sum(1 for message in messages if message.image))
     marked = []
     for message in reversed(messages):
         keep = bool(message.image) and allowance > 0
@@ -241,4 +313,4 @@ def needs_vision(wire: list[dict[str, Any]]) -> bool:
 
 __all__ = ["ASSISTANT", "USER", "build", "clean_reply", "continue_instruction",
            "greeting_text", "has_image", "impersonate_instruction", "needs_vision",
-           "prefix_instruction", "substitute", "system_text"]
+           "prefix_instruction", "stills_carried", "substitute", "system_text"]
