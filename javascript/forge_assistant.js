@@ -69,6 +69,10 @@
     // fast pair is never missed. A single press waits this long to be sure it
     // is single before the panel opens.
     const TAP_WINDOW = 300;
+    // The Conversation tab's open bridge: a box for a thread's id and a
+    // button that opens it there (mc_llm_chat_panel.py). See `openInStudio`.
+    const STUDIO_OPEN_AT = "mc-llm-chat-open-at";
+    const STUDIO_OPEN_NOW = "mc-llm-chat-open-now";
     // The header's and the composer's buttons are glyphs, and their words are
     // their `aria-label` and their tooltip. Two rows of words -- Workspace,
     // Focus, Send -- was most of a collapsed panel, and on a phone twice over.
@@ -85,12 +89,6 @@
     const NOMINAL_WIDTH = 360;
     const RESIZE_STEP = 16;
     const BOTTOM_SLACK = 100;
-
-    // A menu's gap from the row that opened it, its margin from the edge of
-    // the window, and the least room worth opening into rather than refusing.
-    const MENU_GAP = 4;
-    const MENU_EDGE = 8;
-    const MENU_FLOOR = 120;
 
     // How long the answer to a press holds the status line against "Ready.".
     // See `tell`.
@@ -629,6 +627,9 @@
         panel.appendChild(header);
         Object.assign(this.nodes, {header, minimize, picker, chat, utilities, grip});
 
+        // The menus' box, in the panel's column between the header and the
+        // conversation: a menu takes the conversation's place while it is
+        // up, and the conversation comes back when it closes. See `applyMenu`.
         const menu = element("div", "forge-assistant-menu");
         menu.hidden = true;
         menu.setAttribute("role", "menu");
@@ -752,11 +753,6 @@
     Shell.prototype.applyChat = function () {
         const open = this.state.conversationExpanded;
         this.nodes.chat.setAttribute("aria-expanded", String(open));
-        // `hidden`, not a class: the body has to leave the accessibility tree,
-        // not merely stop being painted.
-        this.nodes.body.hidden = !open;
-        this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open);
-        this.nodes.workspaces.hidden = open;
         // The header's Workspace menu and the row are the same list. Collapsed
         // the row is right there under it, so the menu is a press that buys
         // nothing; it goes, and like the body it leaves the tab order rather
@@ -764,10 +760,16 @@
         // is hidden, it closes -- a menu whose button is gone cannot be
         // dismissed by pressing that button again.
         this.nodes.picker.hidden = !open;
-        if (!open) {
-            if (this.nodes.menu.dataset.owner === "workspaces") this.closeMenu();
-            this.renderWorkspaces();
-        }
+        if (!open && this.nodes.menu.dataset.owner === "workspaces") this.closeMenu();
+        // A menu that is up has the conversation's place (see `applyMenu`):
+        // neither the body nor the row shows under it.
+        const menuUp = !this.nodes.menu.hidden;
+        // `hidden`, not a class: the body has to leave the accessibility tree,
+        // not merely stop being painted.
+        this.nodes.body.hidden = !open || menuUp;
+        this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open);
+        this.nodes.workspaces.hidden = open || menuUp;
+        if (!open && !menuUp) this.renderWorkspaces();
         // The panel is sized to its content while collapsed, so the row
         // appearing or going changes how wide it is and therefore where its
         // anchor puts it.
@@ -937,7 +939,6 @@
             node.style.left = "";
             node.style.top = "";
             node.style.width = "";
-            this.placeMenu();
             return;
         }
         this.nodes.panel.classList.remove("forge-assistant-sheet");
@@ -965,9 +966,6 @@
             : anchorPoint(this.anchor(), box, view, insets());
         node.style.left = at.left + "px";
         node.style.top = at.top + "px";
-        // An open menu is positioned against the window, so a move, a resize
-        // or a keyboard appearing has to take it along.
-        this.placeMenu();
     };
 
     // -- drag -------------------------------------------------------------- //
@@ -1651,7 +1649,12 @@
     /** The Chat button: the conversation shown, or put away -- the whole of
      *  it, body and composer. What the accordion heading did. */
     Shell.prototype.toggleChat = function () {
-        this.state.conversationExpanded = !this.state.conversationExpanded;
+        // With a menu up, Chat is the way back to the conversation: the menu
+        // goes and the conversation shows, whether or not it was showing
+        // before the menu took its place.
+        const menuUp = !!(this.nodes.menu && !this.nodes.menu.hidden);
+        if (menuUp) this.closeMenu();
+        this.state.conversationExpanded = menuUp ? true : !this.state.conversationExpanded;
         this.applyChat();          // which places the panel for its new size
         this._save();
     };
@@ -1962,7 +1965,40 @@
         items.forEach((item) => menu.appendChild(item));
         menu.appendChild(this.cancelItem());
         menu.hidden = false;
-        this.placeMenu();
+        this.applyMenu(true);
+    };
+
+    /** A menu takes the conversation's place -- or the workspace row's, when
+     * the conversation is collapsed -- and gives it back when it closes.
+     *
+     * It used to be fixed to the window beside the panel, so that a panel
+     * that clips its contents could not cut a long list off. Asked for
+     * instead: "make it so that the ⋯ menu and any future menu land within
+     * our view, simply replacing what would have been the window for the
+     * conversation and user prompt". So the body, or the row, is hidden while
+     * a menu is up and the menu is an ordinary child of the panel's column
+     * that scrolls inside the panel's height, and the panel is placed again
+     * for its new size, so one docked along the bottom grows upwards.
+     * `hidden` on the body, as `applyChat` does it: it leaves the
+     * accessibility tree, so a screen reader in the menu is in the menu. A
+     * node that is not there is not hidden -- the menus are built before
+     * the conversation is. */
+    Shell.prototype.applyMenu = function (open) {
+        const nodes = this.nodes;
+        if (nodes.panel && nodes.panel.classList) {
+            nodes.panel.classList.toggle("forge-assistant-menu-open", !!open);
+        }
+        if (open) {
+            if (nodes.body) nodes.body.hidden = true;
+            if (nodes.workspaces) nodes.workspaces.hidden = true;
+            this.place();
+            return;
+        }
+        const expanded = !!this.state.conversationExpanded;
+        if (nodes.body) nodes.body.hidden = !expanded;
+        if (nodes.workspaces) nodes.workspaces.hidden = expanded;
+        if (!expanded) this.renderWorkspaces();
+        this.place();
     };
 
     // Every menu ends with a way out that chooses nothing.
@@ -1986,51 +2022,6 @@
         return item;
     };
 
-    // The menu is positioned against the window, not inside the panel.
-    //
-    // It used to be an absolutely positioned child with `max-height: 50vh`,
-    // which the panel's own `overflow: hidden` then clipped to the panel's
-    // box. With the conversation collapsed that box is a header and an
-    // accordion tall, so most of the workspace list was simply cut off -- and
-    // unreachable, because scrolling a menu whose visible region is shorter
-    // than its own scroll viewport cannot bring the bottom of it into view.
-    // Cancel is the last item, so the one control added to let people out of a
-    // menu was the first thing to be cut off it.
-    //
-    // Fixed to the window, sized to the room that is actually there, and
-    // opened upwards when there is more room above -- which there is whenever
-    // the panel is docked along the bottom, where a downward menu has only the
-    // few pixels between the header and the bottom of the screen.
-    //
-    // `top` in both directions and never `bottom`: `bottom` on a fixed element
-    // is measured against the layout viewport while everything else here is
-    // measured against the visual one, and mixing the two is how a panel ends
-    // up behind a phone's keyboard. Upwards costs one measurement of the
-    // menu's own height, which is the only way to know where its top goes.
-    Shell.prototype.placeMenu = function () {
-        const menu = this.nodes.menu;
-        const header = this.nodes.header;
-        if (!menu || menu.hidden || !header) return;
-        const box = header.getBoundingClientRect();
-        const view = viewport();
-        const below = (view.top + view.height) - box.bottom - MENU_GAP - MENU_EDGE;
-        const above = box.top - view.top - MENU_GAP - MENU_EDGE;
-        const up = above > below;
-        const room = Math.max(MENU_FLOOR, up ? above : below);
-        menu.style.left = Math.round(box.left) + "px";
-        menu.style.width = Math.round(box.width) + "px";
-        menu.style.maxHeight = Math.round(room) + "px";
-        if (!up) {
-            menu.style.top = Math.round(box.bottom + MENU_GAP) + "px";
-            return;
-        }
-        // Measured with the cap already applied, so this is the height it will
-        // actually be drawn at rather than the height it would like.
-        const tall = Math.min(menu.offsetHeight || room, room);
-        menu.style.top = Math.round(Math.max(view.top + MENU_EDGE,
-                                             box.top - MENU_GAP - tall)) + "px";
-    };
-
     Shell.prototype.closeMenu = function () {
         const menu = this.nodes.menu;
         if (!menu) return false;
@@ -2040,6 +2031,8 @@
         menu.dataset.owner = "";
         this.nodes.picker.setAttribute("aria-expanded", "false");
         this.nodes.utilities.setAttribute("aria-expanded", "false");
+        // The conversation, or the row, back in the menu's place.
+        if (had) this.applyMenu(false);
         return had;
     };
 
@@ -2130,6 +2123,8 @@
             item.addEventListener("click", () => {
                 this.closeMenu();
                 this.store.select(view.selection.character, thread.thread_id);
+                // And the tab with it: the two are one conversation.
+                this.openInStudio(thread.thread_id);
             });
             return item;
         }));
@@ -2347,6 +2342,9 @@
                     || "A new chat could not be started.", "warn");
                 return false;
             }
+            // The tab starts from scratch with it: the two are one conversation.
+            const made = outcome.resulting_conversation || {};
+            this.openInStudio(made.thread_id || "");
             // Somebody who asked for a new chat is about to write in it.
             if (!this.state.conversationExpanded) {
                 this.state.conversationExpanded = true;
@@ -2356,6 +2354,32 @@
             this.tell("New chat with " + character + ".", "info");
             return true;
         });
+    };
+
+    /** Move LLM Studio's Conversation tab onto a thread this panel chose.
+     *
+     * "A new thread should make the flyout and conversation mode start from
+     * scratch because they are in sync." The panel used to move alone and the
+     * tab stayed where it was; then the next look found the tab on the old
+     * thread and brought the panel back to it, which read as New chat doing
+     * nothing. The tab is Gradio and hears nothing on its own, so it carries a
+     * hidden box and button for exactly this (`open-at`, `open-now` in
+     * mc_llm_chat_panel.py); the handler behind them opens the thread the box
+     * names, read-only, and remembers it, so the panel's own looks agree.
+     * A page without those controls -- the tab not built -- moves nothing,
+     * and the panel is where it is. */
+    Shell.prototype.openInStudio = function (thread) {
+        const wanted = String(thread || "");
+        if (!wanted) return false;
+        const box = promptBox(STUDIO_OPEN_AT);
+        const holder = hostElement(STUDIO_OPEN_NOW);
+        const button = holder && (holder.tagName === "BUTTON" ? holder
+            : (typeof holder.querySelector === "function" ? holder.querySelector("button")
+                : null));
+        if (!box || !button || typeof button.click !== "function") return false;
+        publish(box, wanted);
+        button.click();
+        return true;
     };
 
     Shell.prototype.setAutoAttach = function (on) {

@@ -248,6 +248,12 @@
         this.polling = false;
         this.lastTraffic = 0;
         this.selection = {character: "", thread: "", epoch: uuid()};
+        // The conversation LLM Studio is on, as last heard -- from the
+        // bootstrap's seed, the feed's character_changed, or a look. What a
+        // look follows is a *move* of the tab since then, never the tab's
+        // standing selection: this page owns its own, and a thread chosen
+        // here or started with New chat stays until the tab moves again.
+        this.tabSelection = {character: "", thread: ""};
         this.mode = "";
         this.activeWorkspace = "";
         this.snapshots = new Map();      // conversationKey -> snapshot
@@ -493,6 +499,7 @@
                 // last opened on this machine. This page owns its selection
                 // from here (two windows may deliberately differ).
                 const seed = found.selection || {};
+                this.noteTab(seed);
                 if (!this.selection.thread && seed.thread_id) {
                     this.selection = {character: String(seed.character || ""),
                                       thread: String(seed.thread_id || ""),
@@ -782,6 +789,7 @@
             // stayed on the thread it was seeded with would be a panel showing
             // a different conversation from the one behind it, with nothing on
             // screen to say so.
+            this.noteTab(event.payload || {});
             this.follow(event.payload || {});
             break;
         case "reply_patch":
@@ -929,6 +937,18 @@
             this.order.splice(index, 1);
             this.snapshots.delete(oldest);
         }
+    };
+
+    /** Where the tab is, noted; answers whether that is a move since the last
+     *  note. The first note of a thread is a move too, so a page that starts
+     *  after the tab has settled somewhere follows it there. */
+    Store.prototype.noteTab = function (found) {
+        const character = String((found && found.character) || "");
+        const thread = String((found && found.thread_id) || "");
+        const moved = !!thread && (character !== this.tabSelection.character
+                                   || thread !== this.tabSelection.thread);
+        this.tabSelection = {character, thread};
+        return moved;
     };
 
     Store.prototype.follow = function (payload) {
@@ -1639,11 +1659,19 @@
         return this.check().finally(() => this.review());
     };
 
-    /** One look at what changed while nothing was open: which conversation
-     * LLM Studio is on (followed, as the feed's character_changed was), the
-     * characters and capabilities, and the conversation itself -- whose
-     * snapshot decides whether a feed is needed. The moments for it are the
-     * panel opening, the page coming back and the workspace changing. */
+    /** One look at what changed while nothing was open: whether LLM Studio
+     * moved to another conversation (followed, as the feed's character_changed
+     * is), the characters and capabilities, and the conversation itself --
+     * whose snapshot decides whether a feed is needed. The moments for it are
+     * the panel opening, the page coming back, the workspace changing and the
+     * idle look.
+     *
+     * A move, and only a move. The first version followed the tab's selection
+     * whenever it differed from this page's, which read as "the panel is
+     * pulled back to the tab's thread": New chat from the ⋯ menu moved the
+     * panel to the new thread, and the next look moved it straight back to
+     * the thread the tab had never left. `noteTab` remembers where the tab
+     * was last heard to be; the panel follows it only when that changes. */
     Store.prototype.check = function () {
         if (!this.ready || this.asleep) return Promise.resolve(null);
         return this.request("/bootstrap?page=" + encodeURIComponent(this.pageId))
@@ -1653,10 +1681,13 @@
                 this.mode = found.mode || this.mode;
                 this.noteReadAloud(found);
                 const seed = found.selection || {};
-                if (seed.thread_id && (String(seed.character || "") !== this.selection.character
-                                       || String(seed.thread_id) !== this.selection.thread)) {
+                const moved = this.noteTab(seed);
+                if (moved && (String(seed.character || "") !== this.selection.character
+                              || String(seed.thread_id || "") !== this.selection.thread)) {
                     return this.follow(seed);
                 }
+                // Not moved, or moved to where this page already is: the
+                // conversation is read either way.
                 return this.refresh();
             })
             .catch(() => this.refresh());

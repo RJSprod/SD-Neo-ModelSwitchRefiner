@@ -817,18 +817,72 @@ class TestTheFeedOpensOnlyWhileSomethingIsComing:
         assert found["paths"] == ["/bootstrap", "/snapshot"], found["paths"]
         assert found["idle"] is True
 
-    def test_looking_follows_the_conversation_llm_studio_is_on(self):
+    def test_looking_follows_a_move_of_llm_studio_to_another_conversation(self):
         """What the feed's character_changed used to carry live, read when the
-        panel looks."""
+        panel looks: the tab was last heard on one thread and is now on
+        another."""
         found = run(self.READY + """
             answers = {"/bootstrap": [200, {selection: {character: "c2", thread_id: "t2"}}],
                        "/snapshot": [200, {operation: null, messages: []}]};
+            store.tabSelection = {character: "c", thread: "t"};
             store.selection = {character: "c", thread: "t", epoch: "e"};
             store.check().then(settle).then(() => console.log(JSON.stringify({
-                selection: [store.selection.character, store.selection.thread]})));
+                selection: [store.selection.character, store.selection.thread],
+                tab: store.tabSelection})));
         """, sources=("store",))
 
         assert found["selection"] == ["c2", "t2"]
+        assert found["tab"] == {"character": "c2", "thread": "t2"}
+
+    def test_a_look_does_not_pull_the_panel_back_to_a_thread_the_tab_never_left(self):
+        """Reported: New chat from the ⋯ menu, "but the old thread stayed".
+        The panel had moved to the new thread and the next look followed the
+        tab's selection -- unchanged, and therefore not a move -- straight
+        back to the old one."""
+        found = run(self.READY + """
+            answers = {"/bootstrap": [200, {selection: {character: "c", thread_id: "t"}}],
+                       "/snapshot": [200, {operation: null, messages: []}]};
+            store.tabSelection = {character: "c", thread: "t"};
+            store.selection = {character: "c", thread: "t9", epoch: "e"};
+            store.check().then(settle).then(() => console.log(JSON.stringify({
+                selection: [store.selection.character, store.selection.thread],
+                paths: paths()})));
+        """, sources=("store",))
+
+        assert found["selection"] == ["c", "t9"]
+        assert found["paths"] == ["/bootstrap", "/snapshot"], "the panel's own thread is read"
+
+    def test_a_new_chat_survives_the_looks_that_follow_it(self):
+        found = run(self.READY + """
+            answers = {"/bootstrap": [200, {selection: {character: "c", thread_id: "t"}}],
+                       "/snapshot": [200, {operation: null, messages: []}],
+                       "/commands": [200, {ok: true, operation_id: "op", phase: "completed",
+                                           resulting_conversation: {character: "c", thread_id: "t9"}}]};
+            store.tabSelection = {character: "c", thread: "t"};
+            store.selection = {character: "c", thread: "t", epoch: "e"};
+            store.createThread("c").then(() => store.check()).then(settle).then(() =>
+                console.log(JSON.stringify({selection: [store.selection.character,
+                                                        store.selection.thread]})));
+        """, sources=("store",))
+
+        assert found["selection"] == ["c", "t9"]
+
+    def test_where_the_tab_is_is_noted_at_the_start_and_on_the_feed(self):
+        found = run(self.READY + """
+            const first = store.noteTab({character: "c", thread_id: "t"});
+            const again = store.noteTab({character: "c", thread_id: "t"});
+            const moved = store.noteTab({character: "c", thread_id: "t2"});
+            const nowhere = store.noteTab({});
+            console.log(JSON.stringify({first, again, moved, nowhere, tab: store.tabSelection}));
+        """, sources=("store",))
+
+        assert found == {"first": True, "again": False, "moved": True, "nowhere": False,
+                         "tab": {"character": "", "thread": ""}}
+        source = STORE.read_text(encoding="utf-8")
+        seeded = source.split("const seed = found.selection || {};", 1)[1].split("announce", 1)[0]
+        assert "this.noteTab(seed)" in seeded, "the bootstrap's seed is where the tab is first heard"
+        changed = source.split('case "character_changed":', 1)[1].split("break;", 1)[0]
+        assert "this.noteTab(" in changed
 
     def test_the_shell_looks_when_the_panel_opens_and_the_workspace_changes(self):
         shell = SHELL.read_text(encoding="utf-8")

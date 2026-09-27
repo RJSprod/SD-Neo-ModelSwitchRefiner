@@ -1809,6 +1809,82 @@ against and failed.
 
 ---
 
+## 3.23 After the fifth round: New chat in sync, the menu inside the panel, and the picture cap
+
+> "I tried to start a new thread from the ... menu, but the old thread stayed!
+> ... I wanted [the menu] to stay within the boundary of our flyout ... simply
+> replacing what would have been the window for the conversation and user
+> prompt ... A new thread should make the flyout and conversation mode start
+> from scratch because they are in sync."
+
+### Why New chat looked like nothing
+
+It worked, for about fifteen seconds. `createThread` sent `create_thread`, got
+the new thread back and `select`ed it; the panel drew the greeting. Then the
+next look -- §3.21's `check()`, which runs when the panel opens, the page
+comes back, the workspace changes and every fifteen idle seconds -- read the
+bootstrap's `selection`, found LLM Studio still on the old thread, and
+followed it. §3.21 had written the look to follow the tab's selection whenever
+it *differed* from the panel's, which was the feed's `character_changed`
+reconstructed for polling, minus the one thing an event carries: that
+something changed. So the panel was pulled back to a thread the tab had never
+left.
+
+Two fixes, because the report had two halves. `Store.noteTab` remembers where
+the tab was last heard (the bootstrap's seed, the feed's `character_changed`,
+every look) and the look follows only a *move* since then. And the tab now
+moves with the panel, because "they are in sync": `_open_from_event` behind a
+hidden box and button (`open-at`, `open-now`) opens the thread the panel
+names -- the list refilled with it chosen, the thread state moved, the
+transcript redrawn, the selection remembered and published -- and the panel's
+`openInStudio` writes the id and presses it after New chat and after a choice
+in the Threads submenu. Read-only like the refresh bridge beside it: nothing
+is ever lifted out of a thread by a press from elsewhere, which is why it is
+not `_open_thread`. (The refresh bridge itself, it turned out, is pressed by
+nothing since the event spine went; it stays for a page that still has it.)
+
+### The menu inside the panel
+
+§3.14 fixed the menu to the window because the panel clips what it contains.
+Asked for instead, in so many words: the conversation's place. `applyMenu`
+hides the body -- or the workspace row, collapsed -- while a menu is up, the
+menu is an ordinary child of the panel's column with `min-height: 0` and
+`overflow-y: auto` so a long list scrolls inside the panel's height, and the
+panel is placed again for its new size. Chat with a menu up puts the menu
+away and shows the conversation whether or not it was showing before.
+`placeMenu`, `MENU_GAP`, `MENU_EDGE` and `MENU_FLOOR` are gone, and so are
+the menu's border, shadow and surface: it is the panel's inside.
+
+### The picture cap: 640
+
+Asked as a recommendation, with the use named: a pose, an outfit on a
+subject, never a face. Two families are in the catalogue and neither spends
+tokens the way the 300-token estimate in `prompt.py` assumes. Qwen 3.5's
+encoder takes one token per 32 by 32 pixels (patch 16, merge 2): 768² is 576
+tokens, 640² is 400, 512² is 256. llama.cpp sizes a Gemma 4 picture to the
+nearest multiple of 48 and spends a token per 48-pixel patch (its issue
+#24146, closed as not planned in June 2026, is the record: the reference
+processor fills a fixed budget instead, which llama.cpp does not): 768 is
+16×16 = 256 tokens, 640 lands on 13×13 or 14×14 = 169 to 196, 512 on 11×11 =
+121. So on this host, where the Intel card reads a prompt at a few tens of
+tokens a second, 640 is a third of the picture's share of every pictured turn
+saved for a loss nobody doing pose or outfit work will see, and 512 is half
+saved for a loss they may: a full-length figure at 512 on the long side has
+its garment a couple of hundred pixels wide, where a print, a buckle or a
+piece of jewellery goes. `MAX_SIDE` and `VISION_MAX_SIDE` are 640.
+
+### Verified
+
+Node: the look's new tests (`test_assistant_recovery_js.py`: a look follows a
+move and not a standing selection, a New chat survives the looks after it),
+the in-panel menu (`test_assistant_js.py::TestTheMenuIsInsideThePanel`), the
+bridge from the panel's side (`test_assistant_v5_js.py`) and from the tab's
+(`test_llm_panels.py::TestTheTabFollowsThePanel`, including that it never
+lifts a message and that the ids match across the two languages), the cap's
+tests translated to 640. Every new check was reverted against and failed.
+
+---
+
 ---
 
 ## 4. Deliberate deviations

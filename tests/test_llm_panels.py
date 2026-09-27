@@ -298,6 +298,115 @@ class TestTheTabSaysWhichConversationItIsOn:
             assert "_selected(" in body, name + " has to say where it landed"
 
 
+class TestTheTabFollowsThePanel:
+    """"A new thread should make the flyout and conversation mode start from
+    scratch because they are in sync." The panel writes the thread's id into
+    the tab's open bridge and presses it; the handler opens that thread the
+    way Threads does, and remembers it, so the panel's own looks agree.
+    """
+
+    def _thread(self, store):
+        from prompt_master.chat.history import ASSISTANT, ChatStore
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.append(ASSISTANT, "Hello.")
+        chats.save(conversation)
+        return conversation
+
+    def test_the_bridge_opens_the_thread_the_panel_chose(self, store):
+        import gradio as gr
+
+        conversation = self._thread(store)
+        width = len(mc_llm_chat_panel._refresh(None, ""))
+
+        answered = mc_llm_chat_panel._open_from_event("Ada", conversation.identifier, "")
+
+        assert answered[0]["value"] == conversation.identifier
+        assert conversation.identifier in [value for _, value in answered[0]["choices"]]
+        assert answered[1] == conversation.identifier
+        assert len(answered) == 2 + width
+        assert answered[2:] != [gr.update()] * width, "the transcript is redrawn"
+
+    def test_the_thread_is_remembered_and_announced(self, store, monkeypatch):
+        import mc_llm_conversation_service as service
+        import mc_llm_state
+
+        said = []
+        monkeypatch.setattr(service, "publish",
+                            lambda kind, key=None, **payload: said.append((kind, payload)))
+        conversation = self._thread(store)
+
+        mc_llm_chat_panel._open_from_event("Ada", conversation.identifier, "")
+
+        assert mc_llm_state.preferences()["thread"] == conversation.identifier
+        assert said == [(service.CHARACTER_CHANGED,
+                         {"character": "Ada", "thread_id": conversation.identifier})]
+
+    def test_a_thread_that_cannot_be_read_changes_nothing(self, store, monkeypatch):
+        import gradio as gr
+        import mc_llm_conversation_service as service
+
+        said = []
+        monkeypatch.setattr(service, "publish",
+                            lambda kind, key=None, **payload: said.append(kind))
+        width = len(mc_llm_chat_panel._refresh(None, ""))
+
+        for who, wanted in (("Ada", "no-such-thread"), ("", "t-1"), ("Ada", "  ")):
+            answered = mc_llm_chat_panel._open_from_event(who, wanted, "")
+
+            assert answered == [gr.update()] * (2 + width), (who, wanted)
+        assert said == []
+
+    def test_it_never_lifts_a_message_out_of_the_thread(self, store):
+        """``_open_thread`` takes an unanswered last message back into the
+        composer and deletes it from the thread; a press from elsewhere may
+        not. The bridge reads."""
+        from prompt_master.chat.history import ChatStore, USER
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.append(USER, "never answered")
+        chats.save(conversation)
+
+        mc_llm_chat_panel._open_from_event("Ada", conversation.identifier, "")
+
+        again = chats.load("Ada", conversation.identifier)
+        assert [m.text for m in again.messages] == ["never answered"]
+
+    def test_the_bridge_is_where_the_panel_looks_for_it(self, store, monkeypatch):
+        """Two halves in two languages with nothing between them but these
+        strings, so they are compared rather than trusted."""
+        from pathlib import Path
+
+        import mc_llm_ui as ui
+
+        seen = self._built_ids(monkeypatch)
+        shell = (Path(mc_llm_chat_panel.__file__).resolve().parent
+                 / "javascript" / "forge_assistant.js").read_text(encoding="utf-8")
+
+        for name in ("open-at", "open-now"):
+            assert ui.ident("chat", name) in seen, name
+            assert f'"{ui.ident("chat", name)}"' in shell, name
+
+    def _built_ids(self, monkeypatch):
+        import gradio as gr
+
+        seen = []
+
+        def recording(original):
+            class Recorded(original):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    seen.append(kwargs.get("elem_id"))
+            return Recorded
+
+        for name in ("Button", "Textbox"):
+            monkeypatch.setattr(gr, name, recording(getattr(gr, name)))
+        mc_llm_chat_panel.build()
+        return seen
+
+
 class TestPerMessageActions:
     """The actions the standalone application hangs on every bubble.
 
