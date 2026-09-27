@@ -47,6 +47,8 @@ The record is chronological, so an older handoff can describe an approach that w
 | Reclaim threshold knob | Proposed in **27** | Superseded by the floor rule before it was built. |
 | Workspace scroll correction | Added in **15** | Reverted later in the same session (turn 4). |
 | PR #63 | **09** | Closed as superseded by #64–#69. |
+| Editing a message in the flyout's own composer box (`editBar`, `applyEditing`, Send reading Save) | Round four, PRs #192–#223 | **Replaced in 29's UI round** by the message editor dialog, `javascript/mc_message_editor.js`, which LLM Studio's Edit opens too. Zero references to `editBar` or `applyEditing` at HEAD; the flyout's `editing` holds only the target. |
+| Focus button in the flyout header; Conversation accordion heading; the character · thread selector line | Header row since round one | **Removed in 29's UI round.** Three presses on the header's drag space toggle focus (`tapHeader`); the **Chat** glyph does what the heading did (`applyChat`); the character's name heads the ⋯ menu's Chat group and the thread list is its Threads submenu. |
 
 ### Not superseded — a trap in the other direction
 
@@ -86,9 +88,9 @@ Dates are session start dates. PR ranges are from `git log`.
 | 26 | 09-02 | Lava install compatibility; wheel closure hashing | `lava-install-compatibility-p9jp6m` | #173–#187 | merged |
 | 27 | 09-02 | Python crash investigation; Forge unload flag / warm-up | `python-crash-investigation-n5zovf` | #188–#191 | merged |
 | 28 | 09-26 | **WanGP-aware LLM placement**; `mc_wangp.py` (ceiling, watch, thread cap); Mini Paint NEO presence contract | `modest-thompson-cutso3` | #224 | merged |
-| 29 | 09-26 | Vision projector **loaded from the start** (setting); prompt front moves in steps, **one still** (`TRIM_STEP`, `stills_carried`); flyout **asks after a reply until its first word**, deadlines on every request, idle looks; sliding-window cache **kept on the Intel GPU** (setting, `--checkpoint-min-step 2048`) | `modest-thompson-cutso3` (reset onto the merged default) | #225–#226 | merged; the every-picture toggle and the 768-pixel cap pushed after them |
+| 29 | 09-26 | Vision projector **loaded from the start** (setting); prompt front moves in steps, **one still** (`TRIM_STEP`, `stills_carried`); flyout **asks after a reply until its first word**, deadlines on every request, idle looks; sliding-window cache **kept on the Intel GPU** (setting, `--checkpoint-min-step 2048`); every-picture toggle and the 768-pixel cap; **UI round**: glyph header with a **Chat** button (accordion and character · thread line gone), **Focus by three presses** on the header (button gone), 36 px rows, the **message editor dialog** (`mc_message_editor.js`, shared with LLM Studio), the **grouped ⋯ menu** with New chat and a Threads submenu, literal boxes with in-box placeholders | `modest-thompson-cutso3` (reset onto the merged default after each merge) | #225–#228 | #225–#227 merged; #228 (the UI round) open |
 
-Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28 and 7,011 passed, 13 skipped at handoff 29; a large drop is a signal something is wrong.
+Branch names above omit the `claude/` prefix. Test-suite size grew roughly 1,577 → 5,424 across handoffs 01–27 and stood at 6,948 passed, 13 skipped at handoff 28 and 7,081 passed, 13 skipped at handoff 29; a large drop is a signal something is wrong.
 
 ---
 
