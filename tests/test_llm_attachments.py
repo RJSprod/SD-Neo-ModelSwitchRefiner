@@ -341,7 +341,7 @@ def _jpeg(size, colour=(40, 120, 60)) -> bytes:
 
 
 class TestNothingLargerThanTheCapReachesTheModel:
-    """Every picture the model is shown fits inside 768 by 768, its shape
+    """Every picture the model is shown fits inside 640 by 640, its shape
     kept, and nothing is ever enlarged. The picker's path has sized pictures
     since the folder existed; these are the paths that did not: bytes stored
     as bytes, an old chat's inline picture moved onto disk, a picture that was
@@ -351,7 +351,8 @@ class TestNothingLargerThanTheCapReachesTheModel:
     def test_the_cap_is_the_preprocessors(self):
         from prompt_master.imaging.preprocess import MAX_SIDE
 
-        assert attachments.VISION_MAX_SIDE == MAX_SIDE == 768
+        assert attachments.VISION_MAX_SIDE == MAX_SIDE == 640, (
+            "a pose or an outfit, never a face: a third off the picture's tokens")
 
     def test_a_decoded_picture_is_sized_as_it_is_stored(self, root):
         from PIL import Image
@@ -359,7 +360,7 @@ class TestNothingLargerThanTheCapReachesTheModel:
         record = attachments.store(picture(size=(2000, 1000)), "Ada")
 
         with Image.open(attachments.locate(record)) as kept:
-            assert kept.size == (768, 384)
+            assert kept.size == (640, 320)
 
     def test_bytes_stored_as_bytes_are_sized_too(self, root):
         from PIL import Image
@@ -367,7 +368,7 @@ class TestNothingLargerThanTheCapReachesTheModel:
         record = attachments.store(_jpeg((1000, 2000)), "Ada")
 
         with Image.open(attachments.locate(record)) as kept:
-            assert kept.size == (384, 768)
+            assert kept.size == (320, 640)
 
     def test_a_small_picture_is_never_enlarged_and_its_bytes_are_its_own(self, root):
         raw = _jpeg((500, 300))
@@ -390,7 +391,7 @@ class TestNothingLargerThanTheCapReachesTheModel:
 
         shown = _decoded(attachments.data_url(record))
 
-        assert shown.size == (768, 384)
+        assert shown.size == (640, 320)
         assert destination.read_bytes() == raw, "the file on disk is not rewritten"
 
     def test_the_sized_copy_is_remembered_for_the_next_turn(self, root, monkeypatch):
@@ -425,7 +426,7 @@ class TestNothingLargerThanTheCapReachesTheModel:
         assert attachments.adopt(conversation, "Ada")
 
         with Image.open(attachments.locate(conversation.messages[-1].image_path)) as kept:
-            assert kept.size == (768, 384)
+            assert kept.size == (640, 320)
 
     def test_an_inline_picture_the_move_could_not_take_is_sized_for_the_request(self, root):
         from prompt_master.chat.history import Message
@@ -436,7 +437,7 @@ class TestNothingLargerThanTheCapReachesTheModel:
 
         mc_llm_chat_panel._with_pictures([message])
 
-        assert _decoded(message.image).size == (384, 768)
+        assert _decoded(message.image).size == (320, 640)
 
     def test_something_that_is_not_a_picture_passes_through_the_guard(self):
         from prompt_master.imaging.preprocess import fit_bytes, fit_data_url

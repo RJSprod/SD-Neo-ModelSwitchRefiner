@@ -55,6 +55,7 @@ shell.renderWorkspaces = () => { shell.rendered += 1; };
 shell.closed = [];
 shell.closeMenu = () => { shell.closed.push(shell.nodes.menu.dataset.owner); };
 const menu = made("div");
+menu.hidden = true;
 menu.dataset.owner = "";
 shell.nodes = {chat: made("button"), body: made("div"), panel: made("section"),
                workspaces: made("div"), picker: made("button"), menu};
@@ -96,10 +97,10 @@ class TestTheChatButton:
     def test_collapsing_draws_the_workspace_row_and_closes_its_menu(self):
         found = run(CHAT + """
             shell.nodes.menu.dataset.owner = "workspaces";
-            shell.toggleChat();
+            shell.state.conversationExpanded = false;
+            shell.applyChat();
             shell.nodes.menu.dataset.owner = "utilities";
-            shell.state.conversationExpanded = true;
-            shell.toggleChat();
+            shell.applyChat();
             console.log(JSON.stringify({rendered: shell.rendered, closed: shell.closed}));
         """)
 
@@ -193,7 +194,7 @@ Object.defineProperty(menu, "innerHTML", {get: () => "", set: () => { menu.child
 shell.nodes = {menu, picker: made("button"), utilities: made("button"),
                header: made("header"), status: made("p")};
 shell.placed = 0;
-shell.placeMenu = () => { shell.placed += 1; };
+shell.place = () => { shell.placed += 1; };
 shell.menuHandle = {};
 const labels = () => menu.children.map((c) => c.textContent);
 const entries = () => menu.children.filter((c) => c.tagName === "BUTTON");
@@ -297,7 +298,7 @@ class TestTheThreadsSubmenu:
         assert found["top"] == {"which": "utilities", "owner": "utilities", "placed": 1}
         assert found["popup"] == "menu"
         assert found["which"] == "threads" and found["owner"] == "utilities"
-        assert found["placed"] == 2, "placed again for its new height"
+        assert found["placed"] == 2, "the panel placed again for its new height"
         assert found["hidden"] is False
         assert found["labels"] == ["‹ Back", "Threads · Ada", "Harbour", "Dusk", "Cancel"]
         assert found["roles"] == ["menuitem", "menuitem", "menuitem", "menuitem"]
@@ -353,3 +354,86 @@ class TestTheThreadsSubmenu:
 
     def test_the_chevron_is_the_stylesheet_s_so_the_word_stays_the_word(self):
         assert 'content: "\\203A"' in rule(".forge-assistant-submenu::after")
+
+
+# --------------------------------------------------------------------------- #
+# 3. The panel and the tab are one conversation
+# --------------------------------------------------------------------------- #
+
+STUDIO = """
+// The Conversation tab's open bridge, as Gradio draws it: a box inside a
+// holder carrying the id, and a button that is its own holder.
+const pressed = [];
+const events = [];
+const box = {tagName: "TEXTAREA", value: "",
+             dispatchEvent(event) { events.push(event.type + ":" + event.bubbles); }};
+const holder = {id: "mc-llm-chat-open-at", tagName: "DIV",
+                querySelector: (selector) => selector === "textarea" ? box : null};
+const button = {id: "mc-llm-chat-open-now", tagName: "BUTTON",
+                click() { pressed.push(box.value); }};
+let page = {"mc-llm-chat-open-at": holder, "mc-llm-chat-open-now": button};
+document.getElementById = (id) => page[id] || null;
+const shell = Object.create(NS.Shell.prototype);
+"""
+
+
+class TestNewChatMovesTheTabToo:
+    """"A new thread should make the flyout and conversation mode start from
+    scratch because they are in sync." The panel used to move alone; the next
+    look found the tab on the old thread and brought the panel back to it."""
+
+    def test_the_tab_is_told_which_thread_through_its_own_controls(self):
+        found = run(STUDIO + """
+            const moved = shell.openInStudio("t9");
+            console.log(JSON.stringify({moved, value: box.value, events, pressed}));
+        """)
+
+        assert found == {"moved": True, "value": "t9", "events": ["input:true"],
+                         "pressed": ["t9"]}
+
+    def test_a_page_without_the_tab_s_controls_moves_nothing(self):
+        found = run(STUDIO + """
+            page = {};
+            const moved = shell.openInStudio("t9");
+            const none = shell.openInStudio("");
+            console.log(JSON.stringify({moved, none, pressed}));
+        """)
+
+        assert found == {"moved": False, "none": False, "pressed": []}
+
+    def test_new_chat_opens_the_new_thread_in_the_tab(self):
+        found = run(STUDIO + """
+            shell.state = {conversationExpanded: true};
+            shell.nodes = {status: document.createElement("p")};
+            shell.store = {createThread: () => Promise.resolve({ok: true,
+                resulting_conversation: {character: "Ada", thread_id: "t9"}})};
+            shell.startThread("Ada").then(() => console.log(JSON.stringify(
+                {pressed, said: shell.nodes.status.textContent})));
+        """)
+
+        assert found == {"pressed": ["t9"], "said": "New chat with Ada."}
+
+    def test_a_refused_new_chat_moves_the_tab_nowhere(self):
+        found = run(STUDIO + """
+            shell.state = {conversationExpanded: true};
+            shell.nodes = {status: document.createElement("p")};
+            shell.store = {createThread: () => Promise.resolve({ok: false, error: {message: "No."}})};
+            shell.startThread("Ada").then(() => console.log(JSON.stringify({pressed})));
+        """)
+
+        assert found == {"pressed": []}
+
+    def test_choosing_a_thread_in_the_panel_opens_it_in_the_tab(self):
+        found = run(STUDIO + """
+            shell.closeMenu = () => {};
+            const selected = [];
+            shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"},
+                conversation: {threads: [{thread_id: "t1", title: "Harbour"},
+                                         {thread_id: "t2", title: "Dusk"}]}}),
+                select(c, t) { selected.push([c, t]); }};
+            const item = shell.threadItems().find((i) => i.textContent === "Dusk");
+            item.handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify({selected, pressed}));
+        """)
+
+        assert found == {"selected": [["Ada", "t2"]], "pressed": ["t2"]}

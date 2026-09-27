@@ -357,6 +357,20 @@ def build() -> dict:
                                     elem_id=ui.ident("chat", "refresh-at"))
             refresh_now = gr.Button("Refresh this conversation", visible=False,
                                     elem_id=ui.ident("chat", "refresh-now"))
+            # The open bridge. A thread started or chosen in the Forge
+            # Assistant's panel is this tab's thread too -- "a new thread
+            # should make the flyout and conversation mode start from scratch
+            # because they are in sync" -- and the tab hears nothing on its
+            # own, so the panel writes the thread's id here and presses this.
+            # The handler opens that thread the way choosing it in Threads
+            # does and remembers it, so the next page and the panel's own looks
+            # agree with it. Read-only like the refresh bridge: it never lifts
+            # a message out of a thread, which is ``_open_thread``'s business
+            # and not something a press from elsewhere may do.
+            open_at = gr.Textbox(value="", visible=False, container=False,
+                                 elem_id=ui.ident("chat", "open-at"))
+            open_now = gr.Button("Open the thread the assistant chose", visible=False,
+                                 elem_id=ui.ident("chat", "open-now"))
             # The paste bridge. A picture pasted into this composer is staged
             # over the assistant's own upload route by the browser, which hands
             # back a token; this puts the staged picture into the chip so the
@@ -882,6 +896,8 @@ def build() -> dict:
     # a round trip to open a dialog that was already one tap away.
     refresh_now.click(fn=_refresh_from_event, inputs=[character, thread_state, refresh_at],
                       outputs=view, queue=False)
+    open_now.click(fn=_open_from_event, inputs=[character, open_at, search],
+                   outputs=[threads, thread_state] + view, queue=False)
     paste_now.click(fn=_attach_staged, inputs=[paste_token],
                     outputs=[attachment, status], queue=False)
 
@@ -1725,6 +1741,27 @@ def _refresh_from_event(who, identifier, wanted=""):
                      exc_info=True)
         return [gr.update()] * len(_refresh(None, ""))
     return _refresh(conversation, conversation.title)
+
+
+def _open_from_event(who, wanted, filter_text=""):
+    """Open the thread the Forge Assistant's panel chose, and remember it.
+
+    The panel and this tab are one conversation, so a thread started or chosen
+    there is this tab's thread too. Opened the way Threads opens one -- the
+    list refilled with it chosen, the thread state moved, the transcript
+    redrawn, the selection remembered and published -- and never more than
+    that: the composer is left exactly as it is, and nothing is lifted out of
+    the thread, which :func:`_open_thread` does for a press that asked for it
+    and a press from elsewhere may not. A thread that cannot be read changes
+    nothing, and says nothing: the panel has already said what it did.
+    """
+    identifier = str(wanted or "").strip()
+    conversation = _load(who, identifier) if who and identifier else None
+    if conversation is None:
+        return [gr.update(), gr.update()] + [gr.update()] * len(_refresh(None, ""))
+    _selected(who, identifier)
+    return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier), identifier]
+            + _refresh(conversation, conversation.title))
 
 
 def _attach_staged(token):

@@ -8,7 +8,7 @@ from PIL import Image, ImageOps
 
 SUPPORTED = {".png", ".jpg", ".jpeg", ".webp"}
 
-MAX_SIDE = 768
+MAX_SIDE = 640
 """What a picture is shrunk to before it is sent to the local model.
 
 A vision projector charges by the tile, and an 8-megapixel phone photograph is

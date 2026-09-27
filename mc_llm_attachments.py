@@ -61,8 +61,20 @@ reaches here goes through the vendored preprocessor, which produces the sized
 JPEG that inference is sent -- a decoded picture through :func:`jpeg_bytes`,
 bytes that arrive already encoded through :func:`fit_bytes`."""
 
-VISION_MAX_SIDE = 768
+VISION_MAX_SIDE = 640
 """The longest side a picture may have when it reaches the model.
+
+640, down from 768, for what the pictures are used for -- a pose, an outfit
+on a subject, never a face to identify -- and for what the two model families
+in the catalogue do with the pixels. Qwen 3.5's encoder spends one token per
+32 by 32 pixels, so a 768-pixel square is 576 tokens and a 640-pixel one 400;
+llama.cpp sizes a Gemma 4 picture to the nearest multiple of 48 pixels and
+spends a token per 48-pixel patch, so 768 is 256 tokens and 640 about 190.
+Either way a third of the picture's share of the prompt goes, and on the Intel
+card, where a prompt is read at a few tens of tokens a second, that is
+seconds off every pictured turn. 512 would take half off again but starts to
+lose the small things on a full-length figure -- a print, a buckle, a piece
+of jewellery -- that outfit sampling is about.
 
 The preprocessor's own :data:`prompt_master.imaging.preprocess.MAX_SIDE`, named
 here because this module is where the promise is kept: :func:`store` sizes

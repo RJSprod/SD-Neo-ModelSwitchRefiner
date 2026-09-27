@@ -2971,7 +2971,7 @@ A picture that has been sent is **kept**, and kept where you can find it:
 <LLM data root>/chat-images/<character>/<content hash>.jpg
 ```
 
-It is the same JPEG the model was shown — no larger than 768 pixels on its
+It is the same JPEG the model was shown — no larger than 640 pixels on its
 longer side, its shape kept, never enlarged — so a thread reopened next month
 shows exactly what was sent, inline, at a readable size, in the message it
 belongs to. That cap holds on every path to the model: a picture stored before
@@ -3323,12 +3323,16 @@ entries act on, and a **Cancel**:
 | **Panel** | **Free Float**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
 
-The three switches — Auto Attach, Send to Generate, Free Float — have a ✓
-beside them when on; the labels stay lined up either way. **Threads ›** opens
-one level down, in the same box: the character's threads, the one the panel is
-on marked, under a **‹ Back** that returns to the menu. Choosing one moves the
-panel onto it; the tab stays where it is. The two Models entries are the same
-request: *I need this card back, now.*
+A menu opens inside the panel, in the conversation's place — or the workspace
+row's, when the conversation is collapsed — and scrolls there if it is long.
+**Cancel**, Escape or the button that opened it puts the conversation back, and
+so does **Chat**, which with a menu up shows the conversation whether or not it
+was showing before. The three switches — Auto Attach, Send to Generate, Free
+Float — have a ✓ beside them when on; the labels stay lined up either way.
+**Threads ›** opens one level down, in the same box: the character's threads,
+the one the panel is on marked, under a **‹ Back** that returns to the menu.
+Choosing one moves the panel and the tab onto it. The two Models entries are
+the same request: *I need this card back, now.*
 
 | | |
 | --- | --- |
@@ -3343,8 +3347,8 @@ needs a model loads it again exactly as it would have.
 
 **New chat** starts a fresh thread with the character the panel is talking
 to — made and greeted exactly as the tab's **New thread** makes one — and moves
-the panel onto it, opening the conversation if it was collapsed. The tab stays
-on the thread it is on, as it does when you choose a thread in the panel.
+the panel *and the tab* onto it, opening the conversation if it was collapsed:
+the two are one conversation, and both start from scratch.
 **System prompt…** opens the full-page system prompt editor on that character,
 the one LLM Studio's **⤢ System prompt** opens (see *The system prompt editor*);
 the panel is where you left it when you close it. All three Chat entries are
@@ -3494,11 +3498,13 @@ everything focus changed is put back and it falls back to laying the workspace
 over the page instead. That is worse under a theme with its own header and it
 is never a blank page. The status line says which one you got.
 
-**The conversation** in the panel is the one in the tab, and it follows the tab:
-choose another thread there — or start one, or branch — and the panel moves with
-it. A new panel opens on the conversation Conversation was last left on, and
-from then on the window owns its own selection, so two windows can deliberately
-sit on different threads.
+**The conversation** in the panel is the one in the tab, and the two move
+together: choose another thread there — or start one, or branch — and the panel
+moves with it; start a **New chat** or choose a thread in the panel and the tab
+moves with that. A new panel opens on the conversation Conversation was last
+left on. What the panel follows is a *move* of the tab, never its standing
+selection, so a thread the panel is put on stays until the tab moves again; a
+second browser window can still deliberately sit on a different thread.
 
 **Tap a message to see what you can do with it.** Nothing is drawn under the
 messages until you do; the message you tapped gets an outline and a row of
@@ -3604,7 +3610,7 @@ paperclip — or attached for you by **Auto Attach**, above. One per message, an
 a second one asks whether to replace the first. Only the newest picture in a
 thread is shown to the model unless **Show the model every picture in the
 conversation** is on in Settings; the older ones stay in the thread and are
-named to it, and no picture reaches the model larger than 768 pixels on its
+named to it, and no picture reaches the model larger than 640 pixels on its
 longer side (see *Pictures in a conversation*). A message's picture shows on it
 in the panel, fetched with the page's key like every other request the panel
 makes; one that has gone, or cannot be fetched, is a placeholder that says
@@ -3707,8 +3713,9 @@ which it is abandoned and said so; a Send whose answer was lost is not sent
 again, the panel asks whether it arrived. And while the panel is open with
 nothing on its way it looks every fifteen seconds, as well as when it opens,
 when the window is focused, when you come back to the page and when you switch
-workspace: that is how it picks up which conversation LLM Studio is on, threads
-made or deleted elsewhere, a reply started from the tab, and unread counts,
+workspace: that is how it picks up a move of LLM Studio to another
+conversation, threads made or deleted elsewhere, a reply started from the tab,
+and unread counts,
 none of which it hears about live. A tab switched away mid-reply keeps the
 connection until that reply finishes (at most ten minutes). A closed
 connection is its resting state, so the status line never calls it a problem.

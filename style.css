@@ -6882,26 +6882,28 @@
     border-radius: var(--radius-sm, 6px);
 }
 
-/* Fixed to the window rather than absolute inside the panel, because the
-   panel clips what it contains -- `overflow: hidden`, a few lines up -- and a
-   menu taller than a collapsed panel was cut off at its edge with no way to
-   scroll to the rest. `left`, `width`, `top` and `max-height` are set by
-   `placeMenu()` from the room actually available; there is nothing sensible to
-   state for them here. */
+/* Inside the panel, in the conversation's place. It was fixed to the window
+   beside the panel -- the panel clips what it contains, and a menu taller than
+   a collapsed panel was cut off at its edge -- and was asked back in: "make it
+   so that the ⋯ menu and any future menu land within our view, simply
+   replacing what would have been the window for the conversation and user
+   prompt". So while a menu is up the conversation (or the workspace row) is
+   hidden and the menu is an ordinary child of the panel's column, which is
+   what `applyMenu` arranges. `min-height: 0` and `overflow-y: auto` in that
+   flex column are what let a long list scroll inside the panel's height
+   instead of growing the panel past the window; the panel is placed again
+   for its new size. No border, no shadow, no surface of its own: it is the
+   panel's inside, not a thing on top of it. */
 .forge-assistant-menu {
-    position: fixed;
-    z-index: 2;
     box-sizing: border-box;
     display: flex;
+    flex: 0 1 auto;
     flex-direction: column;
     gap: 0.2em;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 0.4em;
-    border: 1px solid var(--border-color-primary);
-    border-radius: var(--radius-lg, 10px);
-    background: var(--background-fill-primary);
-    box-shadow: var(--shadow-drop-lg, 0 6px 20px rgba(0, 0, 0, 0.25));
+    padding: 0.4em 0.6em 0.6em;
 }
 
 .forge-assistant-menu-item {

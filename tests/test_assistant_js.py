@@ -2194,104 +2194,122 @@ function sized(width, height) {
 """
 
 
-class TestAMenuThePanelCannotClip:
-    """Reported in use: with the conversation collapsed, the workspace list was
-    cut off and could not be scrolled to the bottom of.
+IN_PANEL = """
+// A panel with a conversation, a workspace row and the menus' box, and the
+// real menu code over it.
+const shell = Object.create(NS.Shell.prototype);
+shell.state = {conversationExpanded: true, panelOpen: true, freeFloat: false,
+               autoAttach: false, sendToGenerate: false};
+shell.placed = 0;
+shell.place = () => { shell.placed += 1; };
+shell._save = () => {};
+shell.rendered = 0;
+shell.renderWorkspaces = () => { shell.rendered += 1; };
+shell.host = {listUtilities: () => [], openOnly() {}, listWorkspaces: () => [],
+              getActiveWorkspace: () => "tab_txt2img"};
+shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"},
+                                 conversation: {threads: []}})};
+const made = (tag) => document.createElement(tag);
+const menu = made("div");
+menu.hidden = true;
+Object.defineProperty(menu, "innerHTML", {get: () => "", set: () => { menu.children = []; }});
+shell.nodes = {menu, body: made("div"), workspaces: made("div"), panel: made("section"),
+               chat: made("button"), picker: made("button"), utilities: made("button")};
+shell.nodes.workspaces.hidden = true;
+shell.menuHandle = {};
+const seen = () => ({menu: menu.hidden, body: shell.nodes.body.hidden,
+                     strip: shell.nodes.workspaces.hidden,
+                     marked: shell.nodes.panel.classList.contains("forge-assistant-menu-open"),
+                     placed: shell.placed, expanded: shell.state.conversationExpanded});
+"""
 
-    The menu was an absolutely positioned child of the panel, and the panel
-    clips what it contains. A collapsed panel is a header and an accordion
-    tall, so most of the list was outside that box -- and unreachable, because
-    scrolling a menu whose visible region is shorter than its own scroll
-    viewport cannot bring the bottom into view. Cancel is the last item, so the
-    one control added to let people out of a menu was the first thing cut off
-    it.
+
+class TestTheMenuIsInsideThePanel:
+    """Asked for: "Make it so that the ⋯ menu and any future menu land within
+    our view, simply replacing what would have been the window for the
+    conversation and user prompt". It was fixed to the window beside the
+    panel, so that a panel that clips its contents could not cut a long list
+    off; now the conversation gives it its place and takes it back after.
     """
 
-    def test_it_opens_below_the_header_when_there_is_room(self):
-        found = run(PANEL + """
-            sized(1280, 900);
-            const shell = panel({header: {top: 40, height: 48}});
-            shell.placeMenu();
-            console.log(JSON.stringify(placed(shell.nodes.menu)));
+    def test_a_menu_takes_the_conversation_s_place_and_gives_it_back(self):
+        found = run(IN_PANEL + """
+            shell.toggleMenu("utilities");
+            const up = seen();
+            shell.closeMenu();
+            console.log(JSON.stringify({up, down: seen()}));
         """, sources=("shell",))
 
-        assert found["top"] == "92px", "the header's bottom plus the gap"
-        assert found["left"] == "100px"
-        assert found["width"] == "360px"
+        assert found["up"] == {"menu": False, "body": True, "strip": True, "marked": True,
+                               "placed": 1, "expanded": True}
+        assert found["down"] == {"menu": True, "body": False, "strip": True, "marked": False,
+                                 "placed": 2, "expanded": True}
 
-    def test_it_opens_above_the_header_when_that_is_where_the_room_is(self):
-        """Which it is whenever the panel is docked along the bottom: below the
-        header there is only the rest of a short panel and then the edge of the
-        screen."""
-        found = run(PANEL + """
-            sized(1280, 900);
-            const shell = panel({header: {top: 760, height: 48}, menuHeight: 300});
-            shell.placeMenu();
-            console.log(JSON.stringify(placed(shell.nodes.menu)));
+    def test_collapsed_it_takes_the_workspace_row_s_place(self):
+        found = run(IN_PANEL + """
+            shell.state.conversationExpanded = false;
+            shell.nodes.body.hidden = true;
+            shell.nodes.workspaces.hidden = false;
+            shell.toggleMenu("utilities");
+            const up = seen();
+            shell.closeMenu();
+            console.log(JSON.stringify({up, down: seen(), rendered: shell.rendered}));
         """, sources=("shell",))
 
-        assert found["top"] == "456px", "its own height above the header"
-        assert int(found["maxHeight"][:-2]) >= 700
+        assert found["up"]["strip"] is True and found["up"]["body"] is True
+        assert found["down"]["strip"] is False and found["down"]["body"] is True
+        assert found["rendered"] == 1, "the row is drawn again when it comes back"
 
-    def test_the_height_is_the_room_there_is_not_a_fixed_fraction(self):
-        """`max-height: 50vh` was the old rule, and half a window is not the
-        same as the space between this header and the edge of one."""
-        found = run(PANEL + """
-            sized(1280, 900);
-            const roomy = panel({header: {top: 40, height: 48}});
-            roomy.placeMenu();
-            const tight = panel({header: {top: 700, height: 48}});
-            tight.placeMenu();
-            console.log(JSON.stringify({
-                roomy: roomy.nodes.menu.style.maxHeight,
-                tight: tight.nodes.menu.style.maxHeight,
-            }));
+    def test_a_submenu_keeps_the_place_and_places_the_panel_again(self):
+        found = run(IN_PANEL + """
+            shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"},
+                conversation: {threads: [{thread_id: "t1", title: "Harbour"}]}})};
+            shell.toggleMenu("utilities");
+            menu.children.find((c) => c.textContent === "Threads").handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify(Object.assign(seen(), {which: menu.dataset.which})));
         """, sources=("shell",))
 
-        assert found["roomy"] == "800px"
-        assert found["roomy"] != found["tight"]
+        assert found["which"] == "threads"
+        assert found["body"] is True and found["menu"] is False
+        assert found["placed"] == 2
 
-    def test_a_menu_with_no_room_either_way_still_gets_some(self):
-        """Refusing to open is worse than opening small and scrolling: the
-        items are reachable either way, and one of them is the way out."""
-        found = run(PANEL + """
-            sized(1280, 220);
-            const shell = panel({header: {top: 90, height: 48}});
-            shell.placeMenu();
-            console.log(JSON.stringify({height: shell.nodes.menu.style.maxHeight}));
+    def test_chat_with_a_menu_up_brings_the_conversation_back(self):
+        """Whether or not it was showing before the menu took its place: a
+        press on Chat over a menu is a press for the conversation."""
+        found = run(IN_PANEL + """
+            shell.toggleMenu("utilities");
+            shell.toggleChat();
+            const fromOpen = seen();
+            shell.state.conversationExpanded = false;
+            shell.applyChat();
+            shell.toggleMenu("utilities");
+            shell.toggleChat();
+            console.log(JSON.stringify({fromOpen, fromCollapsed: seen()}));
         """, sources=("shell",))
 
-        assert int(found["height"][:-2]) >= 120
+        for name in ("fromOpen", "fromCollapsed"):
+            assert found[name]["menu"] is True, name
+            assert found[name]["body"] is False, name
+            assert found[name]["expanded"] is True, name
 
-    def test_a_closed_menu_is_not_positioned(self):
-        found = run(PANEL + """
-            const shell = panel({menuOpen: false});
-            shell.placeMenu();
-            console.log(JSON.stringify(placed(shell.nodes.menu)));
-        """, sources=("shell",))
-
-        assert found == {}
-
-    def test_moving_the_panel_takes_an_open_menu_with_it(self):
-        """It is positioned against the window, so a drag, a resize or a
-        keyboard appearing leaves it behind unless something moves it."""
-        shell = SHELL.read_text(encoding="utf-8")
-        body = shell.split("Shell.prototype.placeNow = function", 1)[1] \
-            .split("Shell.prototype", 1)[0]
-
-        assert body.count("this.placeMenu()") == 2, (
-            "both the sheet and the floating panel have to take it along")
-
-    def test_the_stylesheet_no_longer_lets_the_panel_clip_it(self):
+    def test_it_is_a_child_of_the_panel_that_scrolls_inside_it(self):
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
         rule = only(css, ".forge-assistant-menu")
 
-        assert "position: fixed" in rule
-        assert "50vh" not in rule, "the height is the room there is, set by script"
-        # And the panel still clips its own content, which is what keeps the
-        # conversation inside the rounded corners.
+        assert "position: fixed" not in rule
+        assert "min-height: 0" in rule and "overflow-y: auto" in rule, (
+            "what lets a long list scroll inside a flex column instead of growing the panel")
         assert "overflow: hidden" in only(css, ".forge-assistant-panel")
+
+    def test_nothing_places_a_menu_against_the_window_any_more(self):
+        shell = SHELL.read_text(encoding="utf-8")
+
+        assert "placeMenu" not in shell
+        assert "MENU_GAP" not in shell
+        placing = shell.split("Shell.prototype.placeNow = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+        assert "menu" not in placing.lower()
 
 
 class TestFreeFloat:
@@ -2786,6 +2804,7 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
             shell.nodes.panel = document.createElement("div");
             shell.nodes.picker = document.createElement("button");
             shell.nodes.menu = document.createElement("div");
+            shell.nodes.menu.hidden = true;
             shell.nodes.menu.dataset.owner = "";
             const seen = [];
             [false, true].forEach((open) => {
