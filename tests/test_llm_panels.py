@@ -898,6 +898,22 @@ class TestTheHeaderCarriesTheDestinations:
             assert ui.ident("chat", name) in seen
             assert f'"{ui.ident("chat", name)}"' in script
 
+    def test_the_edit_row_s_buttons_are_where_the_script_looks_for_them(self, store, monkeypatch):
+        """The message editor's dialog finishes an edit by pressing the row's
+        own Save or Cancel (javascript/llm_studio.js); a button without its
+        id is a Done that does nothing."""
+        from pathlib import Path
+
+        import mc_llm_ui as ui
+
+        seen = self._built_ids(monkeypatch)
+        script = (Path(mc_llm_chat_panel.__file__).resolve().parent
+                  / "javascript" / "llm_studio.js").read_text(encoding="utf-8")
+
+        for name in ("edit-save", "edit-cancel"):
+            assert ui.ident("chat", name) in seen, name
+            assert f'"{ui.ident("chat", name)}"' in script, name
+
 
 class TestWhoSaidWhat:
     """A face beside every message, and an edge on the bubble saying it again.

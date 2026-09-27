@@ -101,7 +101,8 @@ function focusShell(over) {
     shell.place = () => {};
     shell.closeMenu = () => {};
     shell.say = (text, tone) => shell.said.push({text, tone});
-    shell.nodes = {focusToggle: {setAttribute(name, value) { this[name] = value; }}};
+    // Focus is marked on the panel now that there is no Focus button.
+    shell.nodes = {panel: {dataset: {}}};
     shell.host = Object.assign({
         getActiveWorkspace: () => "tab_txt2img",
         activateWorkspace: (id) => Promise.resolve(id),
@@ -125,7 +126,7 @@ function seen(shell, screen) {
     return {
         focus: shell.focus.on,
         enabled: shell.state.focusEnabled,
-        pressed: shell.nodes.focusToggle["aria-pressed"],
+        marked: shell.nodes.panel.dataset.focus,
         owned: !!shell.screenOwned,
         pending: !!shell.screenPending,
         full: document.fullscreenElement === page ? "page"
@@ -155,7 +156,7 @@ class TestOnePressBothWays:
         """)
 
         assert found["asked"]["focus"] == "tab_txt2img"
-        assert found["asked"]["pressed"] == "true"
+        assert found["asked"]["marked"] == "on"
         assert found["asked"]["calls"] == [{"request": "page", "navigationUI": "hide"}]
         assert found["granted"]["owned"] is True
         assert found["granted"]["full"] == "page"
@@ -173,7 +174,7 @@ class TestOnePressBothWays:
         """)
 
         assert found["focus"] == ""
-        assert found["pressed"] == "false"
+        assert found["marked"] == "off"
         assert found["exits"] == 1
         assert found["full"] is None
         assert found["owned"] is False
@@ -250,7 +251,7 @@ class TestTheBrowserEndingItEndsFocus:
 
         assert found["focus"] == ""
         assert found["enabled"] is False
-        assert found["pressed"] == "false"
+        assert found["marked"] == "off"
         assert found["exits"] == 0
         assert found["owned"] is False
         assert found["savedAgain"] is True

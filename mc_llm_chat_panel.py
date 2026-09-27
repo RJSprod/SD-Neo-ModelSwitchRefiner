@@ -482,9 +482,14 @@ def build() -> dict:
                                       show_label=False, container=False, scale=1,
                                       placeholder="Editing this message…",
                                       elem_id=ui.ident("chat", "editor"))
+                # Named for the browser: javascript/llm_studio.js opens the
+                # message editor's dialog over this row and presses these two
+                # with the dialog's answer. Without the script the row is the
+                # editor, as it always was.
                 save_edit = gr.Button("Save", variant="primary", size="sm", scale=0,
-                                      min_width=80)
-                cancel_edit = gr.Button("Cancel", size="sm", scale=0, min_width=80)
+                                      min_width=80, elem_id=ui.ident("chat", "edit-save"))
+                cancel_edit = gr.Button("Cancel", size="sm", scale=0, min_width=80,
+                                        elem_id=ui.ident("chat", "edit-cancel"))
 
         # -- THREADS_SCREEN ------------------------------------------------- #
 

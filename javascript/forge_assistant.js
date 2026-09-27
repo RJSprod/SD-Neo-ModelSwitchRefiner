@@ -69,6 +69,13 @@
     // fast pair is never missed. A single press waits this long to be sure it
     // is single before the panel opens.
     const TAP_WINDOW = 300;
+    // The header's and the composer's buttons are glyphs, and their words are
+    // their `aria-label` and their tooltip. Two rows of words -- Workspace,
+    // Focus, Send -- was most of a collapsed panel, and on a phone twice over.
+    const WORKSPACE_GLYPH = "\u{1F4D1}";      // bookmark tabs: the tab bar
+    const CHAT_GLYPH = "\u{1F4AC}";           // a speech balloon: the conversation
+    const SEND_GLYPH = "\u27A4";              // an arrowhead
+    const STOP_GLYPH = "\u25A0";              // a square
     // How long a request for the browser's full screen is waited on before
     // the next press may ask again. Browsers answer within a frame or two;
     // this is for one that never answers at all.
@@ -281,6 +288,17 @@
         const node = document.createElement(tag);
         if (className) node.className = className;
         if (text !== undefined) node.textContent = text;
+        return node;
+    }
+
+    /** A button that is a glyph. Its word is its `aria-label` and its
+     *  tooltip and never its text, so a screen reader and a hover both get
+     *  the word and the row gets the room. */
+    function iconButton(className, glyph, label) {
+        const node = element("button", className, glyph);
+        node.type = "button";
+        node.setAttribute("aria-label", label);
+        node.title = label;
         return node;
     }
 
@@ -557,7 +575,8 @@
         panel.setAttribute("aria-label", this.settings.label);
         this.nodes.panel = panel;
 
-        // One row, and everything is in it.
+        // One row, and everything is in it: three glyphs, the space you drag
+        // by, and the ✕.
         //
         // It was two: a title row carrying the panel's name and the ✕, and a
         // nav row under it carrying Workspace, Focus and ⋯. The name was the
@@ -567,38 +586,48 @@
         // name where a name is actually used: `aria-label`, set above, which
         // is what a screen reader announces when focus enters it.
         //
+        // Then the words went too, for the same reason at a smaller scale:
+        // "Workspace" and "Focus" and a row tall enough for a finger left a
+        // header wider than the conversation under it needed. Workspace is a
+        // glyph; Chat is a glyph, and it does what the accordion heading
+        // under the header did -- shows the conversation or puts it away;
+        // Focus is gone from the row altogether, because three presses on
+        // the row's own space do what it did (`tapHeader`), the way three on
+        // the launcher always have.
+        //
         // The space between the menus and the ✕ is the drag handle. It has to
-        // be explicit now: `startDrag` ignores a press that lands on a
-        // control, so with the row full of controls there would otherwise be
-        // nothing left to take hold of.
+        // be explicit: `startDrag` ignores a press that lands on a control,
+        // so with the row full of controls there would otherwise be nothing
+        // left to take hold of. It is also where the presses are counted.
         const header = element("header", "forge-assistant-header");
-        const picker = element("button", "forge-assistant-nav-button", "Workspace");
-        picker.type = "button";
+        const picker = iconButton("forge-assistant-nav-button forge-assistant-picker",
+                                  WORKSPACE_GLYPH, "Workspace");
         picker.setAttribute("aria-haspopup", "menu");
         picker.setAttribute("aria-expanded", "false");
-        const focusToggle = element("button", "forge-assistant-nav-button", "Focus");
-        focusToggle.type = "button";
-        focusToggle.setAttribute("aria-pressed", "false");
-        const utilities = element("button", "forge-assistant-nav-button", "⋯");
-        utilities.type = "button";
+        // Chat owns the ENTIRE conversation body, as the accordion heading
+        // did: collapsed, all of it leaves the layout and the accessibility
+        // tree -- a body that is only visually hidden is a body a screen
+        // reader still reads out. `aria-expanded` and `aria-controls` say so.
+        const chat = iconButton("forge-assistant-nav-button forge-assistant-chat",
+                                CHAT_GLYPH, "Chat");
+        chat.setAttribute("aria-expanded", String(this.state.conversationExpanded));
+        chat.setAttribute("aria-controls", "forge-assistant-conversation");
+        const utilities = iconButton("forge-assistant-nav-button forge-assistant-utilities",
+                                     "⋯", "More actions");
         utilities.setAttribute("aria-haspopup", "menu");
         utilities.setAttribute("aria-expanded", "false");
-        utilities.setAttribute("aria-label", "More actions");
         const grip = element("div", "forge-assistant-grip");
         grip.setAttribute("aria-hidden", "true");
-        const minimize = element("button", "forge-assistant-icon-button");
-        minimize.type = "button";
-        minimize.setAttribute("aria-label", "Minimize the assistant");
+        const minimize = iconButton("forge-assistant-icon-button", "✕",
+                                    "Minimize the assistant");
         minimize.title = "Minimize";
-        minimize.textContent = "✕";
         header.appendChild(picker);
-        header.appendChild(focusToggle);
+        header.appendChild(chat);
         header.appendChild(utilities);
         header.appendChild(grip);
         header.appendChild(minimize);
         panel.appendChild(header);
-        Object.assign(this.nodes,
-                      {header, minimize, picker, utilities, focusToggle, grip});
+        Object.assign(this.nodes, {header, minimize, picker, chat, utilities, grip});
 
         const menu = element("div", "forge-assistant-menu");
         menu.hidden = true;
@@ -624,36 +653,18 @@
         panel.appendChild(workspaces);
         this.nodes.workspaces = workspaces;
 
-        // The accordion heading owns the ENTIRE conversation body. Collapsed,
-        // all of it leaves the layout and the accessibility tree -- a body that
-        // is only visually hidden is a body a screen reader still reads out.
-        const heading = element("button", "forge-assistant-accordion");
-        heading.type = "button";
-        heading.setAttribute("aria-expanded", String(this.state.conversationExpanded));
-        heading.setAttribute("aria-controls", "forge-assistant-conversation");
-        heading.innerHTML = '<span class="forge-assistant-chevron" aria-hidden="true">'
-            + "›</span>";
-        heading.appendChild(document.createTextNode("Conversation"));
-        panel.appendChild(heading);
-        this.nodes.heading = heading;
-
+        // The conversation body, the whole of what Chat shows and hides.
+        //
+        // It used to open with a line saying which conversation this is --
+        // "Prompt Bot · New chat" -- that was also the button for the thread
+        // list. Asked to go: on a phone it was a row of the panel spent on
+        // words already known. Which character the panel is talking to is
+        // said in the ⋯ menu instead, at the head of its Chat group, and the
+        // thread list is that group's Threads entry.
         const body = element("div", "forge-assistant-conversation");
         body.id = "forge-assistant-conversation";
         panel.appendChild(body);
         this.nodes.body = body;
-
-        // Which conversation this is. It was an empty div: the panel gave no
-        // indication of which thread it was showing, which is fine until it is
-        // showing a different one from the tab behind it -- and then it is the
-        // only thing that would have said so.
-        const selector = element("div", "forge-assistant-selector");
-        const who = element("button", "forge-assistant-who", "\u2026");
-        who.type = "button";
-        who.setAttribute("aria-haspopup", "menu");
-        who.setAttribute("aria-label", "Choose a conversation");
-        selector.appendChild(who);
-        body.appendChild(selector);
-        Object.assign(this.nodes, {selector, who});
 
         const suppressed = element("p", "forge-assistant-suppressed");
         suppressed.hidden = true;
@@ -679,18 +690,9 @@
         this.nodes.status = status;
 
         const composer = element("div", "forge-assistant-composer");
-        // Editing a message happens in this box, not in a dialog of the
-        // browser's: the strip says which message and is the way out. See
-        // `startEdit`.
-        const editBar = element("div", "forge-assistant-edit-bar");
-        editBar.hidden = true;
-        const editLabel = element("span", "forge-assistant-edit-label",
-                                  "Editing your message");
-        const editCancel = element("button", "forge-assistant-edit-cancel", "Cancel");
-        editCancel.type = "button";
-        editCancel.title = "Keep the message as it was";
-        editBar.appendChild(editLabel);
-        editBar.appendChild(editCancel);
+        // The box is the draft's, and only ever the draft's. Editing a message
+        // happens in a dialog of this extension's own, over the panel -- see
+        // `startEdit` -- so nothing here changes shape around an edit.
         const chip = element("div", "forge-assistant-chip");
         chip.hidden = true;
         const input = element("textarea", "forge-assistant-input");
@@ -712,10 +714,8 @@
         readAloud.type = "button";
         readAloud.setAttribute("role", "switch");
         readAloud.setAttribute("aria-label", "Read replies aloud");
-        const send = element("button", "forge-assistant-send", "Send");
-        send.type = "button";
-        const stop = element("button", "forge-assistant-stop", "Stop");
-        stop.type = "button";
+        const send = iconButton("forge-assistant-send", SEND_GLYPH, "Send");
+        const stop = iconButton("forge-assistant-stop", STOP_GLYPH, "Stop the reply");
         stop.hidden = true;
         const filePicker = element("input");
         filePicker.type = "file";
@@ -726,15 +726,13 @@
         toolbar.appendChild(readAloud);
         toolbar.appendChild(send);
         toolbar.appendChild(stop);
-        composer.appendChild(editBar);
         composer.appendChild(chip);
         composer.appendChild(input);
         composer.appendChild(toolbar);
         composer.appendChild(filePicker);
         body.appendChild(composer);
-        Object.assign(this.nodes, {composer, editBar, editLabel, editCancel, chip, input,
-                                   toolbar, attach, dictate, readAloud, send, stop,
-                                   filePicker});
+        Object.assign(this.nodes, {composer, chip, input, toolbar, attach, dictate,
+                                   readAloud, send, stop, filePicker});
 
         const handle = element("div", "forge-assistant-resize");
         handle.setAttribute("role", "separator");
@@ -747,12 +745,13 @@
         this.nodes.root.appendChild(panel);
         this.menuHandle = {close: () => this.closeMenu()};
         this.disposers.push(this.host.registerMenu(this.menuHandle));
-        this.applyAccordion();
+        this.applyChat();
     };
 
-    Shell.prototype.applyAccordion = function () {
+    /** Everything that follows from whether the conversation is showing. */
+    Shell.prototype.applyChat = function () {
         const open = this.state.conversationExpanded;
-        this.nodes.heading.setAttribute("aria-expanded", String(open));
+        this.nodes.chat.setAttribute("aria-expanded", String(open));
         // `hidden`, not a class: the body has to leave the accessibility tree,
         // not merely stop being painted.
         this.nodes.body.hidden = !open;
@@ -766,7 +765,7 @@
         // dismissed by pressing that button again.
         this.nodes.picker.hidden = !open;
         if (!open) {
-            if (this.nodes.menu.dataset.which === "workspaces") this.closeMenu();
+            if (this.nodes.menu.dataset.owner === "workspaces") this.closeMenu();
             this.renderWorkspaces();
         }
         // The panel is sized to its content while collapsed, so the row
@@ -1006,6 +1005,9 @@
         if (target && target !== node && target.closest
             && target.closest("button, a, input, textarea, select")
             && target.closest("button, a, input, textarea, select") !== node) return;
+        // A new press. Whatever the last drag left for the header's click to
+        // swallow, that click is not coming now.
+        this.suppressHeaderClick = false;
         const box = node.getBoundingClientRect();
         this.drag = {
             node,
@@ -1096,8 +1098,14 @@
             }
             // Only the launcher's own click is the tail of this gesture. A
             // panel dragged by its header leaves no click on the launcher, and
-            // a flag set for one used to eat the next real press on it.
+            // a flag set for one used to eat the next real press on it. The
+            // header counts its own presses, so a panel dragged by it has a
+            // tail of its own to swallow -- if the click comes at all: with
+            // the pointer captured it may land on the panel instead, which is
+            // why `startDrag` clears this at the next press rather than
+            // trusting a click to.
             if (drag.node === this.nodes.launcher) this.suppressClick = true;
+            if (drag.node === this.nodes.panel) this.suppressHeaderClick = true;
             this._save();
         }
         drag.node.style.left = "";
@@ -1189,8 +1197,10 @@
         if (this.strip) this.endStrip(null, true);
         if (this.resizing) this.endResize(null, true);
         this.suppressClick = false;
+        this.suppressHeaderClick = false;
         this.stripMoved = false;
         this.resetTaps();
+        this.resetHeaderTaps();
         const root = this.nodes.root;
         if (root) root.classList.remove("forge-assistant-dragging");
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
@@ -1340,19 +1350,14 @@
 
         this.on(nodes.launcher, "click", (event) => this.launcherClick(event));
         this.on(nodes.minimize, "click", () => this.close());
-        this.on(nodes.heading, "click", () => {
-            this.state.conversationExpanded = !this.state.conversationExpanded;
-            this.applyAccordion();
-            this._save();
-            this.place();
-        });
-        this.on(nodes.who, "click", () => this.toggleMenu("threads"));
+        this.on(nodes.chat, "click", () => this.toggleChat());
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
-        this.on(nodes.focusToggle, "click", () => this.toggleFocus());
+        // The row's own space: a press on any of its buttons is that button's
+        // and stops here, so only the space is counted. See `headerClick`.
+        this.on(nodes.header, "click", (event) => this.headerClick(event));
 
         this.on(nodes.input, "input", () => this.typed());
-        this.on(nodes.editCancel, "click", () => this.cancelEdit());
         this.on(nodes.input, "keydown", (event) => this.composerKey(event));
         this.on(nodes.input, "paste", (event) => this.paste(event));
         this.on(nodes.send, "click", () => this.send());
@@ -1510,13 +1515,7 @@
      *  and then it is the message: the draft is kept as it was and comes back
      *  when the edit ends. */
     Shell.prototype.typed = function () {
-        const nodes = this.nodes;
-        if (this.editing) {
-            this.grow();
-            nodes.send.disabled = !this.canSaveEdit(this.store.snapshot());
-            return;
-        }
-        this.store.setDraftText(nodes.input.value);
+        this.store.setDraftText(this.nodes.input.value);
         this.grow();
     };
 
@@ -1524,10 +1523,8 @@
         const input = this.nodes.input;
         input.style.height = "auto";
         const lineHeight = 20;
-        // Six lines for a message; more for an edit, because the prompt being
-        // edited is often long and the transcript above gives the room up
-        // (it is the panel's one part that shrinks). Past that, it scrolls.
-        const max = this.editing ? editHeight(lineHeight) : lineHeight * 6 + 12;
+        // Six lines, and past that it scrolls.
+        const max = lineHeight * 6 + 12;
         input.style.height = Math.min(input.scrollHeight, max) + "px";
         input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
     };
@@ -1651,6 +1648,60 @@
         this.taps = 0;
     };
 
+    /** The Chat button: the conversation shown, or put away -- the whole of
+     *  it, body and composer. What the accordion heading did. */
+    Shell.prototype.toggleChat = function () {
+        this.state.conversationExpanded = !this.state.conversationExpanded;
+        this.applyChat();          // which places the panel for its new size
+        this._save();
+    };
+
+    /** A click on the header. Only its own space counts as a press -- the
+     * grip, the padding, anything in the row that is not a control. A press
+     * on one of its buttons is that button's, and the tail of a drag is
+     * nobody's. `detail` is 0 for a keyboard activation and a header cannot
+     * be activated from the keyboard, so a click with none is synthetic.
+     */
+    Shell.prototype.headerClick = function (event) {
+        const target = event && event.target;
+        if (target && target !== this.nodes.header && typeof target.closest === "function"
+            && target.closest("button, a, input, textarea, select")) return;
+        if (this.suppressHeaderClick) {
+            this.suppressHeaderClick = false;
+            this.resetHeaderTaps();
+            return;
+        }
+        if (!event || !event.detail) return;
+        this.tapHeader();
+    };
+
+    /** Three presses on the header's space turn focus on or off -- the Focus
+     * button's job, now that the row has no room for a word. The launcher's
+     * pace: a press belongs to the gesture when it lands within TAP_WINDOW
+     * of the one before it. One press and two do nothing here, so nothing
+     * waits for the window to pass; the count is simply forgotten when it
+     * does. The third acts inside its own press, for the launcher's reason:
+     * a browser grants full screen only to a press that is still being
+     * handled.
+     */
+    Shell.prototype.tapHeader = function () {
+        const taps = (this.headerTaps || 0) + 1;
+        this.resetHeaderTaps();
+        if (taps >= 3) {
+            this.toggleFocus();
+            return;
+        }
+        this.headerTaps = taps;
+        this.headerTapTimer = window.setTimeout(() => this.resetHeaderTaps(), TAP_WINDOW);
+    };
+
+    /** Forget a half-counted header gesture. */
+    Shell.prototype.resetHeaderTaps = function () {
+        if (this.headerTapTimer) window.clearTimeout(this.headerTapTimer);
+        this.headerTapTimer = 0;
+        this.headerTaps = 0;
+    };
+
     /** Back to the workspace before this one -- and, pressed again, forward to
      * the one just left, because that is now the one before. Through
      * `switchWorkspace`, so focus mode follows the switch rather than hiding
@@ -1691,13 +1742,21 @@
     Shell.prototype.focusOff = function () {
         this.state.focusEnabled = false;
         this.state.focusWorkspaceId = null;
-        if (this.nodes.focusToggle) this.nodes.focusToggle.setAttribute("aria-pressed", "false");
+        this.markFocus(false);
         this.leaveScreen();
     };
 
-    // Focus a workspace and do the bookkeeping: the toggle's pressed state,
-    // what the next session starts with, and the panel's own position, which
-    // is measured against the focused box.
+    /** Whether focus is on, written on the panel for anything that draws
+     *  from it. There is no Focus button to carry a pressed state any more;
+     *  the header's space is the toggle, and a space has no state to show. */
+    Shell.prototype.markFocus = function (on) {
+        const panel = this.nodes.panel;
+        if (panel && panel.dataset) panel.dataset.focus = on ? "on" : "off";
+    };
+
+    // Focus a workspace and do the bookkeeping: the panel's mark, what the
+    // next session starts with, and the panel's own position, which is
+    // measured against the focused box.
     //
     // Shared with the workspace picker, because entering focus and moving it
     // to another workspace are one operation with the same three outcomes --
@@ -1715,7 +1774,7 @@
         if (found.note) this.say(found.note, "warn");
         this.state.focusEnabled = true;
         this.state.focusWorkspaceId = id;
-        this.nodes.focusToggle.setAttribute("aria-pressed", "true");
+        this.markFocus(true);
         this._save();
         this.place();
         return true;
@@ -1725,8 +1784,9 @@
     //
     // Focus takes the page's own chrome away -- the tab bar, a theme's header
     // and footer. Asked for alongside it: the browser's chrome as well, from
-    // the same press. So the Focus toggle asks the browser for full screen
-    // when it turns focus on, and ends it when it turns focus off.
+    // the same press. So the focus toggle -- three presses on the launcher or
+    // on the header's space -- asks the browser for full screen when it turns
+    // focus on, and ends it when it turns focus off.
     //
     // What goes full screen is the whole document, never the workspace. An
     // element in full screen is the only thing the browser draws -- the
@@ -1865,20 +1925,18 @@
 
     // -- menus --------------------------------------------------------------- //
 
+    /** The menu under one of the header's buttons: open it, or if it is
+     *  this button's menu that is open, close it. `owner` is the button;
+     *  `which` (in `showMenu`) is the list showing, which for the ⋯ menu may
+     *  be one of its submenus. */
     Shell.prototype.toggleMenu = function (which) {
         const menu = this.nodes.menu;
-        if (!menu.hidden && menu.dataset.which === which) {
+        if (!menu.hidden && menu.dataset.owner === which) {
             this.closeMenu();
             return;
         }
-        menu.innerHTML = "";
-        menu.dataset.which = which;
-        const items = which === "workspaces" ? this.workspaceItems()
-            : (which === "threads" ? this.threadItems() : this.utilityItems());
-        items.forEach((item) => menu.appendChild(item));
-        menu.appendChild(this.cancelItem());
-        menu.hidden = false;
-        this.placeMenu();
+        menu.dataset.owner = which;
+        this.showMenu(which);
         this.nodes.picker.setAttribute("aria-expanded",
                                        String(which === "workspaces"));
         this.nodes.utilities.setAttribute("aria-expanded",
@@ -1889,6 +1947,22 @@
         // registering the shell itself would make "close the menus" close the
         // panel.
         this.host.openOnly(this.menuHandle);
+    };
+
+    /** Draw one list in the menu's box: the workspaces, the ⋯ menu, or one
+     *  of the ⋯ menu's submenus. A submenu replaces the list rather than
+     *  opening beside it -- there is no room beside a panel on a phone, and
+     *  a list that is a level down says so with a Back entry at its head. */
+    Shell.prototype.showMenu = function (which) {
+        const menu = this.nodes.menu;
+        menu.innerHTML = "";
+        menu.dataset.which = which;
+        const items = which === "workspaces" ? this.workspaceItems()
+            : (which === "threads" ? this.threadItems() : this.utilityItems());
+        items.forEach((item) => menu.appendChild(item));
+        menu.appendChild(this.cancelItem());
+        menu.hidden = false;
+        this.placeMenu();
     };
 
     // Every menu ends with a way out that chooses nothing.
@@ -1963,6 +2037,7 @@
         const had = !menu.hidden;
         menu.hidden = true;
         menu.dataset.which = "";
+        menu.dataset.owner = "";
         this.nodes.picker.setAttribute("aria-expanded", "false");
         this.nodes.utilities.setAttribute("aria-expanded", "false");
         return had;
@@ -2032,16 +2107,21 @@
         });
     };
 
+    /** The Threads submenu: the character's threads, the one the panel is on
+     *  marked, under a Back entry to the ⋯ menu. */
     Shell.prototype.threadItems = function () {
         const view = this.store.snapshot();
         const conversation = view.conversation || {};
         const threads = conversation.threads || [];
+        const character = view.selection.character;
+        const items = [this.backItem(),
+                       this.groupLabel(character ? "Threads \u00b7 " + character : "Threads")];
         if (!threads.length) {
-            const empty = element("p", "forge-assistant-menu-empty",
-                                  "No threads yet. Start one in LLM Studio.");
-            return [empty];
+            items.push(element("p", "forge-assistant-menu-empty",
+                               "No threads yet. Start one with New chat."));
+            return items;
         }
-        return threads.map((thread) => {
+        return items.concat(threads.map((thread) => {
             const item = element("button", "forge-assistant-menu-item", thread.title);
             item.type = "button";
             item.setAttribute("role", "menuitem");
@@ -2052,20 +2132,46 @@
                 this.store.select(view.selection.character, thread.thread_id);
             });
             return item;
-        });
+        }));
     };
 
+    /** The ⋯ menu, in four groups.
+     *
+     * It was one flat list, and it grew one entry at a time until a phone
+     * showed nine things with nothing to say which were about the
+     * conversation and which about the panel. Grouped now, by what an entry
+     * acts on, and the groups are in the order they are reached for:
+     *
+     *   Chat -- the conversation: a new one, the thread list (one level down,
+     *   because it is a list of its own), the system prompt. Headed by the
+     *   character's name, because the line under the header that used to
+     *   say who the panel is talking to is gone, and this is where it went.
+     *
+     *   Composer -- what goes with a message and what a reply's button does:
+     *   Auto Attach and Send to Generate, the two switches.
+     *
+     *   Panel -- the panel itself: Free Float, and the launcher's look.
+     *
+     *   Models -- the host's utilities, which give a graphics card back and
+     *   are last because they are not what anybody wants to hit on the way to
+     *   something else.
+     *
+     * The switches are the shell's own preferences, so they are added here
+     * rather than in the host's list of utilities, which is about things the
+     * *host* can be asked to do.
+     */
     Shell.prototype.utilityItems = function () {
-        // Free float first, because it is a mode rather than an action, and
-        // because the two below it give a graphics card back and are not what
-        // anybody wants to hit by accident. It is the shell's own preference,
-        // so it is added here rather than in the host's list of utilities,
-        // which is about things the *host* can be asked to do.
-        const own = [this.floatItem(), this.autoAttachItem(), this.sendToGenerateItem(),
-                     this.newThreadItem()];
-        if (NS.systemEditor) own.push(this.systemPromptItem());
-        if (NS.look) own.push(this.customizeItem());
-        return own.concat(this.host.listUtilities().map((utility) => {
+        const character = this.store.snapshot().selection.character;
+        const items = [this.groupLabel(character ? "Chat \u00b7 " + character : "Chat"),
+                       this.newChatItem(), this.threadsItem()];
+        if (NS.systemEditor) items.push(this.systemPromptItem());
+        items.push(this.groupLabel("Composer"), this.autoAttachItem(),
+                   this.sendToGenerateItem());
+        items.push(this.groupLabel("Panel"), this.floatItem());
+        if (NS.look) items.push(this.customizeItem());
+        const utilities = this.host.listUtilities();
+        if (utilities.length) items.push(this.groupLabel("Models"));
+        return items.concat(utilities.map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
             item.type = "button";
             item.setAttribute("role", "menuitem");
@@ -2078,6 +2184,47 @@
             });
             return item;
         }));
+    };
+
+    /** A group's heading. Not an entry: nothing to press, nothing a screen
+     *  reader offers as a choice -- `role="presentation"` keeps it out of the
+     *  menu's list of items while it stays on the screen for the eye. */
+    Shell.prototype.groupLabel = function (text) {
+        const label = element("div", "forge-assistant-menu-group", text);
+        label.setAttribute("role", "presentation");
+        return label;
+    };
+
+    /** The way up from a submenu: back to the ⋯ menu's own list. */
+    Shell.prototype.backItem = function () {
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-menu-back",
+                             "\u2039 Back");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.addEventListener("click", () => this.showMenu("utilities"));
+        return item;
+    };
+
+    /** Into the Threads submenu. The chevron after the word is the
+     *  stylesheet's, so the label stays the label. */
+    Shell.prototype.threadsItem = function () {
+        const view = this.store.snapshot();
+        const character = view.selection.character;
+        const threads = (view.conversation && view.conversation.threads) || [];
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-submenu",
+                             "Threads");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "menu");
+        item.disabled = !character;
+        item.title = character
+            ? (threads.length ? "Choose one of " + character + "\u2019s threads"
+                : "No threads yet")
+            : "Choose a conversation first";
+        item.addEventListener("click", () => this.showMenu("threads"));
+        return item;
     };
 
     Shell.prototype.floatItem = function () {
@@ -2149,16 +2296,18 @@
     };
 
     /** "Add the ability to start a new thread directly from the fly out menu.
-     *  It should start a fresh thread with the character." */
-    Shell.prototype.newThreadItem = function () {
+     *  It should start a fresh thread with the character." Called New chat
+     *  now, at the head of the menu's Chat group: "start a new chat with the
+     *  currently set up character". It is the tab's New thread. */
+    Shell.prototype.newChatItem = function () {
         const character = this.store.snapshot().selection.character;
         const item = element("button",
                              "forge-assistant-menu-item forge-assistant-new-thread",
-                             "New thread");
+                             "New chat");
         item.type = "button";
         item.setAttribute("role", "menuitem");
         item.disabled = !character;
-        item.title = character ? "Start a fresh thread with " + character
+        item.title = character ? "Start a new chat with " + character
             : "Choose a conversation first";
         item.addEventListener("click", () => {
             this.closeMenu();
@@ -2191,20 +2340,20 @@
     };
 
     Shell.prototype.startThread = function (character) {
-        this.tell("Starting a new thread with " + character + "\u2026", "info");
+        this.tell("Starting a new chat with " + character + "\u2026", "info");
         return this.store.createThread(character).then((outcome) => {
             if (!outcome || !outcome.ok) {
                 this.tell((outcome && outcome.error && outcome.error.message)
-                    || "A new thread could not be started.", "warn");
+                    || "A new chat could not be started.", "warn");
                 return false;
             }
-            // Somebody who asked for a new thread is about to write in it.
+            // Somebody who asked for a new chat is about to write in it.
             if (!this.state.conversationExpanded) {
                 this.state.conversationExpanded = true;
-                this.applyAccordion();
+                this.applyChat();
                 this._save();
             }
-            this.tell("New thread with " + character + ".", "info");
+            this.tell("New chat with " + character + ".", "info");
             return true;
         });
     };
@@ -2339,6 +2488,8 @@
         // before an unapplied edit is thrown away.
         if (this.lookEditor && this.lookEditor.isOpen()) return;
         if (NS.systemEditor && NS.systemEditor.isOpen()) return;
+        // The message editor's Escape is its own too: it cancels the edit.
+        if (window.mcMessageEditor && window.mcMessageEditor.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,
@@ -2346,11 +2497,6 @@
             insideAssistant: this.nodes.root
                 && this.nodes.root.contains(document.activeElement),
             assistantMenuOpen: this.nodes.menu && !this.nodes.menu.hidden,
-            // Only from inside the panel: an Escape pressed in Forge's own
-            // prompt box is that box's, and taking it would drop an edit
-            // nobody was looking at.
-            assistantEditing: !!this.editing && !!(this.nodes.root
-                && this.nodes.root.contains(document.activeElement)),
             focusActive: this.focus.isActive(),
         };
         const action = NS.escapeOrder(event, context);
@@ -2358,7 +2504,6 @@
         event.preventDefault();
         event.stopPropagation();
         if (action === "close-menu") this.closeMenu();
-        else if (action === "cancel-edit") this.cancelEdit();
         else if (action === "exit-focus") this.toggleFocus();
     };
 
@@ -2428,13 +2573,6 @@
         const images = Array.prototype.filter.call(data.items, (item) =>
             item.kind === "file" && /^image\/(png|jpeg|webp)$/.test(item.type));
         if (!images.length) return;          // ordinary text paste, untouched
-        if (this.editing) {
-            // An edit changes the words. The picture on the message stays as
-            // it is, and one pasted now would land in the draft unseen.
-            event.preventDefault();
-            this.tell("A picture cannot be added while you edit a message.", "warn");
-            return;
-        }
         // Only the image half is intercepted. Text pasted alongside it still
         // lands in the box, because taking somebody's words away to keep their
         // picture is not a trade anybody asked for.
@@ -2475,10 +2613,6 @@
     // -- sending --------------------------------------------------------------- //
 
     Shell.prototype.send = function () {
-        if (this.editing) {
-            this.saveEdit();
-            return;
-        }
         const view = this.store.snapshot();
         if (!this.canSend(view)) return;
         this.store.setDraftText(this.nodes.input.value);
@@ -2871,40 +3005,20 @@
         nodes.unread.hidden = !view.unreadTotal;
         nodes.unread.textContent = String(view.unreadTotal || "");
 
-        if (this.editing && this.editing.key !== NS.conversationKey(
-            view.selection.character, view.selection.thread)) {
-            // The message being edited is in a conversation that is no longer
-            // on screen, and Save would be aimed at it from this one. The box
-            // takes the draft of the conversation that is -- even focused,
-            // which the ordinary sync below leaves alone.
-            this.finishEdit(view.draft.text || "");
-            this.tell("The conversation changed, so the edit was put away.", "warn");
-        }
-        if (!this.editing && nodes.input.value !== view.draft.text
+        if (nodes.input.value !== view.draft.text
             && document.activeElement !== nodes.input) {
             nodes.input.value = view.draft.text || "";
             this.grow();
         }
-        this.renderSelector(view);
         this.renderChip(view.draft.attachment);
         this.renderAutoAttach();
         this.renderReadAloud(view);
         this.renderTranscript(view);
         this.renderStatus(view);
-        nodes.send.disabled = this.editing ? !this.canSaveEdit(view) : !this.canSend(view);
+        nodes.send.disabled = !this.canSend(view);
         const busy = !!(view.operation && !view.operation.terminal);
         nodes.stop.hidden = !(busy || view.speech.playing);
         this.applySuppression();
-    };
-
-    Shell.prototype.renderSelector = function (view) {
-        const conversation = view.conversation && view.conversation.conversation;
-        const character = (conversation && conversation.character)
-            || view.selection.character;
-        const title = conversation && conversation.title;
-        this.nodes.who.textContent = title
-            ? (character ? character + " \u00b7 " + title : title)
-            : (character || "Choose a conversation");
     };
 
     Shell.prototype.renderChip = function (attachment) {
@@ -3445,13 +3559,6 @@
     const DEFAULT_PROMPT_TARGET = {id: "txt2img_prompt", label: "txt2img",
                                    tab: "tab_txt2img", name: "txt2img"};
 
-    function editHeight(lineHeight) {
-        const view = window.visualViewport;
-        const high = (view && view.height) || window.innerHeight || 800;
-        return Math.max(lineHeight * 6 + 12,
-                        Math.min(lineHeight * 14 + 12, Math.round(high * 0.4)));
-    }
-
     function promptTarget(workspace) {
         return PROMPT_TARGETS[workspace] || DEFAULT_PROMPT_TARGET;
     }
@@ -3637,79 +3744,102 @@
     // -- Editing a message ------------------------------------------------------ //
     //
     // "This is what happens when i try to edit a prompt in the flyout view ...
-    // I dont want the browser doing this, i need UI in our flyout ... make sure
-    // it feels clear that I am editing a previous message, not simply
-    // submitting a new one."
+    // I dont want the browser doing this, i need UI in our flyout." And then:
+    // "when i choose to edit, i want a simple pop up. It should have the
+    // current text in an input field, cancel, and a done button ... For both
+    // LLM studio conversation and our flyout menu."
     //
-    // It was `window.prompt`: one line, the browser's own chrome, no way to
-    // read a long prompt, and on a phone a dialog over everything. Now the
-    // message goes into the panel's own box, and the box says it is an edit:
-    // a strip above it naming the message, an outline and a glow on the box,
-    // the same outline on the message in the thread, and Send reading Save.
+    // It was `window.prompt`, then the panel's own box: the draft went away,
+    // a strip said which message the box held, Send read Save, and the
+    // paperclip and the microphone stood aside. Now Edit opens
+    // `mcMessageEditor` -- a dialog of this extension's own, the same one LLM
+    // Studio's Edit opens -- over the panel, with the message's words in a
+    // box, Cancel and Done. The composer is never touched: whatever was
+    // half-typed stays exactly where it was, and nothing in the panel changes
+    // shape around an edit except the outline on the message being changed.
     //
-    // The box rather than the bubble, and that was the decision asked for.
-    // Bubbles are rebuilt whenever the thread moves, and an editor inside one
-    // would have to survive every redraw; the transcript is a third of the
-    // window, too little room for a long prompt. The box already has the
-    // keyboard, the phone's keyboard and the growing, and it is where somebody
-    // expects to type.
-    //
-    // The draft is not touched: what was half-typed before Edit is kept in the
-    // store while the box holds the edit, and put back when the edit ends. And
-    // Save replaces the words and does nothing else -- no new reply, as the
+    // Done replaces the words and does nothing else -- no new reply, as the
     // service's own `_edit` says (a rewritten question keeps the answer under
-    // it). A save the server refuses leaves the edit in the box, with why.
+    // it). A save the server refuses leaves the dialog open, with the words
+    // in it and why under them; Cancel and Escape leave the message as it
+    // was. The save is aimed by `editing` -- the conversation the edit began
+    // in -- and not by the selection, so a thread that changes under an open
+    // dialog changes nothing about where Done goes.
 
     Shell.prototype.startEdit = function (row, revision) {
+        const editor = window.mcMessageEditor;
+        if (!editor || typeof editor.open !== "function") {
+            this.tell("The message editor is not loaded. Reload the page to edit.", "warn");
+            return false;
+        }
         const view = this.store.snapshot();
         const character = view.selection.character;
         const thread = view.selection.thread;
         const key = NS.conversationKey(character, thread);
         const current = this.editing;
-        if (current && current.key === key && current.index === row.index) {
-            this.nodes.input.focus();
-            return;
+        if (current && current.key === key && current.index === row.index
+            && editor.isOpen()) {
+            // Already open on this message. Not reopened: what is being typed
+            // in it is not thrown away by a second press on the way in.
+            return true;
         }
-        if (current) this.finishEdit();
         const conversation = view.conversation && view.conversation.conversation;
-        this.editing = {key, character, thread, index: row.index, version: row.active,
-                        revision, text: String(row.text || ""), role: row.role,
-                        who: (conversation && conversation.character) || character,
-                        saving: false};
-        const input = this.nodes.input;
-        input.value = this.editing.text;
-        this.applyEditing();
-        // Save's own rule from the first moment: Send's was about the draft,
-        // and an empty draft left Save greyed out over a message full of words.
-        this.nodes.send.disabled = !this.canSaveEdit(view);
-        this.grow();
-        input.focus();
-        try {
-            input.setSelectionRange(input.value.length, input.value.length);
-        } catch (error) { /* a box that will not take a caret still takes the edit */ }
+        const who = (conversation && conversation.character) || character;
+        const editing = {key, character, thread, index: row.index, version: row.active,
+                         revision, text: String(row.text || ""), role: row.role, who,
+                         saving: false};
+        this.editing = editing;
         this.markEditTarget(true);
+        editor.open({
+            title: row.role === "assistant"
+                ? "Edit " + (who || "the character") + "’s reply"
+                : "Edit your message",
+            text: editing.text,
+            placeholder: "The message’s new words…",
+            done: (text) => this.saveEdit(text),
+            // Its own edit's, not whichever is current: Edit on another
+            // message replaces the dialog, and the first request is told it
+            // was given up only once the second has begun.
+            cancel: () => {
+                if (this.editing === editing) this.cancelEdit();
+            },
+        });
+        return true;
     };
 
+    /** Whether Done can take effect now: the conversation is there, and no
+     *  reply is being written into it. */
     Shell.prototype.canSaveEdit = function (view) {
         const editing = this.editing;
         if (!editing || editing.saving) return false;
         if (!view.ready || view.error || !view.conversation) return false;
         if (view.operation && !view.operation.terminal) return false;
-        return !!this.nodes.input.value.trim();
+        return true;
     };
 
-    Shell.prototype.saveEdit = function () {
+    /** Done, with the dialog's words. Answers the dialog: `{ok: true}` closes
+     *  it, `{ok: false, message}` keeps it open with the message under the
+     *  box. Always a promise, so the dialog has one thing to wait on. */
+    Shell.prototype.saveEdit = function (text) {
         const editing = this.editing;
-        if (!editing || editing.saving) return Promise.resolve(false);
-        const text = this.nodes.input.value;
+        if (!editing) return Promise.resolve({ok: false, message: "Nothing is being edited."});
+        if (editing.saving) return Promise.resolve({ok: false, message: "Still saving…"});
+        text = String(text === undefined || text === null ? "" : text);
         if (!text.trim()) {
-            this.tell("Type the message's new words, or press Cancel to keep it.", "warn");
-            return Promise.resolve(false);
+            return Promise.resolve({ok: false, message:
+                "Type the message’s new words, or press Cancel to keep it."});
         }
         if (text.trim() === editing.text.trim()) {
             this.finishEdit();
             this.tell("Nothing was changed.", "info");
-            return Promise.resolve(false);
+            return Promise.resolve({ok: true});
+        }
+        const view = this.store.snapshot();
+        if (!this.canSaveEdit(view)) {
+            return Promise.resolve({ok: false, message:
+                view.operation && !view.operation.terminal
+                    ? "A reply is being written. Wait for it to finish, then press Done."
+                    : "The conversation is not ready to be edited."});
         }
         const revision = editing.revision;
         const envelope = this.store.envelope("edit_message", {
@@ -3723,39 +3853,29 @@
         });
         envelope.payload = {text, image_action: "keep"};
         editing.saving = true;
-        this.nodes.send.disabled = true;
-        this.say("Saving your edit\u2026", "info");
+        this.say("Saving your edit…", "info");
         return this.store.send(envelope).then((outcome) => outcome, (error) => ({
             ok: false, error: {message: (error && error.message) || ""},
         })).then((outcome) => {
             editing.saving = false;
-            if (this.editing !== editing) return !!(outcome && outcome.ok);
+            if (this.editing !== editing) return {ok: !!(outcome && outcome.ok)};
             if (outcome && outcome.ok) {
                 this.finishEdit();
                 this.tell("Message edited.", "info");
-                return true;
+                return {ok: true};
             }
-            this.tell(((outcome && outcome.error && outcome.error.message)
-                       || "That edit was refused.") + " Your edit is still in the box.",
-                      "warn");
-            this.nodes.send.disabled = !this.canSaveEdit(this.store.snapshot());
-            return false;
+            const why = (outcome && outcome.error && outcome.error.message)
+                || "That edit was refused.";
+            this.tell(why + " Your edit is still in the editor.", "warn");
+            return {ok: false, message: why};
         });
     };
 
-    /** The edit is over, saved or not: the box is the draft's again --
-     *  the draft of the conversation the edit was in, unless told which. */
-    Shell.prototype.finishEdit = function (text) {
-        const editing = this.editing;
-        if (!editing) return false;
+    /** The edit is over, saved or not: the outline comes off the message. */
+    Shell.prototype.finishEdit = function () {
+        if (!this.editing) return false;
         this.editing = null;
-        const input = this.nodes.input;
-        input.value = typeof text === "string" ? text
-            : (this.store.draft(editing.key).text || "");
-        this.applyEditing();
-        this.grow();
         this.markEditTarget();
-        this.nodes.send.disabled = !this.canSend(this.store.snapshot());
         return true;
     };
 
@@ -3765,37 +3885,23 @@
         return true;
     };
 
-    /** Everything that says the box holds an edit, drawn from `editing`. */
-    Shell.prototype.applyEditing = function () {
-        const nodes = this.nodes;
-        const editing = this.editing;
-        nodes.composer.classList.toggle("forge-assistant-editing", !!editing);
-        nodes.editBar.hidden = !editing;
-        if (editing) {
-            nodes.editLabel.textContent = editing.role === "assistant"
-                ? "\u270e Editing " + (editing.who || "the") + "\u2019s reply"
-                : "\u270e Editing your message";
-        }
-        nodes.send.textContent = editing ? "Save" : "Send";
-        nodes.send.title = editing ? "Replace the message with these words" : "";
-        nodes.input.setAttribute("aria-label", editing ? "Edit the message" : "Message");
-        nodes.input.placeholder = editing ? "The message\u2019s new words\u2026"
-            : "Message\u2026";
-        // An edit changes the words, so the tools that add to a message stand
-        // aside. The picture already on it is kept.
-        nodes.attach.disabled = !!editing;
-        nodes.dictate.disabled = !!editing;
-    };
-
-    /** Outline the message being edited, and bring it into view when asked. */
+    /** Outline the message being edited, and bring it into view when asked.
+     *
+     * Only on the conversation the edit is in: the thread on screen can
+     * change under an open dialog, and the same index there is somebody
+     * else's message. */
     Shell.prototype.markEditTarget = function (show) {
         const transcript = this.nodes.transcript;
         if (!transcript) return;
         const editing = this.editing;
+        const view = this.store && typeof this.store.snapshot === "function"
+            ? this.store.snapshot() : null;
+        const shown = view && view.selection
+            ? NS.conversationKey(view.selection.character, view.selection.thread) : "";
+        const here = !!editing && editing.key === shown;
         let found = null;
         Array.prototype.forEach.call(transcript.children || [], (node) => {
-            const on = !!editing && !!node.dataset
-                && node.dataset.index === String(editing.index);
+            const on = here && !!node.dataset && node.dataset.index === String(editing.index);
             if (on) found = node;
             if (node.classList) node.classList.toggle("forge-assistant-edit-target", on);
         });
@@ -3890,6 +3996,7 @@
 
     Shell.prototype.dispose = function () {
         this.resetTaps();
+        this.resetHeaderTaps();
         this.disposers.forEach((off) => {
             try {
                 off();

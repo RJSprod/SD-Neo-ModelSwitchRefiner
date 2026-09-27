@@ -178,7 +178,7 @@ class TestTheReadAloudSwitch:
             const node = () => document.createElement("div");
             Object.assign(shell.nodes, {root: node(), unread: node(), input: node(),
                                         send: node(), stop: node()});
-            ["renderSelector", "renderChip", "renderTranscript", "renderStatus",
+            ["renderChip", "renderTranscript", "renderStatus",
              "applySuppression", "grow"].forEach((name) => { shell[name] = () => {}; });
             shell.canSend = () => false;
             const view = {readAloud: true, unreadTotal: 0, speech: {},
@@ -1232,15 +1232,19 @@ class TestTheAutoAttachSwitch:
 
         assert found == {"restored": False, "on": True}
 
-    def test_the_menu_offers_it_beside_free_float(self):
+    def test_the_menu_offers_it_in_the_composer_group(self):
+        """Beside Send to Generate: the two switches about what a message
+        carries and what a reply's button does, under one heading."""
         found = run_auto(AUTO + """
             const shell = autoShell();
             shell.closeMenu = () => undefined;
             shell.host.listUtilities = () => [];
-            console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
+            const labels = shell.utilityItems().map((item) => item.textContent);
+            const at = labels.indexOf("Composer");
+            console.log(JSON.stringify(labels.slice(at, at + 3)));
         """)
 
-        assert found[:2] == ["Free Float", "Auto Attach"]
+        assert found == ["Composer", "Auto Attach", "Send to Generate"]
 
     def test_the_paperclip_is_lit_while_it_is_on(self):
         on = rule('.forge-assistant-attach[data-auto="on"]')

@@ -1402,17 +1402,39 @@ class TestTheRowFitsItsColumn:
         assert built.components["literal_positive"].label == "Positive Literal"
         assert built.components["literal_negative"].label == "Negative Literal"
 
-    def test_neither_box_explains_itself(self, built):
-        """Label and field, and nothing else. This sits between the native
-        Negative Prompt and the generation controls, where a paragraph of
-        description under each of two boxes is what pushes everything else off
-        screen -- and where the boxes are the only two of the four that would
-        have one."""
+    def test_neither_box_explains_itself_outside_the_box(self, built):
+        """The field, and nothing above or under it. This sits between the
+        native Negative Prompt and the generation controls, where a title
+        above each of two boxes and a paragraph under each is what pushes
+        everything else off screen. What each box is goes *inside* it, the
+        way the two prompt boxes above say what they are: a placeholder in
+        the quiet type, gone the moment somebody types. "There should be no
+        title above the box."
+        """
+        import model_chain_krea_creative as creative
+
+        hints = {"literal_positive": creative.LITERAL_POSITIVE_HINT,
+                 "literal_negative": creative.LITERAL_NEGATIVE_HINT}
         for name in ("literal_positive", "literal_negative"):
             box = built.components[name]
 
             assert getattr(box, "info", None) is None
-            assert not getattr(box, "placeholder", None)
+            assert box.show_label is False, "no title above the box"
+            assert box.placeholder == hints[name]
+            # The label is kept for what a label is for -- the accessible name,
+            # and the Extra Networks browser's memory of which box was used
+            # last -- and simply not drawn.
+            assert box.label in ("Positive Literal", "Negative Literal")
+
+    def test_the_hints_say_what_the_boxes_are_and_which_is_which(self):
+        import model_chain_krea_creative as creative
+
+        assert creative.LITERAL_POSITIVE_HINT.startswith("Positive Literal")
+        assert creative.LITERAL_NEGATIVE_HINT.startswith("Negative Literal")
+        assert "in front of" in creative.LITERAL_POSITIVE_HINT
+        assert "after" in creative.LITERAL_NEGATIVE_HINT
+        assert "Negative Prompt" in creative.LITERAL_NEGATIVE_HINT, (
+            "the one thing people mistake it for, said where they would make the mistake")
 
     def test_neither_box_states_a_width_of_any_kind(self, built):
         """No `scale`, no `min_width`.

@@ -470,7 +470,8 @@
         if (context.nativeDialog) return "";               // browser's own
         if (context.hostDialogOpen && !context.insideAssistant) return "";
         if (context.assistantMenuOpen) return "close-menu";
-        if (context.assistantEditing) return "cancel-edit";
+        // An edit in progress is in the message editor's dialog, whose
+        // Escape is its own and never reaches here.
         if (context.focusActive) return "exit-focus";
         return "";                                         // the host's Escape
     }

@@ -4,7 +4,7 @@
 // JavaScript focused on enhancement, not core business logic. Python should
 // remain authoritative for model state, persistence, inference, and memory
 // decisions." Nothing here talks to a model, stores anything, or decides
-// anything. It does seven things a browser is better placed to do than a
+// anything. It does eight things a browser is better placed to do than a
 // server round trip:
 //
 //   * Ctrl/Cmd+Enter submits the composer that has focus;
@@ -17,7 +17,9 @@
 //     stylesheet;
 //   * a status line that says something is in progress counts the seconds it
 //     has been in progress for;
-//   * the WebUI's footer is taken off the page, if the setting says so.
+//   * the WebUI's footer is taken off the page, if the setting says so;
+//   * Edit opens the message editor's dialog over the edit row, and hands the
+//     row the words back.
 //
 // The counter is the one that has to justify itself, because the server could
 // in principle have written the number. It could not have kept writing it: a
@@ -647,6 +649,80 @@
         }, true);
     }
 
+    // -- editing in a dialog ------------------------------------------------ //
+    //
+    // Edit opens the row under the transcript -- the box, the paperclip, Save
+    // and Cancel -- and that row is still what the server knows about. What
+    // was asked for is a dialog: "a simple pop up, current text in an input
+    // field, cancel, and a done button", the same one the Forge Assistant's
+    // Edit opens. So when the row appears, its words go into the dialog; Done
+    // puts the dialog's words back into the row's box and presses its Save,
+    // and Cancel presses its Cancel. Python decides everything after that,
+    // exactly as before, and a page without the dialog's script still has
+    // the row. The browser nominates and decides nothing.
+    //
+    // The row is watched rather than the Edit button, because the words to
+    // edit come back from the server with the row: only once it is showing
+    // is there a message in the box. `offsetParent` is how this file already
+    // asks whether something is showing -- it is null for an element with
+    // `display: none` on it or on any ancestor, whichever way Gradio wrote it.
+    const EDIT_ROW = "mc-llm-chat-edit";
+    const EDIT_BOX = "mc-llm-chat-editor";
+    const EDIT_SAVE = "mc-llm-chat-edit-save";
+    const EDIT_CANCEL = "mc-llm-chat-edit-cancel";
+
+    function editorLoaded() {
+        return !!(window.mcMessageEditor && typeof window.mcMessageEditor.open === "function");
+    }
+
+    function wireEditor() {
+        const row = byId(EDIT_ROW);
+        if (!row || row.dataset.mcLlmEditor === "1") return;
+        if (!editorLoaded()) return;
+        row.dataset.mcLlmEditor = "1";
+        let was = !!row.offsetParent;
+        const observer = new MutationObserver(function () {
+            const now = !!row.offsetParent;
+            if (now && !was) openEditor();
+            was = now;
+        });
+        observer.observe(row, {attributes: true, attributeFilter: ["class", "style"]});
+        if (was) openEditor();
+    }
+
+    function openEditor() {
+        const holder = byId(EDIT_BOX);
+        const field = holder && (holder.tagName === "TEXTAREA" ? holder
+            : holder.querySelector("textarea"));
+        if (!field) return;
+        // A frame later: the row and the words in its box arrive in the same
+        // update, and the observer may run on the first of them.
+        const open = function () {
+            window.mcMessageEditor.open({
+                title: "Edit message",
+                text: field.value,
+                placeholder: "The message’s new words…",
+                done: function (words) {
+                    field.value = words;
+                    // Gradio reads the box on `input`, not on assignment.
+                    field.dispatchEvent(new Event("input", {bubbles: true}));
+                    if (!press(EDIT_SAVE)) {
+                        return {ok: false, message: "Save is not available right now."};
+                    }
+                    return {ok: true};
+                },
+                cancel: function () {
+                    press(EDIT_CANCEL);
+                },
+            });
+        };
+        if (typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(open);
+        } else {
+            open();
+        }
+    }
+
     // Each concern on its own. Polish must never be able to break the tab it is
     // polishing -- and one piece of polish must never be able to break another,
     // which a single try around all of them does not give you: these are
@@ -668,6 +744,7 @@
         attempt("follow the transcript", wireTranscript);
         attempt("draw the reply icons", wireReplies);
         attempt("keep the sheets in view", wireSheets);
+        attempt("edit in a dialog", wireEditor);
         attempt("count the seconds", function () { watchActivity(); tick(); });
         attempt("fit the workspace", function () { watchWindow(); fit(); });
     }
