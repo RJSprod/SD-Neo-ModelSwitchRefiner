@@ -39,6 +39,7 @@ LOOK = JAVASCRIPT / "forge_assistant_look.js"
 HOST = JAVASCRIPT / "forge_assistant_host.js"
 STORE = JAVASCRIPT / "forge_assistant_store.js"
 SYSTEM = JAVASCRIPT / "forge_assistant_system.js"
+EDITOR = JAVASCRIPT / "mc_message_editor.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 
@@ -178,7 +179,8 @@ def run(scenario: str, viewport=None, insets=None, sources=("shell",)) -> dict:
     Written to a file rather than passed with ``node -e``: a single argument is
     capped at 128 KiB on Linux and the harness plus the sources is past that.
     """
-    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK, "system": SYSTEM}
+    order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK, "system": SYSTEM,
+             "editor": EDITOR}
     body = "\n".join(order[name].read_text(encoding="utf-8") for name in sources)
     # The scalars first and the sources last, deliberately. The sources contain
     # the word VIEWPORT (in ``NARROW_VIEWPORT``), so substituting them first
@@ -497,10 +499,6 @@ class TestEscapePrecedence:
         assert self.order({"assistantMenuOpen": True, "focusActive": True}) \
             == "close-menu"
 
-    def test_an_edit_is_cancelled_before_focus_exits(self):
-        assert self.order({"assistantEditing": True, "focusActive": True}) \
-            == "cancel-edit"
-
     def test_focus_exits_when_nothing_else_wants_it(self):
         assert self.order({"focusActive": True}) == "exit-focus"
 
@@ -683,7 +681,8 @@ function picker(host, focus) {
     shell.say = (text, tone) => shell.said.push({text, tone});
     shell._save = () => {};
     shell.place = () => {};
-    shell.nodes = {focusToggle: {setAttribute(name, value) { this[name] = value; }}};
+    // Focus is marked on the panel now that there is no Focus button.
+    shell.nodes = {panel: {dataset: {}}};
     // The ⋯ menu's conversation entries ask which conversation is on screen.
     shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
     shell.host = Object.assign({
@@ -1862,8 +1861,9 @@ class TestEveryMenuHasAWayOut:
         assert found["role"] == "menuitem"
 
     def test_the_way_out_is_added_where_a_new_menu_cannot_forget_it(self):
-        """In `toggleMenu`, not in each builder. A fourth menu added later gets
-        one without anybody remembering to."""
+        """In `showMenu`, which draws every list -- the ⋯ menu's own and its
+        submenus alike -- and not in each builder. A fourth list added later
+        gets one without anybody remembering to."""
         shell = SHELL.read_text(encoding="utf-8")
         builders = [shell.split("Shell.prototype." + name + " = function", 1)[1]
                     .split("Shell.prototype", 1)[0]
@@ -1871,10 +1871,13 @@ class TestEveryMenuHasAWayOut:
 
         for body in builders:
             assert "cancelItem" not in body, (
-                "the way out belongs in toggleMenu, once, not in every builder")
+                "the way out belongs in showMenu, once, not in every builder")
+        show = shell.split("Shell.prototype.showMenu = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+        assert "cancelItem" in show
         toggle = shell.split("Shell.prototype.toggleMenu = function", 1)[1] \
             .split("Shell.prototype", 1)[0]
-        assert "cancelItem" in toggle
+        assert "showMenu" in toggle and "cancelItem" not in toggle
 
 
 class TestSwitchingWorkspaceWhileFocused:
@@ -1899,7 +1902,7 @@ class TestSwitchingWorkspaceWhileFocused:
                     calls: shell.focus.calls,
                     on: shell.focus.activeWorkspace(),
                     remembered: shell.state.focusWorkspaceId,
-                    pressed: shell.nodes.focusToggle["aria-pressed"],
+                    marked: shell.nodes.panel.dataset.focus,
                 }));
             });
         """, sources=("shell",))
@@ -1908,7 +1911,7 @@ class TestSwitchingWorkspaceWhileFocused:
             "off before the host is asked to show a panel this code is hiding")
         assert found["on"] == "tab_img2img"
         assert found["remembered"] == "tab_img2img"
-        assert found["pressed"] == "true"
+        assert found["marked"] == "on"
 
     def test_the_host_is_asked_while_nothing_is_being_hidden(self):
         """The order is the fix. Asked first and unfocused second, the host
@@ -1970,13 +1973,13 @@ class TestSwitchingWorkspaceWhileFocused:
             shell.state.focusEnabled = true;
             shell.switchWorkspace("tab_img2img").then(() => {
                 console.log(JSON.stringify({enabled: shell.state.focusEnabled,
-                                            pressed: shell.nodes.focusToggle["aria-pressed"],
+                                            marked: shell.nodes.panel.dataset.focus,
                                             said: shell.said.map((s) => s.text)}));
             });
         """, sources=("shell",))
 
         assert found["enabled"] is False
-        assert found["pressed"] == "false"
+        assert found["marked"] == "off"
         assert found["said"] == ["No panel to fill with."]
 
     def test_navigation_never_tries_to_move_focus_that_is_off(self):
@@ -2296,7 +2299,10 @@ class TestFreeFloat:
     than snapping to one of six resting places, remembered between sessions.
     """
 
-    def test_the_utility_menu_offers_it_first(self):
+    def test_the_utility_menu_offers_it_in_the_panel_group(self):
+        """It is a mode of the panel, so it is in the group about the panel;
+        the two that give a card back are last, under a heading of their
+        own, and not what anybody hits on the way to something else."""
         found = run(PICKER + """
             const shell = picker();
             shell.state.freeFloat = false;
@@ -2306,18 +2312,18 @@ class TestFreeFloat:
                 {id: "l", label: "Unload LLM", enabled: true,
                  kind: "unload", scope: "llm"}];
             const items = shell.utilityItems();
+            const item = items.find((i) => i.textContent === "Free Float");
             console.log(JSON.stringify({
                 labels: items.map((i) => i.textContent),
-                checked: items[0].getAttribute("aria-checked"),
-                role: items[0].getAttribute("role"),
+                checked: item.getAttribute("aria-checked"),
+                role: item.getAttribute("role"),
             }));
         """, sources=("shell",))
 
-        # Auto Attach and Send to Generate follow it: the other modes in this
-        # menu, and a mode is not what anybody should hit on the way to giving
-        # a card back.
-        assert found["labels"] == ["Free Float", "Auto Attach", "Send to Generate",
-                                   "New thread", "Unload All Models", "Unload LLM"]
+        assert found["labels"] == ["Chat · Ada", "New chat", "Threads",
+                                   "Composer", "Auto Attach", "Send to Generate",
+                                   "Panel", "Free Float",
+                                   "Models", "Unload All Models", "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")
@@ -2327,9 +2333,8 @@ class TestFreeFloat:
             const shell = picker();
             shell.state.freeFloat = true;
             shell.host.listUtilities = () => [];
-            console.log(JSON.stringify({
-                checked: shell.utilityItems()[0].getAttribute("aria-checked"),
-            }));
+            const item = shell.utilityItems().find((i) => i.textContent === "Free Float");
+            console.log(JSON.stringify({checked: item.getAttribute("aria-checked")}));
         """, sources=("shell",))
 
         assert found["checked"] == "true"
@@ -2521,7 +2526,9 @@ class TestFreeFloat:
 class TestTheHeaderIsOneRow:
     """Asked for: one row carrying Workspace, Focus, ⋯ and ✕, with the title
     gone. It was two rows, and above a collapsed conversation that was most of
-    the panel."""
+    the panel. Then the words went too: Workspace and Chat are glyphs, Focus
+    is three presses on the row's space, and the accordion heading under the
+    row is the Chat glyph."""
 
     def test_the_row_carries_all_four_controls_and_no_title(self):
         found = run("""
@@ -2538,17 +2545,29 @@ class TestTheHeaderIsOneRow:
             shell.buildPanel();
             const header = shell.nodes.header;
             console.log(JSON.stringify({
-                order: header.children.map((c) => c.textContent || c.className),
+                order: header.children.map((c) => c["aria-label"] || c.className),
+                words: header.children.map((c) => c.textContent),
                 title: shell.nodes.title === undefined,
                 nav: shell.nodes.nav === undefined,
+                focusButton: shell.nodes.focusToggle === undefined,
+                heading: shell.nodes.heading === undefined,
+                who: shell.nodes.who === undefined,
+                chat: shell.nodes.chat["aria-expanded"],
+                controls: shell.nodes.chat["aria-controls"],
                 named: shell.nodes.panel["aria-label"],
             }));
         """, sources=("shell",))
 
-        assert found["order"] == ["Workspace", "Focus", "⋯",
-                                 "forge-assistant-grip", "✕"]
+        assert found["order"] == ["Workspace", "Chat", "More actions",
+                                 "forge-assistant-grip", "Minimize the assistant"]
+        # Glyphs, every one: nothing in the row is a word.
+        assert all(len(word) <= 2 for word in found["words"]), found["words"]
         assert found["title"] is True
         assert found["nav"] is True
+        assert found["focusButton"] is True, "three presses on the row do its job"
+        assert found["heading"] is True and found["who"] is True, (
+            "the accordion heading and the character · thread line are gone")
+        assert found["chat"] == "false" and found["controls"] == "forge-assistant-conversation"
         assert found["named"] == "Forge Assistant", (
             "the panel keeps its name where a name is used")
 
@@ -2593,6 +2612,14 @@ class TestTheHeaderIsOneRow:
 
         assert ".forge-assistant-title" not in css
         assert ".forge-assistant-nav {" not in css
+        # The accordion heading, the character · thread line and the edit
+        # strip in the composer went in the round after.
+        assert ".forge-assistant-accordion" not in css
+        assert ".forge-assistant-chevron" not in css
+        assert ".forge-assistant-who" not in css
+        assert ".forge-assistant-selector" not in css
+        assert ".forge-assistant-edit-bar" not in css
+        assert ".forge-assistant-editing" not in css
         # The button class the three menus share is still in use.
         assert ".forge-assistant-nav-button" in css
 
@@ -2754,16 +2781,16 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
         transcript's height."""
         found = run(ROW + """
             const shell = rowShell(TABS, "tab_txt2img");
-            shell.nodes.heading = document.createElement("button");
+            shell.nodes.chat = document.createElement("button");
             shell.nodes.body = document.createElement("div");
             shell.nodes.panel = document.createElement("div");
             shell.nodes.picker = document.createElement("button");
             shell.nodes.menu = document.createElement("div");
-            shell.nodes.menu.dataset.which = "";
+            shell.nodes.menu.dataset.owner = "";
             const seen = [];
             [false, true].forEach((open) => {
                 shell.state.conversationExpanded = open;
-                shell.applyAccordion();
+                shell.applyChat();
                 seen.push({open, hidden: shell.nodes.workspaces.hidden,
                            drawn: shell.nodes.workspaces.children.length,
                            menuButton: shell.nodes.picker.hidden});
@@ -2785,18 +2812,18 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
         cannot be dismissed by pressing that button again."""
         found = run(ROW + """
             const shell = rowShell(TABS, "tab_txt2img");
-            shell.nodes.heading = document.createElement("button");
+            shell.nodes.chat = document.createElement("button");
             shell.nodes.body = document.createElement("div");
             shell.nodes.panel = document.createElement("div");
             shell.nodes.picker = document.createElement("button");
             shell.nodes.menu = document.createElement("div");
             shell.closed = [];
-            shell.closeMenu = () => { shell.closed.push(shell.nodes.menu.dataset.which); };
+            shell.closeMenu = () => { shell.closed.push(shell.nodes.menu.dataset.owner); };
             const seen = [];
             ["workspaces", "utilities"].forEach((which) => {
-                shell.nodes.menu.dataset.which = which;
+                shell.nodes.menu.dataset.owner = which;
                 shell.state.conversationExpanded = false;
-                shell.applyAccordion();
+                shell.applyChat();
             });
             console.log(JSON.stringify({closed: shell.closed}));
         """, sources=("shell",))

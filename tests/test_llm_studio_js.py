@@ -1019,3 +1019,178 @@ class TestThePaperclipOpensThePicker:
                        'elements["mc-llm-chat-attach"].handlers.click();')
 
         assert found["opened"] == ["mc-llm-chat-image"]
+
+
+# --------------------------------------------------------------------------- #
+# Editing in the message editor's dialog
+# --------------------------------------------------------------------------- #
+#
+# Edit opens the row under the transcript, and that row is still what the
+# server knows about. Asked for instead: "a simple pop up ... For both LLM
+# studio conversation and our flyout menu." So the script watches the row,
+# opens the shared dialog with the box's words when it appears, and finishes
+# the press through the row's own Save and Cancel. Python decides everything
+# after that, as before.
+
+DIALOG = """
+function control(id, tag) {
+    const node = {
+        id, tagName: tag, dataset: {}, handlers: {}, disabled: false,
+        addEventListener(kind, fn) { node.handlers[kind] = fn; },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        click() { pressed.push(id); },
+    };
+    return node;
+}
+const pressed = [];
+const events = [];
+const field = {tagName: "TEXTAREA", value: "make it top down view",
+               dispatchEvent(event) { events.push(event.type + ":" + event.bubbles); }};
+const holder = control("mc-llm-chat-editor", "DIV");
+holder.querySelector = (selector) => selector === "textarea" ? field : null;
+const row = control("mc-llm-chat-edit", "DIV");
+row.offsetParent = ROW_SHOWING ? {} : null;
+const elements = {
+    "mc-llm-chat-edit": row,
+    "mc-llm-chat-editor": holder,
+    "mc-llm-chat-edit-save": control("mc-llm-chat-edit-save", "BUTTON"),
+    "mc-llm-chat-edit-cancel": control("mc-llm-chat-edit-cancel", "BUTTON"),
+};
+const opened = [];
+if (WITH_EDITOR) {
+    globalThis.mcMessageEditor = {open(options) { opened.push(options); return true; }};
+}
+const observers = [];
+globalThis.MutationObserver = function (callback) {
+    this.callback = callback;
+    this.observe = (node, options) => { observers.push({node: node.id, options, fire: callback}); };
+};
+const html = {scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+              getAttribute: () => null, setAttribute() {}, removeAttribute() {}};
+globalThis.document = {
+    documentElement: html,
+    querySelector: (selector) => elements[selector.replace("#", "")] || null,
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.setInterval = () => 0;
+globalThis.gradioApp = () => globalThis.document;
+
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+const show = () => { row.offsetParent = {}; observers.forEach((o) => o.fire()); };
+const hide = () => { row.offsetParent = null; observers.forEach((o) => o.fire()); };
+__SCENARIO__
+console.log(JSON.stringify({
+    opened: opened.map((o) => ({title: o.title, text: o.text, placeholder: o.placeholder})),
+    observed: observers.map((o) => [o.node, o.options.attributeFilter]),
+    pressed, events, value: field.value,
+    __EXTRA__
+}));
+"""
+
+
+def dialog(scenario: str = "", extra: str = "", showing: bool = False,
+           with_editor: bool = True) -> dict:
+    harness = (DIALOG.replace("SOURCE", SCRIPT.read_text())
+               .replace("__SCENARIO__", scenario)
+               .replace("__EXTRA__", extra)
+               .replace("ROW_SHOWING", "true" if showing else "false")
+               .replace("WITH_EDITOR", "true" if with_editor else "false"))
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestEditOpensTheDialog:
+    def test_the_row_is_watched_and_nothing_opens_until_it_shows(self):
+        found = dialog()
+
+        assert found["observed"] == [["mc-llm-chat-edit", ["class", "style"]]]
+        assert found["opened"] == []
+
+    def test_when_the_row_appears_the_dialog_opens_with_the_box_s_words(self):
+        found = dialog("show();")
+
+        assert found["opened"] == [{"title": "Edit message", "text": "make it top down view",
+                                    "placeholder": "The message’s new words…"}]
+        assert found["pressed"] == []
+
+    def test_a_row_already_showing_when_the_page_is_wired_opens_at_once(self):
+        found = dialog(showing=True)
+
+        assert len(found["opened"]) == 1
+
+    def test_a_row_that_stays_showing_does_not_open_a_second_dialog(self):
+        """The observer fires on every attribute change; only the change
+        from hidden to showing is an Edit."""
+        found = dialog("show(); show(); hide(); show();")
+
+        assert len(found["opened"]) == 2
+
+    def test_done_hands_the_words_to_the_row_and_presses_its_save(self):
+        found = dialog("""
+            show();
+            const answer = opened[0].done("make it a top down view, at dusk");
+        """, extra="answer,")
+
+        assert found["value"] == "make it a top down view, at dusk"
+        assert found["events"] == ["input:true"], (
+            "Gradio reads the box on `input`, not on assignment")
+        assert found["pressed"] == ["mc-llm-chat-edit-save"]
+        assert found["answer"] == {"ok": True}
+
+    def test_a_save_that_cannot_be_pressed_is_a_refusal_the_dialog_shows(self):
+        found = dialog("""
+            show();
+            elements["mc-llm-chat-edit-save"].disabled = true;
+            const answer = opened[0].done("edited");
+        """, extra="answer,")
+
+        assert found["pressed"] == []
+        assert found["answer"] == {"ok": False, "message": "Save is not available right now."}
+
+    def test_cancel_presses_the_row_s_cancel(self):
+        found = dialog("""
+            show();
+            opened[0].cancel();
+        """)
+
+        assert found["pressed"] == ["mc-llm-chat-edit-cancel"]
+        assert found["value"] == "make it top down view", "the words are left alone"
+
+    def test_without_the_dialog_s_script_the_row_is_the_editor_as_before(self):
+        found = dialog("show();", with_editor=False)
+
+        assert found["observed"] == [] and found["opened"] == []
+
+    def test_wiring_twice_watches_once(self):
+        found = dialog("loaded.forEach((fn) => fn()); show();")
+
+        assert len(found["observed"]) == 1
+        assert len(found["opened"]) == 1
+
+    def test_the_ids_are_the_panel_s(self):
+        """Two halves in two languages with nothing between them but these
+        strings, so they are compared rather than trusted."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import mc_llm_ui as ui
+
+        script = SCRIPT.read_text(encoding="utf-8")
+        for name in ("edit", "editor", "edit-save", "edit-cancel"):
+            assert f'"{ui.ident("chat", name)}"' in script, name

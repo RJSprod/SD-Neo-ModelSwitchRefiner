@@ -34,13 +34,21 @@ def rule(selector):
 
 
 # --------------------------------------------------------------------------- #
-# 1. Editing a message in the panel
+# 1. Editing a message, in the message editor's dialog
 # --------------------------------------------------------------------------- #
+#
+# The edit first went into the panel's own box (this round's original ask:
+# "i need UI in our flyout"), and then into a dialog of the extension's own
+# (the round after: "a simple pop up ... current text in an input field,
+# cancel, and a done button ... For both LLM studio conversation and our
+# flyout menu"). These are the box's tests translated to the dialog: what a
+# save carries, where it is aimed, what a refusal leaves, what Cancel and
+# Escape do. The dialog is the real `mc_message_editor.js`.
 
 EDITING = """
-// A panel with a composer and a transcript, and a store that answers as the
-// scenario says. Only what the edit touches is real; everything is the real
-// shell code.
+// A panel with a transcript and a status line, a store that answers as the
+// scenario says, and the real message editor over it. Only what the edit
+// touches is real; everything is the real shell and editor code.
 const made = (tag, cls) => { const n = document.createElement(tag); if (cls) n.className = cls; return n; };
 const KEY = NS.conversationKey("Ada", "t1");
 const drafts = {};
@@ -75,9 +83,6 @@ const shell = Object.create(NS.Shell.prototype);
 shell.store = store;
 shell.state = {};
 shell.settings = {bubbleWidth: 75};
-const composer = made("div", "forge-assistant-composer");
-const editBar = made("div", "forge-assistant-edit-bar");
-editBar.hidden = true;
 const transcript = made("div", "forge-assistant-transcript");
 MESSAGES.forEach((row) => {
     const bubble = made("article", "forge-assistant-bubble");
@@ -88,19 +93,22 @@ MESSAGES.forEach((row) => {
 const input = made("textarea", "forge-assistant-input");
 input.value = "half a thought";
 input.scrollHeight = 40;
-input.setSelectionRange = (a, b) => { input.caret = [a, b]; };
-input.focus = () => { document.activeElement = input; };
-shell.nodes = {composer, editBar, editLabel: made("span"), editCancel: made("button"),
-               input, transcript, send: made("button"), attach: made("button"),
-               dictate: made("button"), status: made("p"), root: made("div")};
-shell.nodes.send.textContent = "Send";
-shell.nodes.root.contains = (node) => node === input;
+const send = made("button");
+send.textContent = "➤";
+shell.nodes = {input, transcript, send, attach: made("button"), dictate: made("button"),
+               status: made("p"), root: made("div"), composer: made("div")};
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+const editor = () => window.mcMessageEditor.editor();
+const box = () => editor().controls.text;
 function mode() {
     const n = shell.nodes;
-    return {editing: !!shell.editing, value: input.value,
-            composer: composer.classList.contains("forge-assistant-editing"),
-            bar: !n.editBar.hidden, label: n.editLabel.textContent, send: n.send.textContent,
+    const c = editor().controls;
+    const open = window.mcMessageEditor.isOpen();
+    return {editing: !!shell.editing, open,
+            value: open ? c.text.value : null,
+            title: c.heading ? c.heading.textContent : "",
+            note: c.note ? c.note.textContent : "",
+            draft: input.value, send: n.send.textContent,
             attach: !!n.attach.disabled, dictate: !!n.dictate.disabled,
             said: n.status.textContent, kind: n.status.dataset.kind,
             targets: transcript.children.filter((b) => b.classList.contains(
@@ -109,52 +117,42 @@ function mode() {
 """
 
 
-def run_edit(scenario, sources=("shell", "store")):
+def run_edit(scenario, sources=("shell", "store", "editor")):
     return run(EDITING + scenario, sources=sources)
 
 
-class TestEditingHappensInThePanel:
+class TestEditingHappensInADialog:
     """"That image is what my browser threw me to edit. It sucks. I dont want
-    the browser doing this, i need UI in our flyout.\""""
+    the browser doing this, i need UI in our flyout." And then: "when i choose
+    to edit, i want a simple pop up.\""""
 
     def test_the_browser_s_prompt_is_never_asked(self):
         found = run_edit("""
             let asked = 0;
             globalThis.prompt = () => { asked += 1; return "typed into a dialog"; };
             shell.startEdit(MESSAGES[0], 7);
-            console.log(JSON.stringify({asked, value: input.value}));
+            console.log(JSON.stringify({asked, open: mode().open, value: mode().value}));
         """)
 
-        assert found == {"asked": 0, "value": "make it top down view"}
-        assert not re.search(r"window\.prompt\s*\(", SHELL.read_text(encoding="utf-8"))
+        assert found == {"asked": 0, "open": True, "value": "make it top down view"}
+        for source in (SHELL, SHELL.parent / "mc_message_editor.js"):
+            assert not re.search(r"window\.prompt\s*\(", source.read_text(encoding="utf-8"))
 
-    def test_the_message_goes_into_the_box_and_the_box_says_it_is_an_edit(self):
+    def test_the_message_goes_into_the_dialog_and_the_dialog_says_whose_it_is(self):
         found = run_edit("""
+            editor().build();
+            box().setSelectionRange = (a, b) => { box().caret = [a, b]; };
             shell.startEdit(MESSAGES[0], 7);
             console.log(JSON.stringify(Object.assign(mode(), {
-                focused: document.activeElement === input, caret: input.caret,
-                aria: input["aria-label"]})));
+                focused: !!box().focused, caret: box().caret,
+                placeholder: box().placeholder})));
         """)
 
+        assert found["open"] is True and found["editing"] is True
         assert found["value"] == "make it top down view"
-        assert found["composer"] is True and found["bar"] is True
-        assert found["label"] == "✎ Editing your message"
-        assert found["send"] == "Save"
+        assert found["title"] == "Edit your message"
         assert found["focused"] is True and found["caret"] == [21, 21]
-        assert found["aria"] == "Edit the message"
-
-    def test_save_can_be_pressed_from_the_start(self):
-        """Found in Chromium: Send is disabled over an empty draft, and Save
-        kept that until something was typed -- a greyed-out Save over a
-        message full of words."""
-        found = run_edit("""
-            drafts[KEY] = {text: "", attachment: null};
-            shell.nodes.send.disabled = true;
-            shell.startEdit(MESSAGES[0], 7);
-            console.log(JSON.stringify({save: !shell.nodes.send.disabled}));
-        """)
-
-        assert found == {"save": True}
+        assert found["placeholder"] == "The message’s new words…"
 
     def test_a_reply_says_whose_it_is(self):
         found = run_edit("""
@@ -162,14 +160,30 @@ class TestEditingHappensInThePanel:
             console.log(JSON.stringify(mode()));
         """)
 
-        assert found["label"] == "✎ Editing Ada’s reply"
+        assert found["title"] == "Edit Ada’s reply"
+
+    def test_the_composer_is_left_exactly_as_it_was(self):
+        """The box used to hold the edit, so the draft went away and Send read
+        Save and the paperclip stood aside. None of that now: the edit is in
+        the dialog and the composer is not part of it."""
+        found = run_edit("""
+            shell.startEdit(MESSAGES[0], 7);
+            console.log(JSON.stringify(Object.assign(mode(), {typed: store.typed,
+                composerClass: shell.nodes.composer.className})));
+        """)
+
+        assert found["draft"] == "half a thought"
+        assert found["send"] == "➤"
+        assert found["attach"] is False and found["dictate"] is False
+        assert found["typed"] == []
+        assert "editing" not in found["composerClass"]
 
     def test_the_message_being_edited_is_outlined_and_brought_into_view(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[1], 7);
             const during = mode().targets;
             const shown = !!transcript.children[1].scrolledTo;
-            shell.cancelEdit();
+            editor().cancel();
             console.log(JSON.stringify({during, shown, after: mode().targets}));
         """)
 
@@ -193,26 +207,68 @@ class TestEditingHappensInThePanel:
 
         assert found == {"count": 2, "targets": ["1"]}
 
-    def test_the_tools_that_add_to_a_message_stand_aside(self):
+    def test_the_outline_is_only_on_the_conversation_the_edit_is_in(self):
+        """The thread on screen can change under an open dialog, and the same
+        index there is somebody else's message."""
         found = run_edit("""
-            shell.startEdit(MESSAGES[0], 7);
-            const during = [mode().attach, mode().dictate];
-            shell.cancelEdit();
-            console.log(JSON.stringify({during, after: [mode().attach, mode().dictate]}));
+            shell.startEdit(MESSAGES[1], 7);
+            view = Object.assign({}, view, {selection: {character: "Ada", thread: "t2",
+                                                        epoch: "e2"}});
+            shell.markEditTarget();
+            const away = mode().targets;
+            view = Object.assign({}, view, {selection: {character: "Ada", thread: "t1",
+                                                        epoch: "e1"}});
+            shell.markEditTarget();
+            console.log(JSON.stringify({away, back: mode().targets, open: mode().open}));
         """)
 
-        assert found == {"during": [True, True], "after": [False, False]}
+        assert found == {"away": [], "back": ["1"], "open": True}
+
+    def test_a_second_press_on_edit_keeps_what_is_being_typed(self):
+        found = run_edit("""
+            shell.startEdit(MESSAGES[0], 7);
+            box().value = "half of my edit";
+            shell.startEdit(MESSAGES[0], 7);
+            console.log(JSON.stringify(mode()));
+        """)
+
+        assert found["editing"] is True and found["open"] is True
+        assert found["value"] == "half of my edit"
+
+    def test_edit_on_another_message_moves_the_dialog_to_it(self):
+        found = run_edit("""
+            shell.startEdit(MESSAGES[0], 7);
+            box().value = "half of my edit";
+            shell.startEdit(MESSAGES[1], 7);
+            console.log(JSON.stringify(Object.assign(mode(), {index: shell.editing.index})));
+        """)
+
+        assert found["index"] == 1
+        assert found["value"] == "A harbour seen from above, 35mm"
+        assert found["title"] == "Edit Ada’s reply"
+        assert found["targets"] == ["1"]
+
+    def test_without_the_dialog_s_script_the_press_says_so(self):
+        found = run_edit("""
+            delete window.mcMessageEditor;
+            const began = shell.startEdit(MESSAGES[0], 7);
+            console.log(JSON.stringify({began, editing: !!shell.editing,
+                                        said: shell.nodes.status.textContent}));
+        """)
+
+        assert found == {"began": False, "editing": False,
+                         "said": "The message editor is not loaded. Reload the page to edit."}
 
 
-class TestSavingAnEdit:
+class TestDoneSavesTheEdit:
     """"i just need the ability to submit the edit and have it replace what
     was there.\""""
 
-    def test_save_replaces_the_message_it_was_aimed_at(self):
+    def test_done_replaces_the_message_it_was_aimed_at(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "make it a top down view, at dusk";
-            shell.send();
+            box().value = "make it a top down view, at dusk";
+            editor().done();
             settle().then(() => console.log(JSON.stringify(store.sent)));
         """)
 
@@ -226,171 +282,154 @@ class TestSavingAnEdit:
                                    "image_action": "keep"}
 
     def test_the_save_goes_to_the_conversation_the_edit_began_in(self):
-        """The selection can move before the panel redraws and puts the edit
-        away; a Save pressed in between is still aimed at the edit's thread."""
+        """The selection can move under an open dialog; Done is still aimed
+        at the edit's thread."""
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "edited";
+            box().value = "edited";
             view = Object.assign({}, view, {selection: {character: "Ada", thread: "t2",
                                                         epoch: "e2"}});
-            shell.saveEdit().then(() => console.log(JSON.stringify(store.sent[0].conversation)));
+            editor().done().then(() => console.log(JSON.stringify(store.sent[0].conversation)));
         """)
 
         assert found == {"character": "Ada", "thread_id": "t1"}
 
-    def test_a_second_press_on_edit_keeps_what_is_being_typed(self):
+    def test_enter_is_done_and_shift_enter_is_a_new_line(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "half of my edit";
-            shell.startEdit(MESSAGES[0], 7);
-            console.log(JSON.stringify(mode()));
-        """)
-
-        assert found["editing"] is True
-        assert found["value"] == "half of my edit"
-
-    def test_enter_saves_and_asks_for_no_reply(self):
-        found = run_edit("""
-            shell.startEdit(MESSAGES[0], 7);
-            input.value = "edited";
-            let prevented = false;
-            shell.composerKey({key: "Enter", preventDefault() { prevented = true; }});
+            box().value = "edited";
+            let prevented = [];
+            editor().keyed({key: "Enter", shiftKey: true, preventDefault() { prevented.push("shift"); }});
+            const afterShift = store.sent.length;
+            editor().keyed({key: "Enter", preventDefault() { prevented.push("plain"); }});
             settle().then(() => console.log(JSON.stringify(
-                {prevented, actions: store.sent.map((e) => e.action)})));
+                {prevented, afterShift, actions: store.sent.map((e) => e.action)})));
         """)
 
-        assert found == {"prevented": True, "actions": ["edit_message"]}
+        assert found == {"prevented": ["plain"], "afterShift": 0, "actions": ["edit_message"]}
 
-    def test_afterwards_the_box_is_the_draft_again(self):
-        """What was half-typed before Edit comes back, and it never went into
-        the store as the edit's words."""
+    def test_afterwards_the_dialog_is_gone_and_the_draft_was_never_touched(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "edited";
-            input.handlers = input.handlers || {};
-            shell.saveEdit().then(() => console.log(JSON.stringify(Object.assign(mode(),
+            box().value = "edited";
+            editor().done().then(() => console.log(JSON.stringify(Object.assign(mode(),
                 {typed: store.typed}))));
         """)
 
-        assert found["editing"] is False
-        assert found["value"] == "half a thought"
-        assert found["composer"] is False and found["bar"] is False
-        assert found["send"] == "Send"
+        assert found["editing"] is False and found["open"] is False
+        assert found["draft"] == "half a thought"
         assert found["said"] == "Message edited."
         assert found["typed"] == []
+        assert found["targets"] == []
 
-    def test_typing_an_edit_does_not_write_the_draft(self):
-        found = run_edit("""
-            shell.typed();
-            const before = store.typed.slice();
-            shell.startEdit(MESSAGES[0], 7);
-            input.value = "edi";
-            shell.typed();
-            const saveable = !shell.nodes.send.disabled;
-            input.value = "";
-            shell.typed();
-            console.log(JSON.stringify({before, during: store.typed.length - before.length,
-                                        saveable, empty: !!shell.nodes.send.disabled}));
-        """)
-
-        assert found["before"] == ["half a thought"], "outside an edit it is the draft"
-        assert found["during"] == 0
-        assert found["saveable"] is True and found["empty"] is True
-
-    def test_a_refused_save_keeps_the_edit_and_says_why(self):
+    def test_a_refused_save_keeps_the_dialog_open_and_says_why_in_it(self):
         found = run_edit("""
             store.answer = {ok: false, error: {message: "That message changed in another window."}};
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "my careful edit";
-            shell.saveEdit().then(() => console.log(JSON.stringify(mode())));
+            box().value = "my careful edit";
+            editor().done().then(() => console.log(JSON.stringify(Object.assign(mode(),
+                {doneEnabled: !editor().controls.done.disabled,
+                 noteKind: editor().controls.note.dataset.kind}))));
         """)
 
-        assert found["editing"] is True
+        assert found["editing"] is True and found["open"] is True
         assert found["value"] == "my careful edit"
+        assert found["note"] == "That message changed in another window."
+        assert found["noteKind"] == "error"
+        assert found["doneEnabled"] is True, "so it can be tried again"
         assert found["said"] == ("That message changed in another window. "
-                                 "Your edit is still in the box.")
+                                 "Your edit is still in the editor.")
         assert found["kind"] == "warn"
 
     def test_a_save_that_throws_is_a_refusal_too(self):
         found = run_edit("""
             store.send = () => Promise.reject(new Error("The server went away."));
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "my careful edit";
-            shell.saveEdit().then(() => console.log(JSON.stringify(mode())));
+            box().value = "my careful edit";
+            editor().done().then(() => console.log(JSON.stringify(mode())));
         """)
 
-        assert found["editing"] is True and found["value"] == "my careful edit"
-        assert found["said"].startswith("The server went away.")
+        assert found["editing"] is True and found["open"] is True
+        assert found["value"] == "my careful edit"
+        assert found["note"] == "The server went away."
 
-    def test_a_second_press_while_saving_sends_nothing_more(self):
+    def test_a_second_press_of_done_while_saving_sends_nothing_more(self):
         found = run_edit("""
             let release;
             store.send = (envelope) => { store.sent.push(envelope);
                 return new Promise((resolve) => { release = () => resolve({ok: true}); }); };
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "edited";
-            shell.saveEdit();
-            shell.saveEdit();
-            shell.send();
+            box().value = "edited";
+            editor().done();
+            const greyed = !!editor().controls.done.disabled;
+            editor().done();
+            shell.saveEdit("edited again");
             const during = store.sent.length;
             release();
-            settle().then(() => console.log(JSON.stringify({during, editing: !!shell.editing})));
+            settle().then(() => settle()).then(() => console.log(JSON.stringify(
+                {during, greyed, editing: !!shell.editing, open: mode().open})));
         """)
 
-        assert found == {"during": 1, "editing": False}
+        assert found == {"during": 1, "greyed": True, "editing": False, "open": False}
 
     def test_nothing_changed_is_not_sent(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            shell.saveEdit().then(() => console.log(JSON.stringify(Object.assign(mode(),
+            editor().done().then(() => console.log(JSON.stringify(Object.assign(mode(),
                 {sent: store.sent.length}))));
         """)
 
         assert found["sent"] == 0
-        assert found["editing"] is False
+        assert found["editing"] is False and found["open"] is False
         assert found["said"] == "Nothing was changed."
 
     def test_an_empty_box_is_not_saved(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "   ";
-            const allowed = shell.canSaveEdit(view);
-            shell.saveEdit().then(() => console.log(JSON.stringify(Object.assign(mode(),
-                {sent: store.sent.length, allowed}))));
+            box().value = "   ";
+            editor().done().then(() => console.log(JSON.stringify(Object.assign(mode(),
+                {sent: store.sent.length}))));
         """)
 
         assert found["sent"] == 0
-        assert found["allowed"] is False
-        assert found["editing"] is True
-        assert found["kind"] == "warn"
+        assert found["editing"] is True and found["open"] is True
+        assert found["note"] == "Type the message’s new words, or press Cancel to keep it."
 
-    def test_save_waits_for_a_reply_that_is_being_written(self):
+    def test_done_waits_for_a_reply_that_is_being_written(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "edited";
+            box().value = "edited";
             const idle = shell.canSaveEdit(view);
             view = Object.assign({}, view, {operation: {id: "o1", terminal: false}});
-            console.log(JSON.stringify({idle, busy: shell.canSaveEdit(view)}));
+            const busy = shell.canSaveEdit(view);
+            editor().done().then(() => console.log(JSON.stringify(Object.assign(mode(),
+                {idle, busy, sent: store.sent.length}))));
         """)
 
-        assert found == {"idle": True, "busy": False}
+        assert found["idle"] is True and found["busy"] is False
+        assert found["sent"] == 0 and found["open"] is True
+        assert found["note"] == ("A reply is being written. Wait for it to finish, "
+                                 "then press Done.")
 
 
 class TestLeavingAnEdit:
-    def test_cancel_puts_everything_back_and_sends_nothing(self):
+    def test_cancel_puts_the_dialog_away_and_sends_nothing(self):
         found = run_edit("""
             shell.startEdit(MESSAGES[0], 7);
-            input.value = "a change I no longer want";
-            shell.cancelEdit();
+            box().value = "a change I no longer want";
+            editor().cancel();
             console.log(JSON.stringify(Object.assign(mode(), {sent: store.sent.length})));
         """)
 
-        assert found["editing"] is False
-        assert found["value"] == "half a thought"
+        assert found["editing"] is False and found["open"] is False
+        assert found["draft"] == "half a thought"
         assert found["sent"] == 0
         assert found["said"] == "Edit cancelled. The message is as it was."
 
-    def test_escape_in_the_panel_cancels_it(self):
+    def test_escape_is_the_dialog_s_own_and_cancels_the_edit(self):
+        """The browser's `cancel` on a modal dialog. Taken over so the panel
+        hears the edit was given up -- and never reaches the panel's own
+        Escape, which would have left focus mode behind the dialog."""
         found = run_edit("""
             shell.focus = {isActive: () => true};
             shell.nodes.menu = {hidden: true};
@@ -399,100 +438,103 @@ class TestLeavingAnEdit:
             let prevented = false;
             shell.documentKey({key: "Escape", preventDefault() { prevented = true; },
                                stopPropagation() {}});
-            console.log(JSON.stringify({editing: !!shell.editing, prevented,
-                                        leftFocus: !!shell.leftFocus}));
-        """, sources=("shell", "host", "store"))
+            const stillEditing = !!shell.editing;
+            let dialogPrevented = false;
+            editor().dialog.handlers.cancel.forEach((fn) => fn(
+                {preventDefault() { dialogPrevented = true; }}));
+            console.log(JSON.stringify({stillEditing, prevented, dialogPrevented,
+                                        editing: !!shell.editing, open: mode().open,
+                                        leftFocus: !!shell.leftFocus,
+                                        said: shell.nodes.status.textContent}));
+        """, sources=("shell", "host", "store", "editor"))
 
-        assert found == {"editing": False, "prevented": True, "leftFocus": False}
+        assert found == {"stillEditing": True, "prevented": False, "dialogPrevented": True,
+                         "editing": False, "open": False, "leftFocus": False,
+                         "said": "Edit cancelled. The message is as it was."}
 
-    def test_escape_elsewhere_on_the_page_is_not_the_edit_s(self):
-        """An Escape in Forge's own prompt box belongs to that box; taking it
-        would drop an edit nobody was looking at."""
+    def test_another_conversation_leaves_the_dialog_open_and_the_save_aimed(self):
+        """The box used to be shared with the draft, so a change of
+        conversation put the edit away. The dialog is nobody's but the
+        edit's: it stays, the outline moves off the thread that is not the
+        edit's, and Done still goes where the edit began."""
         found = run_edit("""
-            shell.focus = {isActive: () => false};
-            shell.nodes.menu = {hidden: true};
-            shell.startEdit(MESSAGES[0], 7);
-            document.activeElement = made("textarea");
-            let prevented = false;
-            shell.documentKey({key: "Escape", preventDefault() { prevented = true; },
-                               stopPropagation() {}});
-            console.log(JSON.stringify({editing: !!shell.editing, prevented}));
-        """, sources=("shell", "host", "store"))
-
-        assert found == {"editing": True, "prevented": False}
-
-    def test_another_conversation_puts_the_edit_away_and_shows_its_draft(self):
-        """Save would be aimed at a message in a thread that is no longer on
-        screen -- and the box, focused, would keep the old thread's draft."""
-        found = run_edit("""
-            ["renderSelector", "renderChip", "renderAutoAttach", "renderReadAloud",
-             "renderTranscript", "renderStatus", "applySuppression"].forEach((name) => {
+            ["renderChip", "renderAutoAttach", "renderReadAloud",
+             "renderStatus", "applySuppression"].forEach((name) => {
                 shell[name] = () => {};
             });
+            Object.defineProperty(transcript, "innerHTML", {
+                get() { return ""; }, set() { transcript.children = []; }});
+            shell.nodes.jump = made("button");
             shell.nodes.unread = made("span");
             shell.nodes.stop = made("button");
             shell.canSend = () => true;
             shell.startEdit(MESSAGES[0], 7);
+            box().value = "edited";
             view = Object.assign({}, view, {
                 selection: {character: "Ada", thread: "t2", epoch: "e2"},
+                conversation: {conversation: {character: "Ada", thread_id: "t2", revision: 1},
+                               messages: MESSAGES},
                 draft: drafts[NS.conversationKey("Ada", "t2")]});
             shell.render(view);
-            console.log(JSON.stringify(mode()));
+            const during = mode();
+            editor().done().then(() => console.log(JSON.stringify(
+                {during, conversation: store.sent[0].conversation})));
         """)
 
-        assert found["editing"] is False
-        assert found["value"] == "the other thread's draft"
-        assert found["said"] == "The conversation changed, so the edit was put away."
+        assert found["during"]["editing"] is True and found["during"]["open"] is True
+        assert found["during"]["value"] == "edited"
+        assert found["during"]["targets"] == []
+        assert found["during"]["draft"] == "the other thread's draft"
+        assert found["conversation"] == {"character": "Ada", "thread_id": "t1"}
 
-    def test_a_picture_pasted_into_an_edit_is_refused(self):
+    def test_a_long_edit_gets_a_taller_box_up_to_the_glass(self):
         found = run_edit("""
-            shell.stageFile = () => { shell.staged = true; };
+            globalThis.visualViewport = {offsetLeft: 0, offsetTop: 0, width: 1280, height: 800};
             shell.startEdit(MESSAGES[0], 7);
-            let prevented = false;
-            shell.paste({preventDefault() { prevented = true; }, clipboardData: {items: [
-                {kind: "file", type: "image/png", getAsFile: () => ({name: "p.png"})}]}});
-            console.log(JSON.stringify({prevented, staged: !!shell.staged, said: mode().said}));
+            box().scrollHeight = 40;
+            editor().grow();
+            const short = [box().style.height, box().style.overflowY];
+            box().scrollHeight = 900;
+            editor().grow();
+            console.log(JSON.stringify({short, tall: [box().style.height, box().style.overflowY]}));
         """)
 
-        assert found == {"prevented": True, "staged": False,
-                         "said": "A picture cannot be added while you edit a message."}
-
-    def test_a_long_edit_gets_a_taller_box(self):
-        found = run_edit("""
-            globalThis.visualViewport = {height: 800, width: 1280};
-            input.scrollHeight = 900;
-            shell.grow();
-            const message = input.style.height;
-            shell.startEdit(MESSAGES[0], 7);
-            input.scrollHeight = 900;
-            shell.grow();
-            console.log(JSON.stringify({message, edit: input.style.height,
-                                        scrolls: input.style.overflowY}));
-        """)
-
-        assert found == {"message": "132px", "edit": "292px", "scrolls": "auto"}
+        assert found["short"] == ["96px", "hidden"], "four lines at least"
+        assert found["tall"] == ["768px", "auto"], "the glass less its margins, then scrolls"
 
 
 class TestTheEditLooksLikeAnEdit:
-    def test_the_box_is_outlined_and_glows_in_the_accent(self):
-        box = rule(".forge-assistant-editing .forge-assistant-input")
-
-        assert "border-color: var(--color-accent" in box
-        assert "box-shadow" in box and "var(--color-accent" in box
-        assert "accent-soft" not in box
-
-    def test_the_message_is_outlined_the_same_way(self):
+    def test_the_message_is_outlined_in_the_accent(self):
         target = rule(".forge-assistant-bubble.forge-assistant-edit-target")
 
         assert "var(--color-accent" in target and "accent-soft" not in target
 
-    def test_the_strip_and_save_never_take_the_soft_accent(self):
-        for selector in (".forge-assistant-edit-bar",
-                         ".forge-assistant-editing .forge-assistant-send"):
-            assert "accent-soft" not in rule(selector), selector
+    def test_the_dialog_is_not_full_screen(self):
+        """"This new pop up should not be full screen, make it reasonable."
+        The system prompt editor fills the window with `inset: 0`; this one
+        is placed and sized by the script from the glass, and is a box with
+        corners on top of the page."""
+        dialog = rule(".mc-message-editor")
 
-    def test_cancel_is_a_finger_wide(self):
-        assert "min-height: 44px" in rule(".forge-assistant-edit-cancel")
+        assert "position: fixed" in dialog
+        assert "inset: 0" not in dialog
+        assert "border-radius" in dialog
+        assert re.search(r"^\s*display\s*:", dialog, re.M) is None, (
+            "an author display would keep a closed dialog on the page")
+
+    def test_done_and_cancel_are_a_finger_tall(self):
+        assert "min-height: 44px" in rule(".mc-message-editor-action")
+
+    def test_the_box_does_not_make_a_phone_zoom(self):
+        assert "font-size: max(16px, 1em)" in rule(".mc-message-editor-text")
+
+    def test_the_composer_has_no_edit_strip_any_more(self):
+        bare = re.sub(r"/\*.*?\*/", "", CSS, flags=re.DOTALL)
+
+        assert ".forge-assistant-edit-bar" not in bare
+        assert ".forge-assistant-editing" not in bare
+        shell = SHELL.read_text(encoding="utf-8")
+        assert "editBar" not in shell and "applyEditing" not in shell
 
 
 # --------------------------------------------------------------------------- #
@@ -525,8 +567,10 @@ class TestTheMenuSaysWhatIsOn:
                 .map((item) => [item.textContent, item.getAttribute("aria-checked")])));
         """)
 
-        assert found == [["Free Float", "true"], ["Auto Attach", "false"],
-                         ["Send to Generate", "true"]]
+        # In the menu's order: the Composer group's two, then Free Float in
+        # the Panel group.
+        assert found == [["Auto Attach", "false"], ["Send to Generate", "true"],
+                         ["Free Float", "true"]]
 
     def test_the_check_is_drawn_from_that_state(self):
         on = rule('.forge-assistant-menu-item[role="menuitemcheckbox"]'

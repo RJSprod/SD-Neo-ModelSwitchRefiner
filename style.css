@@ -6260,6 +6260,133 @@
     margin-left: auto;
 }
 
+/* The message editor: one small dialog for editing a message, shared by LLM
+   Studio's Conversation tab and the Forge Assistant's panel
+   (javascript/mc_message_editor.js).
+
+   A native modal <dialog> for the system prompt editor's reasons -- the top
+   layer, focus containment, Escape -- and, unlike it, not the whole window:
+   "not full screen, make it reasonable, and responsive to the browser
+   available space so it also looks good on mobile". `left`, `top`, `width`
+   and `max-height` are written by the script from the visual viewport, which
+   is the only measure of the glass a phone gives; nothing sensible can be
+   stated for them here. No rule sets its `display`: an author `display`
+   beats the browser's `dialog:not([open]) { display: none }`, and a closed
+   editor would stay on the page. */
+.mc-message-editor {
+    box-sizing: border-box;
+    position: fixed;
+    z-index: 2100;              /* only without showModal: the top layer ignores it */
+    margin: 0;
+    padding: 0;
+    max-width: none;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 12px;
+    background: var(--background-fill-primary, Canvas);
+    color: var(--body-text-color, CanvasText);
+    box-shadow: var(--shadow-drop-lg, 0 12px 32px rgba(0, 0, 0, 0.35));
+    overflow: hidden;
+}
+
+/* The page behind it, dimmed in the theme's own ink rather than a colour of
+   this file's: dark under a light theme, light under a dark one. */
+.mc-message-editor::backdrop {
+    background: color-mix(in srgb, var(--body-text-color, CanvasText) 40%, transparent);
+}
+
+.mc-message-editor-sheet {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: inherit;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+.mc-message-editor-heading {
+    flex: 0 0 auto;
+    margin: 0;
+    font-size: 1.05em;
+    overflow-wrap: anywhere;
+}
+
+/* The box. Its height is the script's, from the words and the room; 16px so
+   a phone does not zoom the page when it is tapped. */
+.mc-message-editor-text {
+    box-sizing: border-box;
+    flex: 0 1 auto;
+    width: 100%;
+    min-height: 96px;
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 8px;
+    background: var(--input-background-fill, var(--background-fill-secondary, transparent));
+    color: var(--body-text-color, inherit);
+    font: inherit;
+    font-size: max(16px, 1em);
+    line-height: 1.45;
+    resize: none;
+    overflow-y: auto;
+}
+
+.mc-message-editor-text:focus {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: -1px;
+}
+
+.mc-message-editor-hint,
+.mc-message-editor-note {
+    flex: 0 0 auto;
+    margin: 0;
+    font-size: 0.85em;
+}
+
+.mc-message-editor-hint {
+    color: var(--body-text-color-subdued, inherit);
+}
+
+.mc-message-editor-note {
+    min-height: 1.2em;
+}
+
+.mc-message-editor-note[data-kind="error"] {
+    color: var(--error-text-color, #dc2626);
+}
+
+.mc-message-editor-foot {
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    gap: 0.5em;
+}
+
+/* The two buttons are a finger tall: this is the one place in the edit
+   somebody has to hit something, and on a phone it is under a keyboard. */
+.mc-message-editor-action {
+    min-height: 44px;
+    min-width: 88px;
+    padding: 0.3em 1em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    background: var(--background-fill-secondary, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.mc-message-editor-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.mc-message-editor-done {
+    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
+    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
+    color: var(--button-primary-text-color, white);
+    font-weight: 600;
+}
+
 /* The unread count on the launcher. Its fill was the theme's soft accent too,
    under body text -- light on light under Lobe, the defect the lit buttons
    had -- and it is the same tint of the accent over the neutral surface. */
@@ -6289,8 +6416,8 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.4em;
-    padding: 0.5em 0.6em;
+    gap: 0.3em;
+    padding: 0.25em 0.4em;
     border-bottom: 1px solid var(--border-color-primary);
     cursor: grab;
     touch-action: none;
@@ -6323,8 +6450,32 @@
     cursor: pointer;
 }
 
-.forge-assistant-icon-button {
-    min-width: 44px;
+/* The two rows of chrome -- the header's and the composer's -- are 36 pixels
+   tall and not 44. Asked for: "too much height". Together they were the
+   height of a finger twice over, on a phone where the conversation between
+   them was a few lines; 36 is still a thumb's width, and everything in a
+   list -- the menus, the actions under a message -- keeps the full 44. */
+.forge-assistant-icon-button,
+.forge-assistant-nav-button,
+.forge-assistant-send,
+.forge-assistant-stop {
+    min-height: 36px;
+    min-width: 36px;
+    padding: 0.15em 0.45em;
+    line-height: 1;
+}
+
+/* The header's glyphs, a little larger than the words they replaced would be
+   at this size, so a speech balloon reads as one. Chat is lit while the
+   conversation is showing: it is the one button in the row with a state
+   worth seeing, and the accent is how this panel says "on". */
+.forge-assistant-nav-button {
+    font-size: 1.1em;
+}
+
+.forge-assistant-chat[aria-expanded="true"] {
+    border-color: var(--color-accent, #2563eb);
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
 }
 
 /* The read-aloud switch, in two states nobody has to guess between.
@@ -6494,31 +6645,6 @@
     color: var(--color-accent, #2563eb);
 }
 
-.forge-assistant-accordion {
-    display: flex;
-    align-items: center;
-    gap: 0.4em;
-    width: 100%;
-    padding: 0.5em 0.6em;
-    border: 0;
-    border-top: 1px solid var(--border-color-primary);
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    font-weight: 600;
-    text-align: left;
-    cursor: pointer;
-}
-
-.forge-assistant-chevron {
-    display: inline-block;
-    transition: transform 120ms ease;
-}
-
-.forge-assistant-accordion[aria-expanded="true"] .forge-assistant-chevron {
-    transform: rotate(90deg);
-}
-
 .forge-assistant-conversation {
     display: flex;
     flex-direction: column;
@@ -6671,14 +6797,14 @@
 .forge-assistant-composer {
     display: flex;
     flex-direction: column;
-    gap: 0.35em;
+    gap: 0.3em;
 }
 
 .forge-assistant-input {
     width: 100%;
-    min-height: 44px;
+    min-height: 36px;
     box-sizing: border-box;
-    padding: 0.45em 0.6em;
+    padding: 0.4em 0.55em;
     border: 1px solid var(--border-color-primary);
     border-radius: var(--radius-sm, 6px);
     background: var(--background-fill-primary);
@@ -6695,8 +6821,34 @@
     flex-wrap: nowrap;
 }
 
+/* Send is a glyph, and the one filled button in the row: the theme's primary
+   pair, fill and text, which a theme promises are legible together -- never
+   the soft accent, which a theme may set nearly white. Stop takes its place
+   while a reply is on its way, in the theme's stop colours where it has
+   them, and both are wider than the icon buttons beside them because they
+   are the row's action. */
 .forge-assistant-send {
     margin-left: auto;
+    min-width: 44px;
+    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
+    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
+    color: var(--button-primary-text-color, white);
+    font-size: 1.05em;
+}
+
+.forge-assistant-stop {
+    margin-left: auto;
+    min-width: 44px;
+    border-color: var(--button-cancel-border-color, var(--border-color-primary));
+    background: var(--button-cancel-background-fill,
+                    var(--background-fill-secondary, transparent));
+    color: var(--button-cancel-text-color, inherit);
+    font-size: 0.9em;
+}
+
+.forge-assistant-toolbar button:disabled {
+    opacity: 0.45;
+    cursor: default;
 }
 
 /* Editing a message.
@@ -6705,69 +6857,13 @@
    "make sure it feels clear that I am editing a previous message, not simply
    submitting a new one. Maybe a stroke outline or glow."
 
-   Four things say it at once: a strip above the box naming the message, an
-   outline and a glow on the box, the same outline on the message in the
-   thread, and Send reading Save in the theme's primary colours. All of it is
-   drawn from the accent itself and never from the soft accent, which a theme
-   may set nearly white -- the lit buttons' defect. */
-.forge-assistant-edit-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.5em;
-    padding: 0.2em 0.2em 0.2em 0.6em;
-    border-left: 3px solid var(--color-accent, #2563eb);
-    border-radius: var(--radius-sm, 6px);
-    background: color-mix(in srgb, var(--color-accent, #2563eb) 16%,
-                          var(--background-fill-secondary, transparent));
-    font-size: 0.85em;
-}
-
-.forge-assistant-edit-label {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    font-weight: 600;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.forge-assistant-edit-cancel {
-    flex: 0 0 auto;
-    min-height: 44px;
-    padding: 0.2em 0.9em;
-    border: 1px solid var(--border-color-primary);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--background-fill-primary, transparent);
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-}
-
-.forge-assistant-editing .forge-assistant-input {
-    border-color: var(--color-accent, #2563eb);
-    box-shadow: 0 0 0 1px var(--color-accent, #2563eb),
-                0 0 12px 2px color-mix(in srgb, var(--color-accent, #2563eb) 45%, transparent);
-    outline: none;
-}
-
-/* The message being replaced, outlined the way the box is. */
+   The edit happens in the message editor's dialog -- the `.mc-message-editor`
+   rules, shared with LLM Studio -- and the panel's part is the message being
+   replaced, outlined in the accent behind it. The accent itself and never the
+   soft accent, which a theme may set nearly white -- the lit buttons' defect. */
 .forge-assistant-bubble.forge-assistant-edit-target {
     border-color: var(--color-accent, #2563eb);
     box-shadow: 0 0 0 1px var(--color-accent, #2563eb);
-}
-
-.forge-assistant-editing .forge-assistant-send {
-    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
-    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
-    color: var(--button-primary-text-color, white);
-    font-weight: 600;
-}
-
-/* The paperclip and the microphone stand aside while the box holds an edit,
-   and look it; so does Save with nothing in the box. */
-.forge-assistant-editing .forge-assistant-toolbar button:disabled {
-    opacity: 0.45;
-    cursor: default;
 }
 
 .forge-assistant-chip {
@@ -6817,6 +6913,37 @@
 .forge-assistant-cancel {
     margin-top: 0.3em;
     opacity: 0.85;
+}
+
+/* A group's heading in the ⋯ menu: small, quiet, and set off from the
+   entries under it. Not an entry -- it is `role="presentation"` -- so it
+   takes none of the entries' padding, border or height, and it starts a
+   group whatever the menu's checkbox column does to the entries. */
+.forge-assistant-menu-group {
+    margin: 0.4em 0 0.1em;
+    padding: 0 0.25em;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    opacity: 0.7;
+}
+
+.forge-assistant-menu-group:first-child {
+    margin-top: 0.1em;
+}
+
+/* An entry that opens a submenu carries a chevron after its word, drawn here
+   so the word stays the label. Back, at the head of a submenu, has its
+   chevron in the text, because there it is part of the word. */
+.forge-assistant-submenu::after {
+    content: "\203A";
+    float: right;
+    opacity: 0.7;
+}
+
+.forge-assistant-menu-back {
+    font-weight: 600;
 }
 
 .forge-assistant-menu-item[aria-current="true"] {
@@ -7122,31 +7249,6 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     #mc-llm-studio .mc-llm-transcript .message-row > .flex-wrap {
         max-width: max(var(--forge-assistant-bubble, 75%), 90%);
     }
-}
-
-/* The conversation the panel is on. It was an empty row: the panel gave no
-   indication of which thread it was showing, which is fine right up until it
-   is showing a different one from the tab behind it. */
-.forge-assistant-selector {
-    display: flex;
-    min-width: 0;
-}
-
-.forge-assistant-who {
-    flex: 1 1 auto;
-    min-width: 0;
-    min-height: 32px;
-    padding: 0.2em 0.4em;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    font-weight: 600;
-    text-align: left;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    cursor: pointer;
 }
 
 .forge-assistant-menu-empty {

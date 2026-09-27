@@ -456,15 +456,14 @@ class TestACoveredLauncher:
             shell.reachable = () => false;
             shell.focus.on = true;
             shell.state.focusEnabled = true;
-            shell.nodes.focusToggle = document.createElement("button");
             shell.supersede(press());
             shell.supersede(press());
             console.log(JSON.stringify({exits: shell.focus.exits,
                                         enabled: shell.state.focusEnabled,
-                                        pressed: shell.nodes.focusToggle["aria-pressed"]}));
+                                        marked: shell.nodes.panel.dataset.focus}));
         """)
 
-        assert found == {"exits": 1, "enabled": False, "pressed": "false"}
+        assert found == {"exits": 1, "enabled": False, "marked": "off"}
 
     def test_focus_is_kept_when_the_reset_uncovered_it(self):
         found = run(self.SETUP + """

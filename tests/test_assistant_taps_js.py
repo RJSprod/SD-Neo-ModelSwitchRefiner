@@ -231,3 +231,179 @@ def test_the_launcher_and_the_navigation_feed_are_wired_to_them():
                      wiring)
     subscriber = wiring.split("subscribeNavigation((active)", 1)[1]
     assert subscriber.lstrip(" =>{\n").startswith("this.noteWorkspace(active);")
+
+
+# --------------------------------------------------------------------------- #
+# Presses on the header's own space
+# --------------------------------------------------------------------------- #
+
+HEADER = CLOCK + """
+// The header, a control in it, and the space between the controls.
+const header = {id: "header"};
+const control = {closest: () => control};
+const space = {closest: () => null};
+function headerShell() {
+    const shell = tapShell();
+    shell.nodes = {header, panel: {dataset: {}}};
+    return shell;
+}
+const on = (target, detail) => ({detail: detail === undefined ? 1 : detail,
+                                 target: target === undefined ? space : target});
+"""
+
+
+class TestPressesOnTheHeader:
+    """Asked for with the Focus button's removal: "triple tapping on the drag
+    area to be the toggle focus on / off ... just like the launcher's triple
+    tap." The drag area is the header's own space -- the grip and the padding
+    between its buttons -- and a press on one of the buttons is that button's.
+    """
+
+    def test_three_presses_on_the_space_toggle_focus_inside_the_third(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            shell.headerClick(on());
+            shell.headerClick(on());
+            const before = shell.did.slice();
+            shell.headerClick(on());
+            const during = shell.did.slice();
+            const fired = lapse();
+            console.log(JSON.stringify({before, during, fired, after: shell.did}));
+        """)
+
+        assert found == {"before": [], "during": ["focus"], "fired": 0, "after": ["focus"]}
+
+    def test_a_press_on_the_header_itself_counts_as_the_space(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            [1, 2, 3].forEach(() => shell.headerClick(on(header)));
+            console.log(JSON.stringify(shell.did));
+        """)
+
+        assert found == ["focus"]
+
+    def test_one_or_two_do_nothing_and_are_forgotten_when_the_window_passes(self):
+        """Nothing waits on the window here -- the header has no single-press
+        action -- so a pair that is forgotten is simply two presses that were
+        not three."""
+        found = run(HEADER + """
+            const shell = headerShell();
+            shell.headerClick(on());
+            shell.headerClick(on());
+            const fired = lapse();
+            shell.headerClick(on());
+            shell.headerClick(on());
+            const afterFour = shell.did.slice();
+            shell.headerClick(on());
+            console.log(JSON.stringify({fired, afterFour, then: shell.did}));
+        """)
+
+        assert found == {"fired": 1, "afterFour": [], "then": ["focus"]}
+
+    def test_the_pace_is_the_launcher_s(self):
+        source = SHELL.read_text(encoding="utf-8")
+        tap = source.split("Shell.prototype.tapHeader = function", 1)[1] \
+            .split("Shell.prototype", 1)[0]
+
+        assert "TAP_WINDOW" in tap
+
+    def test_a_press_on_a_button_in_the_row_is_that_button_s(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            [1, 2, 3].forEach(() => shell.headerClick(on(control)));
+            const onControls = shell.did.slice();
+            shell.headerClick(on(control));
+            shell.headerClick(on());
+            shell.headerClick(on());
+            shell.headerClick(on());
+            console.log(JSON.stringify({onControls, then: shell.did}));
+        """)
+
+        assert found == {"onControls": [], "then": ["focus"]}, (
+            "a press on a control neither counts nor breaks a count")
+
+    def test_a_synthetic_click_is_not_a_press(self):
+        """`detail` is 0 for a keyboard activation, and a header cannot be
+        activated from the keyboard, so a click with none is nobody's."""
+        found = run(HEADER + """
+            const shell = headerShell();
+            [1, 2, 3].forEach(() => shell.headerClick(on(space, 0)));
+            console.log(JSON.stringify(shell.did));
+        """)
+
+        assert found == []
+
+    def test_the_tail_of_a_drag_is_swallowed_once(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            shell.headerClick(on());
+            shell.headerClick(on());
+            shell.suppressHeaderClick = true;
+            shell.headerClick(on());
+            const swallowed = {did: shell.did.slice(), flag: shell.suppressHeaderClick,
+                               count: shell.headerTaps};
+            [1, 2, 3].forEach(() => shell.headerClick(on()));
+            console.log(JSON.stringify({swallowed, then: shell.did}));
+        """)
+
+        assert found["swallowed"] == {"did": [], "flag": False, "count": 0}, (
+            "the drag ends the count it interrupted, and the flag is spent")
+        assert found["then"] == ["focus"]
+
+    def test_a_drag_of_the_panel_by_its_header_leaves_that_tail_to_swallow(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            const panel = {style: {}, releasePointerCapture() {}};
+            shell.nodes = {header, panel, root: {classList: {remove() {}}}};
+            shell.state = {freeFloat: false};
+            shell._save = () => {};
+            shell.placeNow = () => {};
+            shell.drag = {node: panel, pointerId: 1, moved: true, anchor: "top-left"};
+            shell.endDrag({pointerId: 1}, false);
+            const afterPanel = shell.suppressHeaderClick;
+            const launcher = {style: {}, releasePointerCapture() {}};
+            shell.nodes.launcher = launcher;
+            shell.suppressHeaderClick = false;
+            shell.drag = {node: launcher, pointerId: 2, moved: true, anchor: "top-left"};
+            shell.endDrag({pointerId: 2}, false);
+            console.log(JSON.stringify({afterPanel, afterLauncher: shell.suppressHeaderClick,
+                                        launcherTail: shell.suppressClick}));
+        """)
+
+        assert found == {"afterPanel": True, "afterLauncher": False, "launcherTail": True}
+
+    def test_a_new_press_clears_a_tail_that_never_came(self):
+        """With the pointer captured the click may land on the panel instead
+        of the header, so a flag left for it would eat the next real press."""
+        found = run(HEADER + """
+            const shell = headerShell();
+            shell.suppressHeaderClick = true;
+            const node = {getBoundingClientRect: () => ({left: 0, top: 0, width: 10, height: 10}),
+                          setPointerCapture() {}};
+            shell.anchor = () => "top-left";
+            shell.startDrag({button: 0, isPrimary: true, pointerId: 1, clientX: 1, clientY: 1,
+                             target: space}, node);
+            console.log(JSON.stringify({flag: shell.suppressHeaderClick, dragging: !!shell.drag}));
+        """)
+
+        assert found == {"flag": False, "dragging": True}
+
+    def test_a_cancelled_gesture_forgets_the_count(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            shell.nodes.root = {classList: {remove() {}}};
+            shell.drag = null; shell.strip = null; shell.resizing = null;
+            shell.headerClick(on());
+            shell.headerClick(on());
+            shell.cancelGestures();
+            shell.headerClick(on());
+            console.log(JSON.stringify({did: shell.did, count: shell.headerTaps}));
+        """)
+
+        assert found == {"did": [], "count": 1}
+
+    def test_there_is_no_focus_button_left_to_press(self):
+        source = SHELL.read_text(encoding="utf-8")
+
+        assert "focusToggle" not in source
+        assert re.search(r'"Focus"\)', source) is None, "no button is made with that word"

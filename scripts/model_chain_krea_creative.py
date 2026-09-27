@@ -1697,6 +1697,13 @@ def _disarm_replay():
 # --------------------------------------------------------------------------- #
 
 
+# What the Literal Prompt boxes say while they are empty, in place of a title.
+LITERAL_POSITIVE_HINT = ("Positive Literal \u2013 put in front of the finished prompt "
+                         "exactly as written, untouched by any model")
+LITERAL_NEGATIVE_HINT = ("Negative Literal \u2013 put after the finished prompt exactly "
+                         "as written, untouched by any model (not Forge\u2019s Negative Prompt)")
+
+
 class ScriptKreaCreative(scripts.Script):
     """The Creative Mode controls, and the hook that writes the prompt."""
 
@@ -2131,15 +2138,24 @@ class ScriptKreaCreative(scripts.Script):
         # literal prompt to always be there". No toggle touches it any more,
         # which also means no toggle tears it down and rebuilds it in the
         # middle of the prompt area.
+        # No title above either box. Like the two prompt boxes above them,
+        # each says what it is *inside*, in the placeholder's quiet type, and
+        # the words go the moment somebody starts typing: "make a description
+        # inside the box with de-emphasized text style ... There should be no
+        # title above the box." The label is kept for what a label is for --
+        # the accessible name, and the Extra Networks browser's memory of
+        # which box was used last -- and simply not drawn.
         literal = mc_literal_prompts.settings()
         with gr.Column(elem_id=ident("literal", "row"),
                        elem_classes=["mc-literal-row"]) as literal_row:
             literal_positive = gr.Textbox(
-                label="Positive Literal", lines=2, max_lines=4,
+                label="Positive Literal", show_label=False, lines=2, max_lines=4,
+                placeholder=LITERAL_POSITIVE_HINT,
                 value=literal["positive"], elem_id=ident("literal", "positive"),
                 elem_classes=["prompt", "mc-literal-box"])
             literal_negative = gr.Textbox(
-                label="Negative Literal", lines=2, max_lines=4,
+                label="Negative Literal", show_label=False, lines=2, max_lines=4,
+                placeholder=LITERAL_NEGATIVE_HINT,
                 value=literal["negative"], elem_id=ident("literal", "negative"),
                 elem_classes=["prompt", "mc-literal-box"])
 

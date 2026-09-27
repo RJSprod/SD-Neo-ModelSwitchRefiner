@@ -448,28 +448,30 @@ class TestANewThreadFromTheMenu:
             shell.nodes = {status: {dataset: {}, textContent: ""}};
             let closed = 0;
             shell.closeMenu = () => { closed += 1; };
-            shell.applyAccordion = () => { shell.accordion = shell.state.conversationExpanded; };
+            shell.applyChat = () => { shell.chatShown = shell.state.conversationExpanded; };
             shell._save = () => undefined;
-            const item = shell.newThreadItem();
+            const item = shell.newChatItem();
             item.handlers.click.forEach((fn) => fn());
             setImmediate(() => setImmediate(() => console.log(JSON.stringify({
                 label: item.textContent, disabled: item.disabled, closed,
-                selected: shell.store.selected, opened: shell.accordion,
+                selected: shell.store.selected, opened: shell.chatShown,
                 said: shell.nodes.status.textContent}))));
         """)
 
-        assert found["label"] == "New thread" and found["disabled"] is False
+        # "New chat" now: "start a new chat with the currently set up
+        # character". It is the tab's New thread under the menu's own word.
+        assert found["label"] == "New chat" and found["disabled"] is False
         assert found["closed"] == 1
         assert found["selected"] == [["Ada", "t9"]]
         assert found["opened"] is True
-        assert found["said"] == "New thread with Ada."
+        assert found["said"] == "New chat with Ada."
 
     def test_with_no_conversation_the_item_is_there_and_not_pressable(self):
         found = run_both(THREADS + """
             const shell = Object.create(NS.Shell.prototype);
             shell.store = threadStore(MADE);
             shell.store.selection = {character: "", thread: "", epoch: "e1"};
-            const item = shell.newThreadItem();
+            const item = shell.newChatItem();
             console.log(JSON.stringify({disabled: item.disabled, title: item.title}));
         """)
 
@@ -932,13 +934,12 @@ class TestTheMenuOpensTheEditor:
     shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
     """
 
-    def test_it_is_in_the_menu_after_new_thread(self):
+    def test_it_is_in_the_chat_group_after_new_chat_and_threads(self):
         found = run(self.MENU + """
             console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
         """, sources=("shell", "system"))
 
-        assert found[:5] == ["Free Float", "Auto Attach", "Send to Generate", "New thread",
-                             "System prompt…"]
+        assert found[:4] == ["Chat · Ada", "New chat", "Threads", "System prompt…"]
 
     def test_pressing_it_puts_the_menu_away_and_opens_the_character(self):
         found = run(self.MENU + """

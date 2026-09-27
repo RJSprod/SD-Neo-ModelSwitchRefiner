@@ -1649,6 +1649,166 @@ positioned against it, as it was before this round -- sat below the visible
 screen until the page was panned. That is older than this round and was left
 as it is.
 
+## 3.22 The fifth round: glyphs, Chat, three presses, a dialog to edit in, a grouped menu
+
+> "I want the line that has the character name and conversation name removed
+> ... the accordian for conversation i want it removed. Instead, i want a
+> simple button in the top row that reads Chat ... remove the Focus button.
+> Instead, i want triple tapping on the drag area to be the toggle focus on /
+> off ... I want the buttons rows to have reduced height ... convert all
+> buttons with text to icons ... when i choose to edit, i want a simple pop up
+> ... current text in an input field, cancel, and a done button ... For both
+> LLM studio conversation and our flyout menu ... shift + enter to add new
+> lines ... should not be full screen ... responsive ... so it also looks
+> good on mobile ... add a function to the menu from conversation mode New
+> Chat ... reorganize the '...' menu, maybe add some nesting."
+
+Six asks, and the same shape as the rounds before: the panel's chrome gets out
+of the conversation's way. One recommendation was made and taken up -- the
+shape of the grouped menu -- and one thing was traded away knowingly, below.
+
+### The header, and what became of Focus
+
+One row still, and every control in it a glyph: 📑 Workspace, 💬 Chat, ⋯, the
+grip, ✕. `iconButton()` makes each with its word as `aria-label` and `title`
+and never as text, so the row is as tall as its glyphs and a screen reader
+hears the word. Chat is the accordion heading moved into the row: it carries
+the heading's `aria-expanded` and `aria-controls`, `applyChat` (the old
+`applyAccordion`) writes its state, and the stylesheet lights it while the
+conversation shows. The heading and the selector line -- "Prompt Bot · New
+chat", also the thread list's button -- are gone from the DOM and the
+stylesheet; where the name went is in the menu, below.
+
+Focus has no button. Three presses on the header's space -- `headerClick`
+counts a click whose target closes over no control, `tapHeader` keeps the
+count for `TAP_WINDOW` and acts inside the third press, for the launcher's
+reason (a browser grants full screen only to a press still being handled).
+One press and two do nothing, so nothing waits on the window; the count is
+forgotten when it passes. What the launcher's counter learned the hard way is
+carried over: the tail of a drag is not a press (`endDrag` sets
+`suppressHeaderClick` for a panel dragged by its header; `startDrag` clears it
+at the next press, because with the pointer captured the click may land on the
+panel and never come), and `cancelGestures` forgets a half count. Focus state
+is written on the panel (`data-focus`, `markFocus`) for anything that draws
+from it; nothing does yet.
+
+Both rows are 36 pixels, not 44: the header's and the composer's buttons, the
+input, Send (➤, the theme's primary pair) and Stop (■). A list's entries -- the
+menus, the actions under a message -- keep the full 44, because a list is what
+a thumb picks from and a row is chrome.
+
+### Editing in a dialog
+
+`mc_message_editor.js` is one native modal `<dialog>` shared by both surfaces,
+and its contract is the whole of it: `open({title, text, placeholder, done,
+cancel})`; `done(text)` may answer at once or with a promise, `{ok: false,
+message}` keeps the dialog open with the message under the box, anything else
+closes it; `cancel()` is told when the edit is given up, by Cancel, Escape, or
+a second open replacing the first. Enter is Done, Shift+Enter a new line,
+Escape Cancel (the `cancel` event taken over, and the key itself for a dialog
+opened without `showModal`). Done is greyed out while an answer is on its way;
+Cancel is not, because a save that takes a minute is not a reason to be stuck
+in front of it, and a late answer to an edit that was given up is not shown.
+
+Not full screen, unlike the system prompt editor. `fit()` sizes it from the
+visual viewport -- the glass, which on a phone is narrower than the layout
+viewport and shrinks for the keyboard -- no wider than 560, MARGIN from every
+edge, a third of the spare room down so the keyboard, which takes the bottom,
+leaves it alone, and never past the bottom margin whatever the measurement
+said. The box grows with the words up to what the glass leaves once the
+heading, the hint and the buttons have had theirs, then scrolls. It follows
+`resize` and `scroll` on the visual viewport while open.
+
+**The panel.** `startEdit` opens it and keeps only `editing` -- the
+conversation, index, version and revision the Edit was pressed on -- and the
+outline on the message (`markEditTarget`, now only on the conversation the
+edit is in, because the thread on screen can change under an open dialog and
+the same index there is somebody else's message). The composer is not part of
+it: the draft stays, Send stays Send, the paperclip and microphone stay
+enabled, `typed()`, `grow()`, `paste()`, `send()` and `render` have no editing
+branch left, and the edit strip is gone from the DOM and the stylesheet. Done
+is `saveEdit(text)`: the same envelope as before, aimed at the conversation
+the edit began in, with `image_action: "keep"`; a refusal answers the dialog
+with the reason and the status line with "Your edit is still in the editor."
+A change of conversation under an open dialog no longer puts the edit away --
+there is no shared box to fight over. Escape while the dialog is open is the
+dialog's: `documentKey` returns before the precedence list, as it does for
+the system editor, and the host's `assistantEditing` branch went with the
+in-box edit.
+
+**LLM Studio.** The edit row is still what the server knows, and Python still
+decides everything. `llm_studio.js` watches the row (`offsetParent`, the
+file's own test of showing, in a MutationObserver on `class` and `style`),
+opens the dialog with the box's words a frame after the row appears -- the
+row and its words arrive in the same update -- and finishes the press through
+the row's own buttons, which now carry ids: Done writes the words into the
+box, dispatches `input` (Gradio reads a box on `input`, not on assignment)
+and presses Save; Cancel presses Cancel. A page without the dialog's script
+has the row, as it always did.
+
+**Traded away, knowingly.** The row's paperclip -- change or remove the
+picture on a message being edited -- is behind the modal while the dialog is
+up, and the dialog has no picture control: "a simple pop up ... current text
+in an input field, cancel, and a done button" is what was asked for. A
+message's picture is kept as it is by an edit from either surface now. The
+README says so; if a picture control is ever wanted, it goes in the dialog,
+not back in the row.
+
+### The ⋯ menu, in groups
+
+Recommended and taken up: four groups headed by what their entries act on,
+in the order they are reached for, and the thread list one level down.
+
+| Group | Entries |
+| --- | --- |
+| Chat · *character* | New chat, Threads ›, System prompt… |
+| Composer | Auto Attach, Send to Generate |
+| Panel | Free Float, Customize… |
+| Models | the host's utilities (Unload All Models, Unload LLM) |
+
+A heading is `groupLabel`: a `div` with `role="presentation"`, on the screen
+for the eye and out of the menu's list of items for a screen reader, and the
+Chat heading carries the character's name -- which is where the selector line
+went. New chat is the old New thread under the asked-for word (the tab's
+button keeps its own); its status lines say "chat". Threads is `threadsItem`,
+`aria-haspopup="menu"`, and pressing it is `showMenu("threads")`: the same
+box, redrawn with a **‹ Back** entry at its head, the character's threads
+with the current one marked, the empty message ("No threads yet. Start one
+with New chat.") and Cancel. There is no room beside a panel on a phone for a
+menu that opens sideways, and a list that replaces the list says so with Back.
+
+`toggleMenu` gained an owner. `menu.dataset.owner` is the button that opened
+the menu and `menu.dataset.which` the list showing, so ⋯ closes its menu
+whichever of its lists is up, `applyChat` closes the workspace menu by its
+owner, and the stylesheet's checkbox column keys on `which`. `showMenu` is
+where every list, submenus included, gets its Cancel; the test that held
+`toggleMenu` to that now holds `showMenu`.
+
+### The Literal Prompt boxes
+
+No title above either box (`show_label=False`); the description is the
+placeholder, in the quiet type the two prompt boxes above use, gone the moment
+somebody types. The label is kept for the accessible name and the Extra
+Networks browser's memory of which box was used last, and simply not drawn.
+`LITERAL_POSITIVE_HINT` and `LITERAL_NEGATIVE_HINT` say which is which and
+that Negative Literal is not Forge's Negative Prompt -- the one thing people
+mistake it for, said where they would make the mistake.
+
+### Verified
+
+Node: `test_assistant_v5_js.py` (Chat, the shorter rows, the grouped menu, the
+Threads submenu, the owner), `test_assistant_taps_js.py` (presses on the
+header, the drag's tail, a press on a control), `test_message_editor_js.py`
+(the contract, the keys, the glass arithmetic at four viewports, the look),
+`test_assistant_v4_js.py` (the box's editing tests translated to the dialog),
+`test_llm_studio_js.py` (the row watched, Done and Cancel through the row's
+buttons, ids compared across the two languages). The tests that named the
+Focus button's `aria-pressed` read the panel's `data-focus` now, and the ones
+that named the accordion heading press Chat. Every new check was reverted
+against and failed.
+
+---
+
 ---
 
 ## 4. Deliberate deviations

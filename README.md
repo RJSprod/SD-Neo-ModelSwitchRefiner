@@ -1783,7 +1783,9 @@ Stage 1 is given:   <lora:realfilter:1> portrait of a woman blue hat
 
 Whatever you type in them is protected from every language model in this
 extension and put back around the finished prompt — **Positive Literal** in
-front of it, **Negative Literal** after it. They are ordinary prompt boxes:
+front of it, **Negative Literal** after it. Neither has a title above it: like
+the two prompt boxes above them, each says what it is inside, in the
+placeholder's quiet type, until you type. They are ordinary prompt boxes:
 Tag Autocomplete, LoRA completion, copy and paste and the caret all behave as
 they do in the two above them, and the Extra Networks browser inserts into
 whichever of the four you used last.
@@ -3111,7 +3113,7 @@ composer, so neither of them moves:
 
 | Action | What it does |
 | --- | --- |
-| **Edit** | Rewrite it in place, at any position in the thread, yours or the character's alike — the version showing is the one changed. The picture it carries is kept unless you take it off, and the replies under it are left exactly as they are. |
+| **Edit** | Rewrite it in place, at any position in the thread, yours or the character's alike — the version showing is the one changed. The picture it carries is kept, and the replies under it are left exactly as they are. |
 | **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
 | **Continue** | Carry a reply on from exactly where it stopped. On the last reply in a thread that happens in place. On an earlier one it **branches** first, because continuing a reply that has messages under it would leave them answering a paragraph that no longer says what they were answering. |
 | **Send again from here** | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. Your *last* message has nothing after it to keep, so that one is answered in place, in the same thread. |
@@ -3137,9 +3139,14 @@ under it — a conversation whose second turn now asks about the sun, with a rep
 under it that says "blue", is a conversation you can then ask about. What was
 said is what the file says was said, and the file is the only record there is.
 Nothing is regenerated to match: rewriting a question does not silently spend a
-GPU minute rewriting every answer below it. The editor borrows the composer's
-space in an *Editing message* row, and Cancel gives you back whatever you had
-half-written.
+GPU minute rewriting every answer below it. The editor is a small dialog over
+the tab — the message's words in a box, **Cancel** and **Done**, Enter for Done
+and Shift+Enter for a new line — the same one the Forge Assistant's Edit opens,
+sized to the screen you have rather than filling it. Done writes the words
+back and the thread is where you left it; Cancel leaves the message as it was,
+and the composer is not touched either way. (Without the tab's script the
+editor is the *Editing message* row that borrows the composer's space, as it
+was, where a message's picture can also be changed.)
 
 A thread that ends in one of your messages that never got a reply — a cancelled
 reply, a model that failed to load — opens with that message already in the
@@ -3229,13 +3236,21 @@ proportionally in rather than leaving it outside. On a phone the panel is a
 sheet anchored to a half of the screen, which is a shape a floating position
 has nothing to say about, so Free Float waits there until the window is wider.
 
-**Opened**, it is one row — a workspace picker, a Focus toggle, the **⋯** menu
-and **✕** — and the conversation under a heading that collapses the whole of
-it. Collapsed, the transcript and the composer leave the layout and the
-accessibility tree rather than merely stopping being painted. The space between
-the **⋯** and the **✕** is what you drag the panel by; the buttons in that row
-stay buttons. **✕** puts the panel back to the launcher, at the same place;
-pressing the launcher brings it back there. As the conversation grows — a reply
+**Opened**, it is one row of glyphs — 📑 **Workspace**, 💬 **Chat**, the **⋯**
+menu and **✕** — and the conversation under it. Every glyph carries its word as
+a tooltip and to a screen reader. **Chat** shows the conversation or puts it
+away, the whole of it: collapsed, the transcript and the composer leave the
+layout and the accessibility tree rather than merely stopping being painted,
+and the glyph is lit while the conversation is showing. There is no line naming
+the character and the thread any more — the **⋯** menu's Chat group is headed
+by the character's name, and its **Threads** entry lists the threads with the
+one you are on marked. The space between the **⋯** and the **✕** is what you
+drag the panel by, and pressing it three times turns focus mode on or off (see
+*Focus*); the buttons in that row stay buttons. **✕** puts the panel back to the
+launcher, at the same place; pressing the launcher brings it back there. Both
+rows — this one and the composer's, where **Send** is a glyph too — are 36
+pixels tall rather than a full finger, so a collapsed panel is little more than
+the row itself. As the conversation grows — a reply
 arriving, a picture loading, a message's actions opening — the panel is placed
 again, so one docked along the bottom grows upwards and its composer never goes
 off the window.
@@ -3245,7 +3260,7 @@ workspace you were in before this one; press it twice again and you are back
 where you started, so two workspaces can be flipped between without opening
 anything. Until you have been in a second workspace there is nowhere to go back
 to, and a double press does nothing. Press it three times to turn focus mode on
-or off, the same as the panel's **Focus** button. Presses count as one gesture
+or off, the same as three presses on the open panel's header. Presses count as one gesture
 when each follows the last within 300 ms — a double-click's pace — so two
 unhurried presses are still two ordinary presses. The cost is that a single
 press waits those 300 ms before the panel opens, to be sure no second press is
@@ -3298,11 +3313,22 @@ header button, or by another extension's "send to img2img", moves the highlight
 too, and a switch that fails says so in the status line instead of highlighting
 a workspace you are not in. The panel stays open across the switch.
 
-**The utility menu** — the **⋯** beside Focus — has **Free Float**, **Auto
-Attach**, **Send to Generate**, **New thread**, **System prompt…**,
-**Customize…**, two entries and a **Cancel**. The first three are switches, and
-a switch that is on has a ✓ beside it; the labels stay lined up either way. The
-two entries are the same request: *I need this card back, now.*
+**The utility menu** — the **⋯** — is four groups, each headed by what its
+entries act on, and a **Cancel**:
+
+| Group | Entries |
+| --- | --- |
+| **Chat**, headed by the character's name | **New chat**, **Threads ›**, **System prompt…** |
+| **Composer** | **Auto Attach**, **Send to Generate** |
+| **Panel** | **Free Float**, **Customize…** |
+| **Models** | **Unload All Models**, **Unload LLM** |
+
+The three switches — Auto Attach, Send to Generate, Free Float — have a ✓
+beside them when on; the labels stay lined up either way. **Threads ›** opens
+one level down, in the same box: the character's threads, the one the panel is
+on marked, under a **‹ Back** that returns to the menu. Choosing one moves the
+panel onto it; the tab stays where it is. The two Models entries are the same
+request: *I need this card back, now.*
 
 | | |
 | --- | --- |
@@ -3315,14 +3341,14 @@ the twenty gigabytes back from llama-server — and what the status line says is
 what actually happened, not a tick. Neither is policy: the next request that
 needs a model loads it again exactly as it would have.
 
-**New thread** starts a fresh thread with the character the panel is talking
-to — made and greeted exactly as the tab's New thread makes one — and moves the
-panel onto it, opening the conversation if it was collapsed. The tab stays on
-the thread it is on, as it does when you choose a thread in the panel.
+**New chat** starts a fresh thread with the character the panel is talking
+to — made and greeted exactly as the tab's **New thread** makes one — and moves
+the panel onto it, opening the conversation if it was collapsed. The tab stays
+on the thread it is on, as it does when you choose a thread in the panel.
 **System prompt…** opens the full-page system prompt editor on that character,
 the one LLM Studio's **⤢ System prompt** opens (see *The system prompt editor*);
-the panel is where you left it when you close it. Both are greyed out until the
-panel is on a conversation.
+the panel is where you left it when you close it. All three Chat entries are
+greyed out until the panel is on a conversation.
 
 **Auto Attach** sends the picture you are looking at with your message, so you
 do not have to attach it yourself. While it is on — the paperclip is lit to say
@@ -3404,11 +3430,14 @@ does now:
 
 **Focus** gives the whole browser viewport to whichever workspace is open: the
 Forge tab bar, a theme's header and sidebars and the footer go, and the
-workspace takes the space they were using.
+workspace takes the space they were using. There is no Focus button: press the
+open panel's header three times — the space you drag it by, not one of its
+glyphs — or the launcher three times, at a double-click's pace, to turn it on;
+the same three presses, or Escape, turn it off.
 
 The same press takes the browser full screen as well — its address bar and
-tabs, and on a phone the system bars — and pressing Focus again brings back
-both the tab bar and the browser's own chrome. It is the whole page that goes
+tabs, and on a phone the system bars — and the presses that turn focus off bring
+back both the tab bar and the browser's own chrome. It is the whole page that goes
 full screen, not the workspace, so the assistant, dialogs and popups stay on
 it. The two are kept in step:
 
@@ -3519,19 +3548,21 @@ one was stopped or failed. It asks for an answer to that message as it reads now
 edited or not, and the answer arrives in the same thread: your message is not
 written a second time and no copy of the thread is made.
 
-**Edit** puts the message into the panel's own box and turns the box into an
-editor for it, so it is plain that you are changing that message and not sending
-a new one: a strip above the box says *✎ Editing your message* — or *✎ Editing
-Ada's reply* for a reply — with **Cancel**, the box is outlined and glows, the message being
-changed is outlined in the thread, and **Send** becomes **Save**. **Save** — or
-Enter — replaces the message's words where it is and does nothing else; no new
-reply is asked for (**Send again** or **Regenerate** will). Shift+Enter starts a
-new line, and Escape or **Cancel** leaves it as it was. The box grows taller for
-a long prompt and scrolls past that. Whatever you had half-typed before pressing
-Edit is back afterwards. While you edit, the paperclip and the microphone stand
-aside, and a picture already on the message is kept. If the thread changed in
-the meantime the save is refused, your edit stays in the box, and the status
-line says why; moving to another conversation puts the edit away.
+**Edit** opens the message editor — a small dialog over the panel, the same
+one LLM Studio's Edit opens — with the message's words in a box, **Cancel** and
+**Done**. Its heading says *Edit your message* or *Edit Ada's reply*, and the
+message being changed is outlined in the thread behind it. **Done** — or Enter
+— replaces the message's words where it is and does nothing else; no new reply
+is asked for (**Send again** or **Regenerate** will). Shift+Enter starts a new
+line, and Escape or **Cancel** leaves the message as it was. The dialog is not
+full screen: it is sized to the screen you have — no wider than 560 pixels, a
+margin from every edge, near the top so a phone's keyboard leaves it alone —
+and the box grows with the words and scrolls past what fits. The composer is
+not part of it: whatever you had half-typed stays exactly where it was, and a
+picture already on the message is kept. If the thread changed in the meantime
+the save is refused and the dialog stays open, with your words and the reason
+under them; moving to another conversation changes nothing, because Done is
+aimed at the conversation the edit began in.
 
 Every icon carries its word as a tooltip and to a screen reader, and every one
 that changes the conversation carries the message it was pointing at *and the
