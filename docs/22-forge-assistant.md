@@ -1855,6 +1855,24 @@ away and shows the conversation whether or not it was showing before.
 `placeMenu`, `MENU_GAP`, `MENU_EDGE` and `MENU_FLOOR` are gone, and so are
 the menu's border, shadow and surface: it is the panel's inside.
 
+### Taps on the header, under pointer capture
+
+Reported once #229's build was on the host: "Triple tap to focus toggle is
+not working for the flyout. It still works for the flyout button." §3.22's
+`headerClick` listened for `click` on the header, and the node tests called
+it directly. In a browser the drag takes pointer capture on the panel at
+pointerdown (`startDrag`), and a captured pointer's click is dispatched to the
+common ancestor of where the pointer went down and where it came up -- the
+panel, once capture has moved the pointerup there. The header's listener
+never fired. Now `startDrag` notes at pointerdown that the press began on the
+header's space (`headerPress`; `supersede` clears it at every new press), the
+listener is the panel's, and the click is read against the note wherever it
+lands. The taps tests go through `supersede`, `startDrag`, `endDrag` and a
+click on the panel, which is the shape that would have caught it. And asked
+for with the report: two presses on the space go back to the previous
+workspace, as two on the launcher do; `tapHeader` is `tapLauncher` without
+the single press.
+
 ### The picture cap: 640
 
 Asked as a recommendation, with the use named: a pose, an outfit on a

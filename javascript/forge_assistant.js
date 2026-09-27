@@ -1006,6 +1006,13 @@
         // A new press. Whatever the last drag left for the header's click to
         // swallow, that click is not coming now.
         this.suppressHeaderClick = false;
+        // The press began on a handle's own space -- past the guard above,
+        // never on a control -- and for the panel that is the header's space:
+        // remembered here, because the click it becomes may land elsewhere.
+        // (A press on the launcher notes it too, harmlessly: the launcher's
+        // click is its own listener's and never reaches the panel, and the
+        // next press anywhere clears the note before its click.)
+        this.headerPress = true;
         const box = node.getBoundingClientRect();
         this.drag = {
             node,
@@ -1222,6 +1229,9 @@
         if (this.drag || this.strip || this.resizing) this.cancelGestures();
         this.suppressClick = false;
         this.stripMoved = false;
+        // A new press is nobody's until `startDrag` says it began on the
+        // header's space. See `headerClick`.
+        this.headerPress = false;
         this.noticeCover(event);
     };
 
@@ -1351,9 +1361,11 @@
         this.on(nodes.chat, "click", () => this.toggleChat());
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
-        // The row's own space: a press on any of its buttons is that button's
-        // and stops here, so only the space is counted. See `headerClick`.
-        this.on(nodes.header, "click", (event) => this.headerClick(event));
+        // The row's own space, counted from the panel and not from the row:
+        // the drag takes pointer capture, and a captured pointer's click lands
+        // on the panel rather than on the header the press began in. See
+        // `headerClick`.
+        this.on(nodes.panel, "click", (event) => this.headerClick(event));
 
         this.on(nodes.input, "input", () => this.typed());
         this.on(nodes.input, "keydown", (event) => this.composerKey(event));
@@ -1659,33 +1671,43 @@
         this._save();
     };
 
-    /** A click on the header. Only its own space counts as a press -- the
-     * grip, the padding, anything in the row that is not a control. A press
-     * on one of its buttons is that button's, and the tail of a drag is
-     * nobody's. `detail` is 0 for a keyboard activation and a header cannot
-     * be activated from the keyboard, so a click with none is synthetic.
+    /** A click on the panel that began as a press on the header's own space
+     * -- the grip, the padding, anything in the row that is not a control.
+     *
+     * Read from the press and not from the click's target, and listened for
+     * on the panel and not on the header. The first version listened on the
+     * header and never heard a thing: `startDrag` takes pointer capture on
+     * the panel for the drag, and a captured pointer's click is dispatched
+     * to the common ancestor of where the pointer went down and where it
+     * came up -- the panel, once capture has moved the pointerup there. So
+     * `startDrag` notes at pointerdown that the press began on the header's
+     * space (`headerPress`; every new press clears it in `supersede`), and
+     * the click, wherever it lands in the panel, is read against that. A
+     * press on one of the row's buttons never starts a drag, so it never
+     * counts; the tail of a drag is nobody's; and `detail` is 0 for a
+     * keyboard activation, which no header has.
      */
     Shell.prototype.headerClick = function (event) {
-        const target = event && event.target;
-        if (target && target !== this.nodes.header && typeof target.closest === "function"
-            && target.closest("button, a, input, textarea, select")) return;
+        const pressed = !!this.headerPress;
+        this.headerPress = false;
         if (this.suppressHeaderClick) {
             this.suppressHeaderClick = false;
             this.resetHeaderTaps();
             return;
         }
-        if (!event || !event.detail) return;
+        if (!pressed || !event || !event.detail) return;
         this.tapHeader();
     };
 
-    /** Three presses on the header's space turn focus on or off -- the Focus
-     * button's job, now that the row has no room for a word. The launcher's
-     * pace: a press belongs to the gesture when it lands within TAP_WINDOW
-     * of the one before it. One press and two do nothing here, so nothing
-     * waits for the window to pass; the count is simply forgotten when it
-     * does. The third acts inside its own press, for the launcher's reason:
-     * a browser grants full screen only to a press that is still being
-     * handled.
+    /** The launcher's two quick actions, on the header's space: two presses
+     * go back to the workspace before this one, three turn focus on or off.
+     * "Just like the button." The launcher's pace: a press belongs to the
+     * gesture when it lands within TAP_WINDOW of the one before it. Two
+     * cannot act until the window has passed with no third, since they may
+     * still become three; the third acts inside its own press, for the
+     * launcher's reason -- a browser grants full screen only to a press that
+     * is still being handled. One press is nothing here, so nothing waits
+     * on it but the count.
      */
     Shell.prototype.tapHeader = function () {
         const taps = (this.headerTaps || 0) + 1;
@@ -1695,7 +1717,15 @@
             return;
         }
         this.headerTaps = taps;
-        this.headerTapTimer = window.setTimeout(() => this.resetHeaderTaps(), TAP_WINDOW);
+        this.headerTapTimer = window.setTimeout(() => {
+            const counted = this.headerTaps;
+            this.resetHeaderTaps();
+            try {
+                if (counted === 2) this.backToPrevious();
+            } catch (error) {
+                this.fault(error);
+            }
+        }, TAP_WINDOW);
     };
 
     /** Forget a half-counted header gesture. */
