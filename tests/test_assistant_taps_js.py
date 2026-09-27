@@ -238,67 +238,155 @@ def test_the_launcher_and_the_navigation_feed_are_wired_to_them():
 # --------------------------------------------------------------------------- #
 
 HEADER = CLOCK + """
-// The header, a control in it, and the space between the controls.
+// The panel, its header and the space between the header's buttons -- and the
+// presses as a browser delivers them: pointerdown on what was pressed, the
+// drag machinery taking pointer capture on the panel, and the click landing
+// on the PANEL, which is where a captured pointer's click goes (the common
+// ancestor of where the pointer went down and where it came up).
 const header = {id: "header"};
+const panel = {id: "panel", style: {}, releasePointerCapture() {},
+               getBoundingClientRect: () => ({left: 0, top: 0, width: 360, height: 400}),
+               setPointerCapture() { panel.captured = true; }};
 const control = {closest: () => control};
 const space = {closest: () => null};
+const elsewhere = {closest: () => null};
 function headerShell() {
     const shell = tapShell();
-    shell.nodes = {header, panel: {dataset: {}}};
+    shell.state = {panelOpen: true, focusEnabled: false, freeFloat: false};
+    shell.nodes = {header, panel, root: {classList: {remove() {}, add() {}}, appendChild() {}}};
+    shell.anchor = () => "top-left";
+    shell._save = () => {};
+    shell.placeNow = () => {};
+    shell.noticeCover = () => {};
+    shell.fault = (error) => shell.did.push("fault:" + error.message);
     return shell;
 }
-const on = (target, detail) => ({detail: detail === undefined ? 1 : detail,
-                                 target: target === undefined ? space : target});
+// One press, start to finish: down on `target` (through the window's capture
+// listener, then the header's own if the press is in the header), up, click.
+let pointerId = 0;
+function tap(shell, target, options) {
+    options = options || {};
+    pointerId += 1;
+    const down = {button: 0, isPrimary: true, pointerId, clientX: 10, clientY: 10, target};
+    shell.supersede(down);
+    if (target !== elsewhere) shell.startDrag(down, panel);
+    if (options.moved) {
+        shell.moveDrag({pointerId, pointerType: "touch", clientX: 60, clientY: 10});
+    }
+    shell.endDrag({pointerId}, false);
+    shell.headerClick({detail: options.detail === undefined ? 1 : options.detail,
+                       target: panel});
+}
 """
 
 
 class TestPressesOnTheHeader:
     """Asked for with the Focus button's removal: "triple tapping on the drag
     area to be the toggle focus on / off ... just like the launcher's triple
-    tap." The drag area is the header's own space -- the grip and the padding
-    between its buttons -- and a press on one of the buttons is that button's.
+    tap" -- and then, once it did not work in a real browser: "lets bring the
+    double tap to that area. So double tap to last tab, and triple tap to
+    toggle focus. Just like the button!"
+
+    The drag area is the header's own space -- the grip and the padding
+    between its buttons. The first version listened for clicks on the header
+    and never heard one: the drag takes pointer capture on the panel, and a
+    captured pointer's click lands on the panel. These presses go down where
+    the browser puts them and come up where capture puts them.
     """
 
     def test_three_presses_on_the_space_toggle_focus_inside_the_third(self):
         found = run(HEADER + """
             const shell = headerShell();
-            shell.headerClick(on());
-            shell.headerClick(on());
+            tap(shell, space);
+            tap(shell, space);
             const before = shell.did.slice();
-            shell.headerClick(on());
+            tap(shell, space);
             const during = shell.did.slice();
             const fired = lapse();
-            console.log(JSON.stringify({before, during, fired, after: shell.did}));
+            console.log(JSON.stringify({before, during, fired, after: shell.did,
+                                        captured: !!panel.captured}));
         """)
 
-        assert found == {"before": [], "during": ["focus"], "fired": 0, "after": ["focus"]}
+        assert found == {"before": [], "during": ["focus"], "fired": 0, "after": ["focus"],
+                         "captured": True}
 
-    def test_a_press_on_the_header_itself_counts_as_the_space(self):
+    def test_two_presses_go_back_once_the_window_has_passed(self):
+        """Not before: they may still become three."""
         found = run(HEADER + """
             const shell = headerShell();
-            [1, 2, 3].forEach(() => shell.headerClick(on(header)));
+            shell.previousWorkspace = "img2img";
+            tap(shell, space);
+            tap(shell, space);
+            const before = shell.did.slice();
+            lapse();
+            console.log(JSON.stringify({before, after: shell.did}));
+        """)
+
+        assert found == {"before": [], "after": ["switch:img2img"]}
+
+    def test_one_press_does_nothing_and_is_forgotten(self):
+        found = run(HEADER + """
+            const shell = headerShell();
+            shell.previousWorkspace = "img2img";
+            tap(shell, space);
+            lapse();
+            tap(shell, space);
+            tap(shell, space);
+            tap(shell, space);
             console.log(JSON.stringify(shell.did));
         """)
 
-        assert found == ["focus"]
+        assert found == ["focus"], "the lone press before the window is not the first of three"
 
-    def test_one_or_two_do_nothing_and_are_forgotten_when_the_window_passes(self):
-        """Nothing waits on the window here -- the header has no single-press
-        action -- so a pair that is forgotten is simply two presses that were
-        not three."""
+    def test_with_nowhere_to_go_back_to_two_presses_do_nothing(self):
         found = run(HEADER + """
             const shell = headerShell();
-            shell.headerClick(on());
-            shell.headerClick(on());
-            const fired = lapse();
-            shell.headerClick(on());
-            shell.headerClick(on());
-            const afterFour = shell.did.slice();
-            shell.headerClick(on());
-            console.log(JSON.stringify({fired, afterFour, then: shell.did}));
+            tap(shell, space);
+            tap(shell, space);
+            lapse();
+            console.log(JSON.stringify(shell.did));
         """)
 
-        assert found == {"fired": 1, "afterFour": [], "then": ["focus"]}
+        assert found == []
+
+    def test_the_click_is_read_where_the_captured_pointer_puts_it(self):
+        """On the panel, not the header: the listener is the panel's, and a
+        click that comes with no press on the header's space behind it -- a
+        press on a message, say -- is not counted."""
+        found = run(HEADER + """
+            const shell = headerShell();
+            tap(shell, elsewhere);
+            tap(shell, elsewhere);
+            tap(shell, elsewhere);
+            console.log(JSON.stringify({did: shell.did, count: shell.headerTaps || 0}));
+        """)
+
+        assert found == {"did": [], "count": 0}
+        wiring = SHELL.read_text(encoding="utf-8") \
+            .split("Shell.prototype.wire = function", 1)[1] \
+            .split("Shell.prototype.grow = function", 1)[0]
+        assert 'this.on(nodes.panel, "click"' in wiring
+        assert 'this.on(nodes.header, "click"' not in wiring
+
+    def test_a_press_that_never_became_a_click_is_forgotten_at_the_next_press(self):
+        """A touch the browser took for a scroll: pointerdown on the space,
+        then pointercancel and no click. Without the clearing, the next press
+        anywhere in the panel -- on a message, say -- would be counted as a
+        press on the space."""
+        found = run(HEADER + """
+            const shell = headerShell();
+            const down = {button: 0, isPrimary: true, pointerId: 7, clientX: 1, clientY: 1, target: space};
+            shell.supersede(down);
+            shell.startDrag(down, panel);
+            shell.endDrag({pointerId: 7}, true);
+            const noted = shell.headerPress;
+            tap(shell, elsewhere);
+            tap(shell, elsewhere);
+            tap(shell, elsewhere);
+            console.log(JSON.stringify({noted, did: shell.did, count: shell.headerTaps || 0}));
+        """)
+
+        assert found == {"noted": True, "did": [], "count": 0}
 
     def test_the_pace_is_the_launcher_s(self):
         source = SHELL.read_text(encoding="utf-8")
@@ -306,97 +394,73 @@ class TestPressesOnTheHeader:
             .split("Shell.prototype", 1)[0]
 
         assert "TAP_WINDOW" in tap
+        assert "backToPrevious" in tap and "toggleFocus" in tap
 
     def test_a_press_on_a_button_in_the_row_is_that_button_s(self):
+        """It never starts a drag, so it is never a press on the space; and it
+        neither counts nor breaks a count."""
         found = run(HEADER + """
             const shell = headerShell();
-            [1, 2, 3].forEach(() => shell.headerClick(on(control)));
+            [1, 2, 3].forEach(() => tap(shell, control));
             const onControls = shell.did.slice();
-            shell.headerClick(on(control));
-            shell.headerClick(on());
-            shell.headerClick(on());
-            shell.headerClick(on());
+            tap(shell, space);
+            tap(shell, control);
+            tap(shell, space);
+            tap(shell, space);
             console.log(JSON.stringify({onControls, then: shell.did}));
         """)
 
-        assert found == {"onControls": [], "then": ["focus"]}, (
-            "a press on a control neither counts nor breaks a count")
+        assert found == {"onControls": [], "then": ["focus"]}
 
     def test_a_synthetic_click_is_not_a_press(self):
         """`detail` is 0 for a keyboard activation, and a header cannot be
         activated from the keyboard, so a click with none is nobody's."""
         found = run(HEADER + """
             const shell = headerShell();
-            [1, 2, 3].forEach(() => shell.headerClick(on(space, 0)));
+            [1, 2, 3].forEach(() => tap(shell, space, {detail: 0}));
             console.log(JSON.stringify(shell.did));
         """)
 
         assert found == []
 
-    def test_the_tail_of_a_drag_is_swallowed_once(self):
+    def test_the_tail_of_a_drag_is_swallowed_and_ends_the_count(self):
         found = run(HEADER + """
             const shell = headerShell();
-            shell.headerClick(on());
-            shell.headerClick(on());
-            shell.suppressHeaderClick = true;
-            shell.headerClick(on());
-            const swallowed = {did: shell.did.slice(), flag: shell.suppressHeaderClick,
-                               count: shell.headerTaps};
-            [1, 2, 3].forEach(() => shell.headerClick(on()));
-            console.log(JSON.stringify({swallowed, then: shell.did}));
+            tap(shell, space);
+            tap(shell, space);
+            tap(shell, space, {moved: true});
+            const afterDrag = {did: shell.did.slice(), flag: shell.suppressHeaderClick,
+                               count: shell.headerTaps || 0, at: shell.state.anchorOverride};
+            [1, 2, 3].forEach(() => tap(shell, space));
+            console.log(JSON.stringify({afterDrag, then: shell.did}));
         """)
 
-        assert found["swallowed"] == {"did": [], "flag": False, "count": 0}, (
-            "the drag ends the count it interrupted, and the flag is spent")
+        assert found["afterDrag"] == {"did": [], "flag": False, "count": 0, "at": "top-left"}, (
+            "the drag moved the panel and was not the third press; the flag is spent")
         assert found["then"] == ["focus"]
 
-    def test_a_drag_of_the_panel_by_its_header_leaves_that_tail_to_swallow(self):
-        found = run(HEADER + """
-            const shell = headerShell();
-            const panel = {style: {}, releasePointerCapture() {}};
-            shell.nodes = {header, panel, root: {classList: {remove() {}}}};
-            shell.state = {freeFloat: false};
-            shell._save = () => {};
-            shell.placeNow = () => {};
-            shell.drag = {node: panel, pointerId: 1, moved: true, anchor: "top-left"};
-            shell.endDrag({pointerId: 1}, false);
-            const afterPanel = shell.suppressHeaderClick;
-            const launcher = {style: {}, releasePointerCapture() {}};
-            shell.nodes.launcher = launcher;
-            shell.suppressHeaderClick = false;
-            shell.drag = {node: launcher, pointerId: 2, moved: true, anchor: "top-left"};
-            shell.endDrag({pointerId: 2}, false);
-            console.log(JSON.stringify({afterPanel, afterLauncher: shell.suppressHeaderClick,
-                                        launcherTail: shell.suppressClick}));
-        """)
-
-        assert found == {"afterPanel": True, "afterLauncher": False, "launcherTail": True}
-
     def test_a_new_press_clears_a_tail_that_never_came(self):
-        """With the pointer captured the click may land on the panel instead
-        of the header, so a flag left for it would eat the next real press."""
+        """With the pointer captured the click may not come at all, so a flag
+        left for it would eat the next real press."""
         found = run(HEADER + """
             const shell = headerShell();
             shell.suppressHeaderClick = true;
-            const node = {getBoundingClientRect: () => ({left: 0, top: 0, width: 10, height: 10}),
-                          setPointerCapture() {}};
-            shell.anchor = () => "top-left";
-            shell.startDrag({button: 0, isPrimary: true, pointerId: 1, clientX: 1, clientY: 1,
-                             target: space}, node);
-            console.log(JSON.stringify({flag: shell.suppressHeaderClick, dragging: !!shell.drag}));
+            const down = {button: 0, isPrimary: true, pointerId: 9, clientX: 1, clientY: 1, target: space};
+            shell.startDrag(down, panel);
+            console.log(JSON.stringify({flag: shell.suppressHeaderClick, dragging: !!shell.drag,
+                                        pressed: shell.headerPress}));
         """)
 
-        assert found == {"flag": False, "dragging": True}
+        assert found == {"flag": False, "dragging": True, "pressed": True}
 
     def test_a_cancelled_gesture_forgets_the_count(self):
         found = run(HEADER + """
             const shell = headerShell();
-            shell.nodes.root = {classList: {remove() {}}};
             shell.drag = null; shell.strip = null; shell.resizing = null;
-            shell.headerClick(on());
-            shell.headerClick(on());
+            tap(shell, space);
+            tap(shell, space);
             shell.cancelGestures();
-            shell.headerClick(on());
+            tap(shell, space);
             console.log(JSON.stringify({did: shell.did, count: shell.headerTaps}));
         """)
 

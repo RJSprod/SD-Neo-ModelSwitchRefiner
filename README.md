@@ -3245,8 +3245,9 @@ and the glyph is lit while the conversation is showing. There is no line naming
 the character and the thread any more — the **⋯** menu's Chat group is headed
 by the character's name, and its **Threads** entry lists the threads with the
 one you are on marked. The space between the **⋯** and the **✕** is what you
-drag the panel by, and pressing it three times turns focus mode on or off (see
-*Focus*); the buttons in that row stay buttons. **✕** puts the panel back to the
+drag the panel by, and it has the launcher's two quick actions: press it twice
+to go back to the workspace you were in before, three times to turn focus mode
+on or off (see *Focus*); the buttons in that row stay buttons. **✕** puts the panel back to the
 launcher, at the same place; pressing the launcher brings it back there. Both
 rows — this one and the composer's, where **Send** is a glyph too — are 36
 pixels tall rather than a full finger, so a collapsed panel is little more than
@@ -3260,7 +3261,8 @@ workspace you were in before this one; press it twice again and you are back
 where you started, so two workspaces can be flipped between without opening
 anything. Until you have been in a second workspace there is nowhere to go back
 to, and a double press does nothing. Press it three times to turn focus mode on
-or off, the same as three presses on the open panel's header. Presses count as one gesture
+or off. Both work on the open panel's header too: twice on the space you drag
+it by goes back, three times toggles focus. Presses count as one gesture
 when each follows the last within 300 ms — a double-click's pace — so two
 unhurried presses are still two ordinary presses. The cost is that a single
 press waits those 300 ms before the panel opens, to be sure no second press is
