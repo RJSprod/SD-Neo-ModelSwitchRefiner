@@ -230,6 +230,17 @@ class Gguf:
         return tuple(bool(entry) for entry in raw)
 
     @property
+    def sliding_window(self) -> int:
+        """How many tokens a sliding-window block attends over, or 0 for none.
+
+        ``attention.sliding_window`` as llama.cpp reads it. A model with a
+        window keeps only that many positions of most blocks' cache in a saved
+        llama.cpp slot, which is what :mod:`mc_llm_slot_cache` has to know.
+        """
+        found = self._numbers("attention.sliding_window")
+        return max(found) if found else 0
+
+    @property
     def key_lengths(self) -> tuple[int, ...]:
         """Per-head key width per block, from the file when it says so.
 

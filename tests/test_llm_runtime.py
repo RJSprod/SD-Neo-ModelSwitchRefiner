@@ -1467,17 +1467,17 @@ class TestAskingTheBuildWhatItSupports:
 
 
 class TestTheWindowOnTheIntelGPU:
-    """A sliding-window model's full cache is 5.6 GB of the Intel GPU's
-    memory against 1.5 GB for the window, on the 26B-A4B backbone at 8,192
-    tokens with six warm caches, and that memory is the system's. The build
-    this was measured on takes a checkpoint four tokens before the end of
-    every prompt, so a turn that continues the thread costs the same with the
-    window as with the full cache; what the window gives up is an edit far
-    back in the thread, which resumes from the nearest checkpoint. So the
-    window is kept on the Intel GPU by default, with llama.cpp's checkpoints
-    spaced so that "nearest" is at most two thousand tokens back, and the
-    full cache stays the rule on an NVIDIA card and the processor. Every test
-    here was checked against the change it guards by reverting it."""
+    """The full cache on every device by default, the Intel GPU included.
+
+    The Intel GPU kept the window by default for a while, for its memory: 5.6
+    GB against 1.5 GB on the 26B-A4B backbone at 8,192 tokens with six warm
+    caches. Measured afterwards on that user's Arc, the window's checkpoints
+    split a continuing turn into 3.6 batches on average at about 1.5 s each
+    before a token is read, and a saved prompt cache can only be resumed
+    exactly on the full cache. So Automatic is the full cache everywhere, and
+    the window -- with llama.cpp's checkpoints spaced so that an edit re-reads
+    at most two thousand tokens back -- is a choice. Every test here was
+    checked against the change it guards by reverting it."""
 
     LISTS_BOTH = "      --swa-full\n  -cms, --checkpoint-min-step N\n"
 
@@ -1506,21 +1506,34 @@ class TestTheWindowOnTheIntelGPU:
 
         return announce
 
-    def test_the_intel_gpu_keeps_the_window_and_spaces_the_checkpoints(self, build):
-        configuration = build(self.LISTS_BOTH)
+    def test_automatic_gives_the_intel_gpu_the_full_cache(self, build):
+        for configuration, placement in ((build(self.LISTS_BOTH), ctx.Placement(uma=True)),
+                                         (build(self.LISTS_BOTH, device="SYCL0"),
+                                          ctx.Placement(gpu_layers=20))):
+            assert runtime.accelerator_flags(configuration, placement) == [
+                runtime.FULL_ATTENTION_WINDOW_FLAG], placement
+
+    def test_the_window_when_chosen_spaces_the_checkpoints_on_intel(self, build, host):
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_NEVER)
+        configuration = build(self.LISTS_BOTH, device="SYCL0")
 
         flags = runtime.accelerator_flags(configuration, ctx.Placement(uma=True))
 
         assert runtime.FULL_ATTENTION_WINDOW_FLAG not in flags
         assert flags[:2] == [runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
 
-    def test_the_device_name_alone_says_intel(self, build):
+    def test_the_old_automatic_label_now_means_the_full_cache(self, build, host):
+        """A setting saved under the old label -- the window on Intel -- is no
+        longer one of the choices; it reads as Automatic, which is now the full
+        cache there too."""
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW,
+                             "Automatic — the full cache on an NVIDIA card and the processor, "
+                             "the window on the Intel GPU")
         configuration = build(self.LISTS_BOTH, device="SYCL0")
 
-        flags = runtime.accelerator_flags(configuration, ctx.Placement(gpu_layers=20))
-
-        assert runtime.FULL_ATTENTION_WINDOW_FLAG not in flags
-        assert flags[:2] == [runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
+        assert runtime.full_window_mode() == runtime.FULL_WINDOW_AUTO
+        assert runtime.accelerator_flags(configuration, ctx.Placement(uma=True)) == [
+            runtime.FULL_ATTENTION_WINDOW_FLAG]
 
     def test_an_nvidia_card_and_the_processor_keep_the_full_cache(self, build):
         configuration = build(self.LISTS_BOTH)
@@ -1555,7 +1568,8 @@ class TestTheWindowOnTheIntelGPU:
         host.shared.opts.set(runtime.OPT_FULL_WINDOW, "")
         assert runtime.full_window_mode() == runtime.FULL_WINDOW_AUTO
 
-    def test_a_build_without_the_spacing_flag_is_not_given_it(self, build):
+    def test_a_build_without_the_spacing_flag_is_not_given_it(self, build, host):
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_NEVER)
         configuration = build("      --swa-full\n")
 
         assert runtime.accelerator_flags(configuration, ctx.Placement(uma=True)) == []
@@ -1574,6 +1588,68 @@ class TestTheWindowOnTheIntelGPU:
 
         assert "mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(" in source
         assert "mc_llm_runtime.FULL_WINDOW_AUTO," in source
+
+class TestAStartThatCanSave:
+    """A start that carried ``--slot-save-path`` records where it saves and
+    hands out the client that can, and a server that stops forgets it -- so a
+    conversation's cache is only ever saved from, and read into, a server that
+    was started able to do it. The rest is in ``tests/test_llm_slot_cache.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def lists_the_flag(self, monkeypatch):
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+        monkeypatch.setattr(
+            runtime.subprocess, "run",
+            lambda *args, **kwargs: types.SimpleNamespace(
+                stdout="  --slot-save-path PATH   path to save slot kv cache\n", stderr=""))
+        yield
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+
+    def test_the_start_records_its_folder_and_the_client_can_save(self, placed, server,
+                                                                  tmp_path, monkeypatch):
+        import mc_llm_slot_cache
+
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+
+        made = managed.client()
+
+        saving = managed._saved_caches
+        assert saving is not None
+        assert saving.folder == tmp_path / "data" / mc_llm_slot_cache.DIRNAME
+        assert saving.base_url == "http://127.0.0.1:8080" and saving.api_key == "test"
+        assert callable(getattr(made, "stream_conversation", None))
+
+    def test_a_start_with_saving_off_hands_out_the_vendored_client(self, placed, server,
+                                                                    tmp_path, monkeypatch,
+                                                                    host):
+        import mc_llm_slot_cache
+        from prompt_master.inference.llama_client import LlamaClient
+
+        host.shared.opts.set(mc_llm_slot_cache.OPT_SAVE, False)
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+
+        made = managed.client()
+
+        assert managed._saved_caches is None
+        assert type(made) is LlamaClient
+
+    def test_a_stopped_server_saves_nothing_more(self, placed, server, tmp_path, monkeypatch):
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        managed.stop()
+
+        assert managed._saved_caches is None
+
 
 class TestFlagsReachTheCommand:
     @pytest.fixture(autouse=True)

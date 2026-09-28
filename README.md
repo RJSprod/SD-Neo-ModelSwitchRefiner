@@ -4115,11 +4115,13 @@ it. Two things make sure that actually happens:
   llama-server has nothing else to do. It never queues in front of your work —
   it asks for the GPU as background and gives up instantly if anything else
   wants it — so the roll it would have delayed is exactly the roll it skips.
-- **`--swa-full`** is passed when the build supports it. A sliding-window model
-  (Gemma is one) can otherwise only resume at a checkpoint llama.cpp happened to
-  take, which on a measured run meant 668 matching tokens resumed at 460 and the
-  other 208 read again — seven seconds of watching a progress bar. The memory
-  this costs is memory the estimator has always reserved.
+- **`--swa-full`** is passed when the build supports it, on every device, unless
+  you choose the window in Settings (see *What the window costs and what it
+  saves* below). A sliding-window model (Gemma is one) can otherwise only resume
+  at a checkpoint llama.cpp happened to take, which on a measured run meant 668
+  matching tokens resumed at 460 and the other 208 read again — seven seconds of
+  watching a progress bar. The memory this costs is memory the estimator has
+  always reserved.
 
 **A server that is up stays up.** Placement is decided when llama-server is
 started, not before every message. Once it is running, a message is answered by
@@ -4138,6 +4140,107 @@ stop the server, which releases every byte and leaves the weights warm in the
 system page cache so a restart reads from RAM rather than disk; or keep it
 running with its weights in system RAM, which avoids the reload and is much
 slower to generate with.
+
+### Gemma's last reply is not read again
+
+Gemma 4's chat template writes the reply it is generating and the reply it
+generated differently. With thinking off, every new prompt ends with an empty
+thought marker, and the reply is written after it:
+
+```
+<|turn>model
+<|channel>thought
+<channel|>The reply…
+```
+
+Once that reply is in the history, the template deletes the marker, so the same
+turn reads `<|turn>model` followed straight by the reply. llama.cpp resumes a
+prompt where it stops matching its cache, and that was four tokens before the
+last reply — so every turn read the model's own last reply again. From one
+user's llama-server log, a turn on the Intel GPU read 394 new tokens after a
+reply of 331: nearly all of it the reply, at about 80 tokens a second.
+
+llama-server is now given a copy of the model's own template
+(`--chat-template-file`) in which a past reply keeps the marker it was written
+after, when thinking is off. The next prompt then matches the cache through the
+end of the last reply, and a turn reads only what is new. Checked against
+llama-server b10621 with Gemma 4's own template: the match moved from four
+tokens short of the last prompt to the whole of it.
+
+- **Only Gemma 4's template is copied.** It is read from the model file and
+  recognised by all three parts of the asymmetry: the turn opening (exactly
+  once), `strip_thinking` on past model turns, and the empty marker at the end
+  of the prompt. Any other template is left as it was.
+- **Replies are read as before.** llama-server picks Gemma's reply parser from
+  the template's markers, and the copy keeps every one of them.
+- **A first message renders exactly as it did**; the marker is added only in
+  front of a past reply.
+- **The copies are kept in `chat_templates`** under the LLM data root, each
+  named for its own content.
+
+**Settings → Model Chain → Keep Gemma's empty thought marker on its past
+replies** is on by default; off, llama-server uses the model's own template as
+it always did. Either way takes effect at the next start of llama-server.
+
+If a turn still reads the last reply again, llama-server's log says how far
+each prompt matched (`checking sim`). The first thing to look at is whether the
+replies begin with a space or a new line: the template trims a past reply, so
+the match would then stop where the reply begins rather than where it ends.
+
+### A conversation's cache across a restart
+
+llama-server keeps what it has read of a conversation only while it runs. The
+first reply after a WebUI restart, Unload, or a change of model or device reads
+the whole conversation again — from one user's logs, four to six thousand tokens
+at 25 to 90 a second on the Intel GPU, one to four minutes before the first word,
+on top of the model load.
+
+The conversation's cache is kept on disk:
+
+- **Saved after every completed reply**, by llama-server itself
+  (`--slot-save-path`), into `prompt_caches` under the LLM data root. The reply
+  asks llama-server which of its warm caches answered, so the right one is saved
+  when several roles share the server. A stopped reply is not saved.
+- **Read back before the first reply after a restart**, once per conversation,
+  into a warm cache nobody has used since the server started, and that reply is
+  sent to it. It then reads only what is new, as it would have before the restart.
+- **Filed under the conversation and the server that wrote it**: the llama-server
+  build, the model file, the projector, the kind of window cache, the cache types
+  and the chat template. Another combination's file is never offered. A file
+  llama-server refuses is removed, and the next reply's save replaces it.
+
+**A model with a sliding window — Gemma among them — is read back only where the
+resume is exact.** When llama.cpp writes a slot it keeps only the positions
+inside the window for the sliding-window blocks, and it does that with the full
+cache too. Checked against llama-server b10621 with a real save, restart and
+restore: with the window cache the restored slot was never resumed; with the
+full cache it was resumed exactly when the new prompt continued the saved one
+token for token, and anywhere else with part of the window missing for the
+tokens read again. So for such a model:
+
+- **It is saved only on the full cache** — the default, see *What the window
+  costs and what it saves* — and for Gemma 4 only with its thought marker kept
+  (above), without which no prompt continues the one before it.
+- **It is read back only after a check.** llama-server renders and tokenizes the
+  new request, and the file is read back only when that prompt begins with every
+  token the file holds. A regenerated reply, an edit, or a picture anywhere in
+  the conversation fails the check; the prompt is then read in full, as it would
+  have been without saving, and the console says where it parted from the saved
+  one.
+
+It costs disk, not memory. **Settings → Model Chain → Disk space for saved prompt
+caches** caps the folder (4 GB by default) and removes the least recently used
+first; 0, or turning off **Save each conversation's prompt cache to disk and read
+it back after a restart**, saves nothing. The console says each step:
+
+```
+Model Chain: saved this conversation's prompt cache — 4,861 tokens, 212 MB in 0.3s
+Model Chain: restored this conversation's saved prompt cache — 4,861 tokens, 212 MB
+             in 0.8s; the reply reads only what is new since it was saved
+```
+
+The model still has to load: the first reply after a restart waits for
+llama-server to start, and then skips the re-read.
 
 ### Taking turns
 
@@ -4356,15 +4459,15 @@ roughly ten times the memory bandwidth of a laptop's system memory.
 
 **Where the shared memory goes.** Two settings dominate it, and both are yours.
 Warm prompt caches multiply the whole cache, and `--swa-full` — which this
-extension passes on an NVIDIA card and the processor so llama.cpp can resume a
-cached prompt exactly rather than at a checkpoint, and leaves off on the Intel
-GPU by default — holds the sliding-window layers at the full context instead of
-`n_swa + n_ubatch` cells. On the 26B-A4B backbone at 8,192 tokens:
+extension passes on every device by default, so llama.cpp can resume a cached
+prompt exactly rather than at a checkpoint — holds the sliding-window layers at
+the full context instead of `n_swa + n_ubatch` cells. On the 26B-A4B backbone at
+8,192 tokens:
 
 | Warm prompt caches | `--swa-full` | Key/value cache |
 | --- | --- | --- |
-| Six | on (NVIDIA and processor default) | 10.3 GB |
-| Six | off (Intel default) | 2.7 GB |
+| Six | on (the default) | 10.3 GB |
+| Six | off (the window, when chosen) | 2.7 GB |
 | One | on | 1.7 GB |
 | One | off | 0.45 GB |
 
@@ -4372,25 +4475,31 @@ If shared memory is tight, **Prompt caches** in Settings is the larger lever of
 the two.
 
 **What the window costs and what it saves.** The choice is **Settings → Model
-Chain → Key/value cache on a sliding-window model**: *Automatic* (the window on
-the Intel GPU, the full cache elsewhere), *Always the full cache*, or *Always the
-window*. The memory is the table above. The time before the first character is
-the same in the ordinary case: the llama.cpp build this was measured on takes a
-context checkpoint four tokens before the end of every prompt, and the next turn
-of a thread shares a prefix with the last one that ends exactly there, at the
-assistant header, so with the window llama.cpp resumes from that checkpoint and
-with the full cache from the same place. What the window gives up is an edit far
-back in the thread, a reply regenerated from long ago, or a branch taken from
-early on: the full cache resumes at the edit, the window at the nearest
-checkpoint before it. llama.cpp's own spacing puts that checkpoint at the start
-of the thread, so with the window this extension passes
-`--checkpoint-min-step 2048`, which keeps one every two thousand tokens — at
-about 160 MB of system RAM each with a q8_0 cache, twice that at f16 — and an
-edit then re-reads at most that far back plus the edit itself. Generation speed
-at a long context may improve with the window, because the window layers then
-attend over at most 1,536 cells rather than the whole context; that is the
-arithmetic, not a measurement, and the console line *Last reply: llama.cpp
-measured N tokens/s* is where to check it.
+Chain → Key/value cache on a sliding-window model**: *Automatic* (the full cache
+on every device), *Always the full cache*, or *Always the window*. The memory is
+the table above. The time is what made the full cache the default on the Intel
+GPU too, where the window was the default for a while. With the window,
+llama.cpp takes context checkpoints as it reads a prompt — at the last user
+message, and four and 516 tokens before the end — and it reads the prompt in
+separate batches to take them: on one user's Arc a turn that continued a thread
+was read in 3.6 batches on average, where the full cache reads it in one. A
+batch of a mixture-of-experts model costs about a second and a half on SYCL
+before its first token is read (`ggml_sycl_mul_mat_id` waits on the host once
+per layer), so at those figures the window cost about four seconds of every
+turn. The full cache is also the only one a saved prompt cache can be resumed
+on exactly (see *A conversation's cache across a restart*).
+
+What the window gives up besides is an edit far back in the thread, a reply
+regenerated from long ago, or a branch taken from early on: the full cache
+resumes at the edit, the window at the nearest checkpoint before it. llama.cpp's
+own spacing puts that checkpoint at the start of the thread, so with the window
+this extension passes `--checkpoint-min-step 2048`, which keeps one every two
+thousand tokens — at about 160 MB of system RAM each with a q8_0 cache, twice
+that at f16 — and an edit then re-reads at most that far back plus the edit
+itself. Generation speed at a long context may improve with the window, because
+the window layers then attend over at most 1,536 cells rather than the whole
+context; that is the arithmetic, not a measurement, and the console line *Last
+reply: llama.cpp measured N tokens/s* is where to check it.
 
 **The launch.** The server is started with `--device SYCL0` and every layer on
 the device. `CUDA_VISIBLE_DEVICES` is emptied for that start — the number the
@@ -5243,6 +5352,8 @@ mc_llm_vision.py      which projector belongs to the model, and repairing it
 mc_llm_attachments.py      where a conversation's pictures are kept
 mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
+mc_llm_slot_cache.py  a conversation's llama.cpp slot, saved to disk and read back after a restart
+mc_llm_template.py    Gemma 4's chat template with its thought marker kept on past replies
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
 mc_llm_prompt_panel.py     Prompt Studio workspace
 mc_llm_chat_panel.py       Conversation workspace
@@ -5447,7 +5558,7 @@ needs no change to the orchestration code.
 ## Tests
 
 ```
-pip install pytest pillow numpy psutil httpx
+pip install pytest pillow numpy psutil httpx jinja2
 python -m pytest tests/
 ```
 

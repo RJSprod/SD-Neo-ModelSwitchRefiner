@@ -53,7 +53,9 @@ import mc_gguf
 import mc_llm_accel
 import mc_llm_context
 import mc_llm_paths
+import mc_llm_slot_cache
 import mc_llm_state
+import mc_llm_template
 import mc_llm_vision
 
 if TYPE_CHECKING:
@@ -1948,23 +1950,23 @@ budgeted for anyway, because :func:`mc_llm_context.estimate` sizes the cache at
 the full context for every block. So the reserve does not move; reality merely
 stops being cheaper than the arithmetic that placed it.
 
-*On the Intel GPU the window is kept, by default.* Its memory is the system's,
-and on the 26B-A4B backbone at 8,192 tokens with six warm caches the full cache
-is 5.6 GB of it against 1.5 GB for the window (the llama.cpp figures from one
-user's log: 510 + 5,100 MiB of key/value buffers). The seven seconds above
-were the checkpoints llama.cpp took in 2025; the build this was measured on
-takes one four tokens before the end of every prompt (and one 516 before it,
-and one at the start of the last user message), so a turn that continues the
-thread resumes where the full cache would have -- the common prefix ends four
-tokens before the previous prompt's end either way, at the assistant header --
-and costs the same. What the window gives up is an edit far back in the
-thread: the full cache resumes at the edit, the window at the nearest
-checkpoint before it, and with llama.cpp's default spacing of 8,192 tokens
-that checkpoint is the start of the thread. So :data:`CHECKPOINT_SPACING_FLAG`
-is passed with the window, and the re-read is then at most
-:data:`CHECKPOINT_SPACING` tokens more than the edit itself. The setting
-(:data:`OPT_FULL_WINDOW`) puts the full cache back on Intel, or takes it off an
-NVIDIA card whose VRAM is the scarcer thing.
+*The full cache on every device, the Intel GPU included, by default.* For a
+while the Intel GPU kept the window, because its memory is the system's: on the
+26B-A4B backbone at 8,192 tokens with six warm caches the full cache is 5.6 GB
+of it against 1.5 GB for the window (510 + 5,100 MiB of key/value buffers in
+one user's log). Two things measured afterwards, on that user's Arc, put the
+full cache back. The window makes llama.cpp take checkpoints, and a prompt is
+read in separate batches to take them -- at the last user message and four and
+516 tokens before the end -- so a turn that continues the thread was read in
+3.6 batches on average, where the full cache reads it in one; on SYCL a
+mixture-of-experts batch costs about 1.5 s before its first token
+(``ggml_sycl_mul_mat_id`` waits on the host once per layer), so at those figures
+the window cost about four seconds a turn. And a saved prompt cache
+(:mod:`mc_llm_slot_cache`) can only be resumed exactly on the full cache. The
+window stays a choice (:data:`OPT_FULL_WINDOW`), and when it is chosen
+:data:`CHECKPOINT_SPACING_FLAG` is passed with it, so an edit far back in the
+thread re-reads at most :data:`CHECKPOINT_SPACING` tokens more than the edit
+itself rather than the whole thread.
 """
 
 CHECKPOINT_SPACING_FLAG = "--checkpoint-min-step"
@@ -1989,8 +1991,8 @@ FULL_WINDOW_ALWAYS = "always"
 FULL_WINDOW_NEVER = "never"
 
 FULL_WINDOW_MODES = (
-    (FULL_WINDOW_AUTO, "Automatic — the full cache on an NVIDIA card and the processor, the "
-                       "window on the Intel GPU"),
+    (FULL_WINDOW_AUTO, "Automatic — the full cache on every device, which is what placement "
+                       "has always charged for"),
     (FULL_WINDOW_ALWAYS, "Always the full cache — any cached prompt resumes exactly, for the "
                          "memory of the whole context on every block"),
     (FULL_WINDOW_NEVER, "Always the window — llama.cpp resumes from its checkpoints, for a "
@@ -2005,21 +2007,15 @@ def full_window_mode() -> str:
                              FULL_WINDOW_MODES, FULL_WINDOW_AUTO)
 
 
-def _on_intel(configuration: Config | None, placement) -> bool:
-    """Whether this placement runs in the Intel GPU's shared system memory."""
-    if getattr(placement, "uma", False):
-        return True
-    return str(getattr(configuration, "device", "") or "").upper().startswith("SYCL")
-
-
 def full_window_wanted(configuration: Config | None, placement) -> bool:
-    """Whether ``--swa-full`` is wanted for this placement, setting and card."""
-    mode = full_window_mode()
-    if mode == FULL_WINDOW_ALWAYS:
-        return True
-    if mode == FULL_WINDOW_NEVER:
-        return False
-    return not _on_intel(configuration, placement)
+    """Whether ``--swa-full`` is wanted: on every device unless the window was chosen.
+
+    ``configuration`` and ``placement`` are no longer consulted -- the Intel GPU
+    kept the window by default until the batches it costs were measured (see
+    :data:`FULL_ATTENTION_WINDOW_FLAG`) -- and are kept so that a rule by device
+    can come back without changing every caller.
+    """
+    return full_window_mode() != FULL_WINDOW_NEVER
 
 
 def window_flags(configuration: Config, placement) -> list[str]:
@@ -2060,7 +2056,8 @@ _TRACE_SCALE = re.compile(r"--log-verbosity[\s\S]{0,900}?\b4\s*:\s*trace", re.IG
 OPTIONAL_FLAGS = frozenset({
     CPU_MOE_FLAG, N_CPU_MOE_FLAG, FLASH_ATTENTION_FLAG, NO_MMAP_FLAG,
     NO_KV_OFFLOAD_FLAG, OP_OFFLOAD_FLAG, FULL_ATTENTION_WINDOW_FLAG,
-    CHECKPOINT_SPACING_FLAG, LOG_VERBOSITY_FLAG,
+    CHECKPOINT_SPACING_FLAG, LOG_VERBOSITY_FLAG, mc_llm_slot_cache.SLOT_SAVE_FLAG,
+    mc_llm_template.TEMPLATE_FILE_FLAG,
     mc_llm_accel.SPEC_TYPE_FLAG, mc_llm_accel.SPEC_MAX_FLAG,
 })
 """Every flag this extension *chooses* to append, and none that it must.
@@ -2556,7 +2553,9 @@ def _launch_flags(configuration: Config, placement: mc_llm_context.Placement,
     carry, rather than the two being concatenated and hoped about.
     """
     special = _with_runtime(configuration, plan.runtime if plan is not None else None)
-    flags = accelerator_flags(special, placement) + _wangp_thread_flags(special, placement)
+    flags = (accelerator_flags(special, placement) + _wangp_thread_flags(special, placement)
+             + _template_flags(special))
+    flags += _saved_cache_flags(special, flags)
     if plan is None or not plan.flags:
         return flags
     extra = list(plan.flags)
@@ -2573,6 +2572,33 @@ def _wangp_thread_flags(configuration: Config, placement: mc_llm_context.Placeme
         return list(mc_wangp.thread_flags(configuration, placement))
     except Exception:
         logger.debug("Model Chain: could not decide the thread cap for WanGP", exc_info=True)
+        return []
+
+
+def _template_flags(configuration: Config) -> list[str]:
+    """Gemma 4's template with its thought marker kept. See :mod:`mc_llm_template`."""
+    try:
+        return list(mc_llm_template.launch_flags(configuration))
+    except Exception:
+        logger.debug("Model Chain: could not decide on the chat template", exc_info=True)
+        return []
+
+
+def _saved_cache_flags(configuration: Config, flags) -> list[str]:
+    """Where a conversation's prompt cache is saved. See :mod:`mc_llm_slot_cache`.
+
+    Given the flags already chosen for this start, because whether a
+    sliding-window model's cache can be saved depends on two of them: the full
+    cache (``--swa-full``) and the template that keeps its history stable.
+    """
+    try:
+        given = [str(flag) for flag in flags or ()]
+        return list(mc_llm_slot_cache.launch_flags(
+            configuration, full_cache=FULL_ATTENTION_WINDOW_FLAG in given,
+            template_fixed=mc_llm_template.TEMPLATE_FILE_FLAG in given))
+    except Exception:
+        logger.debug("Model Chain: could not decide where to save prompt caches",
+                     exc_info=True)
         return []
 
 
@@ -3186,11 +3212,11 @@ def with_backend_isolation(command, environ):
                 "CUDA_VISIBLE_DEVICES is emptied so no NVIDIA card is picked up behind it, "
                 "and --device on the command line is the whole of the selection")
     if FULL_ATTENTION_WINDOW_FLAG not in argv:
-        logger.info("Model Chain: the sliding-window cache is kept on the Intel GPU (Settings → "
-                    "Model Chain → Key/value cache on a sliding-window model): a turn that "
-                    "continues the thread resumes from llama.cpp's checkpoint and costs what "
-                    "it did with the full cache; an edit far back in the thread re-reads from "
-                    "the nearest checkpoint, at most %s tokens before it",
+        logger.info("Model Chain: the sliding-window cache is kept on the Intel GPU, as chosen "
+                    "in Settings → Model Chain → Key/value cache on a sliding-window model: "
+                    "llama.cpp reads each turn in separate batches to take its checkpoints, a "
+                    "saved prompt cache cannot be resumed, and an edit far back in the thread "
+                    "re-reads from the nearest checkpoint, at most %s tokens before it",
                     f"{int(CHECKPOINT_SPACING):,}" if CHECKPOINT_SPACING_FLAG in argv
                     else "the whole thread back, on a build without --checkpoint-min-step")
     return found
@@ -3949,6 +3975,34 @@ def _profile_arguments(configuration: Config,
             "jinja": bool(configuration.profile.jinja)}
 
 
+def _saved_caches_for(process, flags, executable, configuration: Config,
+                      placement: mc_llm_context.Placement, projector):
+    """What :mod:`mc_llm_slot_cache` needs to know about a server that just started.
+
+    None when the start did not carry ``--slot-save-path``. The identity is
+    taken from what this process was actually given -- the executable, the
+    model, the projector, whether ``--swa-full`` was on the line and the cache
+    types a managed profile passed -- because those decide whether a file
+    another process wrote can be read back into this one.
+    """
+    try:
+        given = [str(flag) for flag in flags or ()]
+        profile = _profile_arguments(configuration, placement)
+        cache_types = (f"{profile.get('cache_type_k', '')}/{profile.get('cache_type_v', '')}"
+                       if profile else "")
+        template = (given[given.index(mc_llm_template.TEMPLATE_FILE_FLAG) + 1]
+                    if mc_llm_template.TEMPLATE_FILE_FLAG in given[:-1] else "")
+        made = mc_llm_slot_cache.identity(
+            executable, configuration.model, projector,
+            full_cache=FULL_ATTENTION_WINDOW_FLAG in given, cache_types=cache_types,
+            template=template)
+        return mc_llm_slot_cache.started(process, flags, made, model=configuration.model)
+    except Exception:
+        logger.debug("Model Chain: could not set up saved prompt caches for this start",
+                     exc_info=True)
+        return None
+
+
 def _room_clause(configuration: Config, before: int) -> str:
     """What the start line says about the memory this placement is going into.
 
@@ -4354,6 +4408,12 @@ class Runtime:
         self._placement: mc_llm_context.Placement | None = None
         self._log: tuple | None = None
         """``(path, offset)`` of the running server's slice of the log."""
+        self._saved_caches = None
+        """What :mod:`mc_llm_slot_cache` knows about the running process, or None.
+
+        Set when a start carried ``--slot-save-path`` and cleared with the rest
+        of the process's state, so a conversation's cache is only ever saved
+        from, and restored into, a server that was started able to do it."""
         self.report = Report()
         self.residency_key = residency_key or RESIDENCY_KEY
         """This server's line in the broker's register.
@@ -5060,7 +5120,9 @@ class Runtime:
         # ``--flash-attn`` as a switch does not get it twice: the ordinary set
         # adds it for a resident placement, and an accelerator's flags are
         # filtered against what it already carries. See ``_launch_flags``.
-        _arm_flags(_launch_flags(configuration, placement, plan))
+        flags = _launch_flags(configuration, placement, plan)
+        _arm_flags(flags)
+        self._saved_caches = None
         # The card, by the name both enumerations agree on. See
         # ``with_pinned_card``: the index recorded at setup is nvidia-smi's and
         # the variable it is written into is read in CUDA's order.
@@ -5078,6 +5140,8 @@ class Runtime:
             said = read_failure(_text_since(log_path, written_before))
             raise _StartFailed(said.text or str(exc), said.out_of_memory,
                                said.bad_argument, said.bad_value) from exc
+        self._saved_caches = _saved_caches_for(process, flags, executable, configuration,
+                                               placement, projector)
 
         _report_start_time(configuration, time.monotonic() - began, self._said_for())
         observed = self._observed_residency(before, placement, card_of(configuration),
@@ -5173,8 +5237,14 @@ class Runtime:
         from prompt_master.inference.llama_client import LlamaClient
         from prompt_master.models import managed_profiles
 
-        return LlamaClient(f"http://127.0.0.1:{self._process.port}", self._process.api_key,
-                           managed_profiles.sampler_arguments(configuration.profile))
+        address = f"http://127.0.0.1:{self._process.port}"
+        sampling = managed_profiles.sampler_arguments(configuration.profile)
+        saving = getattr(self, "_saved_caches", None)
+        if saving is not None:
+            # The same client with one method more, which only a conversation
+            # reply calls. See :mod:`mc_llm_slot_cache`.
+            return mc_llm_slot_cache.client(address, self._process.api_key, sampling, saving)
+        return LlamaClient(address, self._process.api_key, sampling)
 
     def _outgrown(self, configuration: Config, ours: int, vision: bool = False) -> bool:
         """Whether the card could now hold more of the model than this server does.
@@ -6114,6 +6184,7 @@ class Runtime:
         # wanted is the opposite one: no such flag reaches an ordinary start.
         self._accelerator = ()
         self._log = None
+        self._saved_caches = None
         mc_broker.retire(self.residency_key)
         self._forget_placement_plan()
         if process is None:

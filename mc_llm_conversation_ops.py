@@ -768,6 +768,7 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
                  every_picture=every)
     request = sessions.ChatRequest(
         messages=wire,
+        conversation=f"{key.character}/{key.thread_id}",
         needs_vision=needs_vision(wire),
         temperature=_fraction(settings.get("temperature"), character.temperature,
                               DEFAULT_TEMPERATURE),
