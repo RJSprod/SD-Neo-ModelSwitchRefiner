@@ -89,6 +89,18 @@
     const NOMINAL_WIDTH = 360;
     const RESIZE_STEP = 16;
     const BOTTOM_SLACK = 100;
+    //: Leaving the end of the transcript on purpose. An upward wheel that has
+    //: travelled this far within LEAVE_WINDOW_MS -- one notch of a mouse wheel
+    //: in either browser, more than a brush of a trackpad -- or a finger
+    //: dragged this far down the glass, unfollows at once, before the scroll
+    //: it starts has moved anything. The position rule cannot see intent, and
+    //: while a reply was streaming a chunk arriving between two of its events
+    //: put the reader back at the end every time they tried to leave it.
+    const LEAVE_WHEEL_PX = 40;
+    const LEAVE_TOUCH_PX = 24;
+    const LEAVE_WINDOW_MS = 400;
+    //: A wheel reported in lines (Firefox does) or pages, as pixels.
+    const WHEEL_LINE_PX = 16;
 
     // How long the answer to a press holds the status line against "Ready.".
     // See `tell`.
@@ -1385,17 +1397,15 @@
             this.toBottom();
             nodes.jump.hidden = true;
         });
-        this.on(nodes.transcript, "scroll", () => {
-            // Locked to the latest while the reader is at the end of it, and
-            // left exactly where it is the moment they are not. The slack is
-            // what makes "at the bottom" survive a font metric and a rounded
-            // pixel; without it a transcript can be at the end and not know it.
-            const distance = nodes.transcript.scrollHeight - nodes.transcript.scrollTop
-                - nodes.transcript.clientHeight;
-            this.following = distance <= BOTTOM_SLACK;
-            if (this.following) nodes.jump.hidden = true;
-            else if (this.settled) nodes.jump.hidden = false;
-        });
+        this.on(nodes.transcript, "scroll", () => this.scrolledTranscript());
+        // Leaving the end is read from the gesture, not from where it left the
+        // transcript. See `leaveBottom`. Passive: nothing here prevents a scroll.
+        this.on(nodes.transcript, "wheel", (event) => this.wheelTranscript(event),
+                {passive: true});
+        this.on(nodes.transcript, "touchstart", (event) => this.touchTranscript(event, true),
+                {passive: true});
+        this.on(nodes.transcript, "touchmove", (event) => this.touchTranscript(event, false),
+                {passive: true});
         // A tap on a message shows its actions. See `tapBubble`.
         this.on(nodes.transcript, "click", (event) => this.tapBubble(event));
         this.on(nodes.transcript, "keydown", (event) => this.bubbleKey(event));
@@ -3210,8 +3220,90 @@
         } else {
             const now = transcript.querySelector("[data-index]");
             if (now) transcript.scrollTop += now.getBoundingClientRect().top - offset;
+            // Our own move, not the reader's: the scroll event it fires must
+            // not read as them coming back down.
+            this.lastScrollTop = transcript.scrollTop;
         }
         this.showJump(view);
+    };
+
+    // -- Following the end, and leaving it ------------------------------------- //
+    //
+    // Locked to the latest while the reader is at the end of it, left exactly
+    // where they are the moment they are not, and following again when they
+    // come back down. The scroll position alone could not tell leaving from
+    // being at the end while a reply was streaming: the first pixels of a
+    // wheel notch are still inside the slack, a chunk arriving in that instant
+    // saw "at the bottom" and put the reader back there, and the next notch
+    // met the same thing. So leaving is read from the gesture -- a wheel
+    // upward, a finger down the glass, a key that reads back -- the moment it
+    // starts, and the position rule only ever *re-follows* on a scroll that
+    // moved down and reached the end; an upward scroll inside the slack, and
+    // a move this code made itself, change nothing.
+
+    Shell.prototype.scrolledTranscript = function () {
+        const transcript = this.nodes.transcript;
+        if (!transcript) return;
+        const distance = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+        const last = typeof this.lastScrollTop === "number" ? this.lastScrollTop : transcript.scrollTop;
+        const movedDown = transcript.scrollTop > last;
+        this.lastScrollTop = transcript.scrollTop;
+        if (distance > BOTTOM_SLACK) this.following = false;
+        else if (movedDown) this.following = true;
+        this.showJumpNow();
+    };
+
+    Shell.prototype.showJumpNow = function () {
+        const jump = this.nodes.jump;
+        if (!jump) return;
+        if (this.following) jump.hidden = true;
+        else if (this.settled) jump.hidden = false;
+    };
+
+    // Stop following the latest, now, because the reader asked to.
+    Shell.prototype.leaveBottom = function () {
+        this.wheelUp = 0;
+        if (!this.following) return false;
+        this.following = false;
+        this.showJumpNow();
+        return true;
+    };
+
+    function wheelPixels(event, transcript) {
+        const dy = Number(event && event.deltaY) || 0;
+        if (event && event.deltaMode === 1) return dy * WHEEL_LINE_PX;
+        if (event && event.deltaMode === 2) return dy * ((transcript && transcript.clientHeight) || 400);
+        return dy;
+    }
+
+    // A wheel upward, counted over a short window so a notch leaves and a
+    // brush of a trackpad does not. A wheel downward forgets the count.
+    Shell.prototype.wheelTranscript = function (event) {
+        const delta = wheelPixels(event, this.nodes.transcript);
+        if (delta >= 0 || !this.following) {
+            this.wheelUp = 0;
+            return false;
+        }
+        const now = Date.now();
+        if (!this.wheelAt || now - this.wheelAt > LEAVE_WINDOW_MS) this.wheelUp = 0;
+        this.wheelAt = now;
+        this.wheelUp = (this.wheelUp || 0) - delta;
+        if (this.wheelUp < LEAVE_WHEEL_PX) return false;
+        return this.leaveBottom();
+    };
+
+    // A finger that has moved down the glass by a deliberate amount is the
+    // transcript scrolling up under it.
+    Shell.prototype.touchTranscript = function (event, starting) {
+        const touch = event && event.touches && event.touches[0];
+        if (!touch) return false;
+        if (starting) {
+            this.touchY = touch.clientY;
+            return false;
+        }
+        if (!this.following || typeof this.touchY !== "number") return false;
+        if (touch.clientY - this.touchY < LEAVE_TOUCH_PX) return false;
+        return this.leaveBottom();
     };
 
     // Put the latest message on screen, now and again once the browser has
@@ -3227,12 +3319,14 @@
         const transcript = this.nodes.transcript;
         if (!transcript) return;
         transcript.scrollTop = transcript.scrollHeight;
+        this.lastScrollTop = transcript.scrollTop;
         if (this.settling) return;
         this.settling = true;
         window.requestAnimationFrame(() => {
             this.settling = false;
             if (!this.following || !this.nodes.transcript) return;
             this.nodes.transcript.scrollTop = this.nodes.transcript.scrollHeight;
+            this.lastScrollTop = this.nodes.transcript.scrollTop;
             this.settled = true;
         });
     };
@@ -3470,6 +3564,11 @@
 
     /** Enter or Space on a focused message does what a tap does. */
     Shell.prototype.bubbleKey = function (event) {
+        // A key that reads back is leaving the end; the browser still scrolls.
+        if (event && (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home")) {
+            this.leaveBottom();
+            return false;
+        }
         if (!event || (event.key !== "Enter" && event.key !== " ")) return false;
         const node = event.target;
         if (!node || !node.dataset || !node.dataset.actions) return false;
@@ -3532,7 +3631,10 @@
             && typeof transcript.getBoundingClientRect === "function") {
             const box = found.getBoundingClientRect();
             const edge = transcript.getBoundingClientRect();
-            if (box.bottom > edge.bottom) transcript.scrollTop += box.bottom - edge.bottom;
+            if (box.bottom > edge.bottom) {
+                transcript.scrollTop += box.bottom - edge.bottom;
+                this.lastScrollTop = transcript.scrollTop;
+            }
         }
     };
 

@@ -3042,32 +3042,25 @@ to be the loudest thing on a page whose job is to be read.
 
 ### Characters
 
-**Character** in the Conversation menu is one screen doing four things, and the
-drop-down at the top of it — *Talking to* — is only ever the first:
+**Character** in the Conversation menu is one screen: *Talking to* at the top,
+and under it **Edit**, **New**, **↻ Refresh** (re-reads the characters folder)
+and **⤢ System prompt** (the full-page editor, below). Edit and New open the
+editor on the screen, grouped in the order a character is written:
 
 | | |
 | --- | --- |
-| **Edit** | Opens the editor on the character you are talking to. Saving writes it back; changing the name renames it, and its picture moves with it. |
-| **New** | Clears the editor for a character that does not exist yet, and resets the Advanced generation settings with it. It does **not** touch the character you are talking to. |
-| **↻ Refresh** | Re-reads the characters folder, for a `.yaml` copied in from an oobabooga install while the tab was open. |
-| **⤢ System prompt** | Opens the character's system prompt on a page of its own — see *The system prompt editor* below. |
-| **Save character** | Creates when the editor is on a new character and edits when it is on an existing one. Creating over a name already taken is refused rather than writing over it. |
-| **Delete this character** | Removes it and its picture, and lands you on whichever character is left. |
-| **Import a character card** | A `.yaml`, `.json`, or a `.png` V2/V3 card with its JSON inside. |
+| **Picture · Name · Greeting** | One row. The picture lives beside the character file as `<name>.png`; a card imported with one keeps it. |
+| **Context** | Who the character is; shown to the model before the first line. |
+| **System prompt** | *In force* is the prompt the model is actually given, composed as it will be sent, and it follows the boxes as you type. **Copy into override** puts it in the override box, where it becomes the character's own; empty the box again and the character goes back to the built prompt. It never overwrites an override already written. |
+| **Voice** | Which voice reads the character aloud, and its own delivery if it has one. |
+| **Save character** / **Cancel** | Save creates when the editor is on a new character and edits when it is on an existing one; creating over a name already taken is refused. Changing the name renames, picture included. Cancel puts everything back, the Generation settings too. |
 
-The Advanced generation settings are saved *with* the character, so a seed of
-**−1** there is what makes its replies vary — and a character that has never
-been given a seed has −1 already. The same boxes are the per-message override
-for the conversation you are in, so **Cancel** in the editor puts them back to
-the selected character's.
-
-The editor also shows **the system prompt this character actually runs with** —
-the whole thing, composed the way it will be sent, not a description of it. It
-follows the name and description as they are typed, so the effect of a change is
-visible before it is saved. **Edit this system prompt** copies what is showing
-into the override box below it, where it becomes this character's own and is
-saved with them; empty it again and the character goes back to the common
-default. It never overwrites an override already written.
+Under the editor, **Generation** holds temperature, top-p, reply tokens and
+the seed. They are saved with the character and in force while you talk to
+one — moving one while the editor is shut is remembered on that character —
+and −1 is a new seed for every reply. **Import a character card** takes a
+`.yaml`, `.json`, or a `.png` V2/V3 card with its JSON inside. **Delete this
+character** removes it and its picture and lands you on whichever is left.
 
 #### The system prompt editor
 
@@ -3163,7 +3156,10 @@ it.
 The transcript follows a reply while you are at the end of it and holds your
 place while you are not: scroll up to read something and new messages arrive
 below without moving what you are looking at; scroll back to the bottom and it
-starts following again.
+starts following again. Leaving is read from the gesture, not from how far it
+got: one notch of the wheel upward, a finger dragged down the screen, or ↑,
+Page Up or Home lets go of the end at once, so a reply streaming in cannot
+pull you back while you are still on your way up.
 
 The threads list, the character (chat with, edit, or create) and your persona
 are behind **☰** in the header, each on its own screen, and every one of them is
@@ -3614,7 +3610,11 @@ end of a thread it stays at the end as replies arrive, including the picture in
 a reply, which lands after the words do and used to take the bottom with it.
 Scroll up and nothing moves you: the reply carries on arriving below and a
 button offers to take you back to it, saying whether there is something new
-down there or just the end of what you were already reading.
+down there or just the end of what you were already reading. One notch of the
+wheel upward, a short drag of a finger down the transcript, or ↑, Page Up or
+Home is enough to let go of the end — read from the gesture as it starts, so a
+chunk arriving in the same instant cannot pin you back to the bottom — and
+scrolling down to the end takes hold of it again.
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip — or attached for you by **Auto Attach**, above. One per message, and
