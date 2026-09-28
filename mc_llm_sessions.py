@@ -634,6 +634,13 @@ class ChatRequest:
     top_p: float = field(default_factory=_vendored("DEFAULT_TOP_P"))
     max_tokens: int = field(default_factory=_vendored("DEFAULT_MAX_REPLY_TOKENS"))
     seed: int = 0
+    conversation: str = ""
+    """Which conversation this reply belongs to, or empty for none.
+
+    What a saved prompt cache is filed under (:mod:`mc_llm_slot_cache`): a
+    reply that names its conversation has its llama.cpp slot saved after it,
+    and the first reply after a restart has that slot read back before it.
+    Empty is the old behaviour exactly."""
 
 
 def _conversation(request: ChatRequest, cancel: Cancellation):
@@ -653,12 +660,23 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
         yield Event(STATUS, "Replying…")
 
         text = ""
-        for chunk, result in _streamed(
-                lambda on_text: client.stream_chat(request.messages, request.max_tokens,
-                                                   request.seed, on_text, cancel.event,
-                                                   temperature=request.temperature,
-                                                   top_p=request.top_p),
-                when_done=gpu.release):
+        # A client that can save a conversation's cache is asked to, for a
+        # request that says which conversation it is. Everything else -- a test
+        # double, a server started without the folder, a reply with no
+        # conversation -- streams exactly as it always has.
+        saving = getattr(client, "stream_conversation", None)
+        if request.conversation and callable(saving):
+            def work(on_text):
+                return saving(request.conversation, request.messages, request.max_tokens,
+                              request.seed, on_text, cancel.event,
+                              temperature=request.temperature, top_p=request.top_p)
+        else:
+            def work(on_text):
+                return client.stream_chat(request.messages, request.max_tokens,
+                                          request.seed, on_text, cancel.event,
+                                          temperature=request.temperature,
+                                          top_p=request.top_p)
+        for chunk, result in _streamed(work, when_done=gpu.release):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:

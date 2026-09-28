@@ -4139,6 +4139,50 @@ system page cache so a restart reads from RAM rather than disk; or keep it
 running with its weights in system RAM, which avoids the reload and is much
 slower to generate with.
 
+### A conversation's cache across a restart
+
+llama-server keeps what it has read of a conversation only while it runs. The
+first reply after a WebUI restart, Unload, or a change of model or device reads
+the whole conversation again — from one user's logs, four to six thousand tokens
+at 25 to 90 a second on the Intel GPU, one to four minutes before the first word,
+on top of the model load.
+
+For a model without a sliding window, the conversation's cache is kept on disk:
+
+- **Saved after every completed reply**, by llama-server itself
+  (`--slot-save-path`), into `prompt_caches` under the LLM data root. The reply
+  asks llama-server which of its warm caches answered, so the right one is saved
+  when several roles share the server. A stopped reply is not saved.
+- **Read back before the first reply after a restart**, once per conversation,
+  into a warm cache nobody has used since the server started, and that reply is
+  sent to it. It then reads only what is new, as it would have before the restart.
+- **Filed under the conversation and the server that wrote it**: the llama-server
+  build, the model file, the projector, the kind of window cache and the cache
+  types. Another combination's file is never offered. A file llama-server refuses
+  is removed, and the next reply's save replaces it.
+
+**Not for a model with a sliding window — Gemma among them.** When llama.cpp
+writes a slot it keeps only the positions inside the window for the
+sliding-window blocks, and it does that with the full cache too. Checked against
+llama-server b10621 with a real save, restart and restore: with the window cache
+the restored slot was never resumed; with the full cache it was resumed only with
+part of the window missing for the tokens read again. Neither is worth a file, so
+such a model is not saved and its requests are exactly what they were.
+
+It costs disk, not memory. **Settings → Model Chain → Disk space for saved prompt
+caches** caps the folder (4 GB by default) and removes the least recently used
+first; 0, or turning off **Save each conversation's prompt cache to disk and read
+it back after a restart**, saves nothing. The console says each step:
+
+```
+Model Chain: saved this conversation's prompt cache — 4,861 tokens, 212 MB in 0.3s
+Model Chain: restored this conversation's saved prompt cache — 4,861 tokens, 212 MB
+             in 0.8s; the reply reads only what is new since it was saved
+```
+
+The model still has to load: the first reply after a restart waits for
+llama-server to start, and then skips the re-read.
+
 ### Taking turns
 
 Models may share VRAM; jobs do not share the GPU. An LLM turn will not start
@@ -5243,6 +5287,7 @@ mc_llm_vision.py      which projector belongs to the model, and repairing it
 mc_llm_attachments.py      where a conversation's pictures are kept
 mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
+mc_llm_slot_cache.py  a conversation's llama.cpp slot, saved to disk and read back after a restart
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
 mc_llm_prompt_panel.py     Prompt Studio workspace
 mc_llm_chat_panel.py       Conversation workspace

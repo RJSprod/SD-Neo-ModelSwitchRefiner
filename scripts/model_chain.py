@@ -30,6 +30,7 @@ import mc_llm_conversation_api
 import mc_llm_conversation_startup
 import mc_llm_paths
 import mc_llm_runtime
+import mc_llm_slot_cache
 import mc_llm_state
 import mc_llm_studio
 import mc_llm_vision
@@ -453,6 +454,29 @@ shared.options_templates.update(
                 "nearest checkpoint, at most 2,048 tokens before the edit. Automatic keeps "
                 "the window on the Intel GPU, whose memory is the system's, and the full "
                 "cache everywhere else"
+            ),
+            mc_llm_slot_cache.OPT_SAVE: shared.OptionInfo(
+                True,
+                "Save each conversation's prompt cache to disk and read it back after a "
+                "restart",
+            ).info(
+                "llama-server keeps what it has read of a conversation only while it runs, so "
+                "the first reply after a WebUI restart, Unload or a model change reads the "
+                "whole conversation again — minutes, on a slow device. With this on, the "
+                "cache is saved after every reply and read back before that first reply, "
+                "which then reads only what is new, as it would have before the restart. It "
+                "costs disk, not memory. Only a model without a sliding window is saved: "
+                "llama.cpp keeps just the window of a sliding-window model such as Gemma in "
+                "a saved slot and cannot resume it exactly, so those models are left as "
+                "they were"
+            ),
+            mc_llm_slot_cache.OPT_BUDGET_GB: shared.OptionInfo(
+                mc_llm_slot_cache.DEFAULT_BUDGET_GB,
+                "Disk space for saved prompt caches (GB)",
+                gr.Number,
+            ).info(
+                "the least recently used conversations' caches are removed beyond this. "
+                "0 saves nothing"
             ),
             mc_broker.OPT_MODE: shared.OptionInfo(
                 mc_broker.MODE_HYBRID,

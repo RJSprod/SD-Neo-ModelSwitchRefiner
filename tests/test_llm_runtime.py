@@ -1575,6 +1575,68 @@ class TestTheWindowOnTheIntelGPU:
         assert "mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(" in source
         assert "mc_llm_runtime.FULL_WINDOW_AUTO," in source
 
+class TestAStartThatCanSave:
+    """A start that carried ``--slot-save-path`` records where it saves and
+    hands out the client that can, and a server that stops forgets it -- so a
+    conversation's cache is only ever saved from, and read into, a server that
+    was started able to do it. The rest is in ``tests/test_llm_slot_cache.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def lists_the_flag(self, monkeypatch):
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+        monkeypatch.setattr(
+            runtime.subprocess, "run",
+            lambda *args, **kwargs: types.SimpleNamespace(
+                stdout="  --slot-save-path PATH   path to save slot kv cache\n", stderr=""))
+        yield
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+
+    def test_the_start_records_its_folder_and_the_client_can_save(self, placed, server,
+                                                                  tmp_path, monkeypatch):
+        import mc_llm_slot_cache
+
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+
+        made = managed.client()
+
+        saving = managed._saved_caches
+        assert saving is not None
+        assert saving.folder == tmp_path / "data" / mc_llm_slot_cache.DIRNAME
+        assert saving.base_url == "http://127.0.0.1:8080" and saving.api_key == "test"
+        assert callable(getattr(made, "stream_conversation", None))
+
+    def test_a_start_with_saving_off_hands_out_the_vendored_client(self, placed, server,
+                                                                    tmp_path, monkeypatch,
+                                                                    host):
+        import mc_llm_slot_cache
+        from prompt_master.inference.llama_client import LlamaClient
+
+        host.shared.opts.set(mc_llm_slot_cache.OPT_SAVE, False)
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+
+        made = managed.client()
+
+        assert managed._saved_caches is None
+        assert type(made) is LlamaClient
+
+    def test_a_stopped_server_saves_nothing_more(self, placed, server, tmp_path, monkeypatch):
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        managed.stop()
+
+        assert managed._saved_caches is None
+
+
 class TestFlagsReachTheCommand:
     @pytest.fixture(autouse=True)
     def clean(self):
