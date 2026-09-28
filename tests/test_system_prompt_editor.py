@@ -335,6 +335,47 @@ class TestLLMStudioOpensIt:
         assert clicks[0]["js"] == mc_llm_chat_panel.OPEN_SYSTEM_EDITOR
         assert clicks[0]["inputs"] == [seen[ui.ident("chat", "who")]], "Talking to"
 
+    def test_the_character_screen_is_terse_and_grouped(self, monkeypatch):
+        """Asked for by the user: every function kept, grouped, and no prose.
+        The screen is read by people who know what a system prompt is, so a
+        box has a label and nothing under it; the sampling is one accordion
+        called Generation, the card import another, and the voice a third."""
+        import gradio as gr
+
+        import mc_llm_chat_panel
+        import mc_llm_ui as ui
+
+        boxes = {}
+        accordions = []
+        prose = []
+
+        def recording(original, keep):
+            class Recorded(original):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    keep(self, args, kwargs)
+            return Recorded
+
+        monkeypatch.setattr(gr, "Textbox", recording(
+            gr.Textbox, lambda box, args, kwargs: boxes.__setitem__(kwargs.get("elem_id") or id(box), kwargs)))
+        monkeypatch.setattr(gr, "Accordion", recording(
+            gr.Accordion, lambda node, args, kwargs: accordions.append(args[0] if args else kwargs.get("label"))))
+        monkeypatch.setattr(gr, "Markdown", recording(
+            gr.Markdown, lambda node, args, kwargs: prose.append(str(args[0] if args else kwargs.get("value") or ""))))
+        monkeypatch.setattr(gr, "Checkbox", recording(
+            gr.Checkbox, lambda box, args, kwargs: boxes.__setitem__(kwargs.get("elem_id") or id(box), kwargs)))
+        mc_llm_chat_panel.build()
+
+        preview = boxes[ui.ident("chat", "system-preview")]
+        override = boxes[ui.ident("chat", "system")]
+        assert preview.get("label") == "In force" and preview.get("lines") == 4
+        assert override.get("lines") == 4
+        assert not preview.get("info") and not override.get("info"), "a label, and nothing under it"
+        assert not boxes[ui.ident("chat", "character-voice-custom")].get("info")
+        assert "Generation" in accordions and "Import a character card" in accordions and "Voice" in accordions
+        assert not any("Save writes" in text or "Which voice reads" in text for text in prose), prose
+        assert "##### System prompt" in prose, "the prompt's two boxes are one group"
+
     def test_the_override_box_is_named_for_the_editor_to_find(self, monkeypatch):
         import mc_llm_ui as ui
 

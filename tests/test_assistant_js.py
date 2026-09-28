@@ -1131,6 +1131,144 @@ function conversationOf(count, epoch) {
 """
 
 
+class TestLeavingTheEnd:
+    """Reported in use: while a reply streamed, the transcript could not be
+    scrolled away from the end -- every chunk put the reader back. The first
+    pixels of a wheel notch are inside the slack, and a render in that instant
+    read "at the bottom". Leaving is a gesture now, read before the scroll it
+    starts, and the position only ever re-follows on a scroll that moved down.
+    """
+
+    def test_one_notch_of_the_wheel_upward_leaves_the_end_before_anything_scrolled(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.settled = true;
+            const left = shell.wheelTranscript({deltaY: -3, deltaMode: 1});   // Firefox: lines
+            console.log(JSON.stringify({left, following: shell.following, jump: shell.nodes.jump.hidden,
+                                        top: transcript.scrollTop, end: bottom(transcript)}));
+        """)
+
+        assert found["left"] is True and found["following"] is False
+        assert found["jump"] is False, "the way back is offered at once"
+        assert found["top"] == found["end"], "read from the gesture, before the scroll it starts"
+
+    def test_a_wheel_downward_and_a_brush_of_a_trackpad_do_not(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            let now = 1000;
+            Date.now = () => now;
+            const down = shell.wheelTranscript({deltaY: 100, deltaMode: 0});
+            const brush = shell.wheelTranscript({deltaY: -12, deltaMode: 0});
+            const stillFollowing = shell.following;
+            now += 1000;                                   // the window has closed
+            const later = shell.wheelTranscript({deltaY: -30, deltaMode: 0});
+            const afterLate = shell.following;
+            now += 100;
+            const adds = shell.wheelTranscript({deltaY: -12, deltaMode: 0});
+            // Down and then up, inside one window: the way down earns no credit
+            // against the notch that follows it.
+            shell.following = true;
+            now += 1000;
+            shell.wheelTranscript({deltaY: 100, deltaMode: 0});
+            now += 50;
+            const upAfterDown = shell.wheelTranscript({deltaY: -48, deltaMode: 0});
+            console.log(JSON.stringify({down, brush, stillFollowing, later, afterLate, adds,
+                                        following: shell.following, upAfterDown}));
+        """)
+
+        assert found["down"] is False and found["brush"] is False
+        assert found["stillFollowing"] is True
+        assert found["later"] is False and found["afterLate"] is True, "a brush an age ago does not count"
+        assert found["adds"] is True and found["following"] is False, "two brushes in one gesture are a notch"
+        assert found["upAfterDown"] is True, "a wheel downward forgets the count rather than owing it"
+
+    def test_the_first_pixels_of_leaving_do_not_put_the_reader_back(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.wheelTranscript({deltaY: -100, deltaMode: 0});
+            transcript.scrollTop -= 5;                     // upward, inside the slack
+            shell.scrolledTranscript();
+            const inside = shell.following;
+            shell.renderTranscript(conversationOf(21));    // a chunk arrives meanwhile
+            const afterRender = {following: shell.following, top: transcript.scrollTop,
+                                 end: bottom(transcript)};
+            transcript.scrollTop = bottom(transcript);     // back down to the end
+            shell.scrolledTranscript();
+            console.log(JSON.stringify({inside, afterRender, back: shell.following,
+                                        jump: shell.nodes.jump.hidden}));
+        """)
+
+        assert found["inside"] is False
+        assert found["afterRender"]["following"] is False
+        assert found["afterRender"]["top"] < found["afterRender"]["end"], "the reader was not moved"
+        assert found["back"] is True and found["jump"] is True
+
+    def test_a_render_that_keeps_the_place_is_not_the_reader_coming_down(self):
+        """The exact case: one notch up is inside the slack, the chunk's render
+        keeps the reader's place, and the scroll event that move fires must not
+        read as them scrolling down to the end."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.wheelTranscript({deltaY: -100, deltaMode: 0});
+            transcript.scrollTop -= 48;
+            shell.scrolledTranscript();
+            // The last few pixels of the reader's move, not yet reported:
+            // scroll events are coalesced, and a render can land between the
+            // move and its event.
+            transcript.scrollTop += 3;
+            shell.renderTranscript(conversationOf(21));
+            shell.scrolledTranscript();                    // the event the render's own move fires
+            console.log(JSON.stringify({following: shell.following, top: transcript.scrollTop,
+                                        end: bottom(transcript)}));
+        """)
+
+        assert found["following"] is False
+        assert found["top"] < found["end"]
+
+    def test_a_finger_down_the_glass_leaves_and_so_does_a_key_that_reads_back(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.touchTranscript({touches: [{clientY: 300}]}, true);
+            const small = shell.touchTranscript({touches: [{clientY: 310}]}, false);
+            const drag = shell.touchTranscript({touches: [{clientY: 330}]}, false);
+            const afterTouch = shell.following;
+            shell.following = true;
+            const key = shell.bubbleKey({key: "ArrowUp"});
+            console.log(JSON.stringify({small, drag, afterTouch, key, following: shell.following}));
+        """)
+
+        assert found["small"] is False and found["drag"] is True and found["afterTouch"] is False
+        assert found["key"] is False, "the key is left to the browser, which scrolls"
+        assert found["following"] is False
+
+    def test_scrolling_down_into_the_end_follows_again(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            transcript.scrollTop = 0; shell.scrolledTranscript();
+            const far = shell.following;
+            transcript.scrollTop = bottom(transcript) - 60; shell.scrolledTranscript();
+            const near = shell.following;
+            transcript.scrollTop -= 30; shell.scrolledTranscript();   // a scrollbar nudge inside the slack
+            console.log(JSON.stringify({far, near, nudged: shell.following}));
+        """)
+
+        assert found["far"] is False
+        assert found["near"] is True, "coming down into the slack is coming back"
+        assert found["nudged"] is True, "leaving by the scrollbar takes more than the slack"
+
+
 class TestTheTranscriptScroll:
     """Reported in use: the thread showed, but not at the end of itself.
 

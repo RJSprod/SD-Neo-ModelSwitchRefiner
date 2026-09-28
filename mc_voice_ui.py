@@ -422,10 +422,6 @@ def character_panel() -> dict:
     """
     controls = {}
     with gr.Accordion("Voice", open=False, elem_classes=ui.classes("advanced")):
-        gr.Markdown(
-            "Which voice reads this character's replies, and how. Saved with the character "
-            "by **Save character** below.",
-            elem_classes=ui.classes("hint"))
         picker = gr.HTML(character_voices_html(),
                          elem_id=ui.ident("chat", "character-voice-list"))
         # Never shown and never a control. It is where the browser puts the row
@@ -434,10 +430,8 @@ def character_panel() -> dict:
         chosen = gr.Textbox(value="", visible=False, container=False,
                             elem_id=ui.ident("chat", "character-voice"))
         custom = gr.Checkbox(
-            label="Give this character its own delivery", value=False,
-            elem_id=ui.ident("chat", "character-voice-custom"),
-            info="Off, it speaks the way Settings → Voice Chat says. On, the settings "
-                 "below are this character's and nothing else changes them.")
+            label="Own delivery (off: Settings → Voice Chat)", value=False,
+            elem_id=ui.ident("chat", "character-voice-custom"))
         with gr.Group(visible=False,
                       elem_id=ui.ident("chat", "character-voice-delivery")) as delivery:
             for control in delivery_controls():

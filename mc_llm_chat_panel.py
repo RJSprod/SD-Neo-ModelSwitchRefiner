@@ -569,70 +569,67 @@ def build() -> dict:
             # one is being written, and reading the drop-down for it is what
             # made New behave as Rename. See the note above ``_open_character``.
             editing = gr.State(NOT_EDITING)
+            # The editor, in the order somebody writes a character: who they
+            # are, what they say first, what they are told, how they sound.
+            # Labels and no prose: the people on this screen know what a
+            # system prompt is, and a paragraph under every box was what made
+            # it a page to scroll rather than a form to fill.
             with gr.Group(visible=False,
                           elem_id=ui.ident("chat", "character-editor")) as character_editor:
-                name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
-                # Beside the character file as ``<name>.png``, which is where
-                # oobabooga keeps one and where importing a card already writes
-                # it -- so a character imported with a face already has one and
-                # this box is only for the ones that did not.
-                character_face = gr.Image(label="Picture", type="pil", sources=["upload"],
-                                          height=96, width=96, show_download_button=False,
-                                          elem_id=ui.ident("chat", "character-face"),
-                                          elem_classes=ui.classes("face"))
+                with gr.Row(elem_classes=ui.classes("identity")):
+                    # Beside the character file as ``<name>.png``, which is
+                    # where oobabooga keeps one and where importing a card
+                    # already writes it -- so a character imported with a face
+                    # already has one and this box is only for the ones that
+                    # did not.
+                    character_face = gr.Image(label="Picture", type="pil", sources=["upload"],
+                                              height=96, width=96, show_download_button=False,
+                                              scale=0, min_width=112,
+                                              elem_id=ui.ident("chat", "character-face"),
+                                              elem_classes=ui.classes("face"))
+                    with gr.Column(scale=1, min_width=160):
+                        name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
+                        greeting = gr.Textbox(label="Greeting", lines=2)
                 context = gr.Textbox(label="Context", lines=6,
-                                     placeholder="Who the character is. Shown to the model "
-                                                 "before the first line of dialogue.")
-                greeting = gr.Textbox(label="Greeting", lines=3)
+                                     placeholder="Who the character is.")
+                gr.Markdown("##### System prompt", elem_classes=ui.classes("sheet-label"))
                 # What the model is actually told, built from the boxes above
-                # and from the persona, and updated as they are typed into. It
-                # is the answer to "what is the system prompt right now", which
-                # nothing on this screen could answer before.
+                # and from the persona, and updated as they are typed into.
                 system_preview = gr.Textbox(
-                    label="System prompt in force", lines=6, interactive=False,
-                    elem_id=ui.ident("chat", "system-preview"),
-                    info="Built from the name, the Context and your persona. Read-only — "
-                         "press Edit this to take a copy into the box below.")
-                edit_system = gr.Button("Edit this system prompt", size="sm")
+                    label="In force", lines=4, interactive=False,
+                    elem_id=ui.ident("chat", "system-preview"))
+                edit_system = gr.Button("Copy into override", size="sm")
                 # Named, because the full-page editor writes this box when it
                 # saves the character this editor is open on -- otherwise the
                 # next Save here would put the old prompt back.
-                system = gr.Textbox(label="System prompt override", lines=6,
+                system = gr.Textbox(label="System prompt override", lines=4,
                                     elem_id=ui.ident("chat", "system"),
-                                    placeholder="Leave empty to use the built prompt above.",
-                                    info="Set, this replaces the built prompt entirely and "
-                                         "stops following the Context and the persona.")
-                gr.Markdown(
-                    "Save writes the override and the Advanced generation settings below "
-                    "with the rest of the character, so a seed of −1 there is what makes "
-                    "its replies vary.",
-                    elem_classes=ui.classes("hint"))
-                # Which voice reads this character aloud, and how, beside the
-                # rest of what makes it that character. Built by the voice
-                # module so the compact list here and the full one in Settings
-                # cannot drift apart -- see mc_voice_ui.character_panel.
+                                    placeholder="Empty: built from the Context and your persona.")
+                # Which voice reads this character aloud, and how. Built by the
+                # voice module so the compact list here and the full one in
+                # Settings cannot drift apart -- see mc_voice_ui.character_panel.
                 character_voice = mc_voice_ui.character_panel()
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
                     close_editor = gr.Button("Cancel", size="sm")
-            import_card = gr.File(label="Import a character card",
-                                  file_types=[".json", ".yaml", ".yml", ".png"],
-                                  elem_id=ui.ident("chat", "import"))
-            # Nested, because they are the answer to a question almost nobody
-            # asks -- and every default here is the vendored package's own,
-            # named rather than copied: a second set of literals in the UI is
-            # how a panel quietly stops matching the engine behind it.
-            with gr.Accordion("Advanced generation settings", open=False,
-                              elem_classes=ui.classes("advanced")):
+            # Saved with the character and in force while talking to one, so
+            # outside the editor on purpose -- see ``_remember_sampling``. Every
+            # default is the vendored package's own, named rather than copied.
+            with gr.Accordion("Generation", open=False, elem_classes=ui.classes("advanced")):
                 with gr.Row():
                     temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
                                             step=0.05, value=DEFAULT_TEMPERATURE)
                     top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
                                       value=DEFAULT_TOP_P)
-                reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
-                                         step=64, value=DEFAULT_MAX_REPLY_TOKENS)
-                seed = ui.seed_box(
-                    info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
+                with gr.Row():
+                    reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
+                                             step=64, value=DEFAULT_MAX_REPLY_TOKENS)
+                    seed = ui.seed_box(info=f"{RANDOM_SEED}: a new seed each reply")
+            with gr.Accordion("Import a character card", open=False,
+                              elem_classes=ui.classes("advanced")):
+                import_card = gr.File(label="Card: .yaml, .json or a .png with its JSON inside",
+                                      file_types=[".json", ".yaml", ".yml", ".png"],
+                                      elem_id=ui.ident("chat", "import"))
             with gr.Group(elem_classes=ui.classes("destructive")):
                 gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
                 delete_character = gr.Button("Delete this character", size="sm",
@@ -3018,14 +3015,12 @@ def _adopt_system_prompt(name, context, system):
     """
     if (system or "").strip():
         return gr.update(), ui.notice(
-            "This character already has a system prompt of its own — the box below is it, "
-            "and the preview is showing what it produces.", "warn")
+            "This character already has a system prompt of its own: the override box.", "warn")
     composed = _system_preview(name, context, system)
     if not composed:
-        return gr.update(), ui.notice("There is no system prompt to copy yet.", "warn")
+        return gr.update(), ui.notice("Nothing to copy yet.", "warn")
     return composed, ui.notice(
-        "Copied into the box below. It is the character's own now: editing the Context or "
-        "the persona will no longer change it. Clear the box to go back to the built one.")
+        "Copied. The Context and your persona no longer change it; empty the box to go back.")
 
 
 def _open_character(who):
@@ -3050,8 +3045,7 @@ def _new_character():
     up with somebody else's.
     """
     return _editor_fields(_blank_character(), NOT_EDITING,
-                          "Fill in a name and press Save character to create it. It will not "
-                          "touch the character you are talking to.")
+                          "New character: a name and Save character create it.")
 
 
 def _cancel_character(who):

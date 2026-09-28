@@ -1930,6 +1930,51 @@ carries a copy of this stylesheet's focus-root rule (`FOCUS_STAND_IN_CSS`), so
 a change to the rule here should be mirrored there too, or their check goes
 on measuring a rule this extension no longer has.
 
+## 3.25 Leaving the end of the transcript, and a character screen with no prose
+
+### The transcript would not let go
+
+"When I am looking at a live conversation, it is very hard to detach from the
+bottom." The follow rule was the scroll position alone: at every scroll event,
+following was *at the bottom within 100 px*. A wheel notch scrolls smoothly, so
+its first events are inside that slack; a chunk of the reply arriving in that
+instant rendered with `wasFollowing` true and put the reader back at the end,
+and the next notch met the same thing. Only a scroll that cleared 100 px
+between two chunks got away, and while a reply streams there is no such gap.
+
+Leaving is read from the gesture now, before the scroll it starts has moved
+anything: an upward wheel that has travelled `LEAVE_WHEEL_PX` (40 px, one
+notch in either browser, more than a brush of a trackpad) within
+`LEAVE_WINDOW_MS`, a finger dragged `LEAVE_TOUCH_PX` down the glass, or ↑,
+Page Up or Home on the transcript — `leaveBottom()`. The position rule
+(`scrolledTranscript`) only ever *re-follows* on a scroll that moved down and
+reached the slack; an upward scroll still inside it changes nothing, and a
+move this code made itself (`toBottom`, a render that kept the reader's place,
+a revealed row scrolled into view) records its own position first so the
+scroll event it fires does not read as the reader coming down. Leaving by the
+scrollbar alone still takes more than the slack, on purpose: a drag of a few
+pixels is not a decision. `tests/test_assistant_js.py::TestLeavingTheEnd` has
+the exact case — one notch up, a chunk's render, the render's own scroll event
+— and the wheel, touch and key gestures; seven mutations of the rule fail it.
+
+### The character screen
+
+"Really bad right now": three system-prompt surfaces with a paragraph under
+each, the sampling in an accordion whose relation to Save was explained in a
+hint, the card import taking a third of the screen. The same components and
+the same wiring, laid out in the order a character is written — picture, name
+and greeting in one row; Context; **System prompt** as one labelled group
+(*In force*, **Copy into override**, the override box); Voice; Save and
+Cancel — with every `info=` and hint paragraph removed, and the sampling as
+**Generation** and the import as **Import a character card**, two closed
+accordions under the editor. The ⤢ System prompt editor is untouched. The
+sampling stays outside the editor because it is in force while talking and
+remembered on the character as it is moved (`_remember_sampling`); putting it
+inside would have hidden a live control behind Edit.
+`tests/test_system_prompt_editor.py::test_the_character_screen_is_terse_and_grouped`
+holds the screen to that: no `info` under a box, the three accordions, no
+prose.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).
