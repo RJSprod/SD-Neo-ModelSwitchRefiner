@@ -1905,6 +1905,31 @@ tests translated to 640. Every new check was reverted against and failed.
 
 ---
 
+## 3.24 The focus root is a contract now: the WanGP tab fills the window
+
+Mini Paint NEO's WanGP tab is a WanGP page in a frame, with the tab's own
+*Integration management* accordion under it, sized by a script of its own to
+the room left in the window. Under focus mode that gave a nearly full window of
+WanGP with eight pixels of this rule's padding around it and the accordion on
+the bottom edge, and the user asked for the frame to be the whole page — no
+accordion, no reload.
+
+Nothing changed here. That tab's stylesheet now keys a rule on the class
+`enter()` puts on the focused panel, `forge-assistant-focus-root`: the panel's
+padding and border go (an id-and-class selector with `!important`, over this
+stylesheet's lone class with `!important`), the accordion is not displayed,
+and that tab's sizer reads the same class to give the frame the panel's whole
+height. So the name of that class is a contract with another repository from
+today, the fourth thing shared with it after the dialog layer, the
+`minipaint:overlay` event and the reading `visible()` makes of a hidden panel.
+It is named in the README's focus passage for that reason: renaming it here
+would break the WanGP tab's full page silently, since nothing on this side
+would notice and that tab would simply keep its accordion and its padding.
+The measurement lives on their side — `tests/browser_intercept.py` there
+carries a copy of this stylesheet's focus-root rule (`FOCUS_STAND_IN_CSS`), so
+a change to the rule here should be mirrored there too, or their check goes
+on measuring a rule this extension no longer has.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).
