@@ -35,29 +35,35 @@ cache or makes llama-server refuse the restore, which costs nothing but the
 attempt: the reply reads its prompt in full, as it would have without this,
 and the file it saves afterwards is the new server's.
 
-**Only a model without a sliding window is saved.** Checked against a real
-llama-server at b10621, not only read from its source. When llama.cpp writes a
-slot, the sliding-window blocks keep only the positions inside the window --
-``llama_kv_cache::state_write`` skips every cell the window has passed, and it
-does so with ``--swa-full`` as well, because the full-size window cache is still
-built with the model's window. A restored slot of such a model then holds
-exactly one window of positions, and:
+**A model with a sliding window is resumed only where it can be exactly.**
+Checked against a real llama-server at b10621, not only read from its source.
+When llama.cpp writes a slot, the sliding-window blocks keep only the positions
+inside the window -- ``llama_kv_cache::state_write`` skips every cell the
+window has passed, and it does so with ``--swa-full`` as well, because the
+full-size window cache is still built with the model's window. A restored slot
+of such a model holds exactly one window of positions, and:
 
-* **with the window cache** (the Intel GPU's default) llama.cpp never resumes
-  it. Its check that enough of the window is left is inclusive by one, a
-  restored slot has exactly one window and no more, and the checkpoint it would
-  fall back on is not part of a slot file. Every restore was read in full.
-* **with the full cache** it resumes when the new prompt parts from the saved
-  one within the last window, and then the tokens it reads again see part of
-  their window missing -- an approximation, not the cache it was.
+* **with the window cache** llama.cpp never resumes it. Its check that enough
+  of the window is left is inclusive by one, a restored slot has exactly one
+  window and no more, and the checkpoint it would fall back on is not part of a
+  slot file. Every restore was read in full. So nothing is saved there.
+* **with the full cache** it resumes wherever the new prompt parts from the
+  saved one within the last window. Where that is the end of the saved state,
+  nothing is missing and the resume is exact. Anywhere earlier, the tokens it
+  reads again see part of their window missing.
 
-Gemma 4 makes the second case the usual one: its template ends every new
-prompt with an empty thought marker and strips that marker from every reply in
-the history, so each prompt parts from the cached one four tokens before the
-last reply. So a model with a window is not saved at all, and nothing about its
-requests changes. A model without one -- pure attention, or a hybrid whose
-recurrent state llama.cpp either resumes exactly or re-reads -- is saved and
-restored, and resumes exactly where a reply in a running server would have.
+So for a model with a window, on the full cache, a file is read back only after
+the new prompt has been shown to *extend* the saved one token for token: the
+file's own token list against llama-server's rendering (``/apply-template``)
+and tokenizing (``/tokenize``) of the new request, which is how the server
+itself will see it. A request that does not extend it -- a regenerated reply,
+an edit, a picture in the prompt -- is read in full, as it would have been
+without this. Gemma 4 needs :mod:`mc_llm_template` for any of its prompts to
+extend the last one, so its cache is saved only when that fix is on the line.
+
+A model without a window -- pure attention, or a hybrid whose recurrent state
+llama.cpp either resumes exactly or re-reads -- is saved and restored with no
+check, and resumes exactly where a reply in a running server would have.
 
 Nothing here is content. The files hold what llama-server wrote; the names are
 hashes; the console lines give token counts, sizes and times, never text, and
@@ -70,6 +76,7 @@ import hashlib
 import json
 import logging
 import os
+import struct
 import threading
 import time
 from pathlib import Path
@@ -103,6 +110,18 @@ RESTORE_TIMEOUT = 120.0
 SAVE_TIMEOUT = 120.0
 """Seconds. A save or restore is a file of a few hundred megabytes read or
 written by llama-server, and every request has a deadline."""
+
+SEQUENCE_MAGIC = 0x67677371
+"""``ggsq``: llama.cpp's sequence state file (``LLAMA_STATE_SEQ_MAGIC``)."""
+
+SEQUENCE_VERSION = 2
+"""``LLAMA_STATE_SEQ_VERSION`` at b10621."""
+
+PACKED_VERSION = 1
+"""``SERVER_TOKENS_STATE_VERSION`` at b10621: how the server packs its tokens."""
+
+NULL_TOKEN = -1
+"""``LLAMA_TOKEN_NULL``: the packed layout's first word, and a picture's place."""
 
 SLOT_FIELDS = ("verbose", "response_fields")
 """What a reply adds to its request so that its answer names its slot."""
@@ -152,30 +171,50 @@ def directory() -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def resumable(model) -> bool:
-    """Whether llama.cpp can resume a saved slot of ``model`` exactly.
-
-    False for a model with a sliding window (see the module docstring) and for
-    a file whose header cannot be read, which is the side that saves nothing.
-    """
+def windowed(model) -> bool | None:
+    """Whether ``model`` has a sliding window; None when its header cannot be read."""
     import mc_gguf
 
     described = mc_gguf.describe(model) if model is not None else None
     if described is None:
+        return None
+    return described.sliding_window > 0 or any(described.swa_blocks)
+
+
+def resumable(model, full_cache: bool = False, template_fixed: bool = False) -> bool:
+    """Whether a saved slot of ``model`` can ever be resumed exactly on this start.
+
+    Always for a model without a sliding window. For one with a window, only on
+    the full cache, and -- for a template whose history does not extend its
+    last prompt without :mod:`mc_llm_template` -- only with that fix on the
+    line. A header that cannot be read is the side that saves nothing.
+    """
+    has_window = windowed(model)
+    if has_window is None:
         return False
-    return described.sliding_window <= 0 and not any(described.swa_blocks)
+    if not has_window:
+        return True
+    if not full_cache:
+        return False
+    import mc_llm_template
+
+    return template_fixed or not mc_llm_template.needs_it(model)
 
 
-def launch_flags(configuration) -> list[str]:
+def launch_flags(configuration, full_cache: bool = False,
+                 template_fixed: bool = False) -> list[str]:
     """``--slot-save-path <folder>`` when saving is on, the model can be resumed
     and the build has the flag.
 
-    The folder is made here, before the start, because llama-server refuses a
-    path that is not a directory as a bad argument and would not start at all.
-    A folder that cannot be made leaves the flag off: the server starts as it
-    always did, and nothing is saved.
+    ``full_cache`` and ``template_fixed`` are what the rest of this start's
+    command line says: whether ``--swa-full`` and ``--chat-template-file`` are on
+    it. The folder is made here, before the start, because llama-server refuses
+    a path that is not a directory as a bad argument and would not start at
+    all. A folder that cannot be made leaves the flag off: the server starts as
+    it always did, and nothing is saved.
     """
-    if not active() or not resumable(getattr(configuration, "model", None)):
+    if not active() or not resumable(getattr(configuration, "model", None), full_cache,
+                                     template_fixed):
         return []
     import mc_llm_runtime
 
@@ -191,15 +230,19 @@ def launch_flags(configuration) -> list[str]:
     return [SLOT_SAVE_FLAG, str(folder)]
 
 
-def identity(runtime, model, projector, full_cache: bool, cache_types: str = "") -> str:
+def identity(runtime, model, projector, full_cache: bool, cache_types: str = "",
+             template=None) -> str:
     """Which server a saved cache belongs to, as twelve hex digits.
 
-    Each part is a file's path, size and modification time, so a replaced
-    build, a re-downloaded model or a different projector is a different
-    identity and its files are simply never offered to the new one.
+    Each file part is a path, size and modification time, so a replaced build,
+    a re-downloaded model, a different projector or a different chat template
+    is a different identity and its files are simply never offered to the new
+    one. ``template`` is the ``--chat-template-file`` the start was given, if
+    any: the template decides every token of every prompt.
     """
     parts = [_stamp(runtime), _stamp(model), _stamp(projector),
-             "full" if full_cache else "window", str(cache_types or "default")]
+             "full" if full_cache else "window", str(cache_types or "default"),
+             _stamp(template or None)]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
@@ -214,13 +257,14 @@ def _stamp(path) -> str:
         return f"{str(path).casefold()}|?"
 
 
-def started(process, flags, identity_: str) -> "Server | None":
+def started(process, flags, identity_: str, model=None) -> "Server | None":
     """What saving knows about a server that has just started, or None.
 
     None unless the start carried :data:`SLOT_SAVE_FLAG`. Read off the flags the
     start was actually given rather than off the setting, because the setting
     can change while the server runs and only what the process was told
-    decides what it can do.
+    decides what it can do. A model with a sliding window gets a server that
+    checks a file before reading it back (see the module docstring).
     """
     flags = [str(flag) for flag in flags or ()]
     if SLOT_SAVE_FLAG not in flags:
@@ -232,7 +276,8 @@ def started(process, flags, identity_: str) -> "Server | None":
     key = getattr(process, "api_key", None)
     if not port or not key:
         return None
-    return Server(f"http://127.0.0.1:{port}", str(key), Path(flags[position + 1]), identity_)
+    return Server(f"http://127.0.0.1:{port}", str(key), Path(flags[position + 1]), identity_,
+                  check=bool(windowed(model)) if model is not None else False)
 
 
 def _conversation_id(conversation) -> str:
@@ -260,11 +305,15 @@ class Refused(RuntimeError):
 class Server:
     """What saving knows about one running llama-server, for as long as it runs."""
 
-    def __init__(self, base_url: str, api_key: str, folder: Path, identity_: str):
+    def __init__(self, base_url: str, api_key: str, folder: Path, identity_: str,
+                 check: bool = False):
         self.base_url = base_url
         self.api_key = api_key
         self.folder = Path(folder)
         self.identity = identity_
+        self.check = check
+        """Whether a file is read back only into a prompt that extends it exactly:
+        a model with a sliding window, whose saved slot holds one window."""
         self._lock = threading.Lock()
         self._seen: set[str] = set()
         """Conversations this process has answered or been offered a file for.
@@ -280,14 +329,16 @@ class Server:
 
     # -- restore ---------------------------------------------------------- #
 
-    def restore(self, conversation) -> int | None:
+    def restore(self, conversation, body: dict | None = None) -> int | None:
         """Read this conversation's saved cache into an unused slot, and name it.
 
         None when there is nothing to do or it could not be done: the
         conversation has been answered by this process already, there is no
-        file for it, every slot has been used, or llama-server refused the file.
-        A refusal of the file itself removes it, so a start that cannot use it
-        does not pay for trying again; the reply's own save replaces it.
+        file for it, every slot has been used, llama-server refused the file,
+        or -- on a server that checks -- the request ``body`` does not extend
+        the saved prompt token for token. A refusal of the file itself removes
+        it, so a start that cannot use it does not pay for trying again; the
+        reply's own save replaces it.
         """
         key = _conversation_id(conversation)
         with self._lock:
@@ -297,6 +348,8 @@ class Server:
         name = self.file_name(conversation)
         path = self.folder / name
         if not path.is_file():
+            return None
+        if self.check and not self._extends(path, body):
             return None
         try:
             slot = self._unused_slot()
@@ -333,6 +386,46 @@ class Server:
                     "%.0f MB in %.1fs; the reply reads only what is new since it was saved",
                     f"{tokens:,}", read / _MB, time.monotonic() - began)
         return slot
+
+    def _extends(self, path: Path, body: dict | None) -> bool:
+        """Whether ``body``'s prompt starts with every token of the saved one.
+
+        The saved tokens are the file's own; the new ones are llama-server's
+        rendering of the request and its tokenizing of that, with the special
+        tokens added as a chat request adds them. A picture on either side is a
+        no: its tokens are not text, and a restore that might not be exact is
+        not made.
+        """
+        saved = saved_tokens(path)
+        if not saved:
+            logger.info("Model Chain: this conversation's saved prompt cache could not be "
+                        "checked against the new prompt, so it was not read back; the prompt "
+                        "is read in full")
+            return False
+        if not isinstance(body, dict) or _has_pictures(body):
+            return False
+        try:
+            rendered = self._post("/apply-template", body, SLOTS_TIMEOUT)
+            prompt = rendered.get("prompt") if isinstance(rendered, dict) else None
+            if not isinstance(prompt, str):
+                return False
+            answer = self._post("/tokenize", {"content": prompt, "add_special": True,
+                                              "parse_special": True}, SLOTS_TIMEOUT)
+            tokens = answer.get("tokens") if isinstance(answer, dict) else None
+        except Exception as exc:
+            logger.info("Model Chain: could not check this conversation's saved prompt cache "
+                        "against the new prompt (%s); the prompt is read in full", _reason(exc))
+            return False
+        if not isinstance(tokens, list):
+            return False
+        if len(tokens) > len(saved) and tokens[:len(saved)] == saved:
+            return True
+        shared = _common(tokens, saved)
+        logger.info("Model Chain: this prompt parts from the saved one at token %s of %s, "
+                    "before its end, so the saved prompt cache was not read back — with "
+                    "a sliding window a resume there would not be exact; the prompt is "
+                    "read in full", f"{shared:,}", f"{len(saved):,}")
+        return False
 
     def _unused_slot(self) -> int | None:
         """A slot that is idle and has never run a task, and was not restored into.
@@ -420,6 +513,61 @@ class Server:
                           headers=self._headers()) as client:
             response = client.post(f"{self.base_url}{path}", json=body)
             return _answer(response)
+
+
+def saved_tokens(path: Path) -> list[int] | None:
+    """The token list a slot file was saved with, or None.
+
+    llama.cpp's sequence file: ``ggsq``, version 2, a token count and that many
+    32-bit tokens, then the state. The b10621 server packs its own structure
+    into those tokens -- a null marker, its version (1), the text tokens, the
+    positions of any pictures and the pictures themselves -- and a file with
+    pictures in it is None here, as is any layout this does not recognise.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(12)
+            if len(head) != 12:
+                return None
+            magic, version, count = struct.unpack("<III", head)
+            if magic != SEQUENCE_MAGIC or version != SEQUENCE_VERSION or count == 0:
+                return None
+            raw = handle.read(4 * count)
+    except OSError:
+        return None
+    if len(raw) != 4 * count:
+        return None
+    packed = list(struct.unpack(f"<{count}i", raw))
+    if packed[0] != NULL_TOKEN:
+        return packed
+    if count < 4 or packed[1] != PACKED_VERSION:
+        return None
+    length = packed[2]
+    if length < 0 or 3 + length >= count:
+        return None
+    tokens = packed[3:3 + length]
+    pictures = packed[3 + length]
+    if pictures != 0 or NULL_TOKEN in tokens:
+        return None
+    return tokens
+
+
+def _has_pictures(body: dict) -> bool:
+    for message in body.get("messages") or ():
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, (list, tuple)) and any(
+                isinstance(part, dict) and part.get("type") != "text" for part in content):
+            return True
+    return False
+
+
+def _common(first: list, second: list) -> int:
+    count = 0
+    for one, other in zip(first, second):
+        if one != other:
+            break
+        count += 1
+    return count
 
 
 def _answer(response):
@@ -616,8 +764,8 @@ def _define_client():
                 return self.stream_chat(messages, max_tokens, seed, on_text, cancel,
                                         temperature=temperature, top_p=top_p)
             check_messages(messages)
-            pinned = server.restore(conversation)
             payload = self.request_body(messages, max_tokens, seed, temperature, top_p)
+            pinned = server.restore(conversation, dict(payload))
             payload.update(slot_fields(pinned))
             found: dict = {}
             pieces = []
@@ -643,5 +791,5 @@ def _define_client():
 
 __all__ = ["DEFAULT_BUDGET_GB", "OPT_BUDGET_GB", "OPT_SAVE", "SLOT_SAVE_FLAG", "Refused",
            "Server", "active", "budget_bytes", "client", "directory", "enabled", "identity",
-           "launch_flags", "prune", "resumable", "slot_fields", "started", "usage",
-           "watching"]
+           "launch_flags", "prune", "resumable", "saved_tokens", "slot_fields", "started",
+           "usage", "watching", "windowed"]

@@ -6,11 +6,13 @@ tokens at 50 to 90 a second -- before its first word. llama-server can write a
 slot to a file and read it back, and its build b10621 does that for a slot with
 pictures in it too. These tests hold the pieces that make that safe to use:
 
-* the start carries ``--slot-save-path`` only when saving is on, the model has
-  no sliding window, the build has the flag and the folder exists -- a missing
-  folder is a start that fails, and a sliding-window model's saved slot cannot
-  be resumed exactly (checked against a real llama-server; see
+* the start carries ``--slot-save-path`` only when saving is on, the model can
+  be resumed exactly, the build has the flag and the folder exists -- a missing
+  folder is a start that fails, and a sliding-window model's saved slot holds
+  one window of positions (checked against a real llama-server; see
   ``TestOnlyWhatLlamaCppCanResumeExactly``);
+* such a model's file is read back only when the new prompt extends it token
+  for token (``TestAWindowedModelIsReadBackOnlyWhenExact``);
 * a file is filed under the conversation *and* the server that wrote it, so a
   different model, projector, build or cache is never offered another's file;
 * a file is read into a slot nobody has used, once per conversation per
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import threading
 import time
 import types
@@ -119,6 +122,11 @@ class FakeLlamaServer:
                                           "timings": {"save_ms": 301.0}})
         if method == "POST" and path == "/v1/chat/completions":
             return FakeResponse(200, None, self.chat(body))
+        if method == "POST" and path == "/apply-template":
+            return FakeResponse(200, {"prompt": rendered(body["messages"])})
+        if method == "POST" and path == "/tokenize":
+            return FakeResponse(200, {"tokens": tokenized(body["content"],
+                                                          body.get("add_special", False))})
         return FakeResponse(404, {"error": {"message": "not found"}})
 
     def chat(self, body):
@@ -151,6 +159,34 @@ class FakeLlamaServer:
     def chats(self):
         return [body for method, url, body, _ in self.requests
                 if url.endswith("/v1/chat/completions")]
+
+
+BOS = 2
+
+
+def rendered(messages) -> str:
+    """The fake server's chat template: every message's text, in order."""
+    return "".join(f"<{message['role']}>{message['content']}" for message in messages)
+
+
+def tokenized(text: str, add_special: bool) -> list[int]:
+    """The fake server's tokenizer: one token per character, BOS in front."""
+    return ([BOS] if add_special else []) + [ord(character) for character in text]
+
+
+def slot_file(path: Path, tokens, pictures: int = 0, magic=None, version=None,
+              packed_version=None, plain=False) -> Path:
+    """A slot file in llama.cpp b10621's layout: header, packed tokens, state."""
+    if plain:
+        body = list(tokens)
+    else:
+        body = [cache.NULL_TOKEN, cache.PACKED_VERSION if packed_version is None
+                else packed_version, len(tokens), *tokens, pictures]
+        body += [7] * pictures + [4, 1] * pictures
+    head = struct.pack("<III", cache.SEQUENCE_MAGIC if magic is None else magic,
+                       cache.SEQUENCE_VERSION if version is None else version, len(body))
+    path.write_bytes(head + struct.pack(f"<{len(body)}i", *body) + b"\0" * 64)
+    return path
 
 
 @pytest.fixture
@@ -254,13 +290,15 @@ class TestTheStartCarriesTheFolder:
 
         return announce
 
-    def test_a_model_with_a_sliding_window_is_not_saved(self, build, tmp_path, monkeypatch):
+    def test_a_model_with_a_sliding_window_is_saved_only_on_the_full_cache(
+            self, build, tmp_path, monkeypatch):
         monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path / "root")
         configuration = build(self.LISTS_IT, model=a_model(tmp_path, "windowed.gguf",
                                                             window=1024))
 
         assert cache.launch_flags(configuration) == []
         assert not (tmp_path / "root" / cache.DIRNAME).exists()
+        assert cache.launch_flags(configuration, full_cache=True)[0] == cache.SLOT_SAVE_FLAG
 
     def test_a_model_whose_header_cannot_be_read_is_not_saved(self, build, tmp_path,
                                                               monkeypatch):
@@ -329,8 +367,11 @@ class TestOnlyWhatLlamaCppCanResumeExactly:
     """Checked against llama-server b10621 with a real start, save, restart and
     restore: a slot file keeps only the window's positions of a sliding-window
     model, so a restore was read in full on the window cache every time, and on
-    the full cache it resumed with part of the window missing. A model without
-    a window resumed exactly where a running server would have."""
+    the full cache it resumed exactly only where the new prompt extended the
+    saved one. A model without a window resumed exactly where a running server
+    would have. So a model with a window is saved only on the full cache (and,
+    for Gemma 4's template, with its thought marker kept -- see
+    ``tests/test_llm_template.py``), and never on the window cache."""
 
     def test_a_model_without_a_window_is_resumable(self, tmp_path):
         assert cache.resumable(a_model(tmp_path)) is True
@@ -553,6 +594,131 @@ class TestRestoring:
 # --------------------------------------------------------------------------- #
 # Saving and the folder
 # --------------------------------------------------------------------------- #
+
+
+class TestTheSavedTokens:
+    """The file's own token list, read as llama.cpp b10621 wrote it."""
+
+    def test_a_packed_text_prompt_gives_its_tokens(self, tmp_path):
+        path = slot_file(tmp_path / "a.slot", [2, 72, 105])
+
+        assert cache.saved_tokens(path) == [2, 72, 105]
+
+    def test_an_older_plain_list_gives_itself(self, tmp_path):
+        path = slot_file(tmp_path / "a.slot", [2, 72, 105], plain=True)
+
+        assert cache.saved_tokens(path) == [2, 72, 105]
+
+    def test_a_file_with_a_picture_cannot_be_checked(self, tmp_path):
+        path = slot_file(tmp_path / "a.slot", [2, 72, 105], pictures=1)
+
+        assert cache.saved_tokens(path) is None
+
+    def test_anything_else_is_not_read(self, tmp_path):
+        for name, arguments in (("magic", dict(magic=0x12345678)),
+                                ("version", dict(version=3)),
+                                ("packing", dict(packed_version=2))):
+            path = slot_file(tmp_path / f"{name}.slot", [2, 72, 105], **arguments)
+            assert cache.saved_tokens(path) is None, name
+        short = tmp_path / "short.slot"
+        short.write_bytes(struct.pack("<III", cache.SEQUENCE_MAGIC, cache.SEQUENCE_VERSION, 50))
+        assert cache.saved_tokens(short) is None
+        assert cache.saved_tokens(tmp_path / "missing.slot") is None
+
+
+class TestAWindowedModelIsReadBackOnlyWhenExact:
+    """A sliding-window model's saved slot holds one window of positions, and
+    llama.cpp resumes it exactly only where the new prompt extends it. So the
+    file is read back only after the server's own rendering and tokenizing of
+    the new request are shown to start with every saved token."""
+
+    SAVED_TEXT = "<system>S<user>U1"
+
+    def checking(self, folder):
+        return cache.Server("http://127.0.0.1:58915", "k", folder, "abc123abc123", check=True)
+
+    def body(self, *extra):
+        messages = [{"role": "system", "content": "S"}, {"role": "user", "content": "U1"}]
+        return {"messages": messages + list(extra), "stream": True}
+
+    def saved(self, folder, running, text=None):
+        path = folder / running.file_name("Ada/thread-1")
+        return slot_file(path, tokenized(text or self.SAVED_TEXT, True))
+
+    def test_a_prompt_that_extends_the_saved_one_is_read_back(self, server, folder):
+        running = self.checking(folder)
+        self.saved(folder, running)
+        body = self.body({"role": "assistant", "content": "R"}, {"role": "user", "content": "U2"})
+
+        assert running.restore("Ada/thread-1", body) == 0
+        assert [url.rsplit("/", 1)[-1] for method, url, _, _ in server.requests] == [
+            "apply-template", "tokenize", "slots", "0?action=restore"]
+        tokenize = [sent for _, url, sent, _ in server.requests if url.endswith("/tokenize")][0]
+        assert tokenize["add_special"] is True and tokenize["parse_special"] is True
+
+    def test_a_prompt_that_parts_before_the_end_is_read_in_full(self, server, folder):
+        running = self.checking(folder)
+        self.saved(folder, running, "<system>S<user>U1<assistant>R")
+        regenerated = self.body({"role": "assistant", "content": "Q"},
+                                {"role": "user", "content": "U2"})
+
+        assert running.restore("Ada/thread-1", regenerated) is None
+        assert server.posted("restore") == []
+
+    def test_the_same_prompt_again_is_read_in_full(self, server, folder):
+        running = self.checking(folder)
+        self.saved(folder, running)
+
+        assert running.restore("Ada/thread-1", self.body()) is None
+        assert server.posted("restore") == []
+
+    def test_a_picture_in_the_request_is_read_in_full_without_asking(self, server, folder):
+        running = self.checking(folder)
+        self.saved(folder, running)
+        pictured = self.body({"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            {"type": "text", "text": "look"}]})
+
+        assert running.restore("Ada/thread-1", pictured) is None
+        assert server.requests == []
+
+    def test_a_file_that_cannot_be_read_is_read_in_full(self, server, folder):
+        running = self.checking(folder)
+        (folder / running.file_name("Ada/thread-1")).write_bytes(b"not a slot file")
+
+        assert running.restore("Ada/thread-1", self.body()) is None
+        assert server.requests == []
+
+    def test_a_model_without_a_window_is_not_checked(self, server, folder):
+        running = a_server(folder)
+        saved_file(folder, running)
+
+        assert running.restore("Ada/thread-1", self.body()) == 0
+        assert not any(url.endswith(("/apply-template", "/tokenize"))
+                       for _, url, _, _ in server.requests)
+
+    def test_the_reply_after_a_checked_restore_goes_to_that_slot(self, server, folder):
+        running = self.checking(folder)
+        client = cache.client("http://127.0.0.1:58915", "k", None, running)
+        messages = [{"role": "system", "content": "S"}, {"role": "user", "content": "U1"},
+                    {"role": "assistant", "content": "R"}, {"role": "user", "content": "U2"}]
+        self.saved(folder, running)
+
+        client.stream_conversation("Ada/thread-1", messages, 512, 7, lambda _text: None)
+
+        assert server.chats()[-1]["id_slot"] == 0
+        rendering = [sent for _, url, sent, _ in server.requests
+                     if url.endswith("/apply-template")][0]
+        assert rendering["messages"] == messages
+        assert "id_slot" not in rendering and "verbose" not in rendering
+
+    def test_a_start_of_a_windowed_model_checks_and_another_does_not(self, tmp_path):
+        process = types.SimpleNamespace(port=58915, api_key="k")
+        flags = [cache.SLOT_SAVE_FLAG, str(tmp_path)]
+
+        assert cache.started(process, flags, "abc",
+                             model=a_model(tmp_path, "w.gguf", window=1024)).check is True
+        assert cache.started(process, flags, "abc", model=a_model(tmp_path)).check is False
 
 
 class TestSaving:

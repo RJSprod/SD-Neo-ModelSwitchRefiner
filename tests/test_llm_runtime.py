@@ -1467,17 +1467,17 @@ class TestAskingTheBuildWhatItSupports:
 
 
 class TestTheWindowOnTheIntelGPU:
-    """A sliding-window model's full cache is 5.6 GB of the Intel GPU's
-    memory against 1.5 GB for the window, on the 26B-A4B backbone at 8,192
-    tokens with six warm caches, and that memory is the system's. The build
-    this was measured on takes a checkpoint four tokens before the end of
-    every prompt, so a turn that continues the thread costs the same with the
-    window as with the full cache; what the window gives up is an edit far
-    back in the thread, which resumes from the nearest checkpoint. So the
-    window is kept on the Intel GPU by default, with llama.cpp's checkpoints
-    spaced so that "nearest" is at most two thousand tokens back, and the
-    full cache stays the rule on an NVIDIA card and the processor. Every test
-    here was checked against the change it guards by reverting it."""
+    """The full cache on every device by default, the Intel GPU included.
+
+    The Intel GPU kept the window by default for a while, for its memory: 5.6
+    GB against 1.5 GB on the 26B-A4B backbone at 8,192 tokens with six warm
+    caches. Measured afterwards on that user's Arc, the window's checkpoints
+    split a continuing turn into 3.6 batches on average at about 1.5 s each
+    before a token is read, and a saved prompt cache can only be resumed
+    exactly on the full cache. So Automatic is the full cache everywhere, and
+    the window -- with llama.cpp's checkpoints spaced so that an edit re-reads
+    at most two thousand tokens back -- is a choice. Every test here was
+    checked against the change it guards by reverting it."""
 
     LISTS_BOTH = "      --swa-full\n  -cms, --checkpoint-min-step N\n"
 
@@ -1506,21 +1506,34 @@ class TestTheWindowOnTheIntelGPU:
 
         return announce
 
-    def test_the_intel_gpu_keeps_the_window_and_spaces_the_checkpoints(self, build):
-        configuration = build(self.LISTS_BOTH)
+    def test_automatic_gives_the_intel_gpu_the_full_cache(self, build):
+        for configuration, placement in ((build(self.LISTS_BOTH), ctx.Placement(uma=True)),
+                                         (build(self.LISTS_BOTH, device="SYCL0"),
+                                          ctx.Placement(gpu_layers=20))):
+            assert runtime.accelerator_flags(configuration, placement) == [
+                runtime.FULL_ATTENTION_WINDOW_FLAG], placement
+
+    def test_the_window_when_chosen_spaces_the_checkpoints_on_intel(self, build, host):
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_NEVER)
+        configuration = build(self.LISTS_BOTH, device="SYCL0")
 
         flags = runtime.accelerator_flags(configuration, ctx.Placement(uma=True))
 
         assert runtime.FULL_ATTENTION_WINDOW_FLAG not in flags
         assert flags[:2] == [runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
 
-    def test_the_device_name_alone_says_intel(self, build):
+    def test_the_old_automatic_label_now_means_the_full_cache(self, build, host):
+        """A setting saved under the old label -- the window on Intel -- is no
+        longer one of the choices; it reads as Automatic, which is now the full
+        cache there too."""
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW,
+                             "Automatic — the full cache on an NVIDIA card and the processor, "
+                             "the window on the Intel GPU")
         configuration = build(self.LISTS_BOTH, device="SYCL0")
 
-        flags = runtime.accelerator_flags(configuration, ctx.Placement(gpu_layers=20))
-
-        assert runtime.FULL_ATTENTION_WINDOW_FLAG not in flags
-        assert flags[:2] == [runtime.CHECKPOINT_SPACING_FLAG, runtime.CHECKPOINT_SPACING]
+        assert runtime.full_window_mode() == runtime.FULL_WINDOW_AUTO
+        assert runtime.accelerator_flags(configuration, ctx.Placement(uma=True)) == [
+            runtime.FULL_ATTENTION_WINDOW_FLAG]
 
     def test_an_nvidia_card_and_the_processor_keep_the_full_cache(self, build):
         configuration = build(self.LISTS_BOTH)
@@ -1555,7 +1568,8 @@ class TestTheWindowOnTheIntelGPU:
         host.shared.opts.set(runtime.OPT_FULL_WINDOW, "")
         assert runtime.full_window_mode() == runtime.FULL_WINDOW_AUTO
 
-    def test_a_build_without_the_spacing_flag_is_not_given_it(self, build):
+    def test_a_build_without_the_spacing_flag_is_not_given_it(self, build, host):
+        host.shared.opts.set(runtime.OPT_FULL_WINDOW, runtime.FULL_WINDOW_NEVER)
         configuration = build("      --swa-full\n")
 
         assert runtime.accelerator_flags(configuration, ctx.Placement(uma=True)) == []

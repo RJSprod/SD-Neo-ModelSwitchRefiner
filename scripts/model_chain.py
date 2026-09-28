@@ -32,6 +32,7 @@ import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_slot_cache
 import mc_llm_state
+import mc_llm_template
 import mc_llm_studio
 import mc_llm_vision
 import mc_logfile
@@ -449,11 +450,10 @@ shared.options_templates.update(
                 "its blocks. The full cache lets llama.cpp resume any cached prompt exactly "
                 "and costs the whole context on every block — 5.6 GB against 1.5 GB for the "
                 "26B backbone at 8,192 tokens with six warm caches. The window relies on "
-                "llama.cpp's context checkpoints instead: a turn that continues the thread "
-                "costs the same either way, and an edit far back in it re-reads from the "
-                "nearest checkpoint, at most 2,048 tokens before the edit. Automatic keeps "
-                "the window on the Intel GPU, whose memory is the system's, and the full "
-                "cache everywhere else"
+                "llama.cpp's context checkpoints instead, and to take them llama.cpp reads "
+                "each turn in separate batches — on the Intel GPU about a second and a half "
+                "each before a token is read — and a saved prompt cache cannot be resumed. "
+                "Automatic is the full cache on every device"
             ),
             mc_llm_slot_cache.OPT_SAVE: shared.OptionInfo(
                 True,
@@ -465,10 +465,22 @@ shared.options_templates.update(
                 "whole conversation again — minutes, on a slow device. With this on, the "
                 "cache is saved after every reply and read back before that first reply, "
                 "which then reads only what is new, as it would have before the restart. It "
-                "costs disk, not memory. Only a model without a sliding window is saved: "
-                "llama.cpp keeps just the window of a sliding-window model such as Gemma in "
-                "a saved slot and cannot resume it exactly, so those models are left as "
-                "they were"
+                "costs disk, not memory. A sliding-window model such as Gemma is saved only "
+                "with the full cache above, and read back only when the new prompt continues "
+                "the saved one exactly, because llama.cpp keeps just the window in a saved "
+                "slot; Gemma also needs its thought marker kept, below"
+            ),
+            mc_llm_template.OPT_KEEP_MARKER: shared.OptionInfo(
+                True,
+                "Keep Gemma's empty thought marker on its past replies",
+            ).info(
+                "Gemma 4's template ends every new prompt with an empty thought marker, which "
+                "the reply is written after, and deletes that marker from every reply in the "
+                "history — so llama.cpp finds the history different from its cache just "
+                "before the last reply and reads that reply again every turn. With this on, "
+                "llama-server is given a copy of the model's own template that keeps the "
+                "marker, and a turn reads only what is new. Takes effect at the next start "
+                "of llama-server; a model whose template is not Gemma 4's is not affected"
             ),
             mc_llm_slot_cache.OPT_BUDGET_GB: shared.OptionInfo(
                 mc_llm_slot_cache.DEFAULT_BUDGET_GB,
