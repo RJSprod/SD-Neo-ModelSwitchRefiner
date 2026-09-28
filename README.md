@@ -3473,6 +3473,15 @@ The workspace's own nested tabs — the extra-network tabs inside Txt2Img, the
 mode tabs inside Img2Img — are the workspace's content and stay exactly as
 they were.
 
+One workspace answers focus with more than the room: Mini Paint NEO's **WanGP**
+tab. Its workspace is a WanGP page in a frame, so with focus on, that tab is
+the frame alone — the whole window, edge to edge, with the tab's *Integration
+management* accordion gone until focus is off — and nothing is reloaded or
+moved to do it. That extension keys its rule on the class this one puts on the
+focused panel, `forge-assistant-focus-root`; renaming it here breaks the WanGP
+tab's full page silently, which is why the name is written down on both sides
+(`docs/22-forge-assistant.md` here, `docs/wangp/CONTRACTS.md` there).
+
 Nothing is moved to do it, and no element of Forge's is touched beyond a class
 going on and coming off, which is what makes leaving focus nothing more than
 that, and what means a theme this code has never heard of is handled by the
