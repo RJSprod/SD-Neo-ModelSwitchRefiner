@@ -1882,13 +1882,22 @@ def _smi_read(physical_index: int, what: str) -> dict:
     return readings
 
 
-def physical_free_vram_bytes(physical_index: int) -> int:
+def physical_free_vram_bytes(physical_index: int, fresh: bool = False) -> int:
     """Free VRAM on a physical card this process cannot address, via nvidia-smi.
 
     The slow path, and the only one there is for a card outside
     ``CUDA_VISIBLE_DEVICES``: torch cannot report on a device it was not given,
     and the driver can.
+
+    ``fresh`` discards the cached reading first. A caller that has just freed
+    memory on a card -- a speech guest unloaded, WanGP flushed -- and is about
+    to decide on the strength of it wants the card as it is now, not as it was
+    up to :data:`_SMI_READING_SECONDS` ago.
     """
+    global _smi_readings
+
+    if fresh:
+        _smi_readings = (0.0, {})
     readings = _smi_read(physical_index, "free VRAM")
     try:
         return int(readings.get(int(physical_index), 0))
@@ -4670,6 +4679,133 @@ def release_vram(needed_bytes: int, reason: str = "") -> int:
         f"; kept {pinned / _GB:.1f} GB of pinned encoders resident" if keep else "",
     )
     return freed
+
+
+PARKED_RAM = "ram"
+PARKED_RECIPE = "recipe"
+
+
+def can_drop_image_model() -> bool:
+    """Whether this Forge can forget its model and rebuild it from its recipe.
+
+    Asked before anything moves, so that a caller who has measured system RAM
+    too short to hold the model is never handed :func:`drop_image_model`'s
+    fallback -- parking it in RAM, the one thing it just ruled out.
+    """
+    try:
+        from modules import sd_models
+
+        return callable(getattr(sd_models, "unload_model_weights", None))
+    except Exception:
+        return False
+
+
+def park_image_model(reason: str = "") -> str:
+    """Move every image weight off the card into system RAM, keeping the model.
+
+    For a speech guest's turn on the image card (:mod:`mc_turns`), when the
+    user's setting keeps the checkpoint in RAM rather than dropping it. The
+    same model object stays loaded -- checkpoint, VAE, text encoders and
+    whatever LoRA state it had -- all of it moved by the host's own
+    ``unload_all_models`` (``ModelPatcher.detach``, which moves and frees
+    nothing; see this module's header) to the offload device it was going to
+    use anyway. So what comes back is what left, and it comes back the way
+    every evicted model does: a generation's own load, or :mod:`mc_arm`'s
+    warm-up, with no read of the checkpoint from disk.
+
+    Nothing is written to disk. The one way this could end on the disk anyway
+    is Windows paging the parked weights out under pressure, and that is the
+    caller's to prevent before it calls: it checks available RAM first.
+
+    Returns :data:`PARKED_RAM`, or ``""`` when nothing could be moved.
+    """
+    join_preload()
+    before = device_free_vram_bytes()
+    resident = resident_vram_bytes()
+    with _model_lock:
+        try:
+            from backend import memory_management
+
+            unload = getattr(memory_management, "unload_all_models", None)
+            if callable(unload):
+                unload()
+            else:
+                memory_management.free_memory(1e30, memory_management.get_torch_device())
+        except Exception:
+            logger.warning("Model Chain: could not move the image model into system RAM "
+                           "for %s", reason or "another workload", exc_info=True)
+            return ""
+    release_cached_vram()
+    freed = max(device_free_vram_bytes() - before, 0)
+    logger.info("Model Chain: parked the image model in system RAM for %s — %.1f GB was "
+                "on the card, %.1f GB of VRAM is free again", reason or "another workload",
+                resident / _GB, freed / _GB)
+    return PARKED_RAM
+
+
+def drop_image_model(reason: str = "") -> str:
+    """Forget the loaded model and keep only its recipe, freeing its VRAM *and* RAM.
+
+    The recipe is the host's loading parameters -- checkpoint, VAE, text
+    encoders, storage type -- which Forge keeps when it drops a model, so its
+    next ``forge_model_reload`` builds the same model from the same files. The
+    drop is the host's own ``sd_models.unload_model_weights``, the function
+    behind its *Unload* button: every loaded weight unloaded, the model object
+    deleted, the loading hash cleared so the next generation cannot be handed a
+    model that is no longer there. LoRAs are not part of the recipe; the next
+    prompt applies them again, as it applies them after any reload.
+
+    Dropping the host's reference frees nothing while something else holds one,
+    so the three references this module keeps to the loaded model go first: the
+    pinned Stage 1 encoders, the captured Stage 2 components, and a warm-cache
+    entry for the same checkpoint. Other cached checkpoints are left where they
+    are; they are a different model, and they were already in RAM before this.
+
+    Nothing is written to disk. A Forge without ``unload_model_weights`` is
+    parked in RAM instead, and the answer says so.
+
+    Returns :data:`PARKED_RECIPE`, :data:`PARKED_RAM` when it had to park
+    instead, or ``""`` when nothing could be done.
+    """
+    join_preload()
+    before_vram = device_free_vram_bytes()
+    before_ram = free_ram_bytes()
+    with _model_lock:
+        try:
+            from modules import sd_models
+
+            unload = getattr(sd_models, "unload_model_weights", None)
+            if not callable(unload):
+                fallback = True
+            else:
+                fallback = False
+                key = _loaded_model_key()
+                clear_pinned_encoders()
+                clear_stage_2_components()
+                if key:
+                    _cache.drop(key)
+                unload()
+        except Exception:
+            logger.warning("Model Chain: could not drop the image model for %s",
+                           reason or "another workload", exc_info=True)
+            return ""
+    if fallback:
+        logger.info("Model Chain: this Forge has no model unload to reload from; parking the "
+                    "image model in system RAM instead")
+        return park_image_model(reason)
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+    release_cached_vram()
+    logger.info("Model Chain: dropped the image model for %s and kept its recipe — %.1f GB of "
+                "VRAM and %.1f GB of system RAM freed; it reloads from its own files",
+                reason or "another workload",
+                max(device_free_vram_bytes() - before_vram, 0) / _GB,
+                max(free_ram_bytes() - before_ram, 0) / _GB)
+    return PARKED_RECIPE
 
 
 def get_model(name: str):

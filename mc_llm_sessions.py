@@ -243,6 +243,25 @@ class _Gpu:
             return False
         return domain.conflicts_with(mc_broker.image_execution_domain())
 
+    @staticmethod
+    def _blocked_by_a_guest(domain, ours: bool) -> str:
+        """What speech guest this turn waits for on its card, or ``""``.
+
+        A VibeVoice request goes next on its card and is never cut off
+        (:mod:`mc_turns`), so a language-model turn on that card waits for it
+        the way it waits for an image job -- except the one turn the host's own
+        running job is blocked on, which is part of that job and would otherwise
+        wait for a guest that is waiting for it. See
+        :func:`mc_turns.llm_wait_reason`.
+        """
+        try:
+            import mc_turns
+
+            return mc_turns.llm_wait_reason(domain, inside_host_job=ours)
+        except Exception:
+            logger.debug("Model Chain: could not ask whose turn the card is", exc_info=True)
+            return ""
+
     def acquire(self):
         """Generator: yields status events until this request may begin.
 
@@ -285,6 +304,11 @@ class _Gpu:
                     else "image generation")
                 time.sleep(WAIT_POLL_SECONDS)
                 continue
+            guest = self._blocked_by_a_guest(domain, ours)
+            if guest:
+                announced = yield from self._announce(started, announced, guest)
+                time.sleep(WAIT_POLL_SECONDS)
+                continue
             self._workload = mc_broker.workload(mc_broker.FAMILY_LLM, self.label,
                                                 timeout=WAIT_POLL_SECONDS, required=False,
                                                 domain=domain)
@@ -300,7 +324,8 @@ class _Gpu:
                 if again != domain:
                     self.release()
                     continue
-                if ours or not self._blocked_by_the_image_job(again):
+                if ((ours or not self._blocked_by_the_image_job(again))
+                        and not self._blocked_by_a_guest(again, ours)):
                     return True
                 self.release()
                 continue

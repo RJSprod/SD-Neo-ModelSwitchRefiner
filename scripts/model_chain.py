@@ -46,6 +46,7 @@ import mc_profile_state
 import mc_progress
 import mc_references
 import mc_styles
+import mc_turns
 import mc_voice_api
 import mc_voice_clone
 import mc_voice_device
@@ -603,6 +604,31 @@ shared.options_templates.update(
                 "starved a WanGP generation for seven minutes in one log. While WanGP is "
                 "up, a start that touches the processor is held to this many threads; "
                 "0 means half the physical cores. A full offload is not affected"
+            ),
+            mc_turns.OPT_IMAGE_RETURN: shared.OptionInfo(
+                mc_turns.RETURN_AUTOMATIC,
+                "Bring the image model back after VibeVoice",
+                gr.Radio,
+                {"choices": [label for _, label in mc_turns.RETURN_MODES]},
+            ).info(
+                "when VibeVoice takes its turn on the card the image model lives on, the "
+                "image model makes room and comes back afterwards. From system RAM keeps "
+                "the very same model — LoRAs included — and moves it back in about twenty "
+                "seconds, but holds its size in RAM while VibeVoice runs; From its recipe "
+                "frees the RAM too and reloads it from its own files. Nothing is ever "
+                "written to disk, and a request that would push system RAM into the "
+                "pagefile is refused with a warning instead"
+            ),
+            mc_turns.OPT_KEEP_WARM: shared.OptionInfo(
+                mc_turns.WARM_EVERY,
+                "Keep VibeVoice warm between requests",
+                gr.Radio,
+                {"choices": [label for _, label in mc_turns.WARM_MODES]},
+            ).info(
+                "a warm VibeVoice starts the next request in seconds instead of loading "
+                "eighteen gigabytes again. It never keeps a card from anything else: an "
+                "image generation, WanGP or the LLM that needs the card unloads it first, "
+                "and a request already running is never cut off"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,
@@ -2633,6 +2659,18 @@ class ScriptModelChain(scripts.Script):
     # -- hooks ------------------------------------------------------------- #
 
     def before_process(self, p, enabled, target, modules=None, *args):
+        # First of all: whose turn it is on the card. A speech guest that is
+        # next on, or rendering on, the image card goes before this generation,
+        # and a warm one leaves for it (mc_turns, rules 2 and 6). Before the
+        # warm-up, the preload and the budget below, because every one of them
+        # moves weights onto the card. The gate script calls this too, for
+        # img2img, and whichever of the two runs second returns at once.
+        try:
+            mc_turns.image_gate(p)
+        except Exception:
+            errors.report("Model Chain: the card's turn check failed; generating anyway",
+                          exc_info=True)
+
         # The two spans below happen before this hook knows whether the chain is
         # armed, and both are real time the user spends looking at an empty
         # progress bar -- waiting on a preload that is still moving weights, and
@@ -3537,6 +3575,10 @@ class ScriptModelChain(scripts.Script):
         it does today -- before_process() joins the thread and then does the
         work itself if it was not already done.
         """
+        if mc_turns.image_card_held():
+            # A speech guest is next on, or warm on, this card. Weights moved on
+            # now would be moved straight back off for it (mc_turns).
+            return
         try:
             width, height = mc_arch.stage1_size(p)
             mc_memory.preload_async(width, height, force=_warm_up_wanted())
@@ -3561,6 +3603,9 @@ class ScriptModelChain(scripts.Script):
         starts, the next generation does exactly what it does today --
         before_process() joins the thread and then does the work itself.
         """
+        if mc_turns.image_card_held():
+            # See _preload_stage_1: a speech guest is next on, or warm on, the card.
+            return
         try:
             width, height = mc_arch.stage1_size(p)
             mc_memory.preload_async(width, height, force=_warm_up_wanted())

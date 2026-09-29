@@ -135,6 +135,8 @@ WATCH_SECONDS = 2.0
 
 PACKAGE = "minipaint_neo"
 PRESENCE_MODULE = "minipaint_neo.wangp.presence"
+TURNS_MODULE = "minipaint_neo.wangp.turns"
+"""Mini Paint's card lease, from bridge 1.12.0 on. See :func:`lease_request`."""
 RUNTIME_MODULE = "minipaint_neo.wangp.runtime"
 CONFIG_MODULE = "minipaint_neo.wangp.config"
 CONTROL_MODULE = "minipaint_neo.wangp.control"
@@ -401,6 +403,88 @@ def is_wangps_card(card, configuration=None, found: Presence | None = None) -> b
 
 
 # --------------------------------------------------------------------------- #
+# The lease: asking Mini Paint for WanGP's card
+# --------------------------------------------------------------------------- #
+#
+# Everything above only *watches* WanGP. A speech guest cannot work that way:
+# an eighteen-gigabyte render that starts on a card WanGP is about to generate
+# on, or that WanGP starts generating under, is one of the two running out of
+# memory. So a VibeVoice turn (mc_turns) asks Mini Paint for the card, Mini Paint
+# lets the job WanGP is running finish, stops handing it the next one, has its
+# bridge hold WanGP between tasks, and says so. docs/23-voice-box.md section 6
+# is the contract; Mini Paint's docs/wangp/CONTRACTS.md is its other half.
+#
+# The functions below are the only place this extension calls it, by name and
+# only once the host has imported Mini Paint, exactly like presence. Each
+# answers the lease record as Mini Paint returned it, or None when there is no
+# Mini Paint to ask, or one too old to lease -- which every caller reads as
+# "there is no WanGP here anybody could hold".
+
+LEASE_KEYS = ("version", "lease", "owner", "phase", "reason", "card_uuid", "wanted",
+              "bridge_hold", "expires_in_s", "wangp")
+"""The lease record's keys, as the contract fixes them. A record missing one is
+read as no answer rather than half-trusted."""
+
+_lease_seam: dict = {"module": None}
+"""Test seam: an object standing in for ``minipaint_neo.wangp.turns``."""
+
+
+def use_lease(module) -> None:
+    """Answer lease calls from ``module`` instead of Mini Paint. ``None`` restores it."""
+    _lease_seam["module"] = module
+
+
+def _turns():
+    seam = _lease_seam["module"]
+    if seam is not None:
+        return seam
+    if PACKAGE not in sys.modules or not enabled():
+        return None
+    try:
+        return importlib.import_module(TURNS_MODULE)
+    except Exception:
+        logger.debug("Model Chain: Mini Paint offers no card lease (bridge 1.12.0 needed)",
+                     exc_info=True)
+        return None
+
+
+def _lease_call(name: str, *args, **kwargs) -> dict | None:
+    module = _turns()
+    call = getattr(module, name, None) if module is not None else None
+    if not callable(call):
+        return None
+    try:
+        found = call(*args, **kwargs)
+    except Exception:
+        logger.warning("Model Chain: Mini Paint's card lease failed on %s", name, exc_info=True)
+        return None
+    if not isinstance(found, dict) or any(key not in found for key in LEASE_KEYS):
+        logger.debug("Model Chain: Mini Paint's %s answered outside the contract", name)
+        return None
+    return found
+
+
+def lease_request(owner: str, *, purpose: str = "", need_bytes: int = 0) -> dict | None:
+    """Ask Mini Paint for WanGP's card. Returns at once; poll :func:`lease_state`."""
+    return _lease_call("request", owner, purpose=purpose, need_bytes=int(need_bytes))
+
+
+def lease_state(lease: str) -> dict | None:
+    """The lease as it stands, which also renews it. Unrenewed, it expires in 20 s."""
+    return _lease_call("state", lease)
+
+
+def lease_flush(lease: str, level: str) -> dict | None:
+    """Ask for WanGP's VRAM: ``soft`` keeps its weights in RAM, ``hard`` discards them."""
+    return _lease_call("flush", lease, level)
+
+
+def lease_release(lease: str, *, reason: str = "") -> dict | None:
+    """Give WanGP's card back: Mini Paint resumes WanGP and submits again."""
+    return _lease_call("release", lease, reason=reason)
+
+
+# --------------------------------------------------------------------------- #
 # The ceiling: what WanGP leaves on its card
 # --------------------------------------------------------------------------- #
 
@@ -509,7 +593,13 @@ def observe(card, found: Presence | None = None) -> Observation | None:
     if total <= 0:
         return None
     ours = max(int(mc_broker.held_bytes(mc_broker.FAMILY_LLM, card=index)), 0)
-    others = max(total - free - ours, 0)
+    # A speech guest is not WanGP either. It is on this card only by a lease
+    # Mini Paint granted while WanGP was held (mc_turns), and counting its
+    # eighteen gigabytes as WanGP's would file them as WanGP's *peak*: the
+    # language model's ceiling here would then stay that much lower for the rest
+    # of the session, long after the guest had gone.
+    guests = max(int(mc_broker.held_bytes(mc_broker.FAMILY_VOICE, card=index)), 0)
+    others = max(total - free - ours - guests, 0)
     peak = _note_peak(found.uuid, others)
     cap = max(total - max(peak, others) - reserve_bytes(), 0)
     return Observation(index, free, total, ours, others, peak, cap)
