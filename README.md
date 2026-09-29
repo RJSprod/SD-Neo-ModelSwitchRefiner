@@ -1759,6 +1759,11 @@ Nothing is written to disk on either path. When VibeVoice does not stay warm,
 the model is warmed straight back; when a generation was waiting, that
 generation loads it itself and nothing is started beside it; and when VibeVoice
 stays warm, the next generation evicts it and loads its model as it always does.
+When the LLM evicts a warm VibeVoice for room of its own, the image model stays
+parked — the room is the LLM's — and comes back at the end of the next VibeVoice
+turn on that card, or with the next generation, whichever is first. Whether the
+next turn has to park anything is decided by what is on the card, not by that
+record, so a checkpoint loaded back by hand in between is parked like any other.
 
 *Keep VibeVoice warm between requests*: **On every card** (default), **Not on the
 image model's card** (there the image model comes straight back) or **Off**.
@@ -1766,7 +1771,11 @@ image model's card** (there the image model comes straight back) or **Off**.
 **Never the pagefile, in numbers.** A request is refused when it would leave less
 than 4 GB of system RAM available — twice the host floor, because Windows starts
 paging parked weights out well before RAM reaches zero — or when the card cannot
-hold the render plus 1 GB once everything that may move has moved. A warm stay
+hold the render plus 1 GB once everything that may move has moved. RAM is checked
+before anything is moved, so a request refused for it leaves the image model on
+its card. A card whose free figure cannot be read is no shortfall: the request
+goes ahead on VibeVoice's own estimate, the log says so, and WanGP is not asked
+to move its weights for a reading that is not one. A warm stay
 ends by itself when available RAM falls below 4 GB with the image model parked in
 it, which gives the model its card back and frees the RAM.
 
@@ -1777,7 +1786,8 @@ Generate included — and reports the card held. If the render still does not fi
 WanGP is asked for a soft flush (its weights stay in RAM), then a hard one (its
 next job reloads them) — each waited for until Mini Paint says it is done — and
 the request is refused if even that is short, with Mini Paint's own reason when
-it declined one (a paused WanGP run refuses a hard flush). A warm
+it declined one (a paused WanGP run refuses a hard flush). The lease is renewed
+every two seconds while VibeVoice renders. A warm
 VibeVoice keeps the lease, renewing it every second, and leaves as soon as a
 Clipboard job or WanGP's own queue wants the card — after its memory is gone,
 because WanGP sizes itself against what the card reports free. A lease nobody
@@ -4109,7 +4119,7 @@ starts:
 | Setting | Behaviour |
 | --- | --- |
 | **Keep the LLM loaded** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt starts warm. |
-| **Free the LLM for every image** | llama-server is stopped and the generation gets every last byte, at the cost of a model load per image. |
+| **Free the LLM for every image** | llama-server is stopped — and a warm VibeVoice unloaded — and the generation gets every last byte, at the cost of a model load per image. |
 
 Neither setting ever *starts* one. **llama-server comes up on the first request
 that needs it and not before** — a warm-up is not a request, and a language

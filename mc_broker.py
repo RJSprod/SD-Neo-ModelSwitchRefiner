@@ -1856,13 +1856,20 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
         # authority whatever over a second GPU (section 9.2), and a sweep that
         # crossed to one would stop a language model to free memory the
         # generation cannot use.
-        released = _release(FAMILY_LLM, target,
-                            reason or f"the {_named(family)} workload taking VRAM ownership",
-                            sweep=True, card=scope)
-        freed += released.freed
-        actions.extend(released.actions)
+        #
+        # Every family that gives ground to an image goes, not the language
+        # model alone: a warm speech guest is the lowest-ranking thing on the
+        # card (:func:`_victim_order`), and a sweep that left its eighteen
+        # gigabytes in place would have taken ownership of what was left over.
+        for victim_family in _victim_order(family):
+            released = _release(victim_family, target,
+                                reason or f"the {_named(family)} workload taking VRAM ownership",
+                                sweep=True, card=scope)
+            freed += released.freed
+            actions.extend(released.actions)
+            if victim_family == FAMILY_LLM:
+                swept = released.moved_anything
         free = reading()
-        swept = released.moved_anything
 
     if free <= 0:
         # VRAM could not be queried. Guessing at a deficit here would evict on

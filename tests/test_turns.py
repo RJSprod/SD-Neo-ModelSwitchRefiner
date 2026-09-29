@@ -25,6 +25,8 @@ one nobody had seen work.
 
 from __future__ import annotations
 
+import collections
+import logging
 import threading
 import time
 import types
@@ -523,6 +525,73 @@ class TestTheImageGate:
         mc_turns.image_gate(object())
         assert machine.joined == 1
 
+    def test_the_gate_stays_shut_until_the_guest_has_let_go(self, machine, host, monkeypatch):
+        """An eviction takes as long as the guest's process takes to let go of
+        eighteen gigabytes. The card is the turn's until then: a gate that opened
+        on the first sign of the end would load a checkpoint beside them."""
+        guest = speaker(machine, lingers=3)
+        choose(host, mc_turns.OPT_KEEP_WARM, mc_turns.WARM_OFF)
+        turn = ask()
+        until(turn, mc_turns.GRANTED)
+        guest.load(IMAGE_UUID)
+        turn.finish()
+        seen = []
+        looks = guest.resident_bytes
+
+        def watched(uuid):
+            seen.append((card_of(turn).busy, mc_turns.image_card_held()))
+            return looks(uuid)
+
+        monkeypatch.setattr(guest, "resident_bytes", watched)
+        step(turn)
+
+        assert turn.phase == mc_turns.DONE and guest.held == {}
+        assert len(seen) >= 4, "the eviction never waited for the memory to go"
+        assert all(busy and held for busy, held in seen), seen
+
+    def test_a_request_arriving_as_the_gate_opens_holds_the_job_again(
+            self, machine, host, monkeypatch):
+        """Between the gate finding the card free and the warm guest's eviction a
+        request can arrive; the guest is next again, and the job is held for it
+        rather than run beside eighteen gigabytes nothing can evict any more."""
+        guest = speaker(machine)
+        first = ask()
+        render(first, guest)
+        arrived = []
+
+        def rendering(uuid):
+            if not arrived:
+                arrived.append(ask())
+            return False
+
+        monkeypatch.setattr(guest, "rendering", rendering)
+
+        def driver(seconds):
+            step(arrived[0])
+            if arrived[0].phase == mc_turns.GRANTED:
+                arrived[0].finish(keep_warm=False)
+
+        monkeypatch.setattr(mc_turns, "_sleep", driver)
+
+        assert mc_turns.image_gate(object()) is True
+        assert arrived[0].phase == mc_turns.DONE
+        assert guest.evictions == ["its request finished"]
+        assert card_of(first).warm == "" and machine.loadable == 1
+
+    def test_a_generation_clears_the_record_of_a_park_the_job_makes_stale(self, machine, host):
+        """The record that the model was parked for a guest outlives the language
+        model's eviction of that guest (rule 7, below). A job that passes the gate
+        loads its own model, and the record is stale the moment it does."""
+        guest = speaker(machine)
+        render(ask(), guest)
+        machine.free[IMAGE_CARD] = 1 * _GB
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 8 * _GB, card=IMAGE_CARD)
+        state = mc_turns._state(IMAGE_UUID)
+        assert guest.evictions and state.parked == mc_memory.PARKED_RAM
+
+        assert mc_turns.image_gate(object()) is False
+        assert state.parked == ""
+
     def test_a_turn_on_another_card_holds_no_generation(self, machine, host):
         speaker(machine)
         ask(WANGP_UUID)
@@ -847,6 +916,43 @@ class TestWarm:
         assert guest.evictions == ["Stage 1"] and released.freed == guest.size
         assert machine.armed == []
 
+    def test_the_model_parked_for_a_guest_the_llm_evicted_comes_back_with_the_next_turn(
+            self, machine, host):
+        """The language model takes a warm guest's room and loads nothing of the
+        image model's. The record of the park survives that eviction, and the
+        next turn on the card brings the model back when it ends (rule 7)."""
+        guest = speaker(machine)
+        render(ask(), guest)
+        state = mc_turns._state(IMAGE_UUID)
+        assert state.parked == mc_memory.PARKED_RAM
+        machine.free[IMAGE_CARD] = 1 * _GB
+
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 8 * _GB, card=IMAGE_CARD,
+                               reason="a conversation reply")
+        assert guest.evictions == ["a conversation reply"] and machine.armed == []
+        assert state.parked == mc_memory.PARKED_RAM
+
+        render(ask(), guest, keep_warm=False)
+        assert machine.armed == ["VibeVoice gave the card back"]
+
+    def test_a_working_guest_declares_what_it_holds_as_it_grows(self, machine):
+        """Granted with nothing loaded, the guest holds eighteen gigabytes a moment
+        later; the broker's picture of the card follows it, once a second rather
+        than on every tick."""
+        guest = speaker(machine)
+        turn = ask(WANGP_UUID)
+        until(turn, mc_turns.GRANTED)
+        guest.load(WANGP_UUID)
+
+        step(turn)
+        held = mc_broker.residencies(mc_broker.FAMILY_VOICE, card=OTHER_CARD)
+        assert [entry.bytes for entry in held] == [0]
+        card_of(turn).declared_at -= mc_turns.WARM_WATCH_SECONDS
+        step(turn)
+        held = mc_broker.residencies(mc_broker.FAMILY_VOICE, card=OTHER_CARD)
+        assert [(entry.bytes, entry.rank) for entry in held] == [(guest.size,
+                                                                  mc_broker.RANK_ACTIVE)]
+
     def test_a_warm_guest_that_says_it_is_working_keeps_the_card(self, machine):
         guest = speaker(machine)
         turn = ask(WANGP_UUID)
@@ -1007,6 +1113,24 @@ class TestParking:
         assert machine.armed == ["VibeVoice gave the card back"]
         assert lock_is_free()
 
+    def test_a_model_loaded_back_by_other_means_is_parked_again_for_the_next_turn(
+            self, machine, host):
+        """The record of a park is not what decides the next turn's parking; the
+        card is. A checkpoint the user loaded from the dropdown while the record
+        still stood is resident, and it is parked like any other."""
+        guest = speaker(machine)
+        render(ask(), guest)
+        machine.free[IMAGE_CARD] = 1 * _GB
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 8 * _GB, card=IMAGE_CARD)
+        state = mc_turns._state(IMAGE_UUID)
+        assert state.parked == mc_memory.PARKED_RAM and machine.image == 0
+        machine.image = int(18.4 * _GB)
+        machine.ram += machine.image
+        machine.free[IMAGE_CARD] = 30 * _GB - machine.image
+
+        render(ask(), guest)
+        assert [kind for kind, _ in machine.moved] == [mc_memory.PARKED_RAM] * 2
+
     def test_a_generation_waiting_at_the_gate_is_not_raced_by_a_warm_up(
             self, machine, host, monkeypatch):
         """The job the gate held loads its own model when it goes on; a warm-up
@@ -1045,6 +1169,19 @@ class TestNeverThePagefile:
         assert "Nothing was loaded" in turn.warning
         assert guest.held == {}
 
+    def test_ram_is_checked_before_anything_is_moved_for_the_turn(self, machine, host):
+        """Refused for RAM with the image model still on its card. Checked after
+        the parking, a request short of RAM had already dropped the model from
+        the card to be told no, and then warmed it back."""
+        speaker(machine)
+        choose(host, mc_turns.OPT_IMAGE_RETURN, mc_turns.RETURN_RECIPE)
+        machine.ram = 5 * _GB
+        turn = ask(ram=3.0)
+
+        assert until(turn, mc_turns.BLOCKED) == mc_turns.BLOCKED
+        assert "3.0 GB of system RAM" in turn.warning
+        assert machine.moved == [] and machine.image > 0 and machine.armed == []
+
     def test_a_request_the_card_cannot_hold_is_refused_with_the_numbers(self, machine):
         speaker(machine)
         machine.free[OTHER_CARD] = 10 * _GB
@@ -1061,6 +1198,21 @@ class TestNeverThePagefile:
         assert machine.free[OTHER_CARD] == 12 * _GB
 
         assert until(ask(WANGP_UUID), mc_turns.GRANTED) == mc_turns.GRANTED
+
+    def test_a_card_that_cannot_be_read_is_said_so_and_wangp_is_not_flushed_for_it(
+            self, machine, wangp, caplog):
+        """Zero free is no reading. The guest goes on its own estimate, the log
+        says so, and WanGP is not asked to move its weights off the card for a
+        shortfall nobody measured."""
+        speaker(machine)
+        wangp.phase, wangp.bridge_hold = "held", "held"
+        machine.free[OTHER_CARD] = 0
+        turn = ask(WANGP_UUID)
+
+        with caplog.at_level(logging.WARNING, logger="model_chain"):
+            assert until(turn, mc_turns.GRANTED, mc_turns.BLOCKED) == mc_turns.GRANTED
+        assert wangp.said("flush") == []
+        assert "could not read what NVIDIA GeForce RTX 5090 has free" in caplog.text
 
     def test_the_card_is_read_through_the_driver_and_fresh(self, machine):
         """Not through torch, which would make a context on the card being
@@ -1094,7 +1246,10 @@ class TestTheLease:
         assert step(turn) == mc_turns.GRANTED
 
     def test_the_lease_is_renewed_while_the_render_runs(self, machine, wangp):
-        """Mini Paint expires a lease nobody renews in twenty seconds."""
+        """Mini Paint expires a lease nobody renews in twenty seconds. Renewed on
+        a cadence well inside that and not on every tick: a renewal is a call
+        into Mini Paint that rewrites its record, four times a second for the
+        length of a render when it was."""
         speaker(machine)
         wangp.phase, wangp.bridge_hold = "held", "held"
         turn = ask(WANGP_UUID)
@@ -1102,7 +1257,11 @@ class TestTheLease:
         before = len(wangp.said("state"))
 
         step(turn, 3)
-        assert len(wangp.said("state")) == before + 3
+        assert len(wangp.said("state")) == before + 1
+        card_of(turn).renewed_at -= mc_turns.LEASE_RENEW_SECONDS
+        step(turn)
+        assert len(wangp.said("state")) == before + 2
+        assert mc_turns.LEASE_RENEW_SECONDS * 3 < 20.0
 
     def test_the_lease_is_released_when_the_guest_leaves(self, machine, host, wangp):
         guest = speaker(machine)
@@ -1274,9 +1433,13 @@ class TestTheLease:
         wangp.phase, wangp.reason = "holding", "WanGP is finishing the task it is running."
 
         with caplog.at_level("WARNING", logger="model_chain"):
-            step(turn, 3)
+            for _ in range(3):
+                # Each step a renewal of its own, so the record is read every time.
+                card_of(turn).renewed_at = None
+                step(turn)
 
         assert turn.phase == mc_turns.GRANTED
+        assert len(wangp.said("state")) >= 3
         assert len([line for line in caplog.messages if "no longer held" in line]) == 1
 
     def test_a_refused_lease_blocks_while_wangp_runs(self, machine, wangp):
@@ -1427,6 +1590,18 @@ class TestTheLanguageModelsSide:
         assert mc_turns.llm_wait_reason(here, inside_host_job=True) == ""
         assert mc_turns.llm_wait_reason(here) != ""
 
+    def test_the_queue_is_read_under_the_lock(self, machine):
+        """The driver pops the queue under the lock; a first turn read outside it
+        is read from a queue that can be empty by then. The snapshot too."""
+        speaker(machine)
+        turn = ask(WANGP_UUID)
+        state = card_of(turn)
+        state.queue = _OnlyUnderTheLock(state.queue)
+        there = mc_broker.cuda_execution(OTHER_CARD)
+
+        assert mc_turns.llm_wait_reason(there) == "VibeVoice 7B on NVIDIA GeForce RTX 5090"
+        assert mc_turns.snapshot()[0]["queued"] == [turn.describe()]
+
     def test_a_warm_guest_is_no_reason_to_wait(self, machine):
         guest = speaker(machine)
         render(ask(WANGP_UUID), guest)
@@ -1520,6 +1695,18 @@ class TestTheLanguageModelsSide:
         gpu.release()
 
 
+class _OnlyUnderTheLock(collections.deque):
+    """A card's queue that refuses to be read by a thread not holding the lock."""
+
+    def __getitem__(self, index):
+        assert mc_turns._lock._is_owned(), "the queue was read outside the lock"
+        return super().__getitem__(index)
+
+    def __iter__(self):
+        assert mc_turns._lock._is_owned(), "the queue was read outside the lock"
+        return super().__iter__()
+
+
 class _Never:
     def is_set(self):
         return False
@@ -1535,6 +1722,19 @@ class TestTheBroker:
         assert mc_broker._victim_order(mc_broker.FAMILY_IMAGE) == (mc_broker.FAMILY_VOICE,
                                                                    mc_broker.FAMILY_LLM)
         assert mc_broker._victim_order(mc_broker.FAMILY_LLM) == (mc_broker.FAMILY_VOICE,)
+
+    def test_exclusive_mode_sweeps_a_warm_guest_off_the_image_card_too(self, machine, host):
+        """Exclusive mode is a promise that the image family owns its card. The
+        sweep that keeps it took the language model alone, and left a warm guest's
+        eighteen gigabytes as the one thing an image pass could not have."""
+        guest = speaker(machine)
+        render(ask(), guest)
+        host.shared.opts.set(mc_broker.OPT_MODE, mc_broker.MODE_EXCLUSIVE)
+
+        released = mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 1 * _GB, card=IMAGE_CARD,
+                                          reason="Stage 1")
+
+        assert guest.evictions == ["Stage 1"] and released.freed == guest.size
 
     def test_nothing_is_ever_released_for_a_guest(self):
         """A guest takes a card through a turn -- a request the user made --
@@ -1863,6 +2063,20 @@ class TestTheRealDriver:
         guest.held.clear()  # the engine's own Unload
         assert stopped(turn)
         assert card_of(turn).warm == ""
+
+    def test_the_gate_opens_only_once_the_guest_has_let_go(self, driven, host):
+        """On real threads: the card's driver evicts a guest whose memory takes
+        thirty looks to go, and a generation at the gate waits for the last."""
+        guest = speaker(driven, lingers=30)
+        choose(host, mc_turns.OPT_KEEP_WARM, mc_turns.WARM_OFF)
+        turn = ask()
+        assert turn.wait(timeout=5.0) == mc_turns.GRANTED
+        guest.load(IMAGE_UUID)
+        turn.finish()
+
+        assert mc_turns.image_gate(object()) is True
+        assert guest.held == {} and turn.phase == mc_turns.DONE
+        assert stopped(turn)
 
     def test_a_caller_that_gives_up_is_withdrawn(self, driven, host):
         speaker(driven)

@@ -59,8 +59,8 @@ parked for the turn (:func:`image_return_mode`) and comes back afterwards.
 *WanGP's card.* Mini Paint NEO feeds WanGP one Clipboard job at a time, so the
 turn asks Mini Paint for the card through a lease (``mc_wangp.lease_*``): Mini
 Paint stops submitting, lets the running job finish, has its bridge hold WanGP
-between tasks, and reports the card held. The lease is renewed on every tick, so
-a Forge that dies cannot leave WanGP held.
+between tasks, and reports the card held. The lease is renewed every couple of
+seconds, so a Forge that dies cannot leave WanGP held.
 
 *Any other card.* Nothing to hold but the language model.
 
@@ -152,7 +152,15 @@ arithmetic, so a quarter of a second is well below anything a person notices."""
 
 WARM_WATCH_SECONDS = 1.0
 """How often a warm stay is checked: its lease renewed (Mini Paint expires one in
-twenty seconds), its guest still loaded, and the RAM under a parked model."""
+twenty seconds), its guest still loaded, and the RAM under a parked model. Also
+how often a granted turn tells the broker what its guest holds by now."""
+
+LEASE_RENEW_SECONDS = 2.0
+"""How often a granted turn renews its lease. Mini Paint expires a lease not
+renewed for twenty seconds, and every renewal is a call into Mini Paint that
+rewrites its record: once every two seconds keeps the lease live with time to
+spare, where renewing on every tick was four calls a second for as long as a
+render lasted."""
 
 GRANT_IDLE_SECONDS = 120.0
 """How long a granted turn may show nothing -- no memory, no work -- before its
@@ -482,6 +490,10 @@ class _CardState:
         """The image job the gate is holding right now, by its job key."""
         self.passed: collections.deque = collections.deque(maxlen=32)
         """Job keys the gate has already let through (it is called twice a job)."""
+        self.renewed_at: float | None = None
+        """When the lease was last renewed under a granted turn."""
+        self.declared_at: float | None = None
+        """When the broker was last told what a granted turn's guest holds."""
         self.thread: threading.Thread | None = None
         self.woken = threading.Event()
 
@@ -496,6 +508,7 @@ class _CardState:
 _lock = threading.RLock()
 _cards: dict[str, _CardState] = {}
 _sleep = time.sleep
+_now = time.monotonic
 
 
 def _state(uuid: str, create: bool = False) -> _CardState | None:
@@ -611,13 +624,14 @@ def tick(target: _CardState) -> None:
             _refuse(target, active, words)
             return
         _declare(target, active.guest, busy=True)
+        target.declared_at = _now()
         logger.info("Model Chain: %s has %s", active.label, target.card.describe())
         active.granted_at = time.monotonic()
         active._set(GRANTED, "")
         return
 
     if active.phase == GRANTED:
-        record = _renew(target)
+        record = _renew(target, every=LEASE_RENEW_SECONDS)
         if (record is not None and target.lease_held and not active._said_unheld
                 and str(record.get("phase") or "") != "held"):
             # A task that slipped past the hold, or WanGP started from its own tab
@@ -631,6 +645,12 @@ def tick(target: _CardState) -> None:
         if active._finished:
             _conclude(target, active, DONE, keep_warm=active._keep_warm)
             return
+        if target.declared_at is None or _now() - target.declared_at >= WARM_WATCH_SECONDS:
+            # What the guest holds grows from nothing to eighteen gigabytes after
+            # the grant, and the broker's picture of the card -- its status line,
+            # what a sweep believes is there -- is only as current as this.
+            target.declared_at = _now()
+            _declare(target, active.guest, busy=True)
         if _abandoned(target, active):
             logger.warning("Model Chain: %s was granted %s %.0f s ago and has neither loaded "
                            "nor started; giving the card back", active.label,
@@ -798,11 +818,9 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
 
     _stop_idle_llm(target)
 
-    if image_card and not target.parked:
-        verdict, words = _park_image_model(target, turn)
-        if verdict == "block":
-            return verdict, words
-
+    # RAM before anything is moved for the turn. A refusal here has to leave the
+    # card as it found it: checked after the parking, a request short of RAM had
+    # already dropped the image model from the card to be told no.
     free_ram = mc_memory.free_ram_bytes()
     if free_ram > 0 and free_ram < turn.need_ram + RAM_MARGIN_BYTES:
         return "block", (
@@ -812,6 +830,12 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
             f"was paged")
 
     if image_card:
+        # Decided by what is on the card, not by the record of an earlier park:
+        # the model a generation loaded back since is resident again, and one
+        # parked for a guest the language model then evicted is still out.
+        verdict, words = _park_image_model(target, turn)
+        if verdict == "block":
+            return verdict, words
         mc_memory.release_cached_vram()
     needed = max(turn.need_vram - already, 0) + VRAM_MARGIN_BYTES
     if target.flushing:
@@ -819,9 +843,16 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
         if verdict is not None:
             return verdict
     free = _free_on(target.card, image_card)
-    if free < needed and target.lease_held and target.flushing != "hard":
-        return _ask_flush(target, "hard" if target.flushing == "soft" else "soft")
-    if free and free < needed:
+    if free <= 0:
+        # Not a shortfall: a card the driver could not read, or one the topology
+        # does not know. The guest's own estimate is all there is to go on, and
+        # WanGP is not asked to move its weights for a reading that is not one.
+        logger.warning("Model Chain: could not read what %s has free — %s goes ahead on its "
+                       "own estimate of %.1f GB", target.card.describe(), turn.label,
+                       turn.need_vram / _GB)
+    elif free < needed:
+        if target.lease_held and target.flushing != "hard":
+            return _ask_flush(target, "hard" if target.flushing == "soft" else "soft")
         return "block", (
             f"{turn.label} needs {turn.need_vram / _GB:.1f} GB on "
             f"{target.card.describe()} plus {VRAM_MARGIN_BYTES / _GB:.0f} GB of margin, "
@@ -970,36 +1001,48 @@ def _conclude(target: _CardState, turn: Turn, phase: str, *, keep_warm,
     each of them can leave the guest loaded: a refused turn for a guest that was
     already warm is still a warm guest, and one that is simply forgotten is an
     eighteen-gigabyte model nothing is tracking.
+
+    The turn stays the card's active one until the card is really free. An
+    eviction takes as long as the guest's process takes to let go of eighteen
+    gigabytes, and the gate opens, a warm-up starts and a language model places
+    itself the moment ``active`` is cleared -- cleared first, each of them began
+    on a card the guest was still leaving.
     """
-    with _lock:
-        target.active = None
-        more = bool(target.queue)
-        # Read with the same hold that frees the card: the gate clears this the
-        # moment it sees the card free, and a job it was holding loads its own
-        # model -- a warm-up started beside that load is two loads of one model.
-        held_job = target.parked_job is not None
     guest = _guest(turn.guest)
     resident = _resident(guest, target.card.uuid) if guest is not None else 0
-    turn._set(phase, "", warning)
+    with _lock:
+        more = bool(target.queue)
     if more:
         # Rule 3: the next VibeVoice request goes before anything that waited.
         # Whatever this card is holding stays held.
-        if resident > 0:
-            with _lock:
+        with _lock:
+            if resident > 0:
                 target.warm = turn.guest
+            target.active = None
+        if resident > 0:
             _declare(target, turn.guest, busy=False)
+        turn._set(phase, "", warning)
         return
     asked = keep_warm if phase == DONE else None
     if resident > 0 and _keep_warm_here(target, asked):
         with _lock:
             target.warm = turn.guest
+            target.active = None
         _declare(target, turn.guest, busy=False)
         _release_queue_lock(target)
+        turn._set(phase, "", warning)
         logger.info("Model Chain: %s stays warm on %s until something else needs the card",
                     turn.label, target.card.describe())
         return
     if resident > 0:
         _evict(target, turn.guest, "its request finished")
+    with _lock:
+        target.active = None
+        # Read with the same hold that frees the card: the gate clears this the
+        # moment it sees the card free, and a job it was holding loads its own
+        # model -- a warm-up started beside that load is two loads of one model.
+        held_job = target.parked_job is not None
+    turn._set(phase, "", warning)
     _hand_back(target, return_image=not held_job)
 
 
@@ -1009,15 +1052,24 @@ def _refuse(target: _CardState, turn: Turn, warning: str) -> None:
     _conclude(target, turn, BLOCKED, keep_warm=None, warning=warning)
 
 
-def _hand_back(target: _CardState, *, return_image: bool) -> None:
+def _hand_back(target: _CardState, *, return_image: bool, keep_parked: bool = False) -> None:
     """Release everything the card was holding for guests, and bring back what moved.
 
     Reachable from the card's driver and from any thread that ends a warm stay,
     so each thing held is taken out of the state under the lock before it is
     released, and whichever thread gets there second finds nothing to release.
+
+    ``keep_parked`` is for an eviction on behalf of something that is not going
+    to load the image model -- the language model taking a warm guest's room.
+    The model stays parked, and the record of it stays too, so that the next
+    turn on the card knows there is a model to bring back when it ends (rule 7),
+    and the warm watch knows there is a parked model to keep RAM under. The next
+    generation, which loads its own model, clears it at the gate.
     """
     with _lock:
-        parked, target.parked = target.parked, ""
+        parked = target.parked
+        if not keep_parked:
+            target.parked = ""
     _release_queue_lock(target)
     _drop_lease(target)
     if parked and return_image:
@@ -1048,9 +1100,20 @@ def _drop_lease(target: _CardState) -> None:
             logger.warning("Model Chain: could not release WanGP's card", exc_info=True)
 
 
-def _renew(target: _CardState) -> dict | None:
+def _renew(target: _CardState, *, every: float = 0.0) -> dict | None:
+    """Renew the lease and return Mini Paint's record; None when there is none to renew.
+
+    With ``every``, only when that long has passed since the last renewal, and
+    None in between: a caller that reads the record for something other than
+    keeping the lease alive reads it that often too.
+    """
     if not target.lease:
         return None
+    if every:
+        now = _now()
+        if target.renewed_at is not None and now - target.renewed_at < every:
+            return None
+        target.renewed_at = now
     try:
         import mc_wangp
 
@@ -1112,12 +1175,13 @@ def _evict(target: _CardState, guest: str, reason: str) -> int:
     return freed
 
 
-def end_warm(target: _CardState, reason: str, *, return_image: bool = True) -> int:
+def end_warm(target: _CardState, reason: str, *, return_image: bool = True,
+             keep_parked: bool = False) -> int:
     """Evict the warm guest on ``target`` if it is idle. Returns bytes freed.
 
     Never a guest that is working: warm means idle, and a guest that says it is
     rendering here keeps the card (rule 1) -- the caller waits for its turn like
-    everybody else.
+    everybody else. ``return_image`` and ``keep_parked`` are :func:`_hand_back`'s.
     """
     with _lock:
         guest = target.warm
@@ -1135,7 +1199,7 @@ def end_warm(target: _CardState, reason: str, *, return_image: bool = True) -> i
         target.warm = ""
     freed = _evict(target, guest, reason)
     if not target.busy:
-        _hand_back(target, return_image=return_image)
+        _hand_back(target, return_image=return_image, keep_parked=keep_parked)
     return freed
 
 
@@ -1267,34 +1331,49 @@ def image_gate(p=None) -> bool:
     with _lock:
         if job in target.passed:
             return False
-        waiting = target.busy
-        ahead = (target.active or (target.queue[0] if target.queue else None))
-        label = ahead.label if ahead is not None else "VibeVoice"
-    waited = False
-    if waiting:
-        waited = True
-        logger.info("Model Chain: holding an image generation — %s is next on %s",
-                    label, target.card.describe())
-        while True:
+    waited = held = False
+    while True:
+        with _lock:
+            busy = target.busy
+            target.parked_job = job if busy else None
+            warm = target.warm
+        if not busy:
+            if not warm:
+                break
+            # The image job needs the card: the warm guest leaves, and the job
+            # loads its own model the way it always does -- from RAM or from its
+            # recipe, whichever parked it -- so nothing is warmed here to be
+            # moved twice.
+            if end_warm(target, "an image generation needs the card", return_image=False):
+                waited = True
+                break
+            # Nothing was evicted. Either another thread got there first and the
+            # card is free, or a request arrived in the gap and the guest is next
+            # again, or the guest is working here outside a turn (rule 1): both
+            # of those are a card to hold for, looked at again after a tick.
             with _lock:
-                if not target.busy:
-                    target.parked_job = None
+                if not (target.busy or target.warm):
                     break
-                target.parked_job = job
-            text = GATE_NOTICE.format(card=target.card.describe())
-            if _interrupted():
-                text = "Interrupted — this generation ends as soon as VibeVoice is done"
-            _set_textinfo(text)
-            _sleep(TICK_SECONDS)
+        if not held:
+            held = waited = True
+            with _lock:
+                ahead = target.active or (target.queue[0] if target.queue else None)
+            logger.info("Model Chain: holding an image generation — %s is next on %s",
+                        ahead.label if ahead is not None else "VibeVoice",
+                        target.card.describe())
+        text = GATE_NOTICE.format(card=target.card.describe())
+        if _interrupted():
+            text = "Interrupted — this generation ends as soon as VibeVoice is done"
+        _set_textinfo(text)
+        _sleep(TICK_SECONDS)
+    if held:
         _set_textinfo(None)
-    if target.warm:
-        # The image job needs the card: the warm guest leaves, and the job loads
-        # its own model the way it always does -- from RAM or from its recipe,
-        # whichever parked it -- so nothing is warmed here to be moved twice.
-        if end_warm(target, "an image generation needs the card", return_image=False):
-            waited = True
     with _lock:
         target.passed.append(job)
+        if not target.busy:
+            # The job loads its own model into the card it was given: whatever
+            # was parked for a guest is back the moment it does.
+            target.parked = ""
     if waited:
         mc_memory.ensure_model_loadable()
     # A turn that ended with nobody waiting brings the image model back on a
@@ -1341,15 +1420,18 @@ def llm_wait_reason(domain, *, inside_host_job: bool = False) -> str:
     if domain is None:
         return ""
     with _lock:
-        states = list(_cards.values())
-    for target in states:
-        active = target.active
-        if active is None and not target.queue:
+        # One picture of each card, taken under the lock: the driver pops the
+        # queue under it, and a first turn read outside would be read from a
+        # queue that could be empty by then.
+        states = [(target, target.active, list(target.queue)) for target in _cards.values()]
+    for target, active, queue in states:
+        if active is None and not queue:
             continue
         if not domain.conflicts_with(target.card.domain):
             continue
-        if target.holding() or not inside_host_job:
-            label = active.label if active is not None else target.queue[0].label
+        holding = active is not None and active.phase in _HOLDING
+        if holding or not inside_host_job:
+            label = active.label if active is not None else queue[0].label
             return f"{label} on {target.card.describe()}"
     return ""
 
@@ -1377,7 +1459,7 @@ class _VoiceReclaimer:
             if freed >= needed_bytes:
                 break
             freed += end_warm(target, reason or "another workload needs the card",
-                              return_image=False)
+                              return_image=False, keep_parked=True)
         return freed
 
     def resident_bytes(self, *, card=mc_broker.ANY_CARD) -> int:
@@ -1416,16 +1498,16 @@ mc_broker.register_reclaimer(mc_broker.FAMILY_VOICE, _VoiceReclaimer())
 def snapshot() -> list[dict]:
     """Every card with turns or a warm guest, for a status line or a panel."""
     with _lock:
-        states = list(_cards.values())
+        states = [(target, target.active, list(target.queue)) for target in _cards.values()]
     found = []
-    for target in states:
-        if not (target.busy or target.warm):
+    for target, active, queue in states:
+        if not (active is not None or queue or target.warm):
             continue
         found.append({
             "card": target.card.describe(),
             "uuid": target.card.uuid,
-            "active": target.active.describe() if target.active is not None else "",
-            "queued": [turn.describe() for turn in target.queue],
+            "active": active.describe() if active is not None else "",
+            "queued": [turn.describe() for turn in queue],
             "warm": target.warm,
             "parked": target.parked,
             "lease": bool(target.lease),

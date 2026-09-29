@@ -194,7 +194,16 @@ avoid. A job that arrives while the warm-up is still loading waits for it at the
 gate. When VibeVoice does stay warm, the image model comes back with the next
 image job: the gate evicts VibeVoice first and the job loads its model as it
 always does. When VibeVoice is evicted because an image pass or the LLM needed
-its room, the image model is not warmed back either: the room is for them.
+its room, the image model is not warmed back then: the room is for them. The
+record that it was parked outlives that eviction, so the next VibeVoice turn on
+the card brings it back when it ends, and the next generation, which loads its
+own model, clears the record at the gate. Whether a turn parks anything is
+decided by what is resident on the card, never by the record.
+
+**The end of a turn.** The turn stays the card's until its guest's memory is
+gone: the gate, the language model's wait and Model Chain's own warming all read
+"the card is free" from the same state, and an eviction takes as long as a
+worker process takes to let go of eighteen gigabytes.
 
 **RAM while parked.** A parked model holds its size in system RAM for as long as
 VibeVoice stays warm. If available RAM falls below the margin in that time,
@@ -227,7 +236,9 @@ The turn asks Mini Paint for the card through an in-process **lease** (section 6
    disk), and blocks with a warning — Mini Paint's own reason in it — if it still
    does not fit.
 5. After the render the lease is kept, renewed, while VibeVoice stays warm, and
-   released when it does not.
+   released when it does not. The lease is renewed every two seconds during the
+   render and every second during a warm stay — not on every tick, because a
+   renewal is a call into Mini Paint that rewrites its record.
 6. A warm lease reports **wanted** when a Clipboard job is waiting at the gate or
    work in WanGP is waiting on the claim. The turn then evicts VibeVoice, confirms
    the card has its memory back — WanGP sizes itself against what the card reports
@@ -292,13 +303,16 @@ bytes are never reported as stray.
 
 For every VibeVoice request, before anything moves:
 
+* **RAM**, first, before anything is moved: VibeVoice's worker must fit within
+  available RAM above a margin larger than the host's 2 GB floor, because Windows
+  starts trimming working sets before memory is exhausted. Short: blocked, with
+  the numbers, and the image model still on its card. Then — when the image model
+  is to be parked in RAM — the model's resident bytes on top. Short: Automatic
+  parks by recipe instead; From system RAM blocks.
 * **VRAM**: after the card is cleared, the driver's free figure for that card
   must cover the render's estimate plus a margin. Short: blocked, with the numbers.
-* **RAM**: VibeVoice's worker, and — when the image model is to be parked in RAM —
-  the model's resident bytes, must fit within available RAM above a margin larger
-  than the host's 2 GB floor, because Windows starts trimming working sets before
-  memory is exhausted. Short: Automatic parks by recipe instead; From system RAM
-  blocks.
+  A figure of zero is no reading, not a shortfall: the request goes ahead on the
+  estimate, the log says so, and WanGP is not flushed for it.
 * **During a warm stay**: section 4.3's RAM watch.
 
 VibeVoice loads its weights straight onto the card; a full copy never passes
@@ -506,3 +520,8 @@ a GPU.
 * Two handoffs disagree about this machine's RAM (48 GB and 96 GB). Every RAM
   decision logs its figures, so the first turn settles it.
 * Nothing in phase 1a has run on the user's machine.
+* Exclusive residency (*Free the LLM for every image*) sweeps a warm VibeVoice
+  off the image card with the language model, because the mode is a promise that
+  the image family owns that card. The gate evicts a warm guest before every
+  generation anyway, so this only shows for image work that asks the broker
+  without passing the gate.
