@@ -30,9 +30,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VOICE_MODULES = sorted(ROOT.glob("mc_voice_*.py"))
 
-FORBIDDEN = ("mc_memory", "mc_broker", "mc_plan", "mc_llm_runtime")
-"""The memory planner, the GPU broker, the execution plan, and the language
-model runtime. Voice may not import any of them at any depth."""
+FORBIDDEN = ("mc_memory", "mc_broker", "mc_plan", "mc_llm_runtime", "mc_turns",
+             "mc_turns_guests")
+"""The memory planner, the GPU broker, the execution plan, the language model
+runtime, and -- since the Voice Box -- the per-card turn system and its guest
+bridge. Voice may not import any of them at any depth: a render asks for its
+card through the client ``mc_turns_guests`` hands ``mc_voice_box``, never by
+importing the turn system, and VibeVoice is registered as a guest from outside
+(``mc_turns_guests.install``), which is the same direction every other voice
+module keeps."""
 
 WORKER = ROOT / "voice_worker" / "worker.py"
 SOPRO_WORKER = ROOT / "sopro_worker" / "worker.py"
