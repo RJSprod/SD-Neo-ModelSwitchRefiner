@@ -13,10 +13,12 @@ are stubs everywhere else.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -333,10 +335,14 @@ class FakeState:
 
 
 class FakeOptionInfo:
-    def __init__(self, default=None, label="", component=None, *args, **kwargs):
+    def __init__(self, default=None, label="", component=None, component_args=None,
+                 *args, **kwargs):
         self.default = default
         self.label = label
         self.component = component
+        # Kept, as the host's OptionInfo keeps it: a radio's choices are what a
+        # label-valued setting is read back against (mc_broker.resolve).
+        self.component_args = component_args
         self.section = None
 
     def info(self, text):
@@ -569,6 +575,78 @@ def _install_modules() -> None:
     )
     sd_models.forge_model_reload = lambda: (None, True)
 
+    class FakeInitialModel:
+        """The host's placeholder for "nothing loaded", by the name it is known by."""
+
+    sd_models.FakeInitialModel = FakeInitialModel
+    sd_models.unloaded = []
+
+    def unload_model_weights(*args, **kwargs):
+        """The host's *Unload* button, as Forge Neo's ``sd_models`` writes it.
+
+        Faithful in the three things a model dropped for a speech guest's turn
+        depends on: every loaded weight goes through ``unload_all_models``, the
+        model object is replaced by the placeholder, and the loading hash is
+        cleared -- which is what makes the next generation rebuild the model
+        from its recipe rather than be handed a model that is no longer there.
+        """
+        memory_management.unload_all_models()
+        del sd_models.model_data.sd_model
+        sd_models.model_data.sd_model = FakeInitialModel()
+        sd_models.model_data.forge_hash = ""
+        sd_models.unloaded.append(True)
+
+    sd_models.unload_model_weights = unload_model_weights
+
+    # modules.call_queue: the lock every GPU call the host makes is taken under.
+    call_queue = types.ModuleType("modules.call_queue")
+
+    class FIFOLock:
+        """Forge's ``modules.fifo_lock.FIFOLock``, line for line.
+
+        Copied rather than stood in for, because a speech guest's turn depends
+        on two properties a stand-in could quietly lack: a non-blocking acquire
+        that fails while anybody holds the lock or is queued for it, and a
+        release from a thread other than the one that acquired it -- the turn
+        takes the lock on its card's driver, and a warm stay can end on the
+        thread of the generation that evicts it.
+        """
+
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._inner_lock = threading.Lock()
+            self._pending_threads = collections.deque()
+
+        def acquire(self, blocking=True):
+            with self._inner_lock:
+                lock_acquired = self._lock.acquire(False)
+                if lock_acquired:
+                    return True
+                elif not blocking:
+                    return False
+
+                release_event = threading.Event()
+                self._pending_threads.append(release_event)
+
+            release_event.wait()
+            return self._lock.acquire()
+
+        def release(self):
+            with self._inner_lock:
+                if self._pending_threads:
+                    release_event = self._pending_threads.popleft()
+                    release_event.set()
+
+                self._lock.release()
+
+        __enter__ = acquire
+
+        def __exit__(self, t, v, tb):
+            self.release()
+
+    call_queue.FIFOLock = FIFOLock
+    call_queue.queue_lock = FIFOLock()
+
     sd_samplers = types.ModuleType("modules.sd_samplers")
     sd_samplers.visible_sampler_names = lambda: ["Euler", "DPM++ 2M"]
     sd_samplers.visible_samplers = lambda: [types.SimpleNamespace(name=n) for n in sd_samplers.visible_sampler_names()]
@@ -608,6 +686,7 @@ def _install_modules() -> None:
     modules.ui_components = ui_components
     modules.paths = paths
     modules.sd_models = sd_models
+    modules.call_queue = call_queue
     modules.sd_samplers = sd_samplers
     modules.sd_schedulers = sd_schedulers
     modules.script_callbacks = script_callbacks
@@ -680,6 +759,14 @@ def _install_modules() -> None:
         return []
 
     memory_management.free_memory = free_memory
+    memory_management.unloaded_all = []
+
+    def unload_all_models():
+        """Forge Neo's own, which is one line: free everything on the torch device."""
+        memory_management.unloaded_all.append(True)
+        return memory_management.free_memory(1e30, memory_management.get_torch_device())
+
+    memory_management.unload_all_models = unload_all_models
     memory_management.load_models_gpu = lambda models, **kw: memory_management.loaded_to_gpu.append(
         list(models)
     )
@@ -701,6 +788,7 @@ def _install_modules() -> None:
         "modules.ui_components": ui_components,
         "modules.paths": paths,
         "modules.sd_models": sd_models,
+        "modules.call_queue": call_queue,
         "modules.sd_samplers": sd_samplers,
         "modules.sd_schedulers": sd_schedulers,
         "modules.script_callbacks": script_callbacks,
@@ -2397,3 +2485,27 @@ def _forget_voice_targets():
         mc_voice_api.forget_targets()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _forget_card_turns():
+    """No card turn, guest, lease or held queue lock survives a test.
+
+    Every generation the chain tests run passes the card's turn gate
+    (``mc_turns.image_gate``), and a turn left queued holds every image job on
+    its card: one stray turn would park the next test's generation for ever.
+    The host's queue lock is replaced too, because a turn that took it and was
+    never concluded would make every later turn wait for a job that does not
+    exist -- and the Mini Paint lease stand-in goes, so no test's scripted
+    WanGP answers another's.
+    """
+    yield
+    found = sys.modules.get("mc_turns")
+    if found is not None:
+        found.forget()
+    wangp = sys.modules.get("mc_wangp")
+    if wangp is not None:
+        wangp.use_lease(None)
+    queue = sys.modules.get("modules.call_queue")
+    if queue is not None:
+        queue.queue_lock = queue.FIFOLock()

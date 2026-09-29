@@ -278,6 +278,13 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "",
     :func:`mc_memory._held_for_a_rebake`. A startup warm-up has none to give,
     which is correct: nobody has typed a prompt yet.
     """
+    if _card_is_a_guests():
+        # A speech guest is next on, or warm on, the image card (mc_turns). The
+        # generation that follows will evict it and load its own model; warming
+        # now would move weights onto the card for the guest to push straight
+        # back off. The turn system brings the model back itself when it hands
+        # the card over.
+        return readiness()
     if not _arming.acquire(blocking=False):
         logger.info("Model Chain: a warm-up is already running; waiting for it")
         with _arming:
@@ -296,6 +303,16 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "",
     logger.info("Model Chain: warm-up finished in %.1fs — %s",
                 time.monotonic() - started, after.explain())
     return after
+
+
+def _card_is_a_guests() -> bool:
+    """Whether a speech guest holds, or is next for, the image card. Never raises."""
+    try:
+        import mc_turns
+
+        return mc_turns.image_card_held()
+    except Exception:
+        return False
 
 
 def _arm_image(width: int = 0, height: int = 0, prompts: tuple = ()) -> None:

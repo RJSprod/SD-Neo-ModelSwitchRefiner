@@ -70,6 +70,28 @@ _GB = 1024**3
 
 FAMILY_IMAGE = "image"
 FAMILY_LLM = "llm"
+FAMILY_VOICE = "voice"
+"""A GPU speech engine a user put on a card: VibeVoice, in Voice Box.
+
+A guest, not a tenant. It takes a card only for a turn the user asked for
+(:mod:`mc_turns`), and between turns it may stay warm in VRAM the card's own
+tenant is not using. That second state is the lowest-ranking thing on any card:
+an image pass or a language model that needs the room evicts it, and it never
+evicts either of them. A guest that is *working* declares itself
+:data:`RANK_ACTIVE`, which nothing here ever demotes -- rule 1 of that module,
+"a running job is never cut off", holds for it exactly as it holds for an image
+generation.
+"""
+
+_SEPARATE_PROCESSES = (FAMILY_LLM, FAMILY_VOICE)
+"""Families whose VRAM lives in another process.
+
+Two things follow from that and both are easy to get wrong. The free figure
+that matters for them is the *driver's*: a block PyTorch is caching in Forge's
+process is free to Forge and to nobody else. And either of them can hold more
+than one card at once, so a card-blind answer from its reclaimer is a
+machine-wide answer wearing one card's label -- see :func:`_ask`.
+"""
 
 MODE_EXCLUSIVE = "exclusive"
 MODE_HYBRID = "hybrid"
@@ -299,7 +321,7 @@ def cuda_execution(card: int | None, *, uuid: str = "", name: str = "") -> Execu
     identify, and :meth:`ExecutionDomain.conflicts_with` will use whichever
     identity it has.
     """
-    identity = {"uuid": str(uuid or ""), "name": str(name or "")}
+    identity = {"uuid": card_identity(uuid), "name": str(name or "")}
     try:
         index = None if card is None else int(card)
     except (TypeError, ValueError):
@@ -307,6 +329,22 @@ def cuda_execution(card: int | None, *, uuid: str = "", name: str = "") -> Execu
     if index is None or index < 0:
         return ExecutionDomain(EXEC_CUDA_UNKNOWN, None, **identity)
     return ExecutionDomain(EXEC_CUDA, index, **identity)
+
+
+def card_identity(uuid) -> str:
+    """A GPU UUID as the hex digits both of its spellings share.
+
+    nvidia-smi writes ``GPU-6a1f…``, and that is what the language model's setup
+    records; torch hands back the bare digits, and that is what the image side
+    records (:func:`mc_memory._uuid_key`, the same reduction). Compared as
+    written, one card in its two spellings was two cards: a language model on
+    Forge's own card was told it was independent of the image job there -- the
+    one answer :meth:`ExecutionDomain.conflicts_with` is built never to guess --
+    and a speech guest's turn on that card would not have been waited for.
+    Reduced here because every domain that carries a UUID is made here.
+    """
+    text = str(uuid or "").strip().casefold()
+    return "".join(character for character in text if character in "0123456789abcdef")
 
 
 def sycl_execution(index: int | None, *, name: str = "") -> ExecutionDomain:
@@ -412,8 +450,15 @@ def _named(family: str) -> str:
 
     ``FAMILY_LLM`` is ``"llm"`` because it is a key, and "llm workload needed
     VRAM" is not a sentence anybody wrote on purpose.
+
+    Looked up rather than branched on. With two families "not the LLM" meant
+    "the image model", and a third family written through that test would have
+    been announced in the log as an image checkpoint.
     """
-    return "LLM" if family == FAMILY_LLM else "image"
+    return _NAMES.get(family, str(family))
+
+
+_NAMES = {FAMILY_IMAGE: "image", FAMILY_LLM: "LLM", FAMILY_VOICE: "VibeVoice"}
 
 
 def option(name: str, default):
@@ -1755,7 +1800,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     # a shortfall that is not there -- or, worse, no shortfall when there is.
     # Either way it is *this card's* figure: mixing a reading from one card
     # with residency bytes from another is invariant I-2's whole subject.
-    if family == FAMILY_LLM:
+    if family in _SEPARATE_PROCESSES:
         def reading():
             return device_free_vram_bytes(where)
     elif where is not None and where != image_device_index():
@@ -2009,7 +2054,7 @@ def unaccounted_bytes(*, card=ANY_CARD) -> int:
     named = _card_index(card if not isinstance(card, _AnyCard) else image_device_index())
     scope = named if named is not None else ANY_CARD
     accounted = sum(held_bytes(family, card=scope)
-                    for family in (FAMILY_IMAGE, FAMILY_LLM))
+                    for family in (FAMILY_IMAGE, FAMILY_LLM, FAMILY_VOICE))
     return max(total - free_vram_bytes() - accounted - _DRIVER_OVERHEAD
                - _own_llm_context_bytes(scope), 0)
 
@@ -2149,8 +2194,20 @@ def _victim_order(family: str) -> tuple[str, ...]:
     preference, it is section 18's regression requirement: ordinary txt2img has
     to keep working, and a background llama-server that could starve a
     generation the user is watching would break it.
+
+    A warm speech guest ranks below both, and gives ground first to either. It
+    is in VRAM only because nothing else wanted the card when its last request
+    finished (:mod:`mc_turns`, rule 6), so it is asked before the language
+    model is: a guest reloads from disk in seconds, a llama-server loses its
+    prompt cache. The asymmetry holds in its direction too -- nothing is ever
+    released *for* a guest here. A guest takes a card through a turn, which is
+    a request the user made, and never through this function.
     """
-    return (FAMILY_LLM,) if family == FAMILY_IMAGE else ()
+    if family == FAMILY_IMAGE:
+        return (FAMILY_VOICE, FAMILY_LLM)
+    if family == FAMILY_LLM:
+        return (FAMILY_VOICE,)
+    return ()
 
 
 def _ask(reclaimer, method: str, card, *args, spans_cards: bool = False):
@@ -2223,7 +2280,7 @@ def _release(family: str, needed: int, reason: str, sweep: bool = False,
         if held <= 0:
             try:
                 held = max(int(_ask(reclaimer, "resident_bytes", card,
-                                    spans_cards=family == FAMILY_LLM) or 0), 0)
+                                    spans_cards=family in _SEPARATE_PROCESSES) or 0), 0)
             except Exception:
                 held = 0
         if held <= 0:
@@ -2232,7 +2289,7 @@ def _release(family: str, needed: int, reason: str, sweep: bool = False,
 
     try:
         freed = int(_ask(reclaimer, "release", card, needed, reason,
-                         spans_cards=family == FAMILY_LLM) or 0)
+                         spans_cards=family in _SEPARATE_PROCESSES) or 0)
     except Exception:
         logger.warning("Model Chain: %s reclaimer failed", family, exc_info=True)
         return Reclaim(needed, 0, 0, needed, ())
@@ -2295,6 +2352,8 @@ class Status:
     free_ram: int = 0
     ram_reserve: int = 0
     image_warm_ram: int = 0
+    voice_bytes: int = 0
+    """What a speech guest holds on the image card. See :data:`FAMILY_VOICE`."""
 
     @property
     def owners(self) -> tuple[str, ...]:
@@ -2303,6 +2362,8 @@ class Status:
             families.append(_named(FAMILY_IMAGE))
         if self.llm_bytes > 0:
             families.append(_named(FAMILY_LLM))
+        if self.voice_bytes > 0:
+            families.append(_named(FAMILY_VOICE))
         return tuple(families)
 
     @property
@@ -2328,7 +2389,7 @@ def reported_bytes(family: str, *, card=ANY_CARD) -> int:
         return 0
     try:
         return max(int(_ask(reclaimer, "resident_bytes", card,
-                            spans_cards=family == FAMILY_LLM) or 0), 0)
+                            spans_cards=family in _SEPARATE_PROCESSES) or 0), 0)
     except Exception:
         return 0
 
@@ -2381,6 +2442,7 @@ def status() -> Status:
         free_ram=free_ram_bytes(),
         ram_reserve=ram_reserve_bytes(),
         image_warm_ram=image_warm_ram_bytes(),
+        voice_bytes=held_bytes(FAMILY_VOICE, card=scope),
     )
 
 

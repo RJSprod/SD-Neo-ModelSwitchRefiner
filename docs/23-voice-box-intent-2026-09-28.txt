@@ -1,0 +1,855 @@
+Project:
+SD-Neo-ModelSwitchRefiner / Forge Neo
+
+Document purpose:
+Define the product and architectural intent for a native Forge "Voice Box" tab
+built around the original VibeVoice-TTS capability set, while remaining compatible
+with the extension's existing Voice Chat engine architecture.
+
+Status:
+Design intent / pre-implementation
+
+Date:
+2026-09-28
+
+
+======================================================================
+1. PRODUCT INTENT
+======================================================================
+
+Voice Box is intended to make VibeVoice a first-class speech workspace inside
+Forge, not merely a hidden TTS backend and not a direct port of a ComfyUI node
+graph.
+
+The tab should give a user one coherent place to:
+
+- load and manage VibeVoice models;
+- choose which GPU hosts VibeVoice;
+- create, save, audition, and reuse reference-based voice clones;
+- generate ordinary single-speaker TTS;
+- generate long-form multi-speaker dialogue;
+- expose the important inference controls in a friendly way;
+- optionally apply supported LoRA/adapters;
+- manage model residency and memory behavior;
+- reuse the same installed model and saved voices from Voice Chat.
+
+The interface should borrow the successful interaction ideas of
+Enemyx-net/VibeVoice-ComfyUI, especially its discoverable model, voice,
+quantization, generation, and multi-speaker controls, while implementing those
+features natively within the architecture of SD-Neo-ModelSwitchRefiner.
+
+The user should never need ComfyUI in order to use VibeVoice through Forge.
+
+
+======================================================================
+2. CAPABILITY BASELINE: THE ORIGINAL PRE-REMOVAL VIBEVOICE
+======================================================================
+
+The scope of Voice Box is explicitly based on the original VibeVoice-TTS release
+that Microsoft published before removing the original repository/model
+distribution in September 2025.
+
+The baseline is NOT defined by the later restricted realtime-only VibeVoice
+release.
+
+The original VibeVoice family was designed as an expressive, long-form,
+multi-speaker conversational TTS system. Its defining product capabilities were:
+
+1. Reference-audio voice cloning
+   A speaker can be conditioned from a supplied voice sample. The 1.5B and 7B
+   model line supports cloning from reference audio rather than being restricted
+   to a fixed set of embedded voices.
+
+2. Multi-speaker synthesis
+   A single generation can contain up to four distinct speakers. This makes
+   VibeVoice useful for podcasts, scripted conversations, interviews, roleplay,
+   narration with multiple characters, and other dialogue-oriented content.
+
+3. Long-form generation
+   The original model family was intended to sustain unusually long speech
+   sequences while preserving speaker identity and conversational flow.
+
+   Preserved model documentation describes approximately:
+   - VibeVoice 1.5B: up to about 90 minutes, up to 4 speakers, 64K context.
+   - VibeVoice 7B: up to about 45 minutes, up to 4 speakers, 32K context.
+
+4. Expressive conversational speech
+   The model was designed for natural turn-taking and expressive speech rather
+   than sentence-by-sentence utility TTS alone.
+
+5. Context-aware long dialogue
+   VibeVoice uses a language-model-driven architecture and ultra-low-rate
+   continuous speech representations so that large conversational contexts are
+   practical.
+
+6. Acoustic variation beyond sterile TTS
+   The original system can sometimes produce breaths, ambience, background
+   sounds, music-like material, or other non-speech acoustic behavior. Some of
+   this is emergent and is not fully deterministic.
+
+7. Cross-lingual behavior
+   The original models show cross-lingual and accent-preservation behavior,
+   although the preserved project documentation describes this as emergent and
+   potentially unstable rather than a guaranteed feature.
+
+8. Minimal text normalization assumptions
+   The original project intentionally relied heavily on the language model to
+   interpret input text rather than requiring a large deterministic
+   normalization layer.
+
+Voice Box should preserve access to the useful consequences of this original
+scope.
+
+A design that only exposes a one-speaker preset voice selector would be
+considered incomplete, even if it used a model bearing the VibeVoice name.
+
+
+======================================================================
+3. MODEL FAMILIES AND INTENDED ROLES
+======================================================================
+
+Voice Box should distinguish model roles instead of pretending all VibeVoice
+variants have the same capability set.
+
+A. VibeVoice 1.5B
+   Primary first implementation target.
+
+   Intended role:
+   - normal Voice Box TTS;
+   - reference-audio cloning;
+   - single-speaker generation;
+   - up to four-speaker generation;
+   - long-form generation;
+   - optional Voice Chat engine;
+   - best initial balance of capability, memory use, and responsiveness.
+
+B. VibeVoice 7B
+   Studio / quality-oriented model.
+
+   Intended role:
+   - long-form content;
+   - multi-speaker scripted content;
+   - reference voice cloning;
+   - higher-cost generation where quality is preferred over latency.
+
+   The 7B model is not required for the first functional release if the common
+   runtime supports adding it cleanly later.
+
+C. VibeVoice Realtime / Streaming 0.5B
+   Optional low-latency model.
+
+   Intended role:
+   - live conversational speech;
+   - very low latency;
+   - Voice Chat where fixed/precomputed voices are acceptable.
+
+   Important:
+   The official realtime model does not represent the full original VibeVoice
+   capability set. Its official form uses precomputed voice representations and
+   does not provide ordinary arbitrary reference-audio cloning.
+
+   Therefore:
+   - it must not replace 1.5B/7B as the conceptual center of Voice Box;
+   - it may appear as a separate "Realtime" mode;
+   - any unofficial realtime voice-cloning implementation should be explicitly
+     identified as experimental/community-provided rather than silently treated
+     as equivalent to the original supported model line.
+
+
+======================================================================
+4. USER EXPERIENCE PRINCIPLES
+======================================================================
+
+Voice Box should follow these principles.
+
+A. Capability first, implementation second
+   The interface should describe user goals: model, device, voice, text,
+   speakers, generation quality, output.
+
+   The user should not need to understand VibeVoice's internal module graph.
+
+B. Advanced controls should be available without dominating the page
+   Important generation controls should exist, but common TTS should remain
+   approachable.
+
+C. One voice library
+   A clone created in Voice Box should be reusable by Voice Chat.
+
+   A Voice Chat character using a VibeVoice clone should refer to the same stable
+   voice record rather than maintaining a second duplicate copy.
+
+D. One VibeVoice runtime
+   Manual generation and Voice Chat should use the same backend/runtime
+   implementation.
+
+   Voice Box must not contain a private VibeVoice implementation while Voice Chat
+   uses another one.
+
+E. Device placement must be explicit and truthful
+   If the user selects a particular GPU, the VibeVoice worker must actually run
+   on that GPU.
+
+F. Failure should remain local
+   VibeVoice failure, missing dependencies, a bad model, or an out-of-memory
+   condition must not break Forge image generation or the rest of Model Chain.
+
+G. The tab should work without Voice Chat
+   Voice Box is a standalone capability.
+
+   Voice Chat integration is a consumer of the engine, not a prerequisite for
+   the tab.
+
+
+======================================================================
+5. PROPOSED TOP-LEVEL TAB
+======================================================================
+
+Forge should gain one native tab:
+
+    Voice Box
+
+The first release should favor a single coherent workspace over many nested
+configuration pages.
+
+Suggested conceptual layout:
+
+----------------------------------------------------------------------
+VOICE BOX
+----------------------------------------------------------------------
+
+Model / Runtime
+  Model:         [ VibeVoice 1.5B                v ]
+  Device:        [ GPU <name / VRAM>             v ]
+  Precision:     [ FP16 / BF16 / supported mode  v ]
+  Residency:     [ Auto / Keep loaded / Unload   v ]
+  Status:        Loaded on <GPU>, <memory>, Idle
+  [Load] [Unload] [Rescan]
+
+Voice
+  Voice:         [ Saved VibeVoice clone          v ]
+  [Record Reference] [Upload Reference]
+  [Create Voice] [Audition] [Manage Voices]
+
+Generation Mode
+  (o) Single Speaker
+  ( ) Multi-Speaker
+
+Text / Script
+  [large editor]
+
+Speakers
+  Speaker 1: [voice]
+  Speaker 2: [voice]
+  Speaker 3: [voice]
+  Speaker 4: [voice]
+
+Generation
+  [Generate] [Stop]
+
+Output
+  [audio player / result]
+  [Save WAV]
+
+Advanced
+  Seed
+  CFG
+  diffusion/DDPM steps
+  sampling
+  temperature
+  top-p
+  attention implementation
+  chunk / segmentation behavior
+  speech-speed conditioning
+  LoRA / adapter
+  quantization, where supported
+
+
+======================================================================
+6. VOICE CREATION AND VOICE LIBRARY
+======================================================================
+
+For the original 1.5B/7B model family, "Create Voice" should primarily mean
+creating a reusable reference-conditioned VibeVoice identity.
+
+It should NOT imply that every clone requires model training.
+
+Initial flow:
+
+1. User records or uploads a clean reference clip.
+2. The extension validates:
+   - readable audio;
+   - duration;
+   - channel/sample-rate conversion capability;
+   - non-empty speech;
+   - local storage availability.
+3. The user assigns a display name.
+4. Voice Box creates a stable internal ID.
+5. The reference material and metadata are stored under the VibeVoice voice
+   library.
+6. The new voice is auditioned through the production VibeVoice path.
+7. Only after successful validation/audition is it committed to the selectable
+   voice registry.
+
+The saved voice record should carry enough information to reconstruct the
+reference conditioning without relying on a browser-supplied filesystem path.
+
+The voice display name must not be used as a filesystem identity.
+
+Future optional capability:
+- voice LoRA / fine-tuned adapters;
+- specialized language/voice fine-tunes;
+- richer voice profiling.
+
+These are separate from basic reference-audio cloning.
+
+
+======================================================================
+7. MULTI-SPEAKER DESIGN
+======================================================================
+
+Multi-speaker generation is part of the required original VibeVoice scope.
+
+Voice Box should support up to four logical speakers.
+
+The interface should make speaker assignment understandable without requiring a
+ComfyUI graph.
+
+A script may be represented in a human-readable form such as:
+
+    Speaker 1: Welcome back to the show.
+    Speaker 2: Thanks for having me.
+    Speaker 1: Today we are talking about...
+
+Each logical speaker is mapped to one saved/reference voice.
+
+The UI should permit:
+- one speaker;
+- two speakers;
+- three speakers;
+- four speakers;
+- the same saved voice to be reused intentionally if desired.
+
+The generation layer should validate speaker labels before inference and provide
+a clear message for unknown labels rather than silently remapping them.
+
+
+======================================================================
+8. PAUSES, PACING, AND LONG TEXT
+======================================================================
+
+The Enemyx ComfyUI extension demonstrates useful wrapper-level controls that are
+not necessarily intrinsic VibeVoice model features.
+
+Voice Box should consider an explicit pause syntax such as:
+
+    [pause]
+    [pause:750]
+
+The implementation may segment text and insert silence between generated
+sections.
+
+The UI/documentation must make the consequence clear:
+an externally inserted pause may create a context boundary and therefore may not
+behave exactly like a naturally generated pause inside one uninterrupted model
+sequence.
+
+Long-form text should not be arbitrarily chopped without visibility.
+
+If chunking is required for latency, memory, or Voice Chat integration, the
+runtime should distinguish:
+
+- natural single-generation long-form mode;
+- deliberate chunked/streaming mode.
+
+Voice Box should preserve the ability to request true long-form generation where
+the selected model and available memory support it.
+
+
+======================================================================
+9. GPU PLACEMENT AND SWITCHING
+======================================================================
+
+VibeVoice should run in an isolated worker process.
+
+The parent Forge process should not import the VibeVoice Torch/Transformers stack
+as part of ordinary startup.
+
+The existing Model Chain device architecture should be reused.
+
+GPU identity should be persisted using stable GPU UUIDs rather than assuming
+that CUDA ordinal, nvidia-smi index, or another UI index is permanent.
+
+For a selected GPU:
+
+1. Voice Box stores the selected stable device token.
+2. The worker process is launched with only that physical GPU exposed, preferably
+   through CUDA_VISIBLE_DEVICES using its UUID.
+3. Inside the worker the selected physical GPU becomes cuda:0.
+4. The handshake reports the effective runtime device.
+5. The UI displays what actually loaded.
+
+Switching GPU should be possible without restarting Forge.
+
+Expected switch lifecycle:
+
+1. Stop/cancel active VibeVoice synthesis.
+2. Stop the VibeVoice worker.
+3. Persist the new device selection.
+4. Start/load a new worker on demand using the newly selected GPU.
+5. Verify the worker handshake.
+6. Resume normal use.
+
+The system must not attempt to migrate an already-loaded VibeVoice model object
+between physical GPUs in-place.
+
+Restarting the isolated worker is the preferred correctness boundary.
+
+
+======================================================================
+10. RUNTIME AND DEPENDENCY ISOLATION
+======================================================================
+
+VibeVoice should not be installed directly into Forge's main Python environment
+unless a later design proves that dependency isolation is unnecessary.
+
+The expected design is a dedicated VibeVoice runtime/closure containing known
+compatible versions of:
+
+- Python runtime as needed;
+- PyTorch / CUDA runtime packages;
+- Transformers;
+- Accelerate;
+- Diffusers;
+- audio dependencies;
+- VibeVoice backend code or supported Transformers integration;
+- optional quantization dependencies.
+
+Reasons:
+
+- Forge and its extensions may require different Transformers/Diffusers versions.
+- VibeVoice has changed significantly between its original release, community
+  fork, and native Transformers integration.
+- the old embedded VibeVoice implementations can conflict with newer
+  Transformers model registrations;
+- GPU package selection may be hardware/CUDA dependent;
+- runtime failures must remain isolated from image generation.
+
+The parent and worker should communicate over the same general kind of bounded,
+explicit IPC contract already used by Model Chain's isolated voice engines.
+
+The runtime should be able to:
+- report status without loading a model;
+- load;
+- unload;
+- synthesize;
+- stream where supported;
+- prepare/validate a voice;
+- cancel where the backend safely supports cancellation;
+- shut down cleanly;
+- die with the parent process.
+
+
+======================================================================
+11. INSTALLATION INTENT
+======================================================================
+
+The preferred user experience is managed installation from Voice Box or Model
+Chain settings.
+
+Installation should be reproducible and explicit.
+
+The project should prefer:
+- pinned runtime versions;
+- pinned model identifiers/revisions where practical;
+- artifact sizes;
+- SHA-256 verification for directly managed files;
+- resumable model downloads where practical;
+- clear installed / missing / invalid states;
+- no hidden "pip install latest" mutation of Forge's environment.
+
+Model installation and runtime installation should be conceptually separate.
+
+Example states:
+
+    VibeVoice runtime      Installed
+    VibeVoice 1.5B         Installed
+    VibeVoice 7B           Not installed
+    Realtime 0.5B          Not installed
+
+A user should not have to install every model variant.
+
+The first supported managed install should target VibeVoice 1.5B.
+
+
+======================================================================
+12. MODEL RESIDENCY AND MEMORY
+======================================================================
+
+Voice Box should not copy ComfyUI's "free memory after generation" checkbox
+literally.
+
+Model Chain already has a stronger residency/resource model.
+
+Preferred user-facing choices:
+
+    Unload after generation
+    Keep VibeVoice loaded
+    Auto
+
+"Auto" should be the eventual preferred mode and should integrate with actual
+available VRAM and Model Chain's resource planning.
+
+Initial implementation may support only:
+- Keep loaded
+- Unload
+
+as long as the UI does not claim automatic memory coordination that does not yet
+exist.
+
+A VibeVoice worker occupying one GPU should be treated as a real memory tenant.
+Other Model Chain resource decisions should use actual free-memory readings and,
+in a later phase, may reserve known VibeVoice residency before sizing another
+workload.
+
+
+======================================================================
+13. GENERATION CONTROLS
+======================================================================
+
+The design should expose the useful logical controls demonstrated by the
+Enemyx-net ComfyUI extension while avoiding controls that are meaningless for a
+particular model variant.
+
+Likely controls include:
+
+- model;
+- device;
+- precision;
+- model quantization mode;
+- attention implementation;
+- seed;
+- CFG scale;
+- diffusion/DDPM steps;
+- sampling enable/disable;
+- temperature;
+- top-p;
+- speech-speed/reference-speed conditioning;
+- long-text chunking behavior;
+- LoRA / adapter;
+- LoRA component strengths where the backend genuinely supports them.
+
+Controls should have model-aware visibility.
+
+For example:
+- a fixed realtime voice model should not show ordinary reference-clone controls
+  if that model cannot perform them;
+- a quantization option should not appear merely because another implementation
+  supported it;
+- a LoRA panel should not imply training capability.
+
+The UI should favor effective values reported by the loaded worker rather than
+displaying requested settings that the backend ignored.
+
+
+======================================================================
+14. VOICE CHAT INTEGRATION
+======================================================================
+
+VibeVoice should become another registered TTS engine in the existing Voice Chat
+engine architecture.
+
+It should not be wired into Conversation as a VibeVoice-specific special case.
+
+Conceptually:
+
+    engine id:       vibevoice
+    label:           VibeVoice
+    adapter:         mc_voice_vibevoice
+    runtime:         mc_voice_vibevoice_runtime
+    profiles:        mc_voice_vibevoice_profile
+
+The existing Voice Chat abstractions should continue to own:
+- selected engine;
+- voice resolution;
+- character-level voice choice;
+- turn lifecycle;
+- interruption semantics;
+- browser playback;
+- fallback behavior.
+
+The VibeVoice adapter should own only VibeVoice-specific behavior.
+
+Two speech modes should be supported conceptually.
+
+A. Completed-response speech
+   LLM finishes the response.
+   The full final response is sent to VibeVoice.
+   VibeVoice produces speech.
+   Browser plays it.
+
+   This is the first integration target because it preserves maximum textual
+   context and is operationally simple.
+
+B. Incremental / streaming response speech
+   LLM output is segmented at suitable linguistic boundaries.
+   Completed clauses/sentences are submitted to VibeVoice while the LLM
+   continues generating.
+   Audio segments are queued and played in order.
+
+   The segmenter should avoid tiny fragments that destroy prosody.
+
+   This mode should be added only after the non-streaming production path is
+   stable.
+
+
+======================================================================
+15. REALTIME VOICE CHAT
+======================================================================
+
+"Realtime" must be defined carefully.
+
+There are two distinct product goals:
+
+1. Start speaking before the LLM has finished.
+2. Use a model capable of continuously streaming low-latency audio.
+
+The first can potentially be achieved with the clone-capable 1.5B model by
+sentence/phrase chunking if latency is acceptable on the selected GPU.
+
+The second is the natural role of VibeVoice Realtime 0.5B.
+
+However, official 0.5B and original clone-capable VibeVoice do not have identical
+voice capabilities.
+
+Therefore Voice Chat should eventually be allowed to offer a choice such as:
+
+    VibeVoice 1.5B
+      - cloned voices
+      - higher latency
+      - richer original capability set
+
+    VibeVoice Realtime 0.5B
+      - very low latency
+      - preset/precomputed voices in official form
+      - no ordinary arbitrary clone in official form
+
+The product must not silently switch a character from a saved clone to a
+different preset voice merely to obtain realtime latency.
+
+
+======================================================================
+16. OUTPUT AND HISTORY
+======================================================================
+
+Voice Box should provide immediate playback after generation.
+
+At minimum an output should expose:
+- playable audio;
+- save/download path through Forge's normal local UI mechanisms;
+- model used;
+- voice(s) used;
+- seed;
+- generation settings needed to reproduce the result;
+- duration.
+
+A later result/history panel may keep recent generations for the current
+session.
+
+The first release does not need a full media library.
+
+
+======================================================================
+17. SAFETY, CONSENT, AND PROVENANCE
+======================================================================
+
+Voice Box is intentionally restoring access to a capability Microsoft later
+reduced in its official realtime release: arbitrary reference-audio voice
+conditioning.
+
+The feature should therefore be explicit about what it is doing.
+
+The product should:
+- label saved reference-conditioned identities as cloned/reference voices;
+- require an explicit user action to create/save a clone;
+- avoid background or automatic creation of voice identities from incidental
+  recordings;
+- keep clone source material local unless the user explicitly chooses otherwise;
+- avoid presenting generated audio as evidence that a real person said
+  something;
+- preserve enough metadata to know which local saved voice produced an output.
+
+The design should support legitimate local creative use without hiding the fact
+that the model can reproduce speaker identity from reference audio.
+
+
+======================================================================
+18. FAILURE AND RECOVERY PRINCIPLES
+======================================================================
+
+The following failures should be contained and recoverable:
+
+- runtime missing;
+- model missing;
+- incompatible model/runtime;
+- corrupt download;
+- GPU unavailable;
+- selected GPU removed;
+- CUDA initialization failure;
+- out of VRAM;
+- worker crash;
+- bad reference audio;
+- unsupported speaker configuration;
+- LoRA incompatibility;
+- synthesis timeout.
+
+In all of these cases:
+- Forge should remain running;
+- image generation should remain usable;
+- LLM Studio should remain usable;
+- other TTS engines should remain usable;
+- Voice Box should report a useful state rather than leave a dead control.
+
+Worker crash/restart behavior should follow the same bounded-respawn philosophy
+already used by existing isolated voice runtimes.
+
+
+======================================================================
+19. NON-GOALS FOR THE FIRST RELEASE
+======================================================================
+
+The initial Voice Box release does not need to provide:
+
+- VibeVoice model training;
+- full LoRA training;
+- arbitrary fine-tuning inside Forge;
+- every community checkpoint;
+- automatic conversion of every historical VibeVoice format;
+- distributed/multi-GPU inference for one model;
+- simultaneous generation on both GPUs;
+- a DAW/editor;
+- waveform editing;
+- a permanent audio asset manager;
+- realtime cloning on the official 0.5B model;
+- perfect cross-lingual stability;
+- deterministic suppression of all spontaneous non-speech audio.
+
+These may be evaluated later without being prerequisites for a useful first
+release.
+
+
+======================================================================
+20. PHASED DELIVERY
+======================================================================
+
+PHASE 1 — Runtime foundation
+- isolated VibeVoice worker;
+- managed VibeVoice 1.5B installation;
+- GPU selection using stable device identity;
+- load/unload/status;
+- single-speaker text-to-speech;
+- one temporary uploaded reference;
+- basic audio playback;
+- worker lifecycle tests.
+
+PHASE 2 — Voice Box as a complete standalone tool
+- persistent VibeVoice voice library;
+- record/upload/create/audition/delete voice;
+- up to four speakers;
+- long-form script generation;
+- important advanced generation controls;
+- pause syntax;
+- generation metadata;
+- model residency controls.
+
+PHASE 3 — Voice Chat engine
+- register VibeVoice as the fourth TTS engine;
+- saved VibeVoice voices available to characters;
+- completed-response speaking;
+- engine switch lifecycle;
+- cancellation;
+- Voice Chat regression tests.
+
+PHASE 4 — Performance / advanced model support
+- phrase/sentence streaming during LLM generation;
+- realtime 0.5B model;
+- 7B model;
+- supported quantization modes;
+- LoRA loading;
+- memory-reservation integration;
+- optional experimental community realtime-clone support if separately reviewed.
+
+Each phase should remain useful on its own.
+
+
+======================================================================
+21. ACCEPTANCE INTENT
+======================================================================
+
+The design should be considered successful when a user can do all of the
+following without leaving Forge:
+
+1. Install a supported VibeVoice runtime and the 1.5B model.
+2. Choose either supported NVIDIA GPU and verify which one actually loaded.
+3. Upload or record a reference voice.
+4. Save that voice under a stable local identity.
+5. Type text and generate speech using the saved voice.
+6. Create a script with multiple speakers and generate a multi-speaker result.
+7. Unload or move VibeVoice to the other GPU without restarting Forge.
+8. Select VibeVoice as the active Voice Chat TTS engine.
+9. Assign a saved VibeVoice voice to a character.
+10. Have a completed LLM response spoken through VibeVoice.
+11. Stop or switch engines without leaving orphan worker processes.
+12. Continue using Forge normally if VibeVoice is missing or broken.
+
+A later performance milestone should add:
+13. Begin speaking suitable LLM segments before the LLM has completed the entire
+    response.
+14. Optionally use the realtime 0.5B model where its more restricted voice model
+    is acceptable.
+
+
+======================================================================
+22. DESIGN POSITION
+======================================================================
+
+Voice Box should preserve the ambition of the original VibeVoice release.
+
+The defining feature is not simply "Microsoft made a TTS model."
+
+It is:
+
+    long-form
+    + expressive
+    + reference-clone-capable
+    + multi-speaker
+    + reusable inside an interactive voice system
+
+The later official realtime model is useful, especially for Voice Chat, but it
+should be treated as an additional low-latency operating mode rather than as a
+replacement definition of VibeVoice.
+
+The Forge tab should therefore be built around the original 1.5B/7B capability
+set first, with realtime added as a complementary path.
+
+
+======================================================================
+23. SOURCE BASIS FOR ORIGINAL VIBEVOICE SCOPE
+======================================================================
+
+Preserved community repository:
+https://github.com/vibevoice-community/VibeVoice
+
+Original project references preserved by that repository:
+https://microsoft.github.io/VibeVoice
+https://arxiv.org/abs/2508.19205
+
+Interface inspiration:
+https://github.com/Enemyx-net/VibeVoice-ComfyUI
+
+Host extension:
+https://github.com/RJSprod/SD-Neo-ModelSwitchRefiner
+
+The community repository explicitly identifies itself as a preservation of the
+original Microsoft VibeVoice code following removal of the official repository,
+and documents the original 1.5B/7B long-form, reference-cloning, up-to-four-
+speaker capability set.

@@ -524,6 +524,10 @@ Under **Settings → Model Chain**:
   from scratch, which is slower but leaves nothing to be wrong about.
 - **Predict progress and ETA for the whole chained job** (default on) — see
   [Progress and ETA](#progress-and-eta).
+- **Bring the image model back after VibeVoice** (default Automatic) and **Keep
+  VibeVoice warm between requests** (default on every card) — see
+  [Whose turn it is on each card](#whose-turn-it-is-on-each-card). Neither does
+  anything until Voice Box's VibeVoice is installed.
 - **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
   colour** and the toggles below them — see
   [Progress-bar appearance](#progress-bar-appearance).
@@ -1703,6 +1707,109 @@ weights in its own `postprocess()` hook, which runs *after* this extension's;
 if a checkpoint switch had already happened, those weights would be written into
 Model B. When the built-in Refiner is enabled, Model Chain skips itself for that
 generation and says so rather than corrupting the loaded model.
+
+### Whose turn it is on each card
+
+Voice Box — VibeVoice 7B, a text-to-speech model of about eighteen gigabytes,
+as a tab of its own — is being built in phases (`docs/23-voice-box.md`). It runs
+on whichever card you choose and shares that card with whatever already lives
+there, so the part that decides *whose turn it is* ships first. Until VibeVoice
+itself is installed nothing asks for a turn, and the check every generation
+makes is one dictionary lookup.
+
+The rules, for one card:
+
+1. **A running job is never cut off** — one Generate press (a batch of ten is
+   one job), a WanGP video, an LLM reply, a VibeVoice render.
+2. **A VibeVoice request goes next**, ahead of every job on its card that has
+   not started.
+3. **All VibeVoice first**: several requests run back to back before anything
+   that waited for them.
+4. **One render per card**; the two cards may each run one.
+5. **Between requests VibeVoice stays warm**, and leaves — only while idle —
+   when an image generation, WanGP or the LLM needs the card, or when system RAM
+   runs low under the image model it displaced.
+6. **What made room comes back.**
+7. **Never the pagefile.** A request that would push VRAM or system RAM over is
+   refused before anything loads, with a warning that gives the numbers.
+
+**On Forge's card.** Every txt2img and img2img generation — inpaint is img2img —
+asks first, before Model Chain warms or preloads anything. Model Chain's own
+script is txt2img-only, so a second always-on script, *Model Chain card turns*,
+carries the question on both tabs; it draws nothing and writes nothing into
+infotext. A generation that arrives while VibeVoice is next or rendering waits at
+its start, and its progress line says *Waiting for VibeVoice on NVIDIA GeForce
+RTX 3090 — this generation starts when it is done*. Interrupt and Skip are
+honoured the moment the render is over, and not sooner: a job let go early would
+still load its checkpoint — and img2img would encode its input — on top of the
+render. While a render runs, the turn also holds the WebUI's own job queue, so
+Extras and API calls wait as well; it takes that queue only when it is free,
+because queueing for it would put VibeVoice behind everything already waiting.
+
+**The image model makes room, and comes back.** *Bring the image model back
+after VibeVoice*:
+
+| Choice | While VibeVoice runs | Afterwards |
+| --- | --- | --- |
+| **Automatic** (default) | In system RAM when it fits there with 4 GB to spare; otherwise dropped to its recipe | Whichever was used |
+| **From system RAM** | The very same model object — checkpoint, VAE, text encoders and whatever LoRA state it had — moved off the card by Forge's own unload, which moves weights and frees nothing | Moved back to the card; the checkpoint is not reloaded from disk. A request that RAM cannot take is refused, and the warning names this setting |
+| **From its recipe** | Dropped with Forge's own *Unload*, which keeps the loading parameters; frees its RAM too | Reloaded from its own files, LoRAs applied again by the next prompt |
+
+Nothing is written to disk on either path. When VibeVoice does not stay warm,
+the model is warmed straight back; when a generation was waiting, that
+generation loads it itself and nothing is started beside it; and when VibeVoice
+stays warm, the next generation evicts it and loads its model as it always does.
+
+*Keep VibeVoice warm between requests*: **On every card** (default), **Not on the
+image model's card** (there the image model comes straight back) or **Off**.
+
+**Never the pagefile, in numbers.** A request is refused when it would leave less
+than 4 GB of system RAM available — twice the host floor, because Windows starts
+paging parked weights out well before RAM reaches zero — or when the card cannot
+hold the render plus 1 GB once everything that may move has moved. A warm stay
+ends by itself when available RAM falls below 4 GB with the image model parked in
+it, which gives the model its card back and frees the RAM.
+
+**On WanGP's card.** VibeVoice asks [Mini Paint NEO](https://github.com/RJSprod/a1111-mini-paint-NEO)
+for the card through a lease: Mini Paint stops handing WanGP Clipboard jobs, lets
+the one running finish, has its bridge hold WanGP between tasks — WanGP's own
+Generate included — and reports the card held. If the render still does not fit,
+WanGP is asked for a soft flush (its weights stay in RAM), then a hard one (its
+next job reloads them) — each waited for until Mini Paint says it is done — and
+the request is refused if even that is short, with Mini Paint's own reason when
+it declined one (a paused WanGP run refuses a hard flush). A warm
+VibeVoice keeps the lease, renewing it every second, and leaves as soon as a
+Clipboard job or WanGP's own queue wants the card — after its memory is gone,
+because WanGP sizes itself against what the card reports free. A lease nobody
+renews expires in twenty seconds, so a WebUI that dies cannot leave WanGP held.
+This is the one exception to [WanGP's VRAM is never taken](#wangp-on-the-other-card):
+the card is taken between WanGP's jobs, by WanGP's leave. It needs Mini Paint's
+bridge 1.12.0; with an older bridge, or a Mini Paint without the lease, WanGP's
+card is used only while WanGP is not running, and VibeVoice does not stay warm
+there while it is. A WanGP started by hand, outside Mini Paint, cannot be
+coordinated; its memory still counts as not free.
+
+**The language model.** A conversation on a card VibeVoice holds waits for the
+render and says so (*Waiting for VibeVoice 7B on …*), except the one turn a
+generation is itself waiting for — Krea's writer — which is never made to wait
+for a turn that is waiting for that very generation. A running LLM turn on the
+card finishes before VibeVoice loads; an idle llama-server there is stopped; and
+an LLM that needs room evicts a warm VibeVoice before anything else. A
+llama-server on the Intel Arc shares no card with any of this.
+
+**What the console says:**
+
+```
+Model Chain: VibeVoice 7B asked for NVIDIA GeForce RTX 3090 — next on the card
+Model Chain: holding an image generation — VibeVoice 7B is next on NVIDIA GeForce RTX 3090
+Model Chain: parked the image model in system RAM for VibeVoice 7B's turn — 18.4 GB was
+             on the card, 18.4 GB of VRAM is free again
+Model Chain: VibeVoice 7B has NVIDIA GeForce RTX 3090
+Model Chain: VibeVoice 7B stays warm on NVIDIA GeForce RTX 3090 until something else
+             needs the card
+Model Chain: unloaded VibeVoice from NVIDIA GeForce RTX 3090 (18.0 GB) — an image
+             generation needs the card
+```
 
 ## Krea Creative Mode
 
@@ -4254,6 +4361,10 @@ generation. `postprocess` is not called from a `finally`, so a generation that
 raised would leave the lock held and LLM Studio dead until the WebUI restarted —
 a far worse failure than the brief overlap the lock would have prevented.
 
+A VibeVoice render is waited for the same way: an LLM turn on the card it holds
+does not start until the render is over. See
+[Whose turn it is on each card](#whose-turn-it-is-on-each-card).
+
 ### WanGP on the other card
 
 [Mini Paint NEO](https://github.com/RJSprod/a1111-mini-paint-NEO)'s WanGP tab
@@ -4339,6 +4450,11 @@ generation gives the whole card back" rule are what make that a first-time
 event rather than a repeating one. And LLM priority — the setting that lets the
 language model release *image* residency on its card — does not reach WanGP's:
 that is not image residency, and it is not anybody's to release.
+
+The one thing that does ask WanGP for its card is a VibeVoice turn, and it asks
+Mini Paint rather than taking: between WanGP's jobs, with the running one
+finished first and WanGP held until the render is done. See
+[Whose turn it is on each card](#whose-turn-it-is-on-each-card).
 
 ### Intel Arc through SYCL
 
@@ -5209,6 +5325,11 @@ enforced rather than labelled. Thread counts are conservative and deliberately
 not settings: the point of running beside Forge is lost if speech takes every
 core from the image that is rendering.
 
+VibeVoice, in Voice Box, is the one speech engine that runs on a graphics card,
+and it is not a Voice Chat engine — the engines above stay on the processor
+whatever it does. It takes a card only through a turn, like any other job on it:
+see [Whose turn it is on each card](#whose-turn-it-is-on-each-card).
+
 The speech process talks to Forge over a private pipe — no port, no local HTTP
 authentication problem, no firewall prompt, and no way to bind to a network
 address by accident. **It cannot outlive the WebUI.** That is a release
@@ -5336,6 +5457,8 @@ mc_references.py      Stage 2 supplemental reference routing
 mc_styles.py          style library integration helpers
 
 mc_broker.py          cross-workload residency policy and the workload lock
+mc_turns.py           whose turn it is on each card: a speech guest's turns, the
+                      image gate, parking and return, warm stays, WanGP's lease
 mc_gguf.py            GGUF metadata header reader
 mc_llm_context.py     context capacity estimation and its calibration
 mc_llm_runtime.py     the managed llama.cpp process and its placement
@@ -5432,6 +5555,7 @@ prompt_master/models/managed_profiles.py  the hidden per-backbone quality profil
 
 scripts/model_chain.py                Script class, UI, orchestration
 scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
+scripts/model_chain_turns.py          the card's turn gate, on txt2img and img2img
 style.css             progress-bar appearance, LLM Studio, the Image Pipeline
 javascript/           the settings-to-CSS layer, LLM Studio polish, the pipeline,
                       the two spatial canvases, Voice Chat's capture and playback

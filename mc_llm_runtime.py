@@ -2537,6 +2537,44 @@ def _make_room_for_the_llm(configuration: Config, already_ours: int = 0,
     return int(released.freed)
 
 
+def _make_room_from_a_warm_guest(configuration: Config, already_ours: int = 0,
+                                 needs_vision: bool = False, extra_reserve: int = 0) -> int:
+    """Evict a warm speech guest from this card when the language model needs its room.
+
+    A VibeVoice left warm between requests (:mod:`mc_turns`, rule 6) is the
+    lowest-ranking thing on any card, and the user's rule is that the LLM needing
+    the card is one of the things that ends its stay. "Needing" is the arithmetic
+    here, not the mere fact of a start: the placement the user configured is
+    asked for through :func:`mc_broker.request_vram`, which does nothing at all
+    when it fits beside the guest and otherwise frees the deficit from the one
+    family an LLM may take from -- a warm guest, never a working one.
+
+    Before the negotiation for the same reason :func:`_make_room_for_the_llm` is:
+    :func:`negotiate` promises to move nothing, so room is made first and the
+    negotiation places against what is then free. And only when a guest is on
+    this card at all, so that every other start -- including every start that is
+    going to shrink itself to fit, which is most of them on a busy card -- says
+    nothing and costs nothing.
+    """
+    card = card_of(configuration)
+    if card is None:
+        return 0
+    if mc_broker.held_bytes(mc_broker.FAMILY_VOICE, card=card) <= 0:
+        return 0
+    described = mc_gguf.describe(configuration.model)
+    placement = _requested_placement(configuration, described, already_ours)
+    if not placement.on_gpu:
+        return 0
+    wanted = mc_llm_context.estimate(configuration.model, placement, described)
+    needed = (wanted.total_bytes + projector_bytes(configuration, needs_vision)
+              + max(int(extra_reserve), 0))
+    # A server of ours being replaced gives its own bytes back first.
+    needed = max(needed - max(int(already_ours), 0), 0)
+    released = mc_broker.request_vram(mc_broker.FAMILY_LLM, needed, card=card,
+                                      reason=_backbone_label(configuration))
+    return int(released.freed)
+
+
 def _launch_flags(configuration: Config, placement: mc_llm_context.Placement,
                   plan: mc_llm_accel.Plan | None) -> list[str]:
     """Every extra flag one start needs: the placement's, then the accelerator's.
@@ -4693,6 +4731,12 @@ class Runtime:
                                     chosen=chosen)
             if plan.refused:
                 raise RuntimeError(plan.refusal)
+
+            # A warm speech guest on this card leaves first when the placement
+            # the user configured does not fit beside it: it is the lowest-
+            # ranking thing on any card (mc_turns, rule 6). Before the
+            # negotiation, for the reason given below.
+            _make_room_from_a_warm_guest(configuration, ours, vision, reserve)
 
             # The one place image residency can be released for the language
             # model, and only because somebody set LLM priority: on the card it

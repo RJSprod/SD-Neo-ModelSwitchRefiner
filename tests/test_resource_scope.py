@@ -1923,6 +1923,21 @@ class TestTwoNamespacesForOneSetOfCards:
         assert runtime.execution_domain(settings).conflicts_with(
             mc_broker.image_execution_domain())
 
+    def test_one_card_in_both_spellings_of_its_uuid_is_one_card(
+            self, machine, tmp_path, monkeypatch):
+        """nvidia-smi writes ``GPU-…``, and setup records the language model's
+        card that way; torch hands back the bare digits, and the image side
+        records those. Every other test here spells both sides alike, and
+        compared as written the same card was two: a language model on Forge's
+        own card was told it was independent of the generation there."""
+        monkeypatch.setattr(mc_broker, "image_device_uuid", lambda: "3090aaaa0000")
+        settings = self.llm(tmp_path)
+        object.__setattr__(settings, "gpu_uuid", "GPU-3090aaaa-0000")
+
+        assert runtime.shares_the_image_card(0, settings)
+        assert runtime.execution_domain(settings).conflicts_with(
+            mc_broker.image_execution_domain())
+
     def test_two_different_names_settle_it_without_any_uuid(
             self, machine, tmp_path, monkeypatch):
         """An older torch exposes no UUID and a machine without nvidia-smi has
