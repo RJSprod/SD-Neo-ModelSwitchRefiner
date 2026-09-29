@@ -1226,6 +1226,10 @@ def _perform(job: Job) -> None:
 def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) -> None:
     job.phase = LOADING
     job.reason = "loading the model"
+    if model_id:
+        # The runtime loads the model the engine's settings name; the
+        # configuration's choice is made that name before the load.
+        engine.set_settings({"model_id": model_id})
     runtime.load(job.card)
     pieces: list[bytes] = []
     total_seconds = 0.0

@@ -27,3 +27,4 @@ voice/managed-sopro-models.local.json
 # is a property of the machine that fetched it, and recording it in the tracked
 # manifest would turn every later pull into a merge conflict full of hashes.
 voice/managed-pocket-models.local.json
+voice/managed-vibevoice-models.local.json

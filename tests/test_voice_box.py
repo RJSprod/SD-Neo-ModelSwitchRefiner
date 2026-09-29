@@ -223,6 +223,7 @@ def ready(turns, runtime, engine):
     first = box.add_sample(spoken(), "Ada")
     second = box.add_sample(spoken(5.0), "Brook")
     configuration = box.save_configuration({"name": "Studio", "card_uuid": CARD,
+                                            "model_id": "vibevoice-7b",
                                             "speakers": {"1": first["id"], "2": second["id"]}})
     found = box.new_pipeline("Trailer")
     return {"pipeline": found, "configuration": configuration, "samples": (first, second)}
@@ -516,7 +517,8 @@ class TestRendering:
         assert entry["render"]["sections"] == 2 and entry["render"]["peak_bytes"] == 19 * _GB
         assert [s["title"] for s in entry["render"]["speakers"]] == ["Ada", "Brook"]
         assert box.pipeline(ready["pipeline"]["id"])["outputs"] == [entry["id"]]
-        assert engine.peaks == [("", 19 * _GB)]
+        assert engine.peaks == [("vibevoice-7b", 19 * _GB)]
+        assert engine.values["model_id"] == "vibevoice-7b", "the engine loads what it is told"
         assert box.prompts()["history"][0]["text"].startswith("Speaker 1: Hi.")
         assert job["progress"]["sections"] == 2
 

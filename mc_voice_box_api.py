@@ -156,13 +156,23 @@ def install_payload(values: dict) -> dict:
     return {"ok": True, "already": False}
 
 
+ENGINE_KEYS = ("steps", "cfg_scale", "seed", "max_new_tokens", "card_uuid", "model_id",
+               "keep_warm")
+"""What the engine's own settings file holds. The card, the model and the warm
+stay are Voice Box's to decide (its render service reads its own file), and are
+mirrored into the engine's so that the two files never disagree about them."""
+
+
 def settings_payload(values: dict) -> dict:
-    """Voice Box's own settings and the engine's, saved together, answered together."""
+    """Voice Box's own settings and the engine's, saved together, answered together.
+
+    The engine validates first -- a model id it does not know, a step count out
+    of range -- so a refused value leaves both files as they were.
+    """
+    theirs = {key: values[key] for key in ENGINE_KEYS if key in values}
+    engine_settings = _engine().set_settings(theirs) if theirs else _engine().settings()
     own = {key: values[key] for key in box.SETTINGS_DEFAULTS if key in values}
     found = box.set_settings(own) if own else box.settings()
-    theirs = {key: values[key] for key in ("steps", "cfg_scale", "seed", "max_new_tokens")
-              if key in values}
-    engine_settings = _engine().set_settings(theirs) if theirs else _engine().settings()
     return {"ok": True, "settings": found, "engine_settings": engine_settings}
 
 

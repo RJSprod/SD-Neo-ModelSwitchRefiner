@@ -225,6 +225,40 @@ both and is what either can be rebuilt from.
 """
 
 
+VIBEVOICE_DIRNAME = "vibevoice"
+VIBEVOICE_WORKER_DIRNAME = "vibevoice_worker"
+VIBEVOICE_MANIFEST_FILENAME = "managed-vibevoice-models.json"
+VIBEVOICE_LOCAL_PINS_FILENAME = "managed-vibevoice-models.local.json"
+"""Digests recorded at install time for the VibeVoice artifacts this repository
+could not hash -- the model's shards and the tokenizer live on huggingface.co,
+which the machine that writes the manifest cannot reach. Beside the manifest and
+untracked, for the reason the Kokoro, Sopro and Pocket overlays are: a file only
+ever *filled in*, never one that can change a committed hash."""
+VIBEVOICE_SETTINGS_FILENAME = "settings.json"
+VIBEVOICE_CALIBRATION_FILENAME = "calibration.json"
+"""What a render actually cost on this machine -- the highest reserved VRAM and
+the worker's resident set, per model. Written after every render and read
+before every turn request, so the estimate the manifest ships is a floor the
+first render stands on and the measurement takes over from."""
+VIBEVOICE_TOKENIZER_DIRNAME = "tokenizer-qwen2.5-7b"
+"""Where the text tokenizer is installed, inside the model directory.
+
+The name is load-bearing: the VibeVoice processor chooses its tokenizer class by
+looking for the substring ``qwen`` in the location it is handed, and refuses any
+other. The four Qwen2.5 tokenizer files are installed here because neither
+community mirror of the model ships them, and the worker runs offline."""
+VIBEVOICE_LOCAL_CONFIG = "preprocessor_config.json"
+VIBEVOICE_UPSTREAM_CONFIG = "preprocessor_config.upstream.json"
+"""The processor configuration the worker loads, and the one the mirror shipped.
+
+``VibeVoiceProcessor.from_pretrained`` reads ``preprocessor_config.json`` from
+the model directory and, when it names no ``language_model_pretrained_name``,
+fetches ``Qwen/Qwen2.5-1.5B`` from the hub -- the one call in the load path that
+could reach the network. The installer therefore writes its own copy naming the
+local tokenizer directory above, and keeps upstream's document (when the mirror
+had one) under the second name so nothing it said is lost."""
+
+
 def extension_root() -> Path:
     """The extension directory, which is where this file is."""
     return Path(__file__).resolve().parent
@@ -789,6 +823,123 @@ def pipeline_inside(candidate) -> bool:
     """
     try:
         Path(candidate).resolve().relative_to(pipeline_root())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+
+# --------------------------------------------------------------------------- #
+# VibeVoice
+# --------------------------------------------------------------------------- #
+#
+# A fifth tree, beside Pocket's and the pipeline's, for the reason each of those
+# is separate: its own interpreter, its own CUDA build of Torch and nineteen
+# gigabytes of weights, none of which may be touched by installing or removing a
+# CPU speech engine. Nothing here reaches into another engine's directory.
+
+
+def vibevoice_root() -> Path:
+    """Everything Voice Box's speech guest owns. Nothing else writes here."""
+    return data_root() / VIBEVOICE_DIRNAME
+
+
+def vibevoice_runtime_root() -> Path:
+    """The isolated CUDA Torch/transformers/VibeVoice closure.
+
+    Its own interpreter rather than Forge's, for the reason every voice runtime
+    has one: the closure pins transformers 4.51.3, which Forge's own environment
+    does not and must not be made to.
+    """
+    return vibevoice_root() / RUNTIME_DIRNAME
+
+
+def vibevoice_runtime_manifest() -> Path:
+    return vibevoice_runtime_root() / INSTALLED_FILENAME
+
+
+def vibevoice_models_root() -> Path:
+    return vibevoice_root() / MODELS_DIRNAME
+
+
+def vibevoice_model_root(identifier: str) -> Path:
+    """One installed VibeVoice model. ``identifier`` is checked, not trusted."""
+    return _contained(vibevoice_models_root(), identifier)
+
+
+def vibevoice_tokenizer_root(identifier: str) -> Path:
+    """The text tokenizer's directory inside one model. Its name contains ``qwen``."""
+    return vibevoice_model_root(identifier) / VIBEVOICE_TOKENIZER_DIRNAME
+
+
+def vibevoice_local_config(identifier: str) -> Path:
+    """The processor config the worker loads: upstream's fields, a local tokenizer."""
+    return vibevoice_model_root(identifier) / VIBEVOICE_LOCAL_CONFIG
+
+
+def vibevoice_upstream_config(identifier: str) -> Path:
+    """The processor config the mirror shipped, kept exactly as it arrived."""
+    return vibevoice_model_root(identifier) / VIBEVOICE_UPSTREAM_CONFIG
+
+
+def vibevoice_staging_root() -> Path:
+    return vibevoice_root() / STAGING_DIRNAME
+
+
+def vibevoice_staging_for(identifier: str, nonce: str) -> Path:
+    """One install attempt's scratch directory, a sibling of what it will become.
+
+    A sibling so that promotion is a rename on one filesystem, which is what
+    makes a nineteen-gigabyte install atomic rather than a copy with a window
+    in it.
+    """
+    return _contained(vibevoice_staging_root(), f"{identifier}-{nonce}")
+
+
+def vibevoice_worker_script() -> Path:
+    """The VibeVoice sidecar entry point, inside the extension rather than the data root.
+
+    Its own file, launched by its own interpreter out of its own closure, for
+    the reason every worker here is: one script importable under two closures
+    is one import away from a CUDA runtime reaching for a CPU engine's Torch.
+    """
+    return extension_root() / VIBEVOICE_WORKER_DIRNAME / "worker.py"
+
+
+def vibevoice_manifest_path() -> Path:
+    """The checked-in trust root for every VibeVoice artifact this build may fetch."""
+    return extension_root() / MANIFEST_DIRNAME / VIBEVOICE_MANIFEST_FILENAME
+
+
+def vibevoice_local_pins_path() -> Path:
+    """The untracked overlay of digests recorded at install time."""
+    return extension_root() / MANIFEST_DIRNAME / VIBEVOICE_LOCAL_PINS_FILENAME
+
+
+def vibevoice_settings_path() -> Path:
+    """Voice Box's engine settings, in a file of their own and not in Forge's options.
+
+    For the reason Pocket's and Sopro's are: an option is a component on the
+    settings page as well as a stored value, and "Apply settings" writes the
+    page's build-time copy back over whatever the Voice Box page just set.
+    """
+    return vibevoice_root() / VIBEVOICE_SETTINGS_FILENAME
+
+
+def vibevoice_calibration_path() -> Path:
+    """What renders have actually cost on this machine, per model."""
+    return vibevoice_root() / VIBEVOICE_CALIBRATION_FILENAME
+
+
+def vibevoice_inside(candidate) -> bool:
+    """Whether ``candidate`` is under the VibeVoice subtree.
+
+    Read before every delete, for the reason :func:`pocket_inside` is: an
+    uninstall has to prove every path it is about to remove resolves under
+    *this* guest's root, and may never reach a speech engine's file.
+    """
+    try:
+        Path(candidate).resolve().relative_to(vibevoice_root())
     except (OSError, ValueError):
         return False
     return True
