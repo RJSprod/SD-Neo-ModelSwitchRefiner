@@ -1,0 +1,527 @@
+{
+  "schema": 1,
+  "version": 2,
+  "pinned": false,
+  "notes": "PARTIALLY PINNED. The runtime closure is resolved: every PyPI wheel is named, sized and hashed from pypi.org for windows-x86_64-cp313-cu128, solved from the package's own declarations for CPython 3.13 on Windows x86-64, and tools/pin_vibevoice_models.py refuses a closure whose pins contradict one another. torch is NOT a PyPI wheel here: the CUDA 12.8 build lives only on download.pytorch.org, so the platform carries a versioned resolve entry (torch 2.8.0) that the installer answers against the publisher's own index page at install time, taking the cp313 win_amd64 wheel of exactly that version and the SHA-256 the index states, and the machine that wrote this could not reach download.pytorch.org, so no digest is recorded here yet: `python tools/pin_vibevoice_models.py --torch` on one that can turns the index's word into a committed constant. 2.8.0 is the line both of the user's cards share (sm_86 and sm_120 in one cu128 wheel since 2.7) and the nearest release to the community package's own era; the 2.9 and 2.10 cu128 lines also ship cp313 Windows wheels and moving to one is a review decision, not a default. No torchaudio: nothing imports it. The model, its shards and the tokenizer are DECLARED BUT NOT HASHED. The repositories, paths and revisions are written down; the shard list is read from model.safetensors.index.json at install time; and every file is checked against the digest its publisher states over HTTPS (x-linked-etag) and recorded in voice/managed-vibevoice-models.local.json, because the machine that wrote this could not reach huggingface.co. Neither community mirror ships a tokenizer, so the four Qwen2.5-7B tokenizer files are declared beside the model and installed into a directory whose name contains 'qwen', which is how the processor picks its tokenizer class. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher that changed its mind. `python tools/pin_vibevoice_models.py --model` on a machine that can reach the hub records the sizes, the digests and the shard list and turns the first claim into the second. Not installed, on purpose: gradio, aiortc, av, ml-collections and absl-py (the demo and its server); librosa and soundfile (imported lazily, only to read an audio file from a path and to write one, neither of which the worker does -- it is handed PCM over its pipe and answers with WAV bytes it encodes itself); numba, llvmlite and scipy (librosa's); torchaudio; and httpx (declared by diffusers 0.36 and later, imported only by its pipeline loaders, which vibevoice never touches). runtime.excluded records each reason. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
+  "runtime": {
+    "package": "vibevoice",
+    "import_name": "vibevoice",
+    "version": "0.0.1",
+    "transformers_version": "4.51.3",
+    "accelerate_version": "1.6.0",
+    "provider": "cuda",
+    "python_requires": ">=3.9",
+    "license": "MIT (VibeVoice code, Microsoft Research, preserved as the community package vibevoice 0.0.1); Apache-2.0 (transformers, accelerate, diffusers, huggingface-hub, tokenizers, safetensors, packaging, importlib-metadata, requests); BSD-3-Clause (PyTorch, NumPy, networkx, sympy, idna, psutil, mpmath, colorama, jinja2, MarkupSafe); MIT (tqdm, PyYAML, charset-normalizer, urllib3, fsspec, setuptools, zipp); Unlicense/MIT (filelock); PSF-2.0 (typing-extensions); MPL-2.0 (certifi); Apache-2.0 with the Python-2.0 licence (regex); MIT-CMU (pillow). Each wheel's own METADATA is authoritative.",
+    "attribution": "VibeVoice by Microsoft Research (Zhiliang Peng and others, arXiv 2508.19205), MIT. Microsoft withdrew the long-form code and the 7B weights on 2025-09-04; the package vibevoice 0.0.1 on PyPI is the community's preservation of the original code, and the weights come from community mirrors under the same MIT licence. The closure below is resolved from pypi.org's own records for CPython 3.13 on Windows x86-64.",
+    "closure_notes": "The smallest inference-complete closure this code can honestly claim, solved rather than transcribed: tools/pin_vibevoice_models.py starts from four roots (vibevoice 0.0.1; transformers 4.51.3 and accelerate 1.6.0, which the package pins because the community code breaks on transformers 4.56 and later where DynamicCache.key_cache was removed; and the newest diffusers that still allows huggingface-hub below 1.0, since transformers 4.51.3 requires that and huggingface-hub 1.x would bring httpx, httpcore, anyio, h11 and sniffio into an offline worker for an HTTP client it must never use), walks every declared requirement under a Windows/CPython 3.13 marker environment with no extras, and takes the newest release of each package that satisfies every constraint and ships a wheel this platform can unpack. It then reads what every publisher declares about every other package and refuses a closure whose pins contradict one another -- the check that, on PocketTTS, caught a closure in which every wheel verified and the import died. setuptools is here because torch 2.8.0 still declares it on Python 3.12 and later, and a venv built without pip has none; colorama because tqdm declares it on Windows; mpmath is held below 1.4 by sympy 1.14; importlib-metadata and zipp because diffusers declares the first unconditionally, though on 3.13 it imports the standard library's. Demo-only and lazily imported packages are absent by design and runtime.excluded says why for each. The torch wheel is not in this list: see runtime.torch.",
+    "torch": {
+      "index": "https://download.pytorch.org/whl/cu128/torch/",
+      "package": "torch",
+      "version": "2.8.0",
+      "about_bytes": 3300000000,
+      "notes": "PyTorch's CUDA 12.8 build for Windows, which carries its CUDA libraries inside the wheel (no nvidia-* packages, unlike Linux) and both cards' architectures -- sm_86 for the 3090 and sm_120 for the 5090 -- since 2.7. It is published only on download.pytorch.org, which the machine that wrote this manifest could not reach, so it is a versioned resolve rather than a pin: the installer reads the publisher's index page, takes the cp313 win_amd64 wheel of exactly this version and checks the download against the SHA-256 the index states; `python tools/pin_vibevoice_models.py --torch` on a machine that can reach the index records that digest here as well. 2.8.0 rather than the 2.9 or 2.10 cu128 lines because it is the nearest release to the community package's era that has the sm_120 card; moving lines is a review decision. about_bytes is an estimate of the wheel for the download sentence and the disk check, replaced by the index's own figure once recorded."
+    },
+    "platforms": [
+      {
+        "id": "windows-x86_64-cp313-cu128",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.13",
+        "accelerator": "cuda",
+        "artifacts": [
+          {
+            "filename": "vibevoice-0.0.1-py3-none-any.whl",
+            "local_name": "vibevoice-0.0.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/15/11/aee4ab46e43a645fcfd7491aafd88a25e87059e9e4b5995f3a146e0b2e90/vibevoice-0.0.1-py3-none-any.whl",
+            "bytes": 82639,
+            "sha256": "fe42a8ee9adcd4fa87b2abd72be502f635bb847387e682b672022d7a9d606add"
+          },
+          {
+            "filename": "transformers-4.51.3-py3-none-any.whl",
+            "local_name": "transformers-4.51.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a9/b6/5257d04ae327b44db31f15cce39e6020cc986333c715660b1315a9724d82/transformers-4.51.3-py3-none-any.whl",
+            "bytes": 10383940,
+            "sha256": "fd3279633ceb2b777013234bbf0b4f5c2d23c4626b05497691f00cfda55e8a83"
+          },
+          {
+            "filename": "accelerate-1.6.0-py3-none-any.whl",
+            "local_name": "accelerate-1.6.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/b1/8198e3cdd11a426b1df2912e3381018c4a4a55368f6d0857ba3ca418ef93/accelerate-1.6.0-py3-none-any.whl",
+            "bytes": 354748,
+            "sha256": "1aee717d3d3735ad6d09710a7c26990ee4652b79b4e93df46551551b5227c2aa"
+          },
+          {
+            "filename": "diffusers-0.39.0-py3-none-any.whl",
+            "local_name": "diffusers-0.39.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/3f/3f/7469c46e9d22307ea686bab687d70e6bf328722952f9d10339f5e913e608/diffusers-0.39.0-py3-none-any.whl",
+            "bytes": 5631176,
+            "sha256": "912aca51b5787365110806e984d5555735bf8a461073bb8459029d0bca7870ef"
+          },
+          {
+            "filename": "certifi-2026.7.22-py3-none-any.whl",
+            "local_name": "certifi-2026.7.22-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+            "bytes": 136983,
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+          },
+          {
+            "filename": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+            "local_name": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/8a/33/56d97ade41c8db611e727168c52ae46c9224c362ec28d4b65d7e9869e8da/charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+            "bytes": 199295,
+            "sha256": "aea996a6aba25260827c9ea511d1addfde2da9eb686ac961838509086188b7e6"
+          },
+          {
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "bytes": 25335,
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          },
+          {
+            "filename": "filelock-4.0.6-py3-none-any.whl",
+            "local_name": "filelock-4.0.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a9/3b/b74ae9db2f78f1354278731372ae89870626be7b86cbb46b8d707acd1a98/filelock-4.0.6-py3-none-any.whl",
+            "bytes": 109077,
+            "sha256": "9b139fb93b2ac5807f7feaf63aa4546fbd74074a2d3f554c040f40a4694d7b9f"
+          },
+          {
+            "filename": "fsspec-2026.9.0-py3-none-any.whl",
+            "local_name": "fsspec-2026.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
+            "bytes": 221738,
+            "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f"
+          },
+          {
+            "filename": "huggingface_hub-0.36.2-py3-none-any.whl",
+            "local_name": "huggingface_hub-0.36.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a8/af/48ac8483240de756d2438c380746e7130d1c6f75802ef22f3c6d49982787/huggingface_hub-0.36.2-py3-none-any.whl",
+            "bytes": 566395,
+            "sha256": "48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270"
+          },
+          {
+            "filename": "idna-3.20-py3-none-any.whl",
+            "local_name": "idna-3.20-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+            "bytes": 69583,
+            "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c"
+          },
+          {
+            "filename": "importlib_metadata-9.0.1-py3-none-any.whl",
+            "local_name": "importlib_metadata-9.0.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/b3/55/ecca97ae19075f1fac62def77731e7f535e6c1fb8f92ff08160c5e6dade8/importlib_metadata-9.0.1-py3-none-any.whl",
+            "bytes": 27920,
+            "sha256": "bba5600596a7e21f3eef53281cf28d6a5195634d2f2b78ff9501a3272c6eaab0"
+          },
+          {
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "local_name": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "bytes": 134899,
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          },
+          {
+            "filename": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+            "local_name": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/05/73/c4abe620b841b6b791f2edc248f556900667a5a1cf023a6646967ae98335/markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+            "bytes": 15113,
+            "sha256": "9a1abfdc021a164803f4d485104931fb8f8c1efd55bc6b748d2f5774e78b62c5"
+          },
+          {
+            "filename": "mpmath-1.3.0-py3-none-any.whl",
+            "local_name": "mpmath-1.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+            "bytes": 536198,
+            "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+          },
+          {
+            "filename": "networkx-3.7-py3-none-any.whl",
+            "local_name": "networkx-3.7-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl",
+            "bytes": 2142205,
+            "sha256": "e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0"
+          },
+          {
+            "filename": "numpy-2.5.3-cp313-cp313-win_amd64.whl",
+            "local_name": "numpy-2.5.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/f3/ec/100f2b1794ede74a9b3d7ec6b9736927f56713414c1dfe19ab6c383494bf/numpy-2.5.3-cp313-cp313-win_amd64.whl",
+            "bytes": 12560965,
+            "sha256": "71cad2b2a7451ab79d8f5e71b453485b6775963d5cf794179144a7463fe6e8ec"
+          },
+          {
+            "filename": "packaging-26.3-py3-none-any.whl",
+            "local_name": "packaging-26.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+            "bytes": 129956,
+            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+          },
+          {
+            "filename": "pillow-12.3.0-cp313-cp313-win_amd64.whl",
+            "local_name": "pillow-12.3.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/a6/9b/7a58e61d62be561da3a356fe2384d4059a6345fc130e23ef1c36a5b81d24/pillow-12.3.0-cp313-cp313-win_amd64.whl",
+            "bytes": 7239691,
+            "sha256": "1cca606cd25738df4ed873d5ad46bbdb3d83b5cbca291f6b4ff13a4df6b0bbe8"
+          },
+          {
+            "filename": "psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "local_name": "psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "bytes": 137737,
+            "sha256": "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
+          },
+          {
+            "filename": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "local_name": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/97/c9/39d5b874e8b28845e4ec2202b5da735d0199dbe5b8fb85f91398814a9a46/pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "bytes": 154090,
+            "sha256": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c"
+          },
+          {
+            "filename": "regex-2026.9.29-cp313-cp313-win_amd64.whl",
+            "local_name": "regex-2026.9.29-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/80/a7/bf93a3a6afa5f7bc16b7afb94ae581b01cae620b8ad56bd8f9572a985959/regex-2026.9.29-cp313-cp313-win_amd64.whl",
+            "bytes": 280307,
+            "sha256": "61956f074ecd123f55adca68ee3eab46e6a07ad3f8e64e6db95dfacb444f55c4"
+          },
+          {
+            "filename": "requests-2.34.2-py3-none-any.whl",
+            "local_name": "requests-2.34.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+            "bytes": 73075,
+            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+          },
+          {
+            "filename": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "local_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "bytes": 355540,
+            "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+          },
+          {
+            "filename": "setuptools-84.0.0-py3-none-any.whl",
+            "local_name": "setuptools-84.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
+            "bytes": 818216,
+            "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+          },
+          {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
+            "filename": "tokenizers-0.21.4-cp39-abi3-win_amd64.whl",
+            "local_name": "tokenizers-0.21.4-cp39-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/41/f2/fd673d979185f5dcbac4be7d09461cbb99751554ffb6718d0013af8604cb/tokenizers-0.21.4-cp39-abi3-win_amd64.whl",
+            "bytes": 2507568,
+            "sha256": "475d807a5c3eb72c59ad9b5fcdb254f6e17f53dfcbb9903233b0dfa9c943b597"
+          },
+          {
+            "filename": "tqdm-4.70.1-py3-none-any.whl",
+            "local_name": "tqdm-4.70.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl",
+            "bytes": 80199,
+            "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73"
+          },
+          {
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "bytes": 45571,
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+          },
+          {
+            "filename": "urllib3-2.8.0-py3-none-any.whl",
+            "local_name": "urllib3-2.8.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+            "bytes": 135717,
+            "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3"
+          },
+          {
+            "filename": "zipp-4.1.0-py3-none-any.whl",
+            "local_name": "zipp-4.1.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/3a/13/547360d81e6d88d58492968ffda9f9542854f11310ee556fef14260cc886/zipp-4.1.0-py3-none-any.whl",
+            "bytes": 10238,
+            "sha256": "25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f"
+          },
+          {
+            "local_name": "torch",
+            "resolve": {
+              "index": "https://download.pytorch.org/whl/cu128/torch/",
+              "package": "torch",
+              "version": "2.8.0"
+            }
+          }
+        ]
+      }
+    ],
+    "closure": [
+      [
+        "vibevoice",
+        "0.0.1",
+        "pure"
+      ],
+      [
+        "transformers",
+        "4.51.3",
+        "pure"
+      ],
+      [
+        "accelerate",
+        "1.6.0",
+        "pure"
+      ],
+      [
+        "diffusers",
+        "0.39.0",
+        "pure"
+      ],
+      [
+        "certifi",
+        "2026.7.22",
+        "pure"
+      ],
+      [
+        "charset-normalizer",
+        "3.5.1",
+        "binary"
+      ],
+      [
+        "colorama",
+        "0.4.6",
+        "pure"
+      ],
+      [
+        "filelock",
+        "4.0.6",
+        "pure"
+      ],
+      [
+        "fsspec",
+        "2026.9.0",
+        "pure"
+      ],
+      [
+        "huggingface-hub",
+        "0.36.2",
+        "pure"
+      ],
+      [
+        "idna",
+        "3.20",
+        "pure"
+      ],
+      [
+        "importlib-metadata",
+        "9.0.1",
+        "pure"
+      ],
+      [
+        "Jinja2",
+        "3.1.6",
+        "pure"
+      ],
+      [
+        "MarkupSafe",
+        "3.0.3",
+        "binary"
+      ],
+      [
+        "mpmath",
+        "1.3.0",
+        "pure"
+      ],
+      [
+        "networkx",
+        "3.7",
+        "pure"
+      ],
+      [
+        "numpy",
+        "2.5.3",
+        "binary"
+      ],
+      [
+        "packaging",
+        "26.3",
+        "pure"
+      ],
+      [
+        "pillow",
+        "12.3.0",
+        "binary"
+      ],
+      [
+        "psutil",
+        "7.2.2",
+        "abi3"
+      ],
+      [
+        "PyYAML",
+        "6.0.3",
+        "binary"
+      ],
+      [
+        "regex",
+        "2026.9.29",
+        "binary"
+      ],
+      [
+        "requests",
+        "2.34.2",
+        "pure"
+      ],
+      [
+        "safetensors",
+        "0.8.0",
+        "abi3"
+      ],
+      [
+        "setuptools",
+        "84.0.0",
+        "pure"
+      ],
+      [
+        "sympy",
+        "1.14.0",
+        "pure"
+      ],
+      [
+        "tokenizers",
+        "0.21.4",
+        "abi3"
+      ],
+      [
+        "tqdm",
+        "4.70.1",
+        "pure"
+      ],
+      [
+        "typing-extensions",
+        "4.16.0",
+        "pure"
+      ],
+      [
+        "urllib3",
+        "2.8.0",
+        "pure"
+      ],
+      [
+        "zipp",
+        "4.1.0",
+        "pure"
+      ]
+    ],
+    "excluded": {
+      "gradio": "the demo's web interface; the worker has no interface",
+      "aiortc": "the demo's WebRTC streaming; the worker answers over a pipe",
+      "av": "the demo's media decoding, for aiortc",
+      "ml-collections": "the demo's config objects, imported nowhere in the package",
+      "absl-py": "the demo's flags and logging, imported nowhere in the package",
+      "librosa": "imported lazily, only to read an audio file from a path (VibeVoiceTokenizerProcessor._load_audio_from_path); the worker is handed PCM over its pipe and never names a file",
+      "soundfile": "imported lazily, only to write an audio file (VibeVoiceTokenizerProcessor.save_audio); the worker encodes its own WAV",
+      "numba": "librosa's just-in-time compiler, imported nowhere in the package",
+      "llvmlite": "numba's LLVM binding, imported nowhere in the package; it comes and goes with numba",
+      "scipy": "declared, imported nowhere in the package; librosa's resampling uses it",
+      "torchaudio": "imported nowhere in the package; the pair-pinning trap the pipeline's cu128 entry has is not copied",
+      "httpx": "declared by diffusers 0.36 and later and imported in exactly two of its files, both pipeline loaders (diffusers/pipelines/pipeline_utils.py and pipeline_loading_utils.py), to classify hub download errors; vibevoice imports diffusers.configuration_utils, diffusers.utils and diffusers.schedulers.scheduling_utils, none of which reaches them, and the worker never loads a diffusers pipeline. Read against the 0.39.0 wheel",
+      "hf-xet": "huggingface-hub declares it behind a marker that spells the machine \"amd64\" in lower case while Windows reports \"AMD64\", so pip does not install it there either; it accelerates downloads the worker never makes"
+    }
+  },
+  "defaults": {
+    "model": "vibevoice-7b"
+  },
+  "models": {
+    "vibevoice-7b": {
+      "label": "VibeVoice 7B",
+      "repo": "aoi-ot/VibeVoice-Large",
+      "mirrors": [
+        "vibevoice/VibeVoice-7B"
+      ],
+      "revision": "main",
+      "license": "MIT",
+      "attribution": "VibeVoice-Large (7B, 9.34 B parameters, bf16) by Microsoft Research, MIT. Withdrawn from Hugging Face by Microsoft on 2025-09-04 and preserved by community mirrors under the same licence: aoi-ot/VibeVoice-Large, with vibevoice/VibeVoice-7B as the fallback mirror. Using a third-party mirror is a trust decision the user made explicitly (docs/23-voice-box.md section 3), made safe the way every artifact here is: checked against a digest.",
+      "summary": "Long-form, multi-speaker speech from a script, up to four voices cloned from short samples. 18.7 GB of bf16 weights on an NVIDIA card.",
+      "notes": "Downloaded once and then read from disk. The safetensors index is fetched first and the shards it names are downloaded in its order, so the list of weight files is the model's own statement rather than a table somebody transcribed. The processor configuration the worker loads is written by the installer (preprocessor_config.json) from the mirror's own document, kept beside it as preprocessor_config.upstream.json when the mirror shipped one, with language_model_pretrained_name pointing at the local tokenizer directory -- the one field that would otherwise send the processor to the hub for Qwen/Qwen2.5-1.5B. The worker runs with HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE set.",
+      "sample_rate": 24000,
+      "files": [
+        {
+          "filename": "config.json",
+          "local_name": "config.json",
+          "url": "https://huggingface.co/aoi-ot/VibeVoice-Large/resolve/main/config.json",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "preprocessor_config.json",
+          "local_name": "preprocessor_config.upstream.json",
+          "url": "https://huggingface.co/aoi-ot/VibeVoice-Large/resolve/main/preprocessor_config.json",
+          "bytes": null,
+          "sha256": null,
+          "optional": true
+        },
+        {
+          "filename": "model.safetensors.index.json",
+          "local_name": "model.safetensors.index.json",
+          "url": "https://huggingface.co/aoi-ot/VibeVoice-Large/resolve/main/model.safetensors.index.json",
+          "bytes": null,
+          "sha256": null
+        }
+      ],
+      "shards": [],
+      "tokenizer": {
+        "repo": "Qwen/Qwen2.5-7B",
+        "revision": "main",
+        "dirname": "tokenizer-qwen2.5-7b",
+        "license": "Apache-2.0",
+        "attribution": "Qwen2.5-7B tokenizer by the Qwen team, Alibaba Cloud, Apache-2.0. Only the tokenizer files are installed; the language model's weights are VibeVoice's own.",
+        "files": [
+          {
+            "filename": "tokenizer.json",
+            "local_name": "tokenizer.json",
+            "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/main/tokenizer.json",
+            "bytes": null,
+            "sha256": null
+          },
+          {
+            "filename": "tokenizer_config.json",
+            "local_name": "tokenizer_config.json",
+            "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/main/tokenizer_config.json",
+            "bytes": null,
+            "sha256": null
+          },
+          {
+            "filename": "vocab.json",
+            "local_name": "vocab.json",
+            "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/main/vocab.json",
+            "bytes": null,
+            "sha256": null
+          },
+          {
+            "filename": "merges.txt",
+            "local_name": "merges.txt",
+            "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/main/merges.txt",
+            "bytes": null,
+            "sha256": null
+          }
+        ]
+      },
+      "estimates": {
+        "weights_bytes": 18700000000,
+        "working_bytes": 2147483648,
+        "ram_bytes": 3221225472,
+        "tokenizer_bytes": 11000000
+      },
+      "local_config": {
+        "processor_class": "VibeVoiceProcessor",
+        "speech_tok_compress_ratio": 3200,
+        "db_normalize": true
+      }
+    }
+  }
+}

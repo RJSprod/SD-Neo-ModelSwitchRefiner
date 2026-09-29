@@ -47,7 +47,11 @@ import mc_progress
 import mc_references
 import mc_styles
 import mc_turns
+import mc_turns_guests
 import mc_voice_api
+import mc_voice_box
+import mc_voice_box_api
+import mc_voice_box_ui
 import mc_voice_clone
 import mc_voice_device
 import mc_voice_engines
@@ -64,6 +68,8 @@ import mc_voice_sopro_runtime
 import mc_voice_pocket
 import mc_voice_pocket_profile
 import mc_voice_pocket_runtime
+import mc_voice_vibevoice
+import mc_voice_vibevoice_runtime
 import mc_voice_pipeline
 import mc_voice_pipeline_runtime
 import mc_voice_state
@@ -4149,6 +4155,11 @@ def _on_script_unloaded():
     # prevent, and section 34 says so in as many words: a failure in one must
     # not stop the cleanup of the others.
     for name, stop in (
+            # The Voice Box's renders first, so that no job asks for a card
+            # while the door is closing, then VibeVoice's worker, which holds a
+            # card's worth of memory and is a process of its own (docs/23).
+            ("the Voice Box's renders", mc_voice_box.stop),
+            ("VibeVoice", mc_voice_vibevoice_runtime.shutdown),
             ("Kokoro", mc_voice_runtime.shutdown),
             ("Sopro", mc_voice_sopro_runtime.shutdown),
             # PocketTTS's ordinary Stop drains an abandoned unit; this is not
@@ -4197,6 +4208,7 @@ try:
 
     script_callbacks.on_script_unloaded(_on_script_unloaded)
     script_callbacks.on_ui_tabs(mc_llm_studio.on_ui_tabs)
+    script_callbacks.on_ui_tabs(mc_voice_box_ui.on_ui_tabs)
     # Both of these need the settings loaded, which is what on_app_started is:
     # the log file so that everything this extension says survives the terminal
     # window, and the route the Literal Prompt boxes report themselves over --
@@ -4210,6 +4222,11 @@ try:
     # the reason every other route in this file is: there is no FastAPI app to
     # add anything to until the host has one.
     script_callbacks.on_app_started(mc_voice_api.install)
+    script_callbacks.on_app_started(mc_voice_box_api.install)
+    # VibeVoice becomes a guest of the cards here, from outside the voice
+    # modules (invariant I-3): the turn system never imports an engine and
+    # no voice module imports it.
+    script_callbacks.on_app_started(mc_turns_guests.install)
     # The Forge Assistant's own routes, for the same reason and at the same
     # moment: the panel is a DOM shell outside the tab tree, so this is the
     # only transport it has, and there is no FastAPI app to add it to until the

@@ -30,17 +30,24 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VOICE_MODULES = sorted(ROOT.glob("mc_voice_*.py"))
 
-FORBIDDEN = ("mc_memory", "mc_broker", "mc_plan", "mc_llm_runtime")
-"""The memory planner, the GPU broker, the execution plan, and the language
-model runtime. Voice may not import any of them at any depth."""
+FORBIDDEN = ("mc_memory", "mc_broker", "mc_plan", "mc_llm_runtime", "mc_turns",
+             "mc_turns_guests")
+"""The memory planner, the GPU broker, the execution plan, the language model
+runtime, and -- since the Voice Box -- the per-card turn system and its guest
+bridge. Voice may not import any of them at any depth: a render asks for its
+card through the client ``mc_turns_guests`` hands ``mc_voice_box``, never by
+importing the turn system, and VibeVoice is registered as a guest from outside
+(``mc_turns_guests.install``), which is the same direction every other voice
+module keeps."""
 
 WORKER = ROOT / "voice_worker" / "worker.py"
 SOPRO_WORKER = ROOT / "sopro_worker" / "worker.py"
 POCKET_WORKER = ROOT / "pocket_worker" / "worker.py"
 PIPELINE_WORKER = ROOT / "pipeline_worker" / "worker.py"
+VIBEVOICE_WORKER = ROOT / "vibevoice_worker" / "worker.py"
 
-WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER, PIPELINE_WORKER)
-"""All four sidecars. Each is run by path under a *different* interpreter out
+WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER, PIPELINE_WORKER, VIBEVOICE_WORKER)
+"""All five sidecars. Each is run by path under a *different* interpreter out
 of a *different* dependency closure, and none may import another's engine,
 another's file, or anything from this extension.
 
@@ -51,7 +58,11 @@ be independently verifiable again.
 
 The Voice Pipeline's is a fourth for the same reason and one more: its lifetime
 is coupled to PocketTTS's and its dependencies deliberately are not, so an
-enhancement update cannot mutate the environment a working voice depends on."""
+enhancement update cannot mutate the environment a working voice depends on.
+
+VibeVoice's is a fifth, and the first that runs on a graphics card: its closure
+carries a CUDA build of Torch that no CPU engine may inherit, and its worker is
+the one process the turn system evicts by ending it."""
 
 
 def imported_names(path: Path) -> set[str]:

@@ -7259,3 +7259,513 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     font-size: 0.85em;
     opacity: 0.8;
 }
+
+/* ==========================================================================
+   Voice Box
+   ==========================================================================
+
+   The tab is one element, #mc-voice-box, that javascript/voice_box.js fills,
+   so every selector here is under that id and names only classes the script
+   put in the page. LLM Studio's three rules apply unchanged: scoped, nothing
+   Gradio generated, and no colour of this file's own -- every colour is a
+   var() reference to the host's theme, so a light/dark switch and a Lobe-like
+   palette arrive here without this file being told they exist.
+
+   The four stage cards are a wrapping flex row with a connector glyph between
+   them -- INPUT, PROMPT, CONFIGURATION, OUTPUTS, the pipeline read left to
+   right and, when it wraps, top to bottom. Waveforms are canvases that take
+   their ink from `color`, which is why no rule below paints one. Nothing here
+   draws above the host's dialogs: the section sets no z-index at all, so Mini
+   Paint's dialog layer (2000) and the assistant's panel (1200) stay above
+   everything Voice Box shows. */
+
+#mc-voice-box {
+    color: var(--body-text-color, inherit);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75em;
+    padding: 0.5em 0 1em;
+}
+
+/* `hidden` wins over anything a theme says about display. The script hides
+   and shows with the attribute, and a theme's `display: flex` on a class would
+   otherwise put a hidden trimmer back on screen. */
+#mc-voice-box [hidden] {
+    display: none !important;
+}
+
+#mc-voice-box .mc-voice-box-head {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75em;
+}
+
+#mc-voice-box .mc-voice-box-title {
+    font-size: var(--text-lg, 1.15em);
+    font-weight: 600;
+    margin: 0;
+}
+
+#mc-voice-box .mc-voice-box-pipeline-bar {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+    margin-left: auto;
+}
+
+#mc-voice-box .mc-voice-box-pipeline-label {
+    align-items: center;
+    display: inline-flex;
+    gap: 0.4em;
+}
+
+/* Controls: the host's own surfaces and radii, and a finger-sized minimum. */
+#mc-voice-box select,
+#mc-voice-box textarea,
+#mc-voice-box input[type="text"],
+#mc-voice-box input[type="number"] {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    color: inherit;
+    font: inherit;
+    min-height: 2.2em;
+    padding: 0.3em 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-button {
+    align-items: center;
+    background: var(--button-secondary-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    color: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    justify-content: center;
+    min-height: 2.2em;
+    padding: 0.3em 0.8em;
+}
+
+#mc-voice-box .mc-voice-box-button:focus-visible {
+    outline: 2px solid var(--color-accent, currentColor);
+    outline-offset: 1px;
+}
+
+#mc-voice-box .mc-voice-box-button[disabled] {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+/* A toggle that is on -- Loop, a speaker slot this sample holds, the trimmer's
+   loop -- is filled with the accent, the way the host's own pressed states are. */
+#mc-voice-box .mc-voice-box-button[aria-pressed="true"] {
+    background: var(--color-accent, currentColor);
+    border-color: var(--color-accent, currentColor);
+    color: var(--button-primary-text-color, var(--background-fill-primary, inherit));
+}
+
+#mc-voice-box .mc-voice-box-render {
+    background: var(--button-primary-background-fill, var(--color-accent, currentColor));
+    border-color: var(--button-primary-border-color, var(--color-accent, currentColor));
+    color: var(--button-primary-text-color, inherit);
+    font-weight: 600;
+    padding-inline: 1.4em;
+}
+
+/* The file input hides inside its label, which is drawn as the button. */
+#mc-voice-box .mc-voice-box-file {
+    overflow: hidden;
+    position: relative;
+}
+
+#mc-voice-box .mc-voice-box-file-input {
+    cursor: pointer;
+    height: 100%;
+    inset: 0;
+    opacity: 0;
+    position: absolute;
+    width: 100%;
+}
+
+/* -- the four stages ------------------------------------------------------- */
+
+#mc-voice-box .mc-voice-box-stages {
+    align-items: stretch;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-stage {
+    background: var(--background-fill-secondary, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    display: flex;
+    flex: 1 1 280px;
+    flex-direction: column;
+    gap: 0.6em;
+    min-width: 0;
+    padding: 0.75em;
+}
+
+#mc-voice-box .mc-voice-box-stage-title {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    margin: 0;
+}
+
+#mc-voice-box .mc-voice-box-stage-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5em;
+    min-width: 0;
+}
+
+/* The connector: an arrow between cards, drawn by CSS so the markup carries
+   nothing decorative. It points down when the cards stack on a phone. */
+#mc-voice-box .mc-voice-box-connector {
+    align-self: center;
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 auto;
+    font-size: 1.4em;
+    line-height: 1;
+    text-align: center;
+    width: 1.2em;
+}
+
+#mc-voice-box .mc-voice-box-connector::before {
+    content: "\2192";
+}
+
+@media (max-width: 640px) {
+    #mc-voice-box .mc-voice-box-stage {
+        flex-basis: 100%;
+    }
+
+    #mc-voice-box .mc-voice-box-connector {
+        width: 100%;
+    }
+
+    #mc-voice-box .mc-voice-box-connector::before {
+        content: "\2193";
+    }
+
+    #mc-voice-box .mc-voice-box-pipeline-bar {
+        margin-left: 0;
+    }
+}
+
+/* -- rows, lists, captions ------------------------------------------------- */
+
+#mc-voice-box .mc-voice-box-row {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+}
+
+#mc-voice-box .mc-voice-box-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+#mc-voice-box .mc-voice-box-subtitle {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+    font-weight: 600;
+    margin: 0.4em 0 0;
+}
+
+#mc-voice-box .mc-voice-box-empty {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+    font-style: italic;
+}
+
+/* Waveforms are canvases in the element's own colour. `touch-action: none` on
+   the trimmer's is what lets a finger drag a handle instead of scrolling. */
+#mc-voice-box .mc-voice-box-wave {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    display: block;
+    height: 48px;
+    width: 100%;
+}
+
+#mc-voice-box .mc-voice-box-trimmer-wave {
+    cursor: col-resize;
+    height: 120px;
+    touch-action: none;
+}
+
+#mc-voice-box .mc-voice-box-sample-wave {
+    height: 36px;
+}
+
+#mc-voice-box .mc-voice-box-lane-wave {
+    height: 64px;
+}
+
+#mc-voice-box .mc-voice-box-speaker-wave {
+    flex: 0 0 6em;
+    height: 28px;
+    width: 6em;
+}
+
+/* The players are driven by the lane's own buttons; the elements stay out of
+   the layout, and nothing here is a bare src to a token-checked route. */
+#mc-voice-box audio {
+    display: none;
+}
+
+/* -- INPUT ----------------------------------------------------------------- */
+
+#mc-voice-box .mc-voice-box-trimmer {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    padding: 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-trimmer-source,
+#mc-voice-box .mc-voice-box-trimmer-readout {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+}
+
+#mc-voice-box .mc-voice-box-trimmer-name {
+    flex: 1 1 8em;
+    min-width: 6em;
+}
+
+#mc-voice-box .mc-voice-box-progress {
+    background: var(--background-fill-primary, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    height: 8px;
+    overflow: hidden;
+    width: 100%;
+}
+
+#mc-voice-box .mc-voice-box-progress-bar {
+    background: var(--color-accent, currentColor);
+    display: block;
+    height: 100%;
+    width: 0;
+}
+
+#mc-voice-box .mc-voice-box-sample,
+#mc-voice-box .mc-voice-box-lane {
+    background: var(--background-fill-primary, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    padding: 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-sample-title,
+#mc-voice-box .mc-voice-box-lane-name {
+    cursor: text;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#mc-voice-box .mc-voice-box-sample-meta,
+#mc-voice-box .mc-voice-box-lane-meta {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-xs, 0.8em);
+}
+
+#mc-voice-box .mc-voice-box-sample-speakers {
+    display: inline-flex;
+    gap: 0.2em;
+}
+
+#mc-voice-box .mc-voice-box-sample-speaker,
+#mc-voice-box .mc-voice-box-prompt-star,
+#mc-voice-box .mc-voice-box-prompt-delete,
+#mc-voice-box .mc-voice-box-speaker-clear {
+    flex: 0 0 auto;
+    min-width: 2.2em;
+    padding-inline: 0.4em;
+}
+
+/* -- PROMPT ---------------------------------------------------------------- */
+
+#mc-voice-box .mc-voice-box-prompt {
+    min-height: 10em;
+    resize: vertical;
+    width: 100%;
+}
+
+#mc-voice-box .mc-voice-box-prompt-help,
+#mc-voice-box .mc-voice-box-prompt-summary {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-xs, 0.8em);
+}
+
+#mc-voice-box .mc-voice-box-prompt-summary {
+    font-weight: 600;
+}
+
+#mc-voice-box .mc-voice-box-prompt-lists {
+    display: grid;
+    gap: 0.5em;
+    grid-template-columns: 1fr 1fr;
+}
+
+#mc-voice-box .mc-voice-box-prompt-entry {
+    align-items: center;
+    display: flex;
+    gap: 0.2em;
+}
+
+/* A prompt in the lists is a button the width of the column, its words cut
+   with an ellipsis; the whole text is its title. */
+#mc-voice-box .mc-voice-box-prompt-text {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+    #mc-voice-box .mc-voice-box-prompt-lists {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* -- CONFIGURATION --------------------------------------------------------- */
+
+#mc-voice-box .mc-voice-box-fields {
+    display: grid;
+    gap: 0.4em;
+    grid-template-columns: repeat(auto-fit, minmax(9em, 1fr));
+}
+
+#mc-voice-box .mc-voice-box-field {
+    display: flex;
+    flex-direction: column;
+    font-size: var(--text-sm, 0.85em);
+    gap: 0.2em;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-field-check {
+    align-items: center;
+    flex-direction: row;
+    gap: 0.4em;
+}
+
+#mc-voice-box .mc-voice-box-field-input {
+    min-width: 0;
+    width: 100%;
+}
+
+#mc-voice-box .mc-voice-box-field-check .mc-voice-box-field-input {
+    width: auto;
+}
+
+#mc-voice-box .mc-voice-box-speakers {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+}
+
+#mc-voice-box .mc-voice-box-speaker {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+}
+
+#mc-voice-box .mc-voice-box-speaker-label {
+    flex: 0 0 5.5em;
+    font-size: var(--text-sm, 0.85em);
+    font-weight: 600;
+}
+
+#mc-voice-box .mc-voice-box-speaker-title {
+    flex: 1 1 6em;
+    font-size: var(--text-sm, 0.85em);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* -- OUTPUTS --------------------------------------------------------------- */
+
+#mc-voice-box .mc-voice-box-lane-head {
+    justify-content: space-between;
+}
+
+/* -- the footer ------------------------------------------------------------ */
+
+#mc-voice-box .mc-voice-box-footer {
+    border-top: 1px solid var(--border-color-primary, currentColor);
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    padding-top: 0.75em;
+}
+
+#mc-voice-box .mc-voice-box-footer-row {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6em;
+}
+
+#mc-voice-box .mc-voice-box-render-reason,
+#mc-voice-box .mc-voice-box-install-progress,
+#mc-voice-box .mc-voice-box-cards {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+}
+
+#mc-voice-box .mc-voice-box-job {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    font-size: var(--text-sm, 0.85em);
+    gap: 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-job[data-phase="failed"] .mc-voice-box-job-text {
+    color: var(--error-text-color, inherit);
+}
+
+#mc-voice-box .mc-voice-box-status {
+    font-size: var(--text-sm, 0.85em);
+    min-height: 1.4em;
+}
+
+#mc-voice-box .mc-voice-box-status[data-kind="error"],
+#mc-voice-box .mc-voice-box-status[data-kind="warn"] {
+    color: var(--error-text-color, inherit);
+}
+
+#mc-voice-box .mc-voice-box-rename {
+    font: inherit;
+    min-width: 8em;
+}

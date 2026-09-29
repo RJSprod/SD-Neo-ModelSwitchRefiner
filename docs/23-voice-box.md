@@ -289,9 +289,24 @@ was told it was independent of the generation there.
 
 `mc_turns.py` owns the turns. It is not a voice module: it imports the broker,
 the memory side and `mc_wangp`, and the VibeVoice runtime never imports it. The
-runtime is registered with it as a *guest* by `scripts/model_chain.py` and is
-handed a client object — the direction of dependency that keeps invariant I-3
-(`tests/test_voice_independence.py`) true for every CPU engine.
+join is `mc_turns_guests.py`, which is not a voice module either: it registers
+`VibeVoiceGuest` (three methods that reach `mc_voice_vibevoice_runtime` per
+card) with the turn system, and hands `mc_voice_box` a `TurnClient` through which
+a render asks for its card, reads the cards' snapshot, lists the machine's cards
+with their roles, and unloads a warm guest by hand — the direction of dependency
+that keeps invariant I-3 (`tests/test_voice_independence.py`, where `mc_turns`
+and `mc_turns_guests` are now on the forbidden list) true for every voice
+module. `scripts/model_chain.py` calls `mc_turns_guests.install` from
+`on_app_started`.
+
+The Voice Box itself is four voice modules and a worker: `mc_voice_vibevoice.py`
+(manifest, installer, settings, the VRAM and RAM estimates and their
+calibration), `mc_voice_vibevoice_runtime.py` (one worker process per card, the
+handshake that proves the card, render, cancel, evict), `vibevoice_worker/
+worker.py` (the process: torch, transformers and the community `vibevoice`
+package, imported lazily), `mc_voice_box.py` (samples, prompts, configurations,
+pipelines, outputs, the script parser and the render service), `mc_voice_box_api.py`
+(the routes) and `mc_voice_box_ui.py` with `javascript/voice_box.js` (the page).
 
 `mc_broker` gains a third family, `voice`: the image side's reclaim and the LLM's
 look there first, a warm guest is evictable and a rendering one is not, and its
@@ -478,6 +493,25 @@ Settings that a live page changes (the save folder, configurations, favourites)
 live in Voice Box's own files under the voice data root, so Forge's *Apply
 settings* cannot write a stale copy over them.
 
+**As built (phases 1b and 2).** A sample is three to sixty seconds, normalised
+to mono 16-bit at 24 kHz by `mc_voice_reference`, at most 64 MB on the way in,
+and carries 240 waveform peaks so lists draw without decoding. `[pause]` is
+700 ms, `[pause:ms]` is clamped to 50–10000 and adjacent pauses add up to that
+cap; each section is rendered on its own and the silence put between them. The
+history keeps 100 prompts and never drops a favourite. A configuration holds the
+model, the card, steps 1–50 (10), CFG 1.0–3.0 (1.3), a seed or none, max new
+tokens or none, and four speaker slots. A render job is `queued → waiting →
+loading → rendering → done | failed | cancelled`; everything that can be refused
+before a card is asked for is refused at the press; a blocked turn fails the job
+with the turn's own warning; a cancel withdraws the turn of a waiting job and
+tells the worker of a rendering one to stop; the card is handed back in every
+ending, and the warm stay follows Settings → Model Chain (Voice Box's own toggle
+can only decline it). Renders on one card run in order, one per card. Outputs are
+named after their pipeline and number, saved into the remembered folder with a
+JSON sidecar and never overwritten, and downloaded through the token-checked
+route. Files live under `<voice data root>/voice_box/`. The routes are under
+`/model-chain/voice-box` on Voice Chat's page token.
+
 ---
 
 ## 9. Voice Chat
@@ -493,15 +527,17 @@ that is busy rendering or generating, a spoken reply starts when that work ends.
 | Phase | Delivers |
 |---|---|
 | **1a** | This document; the per-card turn system (`mc_turns`), the gate on txt2img and img2img, parking and return of the image model with its setting, the keep-warm setting, the voice family in the broker, the LLM's side of a turn; Mini Paint's lease, executor gate and bridge 1.12.0 |
-| 1b | The VibeVoice runtime: closure and installer (mirror + folder, pinned pair of torch wheels, tokenizer), worker with a handshake that proves its card, registration as a guest, single-speaker synthesis in a first Voice Box |
-| 2 | The Voice Box page: samples and local trim, prompts with history and favourites, configurations, outputs, pipelines, audio focus, up to four speakers |
-| 3 | VibeVoice as a Voice Chat engine |
-| 4 | Realtime 0.5B, quantised 7B, LoRA, speaking while the LLM writes |
+| **1b** | The VibeVoice runtime: the closure and installer (a community mirror or a folder; torch from the CUDA 12.8 index at a pinned version, no torchaudio; the Qwen tokenizer beside the weights and a local processor config that points at it), the worker with a handshake that proves its card, one worker per card, registration as a guest through `mc_turns_guests`, calibration of the estimates from every render's peak |
+| **2** | The Voice Box page: samples and local trim, prompts with history and favourites, configurations, outputs with loop, save, download and trim-to-sample, pipelines, audio focus, up to four speakers, the render service and its routes |
+| 3 | VibeVoice as a Voice Chat engine — not built: a spoken reply from an eighteen-gigabyte guest that has to take a turn on a card is a different latency class from the CPU engines, and the completed-reply-first design of section 9 wants a measurement of the first real renders before it is worth a fourth engine |
+| 4 | Realtime 0.5B, quantised 7B, LoRA, speaking while the LLM writes — not built, for the same reason and one more: the 0.5B and the quantised weights are different checkpoints with different memory figures, and the manifest's pins for the 7B have not been made on a machine that reaches the hub yet |
 
 Phase 1a has no guest in it: until 1b registers VibeVoice, the gate is a
-dictionary lookup and nothing changes for anybody. It is built first because it
+dictionary lookup and nothing changes for anybody. It was built first because it
 is the part every later phase stands on, and the part that can be tested without
-a GPU.
+a GPU. Phases 1b and 2 were built together, against doubles of the worker and
+the cards: nothing in them has run on the user's machine, and the first real
+render is the measurement every estimate here waits for.
 
 ## 11. Risks and open items
 
@@ -519,7 +555,11 @@ a GPU.
   keep the lock after all.
 * Two handoffs disagree about this machine's RAM (48 GB and 96 GB). Every RAM
   decision logs its figures, so the first turn settles it.
-* Nothing in phase 1a has run on the user's machine.
+* Nothing in phases 1a, 1b or 2 has run on the user's machine. The first
+  things to watch: the worker's handshake reporting the card asked for; the
+  7B's real peak on the 3090 against the estimate (the calibration takes it from
+  there); the installer against the mirror's actual shard list; and the trimmer
+  on a real video file in LibreWolf.
 * Exclusive residency (*Free the LLM for every image*) sweeps a warm VibeVoice
   off the image card with the language model, because the mode is a promise that
   the image family owns that card. The gate evicts a warm guest before every

@@ -5447,6 +5447,210 @@ one line with a count of the rest. A fixed poll that logged every failure turned
 one configuration problem into a hundred and thirty-six identical warnings in
 three minutes, which buried the line that explained it.
 
+## Voice Box
+
+A tab that turns a script into speech with **VibeVoice 7B** — Microsoft's
+long-form, multi-speaker text-to-speech model, as it survives in MIT-licensed
+community copies — on whichever of your cards you choose. It is the second
+thing in this extension that wants a whole graphics card, and everything about
+how it shares one is in [Whose turn it is on each card](#whose-turn-it-is-on-each-card):
+a render goes *next* on its card and never cuts anything off, the image model
+that made room for it comes back, and a request that would overflow VRAM or RAM
+is refused with the numbers before anything loads. This section is about the
+rest — the page, what it keeps, and the worker behind it.
+
+### The page
+
+Four stages in a row, read left to right like a pipeline without wires —
+**INPUT → PROMPT → CONFIGURATION → OUTPUTS** — and above them a **pipeline
+bar**. A pipeline is one pass through the four stages kept the way a
+conversation is kept: a file of its own holding its prompt, the configuration
+it points at and the outputs it made, so you can have several going and come
+back to any of them. Below the stages: **Render** (disabled with the reason when it cannot run — the
+engine not installed, an empty script, a speaker without a sample, no card), the
+list of this pipeline's jobs with what each is doing and a Cancel while it is
+live, one line about what the cards are doing, and an *Unload VibeVoice from …*
+button for each card a worker is up on.
+
+The page is one block of HTML painted once and a script that owns it. Everything
+it shows it fetched from the WebUI on the page token, every request has a
+deadline, a second press waits for the first instead of adding a request, and a
+render's progress is read by polling a record the server owns — never by a
+stream, because a stream held open on Forge's origin is a connection the page
+cannot spare (Mini Paint NEO's browser-connection incident). Settings a live page
+changes — the save folder, configurations, favourites, the chosen card — live in
+Voice Box's own files, so *Apply settings* cannot write a stale copy over them.
+
+### Input: samples, trimmed where they are
+
+Choose an audio or video file. The browser decodes it and draws its waveform on
+your device — nothing is uploaded to look at it. Drag the in and out points (the
+selection starts as the first sixty seconds), play or loop the selection, give it
+a name, and **Save as sample**: only the selection is encoded, as 16-bit mono at
+24 kHz, and sent. A file too long to decode whole — over twenty minutes or two
+hundred megabytes — is captured by playing the selection through the page's own
+audio graph, in real time, with a progress bar. A **Record** button takes a sample
+from the microphone the same way. The server normalises what arrives exactly as
+it does for every engine that clones from a recording (`mc_voice_reference`):
+a sample is three to sixty seconds long, has a voice in it, and is at most
+64 MB on the way in.
+
+The **sample library** underneath is a list of titles with waveforms. Each row
+plays, renames on a double click, deletes, and carries four buttons — **1 2 3
+4** — that put the sample on a speaker of the configuration being edited. A
+sample that a configuration uses can still be deleted; that speaker's slot is
+simply empty again.
+
+### Prompt
+
+The script. `Speaker 1:` … `Speaker 4:` at the start of a line names who says
+it (`[2]:` is accepted too); a line with no name continues the one before it,
+or is Speaker 1's when nobody has spoken yet. `[pause]` puts 700 ms of silence
+in; `[pause:1500]` puts 1500 ms (50 to 10000, and two pauses with nothing between
+them add up, to that cap). A pause is a break between separately generated
+sections: the model renders each section on its own and the silence is put
+between them, which is why the summary under the box says how many sections
+there are, along with the speakers and the word count. A prompt with no words,
+or one naming a fifth speaker, is refused before anything is asked of a card.
+
+Every render puts its prompt at the top of the **history**; the same words are
+one entry. The history keeps a hundred and lets the oldest go; a prompt you
+**star** is a favourite and is never let go.
+
+### Configuration
+
+A named set of the knobs a render takes, kept and chosen by name: the model,
+the card (each named, and marked when it is the image model's card or WanGP's),
+**diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
+a **seed** (blank for a different one each time), **max new tokens** (blank for
+the model's own limit), and the four **speaker** slots, each holding one sample.
+An edit marks the configuration *Save •* until you save it, and Render never
+saves for you: an unsaved configuration is sent along with the render as it
+stands. The card and model you pick become the defaults for the next
+configuration. The values a render actually used are written on its output.
+Controls the model cannot honour are not on the page.
+
+### Outputs
+
+Every render is a lane: its name (rename on a double click), its waveform with
+a playhead, **Play**, **Loop** (remembered per output), **Trim to sample** —
+the same trimmer as the input stage, on the render, so a phrase you like becomes
+a voice sample without leaving the page — **Save**, **Download**, **Delete**,
+and a line of metadata: model, seed, steps, CFG, the speakers' samples, the
+length, how long it took.
+
+**Save** writes the WAV into a folder on the Forge PC that you choose **once**:
+the first press opens the machine's own folder dialog (or, when the WebUI is
+served to other machines, asks you to type a path), and every save after that
+goes there without asking. A file of the same name is never overwritten — the
+second is `name (2).wav` — and a `.json` beside each WAV carries the metadata.
+**Download** is the browser's own download of the same bytes.
+
+### A render's life
+
+Press **Render** and the job appears in the footer. Everything that can be
+refused before a card is asked for is refused at the press, in a sentence:
+the prompt has no words, *Speaker 2 has no sample*, no card is chosen,
+VibeVoice is not installed. Then:
+
+| Phase | What it means |
+|---|---|
+| **queued** | Behind another render on the same card. Renders on one card run in order; the two cards may each run one |
+| **waiting** | Asking for the card: the line says what the turn is waiting for — a generation finishing, WanGP's task, the image model being parked |
+| **loading** | The model is going onto the card (the first render after an eviction; a warm VibeVoice skips it) |
+| **rendering** | Section *n* of *m*, and how many seconds of speech so far |
+| **done** | The output is in the list |
+| **failed** | With the reason. A request the card or the RAM cannot hold fails here, with the turn's own warning — nothing was loaded and nothing was paged |
+| **cancelled** | Withdrawn by you, or the WebUI closed |
+
+**Cancel** withdraws a queued job at once, withdraws the turn of a waiting one —
+a queued turn holds every image job on its card, so it is not left there — and
+tells the worker of a rendering one to stop at its next step, which it does
+within a second or two. Whatever the ending, the card is handed back, and
+whether VibeVoice stays warm on it follows *Keep VibeVoice warm between
+requests* in Settings → Model Chain; Voice Box's own *Keep warm* toggle can
+decline a warm stay but never force one against that setting. A render is named
+after its pipeline and its number in it (*Trailer 3*) unless you name it.
+
+### Where it lives
+
+Under the voice data root, in `voice_box/`: `samples/<id>/` (the sound and its
+metadata), `prompts.json`, `configurations/<id>.json`, `pipelines/<id>.json`,
+`outputs/<id>/` and `settings.json`. Sound is always mono 16-bit WAV at 24 kHz,
+VibeVoice's own rate. Nothing is written to Forge's settings store.
+
+### Audio focus
+
+Voice Box and Voice Chat share one rule about the speakers and the microphone,
+carried by one event on the page (`mc:audio-focus`): when Voice Box plays or
+records, Voice Chat stops speaking and closes any microphone it had open — the
+composer's, the flyout's dictation and the clone recorder's — and when Voice Chat
+speaks or listens, Voice Box pauses. Neither side needs the other to exist.
+
+### The worker
+
+VibeVoice runs in a process of its own, one per card it is used on, started with
+`CUDA_VISIBLE_DEVICES` set to that card's UUID and offline (`HF_HUB_OFFLINE`,
+`TRANSFORMERS_OFFLINE`), out of a runtime that is its own closure and nobody
+else's. Its handshake reports the UUID of the card it actually came up on, and a
+worker on any other card is refused rather than used. It loads the model in
+bfloat16 with PyTorch's scaled-dot-product attention, sets the diffusion steps
+the configuration asks for, and renders a section at a time; a cancel is checked
+at the top of every generation step. What it holds on the card is what the turn
+system sees (`resident_bytes`), and *evicting* it means ending the process, so
+the card is really free — the CUDA context included — before whoever needed it
+goes next. **Unload** on the page does the same by hand, through the turn system,
+so a parked image model comes back.
+
+Every render reports the highest memory the card saw; the next request asks for
+at least that much (`calibration.json` beside the engine's settings), so the
+estimate a turn is checked against — the shard sizes plus a 2 GB working
+allowance until then — learns from the machine rather than from a number written
+here. A render's output also says when the model stopped at its token budget
+rather than at the end of the script, so a truncated render is visible instead
+of silent.
+
+### Installing
+
+Everything is in `voice/managed-vibevoice-models.json`, read the way every other
+voice manifest is ("Who vouches for the bytes", above). The runtime closure —
+the community `vibevoice` package, `transformers` 4.51.3 and `accelerate` 1.6.0,
+which it needs, `diffusers` below the release that needs a newer hub client, and
+their dependencies, thirty-one wheels in all — is named, sized and hashed from
+pypi.org, wheel by wheel, for Windows with CPython 3.13 and CUDA 12.8; torch
+2.8.0 comes from the CUDA 12.8 index, matched by its exact version, and its
+digest is checked against what that index publishes. Nothing the worker never
+imports is shipped: the demo's Gradio and WebRTC stack, librosa and soundfile
+(vibevoice reaches for them only to read and write files, which the worker never
+does), torchaudio, and `httpx`, which `diffusers` declares for its pipelines and
+which none of the scheduler modules vibevoice imports ever touches.
+The 7B weights, from a community mirror, and the Qwen tokenizer it needs are
+declared but not hashed: the machine that wrote the manifest could not reach the
+hub. Until `tools/pin_vibevoice_models.py` runs on one that can, each file is
+checked against the digest its publisher reports at install time and recorded in
+the untracked overlay, exactly as for the Voice Pipeline. The shard list is read
+from the model's own index at install, so a mirror that ships the weights in a
+different number of pieces still installs. Installing from a folder you filled
+yourself works for the runtime and the model alike; a model folder without the
+tokenizer beside it has the four tokenizer files fetched, or is refused with the
+exact folder to fill when the hub cannot be reached.
+
+The installer writes a local `preprocessor_config.json` beside the weights that
+points the processor at the tokenizer directory it installed — the community
+code picks its tokenizer class by the word *qwen* in that path, and would
+otherwise reach for the hub — and keeps the mirror's own copy beside it.
+
+### The routes
+
+Under `/model-chain/voice-box`, on the same page token and origin check as Voice
+Chat's routes and with the same absence of a sign-in gate: status, install,
+settings and the folder dialog; samples (a raw WAV upload with its title in a
+header), prompts, configurations, pipelines; render, jobs and cancel; outputs,
+their audio, save and download; and one runtime action. Audio is fetched with
+the token and played from memory. A request that is refused says why with the
+status that fits — 400 for a bad value, 404 for something no longer there, 409
+for something that cannot happen right now, 413 for too large.
+
 ## Layout
 
 ```
@@ -5469,6 +5673,8 @@ mc_styles.py          style library integration helpers
 mc_broker.py          cross-workload residency policy and the workload lock
 mc_turns.py           whose turn it is on each card: a speech guest's turns, the
                       image gate, parking and return, warm stays, WanGP's lease
+mc_turns_guests.py    VibeVoice registered as a guest of the cards, and the client
+                      the Voice Box asks for its card through (neither is a voice module)
 mc_gguf.py            GGUF metadata header reader
 mc_llm_context.py     context capacity estimation and its calibration
 mc_llm_runtime.py     the managed llama.cpp process and its placement
@@ -5546,6 +5752,17 @@ pipeline_worker/worker.py  the enhancement sidecar: the sample clock lives here
 voice/managed-pipeline-models.json  the pipeline trust root (data only, unpinned)
 tools/pin_pipeline_models.py  resolves and pins it after Phase 0 (maintainers only)
 voice/managed-pocket-models.json  the Pocket closure and its voices (data only)
+
+mc_voice_vibevoice.py the VibeVoice engine: manifest, installer, settings, the estimates
+mc_voice_vibevoice_runtime.py  one worker per card, the handshake that proves the card
+vibevoice_worker/worker.py  the VibeVoice sidecar, the one that runs on a card
+mc_voice_box.py       the Voice Box's files and its render service
+mc_voice_box_api.py   the Voice Box's routes
+mc_voice_box_ui.py    the Voice Box tab: one root, painted once
+javascript/voice_box.js  the page: four stages, the trimmer, the lanes, audio focus
+voice/managed-vibevoice-models.json  the VibeVoice closure (wheels pinned; model declared)
+tools/pin_vibevoice_models.py  resolves the closure, and pins the model on a machine
+                      that reaches the hub (maintainers only)
 tools/pin_pocket_models.py  resolves that closure from PyPI (maintainers only)
 mc_neutralize.py      Neutralize Prompt: one subtraction pass, and what it answers
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
