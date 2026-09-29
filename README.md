@@ -5466,8 +5466,11 @@ Four stages in a row, read left to right like a pipeline without wires —
 bar**. A pipeline is one pass through the four stages kept the way a
 conversation is kept: a file of its own holding its prompt, the configuration
 it points at and the outputs it made, so you can have several going and come
-back to any of them. Below the stages: **Render**, the list of this pipeline's
-jobs with what each is doing, and one line about what the cards are doing.
+back to any of them. Below the stages: **Render** (disabled with the reason when it cannot run — the
+engine not installed, an empty script, a speaker without a sample, no card), the
+list of this pipeline's jobs with what each is doing and a Cancel while it is
+live, one line about what the cards are doing, and an *Unload VibeVoice from …*
+button for each card a worker is up on.
 
 The page is one block of HTML painted once and a script that owns it. Everything
 it shows it fetched from the WebUI on the page token, every request has a
@@ -5481,11 +5484,12 @@ Voice Box's own files, so *Apply settings* cannot write a stale copy over them.
 ### Input: samples, trimmed where they are
 
 Choose an audio or video file. The browser decodes it and draws its waveform on
-your device — nothing is uploaded to look at it. Drag the in and out points,
-play or loop the selection, give it a name, and **Save as sample**: only the
-selection is encoded, as 16-bit mono at 24 kHz, and sent. A file too long to
-decode whole is captured by playing the selection through the page's own audio
-graph, in real time, with a progress bar. A **Record** button takes a sample
+your device — nothing is uploaded to look at it. Drag the in and out points (the
+selection starts as the first sixty seconds), play or loop the selection, give it
+a name, and **Save as sample**: only the selection is encoded, as 16-bit mono at
+24 kHz, and sent. A file too long to decode whole — over twenty minutes or two
+hundred megabytes — is captured by playing the selection through the page's own
+audio graph, in real time, with a progress bar. A **Record** button takes a sample
 from the microphone the same way. The server normalises what arrives exactly as
 it does for every engine that clones from a recording (`mc_voice_reference`):
 a sample is three to sixty seconds long, has a voice in it, and is at most
@@ -5520,8 +5524,11 @@ the card (each named, and marked when it is the image model's card or WanGP's),
 **diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
 a **seed** (blank for a different one each time), **max new tokens** (blank for
 the model's own limit), and the four **speaker** slots, each holding one sample.
-The values a render actually used are written on its output. Controls the model
-cannot honour are not on the page.
+An edit marks the configuration *Save •* until you save it, and Render never
+saves for you: an unsaved configuration is sent along with the render as it
+stands. The card and model you pick become the defaults for the next
+configuration. The values a render actually used are written on its output.
+Controls the model cannot honour are not on the page.
 
 ### Outputs
 

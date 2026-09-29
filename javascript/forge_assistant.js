@@ -110,6 +110,9 @@
     // over, and gives way again. Mini Paint NEO publishes it for its Send to
     // WanGP popup; see `yieldTo`.
     const FOREIGN_OVERLAY = "minipaint:overlay";
+    // Voice Box and Voice Chat share the speaker and the microphone through this
+    // event (docs/23-voice-box.md section 8); the flyout only listens.
+    const AUDIO_FOCUS = "mc:audio-focus";
 
     // -- geometry ---------------------------------------------------------- //
 
@@ -1492,6 +1495,8 @@
         });
         // Another extension's dialog has taken the page. See `yieldTo`.
         this.on(document, FOREIGN_OVERLAY, (event) => this.yieldTo(event));
+        // Voice Box took the microphone. See `audioFocusTaken`.
+        this.on(document, AUDIO_FOCUS, (event) => this.audioFocusTaken(event));
 
         // Drawn once a frame, with the latest view. A streamed reply announces
         // every token, and each announcement used to redraw the panel on the
@@ -2953,6 +2958,19 @@
         NS.speech.startDictation({conversationKey: key,
                                   draftVersion: view.draft.draftVersion,
                                   mode: "review"});
+    };
+
+    /** Voice Box is about to play or record.
+     *
+     * Voice Chat's own listener on the same event has already closed this
+     * dictation (and kept what was heard, as a press of the button would); the
+     * switch has to follow, or it would show a microphone that is not open.
+     */
+    Shell.prototype.audioFocusTaken = function (event) {
+        const detail = event && event.detail;
+        if (!detail || detail.owner !== "voice-box" || !this.dictating) return;
+        this.dictating = false;
+        if (this.nodes.dictate) this.nodes.dictate.setAttribute("aria-pressed", "false");
     };
 
     /** The read-aloud switch, pressed.

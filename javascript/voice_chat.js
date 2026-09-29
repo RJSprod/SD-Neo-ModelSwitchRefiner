@@ -322,6 +322,29 @@
         return found;
     }
 
+    // -- audio focus, shared with Voice Box ------------------------------------ //
+
+    // One event on `document`, "mc:audio-focus", `{owner, kind}` (docs/23-voice-box.md
+    // section 8). This side says "voice-chat" before it speaks or opens a
+    // microphone, and gives the speaker and every microphone up when Voice Box
+    // says it is about to use either (`yieldAudioFocus`, at the end). Every
+    // hook is guarded, so a page with only one of the two behaves exactly as it
+    // did before the event existed.
+    const FOCUS_EVENT = "mc:audio-focus";
+    const FOCUS_OWNER = "voice-chat";
+    const FOCUS_RIVAL = "voice-box";
+
+    function announceAudioFocus(kind) {
+        if (typeof CustomEvent !== "function" || typeof document === "undefined" || !document
+            || typeof document.dispatchEvent !== "function") {
+            return;
+        }
+        try {
+            document.dispatchEvent(new CustomEvent(FOCUS_EVENT,
+                                                   {detail: {owner: FOCUS_OWNER, kind: kind}}));
+        } catch (error) { /* a page without the event is a page as before */ }
+    }
+
     // -- the status line ---------------------------------------------------- //
 
     let statusTimer = 0;
@@ -1043,6 +1066,7 @@
         const state = newSpeech(turnId);
         speech = state;
         setVoiceBusy(true);
+        announceAudioFocus("speech");
 
         unlock().then(function (unlocked) {
             if (!unlocked) {
@@ -1673,6 +1697,7 @@
         });
         return openMicrophone().then(function (stream) {
             if (session) session.mediaAt = nowMs();
+            announceAudioFocus("capture");
             const state = {stream: stream, chunks: [], rate: ctx.sampleRate, nodes: [],
                            track: describeTrack(stream), firstPcmAt: 0, graph: "none",
                            standalone: !!standalone};
@@ -2875,6 +2900,7 @@
         if (speaking) return;
         speaking = true;
         setVoiceBusy(true);
+        announceAudioFocus("speech");
         unlock().then(function (unlocked) {
             if (!unlocked) {
                 speaking = false;
@@ -5161,6 +5187,7 @@
     // production path is that the user hears what Conversation will produce.
 
     let soproRecorder = null;
+    let soproRecording = null;
 
     // The chosen recording, decoded, with the part of it the user has picked.
     //
@@ -6196,6 +6223,7 @@
         unlock();
         startCapture(null, true).then(function (state) {
             soproRecorder = state;
+            soproRecording = {form: form, button: button};
             soproClip = null;
             const trim = form.querySelector("[data-mc-voice-trim]");
             if (trim) trim.hidden = true;
@@ -6217,6 +6245,7 @@
         const note = recordingNote(form);
         const state = soproRecorder;
         soproRecorder = null;
+        soproRecording = null;
         button.textContent = "Record here";
         if (!state) return;
         let samples;
@@ -7168,6 +7197,36 @@
             return true;
         },
     };
+
+    // Voice Box is about to play or record. The speaker first, then every
+    // microphone this file can have open: the flyout's dictation (kept and
+    // transcribed, as a press of its own button would), the composer's slide
+    // (ended as a release would) and the clone recorder (its take lands in the
+    // trimmer, as Stop recording would). Only Voice Box's word does this; this
+    // file's own announcements pass through untouched.
+    function yieldAudioFocus(event) {
+        const detail = event && event.detail;
+        if (!detail || detail.owner !== FOCUS_RIVAL) return;
+        attempt("give up the speaker", function () {
+            if (speech || playing || speaking) stopSpeaking(true, "audio-focus");
+        });
+        attempt("give up the microphone", function () {
+            if (dictation) FACADE.stopDictation({commit: true});
+            if (sliding) endSlide(true);
+            if (capture) {
+                releaseCapture(capture);
+                capture = null;
+            }
+            if (soproRecorder && soproRecording) {
+                stopSoproRecording(soproRecording.form, soproRecording.button);
+            }
+        });
+    }
+
+    if (typeof document !== "undefined" && document
+        && typeof document.addEventListener === "function") {
+        document.addEventListener(FOCUS_EVENT, yieldAudioFocus);
+    }
 
     window.forgeAssistant = window.forgeAssistant || {};
     window.forgeAssistant.speech = FACADE;
