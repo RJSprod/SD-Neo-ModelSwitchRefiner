@@ -124,6 +124,8 @@ class Handshake:
     vibevoice: str = ""
     transformers: str = ""
     sample_rate: int = 0
+    attention: list = field(default_factory=list)
+    """The attention implementations the worker's runtime can run."""
 
 
 @dataclass
@@ -134,33 +136,57 @@ class RenderJob:
     one as the user numbered them; ``voices`` maps each speaker to
     ``(float32 little-endian mono PCM bytes, rate)``. ``temperature`` and
     ``top_p`` are sent only with ``sampling``; without it the model makes its
-    own greedy choices, as upstream ships it.
+    own greedy choices, as upstream ships it. ``takes`` renders that many at
+    once, take k at ``seed + k``, which is why several need a seed.
     """
 
     id: str
     script: list = field(default_factory=list)
     voices: dict = field(default_factory=dict)
     cfg_scale: float = 1.3
-    steps: int = 10
+    steps: int = 12
     seed: "int | None" = None
     max_new_tokens: "int | None" = None
     sampling: bool = False
     temperature: "float | None" = None
     top_p: "float | None" = None
+    solver: str = protocol.SOLVER_DEFAULT
+    attention: str = protocol.ATTENTION_DEFAULT
+    takes: int = 1
+
+
+@dataclass
+class Take:
+    """One take's audio: ``pcm`` is its little-endian 32-bit float mono samples."""
+
+    pcm: bytes
+    seconds: float
+    tokens: int
+    capped: bool
+    seed: "int | None" = None
 
 
 @dataclass
 class RenderResult:
-    """What one render produced. ``wav`` is a complete mono PCM16 file."""
+    """What one render produced: its takes, in order, and what the render cost."""
 
-    wav: bytes
-    seconds: float
+    takes: list
     sample_rate: int
     render_seconds: float
     peak_bytes: int
     cancelled: bool
-    tokens: int
-    capped: bool = False
+
+    @property
+    def seconds(self) -> float:
+        return self.takes[0].seconds if self.takes else 0.0
+
+    @property
+    def tokens(self) -> int:
+        return sum(take.tokens for take in self.takes)
+
+    @property
+    def capped(self) -> bool:
+        return any(take.capped for take in self.takes)
 
 
 def card_key(card_uuid) -> str:
@@ -396,13 +422,13 @@ def _worker_script(vibevoice):
     return paths.extension_root() / "vibevoice_worker" / "worker.py"
 
 
-def _note_peak(vibevoice, identifier: str, peak: int) -> None:
+def _note_peak(vibevoice, identifier: str, peak: int, takes: int = 1) -> None:
     """The calibration figure, handed to the installer's file. Never raises."""
     ask = getattr(vibevoice, "note_peak", None)
     if ask is None or peak <= 0:
         return
     try:
-        ask(identifier, int(peak))
+        ask(identifier, int(peak), takes=max(1, int(takes)))
     except Exception:
         logger.debug("Model Chain: the VibeVoice peak could not be recorded", exc_info=True)
 
@@ -545,7 +571,9 @@ def _handshake_with(record: _Process, key: str) -> Handshake:
         containment=str(reply.get("containment") or ""),
         vibevoice=str(reply.get("vibevoice") or ""),
         transformers=str(reply.get("transformers") or ""),
-        sample_rate=int(reply.get("sample_rate") or 0))
+        sample_rate=int(reply.get("sample_rate") or 0),
+        attention=[str(name) for name in (reply.get("attention") or ())
+                   if isinstance(name, str)])
 
     if found.protocol != protocol.PROTOCOL_VERSION:
         raise VibeVoiceRuntimeError(
@@ -592,7 +620,8 @@ def load(card_uuid: str) -> dict:
 
     The directory and the step count come from the installer's settings, the
     precision and attention from this build: bf16 and SDPA (design section 3).
-    A worker that already holds the model answers at once.
+    A render may ask for other attention, which the worker switches without a
+    second load. A worker that already holds the model answers at once.
     """
     key = card_key(card_uuid)
     ensure_started(card_uuid)
@@ -605,8 +634,9 @@ def load(card_uuid: str) -> dict:
     vibevoice = _installer()
     settings = _settings(vibevoice)
     model_dir = str(vibevoice.model_dir(str(settings.get("model_id") or "")))
-    header = {"op": "load", "model_dir": model_dir, "steps": int(settings.get("steps") or 10),
-              "dtype": "bf16", "attention": "sdpa"}
+    steps = int(settings.get("steps") or getattr(vibevoice, "STEPS_DEFAULT", 12))
+    header = {"op": "load", "model_dir": model_dir, "steps": steps,
+              "dtype": "bf16", "attention": protocol.ATTENTION_DEFAULT}
     try:
         reply, _body = _exchange(record, header, b"", LOAD_TIMEOUT)
     except _WorkerGone as exc:
@@ -662,25 +692,25 @@ def render(card_uuid: str, job: RenderJob, on_progress=None) -> RenderResult:
             raise VibeVoiceRuntimeError(
                 "the VibeVoice worker exited during the render") from None
         result = RenderResult(
-            wav=bytes(body or b""),
-            seconds=float(reply.get("seconds") or 0.0),
+            takes=_takes(reply, body, job),
             sample_rate=int(reply.get("sample_rate") or protocol.SAMPLE_RATE),
             render_seconds=float(reply.get("render_seconds") or 0.0),
             peak_bytes=int(reply.get("peak_bytes") or 0),
-            cancelled=bool(reply.get("cancelled")),
-            tokens=int(reply.get("tokens") or 0),
-            capped=bool(reply.get("capped")))
+            cancelled=bool(reply.get("cancelled")))
         with record.lock:
             record.peak_bytes = max(record.peak_bytes, result.peak_bytes)
         with _table_lock:
             _peaks[key] = max(int(_peaks.get(key, 0)), result.peak_bytes)
         vibevoice = _installer()
         _note_peak(vibevoice, str(_settings(vibevoice).get("model_id") or ""),
-                   result.peak_bytes)
-        logger.info("Model Chain: VibeVoice rendered %.1f s of audio on %s in %.1f s — "
-                    "%d token(s), peak %.1f GiB%s%s", result.seconds, record.label(),
+                   result.peak_bytes, len(result.takes))
+        logger.info("Model Chain: VibeVoice rendered %d take(s), %.1f s of audio, on %s in "
+                    "%.1f s — %d token(s), peak %.1f GiB, %s, %s%s%s", len(result.takes),
+                    sum(take.seconds for take in result.takes), record.label(),
                     result.render_seconds, result.tokens,
                     result.peak_bytes / float(1 << 30),
+                    protocol.SOLVERS.get(job.solver, {}).get("name", job.solver),
+                    protocol.ATTENTION.get(job.attention, job.attention),
                     ", cancelled" if result.cancelled else "",
                     ", reached its token budget" if result.capped else "")
         return result
@@ -688,6 +718,35 @@ def render(card_uuid: str, job: RenderJob, on_progress=None) -> RenderResult:
         with record.lock:
             record.rendering = False
             record.job = ""
+
+
+def _takes(reply: dict, body: bytes, job: RenderJob) -> list:
+    """The reply's takes, each cut from the payload by its sample count.
+
+    The payload is every take's 32-bit float samples in order, and the counts
+    must account for every byte of it: a reply that does not add up is a
+    worker this build does not understand, said as such rather than played.
+    """
+    if str(reply.get("format") or "") != "f32le":
+        raise VibeVoiceRuntimeError(
+            "The VibeVoice worker answered in a format this build does not read. Restart "
+            "the WebUI so the worker and the WebUI are the same build.")
+    found = [entry for entry in (reply.get("takes") or ()) if isinstance(entry, dict)]
+    data = bytes(body or b"")
+    counts = [max(0, int(entry.get("samples") or 0)) for entry in found]
+    if not found or len(found) != max(1, int(job.takes or 1)) or sum(counts) * 4 != len(data):
+        raise VibeVoiceRuntimeError(
+            "The VibeVoice worker's answer did not add up to the takes it named, so it was "
+            "not kept.")
+    takes, offset = [], 0
+    for entry, count in zip(found, counts):
+        takes.append(Take(pcm=data[offset * 4:(offset + count) * 4],
+                          seconds=count / float(reply.get("sample_rate") or protocol.SAMPLE_RATE),
+                          tokens=int(entry.get("tokens") or 0),
+                          capped=bool(entry.get("capped")),
+                          seed=None if entry.get("seed") is None else int(entry["seed"])))
+        offset += count
+    return takes
 
 
 def _render_frame(job: RenderJob) -> "tuple[dict, bytes]":
@@ -727,6 +786,9 @@ def _render_frame(job: RenderJob) -> "tuple[dict, bytes]":
         "sampling": bool(job.sampling),
         "temperature": float(job.temperature) if job.sampling and job.temperature else None,
         "top_p": float(job.top_p) if job.sampling and job.top_p else None,
+        "solver": str(job.solver or protocol.SOLVER_DEFAULT),
+        "attention": str(job.attention or protocol.ATTENTION_DEFAULT),
+        "takes": max(1, int(job.takes or 1)),
     }
     return header, b"".join(chunks)
 
@@ -899,7 +961,7 @@ def _read_frames(record: _Process) -> None:
     stream = record.process.stdout
     try:
         while True:
-            frame = protocol.read_frame(stream)
+            frame = protocol.read_frame(stream, protocol.MAX_REPLY_PAYLOAD)
             if frame is None:
                 break
             header, payload = frame

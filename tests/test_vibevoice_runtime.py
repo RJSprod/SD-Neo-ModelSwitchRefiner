@@ -107,11 +107,17 @@ def containment(parent_pid):
     return "none"
 
 
-def wav(seconds, rate=24000):
-    body = b"\x00\x00" * int(seconds * rate)
-    return (b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
-            + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
-            + b"data" + struct.pack("<I", len(body)) + body)
+def takes(seconds, header, rate=24000):
+    """Each take's 32-bit float samples, and what the reply says about them."""
+    count = max(1, int(header.get("takes") or 1))
+    seed = header.get("seed")
+    samples = int(seconds * rate)
+    entries = [{"seed": None if seed is None else int(seed) + index, "samples": samples,
+                "seconds": samples / float(rate), "tokens": 42, "capped": False}
+               for index in range(count)]
+    if PLAN.get("short_payload"):
+        return entries, struct.pack("<f", 0.25) * (samples * count - 1)
+    return entries, struct.pack("<f", 0.25) * (samples * count)
 
 
 def mark(name, line):
@@ -142,7 +148,7 @@ def main():
                 continue
             found = containment(int(header.get("parent_pid") or 0))
             reply = {"id": rid, "ok": True,
-                     "protocol": PLAN.get("protocol", 1),
+                     "protocol": PLAN.get("protocol", 2),
                      "worker": PLAN.get("worker", "vibevoice"),
                      "python": "3.13.0", "torch": "2.8.0+cu128",
                      "cuda": PLAN.get("cuda", True),
@@ -152,7 +158,8 @@ def main():
                      "total_vram_bytes": 24 << 30, "free_vram_bytes": 23 << 30,
                      "containment": PLAN.get("containment", found),
                      "vibevoice": "0.0.1", "transformers": "4.51.3",
-                     "sample_rate": PLAN.get("sample_rate", 24000)}
+                     "sample_rate": PLAN.get("sample_rate", 24000),
+                     "attention": ["sdpa", "eager"], "max_takes": 4}
             write_frame(stdout, reply)
             continue
         if operation == "status":
@@ -210,7 +217,7 @@ def main():
             event = threading.Event()
             STATE["cancel"] = event
 
-            def run(rid=rid, event=event):
+            def run(rid=rid, event=event, head=header):
                 seconds = float(PLAN.get("render_seconds", 0.05))
                 began = time.monotonic()
                 while time.monotonic() - began < seconds:
@@ -224,14 +231,17 @@ def main():
                         time.sleep(0.05)
                 STATE["peak"] = int(PLAN.get("peak_bytes", 20000000000))
                 audio_seconds = 0.5 if event.is_set() else 1.0
-                reply = {"id": rid, "ok": True, "seconds": audio_seconds,
-                         "sample_rate": 24000,
+                entries, body = takes(audio_seconds, head)
+                reply = {"id": rid, "ok": True, "format": PLAN.get("format", "f32le"),
+                         "seconds": audio_seconds, "sample_rate": 24000,
+                         "takes": entries,
                          "render_seconds": time.monotonic() - began,
                          "peak_bytes": STATE["peak"], "resident_bytes": STATE["resident"],
-                         "cancelled": event.is_set(), "tokens": 42, "capped": False}
+                         "cancelled": event.is_set(), "tokens": 42 * len(entries),
+                         "capped": False}
                 STATE["job"] = ""
                 STATE["cancel"] = None
-                write_frame(stdout, reply, wav(audio_seconds))
+                write_frame(stdout, reply, body)
 
             threading.Thread(target=run, daemon=True).start()
             continue
@@ -321,8 +331,8 @@ def stub(tmp_path, monkeypatch):
         worker_script=lambda: script,
         model_dir=lambda identifier="": model,
         settings=lambda: dict(settings),
-        note_peak=lambda identifier, peak_bytes, rss_bytes=0:
-        peaks.append((identifier, int(peak_bytes), int(rss_bytes))),
+        note_peak=lambda identifier, peak_bytes, rss_bytes=0, takes=1:
+        peaks.append((identifier, int(peak_bytes), int(rss_bytes), int(takes))),
         refusal=lambda manual=False: refusal[0])
     monkeypatch.setitem(sys.modules, "mc_voice_vibevoice", module)
     monkeypatch.setattr(runtime, "STOP_GRACE", 3.0)
@@ -374,7 +384,8 @@ class TestTheHandshakeRefusesWhatThisBuildCannotAccept:
         assert isinstance(found, runtime.Handshake)
         assert found.cuda is True and found.device_uuid == CARD
         assert found.device_name == "Fake GPU 24GB"
-        assert found.protocol == 1 and found.worker == "vibevoice"
+        assert found.protocol == 2 and found.worker == "vibevoice"
+        assert found.attention == ["sdpa", "eager"]
         assert found.sample_rate == 24000
         card = runtime.status()["cards"][CARD_KEY]
         assert card["running"] is True and card["loaded"] is False
@@ -555,6 +566,11 @@ class TestLoadingAndRendering:
         assert header["model_dir"] == str(stub.root / "model")
         assert header["steps"] == 10
         assert header["dtype"] == "bf16" and header["attention"] == "sdpa"
+
+    def test_with_no_step_count_set_the_load_asks_for_twelve(self, stub):
+        stub.settings["steps"] = None
+        runtime.load(CARD)
+        assert stub.loads()[0]["steps"] == 12
         assert runtime.status()["cards"][CARD_KEY]["loaded"] is True
         assert runtime.resident_bytes(CARD) == 18_000_000_000, "from the load reply"
 
@@ -564,7 +580,9 @@ class TestLoadingAndRendering:
         result = runtime.render(CARD, job_for(seed=7, cfg_scale=1.5, steps=12,
                                               max_new_tokens=None), progress.append)
         assert isinstance(result, runtime.RenderResult)
-        assert result.wav[:4] == b"RIFF"
+        assert len(result.takes) == 1
+        take = result.takes[0]
+        assert take.pcm == struct.pack("<f", 0.25) * RATE and take.seed == 7
         assert result.seconds == 1.0 and result.sample_rate == 24000
         assert result.cancelled is False and result.tokens == 42
         assert result.peak_bytes == 20_000_000_000 and result.capped is False
@@ -581,7 +599,40 @@ class TestLoadingAndRendering:
         assert header["seed"] == 7 and header["cfg_scale"] == 1.5 and header["steps"] == 12
         assert header["max_new_tokens"] is None
         assert (header["sampling"], header["temperature"], header["top_p"]) == (False, None, None)
+        assert (header["solver"], header["attention"], header["takes"]) == \
+            ("dpmpp_2m", "sdpa", 1), "the model's own solver and attention unless asked"
         assert progress and all("seconds" in one for one in progress)
+
+    def test_a_batch_names_its_takes_solver_and_attention_and_gets_each_take_back(self, stub):
+        runtime.load(CARD)
+        result = runtime.render(CARD, job_for(seed=9990, takes=4, solver="dpmpp_2m_sde",
+                                              attention="eager"))
+        header = stub.renders()[0]["header"]
+        assert (header["solver"], header["attention"], header["takes"], header["seed"]) == \
+            ("dpmpp_2m_sde", "eager", 4, 9990)
+        assert [take.seed for take in result.takes] == [9990, 9991, 9992, 9993]
+        assert all(take.pcm == struct.pack("<f", 0.25) * RATE for take in result.takes)
+        assert result.tokens == 4 * 42
+
+    def test_a_reply_whose_takes_do_not_add_up_is_refused_not_played(self, stub):
+        stub.plan["short_payload"] = True
+        runtime.load(CARD)
+        with pytest.raises(runtime.VibeVoiceRuntimeError) as raised:
+            runtime.render(CARD, job_for(seed=1, takes=2))
+        assert "did not add up" in str(raised.value)
+        assert runtime.rendering(CARD) is False
+
+    def test_a_reply_in_another_format_is_refused_with_a_sentence(self, stub):
+        stub.plan["format"] = "pcm16-wav"
+        runtime.load(CARD)
+        with pytest.raises(runtime.VibeVoiceRuntimeError) as raised:
+            runtime.render(CARD, job_for(seed=1))
+        assert "format" in str(raised.value)
+
+    def test_the_reply_is_read_with_the_ceiling_for_replies(self):
+        """Four long takes of 32-bit float are more than a request may carry."""
+        source = Path(runtime.__file__).read_text(encoding="utf-8")
+        assert "protocol.read_frame(stream, protocol.MAX_REPLY_PAYLOAD)" in source
 
     def test_a_sampling_render_sends_its_temperature_and_top_p_and_only_then(self, stub):
         runtime.load(CARD)
@@ -685,7 +736,10 @@ class TestLoadingAndRendering:
         runtime.load(CARD)
         assert runtime.peak_observed(CARD) == 0
         runtime.render(CARD, job_for())
-        assert stub.peaks == [("vibevoice-7b", 20_000_000_000, 0)]
+        assert stub.peaks == [("vibevoice-7b", 20_000_000_000, 0, 1)]
+        runtime.render(CARD, job_for("job-2", seed=1, takes=3))
+        assert stub.peaks[-1] == ("vibevoice-7b", 20_000_000_000, 0, 3), \
+            "a batch's peak is recorded with how many takes made it"
         assert runtime.peak_observed(CARD) == 20_000_000_000
         assert runtime.status()["cards"][CARD_KEY]["peak_bytes"] == 20_000_000_000
 

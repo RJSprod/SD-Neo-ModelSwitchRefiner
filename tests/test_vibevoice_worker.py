@@ -78,16 +78,25 @@ class TestTheWireIsTheOneTheOtherWorkersSpeak:
         assert worker._LENGTH.format == ">I"
 
     def test_the_protocol_is_its_own(self):
-        assert worker.PROTOCOL_VERSION == 1
+        assert worker.PROTOCOL_VERSION == 2
         assert worker.WORKER_NAME == "vibevoice"
         assert worker.MARKER == "--model-chain-vibevoice-worker"
         assert worker.MARKER != pocket_worker.MARKER
         assert worker.SAMPLE_RATE == 24000
 
-    def test_the_payload_ceiling_holds_a_forty_five_minute_render(self):
+    def test_the_payload_ceilings_hold_a_request_and_four_forty_five_minute_takes(self):
         assert worker.MAX_PAYLOAD == 256 << 20
         assert worker.MAX_HEADER == 1 << 20
-        assert worker.MAX_PAYLOAD > 45 * 60 * RATE * 2
+        assert worker.MAX_REPLY_PAYLOAD > worker.MAX_TAKES * 45 * 60 * RATE * 4
+        assert worker.MAX_REPLY_PAYLOAD < 1 << 32, "the length prefix is four bytes"
+
+    def test_a_reply_larger_than_a_request_is_read_with_the_reply_ceiling(self):
+        head = json.dumps({"id": "r"}).encode("utf-8")
+        body = b"\x00" * 64
+        raw = worker._LENGTH.pack(len(head)) + head + worker._LENGTH.pack(len(body)) + body
+        with pytest.raises(worker.Refusal):
+            worker.read_frame(io.BytesIO(raw), max_payload=32)
+        assert worker.read_frame(io.BytesIO(raw), max_payload=64) == ({"id": "r"}, body)
 
     def test_an_oversized_header_is_refused_rather_than_allocated(self):
         raw = worker._LENGTH.pack(worker.MAX_HEADER + 1)
@@ -265,20 +274,17 @@ class TestVoiceSamplesFollowTheSpeakerOrder:
         assert len(arrays) == 1
 
 
-class TestAudioLeavesAsPcm16Wav:
-    def test_samples_are_clipped_and_quantised(self):
-        found = numpy.frombuffer(worker.pcm16([0.0, 1.0, -1.0, 2.0, -2.0, 0.5]), dtype="<i2")
-        assert list(found) == [0, 32767, -32767, 32767, -32767, 16383]
+class TestAudioLeavesAsTheModelsOwnFloats:
+    def test_samples_cross_unclipped_and_unquantised(self):
+        """The parent makes the file straight from these, so nothing is lost here."""
+        values = [0.0, 1.0, -1.0, 1.25, -1.5, 0.123456789]
+        found = numpy.frombuffer(worker.float32_bytes(values), dtype="<f4")
+        assert list(found) == [numpy.float32(value) for value in values]
 
-    def test_the_wav_is_mono_sixteen_bit_at_the_models_rate(self):
-        import wave
-
-        body = worker.pcm16(numpy.zeros(2400, dtype=numpy.float32))
-        with wave.open(io.BytesIO(worker.encode_wav(body, RATE)), "rb") as handle:
-            assert handle.getnchannels() == 1
-            assert handle.getsampwidth() == 2
-            assert handle.getframerate() == RATE
-            assert handle.getnframes() == 2400
+    def test_a_value_that_is_not_a_number_is_silence_and_infinity_is_unity(self):
+        found = numpy.frombuffer(worker.float32_bytes([float("nan"), float("inf"),
+                                                       -float("inf")]), dtype="<f4")
+        assert list(found) == [0.0, 1.0, -1.0]
 
 
 # --------------------------------------------------------------------------- #
@@ -317,9 +323,11 @@ class FakeTensor:
         return (types.SimpleNamespace(item=lambda value=value: value) for value in self.data)
 
     def __getitem__(self, index):
-        """``[0, -1]``: one element, the last token of the first sequence."""
-        value = self.data[index[-1]]
-        return types.SimpleNamespace(item=lambda: value)
+        """``[take, -1]`` or ``[take]``: one element; ``[take, a:]``: a row's slice."""
+        found = self.data[index[-1] if isinstance(index, tuple) else index]
+        if isinstance(found, list):
+            return types.SimpleNamespace(tolist=lambda: list(found))
+        return types.SimpleNamespace(item=lambda: found)
 
 
 class FakeCuda:
@@ -360,15 +368,31 @@ class FakeCuda:
         self.calls.append(("empty_cache",))
 
 
+class FakeGenerator:
+    def __init__(self, device="cpu"):
+        self.device = device
+        self.seed = None
+
+    def manual_seed(self, seed):
+        self.seed = seed
+        return self
+
+
 class FakeTorch:
     __version__ = "2.8.0+cu128"
     bfloat16 = "bfloat16"
     float16 = "float16"
     float32 = "float32"
+    Generator = FakeGenerator
 
     def __init__(self, cuda=None):
         self.cuda = cuda or FakeCuda()
         self.seeds = []
+        self.multinomial = self._multinomial
+
+    @staticmethod
+    def _multinomial(probabilities, num_samples, replacement=False, *, generator=None):
+        return ("drawn", generator)
 
     @staticmethod
     def is_tensor(value):
@@ -396,14 +420,42 @@ class FakeProcessor:
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
-        return {"input_ids": FakeTensor([0] * self.prompt_length, (1, self.prompt_length)),
-                "attention_mask": FakeTensor([1] * self.prompt_length, (1, self.prompt_length)),
-                "speech_tensors": FakeTensor([0.0] * 10, (1, 10)),
-                "speech_masks": FakeTensor([True], (1, 1)),
+        rows = len(kwargs.get("text") or [None])
+        return {"input_ids": FakeTensor([0] * self.prompt_length, (rows, self.prompt_length)),
+                "attention_mask": FakeTensor([1] * self.prompt_length,
+                                             (rows, self.prompt_length)),
+                "speech_tensors": FakeTensor([0.0] * 10, (rows, 10)),
+                "speech_masks": FakeTensor([True], (rows, 1)),
                 "speech_input_mask": FakeTensor([False] * self.prompt_length,
-                                                (1, self.prompt_length)),
-                "parsed_scripts": [[(0, " hello")]],
-                "all_speakers_list": [[0]]}
+                                                (rows, self.prompt_length)),
+                "parsed_scripts": [[(0, " hello")]] * rows,
+                "all_speakers_list": [[0]] * rows}
+
+
+class FakeScheduler:
+    """The model's own scheduler: a configuration, and ``from_config`` to make another."""
+
+    made = []
+
+    def __init__(self, **config):
+        base = {"num_train_timesteps": 1000, "beta_schedule": "cosine",
+                "prediction_type": "v_prediction", "algorithm_type": "dpmsolver++",
+                "solver_order": 2, "use_karras_sigmas": False, "use_lu_lambdas": False}
+        base.update(config)
+        self.config = types.SimpleNamespace(**base)
+
+    @classmethod
+    def from_config(cls, config, **overrides):
+        found = dict(vars(config))
+        found.update(overrides)
+        made = cls(**found)
+        cls.made.append((made, dict(overrides)))
+        return made
+
+
+class FakeAcousticTokenizer:
+    def encode(self, audio):
+        return types.SimpleNamespace(mean=audio, std=0.5)
 
 
 class FakeModel:
@@ -420,6 +472,11 @@ class FakeModel:
         self.generate_calls = []
         self.config = types.SimpleNamespace(
             decoder_config=types.SimpleNamespace(max_position_embeddings=32768))
+        self.model = types.SimpleNamespace(
+            noise_scheduler=FakeScheduler(), acoustic_tokenizer=FakeAcousticTokenizer(),
+            language_model=types.SimpleNamespace(
+                config=types.SimpleNamespace(_attn_implementation="sdpa")))
+        self.during = []
 
     @classmethod
     def from_pretrained(cls, path, **kwargs):
@@ -439,6 +496,12 @@ class FakeModel:
 
     def generate(self, **kwargs):
         self.generate_calls.append(kwargs)
+        self.during.append({
+            "hooked": "sample_speech_tokens" in vars(self),
+            "encode_hooked": "encode" in vars(self.model.acoustic_tokenizer),
+            "solver": self.model.noise_scheduler,
+            "attention": self.model.language_model.config._attn_implementation})
+        rows = int(kwargs["input_ids"].shape[0])
         stop = kwargs.get("stop_check_fn")
         streamer = kwargs.get("audio_streamer")
         made = []
@@ -457,10 +520,10 @@ class FakeModel:
             streamer.end()
         prompt = kwargs["input_ids"].shape[-1]
         return types.SimpleNamespace(
-            speech_outputs=[FakeTensor(made, (1, len(made)))] if made else [None],
+            speech_outputs=[FakeTensor(made, (1, len(made))) if made else None] * rows,
             sequences=FakeTensor([0] * (prompt + len(made) // 3200),
-                                 (1, prompt + len(made) // 3200)),
-            reach_max_step_sample=FakeTensor([self.capped], (1,)))
+                                 (rows, prompt + len(made) // 3200)),
+            reach_max_step_sample=FakeTensor([self.capped] * rows, (rows,)))
 
 
 class BoundEngine(worker.Engine):
@@ -482,9 +545,11 @@ class BoundEngine(worker.Engine):
 def _forget_stand_ins():
     FakeModel.made.clear()
     FakeProcessor.made.clear()
+    FakeScheduler.made.clear()
     yield
     FakeModel.made.clear()
     FakeProcessor.made.clear()
+    FakeScheduler.made.clear()
 
 
 def request_for(script=None, voices=None, **values):
@@ -615,7 +680,12 @@ class TestRenderingCallsUpstreamExactly:
         assert reply["peak_bytes"] == 20_000_000_000
         assert reply["capped"] is False
         assert reply["render_seconds"] >= 0.0
-        assert audio[:4] == b"RIFF" and len(audio) == 44 + 6 * 3200 * 2
+        assert reply["format"] == "f32le"
+        assert reply["takes"] == [{"seed": 7, "samples": 6 * 3200,
+                                   "seconds": pytest.approx(6 * 3200 / RATE),
+                                   "tokens": 6, "capped": False}]
+        assert len(audio) == 6 * 3200 * 4
+        assert set(numpy.frombuffer(audio, dtype="<f4")) == {numpy.float32(0.5)}
         assert progress and all("seconds" in one for one in progress)
 
     def test_the_peak_is_reset_before_the_render_and_read_after(self, tmp_path):
@@ -664,7 +734,7 @@ class TestRenderingCallsUpstreamExactly:
         reply, audio = engine.render(request_for(), cancelled)
         assert reply["cancelled"] is True
         assert reply["tokens"] == 2
-        assert len(audio) == 44 + 2 * 3200 * 2
+        assert len(audio) == 2 * 3200 * 4
 
     def test_a_render_that_hit_its_budget_says_so(self, tmp_path):
         engine = BoundEngine()
@@ -746,13 +816,183 @@ class TestRenderingCallsUpstreamExactly:
         assert worker._last_token(FakeTensor([4, 5, 9], (1, 3))) == 9
         assert worker._last_token(None) is None
 
-    def test_no_audio_at_all_is_an_empty_wav_rather_than_an_error(self, tmp_path):
+    def test_no_audio_at_all_is_an_empty_take_rather_than_an_error(self, tmp_path):
         engine = BoundEngine()
         engine.load(str(tmp_path), 10)
         FakeModel.made[0].steps = 0
         reply, audio = engine.render(request_for(), threading.Event())
         assert reply["seconds"] == 0.0
-        assert len(audio) == 44
+        assert reply["takes"][0]["samples"] == 0
+        assert audio == b""
+
+
+class TestTheSolverTheAttentionAndTheTakes:
+    def test_the_solvers_are_vibevoices_own_scheduler_configured(self):
+        """Every solver is the model's DPMSolverMultistepScheduler with its
+        algorithm and order changed: no deprecated algorithm, and no third-order
+        SDE, whose update takes no noise."""
+        assert list(worker.SOLVERS) == ["dpmpp_2m", "dpmpp_2m_sde", "dpmpp_3m", "dpmpp_1m",
+                                        "dpmpp_1m_sde"]
+        for entry in worker.SOLVERS.values():
+            assert entry["algorithm_type"] in ("dpmsolver++", "sde-dpmsolver++")
+            assert entry["solver_order"] in (1, 2, 3)
+            assert not (entry["algorithm_type"].startswith("sde")
+                        and entry["solver_order"] == 3)
+        assert worker.SOLVERS[worker.SOLVER_DEFAULT] == {
+            "name": "DPM++ 2M", "algorithm_type": "dpmsolver++", "solver_order": 2}, \
+            "the default is the scheduler the model is built with"
+        assert worker.SOLVERS["dpmpp_2m_sde"]["algorithm_type"] == "sde-dpmsolver++", \
+            "upstream's Gradio demo"
+
+    def test_the_attentions_are_the_ones_vibevoice_declares(self):
+        assert list(worker.ATTENTION) == ["sdpa", "eager", "flash_attention_2"]
+        assert worker.ATTENTION_DEFAULT == "sdpa"
+
+    def test_a_request_names_its_solver_attention_and_takes(self):
+        request = request_for(solver="dpmpp_2m_sde", attention="eager", takes=4, seed=9990)
+        assert (request.solver, request.attention, request.takes) == \
+            ("dpmpp_2m_sde", "eager", 4)
+        assert request.seeds == [9990, 9991, 9992, 9993]
+        plain = request_for()
+        assert (plain.solver, plain.attention, plain.takes) == ("dpmpp_2m", "sdpa", 1)
+        assert plain.seeds is None
+
+    @pytest.mark.parametrize("values, sentence", [
+        ({"solver": "euler"}, "that solver is not one VibeVoice's scheduler has"),
+        ({"attention": "flex_attention"}, "that attention is not one VibeVoice supports"),
+        ({"takes": 5, "seed": 1}, "a render makes 1 to 4 takes"),
+        ({"takes": 2}, "a render of several takes needs a seed"),
+        ({"takes": -1, "seed": 1}, "the number of takes is negative"),
+    ])
+    def test_what_the_worker_cannot_do_is_refused_in_a_sentence(self, values, sentence):
+        with pytest.raises(worker.Refusal) as raised:
+            request_for(**values)
+        assert str(raised.value) == sentence
+
+    def test_the_default_solver_is_the_models_own_scheduler_object(self, tmp_path):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        own = FakeModel.made[0].model.noise_scheduler
+        engine.render(request_for(), threading.Event())
+        assert FakeModel.made[0].during[-1]["solver"] is own
+        assert FakeScheduler.made == [], "nothing is rebuilt for the solver it already is"
+
+    def test_another_solver_is_the_models_scheduler_with_its_algorithm_and_order(self,
+                                                                                   tmp_path):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        own = FakeModel.made[0].model.noise_scheduler
+        engine.render(request_for(solver="dpmpp_2m_sde"), threading.Event())
+        chosen, overrides = FakeScheduler.made[0]
+        assert overrides == {"algorithm_type": "sde-dpmsolver++", "solver_order": 2}
+        assert FakeModel.made[0].during[-1]["solver"] is chosen
+        assert chosen.config.beta_schedule == "cosine" and \
+            chosen.config.prediction_type == "v_prediction", "the rest is the model's own"
+        engine.render(request_for(solver="dpmpp_3m"), threading.Event())
+        assert FakeScheduler.made[1][1] == {"algorithm_type": "dpmsolver++", "solver_order": 3}
+        engine.render(request_for(), threading.Event())
+        assert FakeModel.made[0].during[-1]["solver"] is own, "and back to the model's own"
+
+    def test_attention_is_switched_on_the_language_model_without_a_second_load(self,
+                                                                                 tmp_path):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10, "bf16", "sdpa")
+        engine.render(request_for(attention="eager"), threading.Event())
+        assert FakeModel.made[0].during[-1]["attention"] == "eager"
+        engine.render(request_for(), threading.Event())
+        assert FakeModel.made[0].during[-1]["attention"] == "sdpa"
+        assert len(FakeModel.made) == 1, "one load"
+
+    def test_flash_attention_without_its_package_is_refused_and_nothing_changes(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(worker, "flash_attention_available", lambda: False)
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        with pytest.raises(worker.Refusal) as raised:
+            engine.render(request_for(attention="flash_attention_2"), threading.Event())
+        assert "flash-attn" in str(raised.value)
+        assert FakeModel.made[0].model.language_model.config._attn_implementation == "sdpa"
+        assert FakeModel.made[0].generate_calls == []
+        monkeypatch.setattr(worker, "flash_attention_available", lambda: True)
+        engine.render(request_for(attention="flash_attention_2"), threading.Event())
+        assert FakeModel.made[0].during[-1]["attention"] == "flash_attention_2"
+
+    def test_a_batch_is_one_generate_over_the_same_prompt_with_each_takes_seed(self,
+                                                                                  tmp_path):
+        torch = FakeTorch()
+        engine = BoundEngine(torch)
+        engine.load(str(tmp_path), 10)
+        reply, audio = engine.render(request_for(takes=4, seed=9990), threading.Event())
+        call = FakeProcessor.made[0].calls[0]
+        assert call["text"] == ["Speaker 1: Hello there."] * 4
+        assert len(call["voice_samples"]) == 4
+        assert len(FakeModel.made[0].generate_calls) == 1
+        assert [take["seed"] for take in reply["takes"]] == [9990, 9991, 9992, 9993]
+        assert len(audio) == sum(take["samples"] for take in reply["takes"]) * 4
+        assert torch.seeds == [9990], "the global generators hold the first take's seed"
+
+    def test_a_batch_draws_its_randomness_take_by_take_and_puts_everything_back(self,
+                                                                                   tmp_path):
+        torch = FakeTorch()
+        engine = BoundEngine(torch)
+        engine.load(str(tmp_path), 10)
+        original = torch.multinomial
+        engine.render(request_for(takes=2, seed=5), threading.Event())
+        during = FakeModel.made[0].during[-1]
+        assert during["hooked"] and during["encode_hooked"]
+        model = FakeModel.made[0]
+        assert "sample_speech_tokens" not in vars(model)
+        assert "encode" not in vars(model.model.acoustic_tokenizer)
+        assert torch.multinomial == original
+
+    def test_a_single_take_keeps_the_global_generators_as_it_always_has(self, tmp_path):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        engine.render(request_for(seed=5), threading.Event())
+        during = FakeModel.made[0].during[-1]
+        assert not during["hooked"] and not during["encode_hooked"]
+
+    def test_each_take_has_generators_of_its_own_on_the_host_and_the_card(self):
+        torch = FakeTorch()
+        found = worker.TakeRandomness(torch, None, [3, 4], clips=1, device="cuda")
+        assert [one.seed for one in found.host] == [3, 4]
+        assert [one.seed for one in found.card] == [3, 4]
+        assert all(one.device == "cuda" for one in found.card)
+        on_cpu = worker.TakeRandomness(torch, None, [3, 4], clips=1, device="cpu")
+        assert on_cpu.card is on_cpu.host, "a machine without a card has one generator"
+
+    def test_the_token_choice_is_drawn_a_take_at_a_time(self):
+        torch = FakeTorch()
+        found = worker.TakeRandomness(torch, None, [3, 4], clips=1)
+        found._multinomial = torch.multinomial
+
+        class Rows:
+            shape = (2, 7)
+
+            def dim(self):
+                return 2
+
+            def __getitem__(self, index):
+                return ("row", index.start)
+
+        drawn = []
+        torch.cat = lambda parts, dim=0: drawn.extend(parts) or parts
+        found.choose(Rows(), num_samples=1)
+        assert [generator.seed for _tag, generator in drawn] == [3, 4]
+
+    def test_each_takes_tokens_stop_at_its_end_of_speech(self):
+        """A batch runs until its last take ends and pads the others with end of
+        speech, so each take's count stops at its first one."""
+        rows = {0: [7, 7, 9, 9, 9], 1: [7, 7, 7, 7, 7]}
+
+        class Sequences:
+            def __getitem__(self, index):
+                take, span = index
+                return types.SimpleNamespace(tolist=lambda: rows[take][span.start - 3:])
+
+        assert worker._tokens_of(Sequences(), 0, 3, 9, 5) == 3
+        assert worker._tokens_of(Sequences(), 1, 3, 9, 5) == 5
+        assert worker._tokens_of(None, 0, 3, 9, 5) == 0
 
 
 class TestProgressCostsTheRenderNothing:
@@ -764,8 +1004,25 @@ class TestProgressCostsTheRenderNothing:
         assert progress.samples == 9600
         assert seen[-1] == {"seconds": pytest.approx(9600 / RATE)}
         assert progress.finished_flags == [False]
-        progress.end(FakeTensor([0]))
+        progress.end()
         assert progress.finished_flags == [True]
+
+    def test_a_take_that_ends_raises_no_flag_that_would_stop_the_others(self):
+        """``generate`` leaves its loop the moment any flag is up, for every
+        take at once; a take ending early must not cut the rest off."""
+        progress = worker.Progress(RATE, None, takes=4)
+        progress.end(FakeTensor([2], (1,)))
+        assert progress.finished_flags == [False] * 4
+        progress.end()
+        assert progress.finished_flags == [True] * 4
+
+    def test_each_take_is_counted_and_the_furthest_is_reported(self):
+        seen = []
+        progress = worker.Progress(RATE, seen.append, takes=3, interval=0.0)
+        progress.put(FakeTensor([0.0] * 3200, (2, 1, 3200)), FakeTensor([0, 2], (2,)))
+        progress.put(FakeTensor([0.0] * 3200, (1, 1, 3200)), FakeTensor([2], (1,)))
+        assert progress.counts == [3200, 0, 6400]
+        assert seen[-1] == {"seconds": pytest.approx(6400 / RATE)}
 
     def test_the_interval_holds_frames_back(self):
         seen = []
@@ -913,10 +1170,13 @@ class FakeEngine:
                 break
             made += 3200
             on_progress({"seconds": made / RATE})
-        return {"seconds": made / RATE, "sample_rate": RATE, "render_seconds": 0.01,
-                "peak_bytes": 20_000_000_000, "resident_bytes": 18_000_000_000,
-                "cancelled": cancelled.is_set(), "tokens": made // 3200,
-                "capped": False}, worker.encode_wav(b"\x00\x00" * made, RATE)
+        return {"format": "f32le", "seconds": made / RATE, "sample_rate": RATE,
+                "render_seconds": 0.01, "peak_bytes": 20_000_000_000,
+                "resident_bytes": 18_000_000_000, "cancelled": cancelled.is_set(),
+                "tokens": made // 3200, "capped": False,
+                "takes": [{"seed": request.seed, "samples": made, "seconds": made / RATE,
+                           "tokens": made // 3200, "capped": False}]}, \
+            worker.float32_bytes(numpy.zeros(made, dtype=numpy.float32))
 
 
 def run_worker(engine, feed, init=True, stdout=None):
@@ -956,8 +1216,10 @@ class TestTheHandshakeSaysWhatTheParentAsksFor:
                      "containment", "vibevoice", "transformers", "sample_rate"):
             assert name in header, name
         assert header["ok"] is True
-        assert header["protocol"] == 1
+        assert header["protocol"] == 2
         assert header["worker"] == "vibevoice"
+        assert header["attention"][:2] == ["sdpa", "eager"]
+        assert header["max_takes"] == 4
         assert header["cuda"] is True
         assert header["device_uuid"] == UUID
         assert header["sample_rate"] == 24000
@@ -1032,7 +1294,7 @@ class TestTheLoopAnswersEveryOperation:
             assert header["ok"] is True
             assert header["seconds"] == pytest.approx(5 * 3200 / RATE)
             assert header["cancelled"] is False and header["tokens"] == 5
-            assert audio[:4] == b"RIFF"
+            assert len(audio) == 5 * 3200 * 4 and header["format"] == "f32le"
             assert out.progress("r1"), "progress frames carry the render's id"
             assert all("seconds" in one for one in out.progress("r1"))
             first = out.of("r1")[0][0]
@@ -1146,7 +1408,7 @@ class TestOneRenderAtATime:
             release.set()
             header, audio = out.reply("r1")
             assert header["ok"] is True and header["cancelled"] is True
-            assert header["tokens"] == 2 and len(audio) == 44 + 2 * 3200 * 2
+            assert header["tokens"] == 2 and len(audio) == 2 * 3200 * 4
             stdin.feed({"op": "cancel", "id": "c2", "job": "one"})
             header, _payload = out.reply("c2")
             assert header["cancelled"] is False, "nothing is rendering any more"

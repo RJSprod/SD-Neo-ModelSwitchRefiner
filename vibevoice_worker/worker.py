@@ -15,8 +15,9 @@ Everything that needs a tensor, which is a short list:
     proving which card this process is on, and how much of it is free
     loading one VibeVoice model and its processor from a local directory
     turning a script and its voice samples into the model's prompt
-    one generation at a time, cancellable between steps
-    the audio it produced, as PCM16 WAV bytes
+    the solver and the attention a render asks for
+    one generation at a time, of one to four takes, cancellable between steps
+    the audio it produced, as the model's own 32-bit float samples
 
 The parent owns the turns on each card, the settings, the samples and the
 outputs; this process owns inference and nothing else. It is handed a directory
@@ -40,9 +41,21 @@ community ``vibevoice`` package (0.0.1, the preserved original):
         return_tensors="pt", return_attention_mask=True)``;
     ``model.generate(**inputs, max_new_tokens=..., cfg_scale=...,
         tokenizer=processor.tokenizer, generation_config={"do_sample": False},
-        verbose=False, stop_check_fn=...)``, whose ``speech_outputs[0]`` is the
-        audio at 24 kHz and whose ``stop_check_fn`` is read at the top of every
-        generation step.
+        verbose=False, stop_check_fn=...)``, whose ``speech_outputs[k]`` is
+        take k's audio at 24 kHz and whose ``stop_check_fn`` is read at the top
+        of every generation step.
+
+And three things the demo itself reaches into, the same way it does:
+
+    ``model.model.noise_scheduler``, replaced by
+        ``type(scheduler).from_config(scheduler.config, algorithm_type=...)``
+        -- how upstream's Gradio demo puts its SDE solver in (:data:`SOLVERS`);
+    ``model.model.language_model.config._attn_implementation``, which
+        transformers 4.51 reads at every forward pass, so the attention a
+        render asks for is one attribute rather than a second load
+        (:data:`ATTENTION`);
+    for a batch of takes only, the three places ``generate`` draws random
+        numbers, each given the take's own generator (:class:`TakeRandomness`).
 
 How the processor numbers speakers, and what that costs the caller
 -------------------------------------------------------------------
@@ -70,6 +83,22 @@ Cancellation is cooperative and honest about it: ``stop_check_fn`` is read at
 the top of every generation step, so a cancel lands within one step and the
 reply carries whatever audio was made before it, marked ``cancelled``.
 
+Takes, and why each draws its own random numbers
+------------------------------------------------
+A render of several takes is one ``generate`` over a batch of identical
+prompts: a card that spends its time reading the language model's weights
+reads them once for all four. What makes the takes differ is randomness, and
+``generate`` draws it from Torch's one global generator in three places -- the
+voice prompt's encoding (its tokenizer samples a latent around its mean), the
+diffusion head's starting noise (and the SDE solver's noise at every step), and
+the token choice when sampling is on. Shared, the takes would come out as
+whatever the batch happened to draw. So a batch gives take k a generator of its
+own seeded ``seed + k``, and draws for it exactly what a render of that seed
+alone draws, in the same order and the same shapes: take k of a batch is the
+take the seed ``seed + k`` makes by itself, give or take the rounding of a
+batched matrix product. A single take is left to the global generator, exactly
+as before, so a seed recorded before batches existed makes the same render.
+
 Nothing private crosses the pipe
 --------------------------------
 An error reply carries either a sentence this file wrote (:class:`Refusal`) or
@@ -82,8 +111,9 @@ parent asked for it; it is never put in an error, a note or a command line.
 from __future__ import annotations
 
 import argparse
+import functools
 import gc
-import io
+import importlib.util
 import json
 import math
 import os
@@ -93,9 +123,8 @@ import struct
 import sys
 import threading
 import time
-import wave
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 """The VibeVoice protocol's own version, counted from one.
 
 Not shared with the other four workers. They speak the same *framing* and this
@@ -103,6 +132,9 @@ one deliberately overlaps none of their operations: it has ``render`` and
 ``cancel`` where they have turns, and it is the only one that answers for a
 graphics card. One number covering all of them would be a number that has to
 change when any of them changes.
+
+Two: a render names its solver, its attention and its number of takes, and
+is answered with each take's 32-bit float samples rather than one PCM16 WAV.
 """
 
 WORKER_NAME = "vibevoice"
@@ -116,9 +148,14 @@ readable on most systems."""
 
 MAX_HEADER = 1 << 20
 MAX_PAYLOAD = 256 << 20
-"""A forty-five-minute render at 24 kHz PCM16 is about 130 MB, and the voice
-samples of a request are a few megabytes; the ceiling is twice the longest
-render rather than "whatever arrives"."""
+"""What this process accepts in a request: the voice samples of a render are a
+few megabytes, so a quarter of a gigabyte is a garbled length, not a request."""
+
+MAX_REPLY_PAYLOAD = 2 << 30
+"""What the parent accepts from its own worker in one reply. The 7B's context
+ends near forty-five minutes of speech, which is about 260 MB of 32-bit float
+at 24 kHz, and a batch is four takes of it: a little over a gigabyte, so the
+ceiling is two rather than "whatever arrives"."""
 
 SAMPLE_RATE = 24000
 """What VibeVoice produces and what its voice samples have to be. Reported in
@@ -130,6 +167,57 @@ MAX_SPEAKERS = 4
 SAMPLING_TEMPERATURE = 0.95
 SAMPLING_TOP_P = 0.95
 """What a request that asks to sample without saying how is given."""
+
+SOLVERS = {
+    "dpmpp_2m": {"name": "DPM++ 2M", "algorithm_type": "dpmsolver++", "solver_order": 2},
+    "dpmpp_2m_sde": {"name": "DPM++ 2M SDE", "algorithm_type": "sde-dpmsolver++",
+                     "solver_order": 2},
+    "dpmpp_3m": {"name": "DPM++ 3M", "algorithm_type": "dpmsolver++", "solver_order": 3},
+    "dpmpp_1m": {"name": "DPM++ 1M", "algorithm_type": "dpmsolver++", "solver_order": 1},
+    "dpmpp_1m_sde": {"name": "DPM++ 1M SDE", "algorithm_type": "sde-dpmsolver++",
+                     "solver_order": 1},
+}
+"""Every solver VibeVoice's own scheduler runs, by the id a request names it with.
+
+The model builds ``vibevoice.schedule.dpm_solver.DPMSolverMultistepScheduler``
+and walks its timesteps itself, feeding the diffusion head's prediction to
+``step`` -- no input scaling, noise of unit variance -- so a solver here is that
+class configured, never another class. Its algorithms that are not deprecated
+are DPM-Solver++ and its SDE variant, at orders one to three, except that the
+third-order update takes no noise: there is no third-order SDE to offer.
+
+``dpmpp_2m`` is what the model is built with and what upstream's
+``inference_from_file.py`` renders with; ``dpmpp_2m_sde`` is upstream's Gradio
+demo, which swaps it in the moment it loads ("Use SDE solver by default") and
+spells the cosine schedule ``squaredcos_cap_v2``, which is the same betas.
+First order is DDIM, in the ODE case. The order of this table is the order
+they are listed in.
+
+Every one keeps the model's own spacing of the steps, evenly along the
+timesteps. The class also offers Karras sigmas and Lu's uniform log-SNR, and
+neither survives VibeVoice's cosine noise schedule: the top of that schedule is
+so steep that several of their noise levels land on timestep 999, the class
+takes its first step at the second copy, and the render runs off the end of
+its noise levels on the last step -- at 45 and 42 of the step counts from 1 to
+50. A spacing the model's own scheduler cannot finish is not offered.
+"""
+
+ATTENTION = {"sdpa": "SDPA", "eager": "Eager", "flash_attention_2": "Flash attention 2"}
+"""The language model's attention implementations VibeVoice declares it supports.
+
+Switched per render on the language model's configuration, which transformers
+4.51 reads at every forward pass. SDPA is PyTorch's fused kernels (on Windows
+without its flash kernel); Eager is plain matrix products with the softmax in
+32-bit float; Flash attention 2 is what upstream loads on a CUDA card, and needs
+the ``flash-attn`` package, which this runtime does not install. Flex attention
+is not listed: VibeVoice does not declare it, and it needs Triton.
+"""
+
+SOLVER_DEFAULT = "dpmpp_2m"
+ATTENTION_DEFAULT = "sdpa"
+
+MAX_TAKES = 4
+"""How many takes one render may make, each at the next seed."""
 
 MIN_NEW_TOKENS = 512
 TOKENS_PER_TEXT_TOKEN = 8
@@ -176,12 +264,14 @@ class Refusal(ValueError):
 # --------------------------------------------------------------------------- #
 
 
-def read_frame(stream) -> "tuple[dict, bytes] | None":
+def read_frame(stream, max_payload: int = MAX_PAYLOAD) -> "tuple[dict, bytes] | None":
     """One request, or ``None`` at end of input.
 
     ``None`` is how the parent's death arrives when this process is waiting for
     work, and it is not an error: the loop ends, the model is released with the
-    process, and the exit status is 0.
+    process, and the exit status is 0. ``max_payload`` is this process's own
+    ceiling by default; the parent reads its worker's replies with
+    :data:`MAX_REPLY_PAYLOAD`.
     """
     header_length = _read_exactly(stream, 4)
     if header_length is None:
@@ -200,7 +290,7 @@ def read_frame(stream) -> "tuple[dict, bytes] | None":
     if payload_length is None:
         return None
     (size,) = _LENGTH.unpack(payload_length)
-    if size > MAX_PAYLOAD:
+    if size > max_payload:
         raise Refusal("payload too large")
     payload = b"" if size == 0 else _read_exactly(stream, size)
     if payload is None:
@@ -436,30 +526,32 @@ def voice_arrays(voices, payload: bytes, speakers) -> list:
     return [found[speaker] for speaker in speakers]
 
 
-def pcm16(samples) -> bytes:
-    """Float samples as little-endian PCM16, clipped to [-1, 1].
+def float32_bytes(samples) -> bytes:
+    """The model's samples as little-endian 32-bit float, exactly as it made them.
 
-    Clipped rather than limited: this is a model's finished output at the level
-    it chose, not a volume control, and a sample beyond unity is a rare
-    overshoot rather than a setting somebody turned up.
+    Not clipped and not quantised: the parent encodes the file, and a sample a
+    hair beyond unity is its to clip once, at the end. A value that is not a
+    number -- which a model should never produce -- is silence rather than a
+    file no decoder can play.
     """
     import numpy
 
     array = numpy.asarray(samples, dtype=numpy.float32).reshape(-1)
-    return (numpy.clip(array, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    return numpy.nan_to_num(array, nan=0.0, posinf=1.0, neginf=-1.0).astype("<f4").tobytes()
 
 
-def encode_wav(pcm: bytes, rate: int = SAMPLE_RATE) -> bytes:
-    """Already-quantised PCM16 as a mono WAV, in memory."""
-    import contextlib
+def flash_attention_available() -> bool:
+    """Whether the ``flash-attn`` package is importable here, asked without importing it."""
+    try:
+        return importlib.util.find_spec("flash_attn") is not None
+    except (ImportError, ValueError):
+        return False
 
-    buffer = io.BytesIO()
-    with contextlib.closing(wave.open(buffer, "wb")) as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(int(rate))
-        handle.writeframes(pcm)
-    return buffer.getvalue()
+
+def attention_available() -> list:
+    """The ids of :data:`ATTENTION` this runtime can run, in the table's order."""
+    return [name for name in ATTENTION
+            if name != "flash_attention_2" or flash_attention_available()]
 
 
 def _float(value, fallback: float) -> float:
@@ -498,10 +590,12 @@ class RenderRequest:
     """
 
     __slots__ = ("job", "text", "speakers", "voices", "cfg_scale", "seed",
-                 "max_new_tokens", "steps", "sampling", "temperature", "top_p")
+                 "max_new_tokens", "steps", "sampling", "temperature", "top_p",
+                 "solver", "attention", "takes")
 
     def __init__(self, job, text, speakers, voices, cfg_scale, seed, max_new_tokens, steps,
-                 sampling=False, temperature=None, top_p=None):
+                 sampling=False, temperature=None, top_p=None, solver=SOLVER_DEFAULT,
+                 attention=ATTENTION_DEFAULT, takes=1):
         self.job = job
         self.text = text
         self.speakers = speakers
@@ -513,6 +607,16 @@ class RenderRequest:
         self.sampling = bool(sampling)
         self.temperature = temperature
         self.top_p = top_p
+        self.solver = solver
+        self.attention = attention
+        self.takes = int(takes)
+
+    @property
+    def seeds(self) -> "list[int] | None":
+        """Each take's seed, the next after the last; ``None`` for a render left unseeded."""
+        if self.seed is None:
+            return None
+        return [int(self.seed) + index for index in range(self.takes)]
 
     @classmethod
     def parse(cls, header: dict, payload: bytes) -> "RenderRequest":
@@ -532,29 +636,44 @@ class RenderRequest:
                 raise Refusal("the temperature must be above 0 and at most 2")
             if not 0.0 < top_p <= 1.0:
                 raise Refusal("top-p must be above 0 and at most 1")
+        solver = str(header.get("solver") or SOLVER_DEFAULT)
+        if solver not in SOLVERS:
+            raise Refusal("that solver is not one VibeVoice's scheduler has")
+        attention = str(header.get("attention") or ATTENTION_DEFAULT)
+        if attention not in ATTENTION:
+            raise Refusal("that attention is not one VibeVoice supports")
+        takes = _optional_int(header.get("takes"), "the number of takes") or 1
+        if takes > MAX_TAKES:
+            raise Refusal(f"a render makes 1 to {MAX_TAKES} takes")
+        seed = _optional_int(header.get("seed"), "the seed")
+        if takes > 1 and seed is None:
+            # Take k is the render seed + k makes: without a seed there is no k.
+            raise Refusal("a render of several takes needs a seed")
         return cls(job=str(header.get("job") or ""), text=text, speakers=speakers,
                    voices=voices, cfg_scale=_float(header.get("cfg_scale"), 1.3),
-                   seed=_optional_int(header.get("seed"), "the seed"),
-                   max_new_tokens=max_new_tokens,
+                   seed=seed, max_new_tokens=max_new_tokens,
                    steps=_optional_int(header.get("steps"), "the step count") or 0,
-                   sampling=sampling, temperature=temperature, top_p=top_p)
+                   sampling=sampling, temperature=temperature, top_p=top_p,
+                   solver=solver, attention=attention, takes=takes)
 
 
 class Progress:
-    """The audio streamer's shape, used to count what has been made so far.
+    """The audio streamer's shape, used to count what each take has made so far.
 
-    ``generate`` hands its streamer every decoded chunk as it is made and calls
-    ``end`` when a sample finishes; it also breaks out of its loop the moment
-    any ``finished_flags`` entry is true. This object never sets one early --
-    only ``end`` does, which ``generate`` itself calls at the very points it is
-    about to stop anyway -- and it counts samples from the chunk's shape rather
-    than copying the chunk off the card, so it costs the render nothing.
+    ``generate`` hands its streamer every decoded chunk as it is made, with the
+    takes it belongs to, and calls ``end`` when a take finishes; it also breaks
+    out of its loop the moment *any* ``finished_flags`` entry is true, for every
+    take at once. So a take that ends raises no flag here: its three companions
+    would stop with it, mid-sentence. Only ``end`` with no takes named -- which
+    ``generate`` calls when the whole render stops -- raises them. Samples are
+    counted from the chunk's shape rather than copied off the card, so this
+    costs the render nothing; the progress reported is the furthest take's.
     """
 
-    def __init__(self, rate: int, report, interval: float = PROGRESS_INTERVAL):
+    def __init__(self, rate: int, report, takes: int = 1, interval: float = PROGRESS_INTERVAL):
         self.rate = int(rate)
-        self.samples = 0
-        self.finished_flags = [False]
+        self.counts = [0] * max(1, int(takes))
+        self.finished_flags = [False] * len(self.counts)
         self._report = report
         self._interval = float(interval)
         self._last = 0.0
@@ -564,32 +683,221 @@ class Progress:
             count = int(audio_chunks.shape[-1])
         except Exception:  # noqa: BLE001 - a shape this build does not have; no progress then
             return
-        self.samples += count
+        for index in _indices(sample_indices, len(self.counts)):
+            self.counts[index] += count
         now = time.monotonic()
         if now - self._last < self._interval:
             return
         self._last = now
         if self._report is not None:
             try:
-                self._report({"seconds": self.samples / float(self.rate or 1)})
+                self._report({"seconds": self.seconds})
             except Exception:  # noqa: BLE001 - progress is advisory
                 pass
 
     def end(self, sample_indices=None) -> None:
         if sample_indices is None:
             self.finished_flags = [True for _flag in self.finished_flags]
-            return
-        for index in sample_indices:
-            try:
-                found = int(index.item()) if hasattr(index, "item") else int(index)
-            except Exception:  # noqa: BLE001 - an index this build does not have
-                continue
-            if 0 <= found < len(self.finished_flags):
-                self.finished_flags[found] = True
+
+    @property
+    def samples(self) -> int:
+        return max(self.counts)
 
     @property
     def seconds(self) -> float:
         return self.samples / float(self.rate or 1)
+
+
+def _indices(sample_indices, count: int) -> list:
+    """The takes a chunk belongs to, as ints; every take when none are named."""
+    if sample_indices is None:
+        return list(range(count))
+    try:
+        found = sample_indices.tolist() if hasattr(sample_indices, "tolist") \
+            else list(sample_indices)
+        found = [int(index.item()) if hasattr(index, "item") else int(index) for index in found]
+    except Exception:  # noqa: BLE001 - an index this build does not have
+        return []
+    return [index for index in found if 0 <= index < count]
+
+
+# --------------------------------------------------------------------------- #
+# A batch's takes, each with its own random numbers
+# --------------------------------------------------------------------------- #
+
+
+class TakeRandomness:
+    """For the length of one ``generate``: each take's random numbers from its own seed.
+
+    ``generate`` draws from Torch's global generators in three places, and for
+    a batch each is given the take's own (see "Takes" in the module docstring):
+
+    the voice prompt -- the acoustic tokenizer's ``encode`` answers with an
+        object whose ``sample`` adds noise around the mean; the object this
+        tokenizer returns is given a ``sample`` that draws each take's clips
+        from that take's card generator, in the shapes a single take draws;
+    the diffusion head -- ``sample_speech_tokens`` is replaced by
+        :meth:`diffuse`, upstream's own loop with the starting noise drawn per
+        take on the host (where upstream draws it) and the SDE solver's noise
+        per take on the card, handed to ``step`` as ``variance_noise``; which
+        takes are speaking is ``generate``'s own ``diffusion_indices``, read
+        from its frame because upstream passes only their conditions;
+    the token choice -- ``torch.multinomial``, which ``generate`` calls for
+        every take at once when sampling, is answered a take at a time.
+
+    Everything is put back on exit, whatever happened. Only ever used for a
+    batch: a single take keeps the global generators, as it always has.
+    """
+
+    def __init__(self, torch, model, seeds, clips: int, device: str = "cuda"):
+        self.torch = torch
+        self.model = model
+        self.seeds = [int(seed) for seed in seeds]
+        self.clips = int(clips)
+        self.host = [torch.Generator().manual_seed(seed) for seed in self.seeds]
+        # A card has a generator of its own beside the host's, and a render
+        # seeds both; a machine with no card draws everything from the host's.
+        self.card = (self.host if str(device) == "cpu" else
+                     [torch.Generator(device=device).manual_seed(seed) for seed in self.seeds])
+        self._multinomial = None
+        self._tokenizer = None
+
+    def __enter__(self):
+        torch = self.torch
+        tokenizer = self.model.model.acoustic_tokenizer
+        encode = tokenizer.encode
+
+        def encoded(*args, **kwargs):
+            found = encode(*args, **kwargs)
+            found.sample = functools.partial(self.prompt, found)
+            return found
+
+        tokenizer.encode = encoded
+        self._tokenizer = tokenizer
+        self.model.sample_speech_tokens = self.diffuse
+        self._multinomial = torch.multinomial
+        torch.multinomial = self.choose
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        if self._multinomial is not None:
+            self.torch.multinomial = self._multinomial
+        for owner, name in ((self._tokenizer, "encode"), (self.model, "sample_speech_tokens")):
+            if owner is not None and name in vars(owner):
+                delattr(owner, name)
+        return False
+
+    # -- the voice prompt -------------------------------------------------- #
+
+    def prompt(self, found, dist_type: str = "fix"):
+        """``VibeVoiceTokenizerEncoderOutput.sample``, a take's clips at a time.
+
+        The same arithmetic in the same order as upstream's, on each take's
+        slice of the batch: ``torch.empty_like(...).normal_(generator=...)`` is
+        what ``torch.randn_like`` is, so the noise keeps the mean's memory
+        layout (a transposed view) and lands where a single take's would.
+        """
+        torch = self.torch
+        mean = found.mean
+        takes = len(self.seeds)
+        if dist_type not in ("fix", "gaussian"):
+            return found.mean, found.std
+        if int(mean.size(0)) != self.clips * takes:
+            raise Refusal("the voice prompt did not come out as one set of samples per take")
+        parts, spreads = [], []
+        for index in range(takes):
+            part = mean[index * self.clips:(index + 1) * self.clips]
+            generator = self.card[index]
+            if dist_type == "fix":
+                noise = torch.empty_like(part).normal_(generator=generator)
+                parts.append(part + found.std * noise)
+                continue
+            value = found.std / 0.8
+            spread = torch.randn(part.size(0), device=part.device, dtype=part.dtype,
+                                 generator=generator) * value
+            while spread.dim() < part.dim():
+                spread = spread.unsqueeze(-1)
+            noise = torch.empty_like(part).normal_(generator=generator)
+            parts.append(part + spread * noise)
+            spreads.append(spread)
+        return torch.cat(parts, dim=0), (torch.cat(spreads, dim=0) if spreads else found.std)
+
+    # -- the diffusion head ------------------------------------------------ #
+
+    def diffuse(self, condition, neg_condition, cfg_scale: float = 3.0):
+        """Upstream's ``sample_speech_tokens``, with each take's noise its own.
+
+        Line for line the loop upstream runs, against whichever solver the
+        model holds. A single take of upstream's draws ``(2, width)`` of
+        starting noise on the host and ``(2, width)`` of SDE noise on the card
+        at every step, and uses the first row; each take here draws exactly
+        that from its own generators, its first row among the conditioned half
+        of the batch and its second in the half the classifier-free guidance
+        doubles it into.
+        """
+        frame = sys._getframe(1)
+        rows = frame.f_locals.get("diffusion_indices")
+        del frame
+        torch = self.torch
+        if rows is None:
+            raise Refusal("this VibeVoice build does not say which takes are speaking")
+        takes = [int(row) for row in rows.tolist()]
+        if len(takes) != int(condition.shape[0]):
+            raise Refusal("the speaking takes and their conditions do not match")
+        model = self.model
+        scheduler = model.model.noise_scheduler
+        with torch.no_grad():
+            scheduler.set_timesteps(model.ddpm_inference_steps)
+            condition = torch.cat([condition, neg_condition], dim=0).to(
+                model.model.prediction_head.device)
+            width = model.config.acoustic_vae_dim
+            speech = self._pairs([torch.randn(2, width, generator=self.host[take])
+                                  for take in takes]).to(condition)
+            stochastic = str(getattr(scheduler.config, "algorithm_type", "")).startswith("sde")
+            for step in scheduler.timesteps:
+                half = speech[: len(speech) // 2]
+                combined = torch.cat([half, half], dim=0)
+                eps = model.model.prediction_head(combined, step.repeat(combined.shape[0]).to(combined),
+                                                  condition=condition)
+                cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
+                half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+                eps = torch.cat([half_eps, half_eps], dim=0)
+                noise = None
+                if stochastic:
+                    noise = self._pairs([torch.randn((2, width), generator=self.card[take],
+                                                     device=eps.device, dtype=torch.float32)
+                                         for take in takes])
+                speech = scheduler.step(eps, step, speech, variance_noise=noise).prev_sample
+            return speech[: len(speech) // 2]
+
+    def _pairs(self, drawn: list):
+        """Each take's two rows, the first rows in take order and then the second."""
+        return self.torch.stack([pair[0] for pair in drawn] + [pair[1] for pair in drawn])
+
+    # -- the token choice -------------------------------------------------- #
+
+    def choose(self, probabilities, num_samples, replacement=False, *, generator=None, out=None):
+        """``torch.multinomial``, each take's row drawn with that take's generator."""
+        original = self._multinomial
+        if generator is None and out is None and getattr(probabilities, "dim", None) is not None \
+                and probabilities.dim() == 2 and int(probabilities.shape[0]) == len(self.card):
+            return self.torch.cat([
+                original(probabilities[index:index + 1], num_samples, replacement,
+                         generator=self.card[index])
+                for index in range(len(self.card))], dim=0)
+        if out is not None:
+            return original(probabilities, num_samples, replacement, generator=generator, out=out)
+        return original(probabilities, num_samples, replacement, generator=generator)
+
+
+class _NoHooks:
+    """What a single take renders under: nothing replaced."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -603,10 +911,13 @@ class Engine:
     Everything Torch-shaped is behind this class, and it is constructed once
     per worker. Its two import points -- :meth:`_frameworks` and
     :meth:`_upstream` -- are methods so a test can hand it stand-ins and
-    exercise the exact call sequence without a card.
+    exercise the exact call sequence without a card. ``device`` is the card
+    (``cuda``, the one card this process can see) everywhere but a check that
+    runs upstream's own code on a machine without one.
     """
 
-    def __init__(self):
+    def __init__(self, device: str = "cuda"):
+        self.device = str(device or "cuda")
         self.torch = None
         self.numpy = None
         self.model = None
@@ -614,6 +925,10 @@ class Engine:
         self.model_dir = ""
         self.steps = 0
         self.weights_bytes = 0
+        self.scheduler = None
+        """The scheduler the model was built with, which every other solver is made from."""
+        self.solver = SOLVER_DEFAULT
+        self.attention = ATTENTION_DEFAULT
 
     # -- imports ----------------------------------------------------------- #
 
@@ -709,7 +1024,7 @@ class Engine:
         began = time.monotonic()
         processor = processor_class.from_pretrained(wanted)
         model = model_class.from_pretrained(
-            wanted, torch_dtype=precision, device_map="cuda",
+            wanted, torch_dtype=precision, device_map=self.device,
             attn_implementation=str(attention or "sdpa"))
         model.eval()
         model.set_ddpm_inference_steps(num_steps=steps or None)
@@ -721,6 +1036,9 @@ class Engine:
         self.model_dir = wanted
         self.steps = steps
         self.weights_bytes = weights
+        self.scheduler = getattr(getattr(model, "model", None), "noise_scheduler", None)
+        self.solver = SOLVER_DEFAULT
+        self.attention = str(attention or ATTENTION_DEFAULT)
         elapsed = time.monotonic() - began
         _note(f"loaded in {elapsed:.1f} s — {weights / float(1 << 30):.1f} GiB of weights, "
               f"{steps or 'default'} step(s), {str(dtype or 'bf16')}, {attention or 'sdpa'}")
@@ -734,6 +1052,9 @@ class Engine:
         self.model_dir = ""
         self.steps = 0
         self.weights_bytes = 0
+        self.scheduler = None
+        self.solver = SOLVER_DEFAULT
+        self.attention = ATTENTION_DEFAULT
         gc.collect()
         if self.torch is not None:
             try:
@@ -746,11 +1067,13 @@ class Engine:
 
     def render(self, request: RenderRequest, cancelled: threading.Event,
                on_progress=None) -> "tuple[dict, bytes]":
-        """One script through the model, as the demo runs it.
+        """One script through the model, as the demo runs it, as one to four takes.
 
         ``cancelled`` is read at the top of every generation step through
         ``stop_check_fn``; a cancel therefore lands within one step, and the
-        reply says so and carries whatever audio there was.
+        reply says so and carries whatever audio there was. The reply's
+        ``takes`` says, take by take, how many samples of the payload are that
+        take's: the payload is every take's 32-bit float samples, in order.
         """
         if self.model is None or self.processor is None:
             raise Refusal("no model is loaded")
@@ -758,20 +1081,29 @@ class Engine:
         if request.steps and request.steps != self.steps:
             self.model.set_ddpm_inference_steps(num_steps=int(request.steps))
             self.steps = int(request.steps)
+        self._use_solver(request.solver)
+        self._use_attention(request.attention)
+        takes = max(1, int(request.takes or 1))
 
         inputs = self.processor(
-            text=[request.text],
-            voice_samples=[list(request.voices)],
+            text=[request.text] * takes,
+            voice_samples=[list(request.voices) for _take in range(takes)],
             padding=True,
             return_tensors="pt",
             return_attention_mask=True,
         )
         for key, value in list(inputs.items()):
             if torch.is_tensor(value):
-                inputs[key] = value.to("cuda")
-        if request.seed is not None:
-            torch.manual_seed(int(request.seed))
-            torch.cuda.manual_seed_all(int(request.seed))
+                inputs[key] = value.to(self.device)
+        seeds = request.seeds
+        if seeds:
+            # The first take's seed on the global generators whatever the
+            # batch: a single take draws from them, and a batch's hooks leave
+            # nothing unseeded behind them.
+            torch.manual_seed(seeds[0])
+            torch.cuda.manual_seed_all(seeds[0])
+        hooks = (TakeRandomness(torch, self.model, seeds, len(request.voices), self.device)
+                 if takes > 1 else _NoHooks())
 
         prompt_length = int(inputs["input_ids"].shape[-1])
         max_new_tokens = request.max_new_tokens or self._token_budget(request.text, prompt_length)
@@ -779,78 +1111,125 @@ class Engine:
         # max_new_tokens; the multiplier is set so the token budget is the one
         # that binds (see TOKENS_PER_TEXT_TOKEN).
         times = max(2, int(math.ceil(max_new_tokens / float(max(1, prompt_length)))) + 1)
-        progress = Progress(SAMPLE_RATE, on_progress)
+        progress = Progress(SAMPLE_RATE, on_progress, takes)
 
-        torch.cuda.reset_peak_memory_stats(0)
+        on_card = self.device == "cuda"
+        if on_card:
+            torch.cuda.reset_peak_memory_stats(0)
         began = time.monotonic()
+        made = []
         try:
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                cfg_scale=float(request.cfg_scale),
-                tokenizer=self.processor.tokenizer,
-                generation_config=_generation(request),
-                verbose=False,
-                stop_check_fn=cancelled.is_set,
-                audio_streamer=progress,
-                max_length_times=times,
-                show_progress_bar=False,
-            )
-            speech = None
-            found = getattr(outputs, "speech_outputs", None)
-            if found:
-                speech = found[0]
-            if speech is None:
-                samples = numpy.zeros(0, dtype=numpy.float32)
-            else:
-                samples = speech.detach().reshape(-1).to(torch.float32).cpu().numpy()
-            render_seconds = time.monotonic() - began
+            with hooks:
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    cfg_scale=float(request.cfg_scale),
+                    tokenizer=self.processor.tokenizer,
+                    generation_config=_generation(request),
+                    verbose=False,
+                    stop_check_fn=cancelled.is_set,
+                    audio_streamer=progress,
+                    max_length_times=times,
+                    show_progress_bar=False,
+                )
+            found = list(getattr(outputs, "speech_outputs", None) or ())
             sequences = getattr(outputs, "sequences", None)
-            tokens = 0
-            if sequences is not None:
-                tokens = max(0, int(sequences.shape[-1]) - prompt_length)
-            capped = False
             reached = getattr(outputs, "reach_max_step_sample", None)
-            if reached is not None:
-                try:
-                    capped = bool(reached.any().item()) if hasattr(reached, "any") \
-                        else bool(any(reached))
-                except Exception:  # noqa: BLE001 - a shape this build does not have
-                    capped = False
-            if not capped and not cancelled.is_set() and tokens >= int(max_new_tokens):
-                # Upstream's generate never raises its own flag when the budget
-                # runs out: its loop's range ends one step before the check
-                # that would. Having used the whole budget without ending on
-                # end-of-speech is what reaching it means.
-                capped = _last_token(sequences) != \
-                    getattr(self.processor.tokenizer, "eos_token_id", None)
-            peak = int(torch.cuda.max_memory_reserved(0))
-            pcm = pcm16(samples)
-            seconds = len(samples) / float(SAMPLE_RATE)
+            ran = max(0, int(sequences.shape[-1]) - prompt_length) if sequences is not None else 0
+            eos = getattr(self.processor.tokenizer, "eos_token_id", None)
+            for take in range(takes):
+                speech = found[take] if take < len(found) else None
+                if speech is None:
+                    samples = numpy.zeros(0, dtype=numpy.float32)
+                else:
+                    samples = speech.detach().reshape(-1).to(torch.float32).cpu().numpy()
+                # A single take ran until it ended; a batch runs until its last
+                # take has, so each take's own count stops at its end of speech.
+                tokens = ran if takes == 1 else _tokens_of(sequences, take, prompt_length,
+                                                           eos, ran)
+                capped = _flag(reached, take)
+                if not capped and not cancelled.is_set() and ran >= int(max_new_tokens):
+                    # Upstream's generate never raises its own flag when the
+                    # budget runs out: its loop's range ends one step before
+                    # the check that would. A take that used the whole budget
+                    # without ending on end-of-speech is what reaching it means.
+                    capped = _last_token(sequences, take) != eos
+                made.append((samples, tokens, capped))
+            render_seconds = time.monotonic() - began
+            peak = int(torch.cuda.max_memory_reserved(0)) if on_card else 0
         finally:
             outputs = None
             inputs = None
             gc.collect()
-            try:
-                torch.cuda.empty_cache()
-            except Exception:  # noqa: BLE001 - nothing to empty
-                pass
-        if capped:
-            _note(f"the render reached its token budget ({max_new_tokens}) before the "
-                  f"script ended")
-        _note(f"rendered {seconds:.1f} s of audio in {render_seconds:.1f} s — {tokens} "
-              f"token(s), peak {peak / float(1 << 30):.1f} GiB"
+            if on_card:
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001 - nothing to empty
+                    pass
+        answers = []
+        for index, (samples, tokens, capped) in enumerate(made):
+            answers.append({"seed": None if seeds is None else seeds[index],
+                            "samples": int(len(samples)),
+                            "seconds": len(samples) / float(SAMPLE_RATE),
+                            "tokens": int(tokens), "capped": bool(capped)})
+        if any(answer["capped"] for answer in answers):
+            _note(f"a take reached its token budget ({max_new_tokens}) before the script ended")
+        longest = max(answer["seconds"] for answer in answers)
+        _note(f"rendered {len(answers)} take(s), the longest {longest:.1f} s of audio, in "
+              f"{render_seconds:.1f} s — {sum(a['tokens'] for a in answers)} token(s), peak "
+              f"{peak / float(1 << 30):.1f} GiB, {SOLVERS[request.solver]['name']}, "
+              f"{ATTENTION[request.attention]}"
               f"{', cancelled' if cancelled.is_set() else ''}")
         return {
-            "seconds": seconds,
+            "format": "f32le",
             "sample_rate": SAMPLE_RATE,
+            "takes": answers,
+            "seconds": answers[0]["seconds"],
             "render_seconds": render_seconds,
             "peak_bytes": peak,
             "resident_bytes": self.resident(),
             "cancelled": bool(cancelled.is_set()),
-            "tokens": tokens,
-            "capped": capped,
-        }, encode_wav(pcm, SAMPLE_RATE)
+            "tokens": sum(answer["tokens"] for answer in answers),
+            "capped": any(answer["capped"] for answer in answers),
+        }, b"".join(float32_bytes(samples) for samples, _tokens, _capped in made)
+
+    def _use_solver(self, solver: str) -> None:
+        """Put the solver a render asks for on the model, made from the model's own.
+
+        The scheduler the model was built with is kept and handed back when it
+        is already the solver asked for, so the default render uses the very
+        object upstream's own render uses; any other solver is that
+        scheduler's configuration with the algorithm and order changed, as
+        upstream's demo does it. ``step`` keeps history between calls and
+        ``set_timesteps`` clears it, and the model calls ``set_timesteps``
+        before every speech frame.
+        """
+        wanted = str(solver or SOLVER_DEFAULT)
+        if wanted == self.solver:
+            return
+        base = self.scheduler
+        if base is None:
+            raise Refusal("no model is loaded")
+        choice = {"algorithm_type": SOLVERS[wanted]["algorithm_type"],
+                  "solver_order": SOLVERS[wanted]["solver_order"]}
+        config = base.config
+        if all(getattr(config, key, None) == value for key, value in choice.items()):
+            chosen = base
+        else:
+            chosen = type(base).from_config(config, **choice)
+        self.model.model.noise_scheduler = chosen
+        self.solver = wanted
+
+    def _use_attention(self, attention: str) -> None:
+        """Have the language model attend the way a render asks. One attribute, no reload."""
+        wanted = str(attention or ATTENTION_DEFAULT)
+        if wanted == self.attention:
+            return
+        if wanted == "flash_attention_2" and not flash_attention_available():
+            raise Refusal("Flash attention 2 needs the flash-attn package, which VibeVoice's "
+                          "runtime does not have")
+        self.model.model.language_model.config._attn_implementation = wanted
+        self.attention = wanted
 
     def _token_budget(self, text: str, prompt_length: int) -> int:
         """How many tokens a render may generate when the caller set no cap.
@@ -1033,6 +1412,8 @@ def serve(stdin, stdout, engine_factory=None) -> int:
                         "vibevoice": _package_version("vibevoice"),
                         "transformers": _package_version("transformers"),
                         "sample_rate": SAMPLE_RATE,
+                        "attention": attention_available(),
+                        "max_takes": MAX_TAKES,
                     })
                     reply(request_id, found)
                     _note(f"ready — {card.get('device_name') or 'unnamed device'}, "
@@ -1167,12 +1548,41 @@ def _generation(request: "RenderRequest") -> dict:
             "top_p": float(request.top_p)}
 
 
-def _last_token(sequences) -> "int | None":
-    """The last token of the first sequence ``generate`` returned, or ``None``."""
+def _last_token(sequences, take: int = 0) -> "int | None":
+    """The last token of a take's sequence as ``generate`` returned it, or ``None``."""
     try:
-        return int(sequences[0, -1].item())
+        return int(sequences[take, -1].item())
     except Exception:  # noqa: BLE001 - no sequences, or a shape this build does not have
         return None
+
+
+def _tokens_of(sequences, take: int, prompt_length: int, eos, ran: int) -> int:
+    """How many tokens a take generated, its end-of-speech included.
+
+    ``generate`` runs until every take has ended and pads a take that ended
+    early with end-of-speech, so a take's count stops at its first one; a take
+    that never ended used every step the render ran.
+    """
+    if sequences is None:
+        return 0
+    try:
+        made = sequences[take, prompt_length:].tolist()
+    except Exception:  # noqa: BLE001 - a shape this build does not have
+        return ran
+    if eos is not None and eos in made:
+        return made.index(eos) + 1
+    return len(made)
+
+
+def _flag(reached, take: int) -> bool:
+    """Upstream's own per-take "reached its length" flag, when it raised one."""
+    if reached is None:
+        return False
+    try:
+        return bool(reached[take].item()) if hasattr(reached[take], "item") \
+            else bool(reached[take])
+    except Exception:  # noqa: BLE001 - a shape this build does not have
+        return False
 
 
 def _package_version(name: str) -> str:
@@ -1213,6 +1623,7 @@ def selftest() -> int:
         Engine()._upstream()
         report["vibevoice"] = _package_version("vibevoice")
         report["cuda"] = bool(torch.cuda.is_available())
+        report["attention"] = attention_available()
         report["ok"] = True
     except Exception as exc:  # noqa: BLE001 - the report is the answer
         report["error"] = f"{exc.__class__.__name__}: {exc}"

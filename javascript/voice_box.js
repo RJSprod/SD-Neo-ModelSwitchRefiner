@@ -39,10 +39,10 @@
 //
 // Render, the Install button and one status line live in the Configuration
 // stage's header. The line shows the first of: a message a press just caused
-// (for a few seconds), an install running, the job on a card with its time
-// ticking from the server's own count, the queue, the last render this page
-// started having failed, VibeVoice warm on a card, why Render is disabled,
-// Ready.
+// (for a few seconds), an install running, the job on a card -- how many
+// takes, for a batch -- with its time ticking from the server's own count, the
+// queue, the last render this page started having failed, VibeVoice warm on a
+// card, why Render is disabled, Ready.
 //
 // Every player -- a sample row, the trimmer, the selected output lane -- has
 // the same transport: Play/Pause, From the start and Stop, as icons. One
@@ -2441,12 +2441,16 @@
 
     // `needs` names the switch a field means nothing without: while it is
     // off the field is disabled, and keeps its value for when it is on again.
+    // `list` names the server's list a select offers (engineOptions).
     const FIELDS = [
         {key: "model_id", label: "Model", kind: "select"},
         {key: "card_uuid", label: "Card", kind: "select"},
         {key: "steps", label: "Diffusion steps", kind: "number", min: 1, max: 50, step: 1},
         {key: "cfg_scale", label: "CFG", kind: "number", min: 1, max: 3, step: 0.1},
+        {key: "solver", label: "Solver", kind: "select", list: "solvers"},
+        {key: "attention", label: "Attention", kind: "select", list: "attention"},
         {key: "seed", label: "Seed", kind: "text", placeholder: "random"},
+        {key: "batch", label: "Batch", kind: "select"},
         {key: "max_new_tokens", label: "Max new tokens", kind: "text", placeholder: "automatic"},
         {key: "sampling", label: "Sampling", kind: "switch", wide: true},
         {key: "temperature", label: "Temperature", kind: "number", min: 0.1, max: 2, step: 0.05,
@@ -2456,6 +2460,28 @@
     // The server's defaults for them (mc_voice_box.CONFIGURATION_DEFAULTS):
     // off is the model's own greedy choice.
     const SAMPLING = {sampling: false, temperature: 0.95, top_p: 0.95};
+    // What a render may ask for when the status does not say (an older
+    // server, or a part of the status that failed): the lists this page was
+    // written against (mc_voice_vibevoice.options), Flash attention 2
+    // unavailable since nothing said it was installed. The defaults are a new
+    // configuration's; they are also what every render made before Solver,
+    // Attention and Batch were choices used -- the model's own solver, SDPA,
+    // one take.
+    const OPTIONS_FALLBACK = {
+        solvers: [{id: "dpmpp_2m", name: "DPM++ 2M", label: "DPM++ 2M (upstream)"},
+                  {id: "dpmpp_2m_sde", name: "DPM++ 2M SDE", label: "DPM++ 2M SDE (upstream demo)"},
+                  {id: "dpmpp_3m", name: "DPM++ 3M", label: "DPM++ 3M"},
+                  {id: "dpmpp_1m", name: "DPM++ 1M", label: "DPM++ 1M"},
+                  {id: "dpmpp_1m_sde", name: "DPM++ 1M SDE", label: "DPM++ 1M SDE"}],
+        attention: [{id: "sdpa", name: "SDPA", label: "SDPA", available: true, reason: ""},
+                    {id: "eager", name: "Eager", label: "Eager", available: true, reason: ""},
+                    {id: "flash_attention_2", name: "Flash attention 2",
+                     label: "Flash attention 2 (upstream)", available: false, reason: "not installed"}],
+        batch_max: 4,
+        defaults: {solver: "dpmpp_2m", attention: "sdpa", batch: 1, steps: 12},
+    };
+    // The fields whose values are picked from those lists.
+    const LISTED = ["solver", "attention", "batch"];
 
     // Render, Install and the one status line with its buttons sit in the
     // stage's header, above the configuration, and stay there while the
@@ -2624,6 +2650,9 @@
             const text = String(input.value || "").trim();
             value = text === "" ? null : Number(text);
             if (value !== null && !isFinite(value)) value = null;
+        } else if (field.key === "batch") {
+            // A count of takes, held as the number it is.
+            value = Number(input.value) || 1;
         } else {
             value = input.value;
         }
@@ -2663,6 +2692,38 @@
         return found;
     }
 
+    // What a render may ask for -- its solvers, attentions, most takes and
+    // their defaults -- as the server lists them (status.engine.options), a
+    // part it did not send taken from OPTIONS_FALLBACK. Whatever the lists
+    // hold is what the selects offer.
+    function engineOptions() {
+        const engine = (state.status && state.status.engine) || {};
+        const sent = engine.options && typeof engine.options === "object" ? engine.options : {};
+        const listed = function (key) {
+            const found = (Array.isArray(sent[key]) ? sent[key] : []).filter(function (option) {
+                return !!option && typeof option.id === "string" && !!option.id;
+            });
+            return found.length ? found : OPTIONS_FALLBACK[key];
+        };
+        const given = sent.defaults && typeof sent.defaults === "object" ? sent.defaults : {};
+        const defaults = {};
+        Object.keys(OPTIONS_FALLBACK.defaults).forEach(function (key) {
+            defaults[key] = pick(given[key], OPTIONS_FALLBACK.defaults[key]);
+        });
+        const most = Math.floor(Number(sent.batch_max));
+        return {solvers: listed("solvers"), attention: listed("attention"),
+                batch_max: most >= 1 ? most : OPTIONS_FALLBACK.batch_max, defaults: defaults};
+    }
+
+    // An option as its select shows it: its label; one the server lists but
+    // cannot run is disabled, with the reason after its label.
+    function choiceOf(option) {
+        const label = String(option.label || option.name || option.id);
+        if (option.available !== false) return {value: option.id, label: label};
+        return {value: option.id, label: label + (option.reason ? " — " + option.reason : ""),
+                disabled: true};
+    }
+
     function cardLabel(card) {
         const roles = [];
         if (card.image_card) roles.push("image model's card");
@@ -2670,33 +2731,54 @@
         return (card.name || card.uuid || "card") + (roles.length ? " — " + roles.join(", ") : "");
     }
 
+    // The options are replaced only when they change: the fields are drawn
+    // again on every poll, each second while a render runs, and a list
+    // rebuilt under an open select can shut it on the user. A disabled option
+    // is still selected when it is the value: that is how a configuration
+    // holding what this machine cannot run shows it.
     function fillSelect(select, options, value) {
-        clear(select);
-        options.forEach(function (option) {
-            const node = el("option", "", option.label);
-            node.value = option.value;
-            node.setAttribute("value", option.value);
-            select.appendChild(node);
-        });
-        select.value = value;
+        const key = JSON.stringify(options.map(function (option) {
+            return [option.value, option.label, !!option.disabled];
+        }));
+        if (select.mcVoiceBoxOptions !== key) {
+            clear(select);
+            options.forEach(function (option) {
+                const node = el("option", "", option.label);
+                node.value = option.value;
+                node.setAttribute("value", option.value);
+                if (option.disabled) {
+                    node.disabled = true;
+                    node.setAttribute("disabled", "");
+                }
+                select.appendChild(node);
+            });
+            select.mcVoiceBoxOptions = key;
+        }
+        if (select.value !== value) select.value = value;
     }
 
     // A new configuration starts from Voice Box's settings (the card and model
-    // chosen last) and the engine's (its steps, CFG, seed and token cap).
+    // chosen last), the engine's (its steps, CFG, seed and token cap) and the
+    // server's defaults for the rest (a solver, an attention, one take, and
+    // twelve steps where the engine names none).
     function defaultConfiguration() {
         const status = state.status || {};
         const settings = status.settings || {};
         const engineSettings = status.engine_settings || {};
         const cards = status.cards || [];
+        const defaults = engineOptions().defaults;
         return {
             id: "",
             name: "",
             model_id: settings.model_id || engineSettings.model_id || engineModels()[0].id,
             card_uuid: settings.card_uuid || engineSettings.card_uuid
                 || (cards[0] ? cards[0].uuid : ""),
-            steps: pick(engineSettings.steps, 10),
+            steps: pick(engineSettings.steps, defaults.steps),
             cfg_scale: pick(engineSettings.cfg_scale, 1.3),
+            solver: defaults.solver,
+            attention: defaults.attention,
             seed: pick(engineSettings.seed, null),
+            batch: defaults.batch,
             max_new_tokens: pick(engineSettings.max_new_tokens, null),
             sampling: SAMPLING.sampling,
             temperature: SAMPLING.temperature,
@@ -2842,8 +2924,23 @@
         if (!nodes.fields) return;
         const working = ensureWorking();
         const cards = (state.status && state.status.cards) || [];
+        const options = engineOptions();
         FIELDS.forEach(function (field) {
             const input = nodes.fields[field.key];
+            if (field.list) {
+                // What the configuration holds stays selected even where it
+                // cannot run: Render is then refused, with the server's reason.
+                fillSelect(input, options[field.list].map(choiceOf), String(working[field.key] || ""));
+                return;
+            }
+            if (field.key === "batch") {
+                const counts = [];
+                for (let count = 1; count <= options.batch_max; count += 1) {
+                    counts.push({value: String(count), label: String(count)});
+                }
+                fillSelect(input, counts, String(working.batch || ""));
+                return;
+            }
             if (field.key === "model_id") {
                 fillSelect(input, engineModels().map(function (model) {
                     return {value: model.id, label: model.label};
@@ -3524,13 +3621,14 @@
             + (state.dirty.configuration ? "; save it to keep it." : "."), "info");
     }
 
-    const REUSED = ["model_id", "card_uuid", "steps", "cfg_scale", "seed", "max_new_tokens"];
+    const REUSED = ["model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed", "batch",
+                    "max_new_tokens"];
     const SAMPLED = ["sampling", "temperature", "top_p"];
 
     // The configuration a render used: the one it recorded, or -- for a render
     // made before configurations were recorded -- rebuilt from the fields it
-    // did record. Sampling, Temperature and Top-p are there only when the
-    // render recorded them.
+    // did record. Sampling, Temperature, Top-p, Solver, Attention and Batch
+    // are there only when the render recorded them.
     function renderedConfiguration(output) {
         const render = (output && output.render) || {};
         const recorded = render.configuration && typeof render.configuration === "object"
@@ -3588,6 +3686,14 @@
             // saying "the default": what the editor holds already stays.
             if (value === "" && (key === "model_id" || key === "card_uuid")) return;
             working[key] = value === "" ? null : value;
+        });
+        // A render made before Solver, Attention and Batch were choices
+        // recorded none of them, and was made with the model's own solver,
+        // SDPA and one take: the fallback's defaults, which it puts back.
+        LISTED.forEach(function (key) {
+            if (values[key] === undefined || values[key] === null || values[key] === "") {
+                working[key] = OPTIONS_FALLBACK.defaults[key];
+            }
         });
         // Sampling is on only when the render says it was: one made before
         // the choice existed was greedy. Temperature and Top-p are taken when
@@ -4004,8 +4110,16 @@
         return state.jobs.filter(function (job) { return job && job.phase === "queued"; }).length;
     }
 
+    // " · 4 takes" for a job that renders more than one, and nothing for one.
+    // Words, never a "×": the line is a span, and Lobe replaces any span
+    // holding one.
+    function takesOf(job) {
+        const count = Math.floor(Number(job.batch) || 0);
+        return count > 1 ? " · " + count + " takes" : "";
+    }
+
     function jobLine(job, queued) {
-        const name = "“" + (job.name || "a render") + "”";
+        const name = "“" + (job.name || "a render") + "”" + takesOf(job);
         let before;
         if (job.phase === "rendering") {
             before = "Rendering " + name;
