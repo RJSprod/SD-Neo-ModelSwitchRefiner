@@ -270,11 +270,13 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
         route.fulfill(status=404, body="")
 
 
-def open_tab(browser, width: int, height: int, *, dark: bool = False, hostile=()):
+def open_tab(browser, width: int, height: int, *, dark: bool = False, hostile=(), configuration=None):
     """A page at ``width`` x ``height`` with the tab booted, its lists drawn and fitted;
-    ``hostile`` names the parts of HOSTILE the page's theme has."""
+    ``hostile`` names the parts of HOSTILE the page's theme has, and ``configuration``
+    what the saved configuration holds besides the fixture's."""
     page = browser.new_page(viewport={"width": width, "height": height})
     answers, html, script = fixtures(), page_html(hostile), SCRIPT.read_text(encoding="utf-8")
+    answers["/configurations"]["configurations"][0].update(configuration or {})
     if dark:
         html = html.replace("<body>", '<body class="dark">', 1)
     page.route(ORIGIN + "/**", lambda route: _answer(route, answers, html, script))
@@ -803,6 +805,58 @@ class TestTheConfigurationManager:
             for icon in controls[1:]:
                 assert _near(icon["width"], icon["height"]), (width, icon)
             assert found["overflow"] <= 1, (width, found)
+
+    def test_every_field_fits_the_stage_with_the_longest_choices_held(self, browser):
+        """Solver, Attention and Batch among them, and the configuration holding
+        the choices with the most words -- an attention this machine cannot
+        run, shown with its reason: in the desktop column and on the phone's
+        card at 390 and 360 px, every field sits inside the stage and its
+        control inside its cell, the new selects as tall as Model's, and
+        nothing scrolls sideways."""
+        held = {"solver": "dpmpp_2m_sde", "attention": "flash_attention_2", "batch": 4}
+        seen = {}
+        for width, height in ((1440, 900), (390, 844), (360, 780)):
+            page = open_tab(browser, width, height, configuration=held)
+            seen[width] = page.evaluate("""() => {
+                const stage = document.querySelector("#mc-voice-box .mc-voice-box-stage-configuration");
+                const s = stage.getBoundingClientRect();
+                const fields = stage.querySelectorAll(".mc-voice-box-fields > .mc-voice-box-field");
+                const cells = [...fields].map((cell) => {
+                    const c = cell.getBoundingClientRect();
+                    const control = cell.querySelector("select, input, button");
+                    const r = control.getBoundingClientRect();
+                    return {key: control.dataset.field, left: c.left, right: c.right, controlLeft: r.left,
+                            controlRight: r.right, height: r.height};
+                });
+                const wide = (node) => ({scroll: node.scrollWidth, client: node.clientWidth});
+                const value = (key) => stage.querySelector('[data-field="' + key + '"]').value;
+                const attention = stage.querySelector('[data-field="attention"]');
+                const option = attention.options[attention.selectedIndex];
+                return {stage: {left: s.left, right: s.right}, cells,
+                        body: wide(stage.querySelector(".mc-voice-box-stage-body")),
+                        form: wide(stage.querySelector(".mc-voice-box-configuration-form")),
+                        page: {scroll: document.documentElement.scrollWidth, client: innerWidth},
+                        held: [value("solver"), value("attention"), option.textContent, option.disabled,
+                               value("batch")]};
+            }""")
+            page.close()
+
+        for width, found in seen.items():
+            cells = {cell["key"]: cell for cell in found["cells"]}
+            assert [cell["key"] for cell in found["cells"]] == [
+                "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed", "batch",
+                "max_new_tokens", "sampling", "temperature", "top_p"], width
+            assert found["held"] == ["dpmpp_2m_sde", "flash_attention_2",
+                                     "Flash attention 2 (upstream) — not installed", True, "4"], (width, found)
+            for cell in found["cells"]:
+                assert cell["left"] >= found["stage"]["left"] - 1, (width, cell, found["stage"])
+                assert cell["right"] <= found["stage"]["right"] + 1, (width, cell, found["stage"])
+                assert cell["controlLeft"] >= cell["left"] - 1, (width, cell)
+                assert cell["controlRight"] <= cell["right"] + 1, (width, cell)
+            for key in ("solver", "attention", "batch"):
+                assert _near(cells[key]["height"], cells["model_id"]["height"]), (width, cells[key])
+            for part in ("body", "form", "page"):
+                assert found[part]["scroll"] <= found[part]["client"] + 1, (width, part, found[part])
 
     def test_unsaved_changes_put_an_accent_dot_on_save(self, browser):
         page = open_tab(browser, 1440, 900)

@@ -829,9 +829,24 @@ OLD_OUTPUT = {"id": "o0", "name": "Old take", "pipeline_id": "p1", "seconds": 3.
 SAMPLING_CONFIGURATION = dict(CONFIGURATION, sampling=True, temperature=1.4, top_p=0.6)
 """A configuration saved with Sampling on, the way the server hands one out now."""
 JOB = {"id": "j1", "name": "Pipeline 1 2", "pipeline_id": "p1", "phase": "queued", "reason": "",
-       "warning": "", "progress": {}, "output_id": "", "created": 3, "started": None,
+       "warning": "", "progress": {}, "output_id": "", "output_ids": [], "created": 3, "started": None,
        "ended": None, "card": "GPU-a", "live": True, "elapsed": None, "seed": 42,
-       "seed_drawn": True}
+       "seed_drawn": True, "batch": 1}
+OPTIONS = {
+    "solvers": [{"id": "dpmpp_2m", "name": "DPM++ 2M", "label": "DPM++ 2M (upstream)"},
+                {"id": "dpmpp_2m_sde", "name": "DPM++ 2M SDE", "label": "DPM++ 2M SDE (upstream demo)"},
+                {"id": "dpmpp_3m", "name": "DPM++ 3M", "label": "DPM++ 3M"},
+                {"id": "dpmpp_1m", "name": "DPM++ 1M", "label": "DPM++ 1M"},
+                {"id": "dpmpp_1m_sde", "name": "DPM++ 1M SDE", "label": "DPM++ 1M SDE"}],
+    "attention": [{"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True, "reason": ""},
+                  {"id": "eager", "name": "Eager", "label": "Eager", "available": True, "reason": ""},
+                  {"id": "flash_attention_2", "name": "Flash attention 2",
+                   "label": "Flash attention 2 (upstream)", "available": False,
+                   "reason": "not installed"}],
+    "batch_max": 4,
+    "defaults": {"solver": "dpmpp_2m", "attention": "sdpa", "batch": 1, "steps": 12},
+}
+"""What a render may ask for, as the status's engine part says it (status.engine.options)."""
 
 
 def fnv_hue(text: str) -> int:
@@ -848,7 +863,7 @@ STATUS = {
     "engine": {"installed": True, "ready": True, "supported": True, "message": "Installed",
                "label": "VibeVoice", "model_id": "vibevoice-7b", "model_label": "VibeVoice 7B",
                "models": [{"id": "vibevoice-7b", "label": "VibeVoice 7B"}],
-               "download_bytes": 0, "parts": []},
+               "download_bytes": 0, "parts": [], "options": OPTIONS},
     "progress": {"running": False, "text": "", "fraction": 0.0, "failed": False, "model": ""},
     "engine_settings": {"card_uuid": "GPU-a", "model_id": "vibevoice-7b", "steps": 10,
                         "cfg_scale": 1.3, "seed": None, "max_new_tokens": None, "keep_warm": True},
@@ -3238,8 +3253,8 @@ class TestSampling:
         working = found["state"]["working"]
         assert (working["sampling"], working["temperature"], working["top_p"]) == (True, 1.2, 0.8)
         assert found["described"] is None and found["descriptions"] == 0
-        assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "seed", "max_new_tokens",
-                                  "sampling", "temperature", "top_p"]
+        assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed",
+                                  "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
         assert found["sampling"] == ["BUTTON", "switch", "Sampling"]
         assert found["kinds"] == [["number", "0.1", "2", "0.05"], ["number", "0.05", "1", "0.01"]]
         assert "mc-voice-box-field-wide" in found["wide"].split()
@@ -3360,6 +3375,308 @@ class TestSampling:
             "vibevoice-7b · seed 42 · 10 steps · CFG 1.3 · sampling · temperature 0.95 · top-p 0.95"
             " · S1 Ada · 4.5 s · GPU-a",
             "vibevoice-7b · seed 42 · 10 steps · CFG 1.3 · S1 Ada · 4.5 s · GPU-a"]
+
+
+# --------------------------------------------------------------------------- #
+# Solver, Attention and Batch
+# --------------------------------------------------------------------------- #
+
+CHOICES = """
+    const field = (key) => find('[data-field="' + key + '"]');
+    // A select's options as [value, words, disabled].
+    const choices = (key) => field(key).options.map((option) => [option.value, option.textContent,
+                                                                 !!option.disabled]);
+    const chosen = () => ({solver: field("solver").value, attention: field("attention").value,
+                           batch: field("batch").value, steps: field("steps").value});
+    const choose = (key, value) => { field(key).value = value; field(key).dispatchEvent({type: "change"}); };
+"""
+
+
+def engine_with(**changes) -> dict:
+    """The status's engine part with ``changes``; ``options=None`` leaves the options out."""
+    engine = dict(STATUS["engine"], **changes)
+    if engine.get("options") is None:
+        engine.pop("options", None)
+    return json.loads(json.dumps(engine))
+
+
+def take(number: int, of: int, solver: str = "dpmpp_2m", attention: str = "sdpa") -> dict:
+    """Take ``number`` of a batch of ``of`` (id o5 for the first), as the outputs
+    list hands it out: its own seed, 41 + ``number``, in its render and in the
+    configuration it recorded."""
+    seed = 41 + number
+    render = dict(OUTPUT["render"], seed=seed, solver=solver, attention=attention, take=number, takes=of,
+                  configuration=dict(OUTPUT["render"]["configuration"], seed=seed, solver=solver,
+                                     attention=attention, batch=of))
+    return dict(OUTPUT, id=f"o{4 + number}", name=f"Pipeline 1 2 take {number}",
+                created=OUTPUT["created"] + 60 + number, render=render)
+
+
+class TestSolverAttentionAndBatch:
+    def test_they_are_selects_in_their_places_offering_whatever_the_server_lists(self):
+        """Solver and Attention after CFG, Batch after Seed; the lists are the
+        server's, whatever they hold, and Batch counts from one to its cap. A
+        saved configuration that names none of the three shows the server's
+        defaults."""
+        options = dict(OPTIONS, batch_max=3,
+                       solvers=[{"id": "dpmpp_2m", "name": "DPM++ 2M", "label": "DPM++ 2M (upstream)"},
+                                {"id": "unipc", "name": "UniPC", "label": "UniPC"}],
+                       attention=[{"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True,
+                                   "reason": ""},
+                                  {"id": "flex", "name": "Flex", "label": "Flex attention", "available": True,
+                                   "reason": ""}])
+        found = run(CHOICES + """
+            await flush();
+            report({order: all("[data-field]").map((node) => node.getAttribute("data-field")),
+                    captions: all(".mc-voice-box-fields .mc-voice-box-field-label").map((node) => node.textContent),
+                    kinds: ["solver", "attention", "batch"].map((key) => [field(key).tagName,
+                                                                          field(key).getAttribute("aria-label")]),
+                    solvers: choices("solver"), attention: choices("attention"), batch: choices("batch"),
+                    chosen: chosen()});
+        """, answers={"/status": {"json": status_with(engine=engine_with(options=options))}})
+
+        assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed",
+                                  "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
+        assert found["captions"] == ["Model", "Card", "Diffusion steps", "CFG", "Solver", "Attention", "Seed",
+                                     "Batch", "Max new tokens", "Temperature", "Top-p"]
+        assert found["kinds"] == [["SELECT", "Solver"], ["SELECT", "Attention"], ["SELECT", "Batch"]]
+        assert found["solvers"] == [["dpmpp_2m", "DPM++ 2M (upstream)", False], ["unipc", "UniPC", False]]
+        assert found["attention"] == [["sdpa", "SDPA", False], ["flex", "Flex attention", False]]
+        assert found["batch"] == [["1", "1", False], ["2", "2", False], ["3", "3", False]]
+        assert found["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "10"}
+        working = found["state"]["working"]
+        assert (working["solver"], working["attention"], working["batch"]) == ("dpmpp_2m", "sdpa", 1)
+
+    def test_a_status_without_options_offers_the_lists_the_page_was_written_against(self):
+        """An older server, or a status whose engine part failed: the page's own
+        lists, Flash attention 2 among them and unavailable, and four takes."""
+        found = run(CHOICES + """
+            await flush();
+            report({solvers: choices("solver"), attention: choices("attention"), batch: choices("batch"),
+                    chosen: chosen()});
+        """, answers={"/status": {"json": status_with(engine=engine_with(options=None))}})
+
+        assert found["solvers"] == [["dpmpp_2m", "DPM++ 2M (upstream)", False],
+                                    ["dpmpp_2m_sde", "DPM++ 2M SDE (upstream demo)", False],
+                                    ["dpmpp_3m", "DPM++ 3M", False], ["dpmpp_1m", "DPM++ 1M", False],
+                                    ["dpmpp_1m_sde", "DPM++ 1M SDE", False]]
+        assert found["attention"] == [["sdpa", "SDPA", False], ["eager", "Eager", False],
+                                      ["flash_attention_2", "Flash attention 2 (upstream) — not installed", True]]
+        assert found["batch"] == [[str(count), str(count), False] for count in (1, 2, 3, 4)]
+        assert found["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "10"}
+
+    def test_an_attention_that_cannot_run_is_disabled_with_its_reason_and_shown_where_it_is_held(self):
+        """A configuration that holds one shows it selected; Render is not held
+        back for it, and the server's refusal is the status line's, as any
+        refusal is."""
+        options = dict(OPTIONS, attention=[
+            {"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True, "reason": ""},
+            {"id": "eager", "name": "Eager", "label": "Eager", "available": False,
+             "reason": "needs a newer runtime"},
+            {"id": "flash_attention_2", "name": "Flash attention 2", "label": "Flash attention 2 (upstream)",
+             "available": False, "reason": "not installed"}])
+        refusal = "Flash attention 2 needs the flash-attn package, which VibeVoice's runtime does not have."
+        found = run(CHOICES + """
+            await flush();
+            const shown = {attention: choices("attention"), chosen: chosen().attention,
+                           render: find(".mc-voice-box-render").disabled};
+            press("Render");
+            await flush();
+            report({shown, line: line(), render: requestsTo("/render").map((r) => r.body)});
+        """, answers={"/status": {"json": status_with(engine=engine_with(options=options))},
+                      "/configurations": {"json": {"ok": True, "configurations": [
+                          dict(CONFIGURATION, attention="flash_attention_2")]}},
+                      "/render": {"status": 400, "json": {"ok": False, "error": refusal}}})
+
+        assert found["shown"]["attention"] == [
+            ["sdpa", "SDPA", False], ["eager", "Eager — needs a newer runtime", True],
+            ["flash_attention_2", "Flash attention 2 (upstream) — not installed", True]]
+        assert found["shown"]["chosen"] == "flash_attention_2"
+        assert found["shown"]["render"] is False
+        assert [(r["configuration_id"], "configuration" in r) for r in found["render"]] == [("c1", False)]
+        assert (found["line"]["text"], found["line"]["kind"]) == (refusal, "error")
+
+    def test_a_new_configuration_starts_at_twelve_steps_and_the_servers_defaults(self):
+        """With nothing saved the editor holds a new configuration: the engine
+        settings' steps where they name some, the server's default steps where
+        they do not, and twelve where nobody says; the server's solver,
+        attention and batch, and the page's own where the status has none."""
+        unnamed = {key: value for key, value in STATUS["engine_settings"].items() if key != "steps"}
+        own = dict(OPTIONS, defaults={"solver": "dpmpp_3m", "attention": "eager", "batch": 2, "steps": 16})
+
+        def fresh(engine, engine_settings):
+            return run(CHOICES + "await flush(); report({chosen: chosen(), save: saveLabel()});",
+                       answers={"/configurations": {"json": {"ok": True, "configurations": []}},
+                                "/status": {"json": status_with(engine=engine, engine_settings=engine_settings)}})
+
+        told = fresh(engine_with(options=own), unnamed)
+        untold = fresh(engine_with(options=None), unnamed)
+        named = fresh(engine_with(options=own), dict(unnamed, steps=20))
+
+        assert told["chosen"] == {"solver": "dpmpp_3m", "attention": "eager", "batch": "2", "steps": "16"}
+        working = told["state"]["working"]
+        assert (working["solver"], working["attention"], working["batch"], working["steps"]) == (
+            "dpmpp_3m", "eager", 2, 16)
+        assert untold["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "12"}
+        assert untold["state"]["working"]["steps"] == 12
+        assert named["chosen"]["steps"] == "20"
+        assert told["state"]["configurationId"] == "" and told["save"] == "Save"
+
+    def test_a_change_to_each_marks_the_configuration_unsaved_and_goes_with_render_and_save(self):
+        """They are the configuration's, sent inline with a render while
+        unsaved and written by Save -- never Voice Box's settings, as the card
+        and the model are. Batch is a number."""
+        found = run(CHOICES + """
+            await flush();
+            const reset = () => {
+                const select = find(".mc-voice-box-configuration-select");
+                select.value = "c1";
+                select.dispatchEvent({type: "change"});
+            };
+            const marks = {};
+            for (const [key, value] of [["solver", "dpmpp_3m"], ["attention", "eager"], ["batch", "3"]]) {
+                reset();
+                const before = saveLabel();
+                choose(key, value);
+                marks[key] = [before, saveLabel(), globalThis.mcVoiceBox.state().working[key]];
+            }
+            reset();
+            choose("solver", "dpmpp_2m_sde");
+            choose("attention", "eager");
+            choose("batch", "4");
+            press("Render");
+            await flush();
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({marks, render: requestsTo("/render").map((r) => r.body),
+                    saved: requestsTo("/configurations/save").map((r) => r.body),
+                    settings: requestsTo("/settings").map((r) => r.body)});
+        """)
+
+        assert found["marks"] == {"solver": ["Save", "Save — unsaved changes", "dpmpp_3m"],
+                                  "attention": ["Save", "Save — unsaved changes", "eager"],
+                                  "batch": ["Save", "Save — unsaved changes", 3]}
+        body = found["render"][0]
+        assert body["configuration_id"] == "c1"
+        inline = body["configuration"]
+        assert (inline["solver"], inline["attention"], inline["batch"], inline["steps"]) == (
+            "dpmpp_2m_sde", "eager", 4, 10)
+        saved = found["saved"][0]
+        assert (saved["id"], saved["solver"], saved["attention"], saved["batch"]) == (
+            "c1", "dpmpp_2m_sde", "eager", 4)
+        assert found["settings"] == []
+
+    def test_reuse_settings_puts_back_the_solver_the_attention_and_the_batch(self):
+        """A take of a batch: its own seed and the batch it came from. Over a
+        saved configuration that differs only in those three, they are what is
+        left to save; over one they match, nothing is."""
+        second = take(2, 3, solver="dpmpp_3m", attention="eager")
+
+        def reused(saved):
+            return run(CHOICES + TestReuseSettings.REUSE + "report({chosen: chosen(), save: saveLabel()});",
+                       answers={"/configurations": {"json": {"ok": True, "configurations": [saved]}},
+                                "/outputs": {"json": {"ok": True, "outputs": [second]}}})
+
+        differing = reused(dict(CONFIGURATION, seed=43))
+        matching = reused(dict(CONFIGURATION, seed=43, solver="dpmpp_3m", attention="eager", batch=3))
+
+        working = differing["state"]["working"]
+        assert (working["solver"], working["attention"], working["batch"], working["seed"]) == (
+            "dpmpp_3m", "eager", 3, 43)
+        assert differing["chosen"] == {"solver": "dpmpp_3m", "attention": "eager", "batch": "3", "steps": "10"}
+        assert differing["save"] == "Save — unsaved changes"
+        assert matching["save"] == "Save"
+        assert matching["state"]["dirty"]["configuration"] is False
+
+    def test_reuse_of_a_render_made_before_the_three_puts_back_what_it_was_made_with(self):
+        """OUTPUT recorded no solver, attention or batch: it was made with the
+        model's own solver, SDPA and one take, and the editor goes back to them
+        whatever it held."""
+        found = run(CHOICES + TestReuseSettings.REUSE + "report({chosen: chosen(), save: saveLabel()});",
+                    answers={"/configurations": {"json": {"ok": True, "configurations": [
+                        dict(CONFIGURATION, solver="dpmpp_3m", attention="eager", batch=4)]}}})
+
+        assert found["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "10"}
+        assert found["save"] == "Save — unsaved changes"
+
+    def test_a_live_batch_says_how_many_takes_beside_the_jobs_name(self):
+        """In every phase that holds a card, and before the queue's count, which
+        is not the job's; one take says nothing more than it did. Words only:
+        the line is a span, and never holds a cross."""
+        cases = [[dict(RUNNING, batch=4)],
+                 [dict(RUNNING, batch=4, phase="loading")],
+                 [dict(RUNNING, batch=2, phase="waiting", reason="the image model is generating")],
+                 [dict(RUNNING, batch=3), QUEUED],
+                 [dict(RUNNING, batch=1)]]
+        found = run("""
+            await flush();
+            const base = answers["/status"].json;
+            const seen = [];
+            for (const jobs of CASES) {
+                answers["/status"] = {json: Object.assign({}, base, {jobs})};
+                await poll();
+                seen.push(line());
+            }
+            report({seen});
+        """.replace("CASES", json.dumps(cases)))
+
+        assert [(entry["state"], entry["text"]) for entry in found["seen"]] == [
+            ("job", "Rendering “Trailer 3” · 4 takes · section 1 of 2 · 0:42"),
+            ("job", "Loading VibeVoice · “Trailer 3” · 4 takes · 0:42"),
+            ("job", "Waiting for the card: the image model is generating · “Trailer 3” · 2 takes · 0:42"),
+            ("job", "Rendering “Trailer 3” · 3 takes · section 1 of 2 · 0:42 · 1 queued"),
+            ("job", "Rendering “Trailer 3” · section 1 of 2 · 0:42"),
+        ]
+        assert all("×" not in entry["text"] for entry in found["seen"])
+
+    def test_a_finished_batch_opens_its_first_take_and_the_rest_arrive_as_lanes(self):
+        takes = [take(number, 4) for number in (1, 2, 3, 4)]
+        live = dict(JOB, id="j7", name="Pipeline 1 2", phase="rendering", started=5, elapsed=1.0, batch=4)
+        done = dict(live, phase="done", live=False, output_id="o5", output_ids=["o5", "o6", "o7", "o8"])
+        found = run("""
+            await flush();
+            answers["/render"] = {json: {ok: true, job: LIVE}};
+            answers["/status"] = {json: Object.assign({}, answers["/status"].json, {jobs: [LIVE]})};
+            press("Render");
+            await flush();
+            const rendering = line().text;
+            answers["/status"] = {json: Object.assign({}, answers["/status"].json, {jobs: [DONE]})};
+            answers["/outputs"] = {json: {ok: true, outputs: TAKES.concat(answers["/outputs"].json.outputs)}};
+            advance(1000);
+            await flush(10);
+            report({rendering, lanes: all(".mc-voice-box-lane").map((row) => row.getAttribute("data-id")),
+                    open: all(".mc-voice-box-lane").filter((row) => row.getAttribute("aria-expanded") === "true")
+                        .map((row) => row.getAttribute("data-id"))});
+        """.replace("LIVE", json.dumps(live)).replace("DONE", json.dumps(done))
+           .replace("TAKES", json.dumps(takes)))
+
+        assert found["rendering"] == "Rendering “Pipeline 1 2” · 4 takes · 0:01"
+        assert sorted(found["lanes"]) == ["o1", "o5", "o6", "o7", "o8"]
+        assert found["open"] == ["o5"]
+        assert found["state"]["selectedOutput"] == "o5"
+
+    def test_a_poll_leaves_a_select_alone_until_its_choices_change(self):
+        """The fields are drawn again on every poll, each second while a render
+        runs, and an option list replaced under an open select can shut it:
+        the options stay the same elements until what they offer changes."""
+        found = run(CHOICES + """
+            await flush();
+            const keys = ["model_id", "card_uuid", "solver", "attention", "batch"];
+            keys.forEach((key) => { field(key).options[0].kept = true; });
+            const kept = () => keys.map((key) => field(key).options[0].kept === true);
+            await poll();
+            const polled = kept();
+            const base = answers["/status"].json;
+            answers["/status"] = {json: Object.assign({}, base, {engine: Object.assign({}, base.engine,
+                {options: Object.assign({}, base.engine.options, {batch_max: 2})})})};
+            await poll();
+            report({polled, changed: kept(), batch: choices("batch"), chosen: chosen()});
+        """)
+
+        assert found["polled"] == [True, True, True, True, True]
+        assert found["changed"] == [True, True, True, True, False]
+        assert found["batch"] == [["1", "1", False], ["2", "2", False]]
+        assert found["chosen"]["batch"] == "1"
 
 
 # --------------------------------------------------------------------------- #

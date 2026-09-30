@@ -89,6 +89,7 @@ from pathlib import Path
 import mc_voice_models as models
 import mc_voice_paths as paths
 import mc_voice_wheelindex as wheelindex
+from vibevoice_worker import worker as protocol
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -108,7 +109,7 @@ SCHEMA = 1
 
 SAMPLE_RATE = 24000
 
-STEPS_DEFAULT = 10
+STEPS_DEFAULT = 12
 STEPS_MIN = 1
 STEPS_MAX = 50
 CFG_DEFAULT = 1.3
@@ -116,8 +117,19 @@ CFG_MIN = 1.0
 CFG_MAX = 3.0
 SEED_MAX = 2 ** 31 - 1
 MAX_NEW_TOKENS_MAX = 32768
-"""The bounds :func:`set_settings` holds. Ten diffusion steps and a CFG of 1.3
-are upstream's demo defaults; the token cap is the 7B's context."""
+"""The bounds :func:`set_settings` holds. A CFG of 1.3 is upstream's default;
+the step count is the user's choice of twelve, where both upstream scripts pass
+ten and the model's own configuration names twenty; the token cap is the 7B's
+context."""
+
+MAX_TAKES = protocol.MAX_TAKES
+"""How many takes one render may make, each at the next seed (the worker's limit)."""
+
+UPSTREAM = {"dpmpp_2m": "upstream", "dpmpp_2m_sde": "upstream demo",
+            "flash_attention_2": "upstream"}
+"""Which choices upstream's own scripts make, said beside them in the lists: the
+model's scheduler and ``inference_from_file.py``; the Gradio demo's solver; the
+attention both load on a CUDA card."""
 
 WEIGHTS_BYTES_DEFAULT = 18_700_000_000
 WORKING_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024
@@ -714,6 +726,48 @@ def _tokenizer_present(entry: Bundle, root: Path) -> bool:
     return all((root / name).is_file() for name in entry.tokenizer.paths)
 
 
+def flash_attention_installed() -> bool:
+    """Whether VibeVoice's runtime has the ``flash-attn`` package, read from its files.
+
+    From the files and not by asking the worker, so the page can say so before
+    a worker has ever started: the runtime is a venv this module built, and a
+    package is a folder in its site-packages. The worker checks again, by
+    import, before it ever switches to it.
+    """
+    environment = paths.vibevoice_runtime_root() / "env"
+    candidates = [environment / "Lib" / "site-packages"]
+    candidates += sorted((environment / "lib").glob("python3*/site-packages")) \
+        if (environment / "lib").is_dir() else []
+    return any((folder / "flash_attn" / "__init__.py").is_file() for folder in candidates)
+
+
+def options() -> dict:
+    """The solvers, attentions and batch a render may ask for, as the page lists them.
+
+    ``name`` is what an output's infotext says; ``label`` is what the list says,
+    with a word for the ones upstream's own scripts use. An attention the
+    runtime cannot run is listed, unavailable, with the reason.
+    """
+    def label(key: str, name: str) -> str:
+        return f"{name} ({UPSTREAM[key]})" if key in UPSTREAM else name
+
+    flash = flash_attention_installed()
+    attention = []
+    for key, name in protocol.ATTENTION.items():
+        available = key != "flash_attention_2" or flash
+        attention.append({"id": key, "name": name, "label": label(key, name),
+                          "available": available,
+                          "reason": "" if available else "not installed"})
+    return {
+        "solvers": [{"id": key, "name": entry["name"], "label": label(key, entry["name"])}
+                    for key, entry in protocol.SOLVERS.items()],
+        "attention": attention,
+        "batch_max": MAX_TAKES,
+        "defaults": {"solver": protocol.SOLVER_DEFAULT, "attention": protocol.ATTENTION_DEFAULT,
+                     "batch": 1, "steps": STEPS_DEFAULT},
+    }
+
+
 def public_status() -> dict:
     """Everything the page needs, JSON-safe, in one answer."""
     found = status()
@@ -753,6 +807,7 @@ def public_status() -> dict:
              "bytes": int(found.model_bytes), "message": found.model_message},
         ],
         "settings": settings(),
+        "options": options(),
         "need_vram_bytes": int(vram),
         "need_ram_bytes": int(ram),
         "refusal": refusal(),
@@ -983,23 +1038,37 @@ def calibration() -> dict:
     return out
 
 
-def note_peak(identifier: str, peak_bytes: int, rss_bytes: int = 0) -> None:
+def note_peak(identifier: str, peak_bytes: int, rss_bytes: int = 0, takes: int = 1) -> None:
     """Remember the most a render has cost on this machine. Never raises.
 
     Called by the runtime after every render with torch's peak reserved bytes
     and the worker's resident set. The highest of each is kept, and written
     atomically: this file is read before every turn request, and a half-written
     one would be an estimate nobody made.
+
+    The figure kept is a single take's. A batch holds the weights once and a
+    working set per take -- each take has its own two KV caches and decoder
+    state -- so a batch's peak is brought back to one take's before it is
+    compared, and :func:`need_vram_bytes` scales it up again for the batch that
+    asks.
     """
     name = str(identifier or "").strip()
     try:
         peak = max(int(peak_bytes or 0), 0)
         rss = max(int(rss_bytes or 0), 0)
+        takes = max(1, int(takes or 1))
     except (TypeError, ValueError):
         return
     if not name or len(name) > 64 or not all(c.isalnum() or c in "-_." for c in name) \
             or (peak <= 0 and rss <= 0):
         return
+    if takes > 1 and peak > 0:
+        try:
+            weights = _weights_bytes(bundle(name))
+        except VibeVoiceError:
+            weights = 0
+        if 0 < weights < peak:
+            peak = weights + (peak - weights) // takes
     with _lock:
         found = _read_json(paths.vibevoice_calibration_path()) or {}
         entries = found.get("models") if isinstance(found.get("models"), dict) else {}
@@ -1017,19 +1086,24 @@ def note_peak(identifier: str, peak_bytes: int, rss_bytes: int = 0) -> None:
                          exc_info=True)
 
 
-def need_vram_bytes(identifier: str = "") -> int:
+def need_vram_bytes(identifier: str = "", takes: int = 1) -> int:
     """What to ask the turn for: the estimate, or the peak a render has reached.
 
     The estimate is the weights -- the shards' committed sizes when the manifest
     lists them, else what earlier installs recorded, else the model card's
     figure -- plus the working set. The calibration's observed peak takes over
     once it is larger, because a measurement of this machine beats an estimate
-    of any machine.
+    of any machine. Both are a single take's, and a batch of ``takes`` asks for
+    the weights once and every take's working set (:func:`note_peak`).
     """
     entry = bundle(identifier)
+    takes = max(1, int(takes or 1))
+    weights = _weights_bytes(entry)
     working = int(entry.estimates.get("working_bytes") or WORKING_BYTES_DEFAULT)
-    estimate = _weights_bytes(entry) + working
+    estimate = weights + working * takes
     observed = int(calibration().get(entry.identifier, {}).get("peak_bytes") or 0)
+    if observed > weights:
+        observed = weights + (observed - weights) * takes
     return max(estimate, observed)
 
 

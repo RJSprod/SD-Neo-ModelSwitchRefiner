@@ -23,6 +23,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
 import struct
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ import pytest
 import mc_voice_models as models
 import mc_voice_paths as paths
 import mc_voice_vibevoice as vibevoice
+from vibevoice_worker import worker
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "tools" / "pin_vibevoice_models.py"
@@ -564,7 +566,7 @@ class TestTheLocalConfig:
 class TestSettings:
     def test_the_defaults(self, voice_root):
         found = vibevoice.settings()
-        assert found == {"card_uuid": "", "model_id": MODEL, "steps": 10, "cfg_scale": 1.3,
+        assert found == {"card_uuid": "", "model_id": MODEL, "steps": 12, "cfg_scale": 1.3,
                          "seed": None, "max_new_tokens": None, "keep_warm": True}
 
     def test_values_are_validated_and_persisted(self, voice_root):
@@ -604,13 +606,13 @@ class TestSettings:
     def test_out_of_range_and_unknown_values_are_refused(self, voice_root, values, words):
         with pytest.raises(vibevoice.VibeVoiceError, match=re.escape(words)):
             vibevoice.set_settings(values)
-        assert vibevoice.settings()["steps"] == 10, "a refused change wrote nothing"
+        assert vibevoice.settings()["steps"] == 12, "a refused change wrote nothing"
 
     def test_a_stored_value_that_no_longer_validates_falls_back_alone(self, voice_root):
         vibevoice._write_json(paths.vibevoice_settings_path(),
                               {"steps": 999, "cfg_scale": 2.0, "model_id": "gone"})
         found = vibevoice.settings()
-        assert found["steps"] == 10
+        assert found["steps"] == 12
         assert found["cfg_scale"] == 2.0
         assert found["model_id"] == MODEL
 
@@ -643,6 +645,21 @@ class TestWhatARenderNeeds:
         assert found["renders"] == 3 and found["peak_bytes"] == 25_000_000_000
         assert found["rss_bytes"] == 4_000_000_000 and found["updated"]
 
+    def test_a_batch_asks_for_the_weights_once_and_a_working_set_a_take(self, voice_root):
+        weights, working = 18_700_000_000, 2 * 1024 ** 3
+        assert vibevoice.need_vram_bytes(takes=4) == weights + 4 * working
+        vibevoice.note_peak(MODEL, weights + 3_000_000_000)
+        assert vibevoice.need_vram_bytes() == weights + 3_000_000_000
+        assert vibevoice.need_vram_bytes(takes=4) == weights + 4 * 3_000_000_000
+
+    def test_a_batchs_peak_is_kept_as_one_takes(self, voice_root):
+        """Four takes reach the weights plus four working sets; what is kept is
+        one take's, so a single render afterwards does not ask for four."""
+        weights = 18_700_000_000
+        vibevoice.note_peak(MODEL, weights + 4 * 3_000_000_000, takes=4)
+        assert vibevoice.calibration()[MODEL]["peak_bytes"] == weights + 3_000_000_000
+        assert vibevoice.need_vram_bytes(takes=4) == weights + 4 * 3_000_000_000
+
     def test_note_peak_writes_atomically_and_never_raises(self, voice_root):
         vibevoice.note_peak(MODEL, 1_000)
         path = paths.vibevoice_calibration_path()
@@ -673,6 +690,46 @@ class TestWhatARenderNeeds:
         recorded = sum(len(_safetensors()) for _ in SHARDS)
         assert vibevoice._weights_bytes(entry) == recorded
         assert vibevoice.need_vram_bytes() == recorded + 2 * 1024 ** 3
+
+
+# --------------------------------------------------------------------------- #
+# What a render may ask for
+# --------------------------------------------------------------------------- #
+
+
+class TestTheOptionsThePageLists:
+    def test_every_solver_and_attention_the_worker_has_is_listed_with_upstreams_marked(
+            self, voice_root):
+        found = vibevoice.options()
+        assert [entry["id"] for entry in found["solvers"]] == list(worker.SOLVERS)
+        assert found["solvers"][0] == {"id": "dpmpp_2m", "name": "DPM++ 2M",
+                                       "label": "DPM++ 2M (upstream)"}
+        assert found["solvers"][1]["label"] == "DPM++ 2M SDE (upstream demo)"
+        assert [entry["id"] for entry in found["attention"]] == list(worker.ATTENTION)
+        assert found["batch_max"] == 4
+        assert found["defaults"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": 1,
+                                     "steps": 12}
+        assert vibevoice.public_status()["options"] == found
+
+    def test_flash_attention_is_listed_unavailable_until_its_package_is_in_the_runtime(
+            self, voice_root):
+        def flash():
+            return next(entry for entry in vibevoice.options()["attention"]
+                        if entry["id"] == "flash_attention_2")
+
+        assert flash() == {"id": "flash_attention_2", "name": "Flash attention 2",
+                           "label": "Flash attention 2 (upstream)", "available": False,
+                           "reason": "not installed"}
+        assert all(entry["available"] for entry in vibevoice.options()["attention"]
+                   if entry["id"] != "flash_attention_2")
+        for site in (Path("Lib") / "site-packages",
+                     Path("lib") / "python3.13" / "site-packages"):
+            package = paths.vibevoice_runtime_root() / "env" / site / "flash_attn"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            assert flash()["available"] is True and flash()["reason"] == ""
+            shutil.rmtree(paths.vibevoice_runtime_root())
+            assert flash()["available"] is False
 
 
 # --------------------------------------------------------------------------- #

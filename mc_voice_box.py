@@ -44,6 +44,7 @@ from pathlib import Path
 
 import mc_voice_paths as paths
 import mc_voice_reference as reference
+from vibevoice_worker import worker as vibevoice_protocol
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -99,17 +100,25 @@ PAUSE_MIN_MS = 50
 PAUSE_MAX_MS = 10_000
 
 STEPS_RANGE = (1, 50)
+BATCH_RANGE = (1, vibevoice_protocol.MAX_TAKES)
 CFG_RANGE = (1.0, 3.0)
 TEMPERATURE_RANGE = (0.1, 2.0)
 TOP_P_RANGE = (0.05, 1.0)
 SEED_MAX = 2**31 - 1
 TOKENS_MAX = 65_536
 
-MP3_BITRATE = 128_000
-"""Constant 128 kb/s, mono, at the model's 24 kHz: a third of the WAV's size,
-and speech at this rate loses nothing anyone hears. The encoder's delay and
-padding are written into the file's own header, so a decoder gives back
-exactly the samples that went in and a looped render has no gap."""
+MP3_BITRATE = 160_000
+MP3_QUALITY = 0
+"""The most an MP3 can hold of the model's sound: 160 kb/s is the ceiling of
+MPEG-2 Layer III, the MP3 of a 24 kHz stream, and LAME's quality 0 is its
+slowest and most careful search for where the bits go. Mono at 24 kHz because
+that is what the model makes: a second channel would be a copy, and a higher
+rate would be a resample of a sound with nothing above 12 kHz to keep. Made
+straight from the model's 32-bit float samples, in memory -- no WAV is written
+first. Constant bitrate so a seek lands where the page asks, and the encoder's
+delay and padding are written into the file's own header, so a decoder gives
+back exactly the samples that went in and a looped render has no gap. About
+1.2 MB a minute, where a WAV of the same sound is 2.9."""
 MEDIA_TYPES = {"mp3": "audio/mpeg", "wav": "audio/wav"}
 SOFTWARE = "Voice Box (VibeVoice)"
 
@@ -322,6 +331,31 @@ def peaks_of(pcm16: bytes, count: int = PEAKS) -> list[float]:
     return found
 
 
+def pcm16_of(samples: bytes) -> bytes:
+    """Little-endian 32-bit float samples as PCM16, clipped to -1..1: a WAV's, and the peaks'."""
+    total = len(samples) // 4
+    try:
+        import numpy
+
+        found = numpy.frombuffer(samples[:total * 4], dtype="<f4")
+        return (numpy.clip(found, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    except ImportError:
+        pass
+    floats = array.array("f")
+    floats.frombytes(samples[:total * 4])
+    if struct.pack("<f", 1.0) != struct.pack("=f", 1.0):
+        floats.byteswap()
+    ints = array.array("h", (int(max(-1.0, min(1.0, value)) * 32767.0) for value in floats))
+    if struct.pack("<h", 1) != struct.pack("=h", 1):
+        ints.byteswap()
+    return ints.tobytes()
+
+
+def silence32(milliseconds: int, rate: int = SAMPLE_RATE) -> bytes:
+    """A pause, as 32-bit float samples."""
+    return bytes(4 * int(round(rate * max(int(milliseconds), 0) / 1000.0)))
+
+
 def float32_of(pcm16: bytes) -> bytes:
     """The same sound as little-endian float32 in -1..1, the form the worker takes."""
     total = len(pcm16) // 2
@@ -345,14 +379,16 @@ def float32_of(pcm16: bytes) -> bytes:
 _mp3_refused = False
 
 
-def _encode_mp3(pcm16: bytes, rate: int, tags: dict) -> bytes | None:
-    """``pcm16`` as a constant-bitrate MP3 carrying ``tags`` as ID3, or ``None``.
+def _encode_mp3(samples: bytes, rate: int, tags: dict) -> bytes | None:
+    """32-bit float ``samples`` as a constant-bitrate MP3 carrying ``tags`` as ID3, or ``None``.
 
     Encoded in this process by PyAV, which Forge Neo installs for its own video
     work and which carries FFmpeg's LAME, so nothing is added to Forge's
-    environment for it -- the voice side never adds anything there. ``None``
-    (no PyAV, a build without the encoder, a failure) keeps the output a WAV,
-    said once in the log.
+    environment for it -- the voice side never adds anything there. The float
+    samples go to LAME as they are, clipped to -1..1, so no 16-bit copy stands
+    between the model and the file (see :data:`MP3_QUALITY`). ``None`` (no
+    PyAV, a build without the encoder, a failure) keeps the output a WAV, said
+    once in the log.
     """
     global _mp3_refused
     try:
@@ -365,14 +401,16 @@ def _encode_mp3(pcm16: bytes, rate: int, tags: dict) -> bytes | None:
         with av.open(buffer, mode="w", format="mp3") as container:
             for key, value in tags.items():
                 container.metadata[key] = str(value)
-            stream = container.add_stream("libmp3lame", rate=int(rate))
+            stream = container.add_stream("libmp3lame", rate=int(rate),
+                                          options={"compression_level": str(MP3_QUALITY)})
             stream.bit_rate = MP3_BITRATE
             stream.layout = "mono"
             size = stream.codec_context.frame_size or 1152
-            samples = numpy.frombuffer(pcm16[:len(pcm16) // 2 * 2], dtype="<i2")
+            found = numpy.frombuffer(samples[:len(samples) // 4 * 4], dtype="<f4")
+            found = numpy.clip(found, -1.0, 1.0).astype(numpy.float32)
             fifo = av.AudioFifo()
-            if samples.size:
-                frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16",
+            if found.size:
+                frame = av.AudioFrame.from_ndarray(found.reshape(1, -1), format="flt",
                                                    layout="mono")
                 frame.sample_rate = int(rate)
                 fifo.write(frame)
@@ -585,9 +623,12 @@ CONFIGURATION_DEFAULTS = {
     "name": "Default",
     "model_id": "",
     "card_uuid": "",
-    "steps": 10,
+    "steps": 12,
     "cfg_scale": 1.3,
+    "solver": vibevoice_protocol.SOLVER_DEFAULT,
+    "attention": vibevoice_protocol.ATTENTION_DEFAULT,
     "seed": None,
+    "batch": 1,
     "max_new_tokens": None,
     "sampling": False,
     "temperature": 0.95,
@@ -596,6 +637,11 @@ CONFIGURATION_DEFAULTS = {
 }
 """A configuration's fields. ``model_id`` and ``card_uuid`` empty mean the
 engine's default model and the card chosen in Voice Box's settings.
+
+``solver`` and ``attention`` are ids of the worker's own tables
+(:data:`vibevoice_worker.worker.SOLVERS` and ``ATTENTION``): the model's own
+DPM++ 2M and SDPA unless changed. ``batch`` is how many takes one render makes,
+one output each, the first at the seed and every next one at the seed after.
 
 ``sampling`` off is the model's own greedy choice, as upstream ships it;
 ``temperature`` and ``top_p`` are kept either way, and used only while it is
@@ -669,6 +715,14 @@ def _sampling_value(value, bounds: tuple, what: str, strict: bool, fallback: flo
     return round(min(max(number, bounds[0]), bounds[1]), 3)
 
 
+def _one_of(value, table: dict, what: str) -> str:
+    """An id of ``table``, or a sentence saying it is not one."""
+    text = str(value or "").strip()
+    if text not in table:
+        raise VoiceBoxError(f"{text or 'Nothing'} is not {what} VibeVoice has.")
+    return text
+
+
 def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
     base = dict(existing or CONFIGURATION_DEFAULTS)
     merged = dict(base)
@@ -684,7 +738,11 @@ def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
         "card_uuid": str(merged.get("card_uuid") or "")[:64],
         "steps": _bounded_int(merged.get("steps"), *STEPS_RANGE, what="Diffusion steps"),
         "cfg_scale": _bounded_float(merged.get("cfg_scale"), *CFG_RANGE, what="CFG"),
+        "solver": _one_of(merged.get("solver"), vibevoice_protocol.SOLVERS, "a solver"),
+        "attention": _one_of(merged.get("attention"), vibevoice_protocol.ATTENTION,
+                             "an attention"),
         "seed": _bounded_int(merged.get("seed"), 0, SEED_MAX, what="The seed", none_ok=True),
+        "batch": _bounded_int(merged.get("batch"), *BATCH_RANGE, what="The batch"),
         "max_new_tokens": _bounded_int(merged.get("max_new_tokens"), 1, TOKENS_MAX,
                                        what="Max new tokens", none_ok=True),
         "sampling": sampling,
@@ -893,11 +951,14 @@ def infotext(entry: dict) -> str:
         return f"{float(value):g}" if isinstance(value, (int, float)) else value
 
     add("Steps", render.get("steps"))
+    add("Solver", vibevoice_protocol.SOLVERS.get(str(render.get("solver") or ""),
+                                                 {}).get("name"))
     add("CFG scale", number(render.get("cfg_scale")))
     add("Seed", render.get("seed"))
     if render.get("sampling"):
         add("Temperature", number(render.get("temperature")))
         add("Top-p", number(render.get("top_p")))
+    add("Attention", vibevoice_protocol.ATTENTION.get(str(render.get("attention") or "")))
     add("Model", render.get("model_id"))
     for speaker in render.get("speakers") or ():
         if isinstance(speaker, dict):
@@ -931,8 +992,12 @@ def _stored_output(identifier: str) -> tuple[dict, Path]:
     return entry, audio
 
 
-def add_output(pcm16: bytes, rate: int, name: str, pipeline_id: str, render: dict) -> dict:
+def add_output(samples: bytes, rate: int, name: str, pipeline_id: str, render: dict) -> dict:
     """Keep a render: its sound as an MP3 (a WAV where MP3 cannot be made), its record beside it.
+
+    ``samples`` is the model's sound as little-endian 32-bit float, which the
+    MP3 is made from directly (:data:`MP3_QUALITY`); the peaks and a WAV, where
+    one has to be made, are its 16-bit copy.
 
     The file carries its own infotext -- the MP3 in ID3 (the comment, and the
     whole record as JSON under ``voicebox``), the WAV in its ``INFO`` chunk --
@@ -941,6 +1006,7 @@ def add_output(pcm16: bytes, rate: int, name: str, pipeline_id: str, render: dic
     one, and a player shows the file's name when there is no title.
     """
     identifier = _new_id()
+    pcm16 = pcm16_of(samples)
     entry = {
         "id": identifier,
         "name": _title(name, "Render"),
@@ -953,7 +1019,7 @@ def add_output(pcm16: bytes, rate: int, name: str, pipeline_id: str, render: dic
         "render": dict(render or {}),
     }
     text = infotext(entry)
-    encoded = _encode_mp3(pcm16, rate, {
+    encoded = _encode_mp3(samples, rate, {
         "comment": text,
         "encoded_by": SOFTWARE,
         "voicebox": json.dumps({"id": identifier, "render": entry["render"]},
@@ -1238,7 +1304,11 @@ class Job:
     seed_drawn: bool = False
     """The seed every section renders with: the configuration's, or one drawn for
     this job when the configuration left it blank -- so every render has a seed
-    that makes it again."""
+    that makes it again. A batch's first take; take k renders at ``seed + k``."""
+    batch: int = 1
+    names: list = field(default_factory=list)
+    """Each take's output name, in take order."""
+    output_ids: list = field(default_factory=list)
     phase: str = QUEUED
     reason: str = ""
     warning: str = ""
@@ -1270,6 +1340,7 @@ class Job:
         return {"id": self.id, "name": self.name, "pipeline_id": self.pipeline_id,
                 "phase": self.phase, "reason": self.reason, "warning": self.warning,
                 "progress": dict(self.progress), "output_id": self.output_id,
+                "output_ids": list(self.output_ids), "batch": self.batch,
                 "created": self.created, "started": self.started, "ended": self.ended,
                 "elapsed": self.elapsed(), "seed": self.seed, "seed_drawn": self.seed_drawn,
                 "card": self.card, "live": self.phase in LIVE}
@@ -1327,9 +1398,9 @@ class _Service:
             return [job.to_dict() for job in reversed(self.jobs)]
 
     def pending(self, pipeline_id: str) -> int:
-        """Jobs of a pipeline that have not made their output yet."""
+        """Outputs a pipeline's live jobs will make: a take each."""
         with self.lock:
-            return sum(1 for job in self.jobs
+            return sum(max(1, int(job.batch or 1)) for job in self.jobs
                        if job.pipeline_id == pipeline_id and job.phase in LIVE)
 
     def clear(self) -> int:
@@ -1440,25 +1511,41 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     if not card:
         raise VoiceBoxError("Choose the card VibeVoice renders on, in the configuration "
                             "or in Voice Box's settings.")
-    refused = _engine().refusal()
+    engine = _engine()
+    refused = engine.refusal()
     if refused:
         raise VoiceBoxError(refused)
-    remember_prompt(prompt)
-    if not name:
-        # Counted in this order, the pipeline read after the jobs: a job keeps
-        # its output before it ends, so one that ends in between is found by
-        # the second read. The other order let it slip between the two, and
-        # two renders took one name.
-        waiting = _service.pending(owner["id"])
-        made = len(pipeline(owner["id"]).get("outputs") or [])
-        name = f"{owner.get('name') or 'Render'} {made + waiting + 1}"
+    if chosen["attention"] == "flash_attention_2":
+        installed = getattr(engine, "flash_attention_installed", None)
+        if installed is None or not installed():
+            raise VoiceBoxError("Flash attention 2 needs the flash-attn package in VibeVoice's "
+                                "runtime, which it does not have. Choose SDPA or Eager.")
+    batch = int(chosen["batch"])
     seed = chosen.get("seed")
     drawn = seed is None
     if drawn:
-        seed = secrets.randbelow(SEED_MAX + 1)
-    job = Job(id=_new_id(), name=_title(name, "Render"), pipeline_id=owner["id"],
+        # Drawn so the whole batch fits: take k renders at seed + k.
+        seed = secrets.randbelow(SEED_MAX - batch + 2)
+    elif int(seed) + batch - 1 > SEED_MAX:
+        raise VoiceBoxError(f"A batch of {batch} from seed {seed} would pass {SEED_MAX}, the "
+                            f"largest seed: choose a smaller seed or a smaller batch.")
+    remember_prompt(prompt)
+    if name:
+        names = [_title(name, "Render")] if batch == 1 else \
+            [_title(f"{name} · {take + 1}", "Render") for take in range(batch)]
+    else:
+        # Counted in this order, the pipeline read after the jobs: a job keeps
+        # its outputs before it ends, so one that ends in between is found by
+        # the second read. The other order let it slip between the two, and
+        # two renders took one name. Every take is an output and takes its own
+        # number, so a batch of four after the third output is the 4th to 7th.
+        waiting = _service.pending(owner["id"])
+        made = len(pipeline(owner["id"]).get("outputs") or [])
+        names = [f"{owner.get('name') or 'Render'} {made + waiting + 1 + take}"
+                 for take in range(batch)]
+    job = Job(id=_new_id(), name=names[0], pipeline_id=owner["id"],
               prompt=str(prompt), configuration=chosen, card=card, configuration_id=source,
-              seed=int(seed), seed_drawn=drawn)
+              seed=int(seed), seed_drawn=drawn, batch=batch, names=names)
     # The answer is the job as it was queued. Read after the card's thread has
     # it, it could already say the job had started, depending on who ran first.
     queued = job.to_dict()
@@ -1488,7 +1575,8 @@ def _perform(job: Job) -> None:
     job.started = _now()
     job.phase = WAITING
     job.reason = "asking for the card"
-    turn = _turns.request(job.card, need_vram=int(engine.need_vram_bytes(model_id)),
+    turn = _turns.request(job.card,
+                          need_vram=int(engine.need_vram_bytes(model_id, takes=job.batch)),
                           need_ram=int(engine.need_ram_bytes(model_id)),
                           label=f"{engine.LABEL} — {job.name}")
     made = None
@@ -1517,13 +1605,18 @@ def _perform(job: Job) -> None:
             logger.warning("Model Chain: could not hand the card back after a render",
                            exc_info=True)
     if made is not None:
-        # The card is handed back first: making the file is work for the
+        # The card is handed back first: making the files is work for the
         # processor, and an image job has no reason to wait for it.
-        _keep(job, *made)
+        _keep(job, made)
 
 
 def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
-    """Load, render every section, and return ``(pcm16, rate, record)``; ``None`` when cancelled."""
+    """Load, render every section, and return each take's ``(samples, rate, record)``.
+
+    ``samples`` is the take's 32-bit float sound, its sections joined by their
+    pauses. ``None`` when cancelled. Every section is rendered as the whole
+    batch at once, and take k is the same take in every section.
+    """
     job.phase = LOADING
     job.reason = "loading the model"
     if model_id:
@@ -1531,13 +1624,14 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
         # configuration's choice is made that name before the load.
         engine.set_settings({"model_id": model_id})
     runtime.load(job.card)
-    pieces: list[bytes] = []
+    takes = max(1, int(job.batch or 1))
+    pieces: list[list[bytes]] = [[] for _take in range(takes)]
     total_seconds = 0.0
     sampling = bool(job.configuration.get("sampling"))
     peak = 0
     rate = SAMPLE_RATE
     render_seconds = 0.0
-    tokens = 0
+    tokens = [0] * takes
     for index, section in enumerate(sections):
         if job.cancelled:
             break
@@ -1545,8 +1639,9 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
         job.reason = ""
         job.progress = {"section": index + 1, "sections": len(sections),
                         "seconds": round(total_seconds, 1)}
-        if section.pause_ms and pieces:
-            pieces.append(silence(section.pause_ms, rate))
+        if section.pause_ms and pieces[0]:
+            for kept in pieces:
+                kept.append(silence32(section.pause_ms, rate))
             total_seconds += section.pause_ms / 1000.0
 
         def progressed(found: dict, _base=total_seconds, _index=index):
@@ -1565,60 +1660,80 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
             max_new_tokens=job.configuration.get("max_new_tokens"),
             sampling=sampling,
             temperature=job.configuration.get("temperature") if sampling else None,
-            top_p=job.configuration.get("top_p") if sampling else None)
+            top_p=job.configuration.get("top_p") if sampling else None,
+            solver=str(job.configuration["solver"]),
+            attention=str(job.configuration["attention"]),
+            takes=takes)
         result = runtime.render(job.card, request, on_progress=progressed)
         peak = max(peak, int(getattr(result, "peak_bytes", 0) or 0))
         render_seconds += float(getattr(result, "render_seconds", 0.0) or 0.0)
-        tokens += int(getattr(result, "tokens", 0) or 0)
         if getattr(result, "cancelled", False):
             job.cancel_event.set()
             break
-        pcm16, rate = pcm_of(result.wav)
-        pieces.append(pcm16)
-        total_seconds += seconds_of(pcm16, rate)
-    if job.cancelled or not pieces:
+        rate = int(getattr(result, "sample_rate", 0) or SAMPLE_RATE)
+        made = list(result.takes)
+        if len(made) != takes:
+            raise VoiceBoxError("VibeVoice answered with a different number of takes than it "
+                                "was asked for.")
+        for take, found in enumerate(made):
+            pieces[take].append(bytes(found.pcm))
+            tokens[take] += int(found.tokens or 0)
+        total_seconds += max(len(found.pcm) for found in made) / 4 / float(rate)
+    if job.cancelled or not pieces[0]:
         _end(job, CANCELLED)
         return None
     # The calibration figure is not noted here: the runtime notes every
     # render's peak itself, and a second note would count each render twice.
     configured = job.configuration
-    return b"".join(pieces), rate, {
-        "model_id": model_id or _model_in_use(engine),
-        "card": job.card,
-        "seed": job.seed,
-        "seed_drawn": job.seed_drawn,
-        "steps": configured["steps"],
-        "cfg_scale": configured["cfg_scale"],
-        "max_new_tokens": configured.get("max_new_tokens"),
-        "sampling": sampling,
-        "temperature": configured.get("temperature") if sampling else None,
-        "top_p": configured.get("top_p") if sampling else None,
-        "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
-                     for number, voice in sorted(voices.items())],
-        "prompt": job.prompt,
-        "sections": len(sections),
-        "render_seconds": round(render_seconds, 1),
-        "peak_bytes": peak,
-        "tokens": tokens,
-        # The configuration as the render used it, to be put back by the page's
-        # Reuse settings: the seed is the one used, so the same render comes
-        # out again; model and card are the configuration's own ("" is the
-        # default), and every speaker slot is kept, used by this script or not.
-        "configuration": {
-            "id": job.configuration_id,
-            "name": str(configured.get("name") or ""),
-            "model_id": str(configured.get("model_id") or ""),
-            "card_uuid": str(configured.get("card_uuid") or ""),
+    kept = []
+    for take in range(takes):
+        seed = int(job.seed) + take
+        kept.append((b"".join(pieces[take]), rate, {
+            "model_id": model_id or _model_in_use(engine),
+            "card": job.card,
+            "seed": seed,
+            "seed_drawn": job.seed_drawn,
             "steps": configured["steps"],
             "cfg_scale": configured["cfg_scale"],
-            "seed": job.seed,
+            "solver": configured["solver"],
+            "attention": configured["attention"],
             "max_new_tokens": configured.get("max_new_tokens"),
             "sampling": sampling,
-            "temperature": configured.get("temperature"),
-            "top_p": configured.get("top_p"),
-            "speakers": dict(configured.get("speakers") or {}),
-        },
-    }
+            "temperature": configured.get("temperature") if sampling else None,
+            "top_p": configured.get("top_p") if sampling else None,
+            "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
+                         for number, voice in sorted(voices.items())],
+            "prompt": job.prompt,
+            "sections": len(sections),
+            "take": take + 1,
+            "takes": takes,
+            "render_seconds": round(render_seconds, 1),
+            "peak_bytes": peak,
+            "tokens": tokens[take],
+            # The configuration as the render used it, to be put back by the
+            # page's Reuse settings: the seed is this take's own, so the same
+            # take comes out again first; model and card are the
+            # configuration's own ("" is the default), and every speaker slot is
+            # kept, used by this script or not.
+            "configuration": {
+                "id": job.configuration_id,
+                "name": str(configured.get("name") or ""),
+                "model_id": str(configured.get("model_id") or ""),
+                "card_uuid": str(configured.get("card_uuid") or ""),
+                "steps": configured["steps"],
+                "cfg_scale": configured["cfg_scale"],
+                "solver": configured["solver"],
+                "attention": configured["attention"],
+                "seed": seed,
+                "batch": takes,
+                "max_new_tokens": configured.get("max_new_tokens"),
+                "sampling": sampling,
+                "temperature": configured.get("temperature"),
+                "top_p": configured.get("top_p"),
+                "speakers": dict(configured.get("speakers") or {}),
+            },
+        }))
+    return kept
 
 
 def _model_in_use(engine) -> str:
@@ -1630,17 +1745,24 @@ def _model_in_use(engine) -> str:
         return ""
 
 
-def _keep(job: Job, pcm16: bytes, rate: int, record: dict) -> None:
-    """Make the render's output and end the job done."""
-    job.reason = "saving the render"
-    entry = add_output(pcm16, rate, job.name, job.pipeline_id, record)
-    job.output_id = entry["id"]
-    sections = int(record.get("sections") or 1)
-    job.progress = {"section": sections, "sections": sections, "seconds": entry["seconds"]}
+def _keep(job: Job, made: list) -> None:
+    """Make every take's output, in take order, and end the job done."""
+    job.reason = "saving the render" if len(made) == 1 else "saving the takes"
+    entries = []
+    for index, (samples, rate, record) in enumerate(made):
+        name = job.names[index] if index < len(job.names) else job.name
+        entry = add_output(samples, rate, name, job.pipeline_id, record)
+        entries.append(entry)
+        job.output_ids.append(entry["id"])
+        if index == 0:
+            job.output_id = entry["id"]
+    sections = int(made[0][2].get("sections") or 1)
+    job.progress = {"section": sections, "sections": sections,
+                    "seconds": max(entry["seconds"] for entry in entries)}
     _end(job, DONE)
-    logger.info("Model Chain: Voice Box rendered “%s” — %.1f s of speech in %.0f s (%s)",
-                job.name, entry["seconds"], float(record.get("render_seconds") or 0.0),
-                entry["format"].upper())
+    logger.info("Model Chain: Voice Box rendered “%s” — %s of speech in %.0f s (%s)",
+                job.name, ", ".join(f"{entry['seconds']:.1f} s" for entry in entries),
+                float(made[0][2].get("render_seconds") or 0.0), entries[0]["format"].upper())
 
 
 def jobs() -> list[dict]:

@@ -37,6 +37,11 @@ def tone_pcm(seconds: float = 1.0, rate: int = 24000) -> bytes:
         return handle.readframes(handle.getnframes())
 
 
+def tone_f32(seconds: float = 1.0, rate: int = 24000) -> bytes:
+    """The same sound as the model hands it over: 32-bit float samples."""
+    return box.float32_of(tone_pcm(seconds, rate))
+
+
 # --------------------------------------------------------------------------- #
 # Doubles
 # --------------------------------------------------------------------------- #
@@ -94,15 +99,26 @@ class FakeTurns:
         return 18 * _GB
 
 
-class Result:
-    def __init__(self, wav: bytes, seconds: float, cancelled: bool = False):
-        self.wav = wav
+class Take:
+    def __init__(self, pcm: bytes, seconds: float, seed=None):
+        self.pcm = pcm
         self.seconds = seconds
+        self.tokens = 120
+        self.capped = False
+        self.seed = seed
+
+
+class Result:
+    def __init__(self, takes: list, cancelled: bool = False):
+        self.takes = takes
         self.sample_rate = 24000
         self.render_seconds = 2.5
         self.peak_bytes = 19 * _GB
         self.cancelled = cancelled
-        self.tokens = 120
+
+    @property
+    def seconds(self):
+        return self.takes[0].seconds
 
 
 class RenderJob:
@@ -134,8 +150,11 @@ class FakeRuntime:
             raise self.fail
         if on_progress is not None:
             on_progress({"seconds": self.seconds / 2})
-        pcm = tone_pcm(self.seconds)
-        return Result(box.wav_bytes(pcm), self.seconds, cancelled=self.cancel_on_render)
+        count = int(getattr(job, "takes", 1) or 1)
+        seed = getattr(job, "seed", None)
+        return Result([Take(tone_f32(self.seconds + 0.25 * take), self.seconds + 0.25 * take,
+                            None if seed is None else seed + take)
+                       for take in range(count)], cancelled=self.cancel_on_render)
 
     def cancel(self, card, job_id):
         self.cancelled.append(job_id)
@@ -155,19 +174,23 @@ class FakeEngine:
     def __init__(self):
         self.refused = ""
         self.peaks: list = []
-        self.values = {"steps": 10, "cfg_scale": 1.3, "seed": None, "max_new_tokens": None}
+        self.flash = False
+        self.values = {"steps": 12, "cfg_scale": 1.3, "seed": None, "max_new_tokens": None}
 
     def refusal(self, manual=False):
         return self.refused
 
-    def need_vram_bytes(self, identifier=""):
-        return 20 * _GB
+    def need_vram_bytes(self, identifier="", takes=1):
+        return 20 * _GB + (takes - 1) * 2 * _GB
 
     def need_ram_bytes(self, identifier=""):
         return 3 * _GB
 
-    def note_peak(self, identifier, peak_bytes, rss_bytes=0):
+    def note_peak(self, identifier, peak_bytes, rss_bytes=0, takes=1):
         self.peaks.append((identifier, peak_bytes))
+
+    def flash_attention_installed(self):
+        return self.flash
 
     def settings(self):
         return dict(self.values)
@@ -408,7 +431,7 @@ class TestConfigurations:
         with pytest.raises(box.VoiceBoxError, match="at most"):
             box.save_pipeline({"id": first["id"], "prompt": "y" * (box.MAX_PROMPT_CHARS + 1)})
 
-        entry = box.add_output(tone_pcm(0.5), 24000, "Take 1", first["id"], {"seed": 3})
+        entry = box.add_output(tone_f32(0.5), 24000, "Take 1", first["id"], {"seed": 3})
         assert box.pipeline(first["id"])["outputs"] == [entry["id"]]
         box.delete_pipeline(first["id"])
         assert box.pipelines() == []
@@ -423,7 +446,7 @@ class TestConfigurations:
 class TestOutputs:
     def test_an_output_carries_its_waveform_and_can_loop(self):
         owner = box.new_pipeline("P")
-        entry = box.add_output(tone_pcm(2.0), 24000, "Take", owner["id"], {"steps": 10})
+        entry = box.add_output(tone_f32(2.0), 24000, "Take", owner["id"], {"steps": 10})
         assert entry["seconds"] == pytest.approx(2.0, abs=0.01)
         assert len(entry["peaks"]) == box.PEAKS and entry["loop"] is False
         assert box.set_loop(entry["id"], True)["loop"] is True
@@ -437,7 +460,7 @@ class TestOutputs:
         assert box.outputs() == [] and box.pipeline(owner["id"])["outputs"] == []
 
     def test_saving_needs_a_folder_once_and_never_overwrites(self, tmp_path):
-        entry = box.add_output(tone_pcm(0.5), 24000, 'Take: "one"?', "", {"seed": 1})
+        entry = box.add_output(tone_f32(0.5), 24000, 'Take: "one"?', "", {"seed": 1})
         with pytest.raises(box.VoiceBoxError, match="Choose a folder"):
             box.save_output(entry["id"])
 
@@ -532,7 +555,10 @@ class TestRendering:
         assert runtime.loaded == [CARD] and len(runtime.renders) == 2
         assert runtime.renders[0].script == [(1, "Hi.")] and runtime.renders[1].script == [(2, "Yo.")]
         assert list(runtime.renders[0].voices) == [1] and list(runtime.renders[1].voices) == [2]
-        assert runtime.renders[0].cfg_scale == 1.3 and runtime.renders[0].steps == 10
+        assert runtime.renders[0].cfg_scale == 1.3 and runtime.renders[0].steps == 12
+        assert (runtime.renders[0].solver, runtime.renders[0].attention,
+                runtime.renders[0].takes) == ("dpmpp_2m", "sdpa", 1), \
+            "the model's own solver and SDPA, one take, unless the configuration says otherwise"
         entry = box.output(job["output_id"])
         assert entry["seconds"] == pytest.approx(3.0, abs=0.02)
         assert entry["pipeline_id"] == ready["pipeline"]["id"]
@@ -733,8 +759,9 @@ class TestTheRecordedConfiguration:
         record = box.output(settled(found["id"])["output_id"])["render"]["configuration"]
 
         assert record == {"id": ready["configuration"]["id"], "name": "Studio",
-                          "model_id": "vibevoice-7b", "card_uuid": CARD, "steps": 10,
-                          "cfg_scale": 1.3, "seed": found["seed"], "max_new_tokens": None,
+                          "model_id": "vibevoice-7b", "card_uuid": CARD, "steps": 12,
+                          "cfg_scale": 1.3, "solver": "dpmpp_2m", "attention": "sdpa",
+                          "seed": found["seed"], "batch": 1, "max_new_tokens": None,
                           "sampling": False, "temperature": 0.95, "top_p": 0.95,
                           "speakers": {"1": first["id"], "2": second["id"]}}, \
             "every slot is kept, used by this script or not"
@@ -776,21 +803,21 @@ class TestInfotext:
               "max_new_tokens": None, "sections": 2, "render_seconds": 45.25}
 
     def test_the_prompt_then_one_line_of_parameters(self):
-        entry = box.add_output(tone_pcm(2.0), 24000, "Take", "", dict(self.RENDER))
+        entry = box.add_output(tone_f32(2.0), 24000, "Take", "", dict(self.RENDER))
         assert entry["infotext"] == (
             "Speaker 1: Hello there.\n[pause]\nSpeaker 2: Hi.\n"
             'Steps: 10, CFG scale: 1.3, Seed: 1234, Model: vibevoice-7b, Speaker 1: Ada, '
             'Speaker 2: "Brook, take two", Sections: 2, Length: 2.0 s, Render time: 45.2 s')
 
     def test_an_output_from_before_seeds_were_recorded_says_nothing_of_one(self):
-        entry = box.add_output(tone_pcm(0.5), 24000, "Old", "",
+        entry = box.add_output(tone_f32(0.5), 24000, "Old", "",
                                {"steps": 10, "cfg_scale": 1.3, "seed": None,
                                 "max_new_tokens": 900, "prompt": "Hi"})
         assert entry["infotext"] == ("Hi\nSteps: 10, CFG scale: 1.3, Max new tokens: 900, "
                                      "Length: 0.5 s")
 
     def test_every_output_handed_out_carries_its_format_and_infotext_and_none_is_stored(self):
-        entry = box.add_output(tone_pcm(0.5), 24000, "Take", "", dict(self.RENDER))
+        entry = box.add_output(tone_f32(0.5), 24000, "Take", "", dict(self.RENDER))
         assert entry["format"] == "wav"
         for found in (box.output(entry["id"]), box.outputs()[0],
                       box.rename_output(entry["id"], "Final"), box.set_loop(entry["id"], True)):
@@ -824,18 +851,19 @@ class TestTheFiles:
                                                                              tmp_path):
         asked = []
 
-        def encoder(pcm16, rate, tags):
-            asked.append((len(pcm16), rate, dict(tags)))
+        def encoder(samples, rate, tags):
+            asked.append((samples, rate, dict(tags)))
             return b"ID3-the-encoded-render"
 
         monkeypatch.setattr(box, "_encode_mp3", encoder)
-        entry = box.add_output(tone_pcm(1.0), 24000, "Take", "", dict(TestInfotext.RENDER))
+        entry = box.add_output(tone_f32(1.0), 24000, "Take", "", dict(TestInfotext.RENDER))
 
         assert entry["format"] == "mp3"
         assert box.output_audio(entry["id"]) == (b"ID3-the-encoded-render", "mp3")
         assert not (box._outputs_root() / entry["id"] / box.AUDIO_FILENAME).exists()
-        (size, rate, tags), = asked
-        assert size == len(tone_pcm(1.0)) and rate == 24000
+        (samples, rate, tags), = asked
+        assert samples == tone_f32(1.0) and rate == 24000, \
+            "the encoder is handed the model's float samples, not a 16-bit copy"
         assert tags["comment"] == entry["infotext"] and "title" not in tags, \
             "a rename would leave a title saying the old name"
         assert json.loads(tags["voicebox"]) == {"id": entry["id"], "render": entry["render"]}
@@ -848,7 +876,7 @@ class TestTheFiles:
         assert sidecar["infotext"] == entry["infotext"] and sidecar["format"] == "mp3"
 
     def test_a_wav_carries_the_infotext_in_its_info_chunk_and_reads_as_before(self):
-        entry = box.add_output(tone_pcm(1.0), 24000, "Take", "", dict(TestInfotext.RENDER))
+        entry = box.add_output(tone_f32(1.0), 24000, "Take", "", dict(TestInfotext.RENDER))
         data, kind = box.output_audio(entry["id"])
 
         assert kind == "wav" and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
@@ -856,7 +884,7 @@ class TestTheFiles:
         info = _info_chunk(data)
         assert info == {"ICMT": entry["infotext"], "ISFT": box.SOFTWARE}
         pcm, rate = box.pcm_of(data)
-        assert rate == 24000 and pcm == tone_pcm(1.0)
+        assert rate == 24000 and pcm == box.pcm16_of(tone_f32(1.0))
 
     def test_a_render_from_before_mp3s_is_listed_played_and_saved_as_a_wav(self, tmp_path):
         identifier = "0123456789abcdef"
@@ -879,9 +907,9 @@ class TestTheFiles:
                                                                          tmp_path):
         box.set_settings({"save_folder": str(tmp_path)})
         monkeypatch.setattr(box, "_encode_mp3", lambda pcm16, rate, tags: b"ID3")
-        first = box.save_output(box.add_output(tone_pcm(0.5), 24000, "Take", "", {})["id"])
+        first = box.save_output(box.add_output(tone_f32(0.5), 24000, "Take", "", {})["id"])
         monkeypatch.setattr(box, "_encode_mp3", no_mp3)
-        second = box.save_output(box.add_output(tone_pcm(0.5), 24000, "Take", "", {})["id"])
+        second = box.save_output(box.add_output(tone_f32(0.5), 24000, "Take", "", {})["id"])
         assert first.endswith("Take.mp3") and second.endswith("Take (2).wav")
         assert json.loads((tmp_path / "Take.json").read_text("utf-8"))["format"] == "mp3"
 
@@ -906,16 +934,19 @@ class TestTheFiles:
         import numpy
 
         pcm = tone_pcm(3.0)
+        samples = box.float32_of(pcm)
         text = "Speaker 1: Hi, there.\nSteps: 10, Seed: 7"
-        encoded = REAL_MP3(pcm, 24000, {"comment": text, "encoded_by": box.SOFTWARE,
-                                        "voicebox": json.dumps({"seed": 7})})
+        encoded = REAL_MP3(samples, 24000, {"comment": text, "encoded_by": box.SOFTWARE,
+                                            "voicebox": json.dumps({"seed": 7})})
         assert encoded is not None and encoded[:3] == b"ID3"
-        assert len(encoded) < len(box.wav_bytes(pcm)) / 2.5
+        # 160 kb/s: 20 000 bytes a second against the WAV's 48 000.
+        assert len(box.wav_bytes(pcm)) / 2.6 < len(encoded) < len(box.wav_bytes(pcm)) / 2.2
 
         with av.open(io.BytesIO(encoded)) as container:
             stream = container.streams.audio[0]
             assert (container.format.name, stream.rate) == ("mp3", 24000)
             assert stream.codec_context.layout.name == "mono"
+            assert stream.bit_rate == box.MP3_BITRATE == 160_000
             assert container.metadata["comment"] == text
             assert json.loads(container.metadata["voicebox"]) == {"seed": 7}
             decoded = numpy.concatenate([frame.to_ndarray().reshape(-1)
@@ -1106,7 +1137,8 @@ class TestSampling:
         configured = render["configuration"]
         assert (configured["sampling"], configured["temperature"], configured["top_p"]) == \
             (True, 0.8, 0.9)
-        assert f"Seed: {found['seed']}, Temperature: 0.8, Top-p: 0.9, Model:" in entry["infotext"]
+        assert f"Seed: {found['seed']}, Temperature: 0.8, Top-p: 0.9, Attention: SDPA, " \
+            f"Model:" in entry["infotext"]
 
     def test_a_greedy_render_sends_no_values_and_its_infotext_says_none(self, ready):
         box.save_configuration({"id": ready["configuration"]["id"], "sampling": False,
@@ -1131,3 +1163,146 @@ class TestSampling:
         settled(found["id"])
         request, = box._runtime().renders
         assert (request.sampling, request.temperature, request.top_p) == (True, 1.2, 0.5)
+
+
+# --------------------------------------------------------------------------- #
+# The solver, the attention and the takes
+# --------------------------------------------------------------------------- #
+
+
+class TestSolverAttentionAndTakes:
+    def test_the_16_bit_copy_is_clipped_and_scaled_as_the_worker_once_made_it(self):
+        """Peaks and a WAV where no MP3 can be made are this copy: clipped to
+        unity and scaled by 32767, the convention every earlier render used."""
+        samples = struct.pack("<6f", 0.0, 1.0, -1.0, 1.5, -2.0, 0.5)
+        assert list(struct.unpack("<6h", box.pcm16_of(samples))) == \
+            [0, 32767, -32767, 32767, -32767, 16383]
+        assert box.silence32(500) == bytes(4 * 12000)
+
+    def test_an_output_made_now_names_its_solver_and_attention(self):
+        render = dict(TestInfotext.RENDER, steps=12, solver="dpmpp_2m_sde", attention="eager",
+                      seed=5)
+        entry = box.add_output(tone_f32(2.0), 24000, "Take", "", render)
+        assert entry["infotext"] == (
+            "Speaker 1: Hello there.\n[pause]\nSpeaker 2: Hi.\n"
+            'Steps: 12, Solver: DPM++ 2M SDE, CFG scale: 1.3, Seed: 5, Attention: Eager, '
+            'Model: vibevoice-7b, Speaker 1: Ada, Speaker 2: "Brook, take two", Sections: 2, '
+            'Length: 2.0 s, Render time: 45.2 s')
+
+    def test_a_configuration_holds_them_and_refuses_what_vibevoice_lacks(self):
+        found = box.save_configuration({"solver": "dpmpp_3m", "attention": "eager", "batch": 3})
+        assert (found["solver"], found["attention"], found["batch"]) == ("dpmpp_3m", "eager", 3)
+        plain = box.save_configuration({})
+        assert (plain["solver"], plain["attention"], plain["batch"], plain["steps"]) == \
+            ("dpmpp_2m", "sdpa", 1, 12)
+        for values, sentence in (({"solver": "euler"}, "not a solver VibeVoice has"),
+                                 ({"attention": "flex_attention"},
+                                  "not an attention VibeVoice has"),
+                                 ({"batch": 5}, "The batch"), ({"batch": 0}, "The batch")):
+            with pytest.raises(box.VoiceBoxError, match=sentence):
+                box.save_configuration(values)
+
+    def test_a_configuration_saved_before_them_reads_with_the_defaults(self):
+        identifier = "0123456789abcdef"
+        path = box._configuration_path(identifier)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"id": identifier, "name": "Old", "model_id": "",
+                                    "card_uuid": CARD, "steps": 10, "cfg_scale": 1.3,
+                                    "seed": None, "max_new_tokens": None, "speakers": {},
+                                    "created": 1.0, "updated": 1.0}), "utf-8")
+        found = box.configuration(identifier)
+        assert (found["solver"], found["attention"], found["batch"]) == ("dpmpp_2m", "sdpa", 1)
+        assert found["steps"] == 10, "a saved step count stays what it was saved as"
+
+    def test_a_batch_is_one_render_a_section_and_an_output_a_take_at_the_next_seed(
+            self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"], "batch": 4, "seed": 9990,
+                                "solver": "dpmpp_2m_sde", "attention": "eager"})
+        runtime, turns = box._runtime(), box.turns()
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.\n[pause]\nSpeaker 2: Yo.",
+                           ready["configuration"]["id"])
+        assert found["batch"] == 4 and found["seed"] == 9990
+        job = settled(found["id"])
+        assert job["phase"] == "done"
+        assert len(runtime.renders) == 2, "one render a section, every take at once"
+        assert all((request.takes, request.seed, request.solver, request.attention) ==
+                   (4, 9990, "dpmpp_2m_sde", "eager") for request in runtime.renders)
+        assert turns.requests[0]["need_vram"] == 20 * _GB + 3 * 2 * _GB, \
+            "the turn asks for the weights once and a working set a take"
+
+        assert len(job["output_ids"]) == 4 and job["output_id"] == job["output_ids"][0]
+        entries = [box.output(identifier) for identifier in job["output_ids"]]
+        assert [entry["render"]["seed"] for entry in entries] == [9990, 9991, 9992, 9993]
+        assert [entry["render"]["configuration"]["seed"] for entry in entries] == \
+            [9990, 9991, 9992, 9993], "Reuse settings makes each take again first"
+        assert {entry["render"]["configuration"]["batch"] for entry in entries} == {4}
+        assert [(entry["render"]["take"], entry["render"]["takes"]) for entry in entries] == \
+            [(1, 4), (2, 4), (3, 4), (4, 4)]
+        assert [entry["name"] for entry in entries] == \
+            ["Trailer 1", "Trailer 2", "Trailer 3", "Trailer 4"]
+        # The fake makes take k a quarter of a second longer in every section:
+        # each take's sections are joined to each other, not to another take's.
+        pause = box.PAUSE_DEFAULT_MS / 1000.0
+        assert [entry["seconds"] for entry in entries] == [
+            pytest.approx(2 * (1.0 + 0.25 * take) + pause, abs=0.02) for take in range(4)]
+        assert all("Seed: " + str(9990 + take) in entry["infotext"]
+                   for take, entry in enumerate(entries))
+
+    def test_the_next_render_is_numbered_after_every_take(self, ready, runtime):
+        """Every take is an output with its own number, counted while its job is
+        still rendering as well as after: a render named while a batch of three
+        is in flight is the fourth."""
+        runtime.hold = threading.Event()
+        box.save_configuration({"id": ready["configuration"]["id"], "batch": 3})
+        first = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        phase_reached(first["id"], "rendering")
+        box.save_configuration({"id": ready["configuration"]["id"], "batch": 1})
+        second = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                            ready["configuration"]["id"])
+        runtime.hold.set()
+        assert settled(first["id"])["name"] == "Trailer 1"
+        assert second["name"] == "Trailer 4"
+        assert settled(second["id"])["phase"] == "done"
+        third = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        assert third["name"] == "Trailer 5", "and after they are kept"
+
+    def test_a_random_seed_is_drawn_so_the_whole_batch_fits(self, ready, monkeypatch):
+        asked = []
+        monkeypatch.setattr(box.secrets, "randbelow",
+                            lambda bound: asked.append(bound) or bound - 1)
+        box.save_configuration({"id": ready["configuration"]["id"], "batch": 4})
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        assert asked == [box.SEED_MAX - 4 + 2]
+        assert found["seed"] + 3 == box.SEED_MAX and found["seed_drawn"] is True
+
+    def test_a_fixed_seed_whose_batch_would_pass_the_largest_is_refused_at_the_press(
+            self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"], "batch": 4,
+                                "seed": box.SEED_MAX - 1})
+        with pytest.raises(box.VoiceBoxError, match="largest seed"):
+            box.render(ready["pipeline"]["id"], "Speaker 1: Hi.", ready["configuration"]["id"])
+        assert box.turns().requests == [] and box.jobs() == []
+
+    def test_flash_attention_is_refused_at_the_press_until_it_is_installed(self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"],
+                                "attention": "flash_attention_2"})
+        with pytest.raises(box.VoiceBoxError, match="flash-attn"):
+            box.render(ready["pipeline"]["id"], "Speaker 1: Hi.", ready["configuration"]["id"])
+        assert box.jobs() == []
+        box._engine().flash = True
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        assert settled(found["id"])["phase"] == "done"
+        assert box._runtime().renders[0].attention == "flash_attention_2"
+
+    def test_a_cancelled_batch_keeps_no_take(self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"], "batch": 2})
+        box._runtime().cancel_on_render = True
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        job = settled(found["id"])
+        assert job["phase"] == "cancelled" and job["output_ids"] == []
+        assert box.outputs() == []

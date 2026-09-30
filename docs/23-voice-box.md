@@ -91,9 +91,16 @@ resolves both unversioned and separately, which can mismatch; the VibeVoice
 closure does not copy that. `PYTORCH_NO_CUDA_MEMORY_CACHING`, which the CPU
 engines set, is not set here: on a card it would disable the caching allocator.
 
-**Attention.** SDPA. Microsoft's demo calls flash-attention the only fully tested
-path, but flash-attention has no official Windows wheels and nobody has measured
-a difference; the first renders are compared by ear.
+**Attention.** SDPA by default, and since the fourth round a choice per
+configuration: SDPA, Eager, or Flash attention 2 when its package is in the
+runtime (§8, the fourth round). Microsoft's demo calls flash-attention the only
+fully tested path, but flash-attention has no official Windows wheels, the three
+compute the same attention up to rounding, and nobody has measured a difference.
+
+**Solver.** The model's own scheduler, DPM-Solver++ second order, which upstream's
+`inference_from_file.py` renders with; upstream's Gradio demo reconfigures the
+same scheduler to its SDE variant the moment it loads. Both, and the other orders
+the class finishes, are a choice per configuration since the fourth round.
 
 **Length.** The 7B's context is 32K, about 45 minutes. `generate()` also stops at
 `max_length_times` (2) times the prompt length; the runtime passes a value that
@@ -659,6 +666,77 @@ runs the Lobe theme, and two of its habits were behind three of the four asks.
    click while the tab is not on screen are not taps. Playback is untouched: the
    active player plays on, keeps its playhead on the compact waveform, and a poll
    does not reopen the lane.
+
+**The fourth round (after #243, at the user's request).** After an analysis of
+how the Voice Box compares with upstream's own settings, the user asked to choose
+the solver and the attention, to render several takes at once, for the best MP3
+the model's sound allows, and for twelve steps by default.
+
+1. *"Allow me to choose solver … I should see all supported options."* A
+   **Solver** list: every configuration of VibeVoice's own scheduler
+   (`vibevoice.schedule.dpm_solver.DPMSolverMultistepScheduler`) that finishes on
+   the model's cosine noise schedule — DPM++ 2M (the model's own, and
+   `inference_from_file.py`'s; the default), DPM++ 2M SDE (the Gradio demo's),
+   DPM++ 3M, DPM++ 1M (DDIM) and DPM++ 1M SDE. Never another class: the model
+   walks the timesteps itself with no input scaling. The deprecated algorithms are
+   out, and there is no third-order SDE (that update takes no noise). The class's
+   Karras and Lu spacings were built and then taken out again, before anything
+   shipped: run against upstream's own code they put several steps on timestep
+   999 of the cosine schedule and the scheduler runs off the end of its noise
+   levels on the last step, at 45 and 42 of the step counts from 1 to 50. A
+   spacing the model's own scheduler cannot finish is not an option, so there is
+   no Schedule control. The worker keeps the model's scheduler object and hands it
+   back for DPM++ 2M; any other is its configuration with the algorithm and order
+   changed, as the demo does it.
+2. *"Allow me to choose attention."* An **Attention** list: SDPA (the default),
+   Eager and Flash attention 2 — the three VibeVoice declares; flex attention is
+   not declared and needs Triton. transformers 4.51 reads the language model's
+   `_attn_implementation` at every forward pass, so a render switches it with one
+   attribute and no second load. Flash attention needs the `flash-attn` package,
+   which the runtime does not install: the installer reads the runtime's
+   site-packages for it, the page lists it greyed with *not installed* until it is
+   there, Render refuses a configuration that holds it, and the worker refuses
+   again by import before it switches.
+3. *"Add option to batch up to 4 … the first in batch is 9990 and last is 9993."*
+   A **Batch** of one to four takes, each its own output, take *k* at seed + *k*.
+   A batch is one `generate` over the prompt repeated — the weights are read once
+   for every take — and upstream draws its randomness from Torch's global
+   generators in three places (the voice prompt's encoding samples a latent around
+   its mean; the diffusion head's starting noise and the SDE solver's per-step
+   noise; the token choice when sampling), so the worker gives each take generators
+   of its own, seeded with its seed, and draws for it exactly what a render of that
+   seed alone draws, in the same order and shapes (`TakeRandomness`). Which takes
+   are speaking at a frame is `generate`'s own `diffusion_indices`, read from its
+   frame, because upstream passes the diffusion head only their conditions.
+   Upstream's streamer contract also had to be met differently: `generate` leaves
+   its loop the moment *any* streamer flag is up, so a take that ends raises none,
+   or it would cut the others off mid-sentence. Checked against upstream's own
+   code with a tiny VibeVoice on the CPU (`tests/test_vibevoice_upstream.py`): a
+   single take through the per-take draws is bit for bit the plain render, for
+   every solver, greedy and sampled, one voice and two; take *k* of a batch has
+   the length, the token count and the samples of the render of seed + *k* (to
+   6e-9 in float32, exactly in bfloat16 there); takes that end at different steps
+   do not end each other. A single take keeps the global generators, so seeds
+   recorded before batches existed make the same renders. A drawn seed leaves room
+   for the whole batch below the largest seed; a fixed one that would pass it is
+   refused at Render. The turn asks for the weights once and a working set per
+   take, and the calibration keeps one take's peak.
+4. *"I want the output to be .mp3 … high fidelity … go straight to high fidelity
+   .mp3."* The worker answers with the model's 32-bit float samples (protocol 2),
+   and the MP3 is made from them in memory: 160 kb/s, the ceiling of MPEG-2 Layer
+   III and so of an MP3 at the model's 24 kHz, at LAME's quality 0, constant
+   bitrate so seeks land where the page asks. Mono at 24 kHz, because a second
+   channel would be a copy of the one the model makes and a higher rate a
+   resample: measured, LAME keeps everything to about 11.3 kHz at this rate, which
+   is where the resampler that prepares every voice sample cuts, and turning its
+   lowpass off changes nothing. The 16-bit copy the page's peaks and a fallback
+   WAV use is scaled as the worker scaled it before. The pipe's reply ceiling is
+   2 GB, four takes of the longest script as float.
+5. *"Make default 12 steps."* New configurations and the engine's settings start
+   at twelve; a configuration saved before keeps the count it was saved with.
+
+*"Exposed the Sampling setting 'Greedy' … Is it exposed already?"* It is: the
+Sampling switch, off by default, is greedy decoding, what upstream ships.
 
 ---
 

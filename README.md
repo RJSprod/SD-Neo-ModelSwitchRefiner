@@ -5584,18 +5584,53 @@ A named set of the knobs a render takes, kept and chosen by name. The list of
 configurations heads the stage on one row with three icon buttons: **Save**,
 **Save as** (a new configuration) and **Delete**. A configuration holds the model,
 the card (each named, and marked when it is the image model's card or WanGP's),
-**diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
-a **seed** (blank for a different one each time — drawn when the render is
-queued and written on its output, so every render has a seed that makes it
-again), **max new tokens** (blank for the model's own limit), **sampling**
-with its **temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by
-default, and the four **speaker** slots, each holding one sample.
+**diffusion steps** (1–50, twelve by default), **CFG** (1.0–3.0, 1.3 by default),
+the **solver** and the **attention** (below), a **seed** (blank for a different
+one each time — drawn when the render is queued and written on its output, so
+every render has a seed that makes it again), the **batch** (one to four takes),
+**max new tokens** (blank for the model's own limit), **sampling** with its
+**temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by default, and
+the four **speaker** slots, each holding one sample. A configuration saved
+before a field existed reads with that field's default and keeps every value it
+was saved with — its step count included.
+
+**Solver** is how the diffusion head walks each frame of speech from noise, and
+every solver VibeVoice's own scheduler can finish is listed: **DPM++ 2M**, the
+one the model is built with and upstream's `inference_from_file.py` renders with
+(the default, marked *upstream*); **DPM++ 2M SDE**, which upstream's Gradio demo
+switches to the moment it loads (*upstream demo*); **DPM++ 3M**; and the
+first-order **DPM++ 1M** — DDIM — and **DPM++ 1M SDE**. The SDE solvers add fresh
+noise at every step, so the seed shapes more of a take. There is no third-order
+SDE: that update takes no noise. The scheduler can also space its steps by
+Karras's sigmas or Lu's log-SNR, and neither is offered: on VibeVoice's cosine
+noise schedule both put several steps on timestep 999 and the scheduler runs
+off the end of its noise levels on the last step — at 45 and 42 of the step
+counts from 1 to 50 (`tests/test_vibevoice_upstream.py` shows it).
+
+**Attention** is how the model's language part attends: **SDPA**, PyTorch's
+fused kernels (the default); **Eager**, plain matrix products with the softmax
+in 32-bit float; and **Flash attention 2**, which upstream loads on a CUDA card
+(*upstream*) and which needs the `flash-attn` package in VibeVoice's runtime.
+Until that package is there it is listed, greyed, with *not installed*, and a
+configuration that holds it is refused at Render. The three compute the same
+attention and differ only in rounding; switching needs no second load of the
+model.
+
+**Batch** renders one to four takes of the script at once, each its own output:
+the first at the seed and every next one at the next seed — a batch of four from
+9990 is 9990, 9991, 9992 and 9993 — and each is the take its seed makes on its
+own, so **Use seed** on any of them makes that take again (give or take the last
+bit of a batched sum). The takes are one pass through the model, which reads its
+weights once for all of them, so four take much less than four times as long;
+the card is asked for the weights once and a working set for each take. A drawn
+seed is drawn low enough that the whole batch fits below the largest seed; a
+fixed one that would pass it is refused at Render.
 
 **Sampling** is a switch: the whole button, its name included, turns it on or
 off, and its knob sits to the right, on a filled track, while it is on. It is
 off by default, and then temperature and top-p are greyed out and not used.
-Off, the model makes its own most likely choices, as its publisher
-ships it. VibeVoice has two parts: the voice — tone, texture, how each word
+Off, the model makes its own most likely choice at every step — greedy
+decoding, as its publisher ships it and as both upstream scripts run it. VibeVoice has two parts: the voice — tone, texture, how each word
 comes out, which the seed, CFG and steps shape — and a pacer that decides,
 every eighth of a second of speech, whether to keep talking, take a break or
 stop. Sampling only touches the pacer: with it on, pauses land in different
@@ -5648,10 +5683,11 @@ playing: the sound plays on, the compact waveform keeps its playhead, and the
 lane's buttons act on it as before when you open it again.
 
 The **infotext** is the render's fingerprint, written the way a WebUI writes an
-image's: the prompt as it was, then one line — `Steps: 10, CFG scale: 1.3,
-Seed: 1234567, Model: vibevoice-7b, Speaker 1: Ada, Speaker 2: Brook, Sections:
-2, Length: 41.3 s, Render time: 95.0 s`, with `Temperature: 0.95, Top-p: 0.95`
-after the seed when the render sampled. **Copy** puts it on the clipboard. It
+image's: the prompt as it was, then one line — `Steps: 12, Solver: DPM++ 2M,
+CFG scale: 1.3, Seed: 1234567, Attention: SDPA, Model: vibevoice-7b, Speaker 1:
+Ada, Speaker 2: Brook, Sections: 2, Length: 41.3 s, Render time: 95.0 s`, with
+`Temperature: 0.95, Top-p: 0.95` after the seed when the render sampled. A render
+made before the solver and the attention were recorded says nothing of either. **Copy** puts it on the clipboard. It
 is also written into the file itself, so a render saved or downloaded says what
 made it wherever it goes: in the MP3's ID3 comment (with the whole record as
 JSON under `voicebox`), or in a WAV's `INFO` chunk. A render made before seeds
@@ -5662,16 +5698,22 @@ were recorded has no seed to give, and its line says nothing of one.
 configuration as unsaved changes — the configuration it came from, when it
 still exists, with the render's values over it (its seed included, so Render
 makes the same take again; clear the seed for a new one; its sampling,
-temperature and top-p too, and a render made before sampling existed turns
-sampling off), or a new unsaved configuration named after the render when that
-one is gone. A speaker whose
+temperature and top-p, its solver, attention and batch too, and a render made
+before sampling existed turns sampling off), or a new unsaved configuration
+named after the render when that one is gone. A speaker whose
 sample has since been deleted is left empty, and the page says which.
 
-A render is kept as an **MP3** — constant 128 kb/s, mono, at the model's own
-24 kHz, about a third of the WAV's size with nothing lost that speech at that
-rate carries. The encoder's delay and padding are written into the file, so it
-decodes to exactly the samples that were rendered and a looped render has no
-gap. It is encoded in the WebUI's own process by PyAV, which Forge Neo already
+A render is kept as an **MP3** — 160 kb/s, the most an MP3 at the model's own
+24 kHz can hold, made by LAME at its most careful setting straight from the
+model's 32-bit float samples, in memory: no WAV is made first and nothing is
+rounded to 16 bits on the way. Mono at 24 kHz because that is what the model
+makes: a second channel would be a copy, and a higher rate a resample. At this
+rate LAME keeps everything up to about 11.3 kHz, which is also where the voice
+samples the model clones from stop (the resampler that prepares them cuts
+there), so nothing the voice was given is lost. About 1.2 MB a minute, where a
+WAV of the same sound is 2.9. The encoder's delay and padding are written into
+the file, so it decodes to exactly the samples that were rendered and a looped
+render has no gap. It is encoded in the WebUI's own process by PyAV, which Forge Neo already
 installs; nothing is added to Forge for it. A Forge that cannot encode one keeps
 the render as a WAV, as every render made before this was, and the page plays,
 trims and saves either the same way. Samples are always WAV: they are what the
@@ -5717,7 +5759,11 @@ Settings → Model Chain; Voice Box's own **Keep warm** switch, in the
 Configuration stage, can decline a warm stay but never force one against that
 setting. A render is named after its
 pipeline and its number in it (*Trailer 3*) unless you name it; two renders
-queued as one ends can no longer be given the same number.
+queued as one ends can no longer be given the same number. Every take of a
+batch is an output with its own number — a batch of four after the third render
+is *Trailer 4* to *Trailer 7* — and one named while a batch is still rendering is
+numbered after all of its takes. A batch lands as one lane a take, the first
+take chosen, and a cancelled batch keeps none of them.
 
 ### Where it lives
 
@@ -5743,9 +5789,23 @@ VibeVoice runs in a process of its own, one per card it is used on, started with
 `TRANSFORMERS_OFFLINE`), out of a runtime that is its own closure and nobody
 else's. Its handshake reports the UUID of the card it actually came up on, and a
 worker on any other card is refused rather than used. It loads the model in
-bfloat16 with PyTorch's scaled-dot-product attention, sets the diffusion steps
-the configuration asks for, and renders a section at a time, each seeded with the
-render's seed; a cancel is checked at the top of every generation step. A
+bfloat16 with PyTorch's scaled-dot-product attention, sets the diffusion steps,
+the solver and the attention each render asks for — the solver is the model's
+own scheduler reconfigured, as upstream's demo does it, and the attention one
+attribute of the language model's configuration, which transformers 4.51 reads
+at every forward pass — and renders a section at a time, each seeded with the
+render's seed; a cancel is checked at the top of every generation step. A batch
+is one `generate` over the same prompt repeated, and `generate` draws its random
+numbers from Torch's global generators in three places — the voice prompt's
+encoding, the diffusion head's noise and, when sampling, the token choice — so
+for a batch the worker gives each take a generator of its own, seeded with that
+take's seed, and draws for it exactly what a render of that seed alone draws.
+`tests/test_vibevoice_upstream.py` runs this against upstream's own code, a tiny
+VibeVoice on the CPU: a single take through the per-take draws is identical bit
+for bit to the plain render, and take *k* of a batch matches the render of seed
++ *k*. A single take keeps the global generators, as it always has, so a seed
+recorded before batches existed makes the same render. It answers with each
+take's 32-bit float samples. A
 section's render slot is free before its reply is written, because the Voice Box
 asks for the next section the moment it reads the last one's reply, and a slot
 freed a moment later refused it as a second render. The protocol runs on a copy
@@ -5761,7 +5821,10 @@ Every render reports the highest memory the card saw; the next request asks for
 at least that much (`calibration.json` beside the engine's settings), so the
 estimate a turn is checked against — the shard sizes plus a 2 GB working
 allowance until then — learns from the machine rather than from a number written
-here. The peak is noted once per render, by the runtime. A render's output
+here. The figure kept is one take's: a batch holds the weights once and a
+working set per take, so its peak is brought back to one take's before it is
+kept, and a batch asks for the weights plus as many working sets as it has
+takes. The peak is noted once per render, by the runtime. A render's output
 also says when the model stopped at its token budget rather than at the end of
 the script, so a truncated render is visible instead of silent: upstream's own
 flag for that is never raised by the 7B (its loop ends one step before the check
@@ -5913,7 +5976,8 @@ voice/managed-pocket-models.json  the Pocket closure and its voices (data only)
 
 mc_voice_vibevoice.py the VibeVoice engine: manifest, installer, settings, the estimates
 mc_voice_vibevoice_runtime.py  one worker per card, the handshake that proves the card
-vibevoice_worker/worker.py  the VibeVoice sidecar, the one that runs on a card
+vibevoice_worker/worker.py  the VibeVoice sidecar, the one that runs on a card: the
+                      solvers, the attentions, a batch's takes each at its own seed
 mc_voice_box.py       the Voice Box's files and its render service
 mc_voice_box_api.py   the Voice Box's routes
 mc_voice_box_ui.py    the Voice Box tab: one root, painted once
@@ -6096,6 +6160,16 @@ every test file that failed was one it had picked, except where the broken
 file sits under a fixture every test runs, which fails every test, the ones
 it picked included. It cannot see what one test leaves behind for the next,
 so the full run is the check before a push.
+
+One file runs only where VibeVoice's own packages are installed, which neither
+Forge nor this suite installs, and is skipped everywhere else:
+`tests/test_vibevoice_upstream.py` builds a tiny VibeVoice from upstream's own
+classes and drives the worker through it on the CPU, to prove what stand-ins
+cannot — that every solver finishes on the model's schedule, that attention
+switches without a load, and that take *k* of a batch is the render of seed +
+*k*. Install `torch`, `transformers` 4.51.3, `diffusers`, the `vibevoice` 0.0.1
+wheel and pytest in a venv and run `<venv>/bin/python -m pytest
+tests/test_vibevoice_upstream.py`; it takes about a minute.
 
 A passing test's temporary folder is deleted as it passes (`pytest.ini`); a
 failing test's is kept to look at. A test that writes into the extension's own
