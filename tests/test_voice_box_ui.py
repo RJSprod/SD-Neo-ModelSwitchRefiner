@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import html
+import re
 from pathlib import Path
 
 import gradio as gr
@@ -161,6 +162,47 @@ class TestWhatTheModuleReaches:
         assert rules
         for rule in rules:
             assert rule.startswith(f"#{mc_voice_box_ui.ROOT_ID}"), rule
+
+
+class TestTheStylesheetSection:
+    """What the section promises in its own header: the host's colours, bar one
+    tint, and nothing drawn above the host's dialogs."""
+
+    @staticmethod
+    def _rules() -> str:
+        """The section's rules without its comments (the split lands inside the
+        section's banner, so the rest of the banner goes first)."""
+        css = (ROOT / "style.css").read_text(encoding="utf-8")
+        section = css.split("Voice Box", 1)[1].split("*/", 1)[1]
+        return re.sub(r"/\*.*?\*/", "", section, flags=re.S)
+
+    def test_its_one_colour_of_its_own_is_the_tint_and_the_dark_theme_takes_it_darker(self):
+        """Every colour is a var() reference to the host's theme except the tint a
+        sample carries onto its outputs: a hue the script derives from the
+        sample's id, at a saturation and lightness declared once on the root --
+        low, and redeclared darker under Forge's dark theme (`.dark`)."""
+        rules = self._rules()
+
+        functions = re.findall(
+            r"(?<![\w-])((?:hsla?|rgba?|hwb|lab|lch|oklab|oklch|color)\([^;]*);", rules)
+        assert functions == ["hsl(var(--mc-voice-box-hue, 0) var(--mc-voice-box-tint-saturation) "
+                             "var(--mc-voice-box-tint-lightness))"]
+
+        light = re.search(r"#mc-voice-box \{([^}]*)\}", rules).group(1)
+        dark = re.search(r"#mc-voice-box:is\(\.dark \*\) \{([^}]*)\}", rules).group(1)
+
+        def percent(block: str, name: str) -> float:
+            return float(re.search(re.escape(name) + r":\s*([\d.]+)%", block).group(1))
+
+        for block in (light, dark):
+            assert 0 < percent(block, "--mc-voice-box-tint-saturation") <= 50, "quiet, not colourful"
+        assert (percent(dark, "--mc-voice-box-tint-lightness")
+                < percent(light, "--mc-voice-box-tint-lightness"))
+
+    def test_it_sets_no_z_index(self):
+        """Mini Paint's dialog layer (2000) and the assistant's panel (1200) stay
+        above everything the tab draws."""
+        assert "z-index" not in self._rules()
 
 
 @pytest.mark.parametrize("attribute", ["data-mc-voice-key", "data-mc-voice-box-prefix",

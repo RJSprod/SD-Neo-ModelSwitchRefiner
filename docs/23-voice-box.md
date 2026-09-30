@@ -565,7 +565,11 @@ user's own words first:
    `elapsed`, `· n queued`) with Cancel and Clear queue (`/jobs/clear`, every
    queued job on every card, the running one left to Cancel); only queued jobs;
    the last failure of a render this page started; VibeVoice warm on a card, with
-   Unload; why Render cannot run; *Ready*.
+   Unload; why Render cannot run; *Ready*. A fresh message (an error, *Saved
+   to …*, *Copied*) takes the line first, 5 s for information and 12 s for a
+   warning, with a ×; the old cards line is the line's tooltip. The queue is a
+   count, so queued jobs are withdrawn together by Clear queue, not one by one;
+   the cancel route still takes any job.
 
 Fixed in the same round: the worker freed a section's render slot only after
 writing its reply, so a parent that asked for the next section on reading it

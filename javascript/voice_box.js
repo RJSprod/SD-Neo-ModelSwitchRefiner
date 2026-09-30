@@ -22,6 +22,25 @@
 // player paused, the recorder stopped -- to any owner that is not itself. Voice
 // Chat's side is in javascript/voice_chat.js.
 //
+// The page fits the window rather than lengthening it. The root's height is
+// measured and written in pixels on the root itself (a percentage height
+// inside Gradio's containers resolves to auto -- Mini Paint NEO's lesson), each
+// long list scrolls inside its own stage, and below a root width of 900 px the
+// stages stack, one screen each, with vertical scroll-snap between them;
+// `data-layout` ("columns" or "stack") on the root says which, for the
+// stylesheet. Nothing observes the root's size, because the root is the box
+// this file resizes: the height is worked out again on the window's and the
+// visual viewport's resize, an orientation change, the tab coming into view
+// (an IntersectionObserver, which watches visibility, not size), the fonts
+// arriving and the first data paint -- once per animation frame, and written
+// only when it changed.
+//
+// Render, the Install button and one status line live in the Outputs stage's
+// header. The line shows the first of: a message a press just caused (for a
+// few seconds), an install running, the job on a card with its time ticking
+// from the server's own count, the queue, the last render this page started
+// having failed, VibeVoice warm on a card, why Render is disabled, Ready.
+//
 // The file is loaded by Forge on every page, like every extension script, so
 // nothing here touches the DOM until the root exists.
 
@@ -48,6 +67,21 @@
     const DECODE_LIMIT = {bytes: 200 * 1024 * 1024, seconds: 20 * 60};
     const PEAK_BUCKETS = 240;
     const LIVE_PHASES = {queued: true, waiting: true, loading: true, rendering: true};
+    // A job holding its card, as opposed to one queued behind it.
+    const ACTIVE_PHASES = {waiting: true, loading: true, rendering: true};
+    // Below this width of the root the stages stack, one screen each.
+    const STACK_BELOW = 900;
+    // The least height the root is given, whatever the window leaves it.
+    const MIN_HEIGHT = 420;
+    // How long a message holds the status line before the line goes back to
+    // what the page is doing. A × puts it away sooner.
+    const MESSAGE_MS = {info: 5000, other: 12000};
+    const TICK_MS = 1000;
+    // A press that travels further than this before it lets go is a drag or
+    // a scroll, and selects nothing.
+    const DRAG_PX = 8;
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+                    "Nov", "Dec"];
     const STAGES = [
         {key: "input", title: "INPUT"},
         {key: "prompt", title: "PROMPT"},
@@ -81,6 +115,7 @@
         pipelineDelete: "/pipelines/delete",
         render: "/render",
         jobCancel: "/jobs/cancel",
+        jobClear: "/jobs/clear",
         outputs: "/outputs",
         outputRename: "/outputs/rename",
         outputLoop: "/outputs/loop",
@@ -118,13 +153,27 @@
         message: "",
         messageKind: "",
         focus: {last: null, sent: []},
+        // The output lane showing its controls, by output id; it survives
+        // polls and pipeline switches, and a render this page started takes
+        // it when it finishes.
+        selectedOutput: "",
+        revealOutput: "",
+        // The last render this page started, when it failed: {id, name, warning}.
+        lastFailure: null,
+        // performance.now() when the last list of jobs arrived. A job's time is
+        // its server-computed `elapsed` plus the time since then -- never this
+        // browser's clock against the server's timestamps.
+        answeredAt: 0,
+        statusLine: "",
+        layout: {mode: "", width: 0, height: 0, raw: 0, correction: 0, writes: 0},
     };
 
     const nodes = {lanes: {}};
     const cache = {urls: {}, blobs: {}};
     const players = [];
     const inflight = {};
-    const timers = {prompt: 0, poll: 0};
+    const timers = {prompt: 0, poll: 0, tick: 0, message: 0};
+    const frames = {fit: 0};
 
     // -- small helpers --------------------------------------------------------- //
 
@@ -212,12 +261,26 @@
 
     // -- the status line ------------------------------------------------------- //
 
+    // A message is what a press just did, or why it could not: it holds the
+    // Outputs header's one status line for a few seconds (MESSAGE_MS), and the
+    // line then goes back to what the page is doing (renderStatus).
     function say(text, kind) {
         state.message = text || "";
         state.messageKind = kind || "info";
-        if (!nodes.status) return;
-        nodes.status.textContent = state.message;
-        nodes.status.setAttribute("data-kind", state.messageKind);
+        if (timers.message) {
+            window.clearTimeout(timers.message);
+            timers.message = 0;
+        }
+        if (state.message) {
+            const shown = state.message;
+            timers.message = window.setTimeout(function () {
+                timers.message = 0;
+                if (state.message !== shown) return;
+                state.message = "";
+                renderStatus();
+            }, state.messageKind === "info" ? MESSAGE_MS.info : MESSAGE_MS.other);
+        }
+        renderStatus();
     }
 
     class RequestError extends Error {
@@ -409,13 +472,44 @@
         document.addEventListener("visibilitychange", function () {
             if (document.visibilityState === "hidden") {
                 schedulePoll();
+                scheduleTick(null);
             } else {
                 refreshStatus().catch(report).then(schedulePoll);
+                scheduleFit();
             }
         });
+        // Everything that changes the room the window leaves the root. The
+        // canvases are redrawn by the fit when the root's width has moved.
         if (typeof window.addEventListener === "function") {
-            window.addEventListener("resize", function () { redrawAll(); });
+            window.addEventListener("resize", scheduleFit);
+            window.addEventListener("orientationchange", scheduleFit);
         }
+        const viewport = window.visualViewport;
+        if (viewport && typeof viewport.addEventListener === "function") {
+            viewport.addEventListener("resize", scheduleFit);
+        }
+        try {
+            const fonts = document.fonts;
+            if (fonts && fonts.ready && typeof fonts.ready.then === "function") {
+                fonts.ready.then(scheduleFit, function () { /* nothing to wait for */ });
+            }
+        } catch (error) { /* a document without the font loading API */ }
+    }
+
+    // Gradio shows a tab by switching its panel from display:none, which moves
+    // nothing a window event would report. An IntersectionObserver on the root
+    // hears the tab come into view; it watches visibility, not size, so the
+    // height this file writes on the root cannot call it back.
+    function watchRoot(root) {
+        if (typeof IntersectionObserver !== "function" || !root) return;
+        try {
+            const observer = new IntersectionObserver(function (entries) {
+                const seen = (entries || []).some(function (entry) { return entry && entry.isIntersecting; });
+                if (seen) scheduleFit();
+            });
+            observer.observe(root);
+            nodes.rootObserver = observer;
+        } catch (error) { /* the window's events still fit it */ }
     }
 
     // -- players --------------------------------------------------------------- //
@@ -824,9 +918,15 @@
         state.token = root.getAttribute("data-mc-voice-key") || "";
         state.prefix = root.getAttribute("data-mc-voice-box-prefix") || DEFAULT_PREFIX;
         nodes.root = root;
+        state.layout = {mode: "", width: 0, height: 0, raw: 0, correction: 0, writes: 0};
         build(root);
         listen();
-        loadAll().catch(report).then(schedulePoll);
+        watchRoot(root);
+        fit();
+        loadAll().catch(report).then(function () {
+            scheduleFit();
+            schedulePoll();
+        });
         return true;
     }
 
@@ -888,6 +988,8 @@
         head.appendChild(bar);
         root.appendChild(head);
 
+        // Each stage is a head that stays and a body under it; the long list
+        // in a body takes what room is left and scrolls inside it.
         const stages = el("div", "mc-voice-box-stages");
         STAGES.forEach(function (stage, index) {
             if (index) {
@@ -897,43 +999,22 @@
             }
             const card = el("section", "mc-voice-box-stage mc-voice-box-stage-" + stage.key);
             card.setAttribute("data-stage", stage.key);
-            card.appendChild(el("h3", "mc-voice-box-stage-title", stage.title));
+            const top = el("div", "mc-voice-box-stage-head");
+            top.appendChild(el("h3", "mc-voice-box-stage-title", stage.title));
+            card.appendChild(top);
             const body = el("div", "mc-voice-box-stage-body");
             card.appendChild(body);
             nodes["stage_" + stage.key] = body;
+            nodes["stageHead_" + stage.key] = top;
             stages.appendChild(card);
         });
+        nodes.stages = stages;
         root.appendChild(stages);
 
         buildInput(nodes.stage_input);
         buildPrompt(nodes.stage_prompt);
         buildConfiguration(nodes.stage_configuration);
-        buildOutputs(nodes.stage_outputs);
-
-        const footer = el("div", "mc-voice-box-footer");
-        const row = el("div", "mc-voice-box-footer-row");
-        nodes.render = button("Render", "Render this pipeline", renderNow, "mc-voice-box-render");
-        nodes.renderReason = el("span", "mc-voice-box-render-reason", "");
-        nodes.install = button("Install VibeVoice", "Install the VibeVoice runtime and model",
-                               installEngine, "mc-voice-box-install");
-        show(nodes.install, false);
-        nodes.installProgress = el("span", "mc-voice-box-install-progress", "");
-        row.appendChild(nodes.render);
-        row.appendChild(nodes.renderReason);
-        row.appendChild(nodes.install);
-        row.appendChild(nodes.installProgress);
-        footer.appendChild(row);
-        nodes.jobs = el("ul", "mc-voice-box-list mc-voice-box-jobs");
-        footer.appendChild(nodes.jobs);
-        nodes.cards = el("div", "mc-voice-box-cards", "");
-        footer.appendChild(nodes.cards);
-        nodes.runtimeActions = el("div", "mc-voice-box-row mc-voice-box-runtime-actions");
-        footer.appendChild(nodes.runtimeActions);
-        nodes.status = el("div", "mc-voice-box-status", "");
-        nodes.status.setAttribute("role", "status");
-        nodes.status.setAttribute("aria-live", "polite");
-        footer.appendChild(nodes.status);
-        root.appendChild(footer);
+        buildOutputs(nodes.stage_outputs, nodes.stageHead_outputs);
     }
 
     // -- INPUT: a file or a recording, the trimmer, the sample library ----------- //
@@ -1030,8 +1111,12 @@
         body.appendChild(library);
     }
 
+    // The list is rebuilt whole, and it scrolls inside its stage: its scroll
+    // position is put back afterwards, or pressing a speaker button on a
+    // sample far down the list would throw the list back to its top.
     function renderSamples() {
         if (!nodes.samples) return;
+        const scrolled = Number(nodes.samples.scrollTop) || 0;
         clear(nodes.samples);
         if (!state.samples.length) {
             nodes.samples.appendChild(el("li", "mc-voice-box-empty",
@@ -1043,6 +1128,8 @@
         state.samples.forEach(function (sample) {
             const row = el("li", "mc-voice-box-sample");
             row.setAttribute("data-id", sample.id);
+            const edge = edgeOf([sample.id]);
+            if (edge) row.appendChild(edge);
             const wave = canvasOf("mc-voice-box-sample-wave");
             row.appendChild(wave);
             const line = el("div", "mc-voice-box-row");
@@ -1081,6 +1168,61 @@
             draw(wave, sample.peaks || []);
         });
         markSamplePlaying(state.playingSample || "");
+        if (scrolled) nodes.samples.scrollTop = scrolled;
+    }
+
+    // -- the tint a sample carries onto its outputs ---------------------------- //
+
+    // A quiet hue per sample, from its id: FNV-1a over the id's characters, so
+    // the same sample is the same hue on every page and every visit. The
+    // stylesheet owns the saturation and the lightness (one for the light
+    // theme, one for the dark); the page only says which hue. Decorative --
+    // the titles say the same thing in words -- so it is hidden from
+    // assistive technology.
+    function hueOf(id) {
+        let hash = 0x811c9dc5;
+        const text = String(id || "");
+        for (let index = 0; index < text.length; index += 1) {
+            hash ^= text.charCodeAt(index);
+            hash = Math.imul(hash, 0x01000193) >>> 0;
+        }
+        return hash % 360;
+    }
+
+    function setHue(node, hue) {
+        const style = node.style;
+        if (!style) return;
+        if (typeof style.setProperty === "function") style.setProperty("--mc-voice-box-hue", String(hue));
+        else style["--mc-voice-box-hue"] = String(hue);
+    }
+
+    // A 4 px edge of one equal segment per distinct sample, in the order
+    // given; nothing at all for no samples.
+    function edgeOf(ids) {
+        const seen = {};
+        const distinct = (ids || []).filter(function (id) {
+            if (!id || seen[id]) return false;
+            seen[id] = true;
+            return true;
+        });
+        if (!distinct.length) return null;
+        const edge = el("span", "mc-voice-box-edge");
+        edge.setAttribute("aria-hidden", "true");
+        distinct.forEach(function (id) {
+            const segment = el("span", "mc-voice-box-edge-segment");
+            segment.setAttribute("data-sample", id);
+            setHue(segment, hueOf(id));
+            edge.appendChild(segment);
+        });
+        return edge;
+    }
+
+    // An output's samples in speaker order: `render.speakers`, by number.
+    function speakerSamples(output) {
+        const render = (output && output.render) || {};
+        const speakers = Array.isArray(render.speakers) ? render.speakers.slice() : [];
+        speakers.sort(function (a, b) { return (Number(a && a.n) || 0) - (Number(b && b.n) || 0); });
+        return speakers.map(function (speaker) { return speaker && speaker.sample_id; });
     }
 
     function markSamplePlaying(id) {
@@ -1134,7 +1276,7 @@
         markConfigurationDirty();
         renderSamples();
         drawSpeakers();
-        renderFooter();
+        renderStatus();
         say("Speaker " + number + " is " + titleOf(sampleId) + ". Save the configuration to keep it.",
             "info");
     }
@@ -1145,7 +1287,7 @@
         markConfigurationDirty();
         renderSamples();
         drawSpeakers();
-        renderFooter();
+        renderStatus();
     }
 
     function titleOf(sampleId) {
@@ -1702,7 +1844,7 @@
             timers.prompt = 0;
             savePrompt().catch(report);
         }, SAVE_DEBOUNCE_MS);
-        renderFooter();
+        renderStatus();
     }
 
     function savePrompt() {
@@ -1755,6 +1897,10 @@
 
     function renderPromptLists() {
         if (!nodes.history) return;
+        // Both lists scroll inside the stage; a star pressed far down one
+        // must not throw it back to its top.
+        const scrolled = {history: Number(nodes.history.scrollTop) || 0,
+                          favourites: Number(nodes.favourites.scrollTop) || 0};
         clear(nodes.history);
         clear(nodes.favourites);
         const history = state.prompts.history || [];
@@ -1763,6 +1909,8 @@
         history.forEach(function (entry) { nodes.history.appendChild(promptEntry(entry, false)); });
         if (!favourites.length) nodes.favourites.appendChild(el("li", "mc-voice-box-empty", "Star a prompt to keep it here."));
         favourites.forEach(function (entry) { nodes.favourites.appendChild(promptEntry(entry, true)); });
+        if (scrolled.history) nodes.history.scrollTop = scrolled.history;
+        if (scrolled.favourites) nodes.favourites.scrollTop = scrolled.favourites;
     }
 
     // -- CONFIGURATION --------------------------------------------------------- //
@@ -1797,6 +1945,11 @@
         bar.appendChild(nodes.configurationDelete);
         body.appendChild(bar);
 
+        // Everything under the header row scrolls inside the stage.
+        const form = el("div", "mc-voice-box-configuration-form");
+        nodes.configurationForm = form;
+        body.appendChild(form);
+
         const fields = el("div", "mc-voice-box-fields");
         nodes.fields = {};
         FIELDS.forEach(function (field) {
@@ -1829,7 +1982,7 @@
             nodes.fields[field.key] = input;
             fields.appendChild(wrap);
         });
-        body.appendChild(fields);
+        form.appendChild(fields);
 
         // Keep warm is Voice Box's setting rather than a configuration's field
         // (the server keeps it beside the save folder), so it saves at once.
@@ -1843,7 +1996,7 @@
         });
         warm.appendChild(nodes.keepWarm);
         warm.appendChild(el("span", "mc-voice-box-field-label", "Keep VibeVoice warm between renders"));
-        body.appendChild(warm);
+        form.appendChild(warm);
 
         const speakers = el("div", "mc-voice-box-speakers");
         nodes.speakers = {};
@@ -1862,7 +2015,7 @@
             nodes.speakers[number] = {wave: wave, title: title, clear: clearButton};
             speakers.appendChild(slot);
         });
-        body.appendChild(speakers);
+        form.appendChild(speakers);
     }
 
     function fieldChanged(field, input) {
@@ -1981,7 +2134,7 @@
     function markConfigurationDirty() {
         state.dirty.configuration = true;
         renderConfigurationBar();
-        renderFooter();
+        renderStatus();
     }
 
     function chooseConfiguration(id) {
@@ -1989,7 +2142,7 @@
         loadWorking();
         renderConfiguration();
         renderSamples();
-        renderFooter();
+        renderStatus();
         const pipeline = pipelineById(state.pipelineId);
         if (!pipeline || pipeline.configuration_id === state.configurationId) return Promise.resolve();
         return request("pipelines/save", ROUTES.pipelineSave,
@@ -2007,8 +2160,11 @@
         const existing = asNew ? null : configurationById(state.configurationId);
         let name = existing ? existing.name : "";
         if (!existing) {
-            name = ask("Name this configuration",
-                       "Configuration " + (state.configurations.length + 1));
+            // An unsaved configuration a render's settings started is named
+            // after that render until somebody names it otherwise.
+            const suggested = !state.configurationId && working.name
+                ? working.name : "Configuration " + (state.configurations.length + 1);
+            name = ask("Name this configuration", suggested);
             if (name === null) return Promise.resolve(null);
         }
         const body = Object.assign({}, working, {name: name});
@@ -2028,7 +2184,7 @@
                 loadWorking();
                 renderConfiguration();
                 renderSamples();
-                renderFooter();
+                renderStatus();
                 const pipeline = pipelineById(state.pipelineId);
                 if (pipeline && pipeline.configuration_id !== state.configurationId) {
                     return request("pipelines/save", ROUTES.pipelineSave,
@@ -2061,7 +2217,7 @@
                 loadWorking();
                 renderConfiguration();
                 renderSamples();
-                renderFooter();
+                renderStatus();
             });
     }
 
@@ -2070,7 +2226,11 @@
         const options = state.configurations.map(function (found) {
             return {value: found.id, label: found.name || "Untitled"};
         });
-        options.unshift({value: "", label: state.configurations.length ? "(unsaved)" : "(no configuration yet)"});
+        let unsaved = state.configurations.length ? "(unsaved)" : "(no configuration yet)";
+        if (!state.configurationId && state.working && state.working.name) {
+            unsaved = "(unsaved) " + state.working.name;
+        }
+        options.unshift({value: "", label: unsaved});
         fillSelect(nodes.configurationSelect, options, state.configurationId || "");
         nodes.configurationSave.textContent = state.dirty.configuration ? "Save •" : "Save";
         nodes.configurationSave.setAttribute("aria-label", state.dirty.configuration
@@ -2132,7 +2292,40 @@
 
     // -- OUTPUTS --------------------------------------------------------------- //
 
-    function buildOutputs(body) {
+    // The stage's header holds Render, the Install button while a part is
+    // missing, and the one status line with the buttons of whatever it is
+    // showing (renderStatus). The lanes under it scroll inside the stage.
+    function buildOutputs(body, head) {
+        const actions = el("span", "mc-voice-box-stage-actions");
+        nodes.install = button("Install VibeVoice", "Install the VibeVoice runtime and model",
+                               installEngine, "mc-voice-box-install");
+        show(nodes.install, false);
+        nodes.render = button("Render", "Render this pipeline", renderNow, "mc-voice-box-render");
+        actions.appendChild(nodes.install);
+        actions.appendChild(nodes.render);
+        head.appendChild(actions);
+
+        const line = el("div", "mc-voice-box-status-line");
+        nodes.status = el("span", "mc-voice-box-status", "");
+        nodes.status.setAttribute("role", "status");
+        nodes.status.setAttribute("aria-live", "polite");
+        line.appendChild(nodes.status);
+        const buttons = el("span", "mc-voice-box-status-actions");
+        nodes.statusCancel = button("Cancel", "Cancel the running render", cancelRunning,
+                                    "mc-voice-box-status-cancel");
+        nodes.statusClear = button("Clear queue", "Withdraw every queued render", clearQueue,
+                                   "mc-voice-box-status-clear");
+        nodes.statusDismiss = button("×", "Dismiss", dismissStatus, "mc-voice-box-status-dismiss");
+        nodes.statusUnloads = el("span", "mc-voice-box-status-unloads");
+        [nodes.statusCancel, nodes.statusClear, nodes.statusDismiss, nodes.statusUnloads]
+            .forEach(function (node) {
+                show(node, false);
+                buttons.appendChild(node);
+            });
+        line.appendChild(buttons);
+        nodes.statusLine = line;
+        head.appendChild(line);
+
         nodes.lanesList = el("ul", "mc-voice-box-list mc-voice-box-lanes");
         body.appendChild(nodes.lanesList);
         nodes.lanesEmpty = el("div", "mc-voice-box-empty", "No renders in this pipeline yet.");
@@ -2160,46 +2353,94 @@
         return parts.join(" · ");
     }
 
+    // When a render was made, the short way: "30 Sep 14:05", with the year
+    // when it is not this one. `created` is the server's seconds since 1970.
+    function when(created) {
+        const stamp = Number(created);
+        if (!isFinite(stamp) || stamp <= 0) return "";
+        const date = new Date(stamp * 1000);
+        if (isNaN(date.getTime())) return "";
+        const two = function (number) { return (number < 10 ? "0" : "") + number; };
+        let day = date.getDate() + " " + MONTHS[date.getMonth()];
+        if (date.getFullYear() !== new Date().getFullYear()) day += " " + date.getFullYear();
+        return day + " " + two(date.getHours()) + ":" + two(date.getMinutes());
+    }
+
+    function isoOf(created) {
+        const stamp = Number(created);
+        if (!isFinite(stamp) || stamp <= 0) return "";
+        try {
+            return new Date(stamp * 1000).toISOString();
+        } catch (error) {
+            return "";
+        }
+    }
+
+    // The seed a render used, when it was recorded: every render records it
+    // now (drawn when the configuration left it blank); one made before that
+    // with a blank seed has none.
+    function seedOf(output) {
+        const render = (output && output.render) || {};
+        const seed = render.seed;
+        if (seed === null || seed === undefined || seed === "") return null;
+        const number = Number(seed);
+        return isFinite(number) ? number : null;
+    }
+
+    function selected(lane) {
+        return !!lane && !!lane.output && state.selectedOutput === lane.output.id;
+    }
+
     function drawLane(lane) {
         const audio = lane.audio;
         const total = Number(audio.duration) || Number(lane.output.seconds) || 0;
-        const head = total && (playing(audio) || Number(audio.currentTime) > 0)
-            ? Math.min(1, (Number(audio.currentTime) || 0) / total) : -1;
+        // A compact lane is its waveform alone: the playhead shows on it only
+        // while it plays; the selected lane keeps it where playback stopped.
+        const shown = playing(audio) || (selected(lane) && Number(audio.currentTime) > 0);
+        const head = total && shown ? Math.min(1, (Number(audio.currentTime) || 0) / total) : -1;
         draw(lane.wave, lane.output.peaks || [], {head: head});
         lane.play.textContent = playing(audio) ? "Pause" : "Play";
         lane.play.setAttribute("aria-label", (playing(audio) ? "Pause " : "Play ") + (lane.output.name || "this render"));
     }
 
+    // A lane that is not the selected one shows the tint of its speakers'
+    // samples, its waveform at full size and one line: when it was made and
+    // its name (a double click renames it). Everything else -- the playhead,
+    // the buttons, the metadata, the infotext with Copy, Use seed and Reuse
+    // settings -- is in `details`, shown while the lane is selected. Lanes
+    // are kept rather than rebuilt (renderOutputs), so a playing one plays on.
     function laneNode(output) {
         const row = el("li", "mc-voice-box-lane");
         row.setAttribute("data-id", output.id);
-        const head = el("div", "mc-voice-box-row mc-voice-box-lane-head");
+        row.setAttribute("tabindex", "0");
+        row.setAttribute("aria-expanded", "false");
+        const edge = edgeOf(speakerSamples(output));
+        if (edge) row.appendChild(edge);
+        const head = el("div", "mc-voice-box-lane-head");
+        const date = el("time", "mc-voice-box-lane-date", when(output.created));
+        const iso = isoOf(output.created);
+        if (iso) date.setAttribute("datetime", iso);
+        head.appendChild(date);
         const name = el("span", "mc-voice-box-lane-name", output.name || "Untitled");
         name.setAttribute("title", "Double-click to rename");
         name.addEventListener("dblclick", function () {
-            renameInline(name, output.name || "", function (text) {
+            renameInline(name, lane.output.name || "", function (text) {
                 return request("outputs/rename", ROUTES.outputRename,
-                               {body: {id: output.id, name: text}, queue: true})
+                               {body: {id: lane.output.id, name: text}, queue: true})
                     .then(refreshOutputs);
             });
         });
         head.appendChild(name);
-        const meta = el("span", "mc-voice-box-lane-meta", metadata(output));
-        head.appendChild(meta);
         row.appendChild(head);
         const wave = canvasOf("mc-voice-box-lane-wave");
         row.appendChild(wave);
         const audio = player("mc-voice-box-lane-audio");
         audio.loop = !!output.loop;
         row.appendChild(audio);
-        // A press on the waveform seeks: the lane's length is the element's once
-        // it has loaded, the record's before that.
-        wave.addEventListener("pointerdown", function (event) {
-            const total = Number(audio.duration) || Number(output.seconds) || 0;
-            if (!total) return;
-            try { audio.currentTime = fractionAt(wave, event) * total; } catch (error) { /* not seekable */ }
-            drawLane(lane);
-        });
+
+        const details = el("div", "mc-voice-box-lane-details");
+        const meta = el("div", "mc-voice-box-lane-meta", metadata(output));
+        details.appendChild(meta);
         const actions = el("div", "mc-voice-box-row mc-voice-box-lane-actions");
         const play = button("Play", "Play " + (output.name || "this render"), function () {
             return toggleLane(lane);
@@ -2217,21 +2458,140 @@
         const remove = button("Delete", "Delete " + (output.name || "this render"),
                               function () { return deleteOutput(lane); }, "mc-voice-box-lane-delete");
         [play, loop, trim, save, download, remove].forEach(function (node) { actions.appendChild(node); });
-        row.appendChild(actions);
-        const lane = {output: output, row: row, name: name, meta: meta, wave: wave, audio: audio,
-                      play: play, loop: loop};
+        details.appendChild(actions);
+        const info = el("div", "mc-voice-box-lane-info");
+        const infotext = el("div", "mc-voice-box-infotext", "");
+        info.appendChild(infotext);
+        const infoActions = el("div", "mc-voice-box-row mc-voice-box-lane-info-actions");
+        const copy = button("Copy", "Copy the infotext", function () {
+            return copyInfotext(lane);
+        }, "mc-voice-box-lane-copy");
+        const seed = button("Use seed", "Put this render's seed in the configuration", function () {
+            return useSeed(lane.output);
+        }, "mc-voice-box-lane-seed");
+        const reuse = button("Reuse settings", "Load this render's prompt and settings", function () {
+            return reuseSettings(lane.output);
+        }, "mc-voice-box-lane-reuse");
+        [copy, seed, reuse].forEach(function (node) { infoActions.appendChild(node); });
+        info.appendChild(infoActions);
+        details.appendChild(info);
+        row.appendChild(details);
+
+        const lane = {output: output, row: row, name: name, date: date, meta: meta, wave: wave,
+                      audio: audio, play: play, loop: loop, details: details, infotext: infotext,
+                      copy: copy, seed: seed, reuse: reuse};
         row.mcVoiceBoxLane = lane;
+        wireLane(lane);
         audio.addEventListener("timeupdate", function () { drawLane(lane); });
         audio.addEventListener("play", function () { drawLane(lane); });
         audio.addEventListener("pause", function () { drawLane(lane); });
         audio.addEventListener("ended", function () { drawLane(lane); });
-        drawLane(lane);
+        fillLane(lane);
         return row;
+    }
+
+    // The parts of a lane that follow its record. The infotext is written only
+    // when it changed, so text somebody is selecting in it survives a poll.
+    function fillLane(lane) {
+        const text = String(lane.output.infotext || "");
+        if (lane.infotext.textContent !== text) lane.infotext.textContent = text;
+        show(lane.infotext, !!text);
+        show(lane.copy, !!text);
+        const seed = seedOf(lane.output);
+        lane.seed.disabled = seed === null;
+        lane.seed.setAttribute("aria-disabled", seed === null ? "true" : "false");
+        lane.seed.setAttribute("title", seed === null
+            ? "This render was made before seeds were recorded."
+            : "Put seed " + seed + " in the configuration");
+    }
+
+    // A press on a lane that is neither a drag nor on one of its controls
+    // selects it, and so do Enter and Space on the lane itself. On the
+    // selected lane a press on the waveform seeks, as it always has; on any
+    // other it is only the press that selects.
+    function wireLane(lane) {
+        const row = lane.row;
+        const press = {down: false, x: 0, y: 0};
+        row.addEventListener("pointerdown", function (event) {
+            press.down = true;
+            press.x = Number(event && event.clientX) || 0;
+            press.y = Number(event && event.clientY) || 0;
+        });
+        row.addEventListener("pointercancel", function () { press.down = false; });
+        row.addEventListener("click", function (event) {
+            const moved = press.down && Math.max(
+                Math.abs((Number(event && event.clientX) || 0) - press.x),
+                Math.abs((Number(event && event.clientY) || 0) - press.y)) > DRAG_PX;
+            press.down = false;
+            if (moved || fromControl(event && event.target, row)) return;
+            selectOutput(lane.output.id);
+        });
+        row.addEventListener("keydown", function (event) {
+            if (!event || event.target !== row) return;
+            if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+            if (typeof event.preventDefault === "function") event.preventDefault();
+            selectOutput(lane.output.id);
+        });
+        lane.wave.addEventListener("pointerdown", function (event) {
+            if (!selected(lane)) return;
+            const total = Number(lane.audio.duration) || Number(lane.output.seconds) || 0;
+            if (!total) return;
+            try { lane.audio.currentTime = fractionAt(lane.wave, event) * total; } catch (error) { /* not seekable */ }
+            drawLane(lane);
+        });
+    }
+
+    // A button, a field -- the rename box above all -- or a link inside the
+    // lane: their presses are theirs, not the lane's.
+    function fromControl(target, row) {
+        for (let at = target; at && at !== row; at = at.parentNode) {
+            const tag = String(at.tagName || "").toUpperCase();
+            if (tag === "BUTTON" || tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA"
+                || tag === "A" || tag === "LABEL") {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function selectOutput(id) {
+        if (!id || state.selectedOutput === id) return;
+        state.selectedOutput = id;
+        Object.keys(nodes.lanes).forEach(function (key) {
+            const lane = nodes.lanes[key] && nodes.lanes[key].mcVoiceBoxLane;
+            if (!lane) return;
+            if ((lane.row.getAttribute("aria-expanded") === "true") !== selected(lane)) expandLane(lane);
+        });
+        const row = nodes.lanes[id];
+        if (row && row.mcVoiceBoxLane) revealLane(row.mcVoiceBoxLane);
+    }
+
+    function expandLane(lane) {
+        const on = selected(lane);
+        lane.row.setAttribute("aria-expanded", on ? "true" : "false");
+        show(lane.details, on);
+        drawLane(lane);
+    }
+
+    // Scrolls the lanes list -- and nothing around it, so a stacked page is
+    // never carried to another stage -- until a lane is in view: all of it
+    // where it fits, its top where it does not.
+    function revealLane(lane) {
+        const list = nodes.lanesList;
+        if (!list || !lane || !lane.row) return;
+        const view = Number(list.clientHeight) || 0;
+        if (!view) return;
+        const top = Number(lane.row.offsetTop) || 0;
+        const height = Number(lane.row.offsetHeight) || 0;
+        const at = Number(list.scrollTop) || 0;
+        if (top < at) list.scrollTop = top;
+        else if (top + height > at + view) list.scrollTop = Math.min(top, top + height - view);
     }
 
     // Lanes are kept, not rebuilt: a playing <audio> would stop if its element
     // were replaced under it. New outputs go on top (newest first); rows whose
-    // output has gone are removed; the rest are updated in place.
+    // output has gone are removed; the rest are updated in place, the selected
+    // one included, which is how a selection survives a poll.
     function renderOutputs() {
         if (!nodes.lanesList) return;
         const wanted = {};
@@ -2250,22 +2610,37 @@
         for (let index = ordered.length - 1; index >= 0; index -= 1) {
             const output = ordered[index];
             const row = nodes.lanes[output.id];
+            let lane = null;
             if (row) {
-                const lane = row.mcVoiceBoxLane;
+                lane = row.mcVoiceBoxLane;
                 lane.output = output;
                 lane.name.textContent = output.name || "Untitled";
+                lane.date.textContent = when(output.created);
                 lane.meta.textContent = metadata(output);
                 lane.audio.loop = !!output.loop;
                 pressed(lane.loop, !!output.loop);
-                drawLane(lane);
+                fillLane(lane);
             } else {
                 const made = laneNode(output);
                 nodes.lanes[output.id] = made;
                 if (nodes.lanesList.firstChild) nodes.lanesList.insertBefore(made, nodes.lanesList.firstChild);
                 else nodes.lanesList.appendChild(made);
+                lane = made.mcVoiceBoxLane;
             }
+            // Shown compact or open (its details' visibility is decided here,
+            // for a new lane as for an old one), and drawn once the row is in
+            // the page, at the width it has there.
+            expandLane(lane);
         }
+        // An empty list takes no room, so the sentence saying so sits under
+        // the header rather than at the foot of the stage.
+        show(nodes.lanesList, ordered.length > 0);
         show(nodes.lanesEmpty, !ordered.length);
+        const reveal = state.revealOutput ? nodes.lanes[state.revealOutput] : null;
+        if (reveal && reveal.mcVoiceBoxLane) {
+            state.revealOutput = "";
+            revealLane(reveal.mcVoiceBoxLane);
+        }
     }
 
     function clearLanes() {
@@ -2304,6 +2679,8 @@
             });
     }
 
+    // The browser decodes an MP3 exactly as it decodes a WAV, so a render in
+    // either format opens in the trimmer the same way.
     function trimOutput(lane) {
         return audioUrl("output:" + lane.output.id,
                         ROUTES.outputAudio + "?id=" + encodeURIComponent(lane.output.id))
@@ -2345,6 +2722,16 @@
         });
     }
 
+    // The file's own format names the download: MP3 now; WAV for a render made
+    // before MP3, or on a machine whose Forge cannot encode it. A record
+    // without the field is told by the bytes' type.
+    function extensionOf(output, blob) {
+        const format = String((output && output.format) || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (format) return format;
+        const type = String((blob && blob.type) || "").toLowerCase();
+        return /mpeg|mp3/.test(type) ? "mp3" : "wav";
+    }
+
     function downloadOutput(lane) {
         const route = ROUTES.outputAudio + "?id=" + encodeURIComponent(lane.output.id) + "&download=1";
         return request("download:" + lane.output.id, route,
@@ -2354,7 +2741,7 @@
                 const link = document.createElement("a");
                 link.href = address;
                 link.setAttribute("href", address);
-                const filename = safeName(lane.output.name) + ".wav";
+                const filename = safeName(lane.output.name) + "." + extensionOf(lane.output, blob);
                 link.download = filename;
                 link.setAttribute("download", filename);
                 link.hidden = true;
@@ -2372,6 +2759,151 @@
         return request("outputs/delete:" + lane.output.id, ROUTES.outputDelete,
                        {body: {id: lane.output.id}})
             .then(refreshOutputs);
+    }
+
+    // -- a render's fingerprint: its infotext, its seed, its settings ---------- //
+
+    // The clipboard can refuse (a page that is not a secure context, a denied
+    // permission); the text is then selected, for the keyboard's copy.
+    function copyInfotext(lane) {
+        const text = String(lane.output.infotext || "");
+        if (!text) return Promise.resolve();
+        const fallback = function () {
+            selectText(lane.infotext);
+            say("The browser would not copy it, so the infotext is selected: copy it from there.",
+                "warn");
+        };
+        const clipboard = typeof navigator !== "undefined" && navigator ? navigator.clipboard : null;
+        if (!clipboard || typeof clipboard.writeText !== "function") {
+            fallback();
+            return Promise.resolve();
+        }
+        return Promise.resolve().then(function () {
+            return clipboard.writeText(text);
+        }).then(function () {
+            say("Copied the infotext of “" + (lane.output.name || "this render") + "”.", "info");
+        }, fallback);
+    }
+
+    function selectText(node) {
+        try {
+            const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+            if (!selection || !node) return false;
+            if (typeof selection.selectAllChildren === "function") {
+                selection.selectAllChildren(node);
+                return true;
+            }
+            if (typeof document.createRange === "function" && typeof selection.addRange === "function") {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                if (typeof selection.removeAllRanges === "function") selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            }
+        } catch (error) { /* nothing to select with */ }
+        return false;
+    }
+
+    function useSeed(output) {
+        const seed = seedOf(output);
+        if (seed === null) return;
+        const working = ensureWorking();
+        if (working.seed !== seed) {
+            working.seed = seed;
+            markConfigurationDirty();
+        }
+        renderConfigurationFields();
+        say("Seed " + seed + " is in the configuration"
+            + (state.dirty.configuration ? "; save it to keep it." : "."), "info");
+    }
+
+    const REUSED = ["model_id", "card_uuid", "steps", "cfg_scale", "seed", "max_new_tokens"];
+
+    // The configuration a render used: the one it recorded, or -- for a render
+    // made before configurations were recorded -- rebuilt from the fields it
+    // did record.
+    function renderedConfiguration(output) {
+        const render = (output && output.render) || {};
+        const recorded = render.configuration && typeof render.configuration === "object"
+            ? render.configuration : null;
+        if (recorded) {
+            const found = {id: String(recorded.id || ""),
+                           speakers: Object.assign({}, recorded.speakers || {})};
+            REUSED.forEach(function (key) { found[key] = recorded[key]; });
+            return found;
+        }
+        const speakers = {};
+        (Array.isArray(render.speakers) ? render.speakers : []).forEach(function (speaker) {
+            if (speaker && speaker.n !== undefined && speaker.n !== null && speaker.sample_id) {
+                speakers[String(speaker.n)] = speaker.sample_id;
+            }
+        });
+        return {id: "", model_id: render.model_id, card_uuid: render.card, steps: render.steps,
+                cfg_scale: render.cfg_scale, seed: render.seed, max_new_tokens: render.max_new_tokens,
+                speakers: speakers};
+    }
+
+    function sameConfiguration(working, saved) {
+        if (!working || !saved) return false;
+        const same = REUSED.every(function (key) {
+            return pick(working[key], null) === pick(saved[key], null);
+        });
+        const a = working.speakers || {};
+        const b = saved.speakers || {};
+        const keys = Object.keys(a).concat(Object.keys(b));
+        return same && keys.every(function (key) { return (a[key] || "") === (b[key] || ""); });
+    }
+
+    // The prompt goes into the box as if typed (so the pipeline keeps it the
+    // usual way), and the configuration into the editor as unsaved edits: over
+    // the configuration it came from while that still exists, otherwise over a
+    // new, unsaved one named after the render. A speaker whose sample has left
+    // the library is left empty, and the status line says so.
+    function reuseSettings(output) {
+        const render = (output && output.render) || {};
+        const values = renderedConfiguration(output);
+        if (typeof render.prompt === "string" && nodes.prompt) {
+            state.prompt = render.prompt;
+            nodes.prompt.value = render.prompt;
+            promptChanged();
+        }
+        const existing = values.id ? configurationById(values.id) : null;
+        const chosen = chooseConfiguration(existing ? existing.id : "");
+        const working = ensureWorking();
+        if (!existing) working.name = (output && output.name) || "";
+        REUSED.forEach(function (key) {
+            const value = values[key];
+            if (value === undefined) return;
+            // A recorded model or card of "" is the configuration's way of
+            // saying "the default": what the editor holds already stays.
+            if (value === "" && (key === "model_id" || key === "card_uuid")) return;
+            working[key] = value === "" ? null : value;
+        });
+        working.speakers = {};
+        const missing = [];
+        Object.keys(values.speakers || {}).sort(function (a, b) { return Number(a) - Number(b); })
+            .forEach(function (number) {
+                const id = values.speakers[number];
+                if (!id) return;
+                if (sampleById(id)) {
+                    working.speakers[String(number)] = id;
+                    return;
+                }
+                const spoken = (Array.isArray(render.speakers) ? render.speakers : []).filter(function (speaker) {
+                    return speaker && String(speaker.n) === String(number);
+                })[0];
+                missing.push("Speaker " + number + "'s sample “" + ((spoken && spoken.title) || id)
+                             + "” is no longer in the library.");
+            });
+        state.dirty.configuration = !existing || !sameConfiguration(working, existing);
+        renderConfiguration();
+        renderSamples();
+        renderStatus();
+        const name = "“" + ((output && output.name) || "this render") + "”";
+        if (missing.length) say(missing.join(" "), "warn");
+        else say("Loaded the prompt and settings of " + name
+                 + (state.dirty.configuration ? "; save the configuration to keep them." : "."), "info");
+        return chosen;
     }
 
     // -- pipelines ------------------------------------------------------------- //
@@ -2475,11 +3007,13 @@
         return request("status", ROUTES.status, {body: {}}).then(function (found) {
             state.status = found || {};
             state.jobs = Array.isArray(state.status.jobs) ? state.status.jobs : [];
-            renderFooter();
-            renderConfigurationFields();
+            state.answeredAt = now();
             const finished = before.filter(function (id) {
                 return !isLive(jobById(id));
             });
+            finished.forEach(noteFinished);
+            renderStatus();
+            renderConfigurationFields();
             if (finished.length) {
                 return Promise.all([refreshOutputs(), refreshPrompts()]).then(function () {
                     return found;
@@ -2489,12 +3023,26 @@
         });
     }
 
+    // A render this page started has ended: its output becomes the selected
+    // lane, or its failure the status line's until dismissed or the next
+    // Render press.
+    function noteFinished(id) {
+        const job = jobById(id);
+        if (!job) return;
+        if (job.phase === "done" && job.output_id) {
+            state.selectedOutput = job.output_id;
+            state.revealOutput = job.output_id;
+        } else if (job.phase === "failed") {
+            state.lastFailure = {id: job.id, name: job.name || "", warning: job.warning || ""};
+        }
+    }
+
     function refreshSamples() {
         return request("samples", ROUTES.samples, {body: {}}).then(function (found) {
             state.samples = listOf(found, "samples");
             renderSamples();
             drawSpeakers();
-            renderFooter();
+            renderStatus();
         });
     }
 
@@ -2546,15 +3094,19 @@
         renderConfiguration();
         renderSamples();
         renderOutputs();
-        renderFooter();
+        renderStatus();
     }
 
-    // -- the footer: Render, the jobs, the cards -------------------------------- //
+    // -- the Outputs header: Render, Install and the one status line ------------ //
 
     function renderBlocker() {
         if (!state.status) return "Loading…";
         const engine = state.status.engine || {};
         if (engine.ready === false) {
+            const progress = state.status.progress || {};
+            if (progress.failed && !progress.running && progress.text) {
+                return "Install failed: " + progress.text;
+            }
             return engine.message || "VibeVoice is not installed.";
         }
         if (!state.pipelineId) return "No pipeline.";
@@ -2583,6 +3135,8 @@
     }
 
     function renderNow() {
+        // A press is the answer to the last failure: the line stops saying it.
+        state.lastFailure = null;
         const why = renderBlocker();
         if (why) {
             say(why, "warn");
@@ -2599,21 +3153,23 @@
             if (unsaved) body.configuration = Object.assign({}, working);
             return request("render", ROUTES.render, {body: body});
         }).then(function (reply) {
+            // The status line shows the new job at once -- queued, or on its
+            // card -- which is the answer to the press. A message in its place
+            // would hide the job's Cancel for as long as it held the line.
             const job = recordOf(reply, "job");
             if (job.id) {
                 state.ownJobs[job.id] = true;
                 if (!jobById(job.id)) state.jobs = [job].concat(state.jobs);
             }
-            say("Render queued.", "info");
-            renderFooter();
+            renderStatus();
             schedulePoll();
             return refreshStatus();
         });
     }
 
+    // The install's progress is the status line's first state.
     function installEngine() {
         return request("install", ROUTES.install, {body: {part: "", folder: ""}}).then(function () {
-            say("Installing VibeVoice… progress shows below.", "info");
             return refreshStatus();
         });
     }
@@ -2623,17 +3179,171 @@
             .then(refreshStatus);
     }
 
-    // One flat record (mc_voice_vibevoice.progress): running, text, fraction, failed.
-    function progressLine(progress) {
-        const found = progress || {};
-        if (found.failed) return "Install failed" + (found.text ? ": " + found.text : ".");
-        if (!found.running && !found.text) return "";
-        let text = found.text || (found.running ? "Installing…" : "");
-        const fraction = Math.max(0, Math.min(1, Number(found.fraction) || 0));
-        if (found.running && fraction > 0) text += " (" + Math.round(fraction * 100) + "%)";
-        return text;
+    function cancelRunning() {
+        const job = activeJob();
+        return job ? cancelJob(job) : Promise.resolve();
     }
 
+    // Every queued render, on every card, whichever pipeline it came from; the
+    // running one is left to Cancel. The answer carries the jobs as they now
+    // are, so the line follows it without another request -- and says so by
+    // no longer counting a queue, rather than by a message over the running
+    // job's Cancel.
+    function clearQueue() {
+        return request("jobs/clear", ROUTES.jobClear, {body: {}}).then(function (reply) {
+            if (reply && Array.isArray(reply.jobs)) {
+                state.jobs = reply.jobs;
+                state.answeredAt = now();
+            }
+            renderStatus();
+            schedulePoll();
+        });
+    }
+
+    function unloadCard(card) {
+        return request("runtime:" + card.uuid, ROUTES.runtime,
+                       {body: {action: "unload", card_uuid: card.uuid}})
+            .then(function () {
+                say("VibeVoice was unloaded from " + card.name + ".", "info");
+                return refreshStatus();
+            });
+    }
+
+    function dismissStatus() {
+        if (state.statusLine === "message") {
+            say("", "info");
+        } else if (state.statusLine === "failed") {
+            state.lastFailure = null;
+            renderStatus();
+        }
+    }
+
+    function now() {
+        try {
+            if (window.performance && typeof window.performance.now === "function") {
+                return window.performance.now();
+            }
+        } catch (error) { /* no monotonic clock: the wall clock will do for a difference */ }
+        return Date.now();
+    }
+
+    // "0:42", "12:05", "1:02:09".
+    function clockOf(value) {
+        const total = Math.max(0, Math.floor(Number(value) || 0));
+        const two = function (number) { return (number < 10 ? "0" : "") + number; };
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const rest = total % 60;
+        return hours ? hours + ":" + two(minutes) + ":" + two(rest) : minutes + ":" + two(rest);
+    }
+
+    // The server's count of a job's seconds when it answered, plus the time
+    // that has passed here since -- a difference of this page's own clock,
+    // never this browser's clock against the server's timestamps.
+    function elapsedOf(job) {
+        if (!job || job.elapsed === null || job.elapsed === undefined) return null;
+        const base = Number(job.elapsed);
+        if (!isFinite(base)) return null;
+        return Math.max(0, base + Math.max(0, now() - (state.answeredAt || now())) / 1000);
+    }
+
+    function startOf(job) {
+        const started = job.started === null || job.started === undefined ? NaN : Number(job.started);
+        return isFinite(started) ? started : (Number(job.created) || 0);
+    }
+
+    // The job holding a card, whichever pipeline it came from: this page's own
+    // before another's, then the one that started first.
+    function activeJob() {
+        let found = null;
+        state.jobs.forEach(function (job) {
+            if (!job || !ACTIVE_PHASES[job.phase]) return;
+            if (!found) {
+                found = job;
+                return;
+            }
+            const mine = !!state.ownJobs[job.id];
+            if (mine !== !!state.ownJobs[found.id]) {
+                if (mine) found = job;
+                return;
+            }
+            if (startOf(job) < startOf(found)) found = job;
+        });
+        return found;
+    }
+
+    // Renders wait per card, whatever pipeline they came from, so the count is
+    // of all of them.
+    function queuedCount() {
+        return state.jobs.filter(function (job) { return job && job.phase === "queued"; }).length;
+    }
+
+    function jobLine(job, queued) {
+        const name = "“" + (job.name || "a render") + "”";
+        let before;
+        if (job.phase === "rendering") {
+            before = "Rendering " + name;
+            const progress = job.progress || {};
+            const sections = Number(progress.sections) || 0;
+            if (sections > 1) before += " · section " + (Number(progress.section) || 1) + " of " + sections;
+        } else if (job.phase === "loading") {
+            before = "Loading VibeVoice · " + name;
+        } else {
+            before = "Waiting for the card" + (job.reason ? ": " + job.reason : "") + " · " + name;
+        }
+        const elapsed = elapsedOf(job);
+        return {before: elapsed === null ? before : before + " · ",
+                clock: elapsed === null ? undefined : clockOf(elapsed),
+                after: queued ? " · " + queued + " queued" : ""};
+    }
+
+    // One flat record (mc_voice_vibevoice.progress): running, text, fraction,
+    // failed. "Installing the runtime — 45 %"; the words alone before a
+    // fraction is known.
+    function installLine(progress) {
+        const words = String(progress.text || "") || "Installing VibeVoice…";
+        const fraction = Math.max(0, Math.min(1, Number(progress.fraction) || 0));
+        if (!(fraction > 0)) return words;
+        return (words.replace(/[\s.…]+$/, "") || "Installing VibeVoice") + " — "
+            + Math.round(fraction * 100) + " %";
+    }
+
+    function cardKey(uuid) {
+        return String(uuid || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+    }
+
+    function cardName(uuid) {
+        const key = cardKey(uuid);
+        const cards = (state.status && state.status.cards) || [];
+        const found = cards.filter(function (card) { return key && cardKey(card.uuid) === key; })[0];
+        return found ? (found.name || "") : "";
+    }
+
+    // Where VibeVoice is up and not rendering: its worker's own report first,
+    // then the turn system's warm stays.
+    function warmCards() {
+        const status = state.status || {};
+        const found = [];
+        const seen = {};
+        const runtime = (status.runtime && status.runtime.cards) || {};
+        Object.keys(runtime).forEach(function (key) {
+            const card = runtime[key] || {};
+            if (!card.running || card.rendering) return;
+            const uuid = card.uuid || key;
+            seen[cardKey(uuid)] = true;
+            found.push({uuid: uuid, name: card.device_name || cardName(uuid) || uuid});
+        });
+        (status.turns || []).forEach(function (turn) {
+            if (!turn || !turn.warm) return;
+            const uuid = turn.uuid || "";
+            if (!uuid || seen[cardKey(uuid)]) return;
+            seen[cardKey(uuid)] = true;
+            found.push({uuid: uuid, name: turn.card || cardName(uuid) || uuid});
+        });
+        return found;
+    }
+
+    // What the cards are doing, in full, for the status line's tooltip.
     function cardsLine(status) {
         const parts = [];
         (status.turns || []).forEach(function (turn) {
@@ -2652,65 +3362,263 @@
                        + " on " + (card.device_name || key) + " (" + gigabytes(card.resident_bytes) + ")");
         });
         if (status.runtime && status.runtime.last_error) parts.push("last error: " + status.runtime.last_error);
-        return parts.length ? parts.join(" · ") : "No card is busy.";
+        return parts.join(" · ");
     }
 
-    function renderFooter() {
+    // The first that applies: a fresh message, an install running, a job on a
+    // card (with its time and the queue), the queue alone, this page's last
+    // render having failed, VibeVoice warm on a card, why Render is disabled,
+    // and otherwise Ready.
+    function statusLine() {
+        if (state.message) {
+            return {state: "message", kind: state.messageKind || "info", before: state.message};
+        }
+        const status = state.status || {};
+        const progress = status.progress || {};
+        if (progress.running) return {state: "install", kind: "info", before: installLine(progress)};
+        const queued = queuedCount();
+        const job = activeJob();
+        if (job) {
+            return Object.assign({state: "job", kind: "info", job: job, queued: queued},
+                                 jobLine(job, queued));
+        }
+        if (queued) return {state: "queued", kind: "info", queued: queued, before: queued + " queued"};
+        if (state.lastFailure) {
+            return {state: "failed", kind: "error",
+                    before: "Last render failed" + (state.lastFailure.warning
+                        ? ": " + state.lastFailure.warning : ".")};
+        }
+        const warm = warmCards();
+        if (warm.length) {
+            return {state: "warm", kind: "info", warm: warm,
+                    before: "VibeVoice warm on " + warm.map(function (card) { return card.name; }).join(" and ")};
+        }
+        const why = renderBlocker();
+        if (why) return {state: "blocked", kind: "info", before: why};
+        return {state: "ready", kind: "info", before: "Ready"};
+    }
+
+    // The line's words, with the job's clock in a span of its own: the words
+    // are rewritten only when they change, so a screen reader hears a new
+    // phase or section but not every second the clock ticks.
+    function writeStatus(line) {
+        const hasClock = line.clock !== undefined;
+        const shape = [line.state, line.kind, line.before, hasClock ? "clock" : "", line.after || ""].join("\u0001");
+        if (nodes.statusShape !== shape) {
+            clear(nodes.status);
+            nodes.status.appendChild(document.createTextNode(line.before));
+            nodes.statusClock = null;
+            if (hasClock) {
+                nodes.statusClock = el("span", "mc-voice-box-status-clock", "");
+                nodes.statusClock.setAttribute("aria-live", "off");
+                nodes.status.appendChild(nodes.statusClock);
+            }
+            if (line.after) nodes.status.appendChild(document.createTextNode(line.after));
+            nodes.statusShape = shape;
+        }
+        if (nodes.statusClock) nodes.statusClock.textContent = line.clock;
+        nodes.status.setAttribute("data-kind", line.kind || "info");
+        nodes.status.setAttribute("data-state", line.state);
+        const details = state.status ? cardsLine(state.status) : "";
+        nodes.status.setAttribute("title", line.before + (hasClock ? line.clock : "") + (line.after || "")
+                                  + (details ? "\n" + details : ""));
+    }
+
+    // One Unload per card VibeVoice is warm on, rebuilt only when that set
+    // changes -- a button replaced under a finger loses the press.
+    function syncUnloads(warm) {
+        const key = warm.map(function (card) { return card.uuid + "=" + card.name; }).join("|");
+        if (nodes.unloadKey === key) return;
+        nodes.unloadKey = key;
+        clear(nodes.statusUnloads);
+        warm.forEach(function (card) {
+            nodes.statusUnloads.appendChild(button(warm.length > 1 ? "Unload from " + card.name : "Unload",
+                                                   "Unload VibeVoice from " + card.name, function () {
+                                                       return unloadCard(card);
+                                                   }, "mc-voice-box-unload"));
+        });
+        show(nodes.statusUnloads, warm.length > 0);
+    }
+
+    function renderStatus() {
         if (!nodes.render) return;
         const status = state.status || {};
         const engine = status.engine || {};
         const why = renderBlocker();
         nodes.render.disabled = !!why;
         nodes.render.setAttribute("aria-disabled", why ? "true" : "false");
-        nodes.renderReason.textContent = why;
-        const installable = state.status && engine.ready === false && engine.supported !== false;
-        show(nodes.install, !!installable);
+        nodes.render.setAttribute("title", why || "Render this pipeline");
+        const installable = !!state.status && engine.ready === false && engine.supported !== false;
+        show(nodes.install, installable);
         if (installable) {
             nodes.install.textContent = "Install VibeVoice"
                 + (engine.download_bytes ? " (" + gigabytes(engine.download_bytes) + ")" : "");
         }
-        nodes.installProgress.textContent = progressLine(status.progress);
-        clear(nodes.jobs);
-        const jobs = state.jobs.filter(function (job) {
-            return !job.pipeline_id || job.pipeline_id === state.pipelineId;
+        const line = statusLine();
+        state.statusLine = line.state;
+        writeStatus(line);
+        show(nodes.statusCancel, line.state === "job");
+        show(nodes.statusClear, (line.state === "job" && line.queued > 0) || line.state === "queued");
+        show(nodes.statusDismiss, line.state === "message" || line.state === "failed");
+        syncUnloads(line.state === "warm" ? line.warm : []);
+        scheduleTick(line);
+    }
+
+    // The job's clock moves every second between polls, from what the last
+    // answer said; nothing ticks while the tab is hidden or nothing runs.
+    function scheduleTick(line) {
+        if (timers.tick) {
+            window.clearTimeout(timers.tick);
+            timers.tick = 0;
+        }
+        if (!state.booted || document.visibilityState === "hidden") return;
+        if (!line || line.state !== "job" || line.clock === undefined) return;
+        timers.tick = window.setTimeout(function () {
+            timers.tick = 0;
+            renderStatus();
+        }, TICK_MS);
+    }
+
+    // -- fitting the window ---------------------------------------------------- //
+
+    // One fit per animation frame, however many events asked for it.
+    function scheduleFit() {
+        if (frames.fit) return;
+        if (typeof window.requestAnimationFrame !== "function") {
+            fit();
+            return;
+        }
+        frames.fit = window.requestAnimationFrame(function () {
+            frames.fit = 0;
+            fit();
         });
-        jobs.forEach(function (job) {
-            const row = el("li", "mc-voice-box-job");
-            row.setAttribute("data-phase", job.phase || "");
-            let text = (job.name || ("Job " + String(job.id || "").slice(0, 6))) + " — " + (job.phase || "?");
-            if (job.reason) text += ": " + job.reason;
-            if (job.warning) text += " — " + job.warning;
-            const progress = job.progress || {};
-            if (progress.sections) {
-                text += " (section " + (progress.section || 0) + "/" + progress.sections
-                    + (progress.seconds ? ", " + seconds(progress.seconds) : "") + ")";
+    }
+
+    function pixels(value) {
+        const number = parseFloat(value);
+        return isFinite(number) ? number : 0;
+    }
+
+    function styleOf(node) {
+        try {
+            return window.getComputedStyle(node) || {};
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function nextElement(node) {
+        if (node.nextElementSibling !== undefined) return node.nextElementSibling;
+        let at = node.nextSibling;
+        while (at && at.nodeType !== undefined && at.nodeType !== 1) at = at.nextSibling;
+        return at || null;
+    }
+
+    // The height of what the document lays out below the root -- Forge's
+    // footer, the containers' own bottom padding -- summed level by level up to
+    // the body. Heights are summed rather than positions read, so a container
+    // stretched to the window, whose emptiness is room the root may take, does
+    // not count; a sibling in a row sits beside the root, not below it.
+    function belowRoot(root) {
+        let total = 0;
+        let node = root;
+        while (node && node !== document.documentElement) {
+            total += pixels(styleOf(node).marginBottom);
+            const parent = node.parentElement || node.parentNode;
+            if (!parent || parent === document) break;
+            const outer = styleOf(parent);
+            const display = String(outer.display || "");
+            const row = /flex/.test(display) && !/column/.test(String(outer.flexDirection || ""));
+            if (!row) {
+                const gap = /flex|grid/.test(display) ? pixels(outer.rowGap) : 0;
+                for (let sibling = nextElement(node); sibling; sibling = nextElement(sibling)) {
+                    const style = styleOf(sibling);
+                    if (style.display === "none" || style.position === "absolute"
+                        || style.position === "fixed") {
+                        continue;
+                    }
+                    let height = 0;
+                    try {
+                        height = Number(sibling.getBoundingClientRect().height) || 0;
+                    } catch (error) {
+                        height = 0;
+                    }
+                    total += height + pixels(style.marginTop) + pixels(style.marginBottom) + gap;
+                }
             }
-            row.appendChild(el("span", "mc-voice-box-job-text", text));
-            if (isLive(job)) {
-                row.appendChild(button("Cancel", "Cancel this render", function () {
-                    return cancelJob(job);
-                }, "mc-voice-box-job-cancel"));
-            }
-            nodes.jobs.appendChild(row);
-        });
-        nodes.cards.textContent = state.status ? cardsLine(status) : "";
-        clear(nodes.runtimeActions);
-        const runtime = (status.runtime && status.runtime.cards) || {};
-        Object.keys(runtime).forEach(function (key) {
-            const card = runtime[key] || {};
-            if (!card.running) return;
-            const uuid = card.uuid || key;
-            nodes.runtimeActions.appendChild(button(
-                "Unload VibeVoice from " + (card.device_name || key),
-                "Unload VibeVoice from " + (card.device_name || key), function () {
-                    return request("runtime:" + uuid, ROUTES.runtime,
-                                   {body: {action: "unload", card_uuid: uuid}})
-                        .then(function () {
-                            say("VibeVoice was unloaded.", "info");
-                            return refreshStatus();
-                        });
-                }, "mc-voice-box-unload"));
-        });
+            total += pixels(outer.paddingBottom) + pixels(outer.borderBottomWidth);
+            node = parent;
+        }
+        return total;
+    }
+
+    function viewportHeight() {
+        const inner = Number(window.innerHeight);
+        if (isFinite(inner) && inner > 0) return inner;
+        const page = document.documentElement;
+        return Number(page && page.clientHeight) || 0;
+    }
+
+    function pageScroll() {
+        const y = Number(window.scrollY !== undefined ? window.scrollY : window.pageYOffset);
+        return isFinite(y) ? y : 0;
+    }
+
+    // How far the page scrolls: what the fit exists to keep at nothing.
+    function pageOverflow() {
+        const page = document.documentElement;
+        if (!page) return 0;
+        const over = (Number(page.scrollHeight) || 0) - (Number(page.clientHeight) || 0);
+        return isFinite(over) && over > 0 ? Math.ceil(over) : 0;
+    }
+
+    function writeHeight(root, wanted) {
+        const height = Math.max(MIN_HEIGHT, Math.floor(wanted));
+        if (height === state.layout.height) return;
+        state.layout.height = height;
+        state.layout.writes += 1;
+        if (root.style && typeof root.style.setProperty === "function") root.style.setProperty("height", height + "px");
+        else if (root.style) root.style.height = height + "px";
+    }
+
+    // The root takes the height the window leaves it -- the window's height,
+    // less where the root starts on the document and what the document lays
+    // out below it -- never less than MIN_HEIGHT, written in pixels on the
+    // root itself and only when it changed. A root with no width is a tab
+    // that is not on screen: nothing is measured.
+    function fit() {
+        const root = nodes.root;
+        if (!root) return;
+        let box = null;
+        try {
+            box = root.getBoundingClientRect();
+        } catch (error) {
+            box = null;
+        }
+        const width = box ? Math.round(Number(box.width) || 0) : 0;
+        if (!width) return;
+        const mode = width < STACK_BELOW ? "stack" : "columns";
+        if (root.getAttribute("data-layout") !== mode) root.setAttribute("data-layout", mode);
+        state.layout.mode = mode;
+        const top = (Number(box.top) || 0) + pageScroll();
+        const raw = Math.floor(viewportHeight() - top - belowRoot(root));
+        if (raw !== state.layout.raw) {
+            state.layout.raw = raw;
+            state.layout.correction = 0;
+        }
+        writeHeight(root, raw - state.layout.correction);
+        // The sum is a model of the page; the page scrolling is the fact.
+        // What the model missed is taken off, and remembered while the window
+        // keeps this shape, so the height does not swing back and forth.
+        const over = pageOverflow();
+        if (over > 0 && state.layout.height > MIN_HEIGHT) {
+            state.layout.correction += over;
+            writeHeight(root, raw - state.layout.correction);
+        }
+        if (width !== state.layout.width) {
+            state.layout.width = width;
+            redrawAll();
+        }
     }
 
     // -- polling --------------------------------------------------------------- //
@@ -2784,6 +3692,9 @@
         parseScript: parseScript,
         resampleLinear: resampleLinear,
         peaksOf: peaksOf,
+        hueOf: hueOf,
+        clockOf: clockOf,
+        fit: fit,
     };
 
     if (typeof onUiLoaded === "function") {

@@ -5491,7 +5491,9 @@ the output lanes — scrolls inside its own stage, while the part of the stage y
 work with (the file picker and trimmer, the script box, the configuration's
 header, Render) stays where it is. The height is measured and written in pixels
 whenever the window, the phone's visible area or the tab changes, because a
-percentage height inside Gradio's containers means nothing.
+percentage height inside Gradio's containers means nothing. It never goes below
+420 pixels: in a window smaller than that the page may scroll after all, and
+each stage then scrolls as a whole.
 
 On a narrow screen — the tab under 900 pixels wide, a phone — the stages stack
 instead, each as wide and as tall as the screen, and the page moves a whole stage
@@ -5499,14 +5501,20 @@ at a time: swipe up for the next stage, down for the one before. A list inside a
 stage still scrolls first, and carries on to the next stage at its end.
 
 **Render** is at the top of the Outputs stage (disabled with the reason when it
-cannot run — the engine not installed, an empty script, a speaker without a
-sample, no card), and beside it **one status line** says the one thing that
-matters most right now: an install and how far it has got; the render that is
-running — its phase, its section, the time since it started, and how many wait
-behind it — with **Cancel** and, when renders are queued, **Clear queue**;
-only the number queued; the last render you started having failed, and why;
-VibeVoice warm on a card, with **Unload**; why Render cannot run; or *Ready*.
-The count is of renders on every card, whichever pipeline they came from.
+cannot run — the engine not installed or its install failed, an empty script, a
+speaker without a sample, no card), with **Install** beside it while a part is
+missing, and under it **one status line** says the one thing that matters most
+right now: an install and how far it has got; the render that is running — its
+phase, its section when it has more than one, the time since it started, and
+how many wait behind it — with **Cancel** and, when renders are queued, **Clear
+queue**; only the number queued; the last render you started having failed,
+and why; VibeVoice warm on a card, with **Unload**; why Render cannot run; or
+*Ready*. The count is of renders on every card, whichever pipeline they came
+from, and a render of this page's own is the one shown when two cards are busy.
+Something the page has to tell you — an error, *Saved to …*, *Copied* — takes
+the line for a few seconds (five, or twelve for a warning) and has a × to
+dismiss it; hovering the line shows what every card is doing, the image model
+parked or WanGP's card on lease included.
 
 The page is one block of HTML painted once and a script that owns it. Everything
 it shows it fetched from the WebUI on the page token, every request has a
@@ -5574,15 +5582,16 @@ Controls the model cannot honour are not on the page.
 ### Outputs
 
 Every render is a lane. Until you choose it, a lane is its waveform and one
-compact line — when it was made and its name (rename on a double click) — with
-its samples' tint along its edge. Tap or click a lane to choose it (one at a
-time; Enter or Space does it from the keyboard) and it opens: the playhead,
+compact line — when it was made, in your own time, and its name (rename on a
+double click) — with its samples' tint along its edge; the playhead shows on it
+only while it plays. Tap or click a lane to choose it (one at a time; Enter or
+Space does it from the keyboard) and it opens: the playhead,
 **Play**, **Loop** (remembered per output), **Trim to sample** — the same
 trimmer as the input stage, on the render, so a phrase you like becomes a voice
 sample without leaving the page — **Save**, **Download**, **Delete**, a line of
 metadata (model, seed, steps, CFG, the speakers' samples, the length, how long it
 took), and its **infotext**. A render you just made opens by itself when it
-lands.
+lands, and the list — only the list — scrolls to it.
 
 The **infotext** is the render's fingerprint, written the way a WebUI writes an
 image's: the prompt as it was, then one line — `Steps: 10, CFG scale: 1.3,
@@ -5636,20 +5645,21 @@ VibeVoice is not installed. Then:
 | **failed** | With the reason. A request the card or the RAM cannot hold fails here, with the turn's own warning — nothing was loaded and nothing was paged |
 | **cancelled** | Withdrawn by you, or the WebUI closed |
 
-**Cancel** withdraws a queued job at once, withdraws the turn of a waiting one —
-a queued turn holds every image job on its card, so it is not left there — and
-tells the worker of a rendering one to stop at its next step, which it does
-within a second or two. **Clear queue** withdraws every render still queued, on
-every card, and leaves the running one to Cancel. The time a render has been
-running is the server's count, carried on by the page between answers, so a
-page on another device's clock still counts right. Whatever the ending, the card
-is handed back — before the output's file is made, which is work for the
-processor that no image job waits for — and whether VibeVoice stays warm on it
-follows *Keep VibeVoice warm between requests* in Settings → Model Chain; Voice
-Box's own *Keep warm* toggle can decline a warm stay but never force one against
-that setting. A render is named after its pipeline and its number in it
-(*Trailer 3*) unless you name it; two renders queued as one ends can no longer
-be given the same number.
+**Cancel**, beside the running render, withdraws its turn while it waits for
+the card — a queued turn holds every image job on its card, so it is not left
+there — and tells the worker to stop at its next step once it is rendering,
+which it does within a second or two. **Clear queue** withdraws every render
+still queued, on every card, and leaves the running one to Cancel; the queue
+is a count on the page, so queued renders go together rather than one by one.
+The time a render has been running is the server's count, carried on by the page
+between answers, so a page on another device's clock still counts right.
+Whatever the ending, the card is handed back — before the output's file is made,
+which is work for the processor that no image job waits for — and whether
+VibeVoice stays warm on it follows *Keep VibeVoice warm between requests* in
+Settings → Model Chain; Voice Box's own *Keep warm* toggle can decline a warm
+stay but never force one against that setting. A render is named after its
+pipeline and its number in it (*Trailer 3*) unless you name it; two renders
+queued as one ends can no longer be given the same number.
 
 ### Where it lives
 
