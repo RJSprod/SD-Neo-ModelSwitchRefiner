@@ -794,24 +794,7 @@ def _clear_wangp(target: _CardState, turn: Turn) -> tuple[str, str]:
 
 
 def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
-    """Measure, and move only what the request needs. ``("go", "")``, ``("wait", why)`` or ``("block", warning)``.
-
-    A ladder, climbed only while the card is still short, one rung at a time
-    and measured again after each:
-
-        1  another guest that is warm here leaves (one card, one guest);
-        2  an idle llama-server of ours on this card is stopped;
-        3  the image model is parked, the way the setting says;
-        4  on WanGP's card, WanGP is asked for a soft flush, then a hard one;
-        5  still short: refused, with the numbers.
-
-    An eighteen-gigabyte render climbs most of it on a 24 GB card. The Realtime
-    0.5B, or the 7B at four bits, usually fits beside what is already there --
-    and stopping a language model that is about to write the next reply, or
-    parking a checkpoint the next generation needs, for a guest that did not
-    need the room, is the cost this module exists to avoid. So nothing is moved
-    on the strength of a request that fits.
-    """
+    """Park, stop, flush and measure. ``("go", "")``, ``("wait", why)`` or ``("block", warning)``."""
     import mc_memory
 
     running = mc_broker.conflicting_llm(target.card.domain)
@@ -833,6 +816,8 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
     if other:
         _evict(target, other, f"{turn.label}'s turn")
 
+    _stop_idle_llm(target)
+
     # RAM before anything is moved for the turn. A refusal here has to leave the
     # card as it found it: checked after the parking, a request short of RAM had
     # already dropped the image model from the card to be told no.
@@ -844,19 +829,7 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
             f"{free_ram / _GB:.1f} GB is available. Nothing was loaded, so nothing "
             f"was paged")
 
-    needed = max(turn.need_vram - already, 0) + VRAM_MARGIN_BYTES
-    if target.flushing:
-        verdict = _flush_settled(target)
-        if verdict is not None:
-            return verdict
     if image_card:
-        # What Forge's allocator holds cached is free for the asking, and a
-        # reading taken with it still held would count it as used.
-        mc_memory.release_cached_vram()
-    free = _free_on(target.card, image_card)
-    if 0 < free < needed and _stop_idle_llm(target):
-        free = _free_on(target.card, image_card)
-    if 0 < free < needed and image_card:
         # Decided by what is on the card, not by the record of an earlier park:
         # the model a generation loaded back since is resident again, and one
         # parked for a guest the language model then evicted is still out.
@@ -864,7 +837,12 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
         if verdict == "block":
             return verdict, words
         mc_memory.release_cached_vram()
-        free = _free_on(target.card, image_card)
+    needed = max(turn.need_vram - already, 0) + VRAM_MARGIN_BYTES
+    if target.flushing:
+        verdict = _flush_settled(target)
+        if verdict is not None:
+            return verdict
+    free = _free_on(target.card, image_card)
     if free <= 0:
         # Not a shortfall: a card the driver could not read, or one the topology
         # does not know. The guest's own estimate is all there is to go on, and
@@ -886,20 +864,15 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
     return "go", ""
 
 
-def _stop_idle_llm(target: _CardState) -> int:
-    """Stop our own idle llama-servers on this card. Returns the bytes released.
-
-    Only ever reached when the card is short without it (:func:`_make_room`), and
-    only for an idle server: a running language-model turn was waited for first.
-    """
+def _stop_idle_llm(target: _CardState) -> None:
+    """Stop our own idle llama-servers on this card. A running turn was waited for."""
     if target.card.index is None:
-        return 0
+        return
     if mc_broker.held_bytes(mc_broker.FAMILY_LLM, card=target.card.index) <= 0:
-        return 0
-    released = mc_broker._release(mc_broker.FAMILY_LLM, 1 << 50,
-                                  f"VibeVoice's turn on {target.card.describe()}",
-                                  sweep=True, card=target.card.index)
-    return max(int(getattr(released, "freed", 0) or 0), 0)
+        return
+    mc_broker._release(mc_broker.FAMILY_LLM, 1 << 50,
+                       f"VibeVoice's turn on {target.card.describe()}",
+                       sweep=True, card=target.card.index)
 
 
 def _park_image_model(target: _CardState, turn: Turn) -> tuple[str, str]:

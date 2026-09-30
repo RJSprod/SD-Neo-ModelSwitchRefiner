@@ -257,25 +257,6 @@ fetches ``Qwen/Qwen2.5-1.5B`` from the hub -- the one call in the load path that
 could reach the network. The installer therefore writes its own copy naming the
 local tokenizer directory above, and keeps upstream's document (when the mirror
 had one) under the second name so nothing it said is lost."""
-VIBEVOICE_REALTIME_TOKENIZER_DIRNAME = "tokenizer-qwen2.5-0.5b"
-"""The Realtime 0.5B's tokenizer directory, inside its own model directory.
-
-Load-bearing for the reason :data:`VIBEVOICE_TOKENIZER_DIRNAME` is: the streaming
-processor picks its tokenizer class by finding ``qwen`` in the location it is
-handed. Each model keeps its own, because the two are different repositories and
-a model directory is installed and removed as one piece."""
-VIBEVOICE_VOICES_DIRNAME = "voices"
-"""The Realtime model's preset voice prompts, one ``<stem>.pt`` per voice, inside
-its model directory. Installed with the model and checked against the digests
-this repository commits; nothing a person supplies is ever written here."""
-VIBEVOICE_LORAS_DIRNAME = "loras"
-VIBEVOICE_LORA_META = "meta.json"
-"""The LoRA library: one directory per adapter, named by an id this extension
-chose, holding the language model's adapter at its root, the optional
-``diffusion_head/``, ``acoustic_connector/`` and ``semantic_connector/`` beside
-it, and ``meta.json`` -- its name, its parts, its size and what the adapter's own
-configuration says about itself. A sibling of the models rather than inside one,
-because an adapter outlives a reinstall of the model it is for."""
 
 
 def extension_root() -> Path:
@@ -950,21 +931,6 @@ def vibevoice_calibration_path() -> Path:
     return vibevoice_root() / VIBEVOICE_CALIBRATION_FILENAME
 
 
-def vibevoice_voices_root(identifier: str) -> Path:
-    """One model's preset voice prompts. ``identifier`` is checked, not trusted."""
-    return vibevoice_model_root(identifier) / VIBEVOICE_VOICES_DIRNAME
-
-
-def vibevoice_loras_root() -> Path:
-    """The LoRA library. Kept by an uninstall, like the settings and the calibration."""
-    return vibevoice_root() / VIBEVOICE_LORAS_DIRNAME
-
-
-def vibevoice_lora_root(identifier: str) -> Path:
-    """One adapter in the library. ``identifier`` is checked, not trusted."""
-    return _contained(vibevoice_loras_root(), identifier)
-
-
 def vibevoice_inside(candidate) -> bool:
     """Whether ``candidate`` is under the VibeVoice subtree.
 
@@ -1039,28 +1005,3 @@ def _setting(name: str):
         return getattr(shared.opts, name, None)
     except Exception:
         return None
-
-
-# --------------------------------------------------------------------------- #
-# VibeVoice as a Voice Chat engine
-# --------------------------------------------------------------------------- #
-#
-# Its own block, apart from the Voice Box's VibeVoice paths above: what Voice
-# Chat remembers about VibeVoice is Voice Chat's, and nothing the Voice Box
-# writes lives in it.
-
-VIBEVOICE_CHAT_FILENAME = "voice-chat.json"
-"""Voice Chat's own VibeVoice choices: which voice speaks by default and the two
-delivery values (guidance and diffusion steps). A file rather than Forge options,
-for the reason Pocket's and Sopro's are: an option is also a component on the
-settings page, and *Apply settings* writes the page's build-time copy back over
-whatever the Voice Chat panel has set since (I-PKT-19)."""
-
-
-def vibevoice_chat_path() -> Path:
-    """Where Voice Chat keeps its VibeVoice default voice and delivery.
-
-    Beside the Voice Box's own ``settings.json`` under the VibeVoice root, which
-    an uninstall keeps: both describe choices, not an installation.
-    """
-    return vibevoice_root() / VIBEVOICE_CHAT_FILENAME

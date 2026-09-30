@@ -1710,12 +1710,12 @@ generation and says so rather than corrupting the loaded model.
 
 ### Whose turn it is on each card
 
-VibeVoice — the text-to-speech of the [Voice Box](#voice-box) tab, and of Voice
-Chat when you choose it there — runs on whichever card you choose and shares that
-card with whatever already lives there: the image model, WanGP, the language
-model. This is the part that decides *whose turn it is* (`docs/23-voice-box.md`).
-Until VibeVoice is installed nothing asks for a turn, and the check every
-generation makes is one dictionary lookup.
+Voice Box — VibeVoice 7B, a text-to-speech model of about eighteen gigabytes,
+as a tab of its own — is being built in phases (`docs/23-voice-box.md`). It runs
+on whichever card you choose and shares that card with whatever already lives
+there, so the part that decides *whose turn it is* ships first. Until VibeVoice
+itself is installed nothing asks for a turn, and the check every generation
+makes is one dictionary lookup.
 
 The rules, for one card:
 
@@ -1768,17 +1768,6 @@ record, so a checkpoint loaded back by hand in between is parked like any other.
 *Keep VibeVoice warm between requests*: **On every card** (default), **Not on the
 image model's card** (there the image model comes straight back) or **Off**.
 
-**Only what a request needs is moved.** Making room is a ladder, climbed one rung
-at a time with the card measured again after each, and only while the request
-still does not fit with 1 GB to spare: an idle llama-server of ours on the card
-is stopped (the next message starts it again); then the image model is parked,
-the way the setting above says; then, on WanGP's card, WanGP is asked to flush;
-and a request still short is refused with the numbers. The 7B at full precision
-climbs most of that on a 24 GB card. The Realtime 0.5B, or the 7B at four bits,
-usually fits beside everything already there, and then nothing moves at all — no
-language model stopped just before it writes the next reply, no checkpoint parked
-that the next generation needs.
-
 **Never the pagefile, in numbers.** A request is refused when it would leave less
 than 4 GB of system RAM available — twice the host floor, because Windows starts
 paging parked weights out well before RAM reaches zero — or when the card cannot
@@ -1814,9 +1803,8 @@ coordinated; its memory still counts as not free.
 render and says so (*Waiting for VibeVoice 7B on …*), except the one turn a
 generation is itself waiting for — Krea's writer — which is never made to wait
 for a turn that is waiting for that very generation. A running LLM turn on the
-card finishes before VibeVoice loads; an idle llama-server there is stopped when
-VibeVoice would not fit beside it; and an LLM that needs room evicts a warm
-VibeVoice before anything else. A
+card finishes before VibeVoice loads; an idle llama-server there is stopped; and
+an LLM that needs room evicts a warm VibeVoice before anything else. A
 llama-server on the Intel Arc shares no card with any of this.
 
 **What the console says:**
@@ -4698,15 +4686,13 @@ projector — the answer you would have got from the panel.
 ## Voice Chat
 
 Hold a button, talk, and read what you said in the message box. Turn on *Speak
-replies automatically* and hear the answer back. Both halves run on this PC, from
-models you downloaded once — on the CPU, or, for speech with VibeVoice, on a
-graphics card you choose — and after that there is nothing for them to reach the
-Internet for, and nothing about what you said leaves your machines.
+replies automatically* and hear the answer back. Both halves run on this PC, on
+the CPU, from models you downloaded once — after that there is nothing for them
+to reach the Internet for, and nothing about what you said leaves your machines.
 
 It is deliberately two small I/O adapters bolted to the Conversation workspace
 rather than a second AI subsystem. There is no wake word, no open microphone, no
-voice activity detection, and no GPU unless you choose the one engine that speaks
-from one. Dictation fills the composer that was
+voice activity detection and no GPU. Dictation fills the composer that was
 already there, and Send is the Send that was already there — so attachments,
 threads, characters, sampling settings, Stop and every per-message action behave
 exactly as they did.
@@ -4758,19 +4744,14 @@ is anything you or the model said.
 bundle ships, chosen in Settings and auditioned there. On Linux, an optional
 offline cloning tool can add your own.
 
-**And there are three more engines, if you want one.** Sopro V2 Turbo makes a
+**And there are two more engines, if you want one.** Sopro V2 Turbo makes a
 voice from five to twenty seconds of you talking — no training job, no separate
 cloning tool, and about a minute on a Windows CPU from pressing record to
 hearing yourself read a reply. **PocketTTS** is the third: a streaming CPU model
 that ships with reviewed official voices and clones from a shorter recording,
 with the cloning half behind an upstream access gate you accept yourself. Both
 install themselves, run in PyTorch runtimes of their own that never touch
-Kokoro's, each other's or Forge's, and are CPU-only like dictation. **VibeVoice**
-is the fourth, and the only one that speaks from a graphics card: Microsoft's
-Realtime 0.5B with its preset voices, or VibeVoice 7B speaking a voice it clones
-from three to sixty seconds of a recording — made in its own panel here or in the
-[Voice Box](#voice-box), whose installation, worker and card turns it shares
-([below](#vibevoice-speaking-from-a-graphics-card)).
+Kokoro's, each other's or Forge's, and are CPU-only like everything else here.
 
 One engine speaks at a time. Choosing one changes which voice settings appear
 everywhere — this page, the Voice menu, every character — and the other engines'
@@ -4914,7 +4895,7 @@ applies to the next one rather than switching voices mid-sentence.
 
 ### Sopro V2: making a voice from a recording
 
-**Settings → Voice Chat → Text-to-speech engine** has four cards. Choosing
+**Settings → Voice Chat → Text-to-speech engine** has three cards. Choosing
 **Sopro V2** replaces every other engine's control on the page with Sopro's,
 cancels any speech, and unloads whichever engine was resident — so the ones you
 are not using cost nothing but disk.
@@ -5048,79 +5029,6 @@ Custom Pocket voices keep the recording they were made from, and their prepared
 data is stored per model — so changing the model or the precision does not
 destroy the version that worked, and **Rebuild** makes a new one from the
 recording you already gave it.
-
-### VibeVoice: speaking from a graphics card
-
-**VibeVoice** is the fourth card in *Settings → Voice Chat → Text-to-speech
-engine*, and the only engine here that runs on a graphics card. It is the same
-VibeVoice the [Voice Box](#voice-box) tab renders with — the same installation,
-the same worker, the same card turns — so it is installed in that tab, and this
-panel says so rather than offering a second installer.
-
-**The voice decides the model.** Its voices come in two kinds, listed together:
-
-| Voice | Spoken by | Where it comes from |
-| --- | --- | --- |
-| A **preset** — Carter, Davis, Emma, Frank, Grace, Mike and Samuel in English, and two in each of nine other languages, marked experimental | VibeVoice **Realtime 0.5B**: small, one voice at a time, quick to start once warm | Microsoft's own voice prompts, shipped with the model |
-| A **cloned voice** — three to sixty seconds of one person talking | VibeVoice **7B**, cloning from that recording every time it speaks, at the precision and with the LoRA chosen in this panel | Made here with *Make a voice from a recording*, or any sample in the Voice Box's library: they are one list |
-
-A character's voice, the default voice and Test work exactly as on the other
-engines.
-
-**Cloning a voice.** *Make a voice from a recording* takes a recording — Record
-(it stops itself at a minute), or an audio file, trimmed in the page to the part
-you want — and plays you the
-Test text spoken by the 7B in that voice before anything is kept. **Save voice**
-keeps it and **Discard** throws it away; until you press one of them the
-recording exists only in the WebUI's memory. Ten clean seconds of one speaker is
-plenty, and shorter is quicker, because a cloned voice re-reads its recording for
-every sentence it speaks. The first preview can take a minute or two while the 7B
-is loaded onto its card; it stays warm after that. A saved voice is a sample in
-the Voice Box's library, so it can speak in a script there too, and every sample
-made in the Voice Box is a voice here: renaming or deleting one on either side is
-the same act. The Realtime 0.5B does not clone — Microsoft withholds the code that
-makes a voice prompt from a recording, to mitigate deepfake risks, and this
-extension does not work around that — and its presets cannot be renamed or
-deleted.
-
-**It takes its turn on a card, like every VibeVoice request.** Replies are spoken
-on the card chosen in this panel (or the Voice Box's, when none is chosen here),
-through the same rules as a Voice Box render: it goes next, it never cuts off a
-generation, a WanGP job or a render already running, and it
-[moves only what it needs](#whose-turn-it-is-on-each-card) — the Realtime 0.5B
-usually fits beside everything already on the card, so a reply neither stops the
-language model nor parks the image model. After a reply VibeVoice stays warm on
-that card until something else needs the room, as *Keep VibeVoice warm between
-requests* says, so the next reply starts at once.
-
-**Replies are spoken while they are still being written.** Each sentence goes to
-the card as soon as Voice Chat's segmenter commits it, and its audio streams back
-while it renders. Sentences that arrive while one is rendering are rendered
-together next, and a scrap of three words or fewer waits for more — the Realtime
-model is unstable on very short input. Upstream has not finished feeding text to
-the model word by word, so a sentence is the smallest unit.
-
-**When the language model shares the card**, the two cannot both run: the reply
-is written first, then spoken, and the next message waits for the speech to end.
-Choose another card for Voice Chat's VibeVoice — the Arc runs the language model,
-the 3090 or the 5090 runs the voice — and they overlap. A reply whose card does
-not come free within a minute and a half of its last word being written (behind a
-long Voice Box render, say) is not read aloud, and the Voice line says why.
-
-**Stop cancels**, as on Kokoro and Sopro: the render stops at its next step and
-the card is handed back.
-
-**Precision, LoRA and delivery.** The 7B speaks at the precision chosen in this
-panel — full, 8-bit or 4-bit — with the panel's LoRA, if any, at its strength:
-Voice Chat's own choices, separate from the Voice Box's configurations, and a
-change reloads the model at the next reply. **Guidance** and **Diffusion steps**
-are the delivery controls, defaulting to the model's own (1.5 and 5 on the
-Realtime model, 1.3 and 10 on the 7B); a character's own delivery opens at the
-numbers its voice's model uses, so ticking it changes nothing until a slider
-moves. Speed, pitch and pause are not offered:
-VibeVoice has no such inputs, and a control that did nothing would be a control
-that lied. The Voice Pipeline below is PocketTTS's alone and does not run on
-VibeVoice's speech.
 
 ### The Voice Pipeline (optional): cleaning and widening what was spoken
 
@@ -5412,29 +5320,25 @@ is more useful than the marketing one:
   and never cached — the responses carry `no-store, no-transform`.
 - A clone's reference recording is the one audio file Voice Chat writes, it goes
   in a directory of its own, and it is deleted when the job ends.
-- A VibeVoice voice *is* its recording: the 7B clones from it every time it
-  speaks. Saving one keeps the recording in the Voice Box's sample library and
-  deleting the voice deletes it; before Save, a preview's recording is held in
-  memory and never written.
 - Once you press Send, the transcript is an ordinary message and is saved in your
   thread exactly like typed text. That is Conversation's own history and it is
   the one place any of this is kept.
 
 ### On the machine
 
-Dictation and the three CPU engines run on the processor, in a process of their
-own, beside everything else. They do not join the GPU broker, do not appear in
-the residency planner, and do not wait for an image job — so you can dictate
-while a generation is running and neither one notices. `CUDA_VISIBLE_DEVICES` is emptied for that process and the
+Speech runs on the CPU, in a process of its own, beside everything else. It does
+not join the GPU broker, does not appear in the residency planner, and does not
+wait for an image job — so you can dictate while a generation is running and
+neither one notices. `CUDA_VISIBLE_DEVICES` is emptied for that process and the
 runtime is refused if it reports anything but a CPU provider, so "CPU only" is
 enforced rather than labelled. Thread counts are conservative and deliberately
 not settings: the point of running beside Forge is lost if speech takes every
 core from the image that is rendering.
 
-VibeVoice is the one speech engine that runs on a graphics card — the Voice
-Box's, and Voice Chat's when you choose it — and the other engines stay on the
-processor whatever it does. It takes a card only through a turn, like any other
-job on it: see [Whose turn it is on each card](#whose-turn-it-is-on-each-card).
+VibeVoice, in Voice Box, is the one speech engine that runs on a graphics card,
+and it is not a Voice Chat engine — the engines above stay on the processor
+whatever it does. It takes a card only through a turn, like any other job on it:
+see [Whose turn it is on each card](#whose-turn-it-is-on-each-card).
 
 The speech process talks to Forge over a private pipe — no port, no local HTTP
 authentication problem, no firewall prompt, and no way to bind to a network
@@ -5545,13 +5449,10 @@ three minutes, which buried the line that explained it.
 
 ## Voice Box
 
-A tab that turns a script into speech with **VibeVoice**, on whichever of your
-cards you choose: **VibeVoice 7B** — Microsoft's long-form, multi-speaker
-text-to-speech model, as it survives in MIT-licensed community copies — cloning
-up to four speakers from samples, at full precision or quantised to 8 or 4 bits,
-with a LoRA if you have one; or Microsoft's **Realtime 0.5B**, one speaker at a
-time from its preset voices. It is the second thing in this extension that
-wants a whole graphics card, and everything about
+A tab that turns a script into speech with **VibeVoice 7B** — Microsoft's
+long-form, multi-speaker text-to-speech model, as it survives in MIT-licensed
+community copies — on whichever of your cards you choose. It is the second
+thing in this extension that wants a whole graphics card, and everything about
 how it shares one is in [Whose turn it is on each card](#whose-turn-it-is-on-each-card):
 a render goes *next* on its card and never cuts anything off, the image model
 that made room for it comes back, and a request that would overflow VRAM or RAM
@@ -5566,8 +5467,7 @@ bar**. A pipeline is one pass through the four stages kept the way a
 conversation is kept: a file of its own holding its prompt, the configuration
 it points at and the outputs it made, so you can have several going and come
 back to any of them. Below the stages: **Render** (disabled with the reason when it cannot run — the
-model not installed, an empty script, a speaker without a voice, more speakers
-than the model has, no card), the
+engine not installed, an empty script, a speaker without a sample, no card), the
 list of this pipeline's jobs with what each is doing and a Cancel while it is
 live, one line about what the cards are doing, and an *Unload VibeVoice from …*
 button for each card a worker is up on.
@@ -5599,9 +5499,7 @@ The **sample library** underneath is a list of titles with waveforms. Each row
 plays, renames on a double click, deletes, and carries four buttons — **1 2 3
 4** — that put the sample on a speaker of the configuration being edited. A
 sample that a configuration uses can still be deleted; that speaker's slot is
-simply empty again. The library is also Voice Chat's list of cloned VibeVoice
-voices: a voice made there is a sample here, marked as made in Voice Chat, and a
-sample made here is a voice there.
+simply empty again.
 
 ### Prompt
 
@@ -5621,47 +5519,16 @@ one entry. The history keeps a hundred and lets the oldest go; a prompt you
 
 ### Configuration
 
-A named set of the knobs a render takes, kept and chosen by name: the
-**model** — the 7B or the Realtime 0.5B; choosing one puts its own defaults in
-the steps and CFG boxes and shows only what it supports — the card (each named,
-and marked when it is the image model's card or WanGP's), the 7B's
-**precision** (Full, 8-bit or 4-bit, each labelled with what it needs on the
-card) and **LoRA** with its strength (0–2), **diffusion steps** (1–50: ten on
-the 7B, five on the Realtime model), **CFG** (1.0–3.0: 1.3 and 1.5), a **seed**
-(blank for a different one each time), **max new tokens** (blank for the model's
-own limit), and the **speakers**: four slots each holding one sample on the 7B,
-one preset voice on the Realtime model — grouped by language, the experimental
-ones marked. A script that names more speakers than the model has is refused at
-the press.
+A named set of the knobs a render takes, kept and chosen by name: the model,
+the card (each named, and marked when it is the image model's card or WanGP's),
+**diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
+a **seed** (blank for a different one each time), **max new tokens** (blank for
+the model's own limit), and the four **speaker** slots, each holding one sample.
 An edit marks the configuration *Save •* until you save it, and Render never
 saves for you: an unsaved configuration is sent along with the render as it
 stands. The card and model you pick become the defaults for the next
 configuration. The values a render actually used are written on its output.
 Controls the model cannot honour are not on the page.
-
-### Precision and LoRAs
-
-**Quantised, the 7B needs far less of the card.** 8-bit and 4-bit (NF4) quantise
-the language model only, with bitsandbytes as the weights load, and leave the
-acoustic and semantic tokenizers, the connectors, the diffusion head and the
-output layer at full precision. The first estimates — about 19, 11.5 and 7.5 GB
-of weights, plus a working allowance — are corrected by each render's measured
-peak, per precision, as at full precision. Quantisation needs CUDA, and says so
-in a sentence where there is none. The Realtime 0.5B runs at full precision
-only; it is small enough not to need anything else.
-
-**LoRAs** are adapters fine-tuned for the 7B — a voice, a style, a language —
-kept in the **LoRA library** in the Configuration stage. *Add a LoRA from a
-folder on this PC* copies a PEFT adapter into it: `adapter_config.json` with
-`adapter_model.safetensors` (or `.bin`) at the folder's root or in `lora/` or
-`language_model/`, and, when present, `diffusion_head/`, `acoustic_connector/`
-and `semantic_connector/` beside it — the layout VibeVoice's fine-tuning code
-writes — up to 4 GB. Anything else is refused with a sentence. Each can be
-renamed and deleted; deleting one takes it out of every configuration that used
-it, which then renders without a LoRA. A configuration chooses one and a strength from 0 to 2,
-which scales every LoRA layer. What is loaded on a card is the model, its
-precision, its LoRA and that strength together: a render that asks for anything
-else reloads.
 
 ### Outputs
 
@@ -5669,8 +5536,8 @@ Every render is a lane: its name (rename on a double click), its waveform with
 a playhead, **Play**, **Loop** (remembered per output), **Trim to sample** —
 the same trimmer as the input stage, on the render, so a phrase you like becomes
 a voice sample without leaving the page — **Save**, **Download**, **Delete**,
-and a line of metadata: model, precision, LoRA, seed, steps, CFG, the speakers'
-voices, the length, how long it took.
+and a line of metadata: model, seed, steps, CFG, the speakers' samples, the
+length, how long it took.
 
 **Save** writes the WAV into a folder on the Forge PC that you choose **once**:
 the first press opens the machine's own folder dialog (or, when the WebUI is
@@ -5683,15 +5550,14 @@ second is `name (2).wav` — and a `.json` beside each WAV carries the metadata.
 
 Press **Render** and the job appears in the footer. Everything that can be
 refused before a card is asked for is refused at the press, in a sentence:
-the prompt has no words, *Speaker 2 has no sample*, the script names more
-speakers than the model has, no card is chosen, the model or the runtime is not
-installed. Then:
+the prompt has no words, *Speaker 2 has no sample*, no card is chosen,
+VibeVoice is not installed. Then:
 
 | Phase | What it means |
 |---|---|
 | **queued** | Behind another render on the same card. Renders on one card run in order; the two cards may each run one |
 | **waiting** | Asking for the card: the line says what the turn is waiting for — a generation finishing, WanGP's task, the image model being parked |
-| **loading** | The model is going onto the card (the first render after an eviction, or after the model, precision or LoRA changed; a warm VibeVoice with the same ones skips it) |
+| **loading** | The model is going onto the card (the first render after an eviction; a warm VibeVoice skips it) |
 | **rendering** | Section *n* of *m*, and how many seconds of speech so far |
 | **done** | The output is in the list |
 | **failed** | With the reason. A request the card or the RAM cannot hold fails here, with the turn's own warning — nothing was loaded and nothing was paged |
@@ -5727,15 +5593,10 @@ VibeVoice runs in a process of its own, one per card it is used on, started with
 `CUDA_VISIBLE_DEVICES` set to that card's UUID and offline (`HF_HUB_OFFLINE`,
 `TRANSFORMERS_OFFLINE`), out of a runtime that is its own closure and nobody
 else's. Its handshake reports the UUID of the card it actually came up on, and a
-worker on any other card is refused rather than used. It loads the model a
-request asks for — the 7B at its precision with its LoRA, or the Realtime 0.5B,
-both with PyTorch's scaled-dot-product attention — keeps it until a request asks
-for another, sets the diffusion steps, and renders a section at a time; a cancel
-is checked at the top of every generation step. A Voice Chat reply is rendered
-*streamed*: VibeVoice's own audio streamer hands the worker each piece as the
-model makes it, and the worker sends it over its pipe at once; a Voice Box render
-comes back whole. What VibeVoice itself prints — *Reached maximum generation
-length*, among others — goes to the WebUI's log, never into the pipe. What it holds on the card is what the turn
+worker on any other card is refused rather than used. It loads the model in
+bfloat16 with PyTorch's scaled-dot-product attention, sets the diffusion steps
+the configuration asks for, and renders a section at a time; a cancel is checked
+at the top of every generation step. What it holds on the card is what the turn
 system sees (`resident_bytes`), and *evicting* it means ending the process, so
 the card is really free — the CUDA context included — before whoever needed it
 goes next. **Unload** on the page does the same by hand, through the turn system,
@@ -5754,9 +5615,8 @@ of silent.
 Everything is in `voice/managed-vibevoice-models.json`, read the way every other
 voice manifest is ("Who vouches for the bytes", above). The runtime closure —
 the community `vibevoice` package, `transformers` 4.51.3 and `accelerate` 1.6.0,
-which it needs, `diffusers` below the release that needs a newer hub client,
-bitsandbytes 0.48.2 and peft 0.17.1 for the quantised 7B and its LoRAs, and
-their dependencies, thirty-three wheels in all — is named, sized and hashed from
+which it needs, `diffusers` below the release that needs a newer hub client, and
+their dependencies, thirty-one wheels in all — is named, sized and hashed from
 pypi.org, wheel by wheel, for Windows with CPython 3.13 and CUDA 12.8; torch
 2.8.0 comes from the CUDA 12.8 index, matched by its exact version, and its
 digest is checked against what that index publishes. Nothing the worker never
@@ -5775,17 +5635,6 @@ yourself works for the runtime and the model alike; a model folder without the
 tokenizer beside it has the four tokenizer files fetched, or is refused with the
 exact folder to fill when the hub cannot be reached.
 
-**One runtime for both models.** The community package has the 7B's long-form
-code and not the Realtime model's; Microsoft's own repository has the Realtime
-model's and no longer the long-form code. The two share the rest, so the runtime
-is the community wheel with five files from Microsoft's repository, at one fixed
-commit, written over it byte for byte — each named, sized and hashed in the
-manifest, and part of the runtime's fingerprint, so a runtime installed before
-them says it needs installing again. The Realtime 0.5B and the Qwen2.5 0.5B
-tokenizer it reads are declared like the 7B; its twenty-five preset voices come
-from Microsoft's repository at the same commit and are hashed here, and a preset
-that has gone missing is fetched again by itself.
-
 The installer writes a local `preprocessor_config.json` beside the weights that
 points the processor at the tokenizer directory it installed — the community
 code picks its tokenizer class by the word *qwen* in that path, and would
@@ -5796,7 +5645,7 @@ otherwise reach for the hub — and keeps the mirror's own copy beside it.
 Under `/model-chain/voice-box`, on the same page token and origin check as Voice
 Chat's routes and with the same absence of a sign-in gate: status, install,
 settings and the folder dialog; samples (a raw WAV upload with its title in a
-header), prompts, configurations, pipelines, LoRAs; render, jobs and cancel; outputs,
+header), prompts, configurations, pipelines; render, jobs and cancel; outputs,
 their audio, save and download; and one runtime action. Audio is fetched with
 the token and played from memory. A request that is refused says why with the
 status that fits — 400 for a bad value, 404 for something no longer there, 409
@@ -5907,16 +5756,12 @@ voice/managed-pocket-models.json  the Pocket closure and its voices (data only)
 mc_voice_vibevoice.py the VibeVoice engine: manifest, installer, settings, the estimates
 mc_voice_vibevoice_runtime.py  one worker per card, the handshake that proves the card
 vibevoice_worker/worker.py  the VibeVoice sidecar, the one that runs on a card
-mc_voice_vibevoice_chat.py  VibeVoice in Voice Chat: presets and cloned voices, cloning
-mc_voice_vibevoice_speech.py  its speaker: a card turn per reply, a sentence at a time
-mc_voice_vibevoice_profile.py  its delivery: guidance and diffusion steps, nothing else
 mc_voice_box.py       the Voice Box's files and its render service
 mc_voice_box_api.py   the Voice Box's routes
 mc_voice_box_ui.py    the Voice Box tab: one root, painted once
 javascript/voice_box.js  the page: four stages, the trimmer, the lanes, audio focus
 voice/managed-vibevoice-models.json  the VibeVoice closure (wheels pinned; model declared)
 tools/pin_vibevoice_models.py  resolves the closure, and pins the model on a machine
-tools/smoke_vibevoice_worker.py  drives the real worker on tiny random models (maintainers)
                       that reaches the hub (maintainers only)
 tools/pin_pocket_models.py  resolves that closure from PyPI (maintainers only)
 mc_neutralize.py      Neutralize Prompt: one subtraction pass, and what it answers
@@ -5991,9 +5836,7 @@ mc_voice_engines -X->  the speech-to-text model, its process, its quality tier
 
 Voice is not a second model-residency domain. It publishes nothing to the
 broker, asks the planner for nothing, and waits for no image job — which is what
-lets it transcribe while a generation is running. VibeVoice is the one speech
-engine that waits for a card, and it does so through a client `mc_turns_guests`
-hands it at startup, so the arrows above hold for its modules too. `mc_voice_models` is the only
+lets it transcribe while a generation is running. `mc_voice_models` is the only
 module with a network transport in it, so "no Internet after setup" is a property
 of the import graph rather than a promise; `test_voice_independence.py` reads
 that graph and fails on any of the arrows above.

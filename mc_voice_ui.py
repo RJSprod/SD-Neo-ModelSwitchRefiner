@@ -507,12 +507,6 @@ def character_state(character) -> dict:
         # sliders open where the sound the user is listening to actually is,
         # rather than at a neutral they are not.
         effective = profiles.resolve(overrides)
-        # A field left to "the model's own" has no number a slider can show;
-        # an engine that knows its model's says it here (VibeVoice), or the
-        # slider would open at its minimum and be saved there.
-        show = getattr(profiles, "shown", None)
-        if callable(show):
-            effective = show(effective, voice_of(character, active))
         names = profiles.FIELDS
     except Exception:
         logger.debug("Model Chain: could not read a character's delivery", exc_info=True)
@@ -573,9 +567,7 @@ def engine_panel() -> str:
     labels = {
         "unloaded": f"\u25cb Unloaded — loads automatically on next voice use",
         "loading": "\u25cc Loading speech models…",
-        # Where it is loaded, when the engine says: every engine but VibeVoice
-        # is on the processor, and VibeVoice is on a graphics card.
-        "idle": f"\u25cf Loaded — {found.get('where') or 'CPU'}, idle",
+        "idle": "\u25cf Loaded — CPU, idle",
         "stt": "\u25cf Loaded — Listening",
         "tts": "\u25cf Loaded — Speaking",
         "speaking": "\u25cf Loaded — Speaking",
@@ -1542,254 +1534,6 @@ def _pocket_engine_settings(settings: dict, found) -> str:
         + '</details>')
 
 
-def vibevoice_html() -> str:
-    """VibeVoice's settings surface: what is installed, where it speaks, and cloning.
-
-    Drawn only when VibeVoice is the selected engine; its voice list and
-    delivery controls live in :func:`voices_html` beneath it, the split every
-    engine has. What is not here is an Install button: VibeVoice is one
-    installation that two tabs speak through, and it is installed in the Voice
-    Box tab -- this panel reports what the installer says, part by part and
-    model by model, and says where to go.
-
-    The settings are Voice Chat's own choices for VibeVoice: which card a reply
-    takes a turn on, and the precision and LoRA the 7B speaks cloned voices at.
-    Then the clone workspace, Pocket's shape: a recording made or chosen here,
-    trimmed in the tab, auditioned by the 7B in that voice through a card turn,
-    and kept -- as a Voice Box sample -- only when somebody presses Save.
-
-    Static markup here is the first frame; ``javascript/voice_chat.js`` repaints
-    it from ``/model-chain/voice/vibevoice``.
-    """
-    import mc_voice_box as box
-    import mc_voice_vibevoice_chat as vibevoice_chat
-
-    try:
-        found = vibevoice_chat.status()
-        settings = vibevoice_chat.engine_settings()
-        cards = vibevoice_chat.cards()
-        loras = vibevoice_chat.loras()
-        connected = box.turns() is not None
-    except Exception:
-        logger.debug("Model Chain: could not describe VibeVoice", exc_info=True)
-        return ('<div class="mc-voice-row" data-mc-voice-kind="vibevoice">'
-                '<div class="mc-voice-head">'
-                '<div class="mc-voice-heading">VibeVoice</div>'
-                '<div class="mc-voice-status">VibeVoice could not be described. This is a '
-                'problem with the extension rather than with your installation.</div>'
-                '</div></div>')
-
-    tab = vibevoice_chat.TAB
-    parts = [f'<div class="mc-voice-check" data-mc-voice-vibevoice-part="runtime">'
-             f'{ui.escape(found.runtime_message or "Runtime: not installed.")}</div>']
-    for model in found.models:
-        identifier = str(model.get("id") or "")
-        line = str(model.get("message") or "") or (
-            "Installed." if model.get("installed") else "Not installed.")
-        parts.append(f'<div class="mc-voice-check" '
-                     f'data-mc-voice-vibevoice-model="{ui.escape(identifier)}">'
-                     f'{ui.escape(str(model.get("label") or identifier))} — '
-                     f'{ui.escape(line)}</div>')
-
-    return (
-        f'<div class="mc-voice-row" data-mc-voice-kind="vibevoice">'
-        f'<div class="mc-voice-head">'
-        f'<div class="mc-voice-heading">VibeVoice</div>'
-        f'<div class="mc-voice-default">on a graphics card, through a turn</div>'
-        f'<div class="mc-voice-status" data-mc-voice-status="vibevoice">'
-        f'{ui.escape(found.message)}</div>'
-        f'</div>'
-        f'<p class="mc-voice-note">VibeVoice is installed in the {ui.escape(tab)} tab — its '
-        f'runtime, the Realtime 0.5B with Microsoft\'s preset voices, and the 7B that speaks '
-        f'from a sample — and Voice Chat speaks through that same installation. Every reply '
-        f'takes a turn on its card the way a Voice Box render does, so on a card that is '
-        f'busy generating an image or writing the reply, a spoken reply starts when that '
-        f'work ends.</p>'
-        + ('' if connected else
-           f'<p class="mc-voice-note">VibeVoice is not connected to the cards on this WebUI '
-           f'yet, so it cannot speak. It is connected when the WebUI finishes starting.</p>')
-        + f'<div class="mc-voice-sopro-parts">{"".join(parts)}</div>'
-        + _vibevoice_settings(settings, cards, loras)
-        + _vibevoice_clone_html(found)
-        + '</div>'
-        + '<div class="mc-voice-note">VibeVoice is the one Voice Chat engine that runs on a '
-          'graphics card. It never takes the card from work already running there: a reply '
-          'waits its turn, and when it is spoken the card goes back to the turn system, which '
-          'keeps VibeVoice warm on it or not as Settings → Model Chain says. Its runtime is '
-          'its own, kept apart from Forge\'s and from every CPU engine\'s.</div>')
-
-
-def _vibevoice_settings(settings: dict, cards: list, loras: list) -> str:
-    """The card, precision and LoRA a reply uses. Global to VibeVoice in Voice Chat.
-
-    Not per character (I-PKT-23): each changes which model identity is loaded on
-    which card, and a character setting that quietly moved the model would be
-    one nobody could reason about. The card empty means the Voice Box's own.
-    """
-    card = str(settings.get("card_uuid") or "")
-    effective = str(settings.get("card_effective") or "")
-    names = {str(item["uuid"]): item for item in cards}
-    shared = names.get(effective) if settings.get("card_source") == "voice-box" else None
-    first = ("The Voice Box's card" + (f" ({shared['name']})" if shared else ""))
-    options = [f'<option value=""{" selected" if not card else ""}>{ui.escape(first)}</option>']
-    for item in cards:
-        role = f" — {item['role']}" if item.get("role") else ""
-        options.append(f'<option value="{ui.escape(item["uuid"])}"'
-                       f'{" selected" if item["uuid"] == card else ""}>'
-                       f'{ui.escape(item["name"] + role)}</option>')
-    if card and card not in names:
-        options.append(f'<option value="{ui.escape(card)}" selected>'
-                       f'{ui.escape(card)} — not found on this machine</option>')
-
-    precision = str(settings.get("precision") or "bf16")
-    precisions = []
-    for item in settings.get("precisions") or ():
-        need = int(item.get("need_vram_bytes") or 0)
-        precisions.append(
-            f'<option value="{ui.escape(item["id"])}"'
-            f'{" selected" if item["id"] == precision else ""}>'
-            f'{ui.escape(item["label"])}'
-            f'{ui.escape(f" — about {need / 1e9:.1f} GB on the card") if need else ""}'
-            f'</option>')
-
-    chosen = str(settings.get("lora_id") or "")
-    lora_options = [f'<option value=""{" selected" if not chosen else ""}>None</option>']
-    for item in loras:
-        lora_options.append(f'<option value="{ui.escape(str(item["id"]))}"'
-                            f'{" selected" if str(item["id"]) == chosen else ""}>'
-                            f'{ui.escape(str(item.get("name") or item["id"]))}</option>')
-    scale = float(settings.get("lora_scale") or 0.0)
-
-    return (
-        '<details class="mc-voice-manual" data-mc-voice-vibevoice-settings>'
-        '<summary>Engine settings</summary>'
-        '<p class="mc-voice-note">Where and how VibeVoice runs for Voice Chat, rather than how '
-        'a character sounds, so they apply to every VibeVoice voice. A change applies from the '
-        'next reply; the one being spoken keeps what it began with.</p>'
-        '<div class="mc-voice-field">'
-        '<label>Card</label>'
-        f'<select data-mc-voice-vibevoice-setting="card_uuid">{"".join(options)}</select>'
-        '<p class="mc-voice-note">The graphics card VibeVoice speaks on. A reply asks for a '
-        'turn on it and never cuts off work already running there; the image model and the '
-        'language model make room for it the way they do for a Voice Box render.</p>'
-        '</div>'
-        '<div class="mc-voice-field">'
-        '<label>Precision</label>'
-        f'<select data-mc-voice-vibevoice-setting="precision">{"".join(precisions)}</select>'
-        '<p class="mc-voice-note">How the 7B holds its language model on the card, for voices '
-        'made from samples. Smaller fits beside more, and is not the sound the model was '
-        'released with. The Realtime model always runs at full precision.</p>'
-        '</div>'
-        '<div class="mc-voice-field">'
-        '<label>LoRA</label>'
-        f'<select data-mc-voice-vibevoice-setting="lora_id">{"".join(lora_options)}</select>'
-        '<label for="mc-voice-vibevoice-strength">Strength</label>'
-        f'<input type="range" id="mc-voice-vibevoice-strength" min="0" max="2" step="0.05" '
-        f'value="{scale:.2f}" data-mc-voice-vibevoice-setting="lora_scale" />'
-        f'<output data-mc-voice-vibevoice-strength>{scale:.2f}</output>'
-        '<p class="mc-voice-note">A fine-tune of the 7B from the Voice Box\'s LoRA library, '
-        'for voices made from samples. The Realtime model takes none.</p>'
-        '</div>'
-        '</details>')
-
-
-def _vibevoice_clone_html(found) -> str:
-    """"Make a voice from a recording": Pocket's workspace, spoken by the 7B.
-
-    Always drawn, and enabled only where it can work: when the runtime and the
-    7B are not both installed, Create is disabled and the status line carries
-    the sentence that says so. The browser enables it the moment a poll says
-    otherwise, so installing the 7B in the Voice Box tab does not need a reload.
-    """
-    import mc_voice_vibevoice_chat as vibevoice_chat
-
-    hints = vibevoice_chat.clone_hints()
-    ready = bool(found.cloning_ready)
-    return (
-        f'<div class="mc-voice-row" data-mc-voice-vibevoice-clone>'
-        f'<div class="mc-voice-head">'
-        f'<div class="mc-voice-heading">Make a voice from a recording</div>'
-        f'<div class="mc-voice-status" data-mc-voice-vibevoice-clone-status>'
-        f'{ui.escape(found.cloning_message)}</div>'
-        f'</div>'
-        f'<p class="mc-voice-note">VibeVoice 7B speaks in a voice straight from a short '
-        f'recording — there is no training and nothing to prepare. A voice made here is '
-        f'spoken by the 7B, and it is kept as a sample in the {ui.escape(vibevoice_chat.TAB)} '
-        f'library too: the same sample, whichever tab renames or deletes it. The Realtime '
-        f'0.5B cannot make a voice; it speaks its preset voices only.</p>'
-        f'<p class="mc-voice-note mc-voice-consent">Only clone a voice you own or have '
-        f'permission to clone. The recording stays on this PC as a Voice Box sample, and '
-        f'deleting the voice deletes the recording.</p>'
-        f'<div class="mc-voice-clone-form" data-mc-voice-vibevoice-form>'
-        f'<div class="mc-voice-field">'
-        f'<label for="mc-voice-vibevoice-name">Name</label>'
-        f'<input type="text" id="mc-voice-vibevoice-name" data-mc-voice-vibevoice-name '
-        f'maxlength="{int(vibevoice_chat.MAX_NAME_CHARS)}" spellcheck="false" />'
-        f'</div>'
-        f'<div class="mc-voice-field">'
-        f'<label for="mc-voice-vibevoice-file">Recording</label>'
-        f'<input type="file" id="mc-voice-vibevoice-file" '
-        f'accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.oga,.opus,.flac,.webm,.mp4" '
-        f'data-mc-voice-vibevoice-file />'
-        f'<button type="button" class="mc-voice-entry-action" '
-        f'data-mc-voice-vibevoice-record>Record here</button>'
-        f'<span class="mc-voice-pocket-recording" data-mc-voice-vibevoice-recording></span>'
-        f'</div>'
-        # The trimmer is the engine-neutral one, attribute for attribute, so the
-        # browser's own wiring drives it unchanged.
-        f'<div class="mc-voice-trim" data-mc-voice-trim hidden>'
-        f'<canvas class="mc-voice-wave" data-mc-voice-wave height="96" '
-        f'aria-label="Waveform of the chosen recording. Drag to choose the part to '
-        f'clone, drag inside the selection to slide it, or use the start and end '
-        f'boxes below."></canvas>'
-        f'<div class="mc-voice-trim-row">'
-        f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-play>'
-        f'Play selection</button>'
-        f'<button type="button" class="mc-voice-entry-action" '
-        f'data-mc-voice-trim-play-clean hidden>Play cleaned</button>'
-        f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-best>'
-        f'Pick {int(hints["max_seconds"])} s for me</button>'
-        f'<label class="mc-voice-lab-check">'
-        f'<input type="checkbox" data-mc-voice-clean /> Clean up the recording</label>'
-        f'<select data-mc-voice-clean-how class="mc-voice-clean-how" hidden>'
-        f'<option value="deepfilternet">with DeepFilterNet (better)</option>'
-        f'<option value="page">in this page (fast)</option>'
-        f'</select>'
-        f'<label for="mc-voice-vibevoice-trim-start">Start</label>'
-        f'<input type="number" id="mc-voice-vibevoice-trim-start" data-mc-voice-trim-start '
-        f'min="0" step="0.1" inputmode="decimal" />'
-        f'<label for="mc-voice-vibevoice-trim-end">End</label>'
-        f'<input type="number" id="mc-voice-vibevoice-trim-end" data-mc-voice-trim-end '
-        f'min="0" step="0.1" inputmode="decimal" />'
-        f'</div>'
-        f'<div class="mc-voice-trim-state" data-mc-voice-trim-state role="status" '
-        f'aria-live="polite"></div>'
-        f'</div>'
-        f'<button type="button" class="mc-voice-install" data-mc-voice-vibevoice-create'
-        f'{"" if ready else " disabled"}>Create preview</button>'
-        f'</div>'
-        # Preview, then Save or Discard. Nothing is written in between: the
-        # recording waits in the WebUI's memory until Save makes it a sample.
-        f'<div class="mc-voice-preview" data-mc-voice-vibevoice-preview hidden>'
-        f'<p class="mc-voice-note" data-mc-voice-vibevoice-preview-note></p>'
-        f'<button type="button" class="mc-voice-entry-action" '
-        f'data-mc-voice-vibevoice-preview-play>Play again</button>'
-        f'<button type="button" class="mc-voice-install" '
-        f'data-mc-voice-vibevoice-preview-save>Save voice</button>'
-        f'<button type="button" class="mc-voice-entry-action" '
-        f'data-mc-voice-vibevoice-preview-discard>Discard</button>'
-        f'</div>'
-        f'<p class="mc-voice-note">'
-        f'{int(hints["min_seconds"])} to {int(hints["max_seconds"])} seconds of one clear '
-        f'speaker, in a room without much background noise — about '
-        f'{int(hints["ideal_seconds"])} seconds is plenty, and a short clean recording starts '
-        f'speaking sooner, because the 7B reads the sample again for every sentence. Create '
-        f'preview asks for the card, loads the 7B if it is not loaded yet — the first time '
-        f'can take a minute or two — and reads a line back in the new voice; nothing is saved '
-        f'until you press Save voice.</p>'
-        f'</div>')
-
-
 def cleanup_html() -> str:
     """The recording-cleanup installer, and what it costs.
 
@@ -2643,19 +2387,13 @@ def _delivery_block() -> str:
     for control in delivery_controls():
         name = control["name"]
         value = current.get(name, control["default"])
-        # A field that follows the model's own value has no number to show, and
-        # the browser would otherwise read the slider's midpoint back as one.
-        unset = 'data-mc-voice-unset="1" ' if value is None else ""
-        # And no value attribute at all for it: the slider sits where a range
-        # input with none sits, rather than holding the word "None".
-        shown = "" if value is None else f'value="{value}" '
         rows.append(
             f'<div class="mc-voice-slider" data-mc-voice-slider="{ui.escape(name)}">'
             f'<label for="mc-voice-slider-{ui.escape(name)}">'
             f'{ui.escape(control["label"])}</label>'
             f'<input type="range" id="mc-voice-slider-{ui.escape(name)}" '
             f'min="{control["minimum"]}" max="{control["maximum"]}" '
-            f'step="{control["step"]}" {shown}{unset}'
+            f'step="{control["step"]}" value="{value}" '
             f'data-mc-voice-slider-input="{ui.escape(name)}" />'
             f'<output data-mc-voice-slider-value="{ui.escape(name)}">'
             f'{ui.escape(_value_label(name, value))}</output>'
@@ -2754,27 +2492,6 @@ def _pocket_delivery_note() -> str:
         'voice still sounds like its reference, so if a clone is not recognisable enough, '
         'lower this before anything else. Left alone it follows the model\'s own '
         'default.</p>')
-
-
-def _vibevoice_delivery_note() -> str:
-    """Two controls, both the model's, and why the other four are absent.
-
-    VibeVoice's worker returns what the model produced with no signal
-    processing between them, and the Voice Pipeline serves PocketTTS only -- so
-    a Speed or a Pitch here would be a slider that moved nothing, which section
-    37 says must not be drawn.
-    """
-    return (
-        '<p class="mc-voice-note">Guidance and Diffusion steps are VibeVoice\'s own. Guidance '
-        'is how strongly each frame of speech is held to the voice and the text; Diffusion '
-        'steps is how much work the model puts into each frame, and the first thing to lower '
-        'if replies start pausing mid-sentence. Neither is an emotion or energy control — '
-        'the model has no such input.</p>'
-        '<p class="mc-voice-note">There is no Speed, Pitch, Volume or Pause on this engine: '
-        'VibeVoice speaks exactly what the model produced, with nothing of Voice Chat\'s '
-        'applied to it, so those sliders would do nothing. Left alone, both controls follow '
-        'the speaking model\'s own values, which differ between the Realtime model and the '
-        '7B.</p>')
 
 
 def _sopro_voices_html() -> str:
@@ -3234,45 +2951,6 @@ def _pocket_clone_html(found) -> str:
           f'</div>')
 
 
-def _vibevoice_voices_html() -> str:
-    """VibeVoice's voice list and delivery controls. Its clone form is in its panel above.
-
-    The generic list, painted from ``/model-chain/voice/voices`` like every
-    engine's: the Realtime model's presets, English first and the experimental
-    languages after, then the Voice Box's samples, which the 7B speaks. What is
-    VibeVoice's here is only the sentence above the list -- that the two kinds
-    come from two models, and that a sample is the Voice Box's own.
-    """
-    import mc_voice_vibevoice_chat as vibevoice_chat
-
-    tab = ui.escape(vibevoice_chat.TAB)
-    return (
-        f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}" '
-        f'data-mc-voice-engine-id="{ui.escape(vibevoice_chat.ENGINE)}">'
-        '<div class="mc-voice-row">'
-        '<div class="mc-voice-head">'
-        '<div class="mc-voice-heading">VibeVoice voices</div>'
-        '<div class="mc-voice-default" data-mc-voice-current>Loading…</div>'
-        '</div>'
-        '<div class="mc-voice-testline">'
-        '<label for="mc-voice-test-text">Test text</label>'
-        '<input type="text" id="mc-voice-test-text" data-mc-voice-test-text '
-        'spellcheck="false" maxlength="400" />'
-        '</div>'
-        f'<p class="mc-voice-note">The Realtime model\'s preset voices come first — '
-        f'Microsoft\'s, installed with that model — then the {tab}\'s samples, which the 7B '
-        f'speaks. A sample added in the {tab} tab appears here, and a voice made from a '
-        f'recording above is a {tab} sample too. Any of them can be set as the default, '
-        f'auditioned and given to a character; a sample can also be renamed or deleted here, '
-        f'which renames or deletes it in the {tab}. A preset ships with its model and keeps '
-        f'its name.</p>'
-        '<div class="mc-voice-warnings" data-mc-voice-warnings></div>'
-        '<div class="mc-voice-list" data-mc-voice-list></div>'
-        '</div>'
-        + _delivery_block()
-        + '</div>')
-
-
 def _value_label(name: str, value) -> str:
     try:
         import mc_voice_engines as engines
@@ -3675,12 +3353,6 @@ COMPONENTS = (
                   _tts_status("sopro"),
                   _engine_detail("sopro", "Sopro V2",
                                  "Streaming speech from a short recording.")),
-    ComponentSpec("tts-vibevoice", "tts", "VibeVoice",
-                  "Speech on a graphics card, installed in the Voice Box tab.",
-                  _tts_status("vibevoice"),
-                  _engine_detail("vibevoice", "VibeVoice",
-                                 "Speech on a graphics card, installed in the Voice Box "
-                                 "tab.")),
     ComponentSpec("voice-pipeline-runtime", "voice_pipeline", "Runtime",
                   "The isolated CPU runtime the enhancement stages run inside.",
                   _pipeline_component_status("runtime"), pipeline_runtime_detail),
@@ -3841,7 +3513,6 @@ _ENGINE_PANELS = {
     "kokoro": _kokoro_panel,
     "sopro": sopro_html,
     "pocket": pocket_html,
-    "vibevoice": vibevoice_html,
 }
 """Which engine draws which section of the Settings install row."""
 
@@ -3849,7 +3520,6 @@ _ENGINE_VOICES = {
     "kokoro": _kokoro_voices_html,
     "sopro": _sopro_voices_html,
     "pocket": _pocket_voices_html,
-    "vibevoice": _vibevoice_voices_html,
 }
 """Which engine draws which voice library, delivery block and clone surface."""
 
@@ -3857,11 +3527,10 @@ _DELIVERY_NOTES = {
     "kokoro": _kokoro_delivery_note,
     "sopro": _sopro_delivery_note,
     "pocket": _pocket_delivery_note,
-    "vibevoice": _vibevoice_delivery_note,
 }
 """Which engine owns which of the delivery controls, said in its own words.
 
-Correctness rather than decoration (section 37): the same labels mean
-different things on each engine, and the paragraph that told a PocketTTS user
+Correctness rather than decoration (section 37): the same five labels mean
+different things on three engines, and the paragraph that told a PocketTTS user
 Kokoro exposes speed was wrong about every sentence in it.
 """

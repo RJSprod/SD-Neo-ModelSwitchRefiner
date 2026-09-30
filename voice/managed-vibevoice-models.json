@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "version": 3,
+  "version": 2,
   "pinned": false,
-  "notes": "PARTIALLY PINNED. The runtime closure is resolved: every PyPI wheel is named, sized and hashed from pypi.org for windows-x86_64-cp313-cu128, solved from the package's own declarations for CPython 3.13 on Windows x86-64, and tools/pin_vibevoice_models.py refuses a closure whose pins contradict one another. It includes bitsandbytes 0.48.2, which quantises the 7B's language model to 8-bit or 4-bit NF4 and whose one Windows wheel carries libbitsandbytes_cuda128.dll with code for sm_86 and sm_120, and peft 0.17.1, which loads LoRA adapters, pinned exactly because peft declares transformers unversioned while 0.18.0 does not import under 4.51.3. HASHED as well: the runtime overlay, five files of Microsoft's own repository (https://github.com/microsoft/VibeVoice) at commit 1541f590c709 -- the Realtime model's configuration, model, generation and processor, which the wheel does not have, and a configuration module its own copy is a subset of -- sized and hashed from raw.githubusercontent.com at that commit and written over the unpacked package (runtime.overlay says why for each), so the runtime's closure is the wheels plus exactly those bytes, and the Realtime 0.5B's 25 preset voices, the .pt voice prompts in demo/voices/streaming_model at the same commit, sized and hashed the same way (Microsoft withholds the code that makes a voice prompt from a recording, so these are the only voices that model has). torch is NOT a PyPI wheel here: the CUDA 12.8 build lives only on download.pytorch.org, so the platform carries a versioned resolve entry (torch 2.8.0) that the installer answers against the publisher's own index page at install time, taking the cp313 win_amd64 wheel of exactly that version and the SHA-256 the index states, and the machine that wrote this could not reach download.pytorch.org, so no digest is recorded here yet: `python tools/pin_vibevoice_models.py --torch` on one that can turns the index's word into a committed constant. 2.8.0 is the line both of the user's cards share (sm_86 and sm_120 in one cu128 wheel since 2.7) and the nearest release to the community package's own era; the 2.9 and 2.10 cu128 lines also ship cp313 Windows wheels and moving to one is a review decision, not a default. No torchaudio: nothing imports it. The models are DECLARED BUT NOT HASHED -- VibeVoice 7B (aoi-ot/VibeVoice-Large, with vibevoice/VibeVoice-7B as fallback), its shards, listed from model.safetensors.index.json at install time, and its Qwen/Qwen2.5-7B tokenizer; VibeVoice Realtime 0.5B (microsoft/VibeVoice-Realtime-0.5B), its weights file (model.safetensors, or the shards an index names if one is published), and its Qwen/Qwen2.5-0.5B tokenizer. The repositories, paths and revisions are written down, and every file is checked against the digest its publisher states over HTTPS (x-linked-etag) and recorded in voice/managed-vibevoice-models.local.json, because the machine that wrote this could not reach huggingface.co. Neither community mirror of the 7B ships a tokenizer, and the Realtime model's own processor fetches one too, so each model's four Qwen tokenizer files are declared beside it and installed into a directory whose name contains 'qwen', which is how the processor picks its tokenizer class. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher that changed its mind. `python tools/pin_vibevoice_models.py --model` on a machine that can reach the hub records the sizes, the digests and the weights list of every model and turns the first claim into the second. Not installed, on purpose: gradio, aiortc, av, ml-collections and absl-py (the demo and its server); librosa and soundfile (imported lazily, only to read an audio file from a path and to write one, neither of which the worker does -- it is handed PCM over its pipe and answers with WAV bytes it encodes itself); numba, llvmlite and scipy (librosa's); torchaudio; and httpx (declared by diffusers 0.36 and later, imported only by its pipeline loaders, which vibevoice never touches). runtime.excluded records each reason. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
+  "notes": "PARTIALLY PINNED. The runtime closure is resolved: every PyPI wheel is named, sized and hashed from pypi.org for windows-x86_64-cp313-cu128, solved from the package's own declarations for CPython 3.13 on Windows x86-64, and tools/pin_vibevoice_models.py refuses a closure whose pins contradict one another. torch is NOT a PyPI wheel here: the CUDA 12.8 build lives only on download.pytorch.org, so the platform carries a versioned resolve entry (torch 2.8.0) that the installer answers against the publisher's own index page at install time, taking the cp313 win_amd64 wheel of exactly that version and the SHA-256 the index states, and the machine that wrote this could not reach download.pytorch.org, so no digest is recorded here yet: `python tools/pin_vibevoice_models.py --torch` on one that can turns the index's word into a committed constant. 2.8.0 is the line both of the user's cards share (sm_86 and sm_120 in one cu128 wheel since 2.7) and the nearest release to the community package's own era; the 2.9 and 2.10 cu128 lines also ship cp313 Windows wheels and moving to one is a review decision, not a default. No torchaudio: nothing imports it. The model, its shards and the tokenizer are DECLARED BUT NOT HASHED. The repositories, paths and revisions are written down; the shard list is read from model.safetensors.index.json at install time; and every file is checked against the digest its publisher states over HTTPS (x-linked-etag) and recorded in voice/managed-vibevoice-models.local.json, because the machine that wrote this could not reach huggingface.co. Neither community mirror ships a tokenizer, so the four Qwen2.5-7B tokenizer files are declared beside the model and installed into a directory whose name contains 'qwen', which is how the processor picks its tokenizer class. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher that changed its mind. `python tools/pin_vibevoice_models.py --model` on a machine that can reach the hub records the sizes, the digests and the shard list and turns the first claim into the second. Not installed, on purpose: gradio, aiortc, av, ml-collections and absl-py (the demo and its server); librosa and soundfile (imported lazily, only to read an audio file from a path and to write one, neither of which the worker does -- it is handed PCM over its pipe and answers with WAV bytes it encodes itself); numba, llvmlite and scipy (librosa's); torchaudio; and httpx (declared by diffusers 0.36 and later, imported only by its pipeline loaders, which vibevoice never touches). runtime.excluded records each reason. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
   "runtime": {
     "package": "vibevoice",
     "import_name": "vibevoice",
@@ -59,20 +59,6 @@
             "url": "https://files.pythonhosted.org/packages/3f/3f/7469c46e9d22307ea686bab687d70e6bf328722952f9d10339f5e913e608/diffusers-0.39.0-py3-none-any.whl",
             "bytes": 5631176,
             "sha256": "912aca51b5787365110806e984d5555735bf8a461073bb8459029d0bca7870ef"
-          },
-          {
-            "filename": "bitsandbytes-0.48.2-py3-none-win_amd64.whl",
-            "local_name": "bitsandbytes-0.48.2-py3-none-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/17/2d/309b3ba276d1fe5f3db4fb5e0a6926d10654656cdbfe49881aa95f4cfcc2/bitsandbytes-0.48.2-py3-none-win_amd64.whl",
-            "bytes": 58992447,
-            "sha256": "a048c285eb6ff53a8d189880e9dfa421d2bfb54e8cab263311757cf5b742d865"
-          },
-          {
-            "filename": "peft-0.17.1-py3-none-any.whl",
-            "local_name": "peft-0.17.1-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/49/fe/a2da1627aa9cb6310b6034598363bd26ac301c4a99d21f415b1b2855891e/peft-0.17.1-py3-none-any.whl",
-            "bytes": 504896,
-            "sha256": "3d129d64def3d74779c32a080d2567e5f7b674e77d546e3585138216d903f99e"
           },
           {
             "filename": "certifi-2026.7.22-py3-none-any.whl",
@@ -296,16 +282,6 @@
         "pure"
       ],
       [
-        "bitsandbytes",
-        "0.48.2",
-        "windows"
-      ],
-      [
-        "peft",
-        "0.17.1",
-        "pure"
-      ],
-      [
         "certifi",
         "2026.7.22",
         "pure"
@@ -455,64 +431,7 @@
       "torchaudio": "imported nowhere in the package; the pair-pinning trap the pipeline's cu128 entry has is not copied",
       "httpx": "declared by diffusers 0.36 and later and imported in exactly two of its files, both pipeline loaders (diffusers/pipelines/pipeline_utils.py and pipeline_loading_utils.py), to classify hub download errors; vibevoice imports diffusers.configuration_utils, diffusers.utils and diffusers.schedulers.scheduling_utils, none of which reaches them, and the worker never loads a diffusers pipeline. Read against the 0.39.0 wheel",
       "hf-xet": "huggingface-hub declares it behind a marker that spells the machine \"amd64\" in lower case while Windows reports \"AMD64\", so pip does not install it there either; it accelerates downloads the worker never makes"
-    },
-    "overlay": [
-      {
-        "path": "vibevoice/modular/configuration_vibevoice.py",
-        "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/vibevoice/modular/configuration_vibevoice.py",
-        "bytes": 16434,
-        "sha256": "bcf59d8749405d5d25436923444436f6719cb9b2b403941a8a5e46f5b94873d0",
-        "source": {
-          "repository": "https://github.com/microsoft/VibeVoice",
-          "commit": "1541f590c7099820f10ea012f48d2399282df69f"
-        },
-        "why": "replaces the wheel's own copy with Microsoft's: the same four configuration classes, VibeVoiceConfig gaining get_text_config() (its decoder configuration) and a to_dict() that writes a torch dtype as a string, plus _convert_dtype_to_string, which the streaming configuration imports, and a speech-recognition configuration nothing here uses"
-      },
-      {
-        "path": "vibevoice/modular/configuration_vibevoice_streaming.py",
-        "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/vibevoice/modular/configuration_vibevoice_streaming.py",
-        "bytes": 4667,
-        "sha256": "1b4417ea2ffe5b42a58d1ee6b3c9508bc253930c2d55f8ec1f10916e36b8029e",
-        "source": {
-          "repository": "https://github.com/microsoft/VibeVoice",
-          "commit": "1541f590c7099820f10ea012f48d2399282df69f"
-        },
-        "why": "the Realtime model's configuration, VibeVoiceStreamingConfig; the wheel has none"
-      },
-      {
-        "path": "vibevoice/modular/modeling_vibevoice_streaming.py",
-        "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/vibevoice/modular/modeling_vibevoice_streaming.py",
-        "bytes": 8031,
-        "sha256": "96d402716fe2cc6284c4ad7f8b2309dd8d06d2133681e266387466116e908afb",
-        "source": {
-          "repository": "https://github.com/microsoft/VibeVoice",
-          "commit": "1541f590c7099820f10ea012f48d2399282df69f"
-        },
-        "why": "the Realtime model itself, VibeVoiceStreamingModel; the wheel has none"
-      },
-      {
-        "path": "vibevoice/modular/modeling_vibevoice_streaming_inference.py",
-        "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/vibevoice/modular/modeling_vibevoice_streaming_inference.py",
-        "bytes": 42627,
-        "sha256": "cb5360a62dbf3a836cea763348bc6330c4d7a422fbe572f4abf7b3c7a15bce8b",
-        "source": {
-          "repository": "https://github.com/microsoft/VibeVoice",
-          "commit": "1541f590c7099820f10ea012f48d2399282df69f"
-        },
-        "why": "the Realtime model's generation, VibeVoiceStreamingForConditionalGenerationInference, which streams through the wheel's own AudioStreamer"
-      },
-      {
-        "path": "vibevoice/processor/vibevoice_streaming_processor.py",
-        "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/vibevoice/processor/vibevoice_streaming_processor.py",
-        "bytes": 18620,
-        "sha256": "41ff57a7da668db9099c395ab7bbee9b2cd7aa0c2f8f0b0c214768c051aa5a53",
-        "source": {
-          "repository": "https://github.com/microsoft/VibeVoice",
-          "commit": "1541f590c7099820f10ea012f48d2399282df69f"
-        },
-        "why": "the Realtime model's processor, VibeVoiceStreamingProcessor, which reads a preset voice prompt (process_input_with_cached_prompt) instead of a recording"
-      }
-    ]
+    }
   },
   "defaults": {
     "model": "vibevoice-7b"
@@ -520,7 +439,6 @@
   "models": {
     "vibevoice-7b": {
       "label": "VibeVoice 7B",
-      "kind": "longform",
       "repo": "aoi-ot/VibeVoice-Large",
       "mirrors": [
         "vibevoice/VibeVoice-7B"
@@ -528,7 +446,7 @@
       "revision": "main",
       "license": "MIT",
       "attribution": "VibeVoice-Large (7B, 9.34 B parameters, bf16) by Microsoft Research, MIT. Withdrawn from Hugging Face by Microsoft on 2025-09-04 and preserved by community mirrors under the same licence: aoi-ot/VibeVoice-Large, with vibevoice/VibeVoice-7B as the fallback mirror. Using a third-party mirror is a trust decision the user made explicitly (docs/23-voice-box.md section 3), made safe the way every artifact here is: checked against a digest.",
-      "summary": "Long-form, multi-speaker speech from a script, up to four voices cloned from short samples. 18.7 GB of bf16 weights on an NVIDIA card; 8-bit and 4-bit NF4 hold its language model in less, and LoRA adapters tune it.",
+      "summary": "Long-form, multi-speaker speech from a script, up to four voices cloned from short samples. 18.7 GB of bf16 weights on an NVIDIA card.",
       "notes": "Downloaded once and then read from disk. The safetensors index is fetched first and the shards it names are downloaded in its order, so the list of weight files is the model's own statement rather than a table somebody transcribed. The processor configuration the worker loads is written by the installer (preprocessor_config.json) from the mirror's own document, kept beside it as preprocessor_config.upstream.json when the mirror shipped one, with language_model_pretrained_name pointing at the local tokenizer directory -- the one field that would otherwise send the processor to the hub for Qwen/Qwen2.5-1.5B. The worker runs with HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE set.",
       "sample_rate": 24000,
       "files": [
@@ -597,417 +515,12 @@
         "weights_bytes": 18700000000,
         "working_bytes": 2147483648,
         "ram_bytes": 3221225472,
-        "tokenizer_bytes": 11000000,
-        "weights_by_precision": {
-          "bf16": 18700000000,
-          "int8": 11500000000,
-          "nf4": 7500000000
-        },
-        "weights_note": "bf16 is the model card's figure until the shards are pinned; int8 and nf4 are first estimates (only the language model is quantised), and a render's measured peak replaces any of them"
+        "tokenizer_bytes": 11000000
       },
       "local_config": {
         "processor_class": "VibeVoiceProcessor",
         "speech_tok_compress_ratio": 3200,
         "db_normalize": true
-      },
-      "defaults": {
-        "steps": 10,
-        "cfg_scale": 1.3
-      },
-      "precisions": [
-        "bf16",
-        "int8",
-        "nf4"
-      ],
-      "lora": true,
-      "max_speakers": 4
-    },
-    "vibevoice-realtime-0.5b": {
-      "label": "VibeVoice Realtime 0.5B",
-      "kind": "realtime",
-      "repo": "microsoft/VibeVoice-Realtime-0.5B",
-      "mirrors": [],
-      "revision": "main",
-      "license": "MIT",
-      "attribution": "VibeVoice-Realtime-0.5B by Microsoft Research, MIT, published by Microsoft on Hugging Face. Its preset voices are Microsoft's too, committed in demo/voices/streaming_model of its VibeVoice repository under the same licence.",
-      "summary": "Streaming speech with one of Microsoft's preset voices: English, with nine other languages experimental. About 2 GB of weights on an NVIDIA card. It cannot make a voice from a recording.",
-      "notes": "Downloaded once and then read from disk. The installer asks for model.safetensors.index.json first and takes the shards it names when it is published, and the one model.safetensors otherwise (single_weights). Its processor reads language_model_pretrained_name from preprocessor_config.json exactly as the 7B's does, so the installer writes a local preprocessor_config.json naming tokenizer-qwen2.5-0.5b/ (the four Qwen2.5-0.5B tokenizer files) and keeps Microsoft's own beside it as preprocessor_config.upstream.json when it is published. Its voices are the preset voice prompts committed in Microsoft's repository (voices_source), each pinned here by size and SHA-256 and installed into voices/<id>.pt; Microsoft withholds the code that makes a voice prompt from a recording, and nothing here tries. One speaker; English, with German, French, Italian, Japanese, Korean, Dutch, Polish, Portuguese and Spanish experimental; inputs of three words or fewer are unstable, as the model's own documentation says.",
-      "sample_rate": 24000,
-      "files": [
-        {
-          "filename": "config.json",
-          "local_name": "config.json",
-          "url": "https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B/resolve/main/config.json",
-          "bytes": null,
-          "sha256": null
-        },
-        {
-          "filename": "preprocessor_config.json",
-          "local_name": "preprocessor_config.upstream.json",
-          "url": "https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B/resolve/main/preprocessor_config.json",
-          "bytes": null,
-          "sha256": null,
-          "optional": true
-        },
-        {
-          "filename": "model.safetensors.index.json",
-          "local_name": "model.safetensors.index.json",
-          "url": "https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B/resolve/main/model.safetensors.index.json",
-          "bytes": null,
-          "sha256": null,
-          "optional": true
-        }
-      ],
-      "single_weights": {
-        "filename": "model.safetensors",
-        "local_name": "model.safetensors",
-        "url": "https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B/resolve/main/model.safetensors",
-        "bytes": null,
-        "sha256": null
-      },
-      "shards": [],
-      "tokenizer": {
-        "repo": "Qwen/Qwen2.5-0.5B",
-        "revision": "main",
-        "dirname": "tokenizer-qwen2.5-0.5b",
-        "license": "Apache-2.0",
-        "attribution": "Qwen2.5-0.5B tokenizer by the Qwen team, Alibaba Cloud, Apache-2.0. Only the tokenizer files are installed; the language model's weights are VibeVoice's own.",
-        "files": [
-          {
-            "filename": "tokenizer.json",
-            "local_name": "tokenizer.json",
-            "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B/resolve/main/tokenizer.json",
-            "bytes": null,
-            "sha256": null
-          },
-          {
-            "filename": "tokenizer_config.json",
-            "local_name": "tokenizer_config.json",
-            "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B/resolve/main/tokenizer_config.json",
-            "bytes": null,
-            "sha256": null
-          },
-          {
-            "filename": "vocab.json",
-            "local_name": "vocab.json",
-            "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B/resolve/main/vocab.json",
-            "bytes": null,
-            "sha256": null
-          },
-          {
-            "filename": "merges.txt",
-            "local_name": "merges.txt",
-            "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B/resolve/main/merges.txt",
-            "bytes": null,
-            "sha256": null
-          }
-        ]
-      },
-      "voices": [
-        {
-          "id": "en-Carter_man",
-          "name": "Carter",
-          "language": "en",
-          "accent": "",
-          "gender": "man",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/en-Carter_man.pt",
-          "bytes": 4256002,
-          "sha256": "a7bfdf1cd4939c22469bcfc6f427ae9c4467b3df46c2c14303a39c294cfc6897"
-        },
-        {
-          "id": "en-Davis_man",
-          "name": "Davis",
-          "language": "en",
-          "accent": "",
-          "gender": "man",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/en-Davis_man.pt",
-          "bytes": 2471258,
-          "sha256": "67561d63bfa2153616e4c02fd967007c182593fc53738a6ad94bf5f84e8832ac"
-        },
-        {
-          "id": "en-Emma_woman",
-          "name": "Emma",
-          "language": "en",
-          "accent": "",
-          "gender": "woman",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/en-Emma_woman.pt",
-          "bytes": 3343090,
-          "sha256": "75b15c481e0d848991f1789620aa9929c583ec2c5f701f8152362cf74498bbf8"
-        },
-        {
-          "id": "en-Frank_man",
-          "name": "Frank",
-          "language": "en",
-          "accent": "",
-          "gender": "man",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/en-Frank_man.pt",
-          "bytes": 3359578,
-          "sha256": "acaa8f1a4f46a79f8f5660cfb7a3af06ef473389319df7debc07376fdc840e47"
-        },
-        {
-          "id": "en-Grace_woman",
-          "name": "Grace",
-          "language": "en",
-          "accent": "",
-          "gender": "woman",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/en-Grace_woman.pt",
-          "bytes": 2772466,
-          "sha256": "5f0ef02a3f3cace04cf721608b65273879466bb15fe4044e46ec6842190f6bb1"
-        },
-        {
-          "id": "en-Mike_man",
-          "name": "Mike",
-          "language": "en",
-          "accent": "",
-          "gender": "man",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/en-Mike_man.pt",
-          "bytes": 2016234,
-          "sha256": "afb64b580fbc6fab09af04572bbbd2b3906ff8ed35a28731a90b8681e47bdc89"
-        },
-        {
-          "id": "in-Samuel_man",
-          "name": "Samuel",
-          "language": "en",
-          "accent": "in",
-          "gender": "man",
-          "experimental": false,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/in-Samuel_man.pt",
-          "bytes": 3782658,
-          "sha256": "b6ec5e8cde4006aa3f26fde0422124f3296f83f5738b5b4506268855a305cb06"
-        },
-        {
-          "id": "de-Spk0_man",
-          "name": "Speaker 0",
-          "language": "de",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/de-Spk0_man.pt",
-          "bytes": 7039666,
-          "sha256": "ba2c3e06c52ca02a851326d8a354188c8cafe4543c717d8beb8b64fe3466913a"
-        },
-        {
-          "id": "de-Spk1_woman",
-          "name": "Speaker 1",
-          "language": "de",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/de-Spk1_woman.pt",
-          "bytes": 5290778,
-          "sha256": "11b4fa505f7d636af7047632793fe639b1e826d46fc6c00d64dacdcf0805ad72"
-        },
-        {
-          "id": "fr-Spk0_man",
-          "name": "Speaker 0",
-          "language": "fr",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/fr-Spk0_man.pt",
-          "bytes": 4386482,
-          "sha256": "64f12314f9df2348f0fd6cdbee9efb0f1ebfc286034560e207be5efc4108a368"
-        },
-        {
-          "id": "fr-Spk1_woman",
-          "name": "Speaker 1",
-          "language": "fr",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/fr-Spk1_woman.pt",
-          "bytes": 4272170,
-          "sha256": "b1425e8b7fab2fb03d400ca23d672ca96dbbb6b7b000e52332117f2fece33077"
-        },
-        {
-          "id": "it-Spk0_woman",
-          "name": "Speaker 0",
-          "language": "it",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/it-Spk0_woman.pt",
-          "bytes": 2552026,
-          "sha256": "1a838184c0304802c696bac887d15a8143539fbb0b5371fe53de66059a010f3d"
-        },
-        {
-          "id": "it-Spk1_man",
-          "name": "Speaker 1",
-          "language": "it",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/it-Spk1_man.pt",
-          "bytes": 2854514,
-          "sha256": "349ce0d28e93ea8b1df55800527f3a8ba8a55bb9e88990841db1bc9ee424519a"
-        },
-        {
-          "id": "jp-Spk0_man",
-          "name": "Speaker 0",
-          "language": "jp",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/jp-Spk0_man.pt",
-          "bytes": 4668234,
-          "sha256": "4881286aa2fe14e65a800d64a7ae7cd0a7ccda53ff6de88a8d6590980c20e16d"
-        },
-        {
-          "id": "jp-Spk1_woman",
-          "name": "Speaker 1",
-          "language": "jp",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/jp-Spk1_woman.pt",
-          "bytes": 4637994,
-          "sha256": "d7a3f5ca602912152c483516bc0198ea13765affd6fbf16fc1bed5e91e1cbbda"
-        },
-        {
-          "id": "kr-Spk0_woman",
-          "name": "Speaker 0",
-          "language": "kr",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/kr-Spk0_woman.pt",
-          "bytes": 4154002,
-          "sha256": "c6d15b8d66f8c271655d000b5923cb33a9b564bf84484a82b10431dc1a2fafef"
-        },
-        {
-          "id": "kr-Spk1_man",
-          "name": "Speaker 1",
-          "language": "kr",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/kr-Spk1_man.pt",
-          "bytes": 5865138,
-          "sha256": "65514854c7ffc7080aba964cf40811822358b19397132ddaf9b3cdb168c394f3"
-        },
-        {
-          "id": "nl-Spk0_man",
-          "name": "Speaker 0",
-          "language": "nl",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/nl-Spk0_man.pt",
-          "bytes": 3704498,
-          "sha256": "70e9221ed11737e2b32af3ccfebb673bd1122f9f9ea8d357efd91e9f3b8e8f72"
-        },
-        {
-          "id": "nl-Spk1_woman",
-          "name": "Speaker 1",
-          "language": "nl",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/nl-Spk1_woman.pt",
-          "bytes": 5095874,
-          "sha256": "76bfd3c13bb9d61760f6146c4eadc032e9d19ddecd4eed6832bc323a8cb5e8c5"
-        },
-        {
-          "id": "pl-Spk0_man",
-          "name": "Speaker 0",
-          "language": "pl",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/pl-Spk0_man.pt",
-          "bytes": 3750522,
-          "sha256": "6c06a9e251ab08ade328dfe16e01eb6f5ddc4ba9c66695a73e3aae8a919396bd"
-        },
-        {
-          "id": "pl-Spk1_woman",
-          "name": "Speaker 1",
-          "language": "pl",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/pl-Spk1_woman.pt",
-          "bytes": 4978626,
-          "sha256": "4a30782a49635f0e60247529b4557cd39713fd158ce2f99bea2ac506bffe7427"
-        },
-        {
-          "id": "pt-Spk0_woman",
-          "name": "Speaker 0",
-          "language": "pt",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/pt-Spk0_woman.pt",
-          "bytes": 2268290,
-          "sha256": "40f3a231e011f9c5e1eb4e852599751ce749439edceb36d0fa2bca952387f5a9"
-        },
-        {
-          "id": "pt-Spk1_man",
-          "name": "Speaker 1",
-          "language": "pt",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/pt-Spk1_man.pt",
-          "bytes": 3554890,
-          "sha256": "06a0052170a4ae5217931eb84318a6f86279439b536ad9780c724526d84148e5"
-        },
-        {
-          "id": "sp-Spk0_woman",
-          "name": "Speaker 0",
-          "language": "sp",
-          "accent": "",
-          "gender": "woman",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/sp-Spk0_woman.pt",
-          "bytes": 4243906,
-          "sha256": "a8b2c54cfe9b46a711642a96cdcc49545140374ae769cc62cf89c593c38b13c0"
-        },
-        {
-          "id": "sp-Spk1_man",
-          "name": "Speaker 1",
-          "language": "sp",
-          "accent": "",
-          "gender": "man",
-          "experimental": true,
-          "url": "https://raw.githubusercontent.com/microsoft/VibeVoice/1541f590c7099820f10ea012f48d2399282df69f/demo/voices/streaming_model/sp-Spk1_man.pt",
-          "bytes": 5130522,
-          "sha256": "9857e3c03334b1934d34dd3aed8b36cb1e6a09367e99c9e164cd3cd8f091edcb"
-        }
-      ],
-      "estimates": {
-        "weights_bytes": 2000000000,
-        "working_bytes": 1073741824,
-        "ram_bytes": 2147483648,
-        "tokenizer_bytes": 11000000,
-        "weights_by_precision": {
-          "bf16": 2000000000
-        },
-        "weights_note": "approximate until pinned: about 2 GB, the model card's scale for 0.5B parameters with its acoustic decoder and diffusion head; tools/pin_vibevoice_models.py --model records the file's real size, and a render's measured peak replaces the whole estimate"
-      },
-      "defaults": {
-        "steps": 5,
-        "cfg_scale": 1.5
-      },
-      "precisions": [
-        "bf16"
-      ],
-      "lora": false,
-      "max_speakers": 1,
-      "local_config": {
-        "processor_class": "VibeVoiceStreamingProcessor",
-        "speech_tok_compress_ratio": 3200,
-        "db_normalize": true
-      },
-      "voices_source": {
-        "repository": "https://github.com/microsoft/VibeVoice",
-        "commit": "1541f590c7099820f10ea012f48d2399282df69f",
-        "path": "demo/voices/streaming_model"
       }
     }
   }

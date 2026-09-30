@@ -3459,47 +3459,6 @@ class TestACharacterHasItsOwnVoice:
         assert loaded.voice_profiles["sopro"]["speed"] == 0.9
         assert loaded.voices["kokoro"] == "kokoro:official:af_nicole"
 
-    def test_a_save_on_any_engine_keeps_every_other_engines_voice(self, characters):
-        """The list of fields a Save carries forward lived in the panel and never
-        gained PocketTTS's six: every Save dropped a character's Pocket voice and
-        delivery, whichever engine was selected. It is the character format's
-        own list now, VibeVoice's fields included."""
-        from prompt_master.chat.characters import Character
-
-        characters.save(Character(name="Ada", sopro_voice="sopro:clone:abc",
-                                  pocket_voice="pocket:official:alba", pocket_temperature=0.6,
-                                  vibevoice_voice="vibevoice:preset:en-Carter_man",
-                                  vibevoice_steps=12))
-        mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
-        loaded = characters.load("Ada")
-        assert loaded.voices == {"kokoro": "kokoro:official:af_nicole",
-                                 "sopro": "sopro:clone:abc",
-                                 "pocket": "pocket:official:alba",
-                                 "vibevoice": "vibevoice:preset:en-Carter_man"}
-        assert loaded.voice_profiles["pocket"]["temperature"] == 0.6
-        assert loaded.voice_profiles["vibevoice"] == {"cfg_scale": None, "steps": 12}
-
-    def test_a_vibevoice_voice_is_saved_as_vibevoices_and_kokoros_is_left_alone(
-            self, characters):
-        """With VibeVoice selected, a Save had no VibeVoice fields to write, fell
-        back to Kokoro's and wrote the VibeVoice id over the character's Kokoro
-        voice."""
-        import mc_voice_engines
-        from prompt_master.chat.characters import Character
-
-        characters.save(Character(name="Ada", voice="kokoro:official:af_nicole"))
-        mc_voice_engines.select("vibevoice")
-        mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None,
-            "vibevoice:preset:en-Carter_man", True, 1.8, 12)
-        loaded = characters.load("Ada")
-        assert loaded.voice == "kokoro:official:af_nicole"
-        assert loaded.vibevoice_voice == "vibevoice:preset:en-Carter_man"
-        assert loaded.voice_profiles["vibevoice"] == {"cfg_scale": 1.8, "steps": 12}
-        assert mc_voice_engines.character_voice(loaded, "vibevoice") == \
-            "vibevoice:preset:en-Carter_man"
-
     def test_two_characters_can_have_two_voices(self, characters):
         from prompt_master.chat.characters import Character
 

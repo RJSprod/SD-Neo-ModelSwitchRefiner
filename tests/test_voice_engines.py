@@ -215,49 +215,6 @@ class TestCharacterState:
         assert engines.character_profile(found, "sopro") == {}
 
 
-    def test_vibevoice_reads_its_own_fields_and_survives_the_file(self):
-        """The fourth engine on the same rule: its voice and its two numbers in
-        fields of their own, written only when they hold something."""
-        from prompt_master.chat.characters import Character
-
-        found = Character(name="Ada", voice="kokoro:official:af_heart",
-                          vibevoice_voice="vibevoice:sample:0123abcd", vibevoice_steps=12)
-        assert engines.character_voice(found, "vibevoice") == "vibevoice:sample:0123abcd"
-        assert engines.character_profile(found, "vibevoice") == {"cfg_scale": None,
-                                                                 "steps": 12}
-        assert engines.character_voice(found, "kokoro") == "kokoro:official:af_heart"
-        written = found.to_mapping()
-        assert written["vibevoice_voice"] == "vibevoice:sample:0123abcd"
-        assert written["vibevoice_steps"] == 12 and "vibevoice_cfg_scale" not in written
-        again = Character.from_mapping(written)
-        assert (again.vibevoice_voice, again.vibevoice_cfg_scale, again.vibevoice_steps) == \
-            ("vibevoice:sample:0123abcd", None, 12)
-        assert "vibevoice" not in Character(name="Grace").voices
-        assert Character.voice_fields("vibevoice", "vibevoice:preset:en-Carter_man",
-                                      {"cfg_scale": 1.8}) == {
-            "vibevoice_voice": "vibevoice:preset:en-Carter_man",
-            "vibevoice_cfg_scale": 1.8, "vibevoice_steps": None}
-
-    def test_every_engine_field_of_the_format_is_in_its_list(self):
-        """A Save carries forward every engine's fields it does not edit, from
-        ``characters.VOICE_FIELDS``. That list used to live in the panel and never
-        gained PocketTTS's: each Save dropped a character's Pocket voice. So the
-        tuple is held to the dataclass -- a field for a fifth engine that is not
-        in it fails here, not on somebody's character."""
-        import dataclasses
-
-        from prompt_master.chat.characters import VOICE_FIELDS, Character
-
-        own = {"name", "context", "greeting", "temperature", "top_p", "max_reply_tokens",
-               "seed", "system"}
-        everything = {field.name for field in dataclasses.fields(Character)}
-        assert set(VOICE_FIELDS) == everything - own
-        assert len(VOICE_FIELDS) == len(set(VOICE_FIELDS))
-        for engine in engines.ENGINES:
-            written = Character.voice_fields(engine, "x", {})
-            assert set(written) <= set(VOICE_FIELDS), engine
-
-
 class TestScoping:
     def test_t_eng_1_the_inactive_engine_is_absent_from_a_payload(self, host):
         """Section 5: absent, not collapsed. A stale DOM cannot expose what was
@@ -344,8 +301,7 @@ class TestTheFacade:
     def test_t_pkt_eng_11_every_engine_declares_what_stop_means(self, host):
         """The one capability shared code reads before it promises anything."""
         found = {engine: engines.interrupt_mode(engine) for engine in engines.ENGINES}
-        assert found == {"kokoro": "cancel", "sopro": "cancel", "pocket": "drain_unit",
-                         "vibevoice": "cancel"}
+        assert found == {"kokoro": "cancel", "sopro": "cancel", "pocket": "drain_unit"}
         for engine in engines.ENGINES:
             assert set(engines.capabilities(engine)) == {
                 "clone_preview", "rebuild", "engine_settings", "starter_voices",
