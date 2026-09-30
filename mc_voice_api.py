@@ -198,6 +198,18 @@ explicit that operations with no meaning on another engine are not generalised
 for symmetry.
 """
 
+VIBEVOICE_ROUTE = f"{PREFIX}/vibevoice"
+"""VibeVoice's panel: what is installed, the card, precision and LoRA a reply
+uses, the cards and LoRAs to choose from, and whether a voice can be made from a
+recording here.
+
+Its own, like Pocket's, because nothing else has this shape -- and only a status
+route. VibeVoice is *installed* in the Voice Box tab, which has routes of its
+own for that; its settings go through the engine-neutral
+:data:`ENGINE_SETTINGS_ROUTE`, and its voices, Test, delivery and clone
+transaction through the same generic routes every engine uses.
+"""
+
 PIPELINE_ROUTE = f"{PREFIX}/pipeline"
 PIPELINE_SETTINGS_ROUTE = f"{PREFIX}/pipeline/settings"
 PIPELINE_INSTALL_ROUTE = f"{PREFIX}/pipeline/install"
@@ -265,6 +277,10 @@ already present, so a route that is not in that tuple is a route a UI reload
 never gains.
 """
 
+VIBEVOICE_ROUTES = (VIBEVOICE_ROUTE,)
+"""What the fourth engine added, named for the reason :data:`POCKET_ROUTES` is:
+a route missing from :data:`ROUTES` is one a UI reload never gains."""
+
 PIPELINE_ROUTES = (PIPELINE_ROUTE, PIPELINE_SETTINGS_ROUTE, PIPELINE_INSTALL_ROUTE,
                    COMPONENTS_ROUTE, COMPONENT_ROUTE)
 """What the Voice Pipeline and the components overview added.
@@ -283,7 +299,8 @@ ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFI
           RUNTIME_ROUTE, VOICES_ROUTE, VOICE_DEFAULT_ROUTE, VOICE_TEST_ROUTE,
           VOICE_RENAME_ROUTE, VOICE_DELETE_ROUTE, CLONING_INSTALL_ROUTE,
           CLONING_STATUS_ROUTE, CLONING_START_ROUTE,
-          CLONING_ABORT_ROUTE) + SOPRO_ROUTES + POCKET_ROUTES + PIPELINE_ROUTES
+          CLONING_ABORT_ROUTE) + SOPRO_ROUTES + POCKET_ROUTES + VIBEVOICE_ROUTES \
+    + PIPELINE_ROUTES
 
 TOKEN_HEADER = "x-model-chain-voice"
 
@@ -1213,6 +1230,12 @@ def stream_headers(turn) -> dict:
         # change what stopping this reply costs (I-PKT-10, I-PKT-28).
         "X-Model-Chain-Voice-Interrupt": str(getattr(turn, "interrupt_mode", "")
                                              or "cancel"),
+        # Which engine the turn was frozen onto, for the same reason: what a
+        # silent stream means depends on it. On VibeVoice it is a reply queued
+        # for its turn on a graphics card, on every other engine something
+        # buffering the response, and the page's last status answer may be
+        # minutes old or may never have been asked for.
+        "X-Model-Chain-Voice-Engine": str(getattr(turn, "engine", "") or ""),
         # nginx and several reverse proxies buffer a response whole unless told
         # not to, which would deliver every sample at once at the end -- the
         # exact failure section 40 says must not be silently called streaming.
@@ -1508,6 +1531,14 @@ def unprepared_reason(entry) -> str:
     """
     if not isinstance(entry, dict) or entry.get("compatible", True):
         return ""
+    # An engine that knows better than the sentences below why a voice of its
+    # own cannot speak says so on the entry, privately. VibeVoice prepares
+    # nothing per precision -- a preset waits for its model to be installed, a
+    # sample for the 7B -- so "rebuild it" or "put the precision back" would be
+    # advice about controls that engine does not have.
+    own = str(entry.get("_unprepared") or "").strip()
+    if own:
+        return own
     name = str(entry.get("display_name") or "That voice")
     if entry.get("official"):
         return (f"{name} is not installed for the speech model now selected. Install the "
@@ -2066,6 +2097,8 @@ def _engine_payload(active: str) -> dict:
         return {"sopro": sopro_payload()}
     if active == engines.POCKET:
         return {"pocket": pocket_payload()}
+    if active == engines.VIBEVOICE:
+        return {"vibevoice": vibevoice_payload()}
     return {}
 
 
@@ -2166,6 +2199,52 @@ def pocket_install(part: str = "", folder: str = "") -> dict:
     except pocket.PocketError as exc:
         raise Refused(409, str(exc)) from None
     return pocket_payload()
+
+
+# --------------------------------------------------------------------------- #
+# VibeVoice
+# --------------------------------------------------------------------------- #
+
+
+def vibevoice_payload() -> dict:
+    """Everything the VibeVoice panel draws. Refused when it is not the selected engine.
+
+    Refused rather than returned empty, for the reason Pocket's is: an empty
+    answer reads as "VibeVoice has nothing", and a mismatch is "this page is out
+    of date", which is what it is.
+
+    What is installed is the installer's to say -- the runtime, each model, the
+    Realtime model's presets -- and installing happens in the Voice Box tab, so
+    there is no install route here. The rest is the panel's: the card, precision
+    and LoRA a reply uses and what each may be, the cards with their roles, the
+    LoRA library, the warnings, and whether a voice can be made from a recording.
+    Nothing here asks for a card or starts a worker.
+    """
+    import mc_voice_engines as engines
+    import mc_voice_vibevoice_chat as vibevoice_chat
+
+    _active(engines.VIBEVOICE)
+    found = vibevoice_chat.public_status()
+    progress = {}
+    try:
+        import mc_voice_vibevoice as vibevoice
+
+        progress = dict(vibevoice.progress() or {})
+    except Exception:
+        logger.debug("Model Chain: VibeVoice's install progress could not be read",
+                     exc_info=True)
+    return {
+        **dict(found.get("block") or {}),
+        "ok": True,
+        "engine": engines.VIBEVOICE,
+        "engine_label": engines.label(engines.VIBEVOICE),
+        "installed": bool(found.get("ready")),
+        "message": str(found.get("message") or ""),
+        "engine_busy": bool(found.get("engine_busy")),
+        "interrupt_mode": str(found.get("interrupt_mode") or "cancel"),
+        "clone": _clone_hints(engines.VIBEVOICE),
+        "progress": progress,
+    }
 
 
 def credential(action: str = "", token: str = "") -> dict:
@@ -3243,6 +3322,9 @@ def install(_demo=None, app=None) -> bool:
     pocket_status_route = _json_route(
         POCKET_ROUTE, lambda _payload: pocket_payload(),
         "PocketTTS's status could not be read.")
+    vibevoice_status_route = _json_route(
+        VIBEVOICE_ROUTE, lambda _payload: vibevoice_payload(),
+        "VibeVoice's status could not be read.")
     credential_route = _json_route(
         CREDENTIAL_ROUTE,
         lambda payload: credential(str(payload.get("action") or ""),
@@ -3566,6 +3648,7 @@ def install(_demo=None, app=None) -> bool:
                               (CLONE_REBUILD_ROUTE, clone_rebuild_route),
                               (POCKET_ROUTE, pocket_status_route),
                               (POCKET_INSTALL_ROUTE, pocket_install_route),
+                              (VIBEVOICE_ROUTE, vibevoice_status_route),
                               (CREDENTIAL_ROUTE, credential_route)):
             if path not in existing:
                 app.add_api_route(path, handler, methods=["POST"])

@@ -14,7 +14,14 @@ half of the card contract the worker cannot assert on its own:
         seconds and never during a render, because the turns read it every
         hundred milliseconds;
     a worker that dies mid-render is a sentence and a reset, not a hang;
-    the crash-loop guard and the shutdown door.
+    the crash-loop guard and the shutdown door;
+    a load that names its identity -- model, precision, LoRA, strength --
+        resolved through the installer before anything starts, with the
+        settings filling only what the caller left to them, and ``loaded``
+        saying what is on the card;
+    a streamed render whose frames reach ``on_audio`` in order on the reader
+        thread, all of them before ``render`` returns, and whose ``False``
+        cancels the render rather than deadlocking the reader.
 
 Nothing here imports Torch or vibevoice. The installer module the runtime
 reaches for lazily (``mc_voice_vibevoice``) is stood in by a namespace, so
@@ -63,7 +70,8 @@ CARD = os.environ.get("CUDA_VISIBLE_DEVICES", "")
 LENGTH = struct.Struct(">I")
 LOCK = threading.Lock()
 STATE = {"loaded": False, "job": "", "cancel": None, "resident": 0, "peak": 0,
-         "model_dir": "", "loads": 0}
+         "model_dir": "", "loads": 0, "identity": None, "kind": "", "precision": "",
+         "lora_dir": ""}
 
 
 def read_frame(stream):
@@ -161,31 +169,48 @@ def main():
                                  "rendering": bool(STATE["job"]), "job": STATE["job"],
                                  "resident_bytes": STATE["resident"],
                                  "peak_bytes": STATE["peak"],
-                                 "model_dir": STATE["model_dir"]})
+                                 "model_dir": STATE["model_dir"],
+                                 "kind": STATE["kind"], "precision": STATE["precision"],
+                                 "lora": bool(STATE["lora_dir"])})
             continue
         if operation == "load":
             fails = PLAN.get("load_fails")
+            if header.get("lora_dir") and PLAN.get("load_fails_with_lora"):
+                # The worker unloads before it joins a LoRA, so a LoRA that
+                # does not fit leaves nothing loaded.
+                STATE["loaded"] = False
+                STATE["identity"] = None
+                fails = PLAN["load_fails_with_lora"]
             if fails:
                 write_frame(stdout, {"id": rid, "ok": False, "error": fails,
                                      "refusal": " " in fails})
                 continue
             time.sleep(float(PLAN.get("load_seconds", 0)))
+            identity = [header.get(name) for name in ("model_dir", "kind", "precision",
+                                                      "lora_dir", "lora_scale", "device")]
+            already = STATE["loaded"] and identity == STATE["identity"]
             STATE["loaded"] = True
+            STATE["identity"] = identity
             STATE["resident"] = int(PLAN.get("resident_bytes", 18000000000))
             STATE["model_dir"] = header.get("model_dir", "")
+            STATE["kind"] = header.get("kind") or "longform"
+            STATE["precision"] = header.get("precision") or header.get("dtype") or "bf16"
+            STATE["lora_dir"] = header.get("lora_dir") or ""
             STATE["loads"] += 1
             mark("load_log", json.dumps(header))
             write_frame(stdout, {"id": rid, "ok": True, "resident_bytes": STATE["resident"],
                                  "weights_bytes": 17900000000, "load_seconds": 0.5,
-                                 "already_loaded": STATE["loads"] > 1})
+                                 "already_loaded": already})
             continue
         if operation == "unload":
             STATE["loaded"] = False
+            STATE["identity"] = None
             STATE["resident"] = int(PLAN.get("empty_bytes", 400000000))
             STATE["model_dir"] = ""
             write_frame(stdout, {"id": rid, "ok": True, "resident_bytes": STATE["resident"]})
             continue
         if operation == "cancel":
+            mark("cancel_log", header.get("job") or "-")
             event = STATE["cancel"]
             wanted = header.get("job") or ""
             ok = event is not None and (not wanted or wanted == STATE["job"])
@@ -210,9 +235,32 @@ def main():
             event = threading.Event()
             STATE["cancel"] = event
 
-            def run(rid=rid, event=event):
+            def run(rid=rid, event=event, stream=header.get("stream") is True):
                 seconds = float(PLAN.get("render_seconds", 0.05))
                 began = time.monotonic()
+                if stream:
+                    # One frame per chunk, PCM16 whose first sample is the
+                    # frame's own number, then a reply with no WAV.
+                    sent = 0
+                    for number in range(int(PLAN.get("stream_frames", 4))):
+                        if event.is_set():
+                            break
+                        time.sleep(float(PLAN.get("frame_gap", 0.01)))
+                        sent += 1
+                        write_frame(stdout, {"id": rid, "audio": {"seq": sent, "samples": 2400,
+                                                                  "rate": 24000}},
+                                    struct.pack("<h", sent) * 2400)
+                    mark("streamed_log", str(sent))
+                    STATE["peak"] = int(PLAN.get("peak_bytes", 20000000000))
+                    reply = {"id": rid, "ok": True, "seconds": sent * 2400 / 24000.0,
+                             "sample_rate": 24000, "render_seconds": time.monotonic() - began,
+                             "peak_bytes": STATE["peak"], "resident_bytes": STATE["resident"],
+                             "cancelled": event.is_set(), "tokens": sent, "capped": False,
+                             "streamed": True, "first_audio_ms": 9, "frames": sent}
+                    STATE["job"] = ""
+                    STATE["cancel"] = None
+                    write_frame(stdout, reply)
+                    return
                 while time.monotonic() - began < seconds:
                     if event.is_set():
                         break
@@ -222,6 +270,10 @@ def main():
                 if PLAN.get("never_answers_render"):
                     while True:
                         time.sleep(0.05)
+                if PLAN.get("stray_frame"):
+                    # A frame for this request that is neither progress, audio
+                    # nor the reply: a newer worker's notice, say.
+                    write_frame(stdout, {"id": rid, "notice": "something new"})
                 STATE["peak"] = int(PLAN.get("peak_bytes", 20000000000))
                 audio_seconds = 0.5 if event.is_set() else 1.0
                 reply = {"id": rid, "ok": True, "seconds": audio_seconds,
@@ -266,17 +318,40 @@ def job_for(identifier="job-1", **values):
     return runtime.RenderJob(**found)
 
 
+MODEL_7B = "vibevoice-7b"
+MODEL_REALTIME = "vibevoice-realtime-0.5b"
+
+MODELS = {
+    MODEL_7B: {"id": MODEL_7B, "label": "VibeVoice 7B", "kind": "longform",
+               "precisions": ["bf16", "int8", "nf4"], "lora": True, "max_speakers": 4,
+               "voices": "samples", "defaults": {"steps": 10, "cfg_scale": 1.3}},
+    MODEL_REALTIME: {"id": MODEL_REALTIME, "label": "VibeVoice Realtime 0.5B",
+                     "kind": "realtime", "precisions": ["bf16"], "lora": False,
+                     "max_speakers": 1, "voices": "presets",
+                     "defaults": {"steps": 5, "cfg_scale": 1.5}},
+}
+"""The two models as the installer's ``model_info`` describes them (the
+contract's names; the installer is stood in, so these tests do not depend on
+its manifest)."""
+
+
+class InstallerError(RuntimeError):
+    """The installer's ``VibeVoiceError``: a sentence for the user."""
+
+
 class Stub:
     """The stood-in installer module and the fake worker's plan, per test."""
 
     def __init__(self, root: Path, plan: dict, settings: dict, peaks: list, refusal: list,
-                 module):
+                 module, asked: list, loras: dict):
         self.root = root
         self.plan = plan
         self.settings = settings
         self.peaks = peaks
         self.refusal = refusal
         self.module = module
+        self.asked = asked
+        self.loras = loras
 
     def lines(self, name: str) -> list:
         path = Path(self.plan[name])
@@ -299,6 +374,12 @@ class Stub:
     def inits(self) -> list:
         return [json.loads(line) for line in self.lines("init_log")]
 
+    def cancels(self) -> list:
+        return self.lines("cancel_log")
+
+    def streamed(self) -> list:
+        return [int(line) for line in self.lines("streamed_log")]
+
 
 @pytest.fixture
 def stub(tmp_path, monkeypatch):
@@ -306,28 +387,53 @@ def stub(tmp_path, monkeypatch):
     script.write_text(FAKE_VIBEVOICE_WORKER, encoding="utf-8")
     model = tmp_path / "model"
     model.mkdir()
+    realtime = tmp_path / "realtime"
+    realtime.mkdir()
     plan = {name: str(tmp_path / f"{name}.txt")
             for name in ("alive_marker", "status_marker", "render_log", "render_requests",
-                         "load_log", "init_log")}
-    settings = {"card_uuid": CARD, "model_id": "vibevoice-7b", "steps": 10,
-                "cfg_scale": 1.3, "seed": None, "max_new_tokens": None, "keep_warm": True}
+                         "load_log", "init_log", "cancel_log", "streamed_log")}
+    settings = {"card_uuid": CARD, "model_id": MODEL_7B, "steps": 10,
+                "cfg_scale": 1.3, "seed": None, "max_new_tokens": None, "keep_warm": True,
+                "precision": "bf16", "lora_id": "", "lora_scale": 1.0}
     peaks = []
     refusal = [""]
+    asked = []
+    loras = {"warm-lora": str(tmp_path / "loras" / "warm-lora")}
+
+    def model_info(identifier=""):
+        name = identifier or settings["model_id"]
+        if name not in MODELS:
+            raise InstallerError(f"{name!r} is not a VibeVoice model this build has recorded.")
+        return dict(MODELS[name])
+
+    def lora_dir(identifier):
+        if identifier not in loras:
+            raise InstallerError("That LoRA is not in the library.")
+        return Path(loras[identifier])
+
+    def refuse(manual=False, model_id=""):
+        asked.append(model_id)
+        return refusal[0]
+
     module = types.SimpleNamespace(
-        GUEST="VibeVoice", LABEL="VibeVoice", MODEL_DEFAULT="vibevoice-7b",
+        GUEST="VibeVoice", LABEL="VibeVoice", MODEL_DEFAULT=MODEL_7B, MODEL_7B=MODEL_7B,
+        MODEL_REALTIME=MODEL_REALTIME, VibeVoiceError=InstallerError,
         runtime_python=lambda: Path(sys.executable),
         worker_environment=lambda card: {"MC_FAKE_VIBEVOICE": json.dumps(plan),
                                          "CUDA_VISIBLE_DEVICES": str(card)},
         worker_script=lambda: script,
-        model_dir=lambda identifier="": model,
+        model_dir=lambda identifier="": realtime if identifier == MODEL_REALTIME else model,
+        model_info=model_info,
+        voices_dir=lambda identifier=MODEL_REALTIME: realtime / "voices",
+        lora_dir=lora_dir,
         settings=lambda: dict(settings),
-        note_peak=lambda identifier, peak_bytes, rss_bytes=0:
-        peaks.append((identifier, int(peak_bytes), int(rss_bytes))),
-        refusal=lambda manual=False: refusal[0])
+        note_peak=lambda identifier, peak_bytes, rss_bytes=0, precision="":
+        peaks.append((identifier, int(peak_bytes), int(rss_bytes), precision)),
+        refusal=refuse)
     monkeypatch.setitem(sys.modules, "mc_voice_vibevoice", module)
     monkeypatch.setattr(runtime, "STOP_GRACE", 3.0)
     monkeypatch.setattr(runtime, "TERMINATE_GRACE", 1.5)
-    found = Stub(tmp_path, plan, settings, peaks, refusal, module)
+    found = Stub(tmp_path, plan, settings, peaks, refusal, module, asked, loras)
     yield found
     runtime.stop("", "test finished")
     with runtime._table_lock:
@@ -675,7 +781,7 @@ class TestLoadingAndRendering:
         runtime.load(CARD)
         assert runtime.peak_observed(CARD) == 0
         runtime.render(CARD, job_for())
-        assert stub.peaks == [("vibevoice-7b", 20_000_000_000, 0)]
+        assert stub.peaks == [("vibevoice-7b", 20_000_000_000, 0, "bf16")]
         assert runtime.peak_observed(CARD) == 20_000_000_000
         assert runtime.status()["cards"][CARD_KEY]["peak_bytes"] == 20_000_000_000
 
@@ -786,6 +892,270 @@ class TestEvictionGivesTheCardBack:
         runtime.render(CARD, job_for())
         assert runtime.resident_bytes(CARD) == 18_000_000_000
         assert stub.status_ops() == 0
+
+
+# --------------------------------------------------------------------------- #
+# A load names its identity
+# --------------------------------------------------------------------------- #
+
+
+class TestALoadNamesItsIdentity:
+    def test_no_arguments_take_the_whole_identity_from_the_settings(self, stub):
+        stub.settings.update({"precision": "int8", "lora_id": "warm-lora", "lora_scale": 0.6})
+        runtime.load(CARD)
+        header = stub.loads()[0]
+        assert header["model_dir"] == str(stub.root / "model")
+        assert header["kind"] == "longform" and header["precision"] == "int8"
+        assert header["lora_dir"] == stub.loras["warm-lora"] and header["lora_scale"] == 0.6
+        assert header["voices_dir"] == "" and header["device"] == "cuda"
+        assert header["steps"] == 10 and header["attention"] == "sdpa"
+        assert runtime.loaded(CARD) == {"model_id": MODEL_7B, "kind": "longform",
+                                        "precision": "int8", "lora_id": "warm-lora",
+                                        "lora_scale": 0.6}
+
+    def test_a_named_model_and_no_lora_is_no_lora_whatever_the_settings_hold(self, stub):
+        """The render service names its configuration's model and passes an
+        empty LoRA for a configuration without one; the Voice Box settings'
+        LoRA must not ride in on that."""
+        stub.settings.update({"lora_id": "warm-lora", "lora_scale": 0.6})
+        runtime.load(CARD, model_id=MODEL_7B, precision="bf16", lora_id="", lora_scale=1.0)
+        header = stub.loads()[0]
+        assert header["lora_dir"] is None and header["lora_scale"] == 1.0
+        assert runtime.loaded(CARD)["lora_id"] == ""
+
+    def test_an_explicit_identity_is_sent_as_named(self, stub):
+        runtime.load(CARD, model_id=MODEL_7B, precision="nf4", lora_id="warm-lora",
+                     lora_scale=1.5)
+        header = stub.loads()[0]
+        assert (header["precision"], header["lora_dir"], header["lora_scale"]) == \
+            ("nf4", stub.loras["warm-lora"], 1.5)
+        assert runtime.loaded(CARD) == {"model_id": MODEL_7B, "kind": "longform",
+                                        "precision": "nf4", "lora_id": "warm-lora",
+                                        "lora_scale": 1.5}
+
+    def test_the_realtime_model_gets_its_voices_its_steps_and_full_precision(self, stub):
+        stub.settings["precision"] = "int8"
+        runtime.load(CARD, model_id=MODEL_REALTIME)
+        header = stub.loads()[0]
+        assert header["kind"] == "realtime" and header["precision"] == "bf16"
+        assert header["model_dir"] == str(stub.root / "realtime")
+        assert header["voices_dir"] == str(stub.root / "realtime" / "voices")
+        assert header["lora_dir"] is None
+        assert header["steps"] == 5, "its own default: the settings' steps are the 7B's"
+        assert runtime.loaded(CARD)["kind"] == "realtime"
+
+    @pytest.mark.parametrize("values, sentence", [
+        ({"model_id": MODEL_REALTIME, "lora_id": "warm-lora"},
+         "VibeVoice Realtime 0.5B does not take a LoRA."),
+        ({"model_id": MODEL_REALTIME, "precision": "int8"},
+         "VibeVoice Realtime 0.5B does not load at that precision."),
+        ({"model_id": MODEL_7B, "precision": "fp8"},
+         "VibeVoice 7B does not load at that precision."),
+        ({"model_id": MODEL_7B, "lora_id": "warm-lora", "lora_scale": 3.0},
+         "A LoRA's strength is from 0 to 2."),
+        ({"model_id": MODEL_7B, "lora_id": "nobody-made-this"},
+         "That LoRA is not in the library."),
+        ({"model_id": "vibevoice-9000"},
+         "'vibevoice-9000' is not a VibeVoice model this build has recorded."),
+    ])
+    def test_what_the_model_cannot_take_is_refused_before_anything_starts(self, stub, values,
+                                                                           sentence):
+        with pytest.raises(runtime.VibeVoiceRuntimeError) as raised:
+            runtime.load(CARD, **values)
+        assert str(raised.value) == sentence
+        assert stub.pids() == [] and stub.loads() == []
+
+    def test_the_installer_is_asked_about_the_model_being_loaded(self, stub):
+        runtime.load(CARD, model_id=MODEL_REALTIME)
+        assert stub.asked and set(stub.asked) == {MODEL_REALTIME}
+        stub.refusal[0] = "The Realtime model is not installed yet."
+        runtime.evict(CARD, "test")
+        with pytest.raises(runtime.VibeVoiceRuntimeError) as raised:
+            runtime.load(CARD, model_id=MODEL_REALTIME)
+        assert str(raised.value) == "The Realtime model is not installed yet."
+
+    def test_a_worker_already_running_is_still_asked_nothing_for_a_model_not_installed(
+            self, stub):
+        runtime.load(CARD)
+        stub.refusal[0] = "The Realtime model is not installed yet."
+        with pytest.raises(runtime.VibeVoiceRuntimeError):
+            runtime.load(CARD, model_id=MODEL_REALTIME)
+        assert len(stub.loads()) == 1, "the running worker was not sent a load it would fail"
+
+    def test_another_identity_reaches_the_worker_and_loaded_follows_it(self, stub):
+        runtime.load(CARD)
+        runtime.load(CARD, model_id=MODEL_REALTIME)
+        assert [header["kind"] for header in stub.loads()] == ["longform", "realtime"]
+        assert runtime.loaded(CARD)["model_id"] == MODEL_REALTIME
+        assert runtime.status()["cards"][CARD_KEY]["model"]["kind"] == "realtime"
+        assert len(stub.pids()) == 1, "one worker per card, whatever it holds"
+
+    def test_loaded_is_none_whenever_nothing_is_known_to_be_there(self, stub):
+        assert runtime.loaded(CARD) is None
+        runtime.load(CARD)
+        assert runtime.loaded(CARD)["model_id"] == MODEL_7B
+        runtime.unload(CARD, "test")
+        assert runtime.loaded(CARD) is None
+        assert runtime.status()["cards"][CARD_KEY]["model"] is None
+        runtime.load(CARD)
+        runtime.evict(CARD, "test")
+        assert runtime.loaded(CARD) is None
+
+    def test_a_failed_load_forgets_what_was_loaded(self, stub):
+        stub.plan["load_fails_with_lora"] = ("the LoRA's language-model adapter does not fit "
+                                             "this model")
+        runtime.load(CARD)
+        assert runtime.loaded(CARD) is not None
+        with pytest.raises(runtime.VibeVoiceRuntimeError) as raised:
+            runtime.load(CARD, model_id=MODEL_7B, lora_id="warm-lora")
+        assert "does not fit" in str(raised.value)
+        assert runtime.loaded(CARD) is None
+        assert runtime.status()["cards"][CARD_KEY]["loaded"] is False
+
+    def test_a_worker_that_says_it_holds_nothing_clears_what_this_side_thought(self, stub,
+                                                                            monkeypatch):
+        runtime.load(CARD)
+        runtime.unload(CARD, "test")
+        runtime.load(CARD)
+        # The worker's own status reply is the authority on "loaded".
+        monkeypatch.setattr(runtime, "RESIDENT_REFRESH", 0.0)
+        stub.plan["resident_bytes"] = 0
+        record = runtime._live(CARD_KEY)
+        with record.lock:
+            runtime._absorb(record, {"loaded": False, "rendering": False})
+        assert runtime.loaded(CARD) is None
+
+
+# --------------------------------------------------------------------------- #
+# Streamed renders, presets, and what a render is noted as
+# --------------------------------------------------------------------------- #
+
+
+class TestAStreamedRender:
+    def test_frames_reach_on_audio_in_order_on_the_reader_thread(self, stub):
+        runtime.load(CARD)
+        heard = []
+        result = runtime.render(CARD, job_for(),
+                                on_audio=lambda pcm, rate: heard.append(
+                                    (pcm, rate, threading.current_thread().name)))
+        assert [struct.unpack("<h", pcm[:2])[0] for pcm, _rate, _name in heard] == [1, 2, 3, 4]
+        assert all(len(pcm) == 2400 * 2 and rate == RATE for pcm, rate, _name in heard)
+        assert all(name.startswith("mc-vibevoice-reader") for _pcm, _rate, name in heard)
+        assert result.streamed is True and result.wav == b""
+        assert result.first_audio_ms >= 1 and result.cancelled is False
+        assert result.seconds == pytest.approx(4 * 2400 / RATE)
+        assert stub.renders()[0]["header"]["stream"] is True
+
+    def test_the_first_frame_is_timed_from_this_side(self, stub):
+        """What a listener waits: from the request to the first frame here,
+        not the figure the worker reports about itself (9 ms in the fake)."""
+        stub.plan["frame_gap"] = 0.25
+        runtime.load(CARD)
+        result = runtime.render(CARD, job_for(), on_audio=lambda pcm, rate: True)
+        assert result.first_audio_ms >= 250
+
+    def test_every_frame_is_delivered_before_render_returns(self, stub):
+        stub.plan["stream_frames"] = 30
+        stub.plan["frame_gap"] = 0.0
+        runtime.load(CARD)
+        heard = []
+        runtime.render(CARD, job_for(), on_audio=lambda pcm, rate: heard.append(pcm))
+        assert len(heard) == 30
+
+    def test_a_false_return_cancels_the_render_and_stops_delivery(self, stub):
+        stub.plan["stream_frames"] = 200
+        stub.plan["frame_gap"] = 0.02
+        runtime.load(CARD)
+        heard = []
+
+        def on_audio(pcm, rate):
+            heard.append(pcm)
+            return len(heard) < 2
+
+        began = time.monotonic()
+        result = runtime.render(CARD, job_for("spoken"), on_audio=on_audio)
+        assert time.monotonic() - began < 3.0, "not the whole two hundred frames"
+        assert len(heard) == 2, "nothing is delivered after the False"
+        assert result.cancelled is True
+        wait_until(lambda: stub.cancels() == ["spoken"], what="the cancel reaching the worker")
+        assert stub.streamed()[0] < 200
+        assert runtime.rendering(CARD) is False
+
+    def test_an_on_audio_that_raises_is_taken_as_a_refusal(self, stub):
+        stub.plan["stream_frames"] = 200
+        stub.plan["frame_gap"] = 0.02
+        runtime.load(CARD)
+        calls = []
+
+        def on_audio(pcm, rate):
+            calls.append(pcm)
+            raise RuntimeError("the turn went away")
+
+        result = runtime.render(CARD, job_for(), on_audio=on_audio)
+        assert len(calls) == 1 and result.cancelled is True
+        wait_until(lambda: stub.cancels() == ["job-1"], what="the cancel reaching the worker")
+
+    def test_a_job_that_streams_with_no_on_audio_gets_its_frames_as_a_wav(self, stub):
+        runtime.load(CARD)
+        result = runtime.render(CARD, job_for(stream=True))
+        assert result.streamed is True and result.wav[:4] == b"RIFF"
+        assert len(result.wav) == 44 + 4 * 2400 * 2
+        assert stub.renders()[0]["header"]["stream"] is True
+
+    def test_a_frame_that_is_not_the_reply_is_never_taken_for_it(self, stub):
+        stub.plan["stray_frame"] = True
+        runtime.load(CARD)
+        result = runtime.render(CARD, job_for())
+        assert result.seconds == 1.0 and result.wav[:4] == b"RIFF" and result.tokens == 42
+
+    def test_a_render_that_does_not_stream_is_as_it_was(self, stub):
+        runtime.load(CARD)
+        result = runtime.render(CARD, job_for())
+        assert result.streamed is False and result.first_audio_ms == 0
+        assert result.wav[:4] == b"RIFF" and result.seconds == 1.0
+        assert stub.renders()[0]["header"]["stream"] is False
+
+    def test_a_clone_preview_is_one_speaker_speaking_with_a_recording(self, stub):
+        """Voice Chat's clone preview renders one line for Speaker 1 with a
+        recording, through exactly the path a Voice Box render takes."""
+        runtime.load(CARD)
+        voice = pcm(1.3)
+        result = runtime.render(CARD, runtime.RenderJob(
+            id="preview", script=[(1, "This is how I sound.")],
+            voices={1: (voice, RATE)}, cfg_scale=1.3, steps=10, seed=None))
+        sent = stub.renders()[0]
+        assert sent["header"]["voices"] == [{"speaker": 1, "offset": 0,
+                                             "count": len(voice) // 4, "rate": RATE}]
+        assert sent["payload_bytes"] == len(voice)
+        assert result.wav[:4] == b"RIFF"
+
+    def test_preset_voices_are_named_and_carry_no_audio(self, stub):
+        runtime.load(CARD, model_id=MODEL_REALTIME)
+        runtime.render(CARD, runtime.RenderJob(
+            id="realtime", script=[(1, "Hello there, how are you today?")],
+            voices={1: {"preset": "en-Carter_man"}}, cfg_scale=None, steps=0))
+        sent = stub.renders()[0]
+        assert sent["header"]["voices"] == [{"speaker": 1, "preset": "en-Carter_man"}]
+        assert sent["payload_bytes"] == 0
+        assert sent["header"]["cfg_scale"] is None, "the model's own guidance"
+        assert sent["header"]["steps"] == 0, "the steps it was loaded with"
+
+    def test_a_voice_that_is_neither_a_recording_nor_a_preset_is_refused_here(self, stub):
+        runtime.load(CARD)
+        with pytest.raises(runtime.VibeVoiceRuntimeError) as raised:
+            runtime.render(CARD, runtime.RenderJob(id="x", script=[(1, "Hi.")],
+                                                   voices={1: {"sample": "abc"}}))
+        assert "neither a recording nor a preset" in str(raised.value)
+        assert stub.renders() == [] and runtime.rendering(CARD) is False
+
+    def test_the_peak_is_noted_for_the_model_and_precision_that_are_loaded(self, stub):
+        runtime.load(CARD, model_id=MODEL_7B, precision="nf4")
+        runtime.render(CARD, job_for())
+        runtime.load(CARD, model_id=MODEL_REALTIME)
+        runtime.render(CARD, runtime.RenderJob(id="r", script=[(1, "Hello there, friend.")],
+                                               voices={1: {"preset": "en-Carter_man"}}))
+        assert stub.peaks == [(MODEL_7B, 20_000_000_000, 0, "nf4"),
+                              (MODEL_REALTIME, 20_000_000_000, 0, "bf16")]
 
 
 # --------------------------------------------------------------------------- #

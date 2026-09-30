@@ -121,9 +121,12 @@ class FakeRuntime:
         self.fail = None
         self.cancel_on_render = False
         self.hold = None
+        self.identities: list = []
 
-    def load(self, card):
+    def load(self, card, *, model_id="", precision="", lora_id="", lora_scale=1.0):
         self.loaded.append(card)
+        self.identities.append({"model_id": model_id, "precision": precision,
+                                "lora_id": lora_id, "lora_scale": lora_scale})
         return {"resident_bytes": 18 * _GB}
 
     def render(self, card, job, on_progress=None):
@@ -148,26 +151,87 @@ class FakeRuntime:
         return None
 
 
+MODEL_7B = "vibevoice-7b"
+MODEL_REALTIME = "vibevoice-realtime-0.5b"
+PRESETS = [{"id": "en-Carter_man", "name": "Carter", "language": "en",
+            "language_label": "English", "gender": "man", "experimental": False,
+            "installed": True},
+           {"id": "de-Spk0_man", "name": "Spk0", "language": "de", "language_label": "German",
+            "gender": "man", "experimental": True, "installed": True}]
+
+
+class VibeVoiceError(RuntimeError):
+    pass
+
+
 class FakeEngine:
     LABEL = "VibeVoice 7B"
     GUEST = "VibeVoice"
+    MODEL_DEFAULT = MODEL_7B
+    VibeVoiceError = VibeVoiceError
 
     def __init__(self):
         self.refused = ""
+        self.refused_for: list = []
         self.peaks: list = []
         self.values = {"steps": 10, "cfg_scale": 1.3, "seed": None, "max_new_tokens": None}
+        self.library = {"0123456789abcdef": {"id": "0123456789abcdef", "name": "Narrator",
+                                             "base": MODEL_7B, "bytes": 1024,
+                                             "parts": ["llm"], "created": 1.0}}
+        self.installed: list = []
 
-    def refusal(self, manual=False):
+    def model_info(self, identifier=""):
+        if identifier == MODEL_REALTIME:
+            return {"id": MODEL_REALTIME, "label": "VibeVoice Realtime 0.5B",
+                    "kind": "realtime", "installed": True, "precisions": ["bf16"],
+                    "lora": False, "max_speakers": 1, "voices": "presets",
+                    "defaults": {"steps": 5, "cfg_scale": 1.5}, "presets": list(PRESETS)}
+        if identifier not in ("", MODEL_7B):
+            raise VibeVoiceError("That model is not one this build has.")
+        return {"id": MODEL_7B, "label": "VibeVoice 7B", "kind": "longform",
+                "installed": True, "precisions": ["bf16", "int8", "nf4"], "lora": True,
+                "max_speakers": 4, "voices": "samples",
+                "defaults": {"steps": 10, "cfg_scale": 1.3}, "presets": []}
+
+    def models_info(self):
+        return [self.model_info(MODEL_7B), self.model_info(MODEL_REALTIME)]
+
+    def loras(self):
+        return list(self.library.values())
+
+    def add_lora(self, folder, name=""):
+        if "bad" in folder:
+            raise VibeVoiceError("That folder holds no LoRA adapter for the language model.")
+        entry = {"id": "fedcba9876543210", "name": name or "Added", "base": MODEL_7B,
+                 "bytes": 2048, "parts": ["llm"], "created": 2.0}
+        self.library[entry["id"]] = entry
+        return entry
+
+    def rename_lora(self, identifier, name):
+        if identifier not in self.library:
+            raise VibeVoiceError("That LoRA is no longer in the library.")
+        self.library[identifier]["name"] = name
+        return self.library[identifier]
+
+    def delete_lora(self, identifier):
+        if identifier not in self.library:
+            raise VibeVoiceError("That LoRA is no longer in the library.")
+        return {"deleted": self.library.pop(identifier)["id"]}
+
+    def refusal(self, manual=False, model_id=""):
+        self.refused_for.append(model_id)
         return self.refused
 
-    def need_vram_bytes(self, identifier=""):
-        return 20 * _GB
+    def need_vram_bytes(self, identifier="", precision=""):
+        if identifier == MODEL_REALTIME:
+            return 3 * _GB
+        return {"int8": 13, "nf4": 9}.get(precision, 20) * _GB
 
-    def need_ram_bytes(self, identifier=""):
+    def need_ram_bytes(self, identifier="", precision=""):
         return 3 * _GB
 
-    def note_peak(self, identifier, peak_bytes, rss_bytes=0):
-        self.peaks.append((identifier, peak_bytes))
+    def note_peak(self, identifier, peak_bytes, rss_bytes=0, precision=""):
+        self.peaks.append((identifier, peak_bytes, precision))
 
     def settings(self):
         return dict(self.values)
@@ -182,10 +246,12 @@ class FakeEngine:
     def progress(self):
         return {}
 
-    def install(self, part=""):
+    def install(self, part="", model_id=""):
+        self.installed.append((part, model_id))
         return None
 
-    def install_from(self, part, folder):
+    def install_from(self, part, folder, model_id=""):
+        self.installed.append((part, folder, model_id))
         return None
 
 
@@ -517,8 +583,10 @@ class TestRendering:
         assert entry["render"]["sections"] == 2 and entry["render"]["peak_bytes"] == 19 * _GB
         assert [s["title"] for s in entry["render"]["speakers"]] == ["Ada", "Brook"]
         assert box.pipeline(ready["pipeline"]["id"])["outputs"] == [entry["id"]]
-        assert engine.peaks == [("vibevoice-7b", 19 * _GB)]
-        assert engine.values["model_id"] == "vibevoice-7b", "the engine loads what it is told"
+        assert engine.peaks == [], "the runtime notes every render's peak itself; a second note " \
+                                   "from the Voice Box counted each render twice"
+        assert runtime.identities == [{"model_id": "vibevoice-7b", "precision": "bf16",
+                                       "lora_id": "", "lora_scale": 1.0}]
         assert box.prompts()["history"][0]["text"].startswith("Speaker 1: Hi.")
         assert job["progress"]["sections"] == 2
 
@@ -647,6 +715,136 @@ class TestRendering:
         assert settled(second["id"])["phase"] == "cancelled"
         assert runtime.cancelled == [f"{first['id']}:1"]
         assert runtime.loaded == [CARD], "the queued job never asked for the card"
+
+
+class TestModelsPrecisionAndLoRA:
+    """Phase 4 in a configuration: which model, how its weights are held, which
+    fine-tune on top, and -- for the Realtime model -- which of its own voices."""
+
+    def test_a_configuration_keeps_the_precision_and_the_lora_the_model_takes(self, engine):
+        found = box.save_configuration({"model_id": MODEL_7B, "precision": "nf4",
+                                        "lora_id": "0123456789abcdef", "lora_scale": 0.75})
+        assert (found["precision"], found["lora_id"], found["lora_scale"]) == \
+            ("nf4", "0123456789abcdef", 0.75)
+
+        for bad, words in (({"precision": "fp8"}, "cannot run at that precision"),
+                           ({"lora_id": "ffffffffffffffff"}, "no longer in the library"),
+                           ({"lora_scale": 2.5}, "strength"),
+                           ({"model_id": "vibevoice-9b"}, "not one this Voice Box knows")):
+            with pytest.raises(box.VoiceBoxError, match=words):
+                box.save_configuration(dict(bad, id=found["id"]))
+
+    def test_the_realtime_model_takes_neither_a_precision_nor_a_lora(self, engine):
+        with pytest.raises(box.VoiceBoxError, match="cannot run at that precision"):
+            box.save_configuration({"model_id": MODEL_REALTIME, "precision": "nf4"})
+        with pytest.raises(box.VoiceBoxError, match="does not take a LoRA"):
+            box.save_configuration({"model_id": MODEL_REALTIME,
+                                    "lora_id": "0123456789abcdef"})
+
+    def test_speaker_slots_follow_the_model(self, engine):
+        sample = box.add_sample(spoken(), "Ada")
+        mixed = {"1": "preset:en-Carter_man", "2": sample["id"], "3": "preset:nope"}
+
+        realtime = box.save_configuration({"model_id": MODEL_REALTIME, "speakers": mixed})
+        longform = box.save_configuration({"model_id": MODEL_7B, "speakers": mixed})
+
+        assert realtime["speakers"] == {"1": "preset:en-Carter_man"}
+        assert longform["speakers"] == {"2": sample["id"]}
+        unknown = box.save_configuration({"model_id": MODEL_REALTIME,
+                                          "speakers": {"1": "preset:en-Nobody_man"}})
+        assert unknown["speakers"] == {}, "a preset the model does not have is dropped"
+
+    def test_a_realtime_render_speaks_with_its_preset_and_asks_for_its_own_room(
+            self, turns, runtime, engine):
+        owner = box.new_pipeline("Realtime")
+        chosen = box.save_configuration({"model_id": MODEL_REALTIME, "card_uuid": CARD,
+                                         "steps": 5, "cfg_scale": 1.5,
+                                         "speakers": {"1": "preset:en-Carter_man"}})
+        found = box.render(owner["id"], "Hello there.\n[pause]\nAnd again.", chosen["id"])
+
+        job = settled(found["id"])
+        assert job["phase"] == "done", job
+        assert turns.requests[0]["need_vram"] == 3 * _GB
+        assert runtime.identities[0]["model_id"] == MODEL_REALTIME
+        assert [request.voices for request in runtime.renders] == [
+            {1: {"preset": "en-Carter_man"}}, {1: {"preset": "en-Carter_man"}}]
+        meta = box.output(job["output_id"])["render"]
+        assert meta["model"] == "VibeVoice Realtime 0.5B"
+        assert meta["speakers"] == [{"n": 1, "sample_id": "", "title": "Carter",
+                                     "preset": "en-Carter_man"}]
+        assert engine.refused_for[-1] == MODEL_REALTIME
+
+    def test_a_realtime_script_with_two_speakers_is_refused_before_any_card(
+            self, turns, runtime, engine):
+        owner = box.new_pipeline("Realtime")
+        chosen = box.save_configuration({"model_id": MODEL_REALTIME, "card_uuid": CARD,
+                                         "speakers": {"1": "preset:en-Carter_man"}})
+        with pytest.raises(box.VoiceBoxError, match="speaks with one voice.*Speaker 2"):
+            box.render(owner["id"], "Speaker 1: Hi.\nSpeaker 2: Hello.", chosen["id"])
+        empty = box.save_configuration({"model_id": MODEL_REALTIME, "card_uuid": CARD})
+        with pytest.raises(box.VoiceBoxError, match="Choose a voice for Speaker 1"):
+            box.render(owner["id"], "Hi there, friend.", empty["id"])
+        assert turns.requests == []
+
+    def test_a_quantised_render_with_a_lora_loads_that_identity_and_sizes_its_turn(
+            self, turns, runtime, engine):
+        sample = box.add_sample(spoken(), "Ada")
+        owner = box.new_pipeline("Quantised")
+        chosen = box.save_configuration({"model_id": MODEL_7B, "card_uuid": CARD,
+                                         "precision": "nf4", "lora_id": "0123456789abcdef",
+                                         "lora_scale": 0.5, "speakers": {"1": sample["id"]}})
+        job = settled(box.render(owner["id"], "Speaker 1: Hello.", chosen["id"])["id"])
+
+        assert job["phase"] == "done"
+        assert turns.requests[0]["need_vram"] == 9 * _GB
+        assert runtime.identities == [{"model_id": MODEL_7B, "precision": "nf4",
+                                       "lora_id": "0123456789abcdef", "lora_scale": 0.5}]
+        meta = box.output(job["output_id"])["render"]
+        assert meta["precision"] == "nf4"
+        assert meta["lora"] == {"id": "0123456789abcdef", "name": "Narrator", "scale": 0.5}
+        assert meta["peak_bytes"] == 19 * _GB and engine.peaks == []
+
+    def test_deleting_a_lora_takes_it_out_of_the_configurations_that_used_it(self, engine):
+        using = box.save_configuration({"name": "With", "model_id": MODEL_7B, "precision": "int8",
+                                        "lora_id": "0123456789abcdef", "lora_scale": 0.5})
+        added = engine.add_lora("C:/loras/warm", "Warm")
+        other = box.save_configuration({"name": "Another", "model_id": MODEL_7B,
+                                        "lora_id": added["id"], "lora_scale": 1.5})
+        engine.delete_lora("0123456789abcdef")
+        with pytest.raises(box.VoiceBoxError, match="no longer in the library"):
+            box.save_configuration({"id": using["id"], "name": "With"})
+
+        assert box.forget_lora("0123456789abcdef") == [using["id"]]
+
+        kept = box.configuration(using["id"])
+        assert (kept["lora_id"], kept["lora_scale"], kept["precision"]) == ("", 1.0, "int8")
+        assert box.configuration(other["id"]) == other
+        assert box.save_configuration({"id": using["id"], "name": "With"})["lora_id"] == ""
+        assert box.forget_lora("") == []
+
+    def test_an_engine_that_cannot_describe_its_models_renders_as_before(self, turns, runtime):
+        """A configuration saved before models could be described: the 7B's shape."""
+        class Plain:
+            LABEL = "VibeVoice"
+
+            def refusal(self, manual=False):
+                return ""
+
+            def need_vram_bytes(self, identifier="", precision=""):
+                return 20 * _GB
+
+            def need_ram_bytes(self, identifier="", precision=""):
+                return 3 * _GB
+
+            def note_peak(self, *args):
+                pass
+
+        box.use_engine(Plain())
+        sample = box.add_sample(spoken(), "Ada")
+        owner = box.new_pipeline("Plain")
+        chosen = box.save_configuration({"card_uuid": CARD, "speakers": {"1": sample["id"]}})
+        assert chosen["precision"] == "bf16" and chosen["lora_id"] == ""
+        assert settled(box.render(owner["id"], "Hi there.", chosen["id"])["id"])["phase"] == "done"
 
 
 class TestSound:

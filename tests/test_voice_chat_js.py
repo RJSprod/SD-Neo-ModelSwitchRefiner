@@ -4455,6 +4455,54 @@ class TestTheReferenceWindowBelongsToTheEngine:
         assert float(found["trimEnd"]) == 20.0, found["trimEnd"]
 
 
+class TestTheRecorderStopsAtThisEnginesCeiling:
+    """The clone recorder stops itself at the top of the engine's own window.
+
+    It stopped at Sopro's twenty seconds, plus one, whichever engine the form
+    belonged to -- so VibeVoice, which clones from up to a minute, could never
+    be given more than twenty-one seconds from the microphone, while its form
+    said sixty. The window is the one the server sends as the engine's clone
+    hints, the same one the trimmer already reads.
+    """
+
+    @staticmethod
+    def _answers(maximum):
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        payload = dict(answers["voice/voices"]["json"])
+        payload["clone"] = {"min_seconds": 3, "max_seconds": maximum, "ideal_seconds": 10}
+        answers["voice/voices"] = {"json": payload}
+        return json.dumps(answers)
+
+    def record_for(self, maximum, seconds):
+        """Whether the microphone is still open ``seconds`` into a recording.
+
+        Read off the track, which is what matters -- a microphone left open is
+        the failure the bound exists for -- and not off the button, which in
+        this harness is the same element as the recording note."""
+        found = run("""
+            await tick();
+            await tick();
+            cloneParts.record.fire("click");
+            await tick(4);
+            const opened = tracks.length;
+            feed(new Array(8000).fill(0.2));
+            NOW += SECONDS * 1000;
+            await tick(8);
+            console.log(JSON.stringify(report({opened})));
+        """.replace("SECONDS", str(seconds)), VOICES_PRESENT="true", VOICES_VISIBLE="true",
+                   ANSWERS=self._answers(maximum))
+        assert found["opened"] >= 1, "the recorder never opened the microphone"
+        return not all(found["tracks"])
+
+    def test_a_minute_long_window_is_still_recording_at_thirty_seconds(self):
+        assert self.record_for(60, 30) is True
+
+    def test_it_stops_itself_at_the_top_of_the_window(self):
+        assert self.record_for(60, 62) is False
+        assert self.record_for(20, 22) is False
+        assert self.record_for(20, 19) is True
+
+
 class TestSlidingTheSelectionAlongTheWaveform:
     """The gesture that was missing, and why it was the annoying part.
 

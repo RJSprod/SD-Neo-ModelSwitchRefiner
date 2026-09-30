@@ -10,12 +10,26 @@ produced from what every publisher declares about every other package and then
 written down in full, where a reviewer can read it.
 
     python tools/pin_vibevoice_models.py --check          # report, change nothing
-    python tools/pin_vibevoice_models.py                  # solve and pin the wheels from pypi.org
+    python tools/pin_vibevoice_models.py                  # solve and pin the wheels from pypi.org,
+                                                          #   and the overlay and the preset voices
+                                                          #   from raw.githubusercontent.com
     python tools/pin_vibevoice_models.py --keep-closure   # re-pin the triples already written
-    python tools/pin_vibevoice_models.py --model          # also size and hash the model, its shards
-                                                          #   and the tokenizer from huggingface.co
+    python tools/pin_vibevoice_models.py --model          # also size and hash every model, its
+                                                          #   weights and its tokenizer from
+                                                          #   huggingface.co
     python tools/pin_vibevoice_models.py --torch          # also record the digest of the torch
                                                           #   wheel from download.pytorch.org
+
+The overlay and the preset voices
+---------------------------------
+The runtime is the community wheel plus five files of Microsoft's own repository
+at one commit (:data:`OVERLAY`), and the Realtime model's voices are the preset
+voice prompts committed at that same commit (:data:`PRESETS`). Both are served by
+raw.githubusercontent.com, which states no digest of its own, so every run
+downloads each file and hashes what arrived; a file whose bytes no longer match
+the digest already checked in is a refusal, exactly as a re-uploaded wheel is.
+The commit pins the content -- a raw URL at a commit is immutable -- and the
+digest is what makes that a claim this repository can check.
 
 Exit codes: 0 when the manifest is complete, 1 when something is still
 unresolved (the model unhashed, the torch digest unrecorded, or a ``--check``
@@ -72,6 +86,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import re
 import sys
@@ -104,6 +119,67 @@ installed and self-tested on it, not when a wheel exists for it.
 """
 
 MODEL_ID = "vibevoice-7b"
+MODEL_REALTIME = "vibevoice-realtime-0.5b"
+
+VIBEVOICE_REPOSITORY = "https://github.com/microsoft/VibeVoice"
+VIBEVOICE_COMMIT = "1541f590c7099820f10ea012f48d2399282df69f"
+RAW_URL = "https://raw.githubusercontent.com/microsoft/VibeVoice/{commit}/{path}"
+
+OVERLAY = (
+    ("vibevoice/modular/configuration_vibevoice.py",
+     "replaces the wheel's own copy with Microsoft's: the same four configuration classes, "
+     "VibeVoiceConfig gaining get_text_config() (its decoder configuration) and a to_dict() "
+     "that writes a torch dtype as a string, plus _convert_dtype_to_string, which the "
+     "streaming configuration imports, and a speech-recognition configuration nothing here "
+     "uses"),
+    ("vibevoice/modular/configuration_vibevoice_streaming.py",
+     "the Realtime model's configuration, VibeVoiceStreamingConfig; the wheel has none"),
+    ("vibevoice/modular/modeling_vibevoice_streaming.py",
+     "the Realtime model itself, VibeVoiceStreamingModel; the wheel has none"),
+    ("vibevoice/modular/modeling_vibevoice_streaming_inference.py",
+     "the Realtime model's generation, VibeVoiceStreamingForConditionalGenerationInference, "
+     "which streams through the wheel's own AudioStreamer"),
+    ("vibevoice/processor/vibevoice_streaming_processor.py",
+     "the Realtime model's processor, VibeVoiceStreamingProcessor, which reads a preset voice "
+     "prompt (process_input_with_cached_prompt) instead of a recording"),
+)
+"""The five files of Microsoft's repository written over the unpacked wheel.
+
+Read against both sides at the commit: the wheel (vibevoice 0.0.1) has the
+long-form code and no streaming model, Microsoft's repository has the streaming
+model and no long-form code, and every module they share is the same code apart
+from cosmetics -- except ``configuration_vibevoice.py``, where Microsoft's is a
+superset the streaming configuration imports from, and so replaces the wheel's.
+"""
+
+PRESET_LANGUAGES = {"en": "", "in": "en", "de": "", "fr": "", "it": "", "jp": "", "kr": "",
+                    "nl": "", "pl": "", "pt": "", "sp": ""}
+"""A preset file's prefix, and the language it speaks when that is not the prefix.
+
+``in-Samuel`` is English with an Indian accent: it was released with the six
+English voices in the commit that added the Realtime model, carries a speaker's
+name as they do, and ``in`` is not among the nine experimental languages the
+model's documentation names -- German, French, Italian, Japanese, Korean, Dutch,
+Polish, Portuguese and Spanish, whose files are ``Spk0``/``Spk1`` and arrived in a
+later commit."""
+
+PRESETS = (
+    "en-Carter_man", "en-Davis_man", "en-Emma_woman", "en-Frank_man", "en-Grace_woman",
+    "en-Mike_man", "in-Samuel_man",
+    "de-Spk0_man", "de-Spk1_woman", "fr-Spk0_man", "fr-Spk1_woman", "it-Spk0_woman",
+    "it-Spk1_man", "jp-Spk0_man", "jp-Spk1_woman", "kr-Spk0_woman", "kr-Spk1_man",
+    "nl-Spk0_man", "nl-Spk1_woman", "pl-Spk0_man", "pl-Spk1_woman", "pt-Spk0_woman",
+    "pt-Spk1_man", "sp-Spk0_woman", "sp-Spk1_man",
+)
+"""The Realtime model's preset voices at :data:`VIBEVOICE_COMMIT`, English first.
+
+Every ``.pt`` file in ``demo/voices/streaming_model/`` there, read from a clone
+of that commit (``git ls-files``) because the listing cannot be fetched from
+raw.githubusercontent.com. More voices exist behind download links in upstream's
+``download_experimental_voices.sh``; they are archives on github.com, outside
+this commit, and not offered."""
+
+PRESETS_PATH = "demo/voices/streaming_model"
 
 PURE = "pure"
 BINARY = "binary"
@@ -130,6 +206,8 @@ ROOTS = (
     ("transformers", "==4.51.3"),
     ("accelerate", "==1.6.0"),
     ("diffusers", ""),
+    ("bitsandbytes", "==0.48.2"),
+    ("peft", "==0.17.1"),
 )
 """Where the solve starts. Everything else is derived.
 
@@ -139,6 +217,18 @@ transformers 4.56 and later, where ``DynamicCache.key_cache`` was removed); and
 ``diffusers`` unpinned, so the solver takes the newest release whose own
 declaration fits beside transformers 4.51.3's ``huggingface-hub<1.0`` -- 0.39
 at the time of writing, because 0.40 needs huggingface-hub 1.23.
+
+``bitsandbytes`` 0.48.2 quantises the 7B's language model to 8-bit or 4-bit
+NF4. Its one Windows wheel (``py3-none-win_amd64``) carries
+``libbitsandbytes_cuda128.dll`` with code for sm_86 and sm_120, both of the
+user's cards, read out of the downloaded wheel; it asks for torch 2.3 or later.
+
+``peft`` 0.17.1 loads LoRA adapters. Pinned exactly, because what peft declares
+says nothing true about transformers: every release from 0.17.1 to 0.21.1 asks
+for ``transformers`` unversioned, and 0.18.0 does not import under 4.51.3
+(``transformers.modeling_layers`` does not exist there). 0.17.1 is the release
+the worker is exercised against; 0.18.1 to 0.21.1 import and pass a LoRA round
+trip on a small Qwen2 too, and moving to one is a review decision, not a default.
 """
 
 EXCLUDED = {
@@ -847,12 +937,16 @@ def _describe(artifact: dict) -> str:
     return "neither a size nor a digest was published (attested at install time)"
 
 
-def model(entry: dict, say) -> dict:
-    """The model's files, its shards from its own index, and its tokenizer."""
+INDEX = "model.safetensors.index.json"
+
+
+def model(entry: dict, say, identifier: str = MODEL_ID) -> dict:
+    """A model's files, its weights from its own index (or, for a model that
+    publishes none, its one weights file), and its tokenizer."""
     found = dict(entry)
     repo = str(entry.get("repo") or "")
     if not repo:
-        raise PinError(f"{MODEL_ID} names no repo")
+        raise PinError(f"{identifier} names no repo")
     commit, served = repository(repo, str(entry.get("revision") or "main"), say)
     files = []
     for declared in entry.get("files") or ():
@@ -872,15 +966,24 @@ def model(entry: dict, say) -> dict:
             artifact["optional"] = True
         say(f"  {path}: {_describe(artifact)}")
         files.append(artifact)
-    index_url = HUB_RESOLVE.format(repo=repo, revision=commit,
-                                   path="model.safetensors.index.json")
-    status, body = _get(index_url)
-    if status != 200:
-        raise PinError(f"{repo}: the hub answered {status} for the safetensors index")
-    try:
-        names = shards_named(json.loads(body.decode("utf-8", "replace")))
-    except ValueError as exc:
-        raise PinError(f"{repo}: the safetensors index is not JSON ({exc})") from None
+    single = entry.get("single_weights") if isinstance(entry.get("single_weights"),
+                                                       dict) else None
+    single_name = str((single or {}).get("filename") or "")
+    if INDEX in served:
+        index_url = HUB_RESOLVE.format(repo=repo, revision=commit, path=INDEX)
+        status, body = _get(index_url)
+        if status != 200:
+            raise PinError(f"{repo}: the hub answered {status} for the safetensors index")
+        try:
+            names = shards_named(json.loads(body.decode("utf-8", "replace")))
+        except ValueError as exc:
+            raise PinError(f"{repo}: the safetensors index is not JSON ({exc})") from None
+    elif single_name and single_name in served:
+        say(f"  {repo} publishes no {INDEX}; its weights are {single_name}")
+        names = [single_name]
+    else:
+        raise PinError(f"{repo} at {commit[:12]} serves no {INDEX}"
+                       + (f" and no {single_name}" if single_name else ""))
     shards = []
     for name in names:
         if name not in served:
@@ -889,10 +992,12 @@ def model(entry: dict, say) -> dict:
         artifact = hub_artifact(repo, commit, name, name)
         say(f"  {name}: {_describe(artifact)}")
         shards.append(artifact)
+    if single is not None and names == [single_name]:
+        found["single_weights"] = dict(shards[0])
     tokenizer = dict(entry.get("tokenizer") or {})
     token_repo = str(tokenizer.get("repo") or "")
     if not token_repo:
-        raise PinError(f"{MODEL_ID} names no tokenizer repo")
+        raise PinError(f"{identifier} names no tokenizer repo")
     token_commit, token_served = repository(
         token_repo, str(tokenizer.get("revision") or "main"), say)
     token_files = []
@@ -914,7 +1019,110 @@ def model(entry: dict, say) -> dict:
     if sizes and all(sizes):
         estimates = dict(found.get("estimates") or {})
         estimates["weights_bytes"] = sum(sizes)
+        by_precision = dict(estimates.get("weights_by_precision") or {})
+        by_precision["bf16"] = sum(sizes)
+        estimates["weights_by_precision"] = by_precision
         found["estimates"] = estimates
+    return found
+
+
+# --------------------------------------------------------------------------- #
+# Microsoft's repository, at one commit
+# --------------------------------------------------------------------------- #
+
+
+def _read_bytes(url: str, ceiling: int = 64 * 1024 * 1024) -> bytes:
+    """One file from raw.githubusercontent.com, whole. A ceiling, because nothing
+    this tool pins from there is larger than a few megabytes."""
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                   "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
+            body = answer.read(ceiling + 1)
+    except urllib.error.HTTPError as answer:
+        with contextlib.closing(answer):
+            raise PinError(f"{url} answered HTTP {answer.code}") from None
+    except Exception as exc:
+        raise PinError(f"{_host(url)} could not be reached ({exc})") from None
+    if len(body) > ceiling:
+        raise PinError(f"{url} is larger than {ceiling} bytes, which nothing pinned from "
+                       f"there should be")
+    if not body:
+        raise PinError(f"{url} answered with nothing")
+    return body
+
+
+class Raw:
+    """Files of Microsoft's repository, read whole so they can be hashed. Cached,
+    and replaceable by a test, like :class:`PyPI`."""
+
+    def __init__(self, fetch=None):
+        self._fetch = fetch or _read_bytes
+        self._cache = {}
+
+    def fetch(self, url: str) -> bytes:
+        if url not in self._cache:
+            self._cache[url] = bytes(self._fetch(url))
+        return self._cache[url]
+
+
+def raw_url(path: str, commit: str = VIBEVOICE_COMMIT) -> str:
+    return RAW_URL.format(commit=commit, path=urllib.parse.quote(path))
+
+
+def overlay_entries(raw: Raw, say, commit: str = VIBEVOICE_COMMIT) -> list:
+    """:data:`OVERLAY` as manifest entries: each file downloaded, sized and hashed."""
+    found = []
+    for path, why in OVERLAY:
+        url = raw_url(path, commit)
+        body = raw.fetch(url)
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise PinError(f"{path} at {commit[:12]} is not a Python source file") from None
+        digest = hashlib.sha256(body).hexdigest()
+        say(f"  {path}: {len(body)} bytes, sha256 {digest[:12]}")
+        found.append({"path": path, "url": url, "bytes": len(body), "sha256": digest,
+                      "source": {"repository": VIBEVOICE_REPOSITORY, "commit": commit},
+                      "why": why})
+    return found
+
+
+def preset_meta(stem: str) -> dict:
+    """What a preset's file name says: its speaker, language, accent and gender.
+
+    ``en-Carter_man`` is Carter, English, a man; ``de-Spk1_woman`` is the second
+    German speaker, a woman; ``in-Samuel_man`` is Samuel, English with an Indian
+    accent (:data:`PRESET_LANGUAGES`). Every language but English is one the
+    model's own documentation calls experimental.
+    """
+    prefix, _, rest = str(stem).partition("-")
+    speaker, _, gender = rest.rpartition("_")
+    if prefix not in PRESET_LANGUAGES or gender not in ("man", "woman") or not speaker \
+            or not re.fullmatch(r"[A-Za-z0-9]+", speaker):
+        raise PinError(f"{stem!r} is not a preset voice name this tool can read "
+                       f"(<language>-<speaker>_<man|woman>)")
+    language = PRESET_LANGUAGES[prefix] or prefix
+    accent = prefix if PRESET_LANGUAGES[prefix] else ""
+    numbered = re.fullmatch(r"Spk(\d+)", speaker)
+    return {"name": f"Speaker {numbered.group(1)}" if numbered else speaker,
+            "language": language, "accent": accent, "gender": gender,
+            "experimental": language != "en"}
+
+
+def preset_entries(raw: Raw, say, commit: str = VIBEVOICE_COMMIT) -> list:
+    """:data:`PRESETS` as manifest entries: each voice downloaded, sized and hashed."""
+    found = []
+    for stem in PRESETS:
+        meta = preset_meta(stem)
+        url = raw_url(f"{PRESETS_PATH}/{stem}.pt", commit)
+        body = raw.fetch(url)
+        if not body.startswith(b"PK\x03\x04"):
+            raise PinError(f"{stem}.pt at {commit[:12]} is not a torch.save archive (an LFS "
+                           f"pointer or an error page would look like this)")
+        digest = hashlib.sha256(body).hexdigest()
+        say(f"  {stem}.pt: {len(body)} bytes, sha256 {digest[:12]}")
+        found.append({"id": stem, **meta, "url": url, "bytes": len(body), "sha256": digest})
     return found
 
 
@@ -976,30 +1184,61 @@ class State:
     wheels: int = 0
     closure_complete: bool = False
     model_hashed: bool = False
+    """Every model the manifest declares is sized and hashed from the hub."""
     torch_recorded: bool = False
     shards: int = 0
+    overlay_pinned: bool = False
+    presets_pinned: bool = False
+    presets: int = 0
+    models_hashed: dict = field(default_factory=dict)
 
     @property
     def pinned(self) -> bool:
-        return bool(self.closure_complete and self.model_hashed and self.torch_recorded)
+        return bool(self.closure_complete and self.model_hashed and self.torch_recorded
+                    and self.overlay_pinned and self.presets_pinned)
+
+
+_HUB = re.compile(r"^https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$")
+
+
+def _identity(artifact: dict) -> str:
+    """What makes an artifact the same artifact, whatever revision its URL names.
+
+    A hub file is its repository and path -- two models' ``config.json``, or two
+    tokenizers' ``tokenizer.json``, are different files -- an overlay file its
+    path in the package, a preset voice its id, and a wheel its filename.
+    """
+    if artifact.get("path"):
+        return f"overlay:{artifact['path']}"
+    url = str(artifact.get("url") or "")
+    if artifact.get("id") and url.startswith("https://raw.githubusercontent.com/"):
+        return f"voice:{artifact['id']}"
+    found = _HUB.match(url)
+    if found:
+        return f"{found.group(1)}/{urllib.parse.unquote(found.group(3))}"
+    return str(artifact.get("filename") or "")
 
 
 def _committed(existing: dict) -> dict:
-    """Every digest already checked in, by filename. One filename, one digest."""
+    """Every digest already checked in, by identity. One artifact, one digest."""
     found = {}
 
     def keep(entry):
-        if not (isinstance(entry, dict) and entry.get("filename") and entry.get("sha256")):
+        if not (isinstance(entry, dict) and entry.get("sha256")
+                and (entry.get("filename") or entry.get("path") or entry.get("id"))):
             return
-        name, digest = str(entry["filename"]), str(entry["sha256"]).casefold()
+        name, digest = _identity(entry), str(entry["sha256"]).casefold()
         was = found.setdefault(name, digest)
         if was != digest:
             raise PinError(f"the manifest gives {name} two digests, {was} and {digest}. "
                            f"One artifact has one identity, and this tool will not choose.")
 
-    for platform in ((existing.get("runtime") or {}).get("platforms") or ()):
+    runtime = existing.get("runtime") or {}
+    for platform in (runtime.get("platforms") or ()):
         for item in platform.get("artifacts") or ():
             keep(item)
+    for item in runtime.get("overlay") or ():
+        keep(item)
     for entry in (existing.get("models") or {}).values():
         if not isinstance(entry, dict):
             continue
@@ -1009,11 +1248,14 @@ def _committed(existing: dict) -> dict:
             keep(item)
         for item in (entry.get("tokenizer") or {}).get("files") or ():
             keep(item)
+        keep(entry.get("single_weights"))
+        for item in entry.get("voices") or ():
+            keep(item)
     return found
 
 
 def _agree(state: State, committed: dict, artifact: dict, where: str) -> None:
-    name = str(artifact.get("filename") or "")
+    name = _identity(artifact)
     fresh = str(artifact.get("sha256") or "").casefold()
     was = committed.get(name, "")
     if was and fresh and was != fresh:
@@ -1038,16 +1280,59 @@ def _model_hashed(entry: dict) -> bool:
             and _hashed((entry.get("tokenizer") or {}).get("files")))
 
 
-def notes_for(state: State, torch: dict, model_entry: dict) -> str:
-    """The manifest's own account of what is and is not pinned. Always current."""
+def _declared_models(models: dict) -> str:
+    """The models still declared-not-hashed, each with its weights and tokenizer."""
+    described = []
+    for identifier, entry in (models or {}).items():
+        if not isinstance(entry, dict) or _model_hashed(entry):
+            continue
+        mirrors = [str(name) for name in (entry.get("mirrors") or ()) if name]
+        weights = ("its weights file (model.safetensors, or the shards an index names if "
+                   "one is published)" if entry.get("single_weights")
+                   else "its shards, listed from model.safetensors.index.json at install time")
+        described.append(
+            f"{entry.get('label') or identifier} ({entry.get('repo') or '?'}"
+            f"{', with ' + ' and '.join(mirrors) + ' as fallback' if mirrors else ''}), "
+            f"{weights}, and its {(entry.get('tokenizer') or {}).get('repo') or 'Qwen'} "
+            f"tokenizer")
+    return "; ".join(described)
+
+
+def notes_for(state: State, torch: dict, models: dict = None) -> str:
+    """The manifest's own account of what is and is not hashed. Always current."""
     version = str(torch.get("version") or "")
+    models = models if isinstance(models, dict) else {}
+    commit = VIBEVOICE_COMMIT[:12]
     closure = ("resolved: every PyPI wheel is named, sized and hashed from pypi.org for "
                f"{PLATFORM_ID}, solved from the package's own declarations for CPython 3.13 "
                "on Windows x86-64, and tools/pin_vibevoice_models.py refuses a closure "
-               "whose pins contradict one another"
+               "whose pins contradict one another. It includes bitsandbytes 0.48.2, which "
+               "quantises the 7B's language model to 8-bit or 4-bit NF4 and whose one Windows "
+               "wheel carries libbitsandbytes_cuda128.dll with code for sm_86 and sm_120, and "
+               "peft 0.17.1, which loads LoRA adapters, pinned exactly because peft declares "
+               "transformers unversioned while 0.18.0 does not import under 4.51.3"
                if state.closure_complete else
                "written down but not yet resolved, so the managed install refuses and says "
                "why")
+    if state.overlay_pinned:
+        overlay = (f"HASHED as well: the runtime overlay, five files of Microsoft's own "
+                   f"repository ({VIBEVOICE_REPOSITORY}) at commit {commit} -- the Realtime "
+                   f"model's configuration, model, generation and processor, which the wheel "
+                   f"does not have, and a configuration module its own copy is a subset of -- "
+                   f"sized and hashed from raw.githubusercontent.com at that commit and written "
+                   f"over the unpacked package (runtime.overlay says why for each), so the "
+                   f"runtime's closure is the wheels plus exactly those bytes")
+    else:
+        overlay = ("NOT YET PINNED: the runtime overlay, so the managed install refuses until "
+                   "this tool has fetched and hashed it")
+    if state.presets_pinned:
+        presets = (f"and the Realtime 0.5B's {state.presets} preset voices, the .pt voice "
+                   f"prompts in {PRESETS_PATH} at the same commit, sized and hashed the same "
+                   f"way (Microsoft withholds the code that makes a voice prompt from a "
+                   f"recording, so these are the only voices that model has)")
+    else:
+        presets = ("and NOT YET PINNED: the Realtime 0.5B's preset voices, which the install "
+                   "therefore cannot check")
     if state.torch_recorded:
         torch_text = (f"which this file also records ({str(torch.get('sha256') or '')[:12]}…), "
                       f"so a publisher that changed the wheel is refused")
@@ -1056,21 +1341,25 @@ def notes_for(state: State, torch: dict, model_entry: dict) -> str:
                       "so no digest is recorded here yet: `python tools/pin_vibevoice_models.py "
                       "--torch` on one that can turns the index's word into a committed "
                       "constant")
-    if state.model_hashed:
-        model_text = (f"PINNED: every file, all {state.shards} shards and the four tokenizer "
-                      f"files are sized and hashed from the hub at named commits")
+    declared = _declared_models(models)
+    if state.model_hashed or (models and not declared):
+        model_text = ("PINNED: every model's files, weights and tokenizer are sized and hashed "
+                      "from the hub at named commits")
     else:
-        model_text = ("DECLARED BUT NOT HASHED. The repositories, paths and revisions are "
-                      "written down; the shard list is read from model.safetensors.index.json "
-                      "at install time; and every file is checked against the digest its "
-                      "publisher states over HTTPS (x-linked-etag) and recorded in "
-                      "voice/managed-vibevoice-models.local.json, because the machine that "
-                      "wrote this could not reach huggingface.co. Neither community mirror "
-                      "ships a tokenizer, so the four Qwen2.5-7B tokenizer files are declared "
-                      "beside the model and installed into a directory whose name contains "
-                      "'qwen', which is how the processor picks its tokenizer class")
+        model_text = ("DECLARED BUT NOT HASHED"
+                      + (f" -- {declared}" if declared else "")
+                      + ". The repositories, paths and revisions are written down, and every "
+                        "file is checked against the digest its publisher states over HTTPS "
+                        "(x-linked-etag) and recorded in "
+                        "voice/managed-vibevoice-models.local.json, because the machine that "
+                        "wrote this could not reach huggingface.co. Neither community mirror of "
+                        "the 7B ships a tokenizer, and the Realtime model's own processor fetches "
+                        "one too, so each model's four Qwen tokenizer files are declared beside "
+                        "it and installed into a directory whose name contains 'qwen', which is "
+                        "how the processor picks its tokenizer class")
     return (
         f"{'PINNED' if state.pinned else 'PARTIALLY PINNED'}. The runtime closure is {closure}. "
+        f"{overlay}, {presets}. "
         f"torch is NOT a PyPI wheel here: the CUDA 12.8 build lives only on "
         f"download.pytorch.org, so the platform carries a versioned resolve entry (torch "
         f"{version}) that the installer answers against the publisher's own index page at "
@@ -1079,14 +1368,15 @@ def notes_for(state: State, torch: dict, model_entry: dict) -> str:
         f"cards share (sm_86 and sm_120 in one cu128 wheel since 2.7) and the nearest release "
         f"to the community package's own era; the 2.9 and 2.10 cu128 lines also ship cp313 "
         f"Windows wheels and moving to one is a review decision, not a default. No "
-        f"torchaudio: nothing imports it. The model, its shards and the tokenizer are "
-        f"{model_text}. That is a weaker claim than the closure's and the difference is worth "
+        f"torchaudio: nothing imports it. The models are {model_text}. That is a weaker "
+        f"claim than the closure's and the difference is worth "
         f"stating: an artifact with a digest here is checked against a number this repository "
         f"committed to, and one without is checked against the digest its publisher reports "
         f"at install time. Both refuse a file that arrives wrong; only the first refuses a "
         f"publisher that changed its mind. `python tools/pin_vibevoice_models.py --model` on "
-        f"a machine that can reach the hub records the sizes, the digests and the shard list "
-        f"and turns the first claim into the second. Not installed, on purpose: gradio, "
+        f"a machine that can reach the hub records the sizes, the digests and the weights "
+        f"list of every model and turns the first claim into the second. Not installed, on "
+        f"purpose: gradio, "
         f"aiortc, av, ml-collections and absl-py (the demo and its server); librosa and "
         f"soundfile (imported lazily, only to read an audio file from a path and to write "
         f"one, neither of which the worker does -- it is handed PCM over its pipe and answers "
@@ -1167,30 +1457,58 @@ def build(existing: dict, options, say) -> tuple:
             torch[key] = resolve[key]
     entry["artifacts"] = artifacts + [{"local_name": "torch", "resolve": resolve}]
 
+    say(f"\nPinning the runtime overlay from {VIBEVOICE_REPOSITORY} at "
+        f"{VIBEVOICE_COMMIT[:12]}:")
+    overlay = overlay_entries(options.raw, say)
+    for item in overlay:
+        _agree(state, committed, item, "runtime.overlay")
+    state.overlay_pinned = bool(overlay) and all(
+        len(str(one["sha256"])) == 64 and one["bytes"] > 0 for one in overlay)
+
     runtime["closure"] = rows
     runtime["excluded"] = dict(EXCLUDED)
     runtime["torch"] = torch
     runtime["platforms"] = [entry]
+    runtime["overlay"] = overlay
     found["runtime"] = runtime
 
     models = dict(found.get("models") or {})
-    model_entry = models.get(MODEL_ID)
-    if not isinstance(model_entry, dict):
+    if not isinstance(models.get(MODEL_ID), dict):
         raise PinError(f"the manifest has no model called {MODEL_ID!r}")
+    realtime = models.get(MODEL_REALTIME)
+    if isinstance(realtime, dict):
+        say(f"\nPinning {MODEL_REALTIME}'s preset voices from {PRESETS_PATH}:")
+        voices = preset_entries(options.raw, say)
+        for item in voices:
+            _agree(state, committed, item, MODEL_REALTIME)
+        realtime = dict(realtime)
+        realtime["voices"] = voices
+        realtime["voices_source"] = {"repository": VIBEVOICE_REPOSITORY,
+                                     "commit": VIBEVOICE_COMMIT, "path": PRESETS_PATH}
+        models[MODEL_REALTIME] = realtime
+        state.presets = len(voices)
+        state.presets_pinned = bool(voices) and all(
+            len(str(one["sha256"])) == 64 and one["bytes"] > 0 for one in voices)
     if options.model:
-        say(f"\nResolving {MODEL_ID} from the hub:")
-        model_entry = model(model_entry, say)
-        for item in list(model_entry.get("files") or ()) + list(model_entry.get("shards") or ()):
-            _agree(state, committed, item, MODEL_ID)
-        for item in (model_entry.get("tokenizer") or {}).get("files") or ():
-            _agree(state, committed, item, f"{MODEL_ID}/tokenizer")
-        models[MODEL_ID] = model_entry
-        found["models"] = models
-    state.shards = len(model_entry.get("shards") or ())
-    state.model_hashed = _model_hashed(model_entry)
+        for identifier in list(models):
+            if not isinstance(models[identifier], dict):
+                continue
+            say(f"\nResolving {identifier} from the hub:")
+            pinned_entry = model(models[identifier], say, identifier)
+            for item in (list(pinned_entry.get("files") or ())
+                         + list(pinned_entry.get("shards") or ())):
+                _agree(state, committed, item, identifier)
+            for item in (pinned_entry.get("tokenizer") or {}).get("files") or ():
+                _agree(state, committed, item, f"{identifier}/tokenizer")
+            models[identifier] = pinned_entry
+    found["models"] = models
+    state.shards = len(models[MODEL_ID].get("shards") or ())
+    state.models_hashed = {identifier: _model_hashed(one) for identifier, one in models.items()
+                           if isinstance(one, dict)}
+    state.model_hashed = bool(state.models_hashed) and all(state.models_hashed.values())
 
     found["pinned"] = state.pinned
-    found["notes"] = notes_for(state, torch, model_entry)
+    found["notes"] = notes_for(state, torch, models)
     found["version"] = int(found.get("version") or 0) + 1
     return found, state
 
@@ -1214,20 +1532,26 @@ def survey(existing: dict, path: Path, say) -> None:
         say(f"  {item.get('id')}: "
             + (f"{len(artifacts)} wheel(s), {hashed} hashed" if artifacts
                else "no wheels resolved"))
+    overlay = runtime.get("overlay") or ()
+    say(f"  runtime.overlay: {len(overlay)} file(s), "
+        f"{sum(1 for one in overlay if one.get('sha256'))} hashed")
     for name, entry in (existing.get("models") or {}).items():
         if not isinstance(entry, dict):
             continue
         say(f"  {name}: {len(entry.get('files') or ())} declared file(s), "
             f"{len(entry.get('shards') or ())} shard(s) listed, "
-            f"{len((entry.get('tokenizer') or {}).get('files') or ())} tokenizer file(s)")
+            f"{len((entry.get('tokenizer') or {}).get('files') or ())} tokenizer file(s)"
+            + (f", {len(entry.get('voices') or ())} preset voice(s)"
+               if entry.get("voices") is not None else ""))
 
 
 class Options:
-    def __init__(self, keep_closure=False, model=False, torch=False, pypi=None):
+    def __init__(self, keep_closure=False, model=False, torch=False, pypi=None, raw=None):
         self.keep_closure = keep_closure
         self.model = model
         self.torch = torch
         self.pypi = pypi or PyPI()
+        self.raw = raw or Raw()
 
 
 def main(argv=None) -> int:
@@ -1278,10 +1602,13 @@ def main(argv=None) -> int:
               "decision, not a script's.", file=sys.stderr)
         return 2
 
-    say(f"\n{state.wheels} wheel(s) resolved; torch digest "
-        f"{'recorded' if state.torch_recorded else 'not recorded'}; model "
-        f"{'hashed' if state.model_hashed else 'declared but not hashed'}"
-        f"{f' ({state.shards} shards listed)' if state.shards else ''}.")
+    say(f"\n{state.wheels} wheel(s) resolved; overlay "
+        f"{'pinned' if state.overlay_pinned else 'not pinned'}; {state.presets} preset "
+        f"voice(s) pinned; torch digest "
+        f"{'recorded' if state.torch_recorded else 'not recorded'}; models "
+        + ", ".join(f"{name} {'hashed' if done else 'declared but not hashed'}"
+                    for name, done in state.models_hashed.items())
+        + f"{f' ({state.shards} shards listed for {MODEL_ID})' if state.shards else ''}.")
 
     body = json.dumps(found, indent=2, ensure_ascii=False) + "\n"
     if arguments.check:

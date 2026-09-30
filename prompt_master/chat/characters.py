@@ -139,6 +139,15 @@ class Character:
     pocket_gain: float | None = None
     pocket_pause: float | None = None
     pocket_temperature: float | None = None
+    # VibeVoice's, on the same rule. Its voice is ``vibevoice:preset:<stem>``
+    # (the Realtime 0.5B) or ``vibevoice:sample:<id>`` (a Voice Box sample the
+    # 7B clones), and its delivery is the model's own two numbers, guidance and
+    # diffusion steps; ``None`` in either follows the stored default, whose own
+    # ``None`` follows the speaking model. Precision, LoRA and the card are
+    # engine-wide, never a character's, for the reason Pocket's precision is.
+    vibevoice_voice: str = ""
+    vibevoice_cfg_scale: float | None = None
+    vibevoice_steps: float | None = None
 
     @property
     def voice_profile(self) -> dict[str, object]:
@@ -171,6 +180,8 @@ class Character:
             found["sopro"] = self.sopro_voice
         if self.pocket_voice:
             found["pocket"] = self.pocket_voice
+        if self.vibevoice_voice:
+            found["vibevoice"] = self.vibevoice_voice
         return found
 
     @property
@@ -198,6 +209,9 @@ class Character:
                   "temperature": self.pocket_temperature}
         if any(value is not None for value in pocket.values()):
             found["pocket"] = pocket
+        vibevoice = {"cfg_scale": self.vibevoice_cfg_scale, "steps": self.vibevoice_steps}
+        if any(value is not None for value in vibevoice.values()):
+            found["vibevoice"] = vibevoice
         return found
 
     @staticmethod
@@ -229,6 +243,11 @@ class Character:
             found = {"pocket_voice": str(voice_id or "").strip()}
             for name in ("speed", "pitch", "gain", "pause", "temperature"):
                 found[f"pocket_{name}"] = offered.get(name)
+            return found
+        if wanted == "vibevoice":
+            found = {"vibevoice_voice": str(voice_id or "").strip()}
+            for name in ("cfg_scale", "steps"):
+                found[f"vibevoice_{name}"] = offered.get(name)
             return found
         # Named rather than defaulted. This used to end in a Kokoro ``return``
         # that any unrecognised engine fell into, which was harmless while
@@ -289,6 +308,13 @@ class Character:
                            ("pocket_temperature", self.pocket_temperature)):
             if value is not None:
                 found[key] = value
+        # VibeVoice's, on the same rule once more.
+        if self.vibevoice_voice:
+            found["vibevoice_voice"] = self.vibevoice_voice
+        for key, value in (("vibevoice_cfg_scale", self.vibevoice_cfg_scale),
+                           ("vibevoice_steps", self.vibevoice_steps)):
+            if value is not None:
+                found[key] = value
         return found
 
     @classmethod
@@ -333,7 +359,27 @@ class Character:
             pocket_gain=_optional_number(values.get("pocket_gain")),
             pocket_pause=_optional_number(values.get("pocket_pause")),
             pocket_temperature=_optional_number(values.get("pocket_temperature")),
+            vibevoice_voice=_first(values, ("vibevoice_voice",)),
+            vibevoice_cfg_scale=_optional_number(values.get("vibevoice_cfg_scale")),
+            vibevoice_steps=_optional_number(values.get("vibevoice_steps")),
         )
+
+
+VOICE_FIELDS = ("voice", "voice_speed", "voice_pitch", "voice_gain", "voice_pause",
+                "sopro_voice", "sopro_speed", "sopro_pitch", "sopro_gain", "sopro_pause",
+                "sopro_temperature", "sopro_top_p", "sopro_top_k", "sopro_language",
+                "pocket_voice", "pocket_speed", "pocket_pitch", "pocket_gain",
+                "pocket_pause", "pocket_temperature",
+                "vibevoice_voice", "vibevoice_cfg_scale", "vibevoice_steps")
+"""Every field of :class:`Character` that belongs to one text-to-speech engine.
+
+Here, beside the fields, because a save has to carry *all* of them forward and
+edit only the active engine's -- and the list that did that used to live in the
+panel, where PocketTTS's six were never added: every character Save dropped a
+character's Pocket voice and delivery, whichever engine was selected. A test
+holds this tuple to the dataclass, so a field added for a fifth engine and
+forgotten here fails there rather than on somebody's character.
+"""
 
 
 @dataclass
