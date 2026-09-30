@@ -619,6 +619,47 @@ name.
    longer active), Loop where it was; inline SVG in `currentColor`, with
    `aria-label` and `title`.
 
+**The third UX round (after #241, at the user's request).** The user's own Forge
+runs the Lobe theme, and two of its habits were behind three of the four asks.
+
+1. *"There appears to be no way to enable sampling … I need a simple sampling
+   toggle. Also, remove that description."* The theme draws every native
+   checkbox itself, a fixed square with `flex: 0` and `appearance: none`, and
+   against the section's own `min-width: 0` on its field inputs that left the
+   box its 2 px border: it worked when that sliver was hit, and nothing said it
+   was a control. Sampling, and *Keep VibeVoice warm between renders* (the same
+   checkbox, the same sliver), are now switches: one button each with a drawn
+   track and knob beside the name, `role="switch"` with `aria-checked`, the knob
+   to the right on a filled track when on, so the side says it without the
+   colour. The hint under Sampling is gone, and so is the paragraph of script
+   syntax under the script box ("I don't need descriptions"): the empty box's
+   placeholder is an example script. The tab has no native checkbox left.
+   Sampling still marks the configuration unsaved, is saved and sent inline and
+   is applied by Reuse settings; Keep warm still saves at once, and a poll that
+   arrives while its save is on the way does not flip it back.
+2. *"Remove that floating X."* The theme's *SVG icon* option, on by default, runs
+   once when its app mounts and replaces the whole content of every `<span>` whose
+   text contains `×` with a 36 px X. The status line's actions were a span holding
+   the dismiss button's `×`, so on the user's page Cancel, Clear queue, Unload and
+   the dismiss were one large X beside *Ready*, and the page's references pointed
+   at buttons no longer in the document. The actions are a `div` now and the
+   dismiss draws its cross. The section's `#mc-voice-box [hidden] { display: none
+   !important }`, there since phase 2 because any author rule that sets `display`
+   beats the browser's own rule for `hidden`, was not the cause; it now covers the
+   root as well.
+3. *"The settings manager needs to be more compact."* The configuration select,
+   Save, Save as and Delete are one row at every width the stage takes: the select
+   takes what is left and ellipsises, the three are square icon buttons (a disk, a
+   disk with a plus, a bin), and unsaved changes are an accent dot on Save, whose
+   name then says so.
+4. *"If I tap anywhere outside of the selected waveform, it should deselect."* A
+   click outside the selected lane's box — the whole open lane counts as inside — or
+   Escape collapses it. The page listens for `click`, which a scroll or a card
+   swipe never makes; a click that ends a drag, a click the page made itself and a
+   click while the tab is not on screen are not taps. Playback is untouched: the
+   active player plays on, keeps its playhead on the compact waveform, and a poll
+   does not reopen the lane.
+
 ---
 
 ## 9. Voice Chat

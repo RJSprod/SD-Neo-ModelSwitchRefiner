@@ -735,6 +735,11 @@ function press(label, within) {
 function labels(within) {
     return within.querySelectorAll("button").filter(shown).map(nameOf);
 }
+// The configuration's Save: an icon whose name says whether there are
+// unsaved changes ("Save" or "Save — unsaved changes").
+function saveLabel() {
+    return find(".mc-voice-box-configuration-save").getAttribute("aria-label");
+}
 // What a player's buttons say: each icon button's label, title and picture,
 // and whether a toggle is pressed.
 function faces(within) {
@@ -973,7 +978,10 @@ class TestBoot:
                 rootChildren: find("#mc-voice-box").children.map((child) => child.className),
                 stagebar: texts(".mc-voice-box-stagebar button"),
                 stagebarNames: all(".mc-voice-box-stagebar button").map((b) => b.getAttribute("aria-label")),
-                help: find(".mc-voice-box-prompt-help").textContent,
+                help: !!find(".mc-voice-box-prompt-help"),
+                example: find(".mc-voice-box-prompt").getAttribute("placeholder"),
+                underBox: find(".mc-voice-box-prompt").parentNode.children
+                    .map((child) => child.className.split(" ")[0]),
             });
         """)
 
@@ -1000,7 +1008,11 @@ class TestBoot:
         assert found["stagebar"] == ["Input", "Prompt", "Config", "Outputs"]
         assert found["stagebarNames"] == ["Input", "Prompt", "Configuration", "Outputs"]
         assert found["status"] == "Ready"
-        assert "[pause:1500]" in found["help"]
+        # No description under the script box (the user asked for none); the
+        # empty box's placeholder shows the syntax instead.
+        assert found["help"] is False
+        assert "Speaker 2:" in found["example"] and "[pause]" in found["example"]
+        assert found["underBox"][:2] == ["mc-voice-box-prompt", "mc-voice-box-prompt-summary"]
         assert found["warnings"] == []
 
     def test_it_fetches_everything_once_on_boot(self):
@@ -1040,7 +1052,7 @@ class TestBoot:
                 speakerTwo: find('.mc-voice-box-speaker[data-speaker="2"] .mc-voice-box-speaker-title').textContent,
                 cardOptions: find('[data-field="card_uuid"]').options.map((o) => o.textContent),
                 configurations: find(".mc-voice-box-configuration-select").options.map((o) => o.textContent),
-                keepWarm: find(".mc-voice-box-keep-warm input").checked,
+                keepWarm: find(".mc-voice-box-keep-warm").getAttribute("aria-checked"),
                 summary: find(".mc-voice-box-prompt-summary").textContent,
                 renderDisabled: find(".mc-voice-box-render").disabled,
             });
@@ -1055,7 +1067,7 @@ class TestBoot:
         assert found["speakerTwo"] == "no sample"
         assert found["cardOptions"] == ["RTX 3090 — image model's card", "RTX 5090 — WanGP's card"]
         assert found["configurations"] == ["(unsaved)", "Default"]
-        assert found["keepWarm"] is True
+        assert found["keepWarm"] == "true"
         assert found["summary"] == "1 speaker, 0 pauses, ~2 words"
         assert found["renderDisabled"] is False
 
@@ -1868,7 +1880,7 @@ class TestTheRenderGate:
         found = run("""
             await flush();
             press("2", find(".mc-voice-box-sample"));
-            const dirty = {save: find(".mc-voice-box-configuration-save").textContent,
+            const dirty = {save: saveLabel(),
                            slot: find('.mc-voice-box-speaker[data-speaker="2"] .mc-voice-box-speaker-title').textContent};
             press("Render");
             await flush();
@@ -1876,7 +1888,7 @@ class TestTheRenderGate:
                     saves: requestsTo("/configurations/save").length});
         """)
 
-        assert found["dirty"] == {"save": "Save •", "slot": "Ada"}
+        assert found["dirty"] == {"save": "Save — unsaved changes", "slot": "Ada"}
         body = found["render"][0]["body"]
         assert body["configuration_id"] == "c1"
         assert body["configuration"]["speakers"] == {"1": "s1", "2": "s1"}
@@ -1891,9 +1903,7 @@ class TestTheRenderGate:
             steps.dispatchEvent({type: "change"});
             find(".mc-voice-box-configuration-save").click();
             await flush();
-            const warm = find(".mc-voice-box-keep-warm input");
-            warm.checked = false;
-            warm.dispatchEvent({type: "change"});
+            find(".mc-voice-box-keep-warm").click();
             await flush();
             report({save: requestsTo("/configurations/save").map(plain),
                     settings: requestsTo("/settings").map(plain)});
@@ -3043,9 +3053,10 @@ class TestTheTransport:
         """)
 
         # The trimmer's four (hidden until a file is open), a sample row's
-        # three and the lane's four.
-        assert found["icons"] == ["play", "start", "stop", "loop", "play", "start", "stop",
-                                  "play", "start", "stop", "loop"]
+        # three, the status line's Dismiss, the configuration's Save, Save as
+        # and Delete, and the lane's four.
+        assert found["icons"] == ["play", "start", "stop", "loop", "play", "start", "stop", "close",
+                                  "save", "saveAs", "delete", "play", "start", "stop", "loop"]
         for picture in found["pictures"]:
             assert (picture["count"], picture["tag"], picture["viewBox"]) == (1, "SVG", "0 0 16 16"), picture
             assert picture["size"] == ["16", "16"] and picture["fill"] == "currentColor", picture
@@ -3177,14 +3188,19 @@ class TestSampling:
         const read = () => {
             const one = (key) => ({value: field(key).value, disabled: field(key).disabled,
                                    greyed: field(key).parentNode.getAttribute("data-disabled")});
-            return {sampling: field("sampling").checked, temperature: one("temperature"),
-                    top_p: one("top_p"), save: find(".mc-voice-box-configuration-save").textContent};
+            return {sampling: field("sampling").getAttribute("aria-checked") === "true",
+                    temperature: one("temperature"), top_p: one("top_p"), save: saveLabel()};
         };
-        const tick = (on) => { field("sampling").checked = on; field("sampling").dispatchEvent({type: "change"}); };
+        // Sampling is a switch: a press flips it.
+        const tick = (on) => {
+            if ((field("sampling").getAttribute("aria-checked") === "true") !== on) field("sampling").click();
+        };
         const set = (key, value) => { field(key).value = value; field(key).dispatchEvent({type: "input"}); };
     """
 
     def test_off_disables_temperature_and_top_p_and_keeps_their_values(self):
+        """Sampling is a switch -- one button with its name on it and no
+        description under it -- and Temperature and Top-p follow it."""
         found = run(self.FIELDS + """
             await flush();
             const off = read();
@@ -3195,14 +3211,16 @@ class TestSampling:
             tick(false);
             const offAgain = read();
             tick(true);
-            const hint = find(".mc-voice-box-field-hint");
-            report({off, on, offAgain, onAgain: read(), hint: hint.textContent, hintId: hint.getAttribute("id"),
-                    described: field("sampling").getAttribute("aria-describedby"),
+            const sampling = field("sampling");
+            report({off, on, offAgain, onAgain: read(),
+                    described: sampling.getAttribute("aria-describedby"),
+                    descriptions: all("*").filter((node) => node._text && node._text.indexOf("pacing") !== -1).length,
                     order: all("[data-field]").map((input) => input.getAttribute("data-field")),
-                    kinds: ["sampling", "temperature", "top_p"].map((key) =>
+                    sampling: [sampling.tagName, sampling.getAttribute("role"), sampling.textContent],
+                    kinds: ["temperature", "top_p"].map((key) =>
                         [field(key).type, field(key).getAttribute("min"), field(key).getAttribute("max"),
                          field(key).getAttribute("step")]),
-                    wide: field("sampling").parentNode.parentNode.className});
+                    wide: sampling.parentNode.className});
         """)
 
         assert found["off"] == {"sampling": False,
@@ -3212,19 +3230,18 @@ class TestSampling:
         assert found["on"] == {"sampling": True,
                                "temperature": {"value": "0.95", "disabled": False, "greyed": "false"},
                                "top_p": {"value": "0.95", "disabled": False, "greyed": "false"},
-                               "save": "Save •"}
+                               "save": "Save — unsaved changes"}
         assert found["offAgain"]["temperature"] == {"value": "1.2", "disabled": True, "greyed": "true"}
         assert found["offAgain"]["top_p"] == {"value": "0.8", "disabled": True, "greyed": "true"}
         assert found["onAgain"]["temperature"] == {"value": "1.2", "disabled": False, "greyed": "false"}
         assert found["onAgain"]["top_p"] == {"value": "0.8", "disabled": False, "greyed": "false"}
         working = found["state"]["working"]
         assert (working["sampling"], working["temperature"], working["top_p"]) == (True, 1.2, 0.8)
-        assert found["hint"] == "Varies the pacing — where pauses and endings fall — from take to take."
-        assert found["described"] == found["hintId"] == "mc-voice-box-hint-sampling"
+        assert found["described"] is None and found["descriptions"] == 0
         assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "seed", "max_new_tokens",
                                   "sampling", "temperature", "top_p"]
-        assert found["kinds"] == [["checkbox", None, None, None], ["number", "0.1", "2", "0.05"],
-                                  ["number", "0.05", "1", "0.01"]]
+        assert found["sampling"] == ["BUTTON", "switch", "Sampling"]
+        assert found["kinds"] == [["number", "0.1", "2", "0.05"], ["number", "0.05", "1", "0.01"]]
         assert "mc-voice-box-field-wide" in found["wide"].split()
 
     def test_each_of_the_three_marks_the_configuration_unsaved(self):
@@ -3247,8 +3264,8 @@ class TestSampling:
             report({marks});
         """, answers={"/configurations": {"json": {"ok": True, "configurations": [SAMPLING_CONFIGURATION]}}})
 
-        assert found["marks"] == {"sampling": ["Save", "Save •"], "temperature": ["Save", "Save •"],
-                                  "top_p": ["Save", "Save •"]}
+        assert found["marks"] == {"sampling": ["Save", "Save — unsaved changes"], "temperature": ["Save", "Save — unsaved changes"],
+                                  "top_p": ["Save", "Save — unsaved changes"]}
 
     def test_they_are_sent_inline_with_a_render_and_saved_with_the_configuration(self):
         on = run(self.FIELDS + """
@@ -3294,7 +3311,7 @@ class TestSampling:
         assert found["fields"] == {"sampling": True,
                                    "temperature": {"value": "1.1", "disabled": False, "greyed": "false"},
                                    "top_p": {"value": "0.7", "disabled": False, "greyed": "false"},
-                                   "save": "Save •"}
+                                   "save": "Save — unsaved changes"}
 
     def test_reuse_of_a_render_made_before_sampling_turns_it_off_and_leaves_the_editors_values(self):
         """OUTPUT's recorded configuration has no sampling fields: the render
@@ -3308,7 +3325,7 @@ class TestSampling:
         assert found["fields"] == {"sampling": False,
                                    "temperature": {"value": "1.4", "disabled": True, "greyed": "true"},
                                    "top_p": {"value": "0.6", "disabled": True, "greyed": "true"},
-                                   "save": "Save •"}
+                                   "save": "Save — unsaved changes"}
 
     def test_reuse_compares_the_three_with_the_saved_configuration(self):
         """A render that sampled as the configuration stands leaves nothing to
@@ -3327,7 +3344,7 @@ class TestSampling:
 
         assert same["fields"]["save"] == "Save"
         assert same["state"]["dirty"]["configuration"] is False
-        assert other["fields"]["save"] == "Save •"
+        assert other["fields"]["save"] == "Save — unsaved changes"
 
     def test_the_selected_lanes_metadata_says_how_it_sampled(self):
         sampled = dict(OUTPUT, id="o2", name="Take 2", created=OUTPUT["created"] + 60,
@@ -3409,16 +3426,16 @@ class TestUseSeed:
             await flush();
             const lane = find(".mc-voice-box-lane");
             lane.click();
-            const before = {save: find(".mc-voice-box-configuration-save").textContent,
+            const before = {save: saveLabel(),
                             seed: find('[data-field="seed"]').value};
             press("Use seed", lane);
-            report({before, save: find(".mc-voice-box-configuration-save").textContent,
+            report({before, save: saveLabel(),
                     seed: find('[data-field="seed"]').value,
                     title: lane.querySelector(".mc-voice-box-lane-seed").getAttribute("title")});
         """)
 
         assert found["before"] == {"save": "Save", "seed": ""}
-        assert found["save"] == "Save •"
+        assert found["save"] == "Save — unsaved changes"
         assert found["seed"] == "42"
         assert found["state"]["working"]["seed"] == 42
         assert found["state"]["dirty"]["configuration"] is True
@@ -3434,7 +3451,7 @@ class TestUseSeed:
             seed.click();
             report({disabled: seed.disabled, title: seed.getAttribute("title"),
                     working: globalThis.mcVoiceBox.state().working.seed,
-                    save: find(".mc-voice-box-configuration-save").textContent});
+                    save: saveLabel()});
         """, answers={"/outputs": {"json": {"ok": True, "outputs": [OLD_OUTPUT]}}})
 
         assert found["disabled"] is True
@@ -3467,7 +3484,7 @@ class TestReuseSettings:
         found = run(self.REUSE + """
             const now = {prompt: find(".mc-voice-box-prompt").value,
                          chosen: find(".mc-voice-box-configuration-select").value,
-                         save: find(".mc-voice-box-configuration-save").textContent,
+                         save: saveLabel(),
                          steps: find('[data-field="steps"]').value,
                          slot2: find('.mc-voice-box-speaker[data-speaker="2"] .mc-voice-box-speaker-title').textContent};
             const early = requestsTo("/pipelines/save").map((r) => r.body);
@@ -3480,7 +3497,7 @@ class TestReuseSettings:
                       "/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
 
         assert found["now"] == {"prompt": "Speaker 1: Hi.\nSpeaker 2: Yo.", "chosen": "c1",
-                                "save": "Save •", "steps": "20", "slot2": "Bo"}
+                                "save": "Save — unsaved changes", "steps": "20", "slot2": "Bo"}
         working = found["state"]["working"]
         assert (working["model_id"], working["card_uuid"], working["steps"], working["cfg_scale"],
                 working["seed"], working["max_new_tokens"]) == ("vibevoice-7b", "GPU-a", 20, 1.5, 42, 900)
@@ -3496,7 +3513,7 @@ class TestReuseSettings:
         saved = dict(CONFIGURATION, seed=7)
         render = dict(OUTPUT["render"], configuration=dict(OUTPUT["render"]["configuration"], seed=7))
         found = run(self.REUSE + """
-            report({save: find(".mc-voice-box-configuration-save").textContent});
+            report({save: saveLabel()});
         """, answers={"/configurations": {"json": {"ok": True, "configurations": [saved]}},
                       "/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
 
@@ -3510,13 +3527,13 @@ class TestReuseSettings:
         found = run(self.REUSE + """
             const select = find(".mc-voice-box-configuration-select");
             const now = {chosen: select.value, label: select.options[0].textContent,
-                         save: find(".mc-voice-box-configuration-save").textContent};
+                         save: saveLabel()};
             find(".mc-voice-box-configuration-save").click();
             await flush();
             report({now, saved: requestsTo("/configurations/save").map((r) => r.body)});
         """, answers={"/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
 
-        assert found["now"] == {"chosen": "", "label": "(unsaved) Take 1", "save": "Save •"}
+        assert found["now"] == {"chosen": "", "label": "(unsaved) Take 1", "save": "Save — unsaved changes"}
         saved = found["saved"][0]
         assert saved["name"] == "Take 1"
         assert "id" not in saved
@@ -3709,7 +3726,7 @@ class TestTheStatusLine:
             find(".mc-voice-box-lane").click();
             press("Use seed");
             note();
-            press("×", find(".mc-voice-box-status-line"));
+            press("Dismiss", find(".mc-voice-box-status-line"));
             note();
             report({seen});
         """))
@@ -3718,11 +3735,11 @@ class TestTheStatusLine:
             ("ready", "Ready", []),
             ("blocked", "Write a script first.", []),
             ("warm", "VibeVoice warm on NVIDIA GeForce RTX 3090", ["Unload"]),
-            ("failed", "Last render failed: The card could not be made ready.", ["×"]),
+            ("failed", "Last render failed: The card could not be made ready.", ["Dismiss"]),
             ("queued", "1 queued", ["Clear queue"]),
             ("job", "Rendering “Trailer 3” · section 1 of 2 · 0:42 · 1 queued", ["Cancel", "Clear queue"]),
             ("install", "Installing the runtime — 45 %", []),
-            ("message", "Seed 42 is in the configuration; save it to keep it.", ["×"]),
+            ("message", "Seed 42 is in the configuration; save it to keep it.", ["Dismiss"]),
             ("install", "Installing the runtime — 45 %", []),
         ]
         assert found["seen"][3]["kind"] == "error"
@@ -3749,7 +3766,7 @@ class TestTheStatusLine:
             set({runtime: WARM, jobs: [FAILED]});
             await poll();
             note();
-            press("×", find(".mc-voice-box-status-line"));
+            press("Dismiss", find(".mc-voice-box-status-line"));
             note();
             set({});
             await poll();
@@ -3762,7 +3779,7 @@ class TestTheStatusLine:
             ("install", "Installing the runtime — 45 %", []),
             ("job", "Rendering “Trailer 3” · section 1 of 2 · 0:42 · 1 queued", ["Cancel", "Clear queue"]),
             ("job", "Rendering “Trailer 3” · section 1 of 2 · 0:42", ["Cancel"]),
-            ("failed", "Last render failed: The card could not be made ready.", ["×"]),
+            ("failed", "Last render failed: The card could not be made ready.", ["Dismiss"]),
             ("warm", "VibeVoice warm on NVIDIA GeForce RTX 3090", ["Unload"]),
             ("ready", "Ready", []),
         ]
@@ -3886,7 +3903,7 @@ class TestTheStatusLine:
             press("Render");
             await flush();
             const failed = line().text;
-            press("×", find(".mc-voice-box-status-line"));
+            press("Dismiss", find(".mc-voice-box-status-line"));
             const dismissed = line().text;
             answers["/render"] = {json: {ok: true, job: Object.assign({}, LIVE, {id: "j5"})}};
             set([FAILED, Object.assign({}, FAILED, {id: "j5", warning: "Out of memory."})]);
@@ -3946,6 +3963,404 @@ class TestTheStatusLine:
         assert warn["held"]["text"] == "This browser cannot record here."
         assert warn["held"]["kind"] == "warn"
         assert warn["after"] == "Ready"
+
+
+# --------------------------------------------------------------------------- #
+# Under a theme that rewrites the page: LobeTheme's icon swap
+# --------------------------------------------------------------------------- #
+
+# LobeTheme's `replaceIcon` (its "svgIcon" option): every <span> whose text
+# contains "×" has its whole content replaced by an X of Lobe's own. That is
+# what put a large X beside "Ready" on the user's page, and took Cancel, Clear
+# queue and Unload out of it.
+LOBE_SWAP = """
+    const lobeSwap = () => {
+        let swapped = 0;
+        all("span").forEach((span) => {
+            if (span.textContent.indexOf("\\u00d7") === -1) return;
+            span.textContent = "";
+            const x = document.createElement("svg");
+            x.className = "lobe-x";
+            span.appendChild(x);
+            swapped += 1;
+        });
+        return swapped;
+    };
+"""
+
+
+class TestUnderLobesIconSwap:
+    def test_no_span_of_the_page_holds_a_cross(self):
+        """In every state that shows the most of the page -- a lane open, the
+        trimmer open, the status line's Dismiss showing -- no span's text has
+        the character Lobe looks for."""
+        found = run(TestTheTrimmer.CHOOSE + LOBE_SWAP + """
+            find(".mc-voice-box-lane").click();
+            press("Use seed");
+            const crossed = all("span").filter((span) => span.textContent.indexOf("\\u00d7") !== -1)
+                .map((span) => span.className);
+            report({crossed, line: line(), swapped: lobeSwap()});
+        """)
+
+        assert found["crossed"] == []
+        assert found["swapped"] == 0
+        assert found["line"]["buttons"] == ["Dismiss"]
+
+    def test_the_status_line_keeps_every_button_through_the_swap(self):
+        """The swap run after the page is built: Cancel, Clear queue, Dismiss
+        and the Unload holder are all still in the page, where the status
+        line shows them, and nothing of Lobe's is."""
+        found = run(LOBE_SWAP + """
+            await flush();
+            const swapped = lobeSwap();
+            const kept = [".mc-voice-box-status-cancel", ".mc-voice-box-status-clear",
+                          ".mc-voice-box-status-dismiss", ".mc-voice-box-status-unloads"]
+                .map((selector) => !!find(".mc-voice-box-status-line " + selector));
+            answers["/status"] = {json: Object.assign({}, answers["/status"].json,
+                                  {jobs: [RUNNING, QUEUED]})};
+            await poll();
+            report({swapped, kept, line: line(), lobe: all(".lobe-x").length,
+                    dismiss: faces(find(".mc-voice-box-status-line"))});
+        """.replace("RUNNING", json.dumps(RUNNING)).replace("QUEUED", json.dumps(QUEUED)))
+
+        assert found["swapped"] == 0
+        assert found["kept"] == [True, True, True, True]
+        assert found["lobe"] == 0
+        assert found["line"]["state"] == "job"
+        assert found["line"]["buttons"] == ["Cancel", "Clear queue"]
+
+    def test_the_dismiss_is_a_drawn_cross_named_dismiss(self):
+        found = run("""
+            await flush();
+            const dismiss = find(".mc-voice-box-status-dismiss");
+            const ready = {hidden: !shown(dismiss), line: line().buttons};
+            find(".mc-voice-box-lane").click();
+            press("Use seed");
+            report({ready, face: faces(find(".mc-voice-box-status-line")), text: dismiss.textContent,
+                    shown: shown(dismiss)});
+        """)
+
+        assert found["ready"] == {"hidden": True, "line": []}
+        assert found["face"] == [{"label": "Dismiss", "title": "Dismiss", "icon": "close", "pressed": None}]
+        assert found["text"] == ""
+        assert found["shown"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Switches: Sampling and Keep warm
+# --------------------------------------------------------------------------- #
+
+
+class TestSwitches:
+    LOOK = """
+        const look = (node) => ({role: node.getAttribute("role"), checked: node.getAttribute("aria-checked"),
+                                 knob: node.mcVoiceBoxThumb ? node.mcVoiceBoxThumb.getAttribute("cx") : null,
+                                 text: node.textContent, label: node.getAttribute("aria-label"),
+                                 title: node.getAttribute("title"), tag: node.tagName});
+    """
+
+    def test_sampling_is_a_switch_whose_knob_moves_to_the_side_it_is_on(self):
+        found = run(self.LOOK + """
+            await flush();
+            const sampling = find('[data-field="sampling"]');
+            const off = look(sampling);
+            sampling.click();
+            const on = look(sampling);
+            sampling.click();
+            report({off, on, again: look(sampling),
+                    picture: [sampling.children[0].tagName, sampling.children[0].getAttribute("aria-hidden")]});
+        """)
+
+        assert found["off"] == {"role": "switch", "checked": "false", "knob": "7", "text": "Sampling",
+                                "label": None, "title": None, "tag": "BUTTON"}
+        assert (found["on"]["checked"], found["on"]["knob"]) == ("true", "17")
+        assert (found["again"]["checked"], found["again"]["knob"]) == ("false", "7")
+        assert found["picture"] == ["SVG", "true"]
+
+    def test_no_native_checkbox_is_left_anywhere_on_the_page(self):
+        found = run(TestTheTrimmer.CHOOSE + """
+            find(".mc-voice-box-lane").click();
+            report({boxes: all("input").filter((input) => input.type === "checkbox"
+                                              || input.getAttribute("type") === "checkbox").length,
+                    inputs: all("input").map((input) => input.getAttribute("type"))});
+        """)
+
+        assert found["boxes"] == 0
+        assert "checkbox" not in found["inputs"]
+
+    def test_keep_warm_is_a_switch_named_in_full_and_saved_at_once(self):
+        """Its face says "Keep warm", its name and tooltip the whole sentence;
+        a press saves the setting there and then. A status that arrives with
+        the old value while the save is on its way does not flip it back."""
+        found = run(self.LOOK + """
+            await flush();
+            const warm = find(".mc-voice-box-keep-warm");
+            const before = look(warm);
+            answers["/settings"] = {json: {ok: true, engine_settings: answers["/status"].json.engine_settings,
+                                    settings: Object.assign({}, answers["/status"].json.settings, {keep_warm: false})}};
+            warm.click();
+            await flush();
+            const pressed = look(warm);
+            await poll();
+            const polled = look(warm);
+            release("/settings");
+            await flush();
+            report({before, pressed, polled, after: look(warm),
+                    settings: requestsTo("/settings").map((r) => r.body)});
+        """, held=["/settings"])
+
+        assert found["before"] == {"role": "switch", "checked": "true", "knob": "17", "text": "Keep warm",
+                                   "label": "Keep VibeVoice warm between renders",
+                                   "title": "Keep VibeVoice warm between renders", "tag": "BUTTON"}
+        assert (found["pressed"]["checked"], found["pressed"]["knob"]) == ("false", "7")
+        assert found["polled"]["checked"] == "false"
+        assert found["after"]["checked"] == "false"
+        assert found["settings"] == [{"keep_warm": False}]
+
+    def test_two_quick_presses_on_keep_warm_end_where_the_last_left_it(self):
+        """The first save's answer arrives while the second is on its way:
+        the switch stays where the second press put it."""
+        settings = STATUS["settings"]
+        found = run(self.LOOK + """
+            await flush();
+            const warm = find(".mc-voice-box-keep-warm");
+            warm.click();
+            warm.click();
+            await flush();
+            release("/settings");
+            await flush();
+            const between = look(warm).checked;
+            release("/settings");
+            await flush();
+            report({between, after: look(warm).checked, bodies: requestsTo("/settings").map((r) => r.body)});
+        """, held=["/settings"], answers={"/settings": {"sequence": [
+            {"json": {"ok": True, "settings": dict(settings, keep_warm=False),
+                      "engine_settings": STATUS["engine_settings"]}},
+            {"json": {"ok": True, "settings": dict(settings, keep_warm=True),
+                      "engine_settings": STATUS["engine_settings"]}}]}})
+
+        assert found["bodies"] == [{"keep_warm": False}, {"keep_warm": True}]
+        assert found["between"] == "true"
+        assert found["after"] == "true"
+
+    def test_a_keep_warm_save_that_fails_puts_the_switch_back(self):
+        found = run(self.LOOK + """
+            await flush();
+            const warm = find(".mc-voice-box-keep-warm");
+            warm.click();
+            await flush();
+            report({after: look(warm), line: line()});
+        """, answers={"/settings": {"status": 500, "json": {"ok": False, "error": "The settings could not be saved."}}})
+
+        assert (found["after"]["checked"], found["after"]["knob"]) == ("true", "17")
+        assert (found["line"]["text"], found["line"]["kind"]) == ("The settings could not be saved.", "error")
+
+
+# --------------------------------------------------------------------------- #
+# The configuration manager
+# --------------------------------------------------------------------------- #
+
+
+class TestTheConfigurationManager:
+    def test_save_save_as_and_delete_are_icons_named_in_full(self):
+        found = run("""
+            await flush();
+            const bar = find(".mc-voice-box-configuration-bar");
+            report({faces: faces(bar), order: bar.children.map((node) => node.className.split(" ").pop()),
+                    select: find(".mc-voice-box-configuration-select").getAttribute("aria-label"),
+                    texts: bar.querySelectorAll("button").map((b) => b.textContent)});
+        """)
+
+        assert found["faces"] == [{"label": "Save", "title": "Save", "icon": "save", "pressed": None},
+                                  {"label": "Save as a new configuration", "title": "Save as a new configuration",
+                                   "icon": "saveAs", "pressed": None},
+                                  {"label": "Delete this configuration", "title": "Delete this configuration",
+                                   "icon": "delete", "pressed": None}]
+        assert found["order"] == ["mc-voice-box-configuration-select", "mc-voice-box-configuration-save",
+                                  "mc-voice-box-configuration-save-as", "mc-voice-box-configuration-delete"]
+        assert found["select"] == "Configuration"
+        assert found["texts"] == ["", "", ""]
+
+    def test_unsaved_changes_are_a_dot_on_save_and_its_name_says_so(self):
+        found = run("""
+            await flush();
+            const save = find(".mc-voice-box-configuration-save");
+            const state = () => ({dirty: save.getAttribute("data-dirty"), label: save.getAttribute("aria-label"),
+                                  title: save.getAttribute("title"),
+                                  deletable: !find(".mc-voice-box-configuration-delete").disabled});
+            const saved = state();
+            const steps = find('[data-field="steps"]');
+            steps.value = "20";
+            steps.dispatchEvent({type: "change"});
+            const changed = state();
+            save.click();
+            await flush();
+            const again = state();
+            const select = find(".mc-voice-box-configuration-select");
+            select.value = "";
+            select.dispatchEvent({type: "change"});
+            report({saved, changed, again, none: state()});
+        """)
+
+        assert found["saved"] == {"dirty": "false", "label": "Save", "title": "Save", "deletable": True}
+        assert found["changed"] == {"dirty": "true", "label": "Save — unsaved changes",
+                                    "title": "Save — unsaved changes", "deletable": True}
+        assert found["again"] == found["saved"]
+        assert found["none"]["deletable"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Putting the selected output away: a tap outside it, or Escape
+# --------------------------------------------------------------------------- #
+
+
+class TestDeselecting:
+    OPEN = """
+        await flush();
+        const lanes = all(".mc-voice-box-lane");
+        const lane = lanes[lanes.length - 1];
+        const open = () => ({expanded: lanes.map((row) => row.getAttribute("aria-expanded")),
+                             selected: globalThis.mcVoiceBox.state().selectedOutput,
+                             details: lanes.map((row) => shown(row.querySelector(".mc-voice-box-lane-details")))});
+        lane.click();
+    """
+
+    def test_a_tap_outside_the_selected_lane_puts_it_away(self):
+        found = run(self.OPEN + """
+            const before = open();
+            tap(find(".mc-voice-box-prompt"));
+            report({before, after: open()});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["before"] == {"expanded": ["false", "true"], "selected": "o1", "details": [False, True]}
+        assert found["after"] == {"expanded": ["false", "false"], "selected": "", "details": [False, False]}
+
+    def test_a_tap_inside_it_keeps_it_open(self):
+        """Its waveform, its metadata, its infotext and its buttons are all
+        the lane's own."""
+        found = run(self.OPEN + """
+            const kept = [];
+            for (const selector of [".mc-voice-box-lane-wave", ".mc-voice-box-lane-meta",
+                                    ".mc-voice-box-infotext", ".mc-voice-box-lane-loop", ".mc-voice-box-lane-head"]) {
+                tap(lane.querySelector(selector), {clientX: 20, clientY: 5});
+                await flush();
+                kept.push([selector, open().selected]);
+            }
+            report({kept});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["kept"] == [[".mc-voice-box-lane-wave", "o1"], [".mc-voice-box-lane-meta", "o1"],
+                                 [".mc-voice-box-infotext", "o1"], [".mc-voice-box-lane-loop", "o1"],
+                                 [".mc-voice-box-lane-head", "o1"]]
+
+    def test_a_tap_on_another_lane_selects_that_one(self):
+        found = run(self.OPEN + """
+            tap(lanes[0], {clientX: 30, clientY: 5});
+            report({after: open()});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["after"] == {"expanded": ["true", "false"], "selected": "o2", "details": [True, False]}
+
+    def test_escape_puts_it_away_but_not_when_said_to_a_field(self):
+        found = run(self.OPEN + """
+            // A rename being given up with Escape is the rename's. A browser
+            // takes the event on to the document along the path it had, the
+            // box removed by then; this DOM's bubbling stops at a removed
+            // box, so the document is handed it the way a browser would.
+            lane.querySelector(".mc-voice-box-lane-name").dispatchEvent({type: "dblclick"});
+            const box = find(".mc-voice-box-rename");
+            box.dispatchEvent({type: "keydown", key: "Escape", target: box});
+            document.dispatchEvent({type: "keydown", key: "Escape", target: box});
+            const renaming = open().selected;
+            document.dispatchEvent({type: "keydown", key: "Enter", target: document.body});
+            const enter = open().selected;
+            document.dispatchEvent({type: "keydown", key: "Escape", target: document.body});
+            report({renaming, enter, after: open(), rename: !!find(".mc-voice-box-rename")});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["renaming"] == "o1"
+        assert found["rename"] is False
+        assert found["enter"] == "o1"
+        assert found["after"]["selected"] == ""
+        assert found["after"]["expanded"] == ["false", "false"]
+
+    def test_a_playing_lane_plays_on_when_it_is_put_away(self):
+        """Still the active player, its playhead on its compact waveform and
+        its drags its own; opened again, Stop and Play still work."""
+        found = run(self.OPEN + """
+            const audio = lane.querySelector("audio");
+            audio.duration = 4.5;
+            const wave = lane.querySelector(".mc-voice-box-lane-wave");
+            press("Play", lane);
+            await flush();
+            audio.currentTime = 1.5;
+            audio.dispatchEvent({type: "timeupdate"});
+            const pauses = audio.pauses;
+            tap(find(".mc-voice-box-prompt"));
+            const away = {selected: open().selected, playing: !audio.paused, pauses: audio.pauses - pauses,
+                          active: globalThis.mcVoiceBox.state().activePlayer, head: wave.mcVoiceBoxHead,
+                          touch: wave.style.touchAction};
+            lane.click();
+            press("Stop", lane);
+            const stopped = {paused: audio.paused, at: audio.currentTime,
+                             active: globalThis.mcVoiceBox.state().activePlayer};
+            press("Play", lane);
+            await flush();
+            report({away, stopped, again: {playing: !audio.paused,
+                                           active: globalThis.mcVoiceBox.state().activePlayer}});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["away"] == {"selected": "", "playing": True, "pauses": 0,
+                                 "active": {"kind": "output", "id": "o1"},
+                                 "head": pytest.approx(1.5 / 4.5), "touch": "pan-y"}
+        assert found["stopped"] == {"paused": True, "at": 0, "active": None}
+        assert found["again"] == {"playing": True, "active": {"kind": "output", "id": "o1"}}
+
+    def test_a_poll_keeps_it_put_away_and_a_render_of_this_page_still_opens_itself(self):
+        made = dict(OUTPUT, id="o5", name="Take 5", created=OUTPUT["created"] + 600)
+        found = run(self.OPEN + """
+            tap(find(".mc-voice-box-prompt"));
+            await poll();
+            const polled = open();
+            answers["/status"] = {json: Object.assign({}, answers["/status"].json, {jobs: [LIVE]})};
+            press("Render");
+            await flush();
+            answers["/status"] = {json: Object.assign({}, answers["/status"].json,
+                                  {jobs: [Object.assign({}, LIVE, {phase: "done", live: false, output_id: "o5"})]})};
+            answers["/outputs"] = {json: {ok: true, outputs: [MADE].concat(answers["/outputs"].json.outputs)}};
+            advance(1000);
+            await flush(10);
+            report({polled, landed: globalThis.mcVoiceBox.state().selectedOutput,
+                    first: all(".mc-voice-box-lane")[0].getAttribute("aria-expanded")});
+        """.replace("LIVE", json.dumps(JOB)).replace("MADE", json.dumps(made)), answers=TWO_OUTPUTS)
+
+        assert found["polled"]["selected"] == ""
+        assert found["polled"]["expanded"] == ["false", "false"]
+        assert found["landed"] == "o5"
+        assert found["first"] == "true"
+
+    def test_a_drag_the_pages_own_click_and_a_tab_off_screen_put_nothing_away(self):
+        """A click that ends a drag (a scrub, a text selection) is not a tap;
+        the page's own synthetic click (a download's link) is not one either;
+        and while the tab is not on screen nothing of it can be tapped."""
+        found = run(self.OPEN + """
+            const outside = find(".mc-voice-box-prompt");
+            outside.dispatchEvent({type: "pointerdown", bubbles: true, clientX: 10, clientY: 10});
+            tap(outside, {clientX: 90, clientY: 12});
+            const dragged = open().selected;
+            tap(outside, {isTrusted: false});
+            const synthetic = open().selected;
+            find("#mc-voice-box").clientWidth = 0;
+            tap(outside);
+            const hidden = open().selected;
+            find("#mc-voice-box").clientWidth = 240;
+            outside.dispatchEvent({type: "pointerdown", bubbles: true, clientX: 10, clientY: 10});
+            tap(outside, {clientX: 13, clientY: 12});
+            report({dragged, synthetic, hidden, tapped: open().selected});
+        """, answers=TWO_OUTPUTS)
+
+        assert (found["dragged"], found["synthetic"], found["hidden"]) == ("o1", "o1", "o1")
+        assert found["tapped"] == ""
 
 
 # --------------------------------------------------------------------------- #

@@ -7317,10 +7317,21 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     box-sizing: border-box;
 }
 
-/* `hidden` wins over anything a theme says about display. The script hides
-   and shows with the attribute, and a theme's `display: flex` on a class would
-   otherwise put a hidden trimmer back on screen. */
-#mc-voice-box [hidden] {
+/* Nothing hidden may show. The script hides and shows with the `hidden`
+   attribute, which the browser implements in its *user-agent* stylesheet --
+   and any author rule that sets `display` beats that outright, a theme's
+   rule about buttons included (the Forge Assistant's section learned it
+   first: "THE ONE RULE WITHOUT WHICH NOTHING IN THIS PANEL CAN BE HIDDEN").
+   `!important` under the root's id puts this above a theme's
+   `button { display: ... !important }` too. Nothing in the section relies on
+   a hidden element keeping its room.
+
+   The large X a user saw beside "Ready" was something else, though:
+   LobeTheme's icon option replaces the whole content of any <span> whose
+   text holds "×" with an X of its own. The page writes no "×" into a span
+   (buildRenderBlock in javascript/voice_box.js says how that looked). */
+#mc-voice-box [hidden],
+#mc-voice-box[hidden] {
     display: none !important;
 }
 
@@ -7831,8 +7842,7 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #mc-voice-box .mc-voice-box-sample-speaker,
 #mc-voice-box .mc-voice-box-prompt-star,
 #mc-voice-box .mc-voice-box-prompt-delete,
-#mc-voice-box .mc-voice-box-speaker-clear,
-#mc-voice-box .mc-voice-box-status-dismiss {
+#mc-voice-box .mc-voice-box-speaker-clear {
     flex: 0 0 auto;
     min-width: 2.2em;
     padding-inline: 0.4em;
@@ -7847,13 +7857,9 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     width: 100%;
 }
 
-#mc-voice-box .mc-voice-box-prompt-help,
 #mc-voice-box .mc-voice-box-prompt-summary {
     color: var(--body-text-color-subdued, inherit);
     font-size: var(--text-xs, 0.8em);
-}
-
-#mc-voice-box .mc-voice-box-prompt-summary {
     font-weight: 600;
 }
 
@@ -7898,6 +7904,41 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 
 /* -- CONFIGURATION --------------------------------------------------------- */
 
+/* The configuration manager is one row at every width the stage takes: the
+   select has the room that is left and cuts its words short; Save, Save as
+   and Delete are square icons. */
+#mc-voice-box .mc-voice-box-configuration-bar {
+    align-items: center;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.3em;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-configuration-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Unsaved changes: a dot of the accent in Save's corner, and its name says so. */
+#mc-voice-box .mc-voice-box-configuration-save {
+    position: relative;
+}
+
+#mc-voice-box .mc-voice-box-configuration-save[data-dirty="true"]::after {
+    background: var(--color-accent, currentColor);
+    border-radius: 50%;
+    content: "";
+    height: 7px;
+    position: absolute;
+    right: 3px;
+    top: 3px;
+    width: 7px;
+}
+
 #mc-voice-box .mc-voice-box-fields {
     display: grid;
     gap: 0.4em;
@@ -7912,39 +7953,66 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     min-width: 0;
 }
 
-#mc-voice-box .mc-voice-box-field-check {
-    align-items: center;
-    flex-direction: row;
-    gap: 0.4em;
-}
-
 #mc-voice-box .mc-voice-box-field-input {
     min-width: 0;
     width: 100%;
 }
 
-#mc-voice-box .mc-voice-box-field-check .mc-voice-box-field-input {
-    width: auto;
-}
-
-/* A field across the whole row: Sampling, with its hint under it. */
+/* A field across the whole row: Sampling. */
 #mc-voice-box .mc-voice-box-field-wide {
     grid-column: 1 / -1;
 }
 
-#mc-voice-box .mc-voice-box-field-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15em;
-    min-width: 0;
+/* A switch's cell: the button its natural width, at the start of the row. */
+#mc-voice-box .mc-voice-box-field-toggle {
+    align-items: flex-start;
 }
 
-#mc-voice-box .mc-voice-box-field-hint {
-    color: var(--body-text-color-subdued, inherit);
-    font-size: var(--text-xs, 0.8em);
+/* A switch -- Sampling, Keep warm -- is one button: a drawn track and knob,
+   then the setting's name, and all of it is the press. No native checkbox:
+   a theme's rules about inputs squeezed Sampling's to a sliver nobody could
+   tell was a control. Off, the knob sits left in an outlined track; on, it
+   sits right in a track filled with the accent, and the button's border
+   takes the accent too -- the knob's side says it without the colour. */
+#mc-voice-box .mc-voice-box-switch-button {
+    gap: 0.5em;
+    justify-content: flex-start;
+    padding-inline: 0.5em 0.8em;
 }
 
-/* A field that means nothing while its checkbox is off -- Temperature and
+#mc-voice-box .mc-voice-box-switch {
+    display: block;
+    flex: 0 0 auto;
+    height: 20px;
+    overflow: visible;
+    pointer-events: none;
+    width: 34px;
+}
+
+#mc-voice-box .mc-voice-box-switch-track {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.2;
+}
+
+#mc-voice-box .mc-voice-box-switch-thumb {
+    fill: currentColor;
+}
+
+#mc-voice-box .mc-voice-box-switch-button[aria-checked="true"] {
+    border-color: var(--color-accent, currentColor);
+}
+
+#mc-voice-box .mc-voice-box-switch-button[aria-checked="true"] .mc-voice-box-switch-track {
+    fill: var(--color-accent, currentColor);
+    stroke: var(--color-accent, currentColor);
+}
+
+#mc-voice-box .mc-voice-box-switch-button[aria-checked="true"] .mc-voice-box-switch-thumb {
+    fill: var(--button-primary-text-color, var(--background-fill-primary, Canvas));
+}
+
+/* A field that means nothing while its switch is off -- Temperature and
    Top-p without Sampling -- is greyed, and its input takes no press. */
 #mc-voice-box .mc-voice-box-field[data-disabled="true"] {
     opacity: 0.55;
