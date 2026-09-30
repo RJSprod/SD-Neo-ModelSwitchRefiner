@@ -77,12 +77,12 @@
     const LIVE_PHASES = {queued: true, waiting: true, loading: true, rendering: true};
     // A job holding its card, as opposed to one queued behind it.
     const ACTIVE_PHASES = {waiting: true, loading: true, rendering: true};
-    // Below this width of the root the stages stack, one screen each.
+    // Below this width of the root the stages are cards, one screen wide each.
     const STACK_BELOW = 900;
     // The least height the root is given, whatever the window leaves it.
     const MIN_HEIGHT = 420;
     // How long a message holds the status line before the line goes back to
-    // what the page is doing. A × puts it away sooner.
+    // what the page is doing. Its Dismiss puts it away sooner.
     const MESSAGE_MS = {info: 5000, other: 12000};
     const TICK_MS = 1000;
     // A press that travels further than this before it lets go is a drag or
@@ -98,10 +98,6 @@
         {key: "configuration", title: "CONFIGURATION", bar: "Config", name: "Configuration"},
         {key: "outputs", title: "OUTPUTS", bar: "Outputs", name: "Outputs"},
     ];
-    const PROMPT_HELP = "Speaker 1: to Speaker 4: start a line ([2]: works too); a line "
-        + "without one is Speaker 1. [pause] is 700 ms and [pause:1500] is 1500 ms of "
-        + "silence between separately rendered sections.";
-
     const ROUTES = {
         status: "/status",
         install: "/install",
@@ -510,6 +506,11 @@
                 fonts.ready.then(scheduleFit, function () { /* nothing to wait for */ });
             }
         } catch (error) { /* a document without the font loading API */ }
+        // A tap anywhere outside the selected output lane, and Escape, put it
+        // away (onPageClick, onPageKey).
+        document.addEventListener("pointerdown", notePress, true);
+        document.addEventListener("click", onPageClick);
+        document.addEventListener("keydown", onPageKey);
     }
 
     // Gradio shows a tab by switching its panel from display:none, which moves
@@ -702,6 +703,28 @@
         loop: [["path", {d: "M12.6 8.6A4.7 4.7 0 1 1 11 4.3", fill: "none", stroke: "currentColor",
                          "stroke-width": "1.8", "stroke-linecap": "round"}],
                ["path", {d: "M13.8 1.8v4.6H9.2z"}]],
+        close: [["path", {d: "M4 4l8 8M12 4l-8 8", fill: "none", stroke: "currentColor",
+                          "stroke-width": "1.8", "stroke-linecap": "round"}]],
+        // A disk: its body with a cut corner, the shutter at the top and the
+        // label at the bottom.
+        save: [["path", {d: "M2.5 2.5h8.2l2.8 2.8v8.2h-11z", fill: "none", stroke: "currentColor",
+                         "stroke-width": "1.4", "stroke-linejoin": "round"}],
+               ["rect", {x: "5", y: "2.5", width: "4.5", height: "3.2"}],
+               ["rect", {x: "4.6", y: "8.6", width: "6.8", height: "4.9", rx: "0.6"}]],
+        // The disk, smaller, with a plus beside it: a new configuration.
+        saveAs: [["path", {d: "M1.5 1.5h6.4l2.1 2.1v6.4h-8.5z", fill: "none", stroke: "currentColor",
+                           "stroke-width": "1.3", "stroke-linejoin": "round"}],
+                 ["rect", {x: "3.5", y: "1.5", width: "3.4", height: "2.4"}],
+                 ["rect", {x: "3.2", y: "6.2", width: "5", height: "3.8", rx: "0.5"}],
+                 ["path", {d: "M12.5 9.5v5M10 12h5", fill: "none", stroke: "currentColor",
+                           "stroke-width": "1.6", "stroke-linecap": "round"}]],
+        // A bin: the lid and its handle, the can and two ribs.
+        delete: [["path", {d: "M2.5 4.2h11M6.2 4.2V2.6h3.6v1.6", fill: "none", stroke: "currentColor",
+                           "stroke-width": "1.4", "stroke-linecap": "round", "stroke-linejoin": "round"}],
+                 ["path", {d: "M3.8 4.2l.8 9.3h6.8l.8-9.3", fill: "none", stroke: "currentColor",
+                           "stroke-width": "1.4", "stroke-linejoin": "round"}],
+                 ["path", {d: "M6.6 6.6v4.6M9.4 6.6v4.6", fill: "none", stroke: "currentColor",
+                           "stroke-width": "1.2", "stroke-linecap": "round"}]],
     };
 
     function svgNode(tag, attributes) {
@@ -754,6 +777,68 @@
     // The Play/Pause button's face and name follow its player.
     function showPlaying(controls, on) {
         if (controls && controls.play) setIcon(controls.play, on ? "pause" : "play", on ? "Pause" : "Play");
+    }
+
+    // -- switches: an on/off setting as one button -------------------------------- //
+    //
+    // A drawn track and knob beside the setting's name, all of it one button:
+    // no native checkbox, whose look is the host theme's to squeeze (a theme
+    // took Sampling's down to a sliver nobody could see was a control). Off,
+    // the knob sits left in an outlined track; on, it sits right in a filled
+    // one -- the side says it without the colour. role="switch" with
+    // aria-checked says it to assistive technology, and being a button, Space
+    // and Enter work it.
+
+    const SWITCH = {off: "7", on: "17"};
+
+    function switchPicture() {
+        const svg = svgNode("svg", {viewBox: "0 0 24 14", width: "34", height: "20", "aria-hidden": "true",
+                                    focusable: "false", "class": "mc-voice-box-switch"});
+        svg.appendChild(svgNode("rect", {"class": "mc-voice-box-switch-track", x: "0.75", y: "0.75",
+                                         width: "22.5", height: "12.5", rx: "6.25"}));
+        svg.appendChild(svgNode("circle", {"class": "mc-voice-box-switch-thumb", cx: SWITCH.off, cy: "7",
+                                           r: "4.5"}));
+        return svg;
+    }
+
+    function switchOn(node) {
+        return !!node && node.getAttribute("aria-checked") === "true";
+    }
+
+    function setSwitch(node, on) {
+        if (!node) return;
+        const wanted = on ? "true" : "false";
+        if (node.getAttribute("aria-checked") !== wanted) node.setAttribute("aria-checked", wanted);
+        const thumb = node.mcVoiceBoxThumb;
+        const x = on ? SWITCH.on : SWITCH.off;
+        if (thumb && thumb.getAttribute("cx") !== x) thumb.setAttribute("cx", x);
+    }
+
+    // `text` is what the button shows; `label`, when given, is its whole name
+    // (and its tooltip), for a setting whose words are shortened on the face.
+    // A press flips it and hands the new state to `changed`.
+    function switchButton(text, label, changed, className) {
+        const node = button("", label || "", null, "mc-voice-box-switch-button " + (className || ""));
+        node.setAttribute("role", "switch");
+        if (label) node.setAttribute("title", label);
+        else node.removeAttribute("aria-label");
+        const picture = switchPicture();
+        node.appendChild(picture);
+        node.mcVoiceBoxThumb = picture.lastChild;
+        node.appendChild(el("span", "mc-voice-box-switch-label", text));
+        setSwitch(node, false);
+        node.addEventListener("click", function (event) {
+            if (event && typeof event.preventDefault === "function") event.preventDefault();
+            const on = !switchOn(node);
+            setSwitch(node, on);
+            try {
+                const result = changed(on);
+                if (result && typeof result.catch === "function") result.catch(report);
+            } catch (error) {
+                report(error);
+            }
+        });
+        return node;
     }
 
     // -- waveforms ------------------------------------------------------------- //
@@ -2223,13 +2308,14 @@
     function buildPrompt(body) {
         nodes.prompt = el("textarea", "mc-voice-box-prompt");
         nodes.prompt.setAttribute("aria-label", "Script");
+        // No description under the box (the user asked for none): the empty
+        // box's placeholder is an example of the script's syntax.
         nodes.prompt.setAttribute("placeholder", "Speaker 1: Welcome back to the show.\nSpeaker 2: Thanks for having me.\n[pause]\nSpeaker 1: Today…");
         nodes.prompt.setAttribute("rows", "10");
         nodes.prompt.setAttribute("maxlength", "20000");
         nodes.prompt.addEventListener("input", promptChanged);
         nodes.prompt.addEventListener("change", promptChanged);
         body.appendChild(nodes.prompt);
-        body.appendChild(el("div", "mc-voice-box-prompt-help", PROMPT_HELP));
         nodes.summary = el("div", "mc-voice-box-prompt-summary", summarize(""));
         body.appendChild(nodes.summary);
         const lists = el("div", "mc-voice-box-prompt-lists");
@@ -2353,7 +2439,7 @@
 
     // -- CONFIGURATION --------------------------------------------------------- //
 
-    // `needs` names the checkbox a field means nothing without: while it is
+    // `needs` names the switch a field means nothing without: while it is
     // off the field is disabled, and keeps its value for when it is on again.
     const FIELDS = [
         {key: "model_id", label: "Model", kind: "select"},
@@ -2362,8 +2448,7 @@
         {key: "cfg_scale", label: "CFG", kind: "number", min: 1, max: 3, step: 0.1},
         {key: "seed", label: "Seed", kind: "text", placeholder: "random"},
         {key: "max_new_tokens", label: "Max new tokens", kind: "text", placeholder: "automatic"},
-        {key: "sampling", label: "Sampling", kind: "checkbox", wide: true,
-         hint: "Varies the pacing — where pauses and endings fall — from take to take."},
+        {key: "sampling", label: "Sampling", kind: "switch", wide: true},
         {key: "temperature", label: "Temperature", kind: "number", min: 0.1, max: 2, step: 0.05,
          needs: "sampling"},
         {key: "top_p", label: "Top-p", kind: "number", min: 0.05, max: 1, step: 0.01, needs: "sampling"},
@@ -2390,12 +2475,18 @@
         nodes.status.setAttribute("role", "status");
         nodes.status.setAttribute("aria-live", "polite");
         line.appendChild(nodes.status);
-        const buttons = el("span", "mc-voice-box-status-actions");
+        // No "×" is ever written as text here. LobeTheme's icon option
+        // (replaceIcon) goes through every <span> on the page and, where one's
+        // text contains "×", replaces all of its content with a 36 px X: this
+        // box's dismiss once made it do that to the whole box -- Cancel, Clear
+        // queue and Unload went with it, and a large X sat beside "Ready". So
+        // the dismiss draws its cross, and this box is a div.
+        const buttons = el("div", "mc-voice-box-status-actions");
         nodes.statusCancel = button("Cancel", "Cancel the running render", cancelRunning,
                                     "mc-voice-box-status-cancel");
         nodes.statusClear = button("Clear queue", "Withdraw every queued render", clearQueue,
                                    "mc-voice-box-status-clear");
-        nodes.statusDismiss = button("×", "Dismiss", dismissStatus, "mc-voice-box-status-dismiss");
+        nodes.statusDismiss = iconButton("close", "Dismiss", dismissStatus, "mc-voice-box-status-dismiss");
         nodes.statusUnloads = el("span", "mc-voice-box-status-unloads");
         [nodes.statusCancel, nodes.statusClear, nodes.statusDismiss, nodes.statusUnloads]
             .forEach(function (node) {
@@ -2409,21 +2500,24 @@
 
     function buildConfiguration(body, head) {
         buildRenderBlock(head);
-        const bar = el("div", "mc-voice-box-row mc-voice-box-configuration-bar");
+        // One row at every width: the select takes the room left, and Save,
+        // Save as and Delete are square icons. Unsaved changes are a dot on
+        // Save (renderConfigurationBar).
+        const bar = el("div", "mc-voice-box-configuration-bar");
         nodes.configurationSelect = el("select", "mc-voice-box-configuration-select");
         nodes.configurationSelect.setAttribute("aria-label", "Configuration");
         nodes.configurationSelect.addEventListener("change", function () {
             chooseConfiguration(nodes.configurationSelect.value).catch(report);
         });
         bar.appendChild(nodes.configurationSelect);
-        nodes.configurationSave = button("Save", "Save this configuration", function () {
+        nodes.configurationSave = iconButton("save", "Save", function () {
             return saveConfiguration(false);
         }, "mc-voice-box-configuration-save");
-        nodes.configurationSaveAs = button("Save as", "Save as a new configuration", function () {
+        nodes.configurationSaveAs = iconButton("saveAs", "Save as a new configuration", function () {
             return saveConfiguration(true);
         }, "mc-voice-box-configuration-save-as");
-        nodes.configurationDelete = button("Delete", "Delete this configuration",
-                                           deleteConfiguration, "mc-voice-box-configuration-delete");
+        nodes.configurationDelete = iconButton("delete", "Delete this configuration", deleteConfiguration,
+                                               "mc-voice-box-configuration-delete");
         bar.appendChild(nodes.configurationSave);
         bar.appendChild(nodes.configurationSaveAs);
         bar.appendChild(nodes.configurationDelete);
@@ -2438,7 +2532,19 @@
         nodes.fields = {};
         nodes.fieldBoxes = {};
         FIELDS.forEach(function (field) {
-            const wrap = el("label", "mc-voice-box-field" + (field.kind === "checkbox" ? " mc-voice-box-field-check" : ""));
+            if (field.kind === "switch") {
+                const toggle = switchButton(field.label, "", function () { fieldChanged(field, toggle); },
+                                            "mc-voice-box-field-switch");
+                toggle.setAttribute("data-field", field.key);
+                nodes.fields[field.key] = toggle;
+                const cell = el("div", "mc-voice-box-field mc-voice-box-field-toggle"
+                                + (field.wide ? " mc-voice-box-field-wide" : ""));
+                cell.appendChild(toggle);
+                nodes.fieldBoxes[field.key] = cell;
+                fields.appendChild(cell);
+                return;
+            }
+            const wrap = el("label", "mc-voice-box-field" + (field.wide ? " mc-voice-box-field-wide" : ""));
             const caption = el("span", "mc-voice-box-field-label", field.label);
             let input;
             if (field.kind === "select") {
@@ -2457,43 +2563,33 @@
             const changed = function () { fieldChanged(field, input); };
             input.addEventListener("change", changed);
             if (field.kind === "text" || field.kind === "number") input.addEventListener("input", changed);
-            if (field.kind === "checkbox") {
-                wrap.appendChild(input);
-                wrap.appendChild(caption);
-            } else {
-                wrap.appendChild(caption);
-                wrap.appendChild(input);
-            }
+            wrap.appendChild(caption);
+            wrap.appendChild(input);
             nodes.fields[field.key] = input;
             nodes.fieldBoxes[field.key] = wrap;
-            // A field with a hint is the field and the hint under it, across
-            // the whole row when it is `wide`; the hint is its description.
-            let holder = wrap;
-            if (field.hint) {
-                holder = el("div", "mc-voice-box-field-group");
-                holder.appendChild(wrap);
-                const hint = el("div", "mc-voice-box-field-hint", field.hint);
-                hint.setAttribute("id", "mc-voice-box-hint-" + field.key);
-                input.setAttribute("aria-describedby", "mc-voice-box-hint-" + field.key);
-                holder.appendChild(hint);
-            }
-            if (field.wide) holder.classList.add("mc-voice-box-field-wide");
-            fields.appendChild(holder);
+            fields.appendChild(wrap);
         });
         form.appendChild(fields);
 
         // Keep warm is Voice Box's setting rather than a configuration's field
         // (the server keeps it beside the save folder), so it saves at once.
-        const warm = el("label", "mc-voice-box-field mc-voice-box-field-check mc-voice-box-keep-warm");
-        nodes.keepWarm = el("input", "mc-voice-box-field-input");
-        nodes.keepWarm.setAttribute("type", "checkbox");
-        nodes.keepWarm.type = "checkbox";
-        nodes.keepWarm.setAttribute("aria-label", "Keep VibeVoice warm between renders");
-        nodes.keepWarm.addEventListener("change", function () {
-            saveSettings({keep_warm: !!nodes.keepWarm.checked}).catch(report);
-        });
+        // Its face says "Keep warm"; its name is the whole sentence. While a
+        // save is on its way -- two, after two quick presses -- a status that
+        // arrives with the old value does not flip it back
+        // (renderConfigurationFields); the last answer decides.
+        const warm = el("div", "mc-voice-box-field mc-voice-box-field-toggle");
+        nodes.keepWarm = switchButton("Keep warm", "Keep VibeVoice warm between renders", function (on) {
+            const settle = function () {
+                nodes.keepWarm.mcVoiceBoxSaving -= 1;
+                renderConfigurationFields();
+            };
+            nodes.keepWarm.mcVoiceBoxSaving = (nodes.keepWarm.mcVoiceBoxSaving || 0) + 1;
+            return saveSettings({keep_warm: on}).then(settle, function (error) {
+                settle();
+                throw error;
+            });
+        }, "mc-voice-box-keep-warm");
         warm.appendChild(nodes.keepWarm);
-        warm.appendChild(el("span", "mc-voice-box-field-label", "Keep VibeVoice warm between renders"));
         form.appendChild(warm);
 
         const speakers = el("div", "mc-voice-box-speakers");
@@ -2519,8 +2615,8 @@
     function fieldChanged(field, input) {
         const working = ensureWorking();
         let value;
-        if (field.kind === "checkbox") {
-            value = !!input.checked;
+        if (field.kind === "switch") {
+            value = switchOn(input);
         } else if (field.kind === "number") {
             value = input.value === "" ? null : Number(input.value);
             if (value !== null && !isFinite(value)) value = null;
@@ -2534,7 +2630,7 @@
         if (working[field.key] === value) return;
         working[field.key] = value;
         markConfigurationDirty();
-        if (field.kind === "checkbox") syncNeeds();
+        if (field.kind === "switch") syncNeeds();
         // The card and the model chosen last become Voice Box's defaults as
         // well, so the next configuration -- and a render with none -- starts
         // from them (design intent section 9: the chosen card is stored).
@@ -2734,9 +2830,11 @@
         }
         options.unshift({value: "", label: unsaved});
         fillSelect(nodes.configurationSelect, options, state.configurationId || "");
-        nodes.configurationSave.textContent = state.dirty.configuration ? "Save •" : "Save";
-        nodes.configurationSave.setAttribute("aria-label", state.dirty.configuration
-            ? "Save this configuration (unsaved changes)" : "Save this configuration");
+        // Unsaved changes: a dot of the accent on Save (the stylesheet draws
+        // it from data-dirty), and its name says so.
+        const dirty = !!state.dirty.configuration;
+        setIcon(nodes.configurationSave, "save", dirty ? "Save — unsaved changes" : "Save");
+        nodes.configurationSave.setAttribute("data-dirty", dirty ? "true" : "false");
         nodes.configurationDelete.disabled = !state.configurationId;
     }
 
@@ -2763,8 +2861,8 @@
                 fillSelect(input, options, working.card_uuid || "");
                 return;
             }
-            if (field.kind === "checkbox") {
-                input.checked = working[field.key] === true;
+            if (field.kind === "switch") {
+                setSwitch(input, working[field.key] === true);
                 return;
             }
             if (focused(input)) return;
@@ -2773,9 +2871,9 @@
             if (input.value !== text) input.value = text;
         });
         syncNeeds();
-        if (nodes.keepWarm && !focused(nodes.keepWarm)) {
+        if (nodes.keepWarm && !nodes.keepWarm.mcVoiceBoxSaving) {
             const settings = (state.status && state.status.settings) || {};
-            nodes.keepWarm.checked = settings.keep_warm !== false;
+            setSwitch(nodes.keepWarm, settings.keep_warm !== false);
         }
     }
 
@@ -3053,13 +3151,91 @@
     function selectOutput(id) {
         if (!id || state.selectedOutput === id) return;
         state.selectedOutput = id;
+        syncExpanded();
+        const row = nodes.lanes[id];
+        if (row && row.mcVoiceBoxLane) revealLane(row.mcVoiceBoxLane);
+    }
+
+    // Every lane shown open or compact as the selection says.
+    function syncExpanded() {
         Object.keys(nodes.lanes).forEach(function (key) {
             const lane = nodes.lanes[key] && nodes.lanes[key].mcVoiceBoxLane;
             if (!lane) return;
             if ((lane.row.getAttribute("aria-expanded") === "true") !== selected(lane)) expandLane(lane);
         });
-        const row = nodes.lanes[id];
-        if (row && row.mcVoiceBoxLane) revealLane(row.mcVoiceBoxLane);
+    }
+
+    // No lane selected: the open one goes back to its compact line. Nothing
+    // else changes -- a lane that is playing plays on, still the active
+    // player, its playhead on its compact waveform -- and a poll keeps it
+    // closed, because the selection is what a poll redraws from.
+    function deselectOutput() {
+        if (!state.selectedOutput) return;
+        state.selectedOutput = "";
+        syncExpanded();
+    }
+
+    // -- putting the selected lane away: a tap outside it, or Escape --------- //
+
+    const page = {press: null};
+
+    // Where the last press went down, to tell a tap from a drag: a click that
+    // ends a drag -- a scrub, a text selection -- is not a tap.
+    function notePress(event) {
+        page.press = event ? {x: Number(event.clientX) || 0, y: Number(event.clientY) || 0} : null;
+    }
+
+    // Only while the tab is on screen: a click in another of Forge's tabs is
+    // somewhere the lane could not be.
+    function onScreen() {
+        try {
+            return !!nodes.root && Number(nodes.root.getBoundingClientRect().width) > 0;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    // A click outside the selected lane's box -- its waveform, buttons,
+    // metadata and infotext are inside -- puts it away. A click is what a tap
+    // makes and a scroll or a card swipe does not, which is why this listens
+    // for it rather than for pointerdown. A click on another lane is that
+    // lane's to select, which it has done by the time this hears it. The
+    // page's own synthetic clicks (a download's link) are not taps.
+    function onPageClick(event) {
+        if (!event || !state.selectedOutput) return;
+        const press = page.press;
+        page.press = null;
+        if (event.isTrusted === false || !onScreen()) return;
+        if (press && Number(event.detail) !== 0 && Math.max(
+            Math.abs((Number(event.clientX) || 0) - press.x),
+            Math.abs((Number(event.clientY) || 0) - press.y)) > DRAG_PX) {
+            return;
+        }
+        const row = nodes.lanes[state.selectedOutput];
+        if (!row) return;
+        // The path the click took, as it was when it happened: a handler on
+        // the way may have rebuilt what was pressed.
+        const path = typeof event.composedPath === "function" ? event.composedPath() : null;
+        const inside = path && path.length ? path.indexOf(row) !== -1
+            : !!event.target && typeof row.contains === "function" && row.contains(event.target);
+        if (!inside) deselectOutput();
+    }
+
+    // Escape puts the selected lane away too, unless it is being said to a
+    // field (a rename being given up) or to something else on the page that
+    // has the focus.
+    function onPageKey(event) {
+        if (!event || event.key !== "Escape" || !state.selectedOutput || !onScreen()) return;
+        if (event.defaultPrevented) return;
+        const target = event.target;
+        const tag = String((target && target.tagName) || "").toUpperCase();
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        // Focus somewhere else on the page -- still in it -- keeps its Escape.
+        const active = document.activeElement;
+        const elsewhere = !!active && active !== document.body && typeof document.contains === "function"
+            && document.contains(active) && !!nodes.root && !nodes.root.contains(active);
+        if (elsewhere) return;
+        deselectOutput();
     }
 
     function expandLane(lane) {

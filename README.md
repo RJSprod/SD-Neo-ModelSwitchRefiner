@@ -5525,6 +5525,11 @@ the line for a few seconds (five, or twelve for a warning) and has a × to
 dismiss it; hovering the line shows what every card is doing, the image model
 parked or WanGP's card on lease included.
 
+The page draws its own switches and icons rather than using the browser's
+checkboxes or text symbols, so a WebUI theme can neither squeeze them to nothing
+nor swap them for icons of its own (the Lobe theme does both to what it finds),
+and nothing the page hides can be brought back by a theme's rules.
+
 The page is one block of HTML painted once and a script that owns it. Everything
 it shows it fetched from the WebUI on the page token, every request has a
 deadline, a second press waits for the first instead of adding a request, and a
@@ -5575,7 +5580,9 @@ one entry. The history keeps a hundred and lets the oldest go; a prompt you
 
 ### Configuration
 
-A named set of the knobs a render takes, kept and chosen by name: the model,
+A named set of the knobs a render takes, kept and chosen by name. The list of
+configurations heads the stage on one row with three icon buttons: **Save**,
+**Save as** (a new configuration) and **Delete**. A configuration holds the model,
 the card (each named, and marked when it is the image model's card or WanGP's),
 **diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
 a **seed** (blank for a different one each time — drawn when the render is
@@ -5584,8 +5591,10 @@ again), **max new tokens** (blank for the model's own limit), **sampling**
 with its **temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by
 default, and the four **speaker** slots, each holding one sample.
 
-Sampling is off by default, and then temperature and top-p are greyed out and
-not used. Off, the model makes its own most likely choices, as its publisher
+**Sampling** is a switch: the whole button, its name included, turns it on or
+off, and its knob sits to the right, on a filled track, while it is on. It is
+off by default, and then temperature and top-p are greyed out and not used.
+Off, the model makes its own most likely choices, as its publisher
 ships it. VibeVoice has two parts: the voice — tone, texture, how each word
 comes out, which the seed, CFG and steps shape — and a pacer that decides,
 every eighth of a second of speech, whether to keep talking, take a break or
@@ -5596,11 +5605,11 @@ says it reached its token budget). The seed still makes a sampled take again
 exactly. Temperature and top-p keep their values while sampling is off, so
 turning it back on brings them back.
 
-An edit marks the configuration *Save •* until you save it, and Render never
-saves for you: an unsaved configuration is sent along with the render as it
-stands. The card and model you pick become the defaults for the next
-configuration. The values a render actually used are written on its output.
-Controls the model cannot honour are not on the page.
+An edit puts a dot on **Save** until you save it, and Render never saves for
+you: an unsaved configuration is sent along with the render as it stands. The
+card and model you pick become the defaults for the next configuration. The
+values a render actually used are written on its output. Controls the model
+cannot honour are not on the page.
 
 ### Players
 
@@ -5630,6 +5639,13 @@ metadata (model, seed, steps, CFG, the speakers' samples, the length, how long i
 took, and, when it sampled, its temperature and top-p), and its **infotext**. A
 render you just made opens by itself when it lands, and the list — only the list
 — scrolls to it.
+
+A tap or click anywhere outside the open lane closes it again — Render and the
+page's other buttons included — and so does Escape; a scroll or a swipe does
+not, and neither does a press anywhere inside the lane — its waveform, its
+buttons, its metadata or its infotext. Closing a lane never touches what it is
+playing: the sound plays on, the compact waveform keeps its playhead, and the
+lane's buttons act on it as before when you open it again.
 
 The **infotext** is the render's fingerprint, written the way a WebUI writes an
 image's: the prompt as it was, then one line — `Steps: 10, CFG scale: 1.3,
@@ -5697,8 +5713,9 @@ between answers, so a page on another device's clock still counts right.
 Whatever the ending, the card is handed back — before the output's file is made,
 which is work for the processor that no image job waits for — and whether
 VibeVoice stays warm on it follows *Keep VibeVoice warm between requests* in
-Settings → Model Chain; Voice Box's own *Keep warm* toggle can decline a warm
-stay but never force one against that setting. A render is named after its
+Settings → Model Chain; Voice Box's own **Keep warm** switch, in the
+Configuration stage, can decline a warm stay but never force one against that
+setting. A render is named after its
 pipeline and its number in it (*Trailer 3*) unless you name it; two renders
 queued as one ends can no longer be given the same number.
 

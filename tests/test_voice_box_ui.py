@@ -204,6 +204,29 @@ class TestTheStylesheetSection:
         above everything the tab draws."""
         assert "z-index" not in self._rules()
 
+    def test_nothing_hidden_can_be_shown_by_a_theme(self):
+        """The script hides with the `hidden` attribute, which only the
+        browser's own stylesheet turns into `display: none`, and any author
+        rule about `display` beats that. The section says it again, under the
+        root's id and `!important`, so a theme's `button { display: ...
+        !important }` does not bring back a hidden Dismiss."""
+        rules = self._rules()
+
+        found = re.search(r"#mc-voice-box \[hidden\],\s*#mc-voice-box\[hidden\] \{([^}]*)\}", rules)
+        assert found, "the section's [hidden] rule went"
+        assert re.fullmatch(r"\s*display:\s*none\s*!important;\s*", found.group(1)), found.group(1)
+
+    def test_the_page_has_no_native_checkbox_left(self):
+        """Sampling and Keep warm are switches the script draws: a theme
+        squeezed the checkboxes they were to a sliver nobody could tell was a
+        control. The script makes no checkbox and the section styles none."""
+        script = (ROOT / "javascript" / "voice_box.js").read_text(encoding="utf-8")
+        code = re.sub(r"//[^\n]*", "", script)
+
+        assert not re.search(r"""["']checkbox["']""", code)
+        assert "checkbox" not in self._rules()
+        assert "mc-voice-box-field-check" not in self._rules()
+
     def test_only_the_trimmer_and_a_range_input_keep_their_sideways_drags(self):
         """On a phone a sideways swipe changes the card everywhere except on a
         control whose drag is sideways: the trimmer's waveform (its handles)

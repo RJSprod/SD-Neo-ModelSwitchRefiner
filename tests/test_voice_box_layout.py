@@ -177,9 +177,47 @@ body.dark #forge-header, body.dark #forge-footer { background: #1f2937; }
 """
 
 
-def page_html() -> str:
-    return PAGE % {"header": HEADER, "footer": FOOTER, "section": voice_box_section(),
+# A theme that does not play fair, as a second variant of the page: its rules
+# come after the Voice Box section, as a theme's do. "display" gives every
+# button, div and span a display of its own, !important -- which beats the
+# browser's own `[hidden] { display: none }`; "inputs" squeezes every input to
+# a sliver, the way the user's theme drew the Sampling checkbox.
+HOSTILE = {
+    "display": ("button { display: inline-flex !important; }\n"
+                "div { display: inline-flex !important; }\n"
+                "span { display: inline-flex !important; }\n"),
+    "inputs": ("input { -webkit-appearance: none !important; appearance: none !important;"
+               " width: 2px !important; }\n"),
+}
+
+# LobeTheme's icon option (its `replaceIcon`), as it runs once the page is
+# built: every <span> whose text holds "×" gets its whole content replaced by
+# a 36 px X of Lobe's own. It is what put a large X beside "Ready".
+LOBE_ICON_SWAP = """() => {
+    let swapped = 0;
+    for (const span of document.querySelectorAll("span")) {
+        if (!span.textContent || span.textContent.indexOf("\u00d7") === -1) continue;
+        span.innerHTML = '<svg class="lobe-x" width="36" height="36" viewBox="0 0 24 24">'
+            + '<path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2"/></svg>';
+        swapped += 1;
+    }
+    return swapped;
+}"""
+
+
+def page_html(hostile=()) -> str:
+    html = PAGE % {"header": HEADER, "footer": FOOTER, "section": voice_box_section(),
                    "root": mc_voice_box_ui.root_markup(TOKEN)}
+    if hostile:
+        rules = "".join(HOSTILE[name] for name in hostile)
+        html = html.replace("</head>", "<style>/* a hostile theme */\n%s</style>\n</head>" % rules, 1)
+        # Outside the tab, what the theme does where nothing stops it: a hidden
+        # button it shows, and a span with a cross for Lobe's swap to take.
+        html = html.replace('<div id="forge-header">Forge header</div>',
+                            '<div id="forge-header">Forge header <button class="probe" hidden>probe</button>'
+                            ' <span class="probe" hidden>probe</span> <div class="probe" hidden>probe</div>'
+                            ' <span id="probe-cross">\u00d7</span></div>', 1)
+    return html
 
 
 def _launch(playwright):
@@ -218,6 +256,13 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
         name = path[len(PREFIX):]
         if name in ("/outputs/audio", "/samples/audio"):
             route.fulfill(status=200, content_type="audio/mpeg", body=b"\x00" * 64)
+        elif name == "/settings":
+            # As the server does: the setting is kept, and the answer carries them all.
+            settings = answers["/status"]["settings"]
+            settings.update(json.loads(route.request.post_data or "{}"))
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "settings": settings,
+                                           "engine_settings": answers["/status"]["engine_settings"]}))
         else:
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(answers.get(name, {"ok": True})))
@@ -225,10 +270,11 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
         route.fulfill(status=404, body="")
 
 
-def open_tab(browser, width: int, height: int, *, dark: bool = False):
-    """A page at ``width`` x ``height`` with the tab booted, its lists drawn and fitted."""
+def open_tab(browser, width: int, height: int, *, dark: bool = False, hostile=()):
+    """A page at ``width`` x ``height`` with the tab booted, its lists drawn and fitted;
+    ``hostile`` names the parts of HOSTILE the page's theme has."""
     page = browser.new_page(viewport={"width": width, "height": height})
-    answers, html, script = fixtures(), page_html(), SCRIPT.read_text(encoding="utf-8")
+    answers, html, script = fixtures(), page_html(hostile), SCRIPT.read_text(encoding="utf-8")
     if dark:
         html = html.replace("<body>", '<body class="dark">', 1)
     page.route(ORIGIN + "/**", lambda route: _answer(route, answers, html, script))
@@ -722,6 +768,228 @@ class TestPhone:
         assert found["status"] == "Ready"
 
 
+class TestTheConfigurationManager:
+    def test_it_is_one_row_at_every_width_the_stage_takes(self, browser):
+        """The select, Save, Save as and Delete share one row -- in the desktop
+        column and on the phone's card at 390 and 360 px -- and nothing in it
+        runs out of the stage."""
+        seen = {}
+        for width, height in ((1440, 900), (390, 844), (360, 780)):
+            page = open_tab(browser, width, height)
+            seen[width] = page.evaluate("""() => {
+                const stage = document.querySelector("#mc-voice-box .mc-voice-box-stage-configuration");
+                const bar = stage.querySelector(".mc-voice-box-configuration-bar");
+                const s = stage.getBoundingClientRect();
+                return {controls: [...bar.children].map((node) => {
+                            const r = node.getBoundingClientRect();
+                            return {name: node.className.split(" ").pop(), top: r.top, left: r.left,
+                                    right: r.right, width: r.width, height: r.height};
+                        }),
+                        stage: {left: s.left, right: s.right}, overflow: bar.scrollWidth - bar.clientWidth};
+            }""")
+            page.close()
+
+        for width, found in seen.items():
+            controls = found["controls"]
+            assert [control["name"] for control in controls] == [
+                "mc-voice-box-configuration-select", "mc-voice-box-configuration-save",
+                "mc-voice-box-configuration-save-as", "mc-voice-box-configuration-delete"], width
+            tops = [control["top"] for control in controls]
+            assert max(tops) - min(tops) <= 2, (width, controls)
+            for control in controls:
+                assert control["left"] >= found["stage"]["left"] - 1, (width, control)
+                assert control["right"] <= found["stage"]["right"] + 1, (width, control)
+            assert controls[0]["width"] >= 60, (width, controls[0])
+            for icon in controls[1:]:
+                assert _near(icon["width"], icon["height"]), (width, icon)
+            assert found["overflow"] <= 1, (width, found)
+
+    def test_unsaved_changes_put_an_accent_dot_on_save(self, browser):
+        page = open_tab(browser, 1440, 900)
+        dot = """() => {
+            const save = document.querySelector("#mc-voice-box .mc-voice-box-configuration-save");
+            const after = getComputedStyle(save, "::after");
+            return {content: after.content, background: after.backgroundColor, width: after.width,
+                    label: save.getAttribute("aria-label")};
+        }"""
+        clean = page.evaluate(dot)
+        page.locator('#mc-voice-box [data-field="steps"]').fill("20")
+        settle(page)
+        dirty = page.evaluate(dot)
+        page.close()
+
+        assert clean["content"] in ("none", "normal") and clean["label"] == "Save"
+        assert dirty["content"] == '""' and dirty["width"] == "7px"
+        assert dirty["background"] == "rgb(249, 115, 22)"
+        assert dirty["label"] == "Save — unsaved changes"
+
+
+class TestDeselecting:
+    def test_a_tap_outside_puts_the_selected_lane_away_and_its_own_download_does_not(self, browser):
+        """In a real browser, where a download's link is clicked by the page
+        itself (a synthetic click, which is no tap) and Escape comes from the
+        keyboard."""
+        page = open_tab(browser, 1440, 900)
+        opened = """() => [...document.querySelectorAll("#mc-voice-box .mc-voice-box-lane")]
+            .map((lane) => lane.getAttribute("aria-expanded")).indexOf("true")"""
+        lane = page.locator("#mc-voice-box .mc-voice-box-lane").nth(1)
+        lane.locator(".mc-voice-box-lane-head").click()
+        settle(page)
+        selected = page.evaluate(opened)
+        page.locator("#mc-voice-box .mc-voice-box-prompt-summary").click()
+        settle(page)
+        tapped = page.evaluate(opened)
+        lane.locator(".mc-voice-box-lane-head").click()
+        settle(page)
+        with page.expect_download():
+            lane.locator(".mc-voice-box-lane-download").click()
+        settle(page)
+        downloaded = page.evaluate(opened)
+        # Escape said to a rename box gives up the rename and nothing more.
+        lane.locator(".mc-voice-box-lane-name").dblclick()
+        page.locator("#mc-voice-box .mc-voice-box-rename").press("Escape")
+        settle(page)
+        renaming = (page.evaluate(opened), page.locator("#mc-voice-box .mc-voice-box-rename").count())
+        page.keyboard.press("Escape")
+        settle(page)
+        escaped = page.evaluate(opened)
+        page.close()
+
+        assert (selected, tapped, downloaded, renaming, escaped) == (1, -1, 1, (1, 0), -1)
+
+
+class TestUnderAHostileTheme:
+    """The same page with a theme that does not play fair (HOSTILE), and with
+    LobeTheme's icon swap run over it once it is built (LOBE_ICON_SWAP)."""
+
+    HIDDEN = [".mc-voice-box-status-dismiss", ".mc-voice-box-status-cancel", ".mc-voice-box-status-clear",
+              ".mc-voice-box-status-unloads", ".mc-voice-box-install", ".mc-voice-box-trimmer",
+              ".mc-voice-box-lane-details", ".mc-voice-box-stage-outputs .mc-voice-box-empty"]
+
+    def test_nothing_hidden_shows_when_a_theme_gives_everything_a_display(self, browser):
+        page = open_tab(browser, 1440, 900, hostile=("display",))
+        found = page.evaluate("""(selectors) => {
+            const root = document.getElementById("mc-voice-box");
+            const boxes = {};
+            for (const selector of selectors) {
+                boxes[selector] = [...root.querySelectorAll(selector)].map((node) => {
+                    const r = node.getBoundingClientRect();
+                    return {hidden: node.hidden, parent: node.offsetParent === null,
+                            width: r.width, height: r.height};
+                });
+            }
+            // The theme's rules are in force: outside the tab, where nothing
+            // stops them, a hidden button, span and div are all back.
+            const probes = [...document.querySelectorAll("#forge-header .probe")].map((node) => {
+                const r = node.getBoundingClientRect();
+                return [node.tagName, node.hidden, r.width * r.height > 0];
+            });
+            return {boxes, probes, status: root.querySelector(".mc-voice-box-status").textContent};
+        }""", self.HIDDEN)
+        page.close()
+
+        assert found["status"] == "Ready"
+        assert found["probes"] == [["BUTTON", True, True], ["SPAN", True, True], ["DIV", True, True]]
+        for selector, entries in found["boxes"].items():
+            assert entries, selector
+            for entry in entries:
+                assert entry == {"hidden": True, "parent": True, "width": 0, "height": 0}, (selector, entry)
+
+    def test_lobes_icon_swap_finds_nothing_to_take_in_the_tab(self, browser):
+        """Run over the whole page, the swap takes the probe's cross outside
+        the tab and nothing inside it: the status line keeps Cancel, Clear
+        queue, Dismiss and the Unload holder, and no X of Lobe's sits there."""
+        page = open_tab(browser, 1440, 900, hostile=("display",))
+        before = page.evaluate("() => document.getElementById('mc-voice-box').innerHTML")
+        swapped = page.evaluate(LOBE_ICON_SWAP)
+        found = page.evaluate("""() => {
+            const line = document.querySelector("#mc-voice-box .mc-voice-box-status-line");
+            const dismiss = line.querySelector(".mc-voice-box-status-dismiss");
+            return {kept: [".mc-voice-box-status-cancel", ".mc-voice-box-status-clear",
+                           ".mc-voice-box-status-dismiss", ".mc-voice-box-status-unloads"]
+                        .map((selector) => !!line.querySelector(selector)),
+                    lobe: document.querySelectorAll("#mc-voice-box .lobe-x").length,
+                    probe: !!document.querySelector("#probe-cross .lobe-x"),
+                    dismiss: dismiss.getBoundingClientRect().width,
+                    after: document.getElementById("mc-voice-box").innerHTML};
+        }""")
+        page.close()
+
+        assert swapped == 1 and found["probe"] is True
+        assert found["after"] == before
+        assert found["kept"] == [True, True, True, True]
+        assert found["lobe"] == 0
+        assert found["dismiss"] == 0
+
+    def test_the_switches_are_controls_when_a_theme_squeezes_inputs(self, browser):
+        """Each at least 32 x 24, its knob a real box that moves to the other
+        side when pressed, its track's fill and its border changing with it;
+        Space and Enter work it, and the focus shows."""
+        page = open_tab(browser, 1440, 900, hostile=("inputs",))
+        found = page.evaluate("""async () => {
+            const root = document.getElementById("mc-voice-box");
+            const wait = () => new Promise((done) => setTimeout(done, 150));
+            const look = (node) => {
+                const r = node.getBoundingClientRect();
+                const knob = node.querySelector(".mc-voice-box-switch-thumb").getBoundingClientRect();
+                const picture = node.querySelector(".mc-voice-box-switch").getBoundingClientRect();
+                const words = node.querySelector(".mc-voice-box-switch-label").getBoundingClientRect();
+                return {checked: node.getAttribute("aria-checked"), width: r.width, height: r.height,
+                        knob: {left: knob.left - r.left, width: knob.width, height: knob.height},
+                        // The picture has room of its own inside the button,
+                        // and the words start after it.
+                        picture: {width: picture.width, height: picture.height,
+                                  inside: knob.left >= r.left && knob.right <= r.right
+                                      && picture.left >= r.left && picture.right <= r.right,
+                                  before: words.left >= picture.right - 0.5},
+                        fill: getComputedStyle(node.querySelector(".mc-voice-box-switch-track")).fill,
+                        border: getComputedStyle(node).borderTopColor};
+            };
+            const out = {squeezed: root.querySelector('[data-field="seed"]').getBoundingClientRect().width,
+                         switches: {}};
+            for (const [name, selector] of [["sampling", '[data-field="sampling"]'],
+                                            ["warm", ".mc-voice-box-keep-warm"]]) {
+                const node = root.querySelector(selector);
+                const first = look(node);
+                node.click();
+                await wait();
+                const second = look(node);
+                node.click();
+                await wait();
+                out.switches[name] = {first, second, third: look(node)};
+            }
+            return out;
+        }""")
+        sampling = page.locator('#mc-voice-box [data-field="sampling"]')
+        sampling.focus()
+        page.keyboard.press("Space")
+        spaced = sampling.get_attribute("aria-checked")
+        page.keyboard.press("Enter")
+        entered = sampling.get_attribute("aria-checked")
+        ring = sampling.evaluate("(node) => ({visible: node.matches(':focus-visible'),"
+                                 " outline: getComputedStyle(node).outlineStyle})")
+        page.close()
+
+        assert found["squeezed"] < 20, found
+        for name, states in found["switches"].items():
+            first, second, third = states["first"], states["second"], states["third"]
+            assert first["width"] >= 32 and first["height"] >= 24, (name, first)
+            assert first["knob"]["width"] > 0 and first["knob"]["height"] > 0, (name, first)
+            for state in (first, second):
+                picture = state["picture"]
+                assert picture["width"] >= 30 and picture["height"] >= 16, (name, state)
+                assert picture["inside"] and picture["before"], (name, state)
+            assert first["checked"] != second["checked"], (name, states)
+            assert second["knob"]["left"] != first["knob"]["left"], (name, states)
+            on, off = (second, first) if second["checked"] == "true" else (first, second)
+            assert on["knob"]["left"] > off["knob"]["left"] + 4, (name, states)
+            assert on["fill"] != off["fill"], (name, states)
+            assert on["border"] != off["border"], (name, states)
+            assert third == first, (name, states)
+        assert (spaced, entered) == ("true", "false")
+        assert ring == {"visible": True, "outline": "solid"}
+
+
 class TestBelowTheFloor:
     def test_a_window_too_small_for_the_floor_still_reaches_everything_in_each_stage(self, browser):
         """Below 420 px the root keeps the floor and the page may scroll; a stage
@@ -730,6 +998,16 @@ class TestBelowTheFloor:
         seen = {}
         for width, height in ((1440, 560), (390, 560)):
             page = open_tab(browser, width, height)
+            # On the desktop the Prompt stage's fixed parts and list floor fit
+            # the floor as they come, so the script box is made taller, as a
+            # user dragging its corner makes it, until they no longer do.
+            page.evaluate("""() => {
+                const root = document.getElementById("mc-voice-box");
+                if (root.dataset.layout !== "stack") {
+                    root.querySelector(".mc-voice-box-prompt").style.height = "14em";
+                }
+            }""")
+            settle(page)
             seen[width] = page.evaluate("""() => ({
                 height: document.getElementById("mc-voice-box").style.height,
                 stages: [...document.querySelectorAll("#mc-voice-box .mc-voice-box-stage")].map((stage) => {
