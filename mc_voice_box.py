@@ -507,10 +507,35 @@ CONFIGURATION_DEFAULTS = {
     "cfg_scale": 1.3,
     "seed": None,
     "max_new_tokens": None,
+    "precision": "bf16",
+    "lora_id": "",
+    "lora_scale": 1.0,
     "speakers": {},
 }
 """A configuration's fields. ``model_id`` and ``card_uuid`` empty mean the
-engine's default model and the card chosen in Voice Box's settings."""
+engine's default model and the card chosen in Voice Box's settings.
+
+``precision``, ``lora_id`` and ``lora_scale`` are the 7B's: how its language
+model is held on the card (full, 8-bit or 4-bit) and which fine-tune, at what
+strength, is applied to it. A model that takes neither -- the Realtime 0.5B --
+is saved with ``bf16``, no LoRA and ``1.0``, and a configuration that asks it
+for anything else is refused with a sentence rather than quietly changed.
+
+``speakers`` maps a speaker number to a sample id for a model that clones
+from samples, and to ``"preset:<stem>"`` for one that speaks with its own
+preset voices; which of the two a model takes is the engine's to say
+(:func:`_model_info`)."""
+
+PRESET_PREFIX = "preset:"
+
+LORA_SCALE_RANGE = (0.0, 2.0)
+
+_FALLBACK_MODEL = {"id": "", "label": "VibeVoice", "kind": "longform", "precisions": ["bf16"],
+                   "lora": False, "max_speakers": MAX_SPEAKERS, "voices": "samples",
+                   "defaults": {"steps": 10, "cfg_scale": 1.3}, "presets": []}
+"""What a model is taken to be when the engine cannot describe it: the 7B's
+shape at full precision, which is what every configuration saved before the
+engine could describe its models was made for."""
 
 
 def _configurations_root() -> Path:
@@ -543,37 +568,112 @@ def _bounded_float(value, low: float, high: float, what: str) -> float:
     return round(number, 3)
 
 
-def _clean_speakers(value) -> dict:
+def _model_info(model_id: str = "") -> dict:
+    """What the engine says about ``model_id``: its kind, voices, precisions, LoRA.
+
+    ``""`` is the model Voice Box's settings name, else the engine's default. An
+    engine that cannot answer describes nothing, and :data:`_FALLBACK_MODEL` --
+    the 7B at full precision -- stands in, so a configuration saved before models
+    could be described still renders the way it always did.
+    """
+    engine = _engine()
+    wanted = str(model_id or settings().get("model_id") or getattr(engine, "MODEL_DEFAULT", "")
+                 or "")
+    try:
+        found = dict(engine.model_info(wanted) or {})
+    except AttributeError:
+        found = {}
+    except Exception as exc:
+        raise VoiceBoxError(str(exc) or "That model is not one this Voice Box knows.") from None
+    merged = dict(_FALLBACK_MODEL, id=wanted)
+    merged.update({key: value for key, value in found.items() if value is not None})
+    return merged
+
+
+def _model_ids() -> set:
+    try:
+        return {str(info.get("id")) for info in (_engine().models_info() or [])}
+    except Exception:
+        return set()
+
+
+def _lora_ids() -> dict:
+    try:
+        return {str(entry.get("id")): entry for entry in (_engine().loras() or [])}
+    except Exception:
+        return {}
+
+
+def _preset_ids(info: dict) -> dict:
+    return {str(entry.get("id")): entry for entry in (info.get("presets") or [])}
+
+
+def _clean_speakers(value, info: dict | None = None) -> dict:
+    """The speaker slots ``info``'s model can use; anything else is dropped.
+
+    Dropped rather than refused, because a slot goes stale by itself -- a sample
+    deleted, a model switched from the 7B to the Realtime one -- and a
+    configuration that could no longer be saved because of it would be one the
+    page could not fix.
+    """
+    info = info or _FALLBACK_MODEL
     found = {}
     if not isinstance(value, dict):
         return found
-    known = {entry["id"] for entry in samples()}
-    for number, sample_id in value.items():
+    presets = info.get("voices") == "presets"
+    limit = max(1, min(int(info.get("max_speakers") or MAX_SPEAKERS), MAX_SPEAKERS))
+    known = _preset_ids(info) if presets else {entry["id"] for entry in samples()}
+    for number, chosen in value.items():
         try:
             n = int(number)
         except (TypeError, ValueError):
             continue
-        if 1 <= n <= MAX_SPEAKERS and str(sample_id or "") in known:
-            found[str(n)] = str(sample_id)
+        text = str(chosen or "")
+        if not 1 <= n <= limit:
+            continue
+        if presets:
+            if text.startswith(PRESET_PREFIX) and text[len(PRESET_PREFIX):] in known:
+                found[str(n)] = text
+        elif text in known:
+            found[str(n)] = text
     return found
 
 
 def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
     base = dict(existing or CONFIGURATION_DEFAULTS)
-    merged = dict(base)
+    merged = dict(CONFIGURATION_DEFAULTS, **base)
     for key in CONFIGURATION_DEFAULTS:
         if key in values:
             merged[key] = values[key]
+    model_id = str(merged.get("model_id") or "")[:64]
+    known = _model_ids()
+    if model_id and known and model_id not in known:
+        raise VoiceBoxError("That model is not one this Voice Box knows.")
+    info = _model_info(model_id)
+    label = info.get("label") or "That model"
+    precision = str(merged.get("precision") or "bf16")
+    if precision not in (info.get("precisions") or ["bf16"]):
+        raise VoiceBoxError(f"{label} cannot run at that precision.")
+    lora_id = str(merged.get("lora_id") or "")
+    if lora_id:
+        if not info.get("lora"):
+            raise VoiceBoxError(f"{label} does not take a LoRA.")
+        if lora_id not in _lora_ids():
+            raise VoiceBoxError("That LoRA is no longer in the library.")
     return {
         "name": _title(merged.get("name"), base.get("name") or "Configuration"),
-        "model_id": str(merged.get("model_id") or "")[:64],
+        "model_id": model_id,
         "card_uuid": str(merged.get("card_uuid") or "")[:64],
         "steps": _bounded_int(merged.get("steps"), *STEPS_RANGE, what="Diffusion steps"),
         "cfg_scale": _bounded_float(merged.get("cfg_scale"), *CFG_RANGE, what="CFG"),
         "seed": _bounded_int(merged.get("seed"), 0, SEED_MAX, what="The seed", none_ok=True),
         "max_new_tokens": _bounded_int(merged.get("max_new_tokens"), 1, TOKENS_MAX,
                                        what="Max new tokens", none_ok=True),
-        "speakers": _clean_speakers(merged.get("speakers")),
+        "precision": precision,
+        "lora_id": lora_id,
+        "lora_scale": _bounded_float(merged.get("lora_scale", 1.0), *LORA_SCALE_RANGE,
+                                     what="The LoRA's strength"),
+        "speakers": _clean_speakers(merged.get("speakers"), info),
     }
 
 
@@ -614,6 +714,29 @@ def delete_configuration(identifier: str) -> dict:
         except FileNotFoundError:
             pass
     return {"deleted": entry["id"]}
+
+
+def forget_lora(identifier: str) -> list[str]:
+    """Take a deleted LoRA out of every configuration that used it.
+
+    The same treatment a deleted sample gets: the configuration keeps
+    everything else and renders without a LoRA, rather than being left naming
+    one that :func:`_clean_configuration` would refuse the next time it is
+    saved. Returns the ids of the configurations that changed.
+    """
+    identifier = str(identifier or "")
+    changed = []
+    if not identifier:
+        return changed
+    with _lock:
+        for entry in configurations():
+            if entry.get("lora_id") != identifier:
+                continue
+            entry["lora_id"] = ""
+            entry["lora_scale"] = 1.0
+            _write_json(_configuration_path(entry["id"]), entry)
+            changed.append(entry["id"])
+    return changed
 
 
 # --------------------------------------------------------------------------- #
@@ -1151,15 +1274,25 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     else:
         chosen = _clean_configuration({})
     wanted = sorted({number for section in sections for number in section.speakers})
+    info = _model_info(chosen.get("model_id"))
+    limit = int(info.get("max_speakers") or MAX_SPEAKERS)
+    if wanted and wanted[-1] > limit:
+        raise VoiceBoxError(
+            f"{info.get('label') or 'That model'} speaks with one voice, and the script names "
+            f"Speaker {wanted[-1]}." if limit == 1 else
+            f"{info.get('label') or 'That model'} speaks with up to {limit} voices, and the "
+            f"script names Speaker {wanted[-1]}.")
     for number in wanted:
         if not chosen["speakers"].get(str(number)):
+            if info.get("voices") == "presets":
+                raise VoiceBoxError(f"Choose a voice for Speaker {number} in the configuration.")
             raise VoiceBoxError(f"Speaker {number} has no sample — choose one in the "
                                 f"configuration's speaker {number} slot.")
     card = chosen.get("card_uuid") or settings().get("card_uuid") or ""
     if not card:
         raise VoiceBoxError("Choose the card VibeVoice renders on, in the configuration "
                             "or in Voice Box's settings.")
-    refused = _engine().refusal()
+    refused = _refusal(info.get("id") or "")
     if refused:
         raise VoiceBoxError(refused)
     remember_prompt(prompt)
@@ -1175,27 +1308,45 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     return job.to_dict()
 
 
+def _refusal(model_id: str) -> str:
+    """Why ``model_id`` cannot render now, in the engine's words, or ``""``."""
+    engine = _engine()
+    try:
+        return str(engine.refusal(model_id=model_id) or "")
+    except TypeError:
+        return str(engine.refusal() or "")
+
+
 def _perform(job: Job) -> None:
     engine = _engine()
     runtime = _runtime()
     sections = parse_script(job.prompt)
+    info = _model_info(job.configuration.get("model_id"))
+    presets = _preset_ids(info)
     voices = {}
     for number in sorted({n for section in sections for n in section.speakers}):
-        sample_id = job.configuration["speakers"].get(str(number))
+        chosen = str(job.configuration["speakers"].get(str(number)) or "")
+        if chosen.startswith(PRESET_PREFIX):
+            stem = chosen[len(PRESET_PREFIX):]
+            voices[number] = {"preset": stem, "sample_id": "",
+                              "title": str((presets.get(stem) or {}).get("name") or stem)}
+            continue
         try:
-            pcm16, rate = sample_pcm(sample_id)
-            title = sample(sample_id).get("title", "")
+            pcm16, rate = sample_pcm(chosen)
+            title = sample(chosen).get("title", "")
         except VoiceBoxError:
             _end(job, FAILED, warning=f"Speaker {number}'s sample is no longer in the library.")
             return
-        voices[number] = {"pcm": float32_of(pcm16), "rate": rate, "sample_id": sample_id,
+        voices[number] = {"pcm": float32_of(pcm16), "rate": rate, "sample_id": chosen,
                           "title": title}
-    model_id = job.configuration.get("model_id") or settings().get("model_id") or ""
+    model_id = str(info.get("id") or "")
+    precision = str(job.configuration.get("precision") or "bf16")
     job.started = _now()
     job.phase = WAITING
     job.reason = "asking for the card"
-    turn = _turns.request(job.card, need_vram=int(engine.need_vram_bytes(model_id)),
-                          need_ram=int(engine.need_ram_bytes(model_id)),
+    turn = _turns.request(job.card,
+                          need_vram=int(engine.need_vram_bytes(model_id, precision)),
+                          need_ram=int(engine.need_ram_bytes(model_id, precision)),
                           label=f"{engine.LABEL} — {job.name}")
     try:
         while True:
@@ -1214,7 +1365,7 @@ def _perform(job: Job) -> None:
             turn.cancel()
             _end(job, CANCELLED)
             return
-        _render_granted(job, sections, voices, model_id, engine, runtime)
+        _render_granted(job, sections, voices, model_id, engine, runtime, precision)
     finally:
         try:
             turn.finish(keep_warm=None if settings().get("keep_warm", True) else False)
@@ -1223,14 +1374,16 @@ def _perform(job: Job) -> None:
                            exc_info=True)
 
 
-def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) -> None:
+def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime,
+                    precision: str = "bf16") -> None:
     job.phase = LOADING
     job.reason = "loading the model"
-    if model_id:
-        # The runtime loads the model the engine's settings name; the
-        # configuration's choice is made that name before the load.
-        engine.set_settings({"model_id": model_id})
-    runtime.load(job.card)
+    # The whole identity, named: a warm model loaded for another configuration --
+    # another precision, another LoRA -- is replaced rather than reused.
+    lora_id = str(job.configuration.get("lora_id") or "")
+    lora_scale = float(job.configuration.get("lora_scale", 1.0))
+    runtime.load(job.card, model_id=model_id, precision=precision, lora_id=lora_id,
+                 lora_scale=lora_scale)
     pieces: list[bytes] = []
     total_seconds = 0.0
     peak = 0
@@ -1256,8 +1409,9 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) 
         request = runtime.RenderJob(
             id=job.render_id,
             script=[(number, body) for number, body in section.lines],
-            voices={number: (voice["pcm"], voice["rate"]) for number, voice in voices.items()
-                    if number in section.speakers},
+            voices={number: ({"preset": voice["preset"]} if voice.get("preset")
+                             else (voice["pcm"], voice["rate"]))
+                    for number, voice in voices.items() if number in section.speakers},
             cfg_scale=float(job.configuration["cfg_scale"]),
             steps=int(job.configuration["steps"]),
             seed=job.configuration.get("seed"),
@@ -1275,14 +1429,20 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) 
     if job.cancelled or not pieces:
         _end(job, CANCELLED)
         return
+    lora = _lora_ids().get(lora_id) or {}
     entry = add_output(b"".join(pieces), rate, job.name, job.pipeline_id, {
         "model_id": model_id,
+        "model": str(_model_info(model_id).get("label") or model_id),
+        "precision": precision,
+        "lora": ({"id": lora_id, "name": str(lora.get("name") or lora_id),
+                  "scale": lora_scale} if lora_id else None),
         "card": job.card,
         "seed": job.configuration.get("seed"),
         "steps": job.configuration["steps"],
         "cfg_scale": job.configuration["cfg_scale"],
         "max_new_tokens": job.configuration.get("max_new_tokens"),
-        "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
+        "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"],
+                      "preset": voice.get("preset", "")}
                      for number, voice in sorted(voices.items())],
         "prompt": job.prompt,
         "sections": len(sections),
@@ -1293,11 +1453,10 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) 
     job.output_id = entry["id"]
     job.progress = {"section": len(sections), "sections": len(sections),
                     "seconds": entry["seconds"]}
-    try:
-        if peak:
-            engine.note_peak(model_id, peak)
-    except Exception:
-        logger.debug("Model Chain: could not record the render's peak", exc_info=True)
+    # The peak is on the output for the record, and not noted with the engine
+    # here: the runtime notes every render's peak itself, under the model and
+    # precision it actually loaded, and a second note from here counted each
+    # render twice in the calibration.
     _end(job, DONE)
     logger.info("Model Chain: Voice Box rendered “%s” — %.1f s of speech in %.0f s", job.name,
                 entry["seconds"], render_seconds)

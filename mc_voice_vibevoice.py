@@ -54,20 +54,50 @@ CPU engines proved. What differs is not cosmetic:
     It remembers what a render cost. The manifest ships an estimate of the
                                    VRAM a render needs; the runtime reports the
                                    peak after every render and
-                                   :func:`note_peak` keeps the highest, so
+                                   :func:`note_peak` keeps the highest, per
+                                   model *and precision*, so
                                    :func:`need_vram_bytes` -- what the turn is
                                    asked for -- stands on a measurement as soon
                                    as there is one.
 
+Two models, one runtime
+-----------------------
+The 7B (``longform``: up to four voices cloned from Voice Box samples, three
+precisions, LoRA adapters) and the Realtime 0.5B (``realtime``: one voice from
+Microsoft's preset voice prompts, full precision only, no LoRA) are two entries of
+one manifest, installed and reported separately (:func:`model_info`), and served by
+one runtime: the community ``vibevoice`` 0.0.1 wheel has the long-form code and no
+streaming model, Microsoft's own repository has the streaming model and no
+long-form code, and their shared modules are the same code. So the runtime is the
+wheel plus an *overlay* of five files from Microsoft's repository at one commit,
+each pinned here by size and SHA-256 and written over the unpacked package
+(:func:`overlay_files`). The overlay's digests are part of :func:`closure_id`, so
+a runtime installed before it existed reads as one to install again.
+
+The Realtime model cannot clone a voice -- Microsoft withholds the code that makes
+a voice prompt from a recording -- so its voices are the preset ``.pt`` files from
+the same commit, pinned here and installed beside it (:func:`presets`). Nothing a
+person supplies is ever turned into one.
+
 What is provisional, and says so
 --------------------------------
-The PyPI wheels are pinned byte for byte. The torch wheel, the model's files,
-its shards and the tokenizer are declared and not hashed, because the machine
-that wrote the manifest could reach pypi.org and nothing else. Each of those is
-checked against the digest its publisher states over HTTPS at install time and
-recorded in ``voice/managed-vibevoice-models.local.json``, so the second install
-is checked against a constant -- exactly as ``README.md`` "Who vouches for the
-bytes" describes, and :attr:`Status.provisional` is how the page says it.
+The PyPI wheels, the overlay and the preset voices are pinned byte for byte. The
+torch wheel, the models' files, their shards and their tokenizers are declared and
+not hashed, because the machine that wrote the manifest could reach pypi.org and
+raw.githubusercontent.com and nothing else. Each of those is checked against the
+digest its publisher states over HTTPS at install time and recorded in
+``voice/managed-vibevoice-models.local.json``, so the second install is checked
+against a constant -- exactly as ``README.md`` "Who vouches for the bytes"
+describes, and :attr:`Status.provisional` is how the page says it.
+
+The LoRA library
+----------------
+Adapters for the 7B's language model (and, optionally, its diffusion head and
+connectors) are copied from a folder on this PC into a library of their own
+(:func:`add_lora`), validated first -- a PEFT LoRA adapter where one is expected,
+nothing larger than :data:`LORA_BYTES_MAX` -- and normalised so the language
+model's adapter is at the root of its directory, which is the one shape the worker
+has to know.
 """
 
 from __future__ import annotations
@@ -98,7 +128,50 @@ LABEL = "VibeVoice"
 GUEST = "VibeVoice"
 """The name the lead registers this guest under with ``mc_turns``."""
 
-MODEL_DEFAULT = "vibevoice-7b"
+MODEL_7B = MODEL_DEFAULT = "vibevoice-7b"
+MODEL_REALTIME = "vibevoice-realtime-0.5b"
+
+KIND_LONGFORM = "longform"
+KIND_REALTIME = "realtime"
+MODEL_KINDS = (KIND_LONGFORM, KIND_REALTIME)
+"""What a model is. ``longform`` speaks a script with up to four voices cloned
+from samples; ``realtime`` speaks with one preset voice and streams as it goes."""
+
+PRECISIONS = ("bf16", "int8", "nf4")
+PRECISION_DEFAULT = "bf16"
+PRECISION_LABELS = {"bf16": "Full (bf16)", "int8": "8-bit", "nf4": "4-bit (NF4)"}
+"""How the language model's weights are held on the card. Only the language model
+is ever quantised (the worker skips the tokenizers, the diffusion head and the
+connectors), so the smaller precisions cost the most where the most is."""
+
+QUANTISED_SHARE = {"bf16": 1.0, "int8": 0.62, "nf4": 0.41}
+"""The weights at a precision as a share of the bf16 weights, for a model whose
+manifest gives no figure for that precision. The 7B's own figures (11.5 and 7.5 GB
+of 18.7) are where these come from; a render's measured peak replaces either."""
+
+LORA_SCALE_MIN = 0.0
+LORA_SCALE_MAX = 2.0
+LORA_SCALE_DEFAULT = 1.0
+LORA_BYTES_MAX = 4 * 1024 * 1024 * 1024
+LORA_NAME_MAX = 80
+LORA_PARTS = ("llm", "diffusion_head", "acoustic_connector", "semantic_connector")
+"""What an adapter in the library can carry. ``llm`` -- the language model's PEFT
+adapter -- is always there; the other three are folders copied when present."""
+
+LORA_EXTRA_FILES = ("model.safetensors", "pytorch_model.bin", "diffusion_head_full.bin")
+"""A full state dict for an optional part, by the names finetuning writes them."""
+ADAPTER_CONFIG = "adapter_config.json"
+ADAPTER_WEIGHTS = ("adapter_model.safetensors", "adapter_model.bin")
+
+LANGUAGE_LABELS = {
+    "en": "English", "de": "German", "fr": "French", "it": "Italian", "jp": "Japanese",
+    "kr": "Korean", "nl": "Dutch", "pl": "Polish", "pt": "Portuguese", "sp": "Spanish",
+}
+ACCENT_LABELS = {"in": "India"}
+"""How a preset's language reads on the page. The codes are upstream's own file
+prefixes (``jp``, ``kr``, ``sp`` rather than ISO's), because they are what the
+voices are called; ``in-Samuel`` is an English voice with an Indian accent,
+released with the English ones rather than with the experimental languages."""
 
 KIND = "vibevoice"
 """What the shared installer's progress table calls this guest's work."""
@@ -136,6 +209,17 @@ DEFAULT_LOCAL_CONFIG = {
 """What the processor assumes when the mirror ships no preprocessor_config.json,
 which is what upstream's own code falls back to."""
 
+CHAT_DEFAULTS = {
+    "card_uuid": "",
+    "precision": PRECISION_DEFAULT,
+    "lora_id": "",
+    "lora_scale": LORA_SCALE_DEFAULT,
+}
+"""Voice Chat's VibeVoice settings, kept in this file under ``"chat"``: the card
+it speaks on (blank means the Voice Box's), and the precision and LoRA it uses
+when a reply is spoken by the 7B. The Realtime model is always full precision
+and takes no LoRA, whatever is stored here."""
+
 SETTINGS_DEFAULTS = {
     "card_uuid": "",
     "model_id": MODEL_DEFAULT,
@@ -144,19 +228,34 @@ SETTINGS_DEFAULTS = {
     "seed": None,
     "max_new_tokens": None,
     "keep_warm": True,
+    "precision": PRECISION_DEFAULT,
+    "lora_id": "",
+    "lora_scale": LORA_SCALE_DEFAULT,
+    "chat": CHAT_DEFAULTS,
 }
 """Voice Box's engine settings, and the shape :func:`settings` always answers in.
 
 ``keep_warm`` defaults on: a warm 7B answers the next render in seconds rather
 than the minute a cold load costs, and it leaves the card the moment an image
 job, WanGP or the language model needs the room (docs/23-voice-box.md §4).
+``precision``, ``lora_id`` and ``lora_scale`` apply to the model ``model_id``
+names, and read as full precision and no LoRA for a model that takes neither.
 """
 
 _lock = threading.RLock()
+_lora_lock = threading.RLock()
+"""Held while the LoRA library changes. Its own lock, because copying a
+four-gigabyte adapter must not hold up a status read of the manifest."""
 _manifest_cache = None
 
 _HUB = re.compile(r"^https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$")
 _SAFE_UUID = re.compile(r"^[A-Za-z0-9,\-]*$")
+_SAFE_STEM = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+"""A preset voice's id, exactly the characters the worker accepts."""
+_SAFE_LORA = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_OVERLAY_PATH = re.compile(r"^vibevoice/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+\.py$")
+"""Where an overlay file may be written: a Python module inside the package, and
+nowhere else in the runtime."""
 
 
 class VibeVoiceError(RuntimeError):
@@ -196,6 +295,44 @@ class Tokenizer:
 
 
 @dataclass(frozen=True)
+class Preset:
+    """One of the Realtime model's preset voice prompts, as the manifest pins it."""
+
+    identifier: str
+    name: str
+    language: str
+    accent: str
+    gender: str
+    experimental: bool
+    artifact: models.Artifact
+
+    @property
+    def filename(self) -> str:
+        return f"{self.identifier}.pt"
+
+    @property
+    def language_label(self) -> str:
+        label = LANGUAGE_LABELS.get(self.language, self.language.upper() or "Unknown")
+        accent = ACCENT_LABELS.get(self.accent, self.accent.upper()) if self.accent else ""
+        return f"{label} ({accent})" if accent else label
+
+
+@dataclass(frozen=True)
+class OverlayFile:
+    """One file of Microsoft's repository written over the unpacked package."""
+
+    path: str
+    artifact: models.Artifact
+    repository: str
+    commit: str
+    why: str
+
+    @property
+    def basename(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+
+@dataclass(frozen=True)
 class Bundle:
     """One installable VibeVoice model, as the manifest declares it."""
 
@@ -216,12 +353,29 @@ class Bundle:
     estimates: dict
     local_config: dict
     raw: dict = field(default_factory=dict, compare=False, repr=False)
+    kind: str = KIND_LONGFORM
+    precisions: tuple = (PRECISION_DEFAULT,)
+    lora: bool = False
+    max_speakers: int = 4
+    defaults: dict = field(default_factory=dict, compare=False)
+    voices: tuple = ()
+    single: "models.Artifact | None" = None
+    """The one weights file to take when the model publishes no safetensors index."""
 
     @property
     def required_paths(self) -> tuple:
         """The declared files that must be there, by installed name."""
         return tuple(item.local_name for item in self.artifacts
                      if item.local_name not in self.optional)
+
+    @property
+    def index_optional(self) -> bool:
+        """Whether the safetensors index may be absent, the weights being one file."""
+        return self.single is not None and "model.safetensors.index.json" in self.optional
+
+    @property
+    def realtime(self) -> bool:
+        return self.kind == KIND_REALTIME
 
     @property
     def weights_bytes(self) -> int:
@@ -235,10 +389,15 @@ class Bundle:
                                          or WEIGHTS_BYTES_DEFAULT)
 
     @property
+    def voices_bytes(self) -> int:
+        return sum(int(item.artifact.size or 0) for item in self.voices)
+
+    @property
     def download_bytes(self) -> int:
         """How large the model part is, for a sentence somebody reads first."""
         heads = sum(int(item.size or 0) for item in self.artifacts)
-        return heads + self.estimated_weights_bytes + self.tokenizer.download_bytes
+        return (heads + self.estimated_weights_bytes + self.tokenizer.download_bytes
+                + self.voices_bytes)
 
 
 def manifest(refresh: bool = False) -> dict:
@@ -402,6 +561,19 @@ def bundle(identifier: str = "") -> Bundle:
     artifacts = tuple(_artifact(item, wanted, repo) for item in (entry.get("files") or ()))
     optional = tuple(str(item.get("local_name") or item.get("filename") or "")
                      for item in (entry.get("files") or ()) if item.get("optional"))
+    kind = str(entry.get("kind") or KIND_LONGFORM)
+    if kind not in MODEL_KINDS:
+        raise VibeVoiceError(f"The VibeVoice manifest calls {wanted} a {kind!r} model, which "
+                             f"this build does not know how to run.")
+    precisions = tuple(str(name) for name in (entry.get("precisions") or (PRECISION_DEFAULT,)))
+    if not precisions or any(name not in PRECISIONS for name in precisions):
+        raise VibeVoiceError(f"The VibeVoice manifest gives {wanted} a precision this build "
+                             f"does not know ({', '.join(precisions) or 'none'}).")
+    voices = tuple(_preset(item, wanted) for item in (entry.get("voices") or ()))
+    if len({voice.identifier for voice in voices}) != len(voices):
+        raise VibeVoiceError(f"The VibeVoice manifest names one of {wanted}'s preset voices "
+                             f"twice.")
+    single = entry.get("single_weights")
     return Bundle(
         identifier=wanted,
         label=str(entry.get("label") or wanted),
@@ -420,7 +592,49 @@ def bundle(identifier: str = "") -> Bundle:
         tokenizer=_tokenizer(entry.get("tokenizer"), wanted),
         estimates=dict(entry.get("estimates") or {}),
         local_config=dict(entry.get("local_config") or DEFAULT_LOCAL_CONFIG),
-        raw=entry)
+        raw=entry,
+        kind=kind,
+        precisions=precisions,
+        lora=bool(entry.get("lora")) and kind == KIND_LONGFORM,
+        max_speakers=max(1, min(int(entry.get("max_speakers")
+                                    or (1 if kind == KIND_REALTIME else 4)), 4)),
+        defaults=_model_defaults(entry.get("defaults")),
+        voices=voices,
+        single=(_artifact(single, f"{wanted} weights", repo)
+                if isinstance(single, dict) else None))
+
+
+def _model_defaults(found) -> dict:
+    """A model's own diffusion steps and CFG, each inside the bounds settings hold."""
+    found = found if isinstance(found, dict) else {}
+    steps = found.get("steps")
+    cfg = found.get("cfg_scale")
+    steps = steps if isinstance(steps, int) and not isinstance(steps, bool) \
+        and STEPS_MIN <= steps <= STEPS_MAX else STEPS_DEFAULT
+    cfg = float(cfg) if isinstance(cfg, (int, float)) and not isinstance(cfg, bool) \
+        and CFG_MIN <= float(cfg) <= CFG_MAX else CFG_DEFAULT
+    return {"steps": steps, "cfg_scale": cfg}
+
+
+def _preset(item, owner: str) -> Preset:
+    """One preset voice as the manifest pins it. Its id is its filename's stem, and a
+    stem with anything but letters, digits, ``-`` and ``_`` is refused here, before
+    anything could turn it into a path."""
+    if not isinstance(item, dict):
+        raise VibeVoiceError(f"The VibeVoice manifest's {owner} voices hold something that "
+                             f"is not a voice.")
+    stem = str(item.get("id") or "").strip()
+    if not _SAFE_STEM.match(stem):
+        raise VibeVoiceError(f"The VibeVoice manifest's {owner} names a preset voice "
+                             f"({stem!r}) that is not a plain file name.")
+    artifact = _artifact({"filename": f"{stem}.pt", "local_name": f"{stem}.pt",
+                          "url": item.get("url"), "bytes": item.get("bytes"),
+                          "sha256": item.get("sha256")}, f"{owner} voices")
+    return Preset(identifier=stem, name=str(item.get("name") or stem),
+                  language=str(item.get("language") or "").strip().lower(),
+                  accent=str(item.get("accent") or "").strip().lower(),
+                  gender=str(item.get("gender") or "").strip().lower(),
+                  experimental=bool(item.get("experimental")), artifact=artifact)
 
 
 def _platform_entry():
@@ -506,8 +720,45 @@ def full_torch_version(resolve: dict) -> str:
     return f"{version}+{found.group(1)}" if found else version
 
 
+def overlay_files() -> tuple:
+    """The files of Microsoft's repository written over the unpacked package.
+
+    Five of them, at one commit, each pinned here by size and SHA-256: the
+    streaming model, its configuration, its inference class, its processor, and
+    a configuration module that replaces the wheel's own with the superset the
+    streaming configuration imports from. Code, not data, so an overlay entry
+    without a committed digest is a broken manifest rather than a file to check
+    against a publisher's word -- raw.githubusercontent.com states none.
+    """
+    found = []
+    seen = set()
+    for item in manifest()["runtime"].get("overlay") or ():
+        if not isinstance(item, dict):
+            raise VibeVoiceError("The VibeVoice manifest's runtime overlay holds something "
+                                 "that is not a file.")
+        path = str(item.get("path") or "").strip()
+        if not _OVERLAY_PATH.match(path) or path in seen:
+            raise VibeVoiceError(f"The VibeVoice manifest's runtime overlay names {path!r}, "
+                                 f"which is not one module inside the vibevoice package.")
+        seen.add(path)
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        artifact = _artifact({"filename": path.rsplit("/", 1)[-1],
+                              "local_name": path.rsplit("/", 1)[-1], "url": item.get("url"),
+                              "bytes": item.get("bytes"), "sha256": item.get("sha256")},
+                             "runtime overlay")
+        if not artifact.pinned:
+            raise VibeVoiceError(f"The VibeVoice manifest's runtime overlay does not pin "
+                                 f"{path} by size and SHA-256. This is a problem with the "
+                                 f"extension rather than with your installation.")
+        found.append(OverlayFile(path=path, artifact=artifact,
+                                 repository=str(source.get("repository") or ""),
+                                 commit=str(source.get("commit") or ""),
+                                 why=str(item.get("why") or "")))
+    return tuple(found)
+
+
 def pinned() -> bool:
-    """Whether this build has resolved its PyPI closure for this machine.
+    """Whether this build has resolved its PyPI closure and its overlay for this machine.
 
     The torch resolve does not count against it, by design: it can never be
     pinned from the machine that writes the manifest, and refusing every
@@ -515,30 +766,39 @@ def pinned() -> bool:
     """
     try:
         chosen = platform()
+        overlay = overlay_files()
     except VibeVoiceError:
         return False
-    if chosen is None or not chosen.artifacts:
+    if chosen is None or not chosen.artifacts or not overlay:
         return False
     return all(item.pinned for item in chosen.artifacts)
 
 
 def closure_id() -> str:
-    """A fingerprint of exactly which wheels this platform installs.
+    """A fingerprint of exactly which wheels and overlay files this platform installs.
 
-    The pinned wheels' digests and the torch *version*, not the torch digest:
-    recording the digest later with the pin tool must not make every installed
-    runtime stale, since the bytes it names are the bytes already unpacked.
+    The pinned wheels' digests, the overlay's digests, and the torch *version*,
+    not the torch digest: recording the digest later with the pin tool must not
+    make every installed runtime stale, since the bytes it names are the bytes
+    already unpacked. An overlay file that changes -- or a runtime installed
+    before there was an overlay -- makes the installed runtime one to install
+    again, which is the only way a new streaming model reaches it.
     """
     chosen = platform()
     resolve = torch_resolve()
     if chosen is None:
         return ""
     parts = [chosen.closure_id, f"torch:{full_torch_version(resolve) if resolve else ''}"]
+    parts += [f"overlay:{item.path}:{item.artifact.sha256}" for item in overlay_files()]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def _runtime_bytes(chosen, resolve) -> int:
     total = sum(int(item.size or 0) for item in (chosen.artifacts if chosen else ()))
+    try:
+        total += sum(int(item.artifact.size or 0) for item in overlay_files())
+    except VibeVoiceError:
+        pass
     torch_bytes = int((resolve or {}).get("bytes") or 0)
     if not torch_bytes:
         try:
@@ -588,12 +848,22 @@ class Status:
     model_message: str = ""
     closure: dict = field(default_factory=dict)
     installed_model: dict = field(default_factory=dict)
+    kind: str = KIND_LONGFORM
+    runtime_stale: bool = False
+    """Installed, but by a build that pinned a different closure or overlay."""
+    presets_installed: int = 0
+    presets_total: int = 0
+
+    @property
+    def presets_ready(self) -> bool:
+        """A Realtime model speaks only with a preset voice; the 7B needs none."""
+        return self.kind != KIND_REALTIME or self.presets_installed > 0
 
     @property
     def ready(self) -> bool:
-        """Whether a render can be attempted: runtime, model and tokenizer."""
+        """Whether a render can be attempted: runtime, model, tokenizer and a voice."""
         return bool(self.supported and self.runtime_installed and self.model_installed
-                    and self.tokenizer_installed)
+                    and self.tokenizer_installed and self.presets_ready)
 
     @property
     def message(self) -> str:
@@ -608,13 +878,18 @@ class Status:
             missing.append("model")
         elif not self.tokenizer_installed:
             missing.append("tokenizer (install the model again)")
+        elif not self.presets_ready:
+            missing.append("preset voices (install the model again)")
         return f"Setup required — VibeVoice's {' and '.join(missing)} still to install."
 
 
-def status() -> Status:
-    """Read from disk. Starts nothing, downloads nothing, never raises."""
+def status(identifier: str = "") -> Status:
+    """Read from disk. Starts nothing, downloads nothing, never raises.
+
+    ``identifier`` names the model; ``""`` is the one the settings name.
+    """
     try:
-        return _status()
+        return _status(identifier)
     except VibeVoiceError as exc:
         return Status(runtime_message=str(exc), model_message=str(exc))
     except Exception:
@@ -629,11 +904,12 @@ def _unsupported_sentence(tail: str) -> str:
             f"is {system}/{machine} on Python {python_version}{tail}")
 
 
-def _status() -> Status:
+def _status(identifier: str = "") -> Status:
     chosen = platform()
-    entry = bundle()
+    entry = bundle(identifier)
     found = Status(model_id=entry.identifier, model_label=entry.label,
-                   provisional=_provisional(entry.raw))
+                   provisional=_provisional(entry.raw), kind=entry.kind,
+                   presets_total=len(entry.voices))
     if chosen is None:
         found.supported = False
         found.runtime_message = _unsupported_sentence(
@@ -654,6 +930,7 @@ def _status() -> Status:
             f"Not installed — about {models._bytes_label(found.runtime_bytes)} of PyTorch "
             f"(CUDA 12.8), transformers and VibeVoice.")
     elif str(installed.get("closure") or "") != closure_id() or runtime_python() is None:
+        found.runtime_stale = True
         found.runtime_message = ("Installed, but this build pins a different VibeVoice "
                                  "runtime. Install it again to update.")
     else:
@@ -662,12 +939,21 @@ def _status() -> Status:
             f"Installed — VibeVoice {installed.get('vibevoice_version') or '?'}, torch "
             f"{installed.get('torch_version') or '?'}, transformers "
             f"{installed.get('transformers_version') or '?'}.")
+        features = installed.get("features") if isinstance(installed.get("features"),
+                                                           dict) else {}
+        if features.get("quantisation") is False:
+            found.runtime_message += (" 8-bit and 4-bit are unavailable: bitsandbytes did not "
+                                      "import when it was checked.")
+        if features.get("lora") is False:
+            found.runtime_message += (" LoRA adapters are unavailable: PEFT did not import "
+                                      "when it was checked.")
     found.closure = dict(installed or {})
 
     root = paths.vibevoice_model_root(entry.identifier)
     marker = _read_json(root / paths.INSTALLED_FILENAME)
     found.installed_model = dict(marker or {})
     found.model_bytes = entry.download_bytes
+    found.presets_installed = _presets_present(entry, root)
     missing = _model_missing(entry, root, marker)
     if not marker:
         found.model_message = (f"Not installed — {entry.label}, about "
@@ -680,16 +966,40 @@ def _status() -> Status:
         shards = list((marker or {}).get("shards") or _installed_shards(root))
         size = sum(int(value) for name, value in ((marker or {}).get("bytes") or {}).items()
                    if name in shards and isinstance(value, int))
-        found.model_message = (f"Installed — {entry.label}, {len(shards)} shard"
-                               f"{'s' if len(shards) != 1 else ''}"
-                               f"{', ' + models._bytes_label(size) if size else ''}.")
+        voices = (f", {found.presets_installed} of {len(entry.voices)} preset voices"
+                  if entry.voices else "")
+        weights = ("one weights file" if (marker or {}).get("weights") == "single"
+                   else f"{len(shards)} shard{'s' if len(shards) != 1 else ''}")
+        found.model_message = (f"Installed — {entry.label}, {weights}"
+                               f"{', ' + models._bytes_label(size) if size else ''}{voices}.")
     found.tokenizer_installed = _tokenizer_present(entry, root)
     if found.model_installed and not found.tokenizer_installed:
         found.model_message += " Its tokenizer is missing — install the model again."
+    if found.model_installed and found.presets_installed < found.presets_total:
+        absent = found.presets_total - found.presets_installed
+        found.model_message += (f" {absent} of its {found.presets_total} preset voices "
+                                f"{'is' if absent == 1 else 'are'} missing — install the "
+                                f"model again.")
+    complete = (found.model_installed and found.tokenizer_installed
+                and found.presets_installed == found.presets_total)
     found.download_bytes = ((0 if found.runtime_installed else found.runtime_bytes)
-                            + (0 if found.model_installed and found.tokenizer_installed
-                               else found.model_bytes))
+                            + (0 if complete else found.model_bytes))
     return found
+
+
+def _preset_present(entry: Bundle, preset: Preset, root: "Path | None" = None) -> bool:
+    """Whether one preset voice is in place, at the size its pin says. A size, not a
+    hash: this is read on every status poll, and the hash was checked on arrival."""
+    folder = Path(root) if root is not None else paths.vibevoice_model_root(entry.identifier)
+    try:
+        size = (folder / paths.VIBEVOICE_VOICES_DIRNAME / preset.filename).stat().st_size
+    except OSError:
+        return False
+    return size > 0 and (not preset.artifact.size or size == int(preset.artifact.size))
+
+
+def _presets_present(entry: Bundle, root: "Path | None" = None) -> int:
+    return sum(1 for preset in entry.voices if _preset_present(entry, preset, root))
 
 
 def _installed_shards(root: Path) -> list:
@@ -714,6 +1024,150 @@ def _tokenizer_present(entry: Bundle, root: Path) -> bool:
     return all((root / name).is_file() for name in entry.tokenizer.paths)
 
 
+def model_info(identifier: str = "") -> dict:
+    """One model as the pages see it: what it is, what it takes, and what is missing.
+
+    ``identifier`` ``""`` is the model the settings name. A model this build does
+    not know is a :class:`VibeVoiceError`. ``installed`` is the model's own files
+    and its tokenizer; ``runtime_installed`` is the runtime every model shares;
+    ``ready`` is both, plus, for a Realtime model, at least one preset voice --
+    the whole of what a render (or, for the 7B, a clone) needs. ``message`` says
+    in one sentence what stands between this model and a render, or is ``""``.
+    """
+    entry = bundle(identifier)
+    current = status(entry.identifier)
+    vram = {}
+    ram = 0
+    for precision in entry.precisions:
+        try:
+            vram[precision] = int(need_vram_bytes(entry.identifier, precision))
+            ram = max(ram, int(need_ram_bytes(entry.identifier, precision)))
+        except Exception:
+            logger.debug("Model Chain: could not size %s at %s", entry.identifier, precision,
+                         exc_info=True)
+            vram[precision] = 0
+    complete = current.model_installed and current.tokenizer_installed
+    if complete:
+        root = paths.vibevoice_model_root(entry.identifier)
+        download = sum(int(item.artifact.size or 0) for item in entry.voices
+                       if not _preset_present(entry, item, root))
+    else:
+        download = entry.download_bytes
+    return {
+        "id": entry.identifier,
+        "label": entry.label,
+        "kind": entry.kind,
+        "installed": bool(complete),
+        "runtime_installed": bool(current.runtime_installed),
+        "ready": bool(current.ready),
+        "precisions": list(entry.precisions),
+        "precision_labels": {name: PRECISION_LABELS[name] for name in entry.precisions},
+        "lora": bool(entry.lora),
+        "max_speakers": int(entry.max_speakers),
+        "voices": "presets" if entry.realtime else "samples",
+        "defaults": dict(entry.defaults),
+        "need_vram_bytes": vram,
+        "need_ram_bytes": int(ram),
+        "presets": presets(entry.identifier) if entry.voices else [],
+        "presets_installed": int(current.presets_installed),
+        "message": _missing_sentence(entry, current),
+        "download_bytes": int(download),
+        "summary": entry.summary,
+        "license": entry.license,
+        "provisional": bool(current.provisional),
+    }
+
+
+def models_info() -> list:
+    """Every model this build knows, in manifest order, as :func:`model_info` has it."""
+    found = []
+    for name in model_ids():
+        try:
+            found.append(model_info(name))
+        except VibeVoiceError:
+            logger.warning("Model Chain: the VibeVoice manifest's %s could not be read", name,
+                           exc_info=True)
+    return found
+
+
+def _missing_sentence(entry: Bundle, current: Status) -> str:
+    """What stands between ``entry`` and a render, in one sentence, or ``""``.
+
+    Precise on purpose: this is what a form reads to say whether its model --
+    the 7B for a clone, the Realtime model for a preset -- is ready, and "setup
+    required" is not something anybody can act on.
+    """
+    if not current.supported:
+        return current.runtime_message
+    clauses = []
+    if not current.runtime_installed:
+        clauses.append("VibeVoice's runtime was installed by an earlier build and has to be "
+                       "installed again" if current.runtime_stale
+                       else "VibeVoice's runtime is not installed")
+    root = paths.vibevoice_model_root(entry.identifier)
+    missing = _model_missing(entry, root, current.installed_model)
+    if not current.model_installed:
+        if current.installed_model and missing:
+            clauses.append(f"{entry.label} is missing {missing[0]} and has to be installed "
+                           f"again")
+        else:
+            clauses.append(f"{entry.label} is not installed")
+    elif not current.tokenizer_installed:
+        clauses.append(f"{entry.label}'s tokenizer is missing and the model has to be "
+                       f"installed again")
+    elif entry.voices and current.presets_installed == 0:
+        clauses.append(f"none of {entry.label}'s {len(entry.voices)} preset voices are "
+                       f"installed, so the model has to be installed again")
+    elif entry.voices and current.presets_installed < len(entry.voices):
+        absent = len(entry.voices) - current.presets_installed
+        clauses.append(f"{absent} of {entry.label}'s {len(entry.voices)} preset voices "
+                       f"{'is' if absent == 1 else 'are'} missing (installing the model again "
+                       f"fetches {'it' if absent == 1 else 'them'})")
+    if not clauses:
+        return ""
+    if len(clauses) == 2 and clauses == ["VibeVoice's runtime is not installed",
+                                         f"{entry.label} is not installed"]:
+        return f"Neither VibeVoice's runtime nor {entry.label} is installed."
+    text = "; ".join(clauses)
+    return text[0].upper() + text[1:] + "."
+
+
+def presets(identifier: str = MODEL_REALTIME) -> list:
+    """The preset voices of ``identifier``, in manifest order, English ones first.
+
+    ``installed`` is whether the voice's file is in place at its pinned size. A
+    model without presets -- the 7B, whose voices are Voice Box samples -- has
+    an empty list; a model this build does not know is a :class:`VibeVoiceError`.
+    """
+    entry = bundle(identifier)
+    root = paths.vibevoice_model_root(entry.identifier)
+    return [{"id": item.identifier, "name": item.name, "language": item.language,
+             "language_label": item.language_label, "accent": item.accent,
+             "gender": item.gender, "experimental": bool(item.experimental),
+             "installed": _preset_present(entry, item, root),
+             "bytes": int(item.artifact.size or 0)}
+            for item in entry.voices]
+
+
+def voices_dir(identifier: str = MODEL_REALTIME) -> Path:
+    """Where ``identifier``'s preset voices are installed. Validated, never a caller's path."""
+    return paths.vibevoice_voices_root(bundle(identifier).identifier)
+
+
+def preset_path(stem: str, identifier: str = MODEL_REALTIME) -> Path:
+    """The file of one preset voice, by its id. Only an id the manifest names is
+    ever turned into a path; anything else is a :class:`VibeVoiceError`."""
+    entry = bundle(identifier)
+    wanted = str(stem or "").strip()
+    for item in entry.voices:
+        if item.identifier == wanted:
+            return paths.vibevoice_voices_root(entry.identifier) / item.filename
+    if not entry.voices:
+        raise VibeVoiceError(f"{entry.label} has no preset voices; its voices are Voice Box "
+                             f"samples.")
+    raise VibeVoiceError(f"{wanted[:64]!r} is not one of {entry.label}'s preset voices.")
+
+
 def public_status() -> dict:
     """Everything the page needs, JSON-safe, in one answer."""
     found = status()
@@ -725,6 +1179,16 @@ def public_status() -> dict:
         vram, ram = need_vram_bytes(found.model_id), need_ram_bytes(found.model_id)
     except Exception:
         vram, ram = 0, 0
+    try:
+        described = models_info()
+    except Exception:
+        logger.debug("Model Chain: could not describe the VibeVoice models", exc_info=True)
+        described = [{"id": name, "label": _model_label(name)} for name in model_ids()]
+    try:
+        library = loras()
+    except Exception:
+        logger.debug("Model Chain: could not read the VibeVoice LoRA library", exc_info=True)
+        library = []
     return {
         "installed": found.ready,
         "ready": found.ready,
@@ -740,7 +1204,9 @@ def public_status() -> dict:
         "model_message": found.model_message,
         "model_id": found.model_id,
         "model_label": found.model_label,
-        "models": [{"id": name, "label": _model_label(name)} for name in model_ids()],
+        "models": described,
+        "loras": library,
+        "precision_labels": dict(PRECISION_LABELS),
         "download_bytes": int(found.download_bytes),
         "download_label": models._bytes_label(found.download_bytes),
         "parts": [
@@ -843,15 +1309,26 @@ def settings() -> dict:
     than taking the whole file down with it.
     """
     stored = _settings_read()
-    found = dict(SETTINGS_DEFAULTS)
+    found = {key: (dict(value) if isinstance(value, dict) else value)
+             for key, value in SETTINGS_DEFAULTS.items()}
     for key in SETTINGS_DEFAULTS:
-        if key in stored:
-            try:
-                found[key] = _validated(key, stored[key])
-            except VibeVoiceError:
-                logger.debug("Model Chain: a stored VibeVoice setting (%s) was ignored", key)
+        if key == "chat" or key not in stored:
+            continue
+        try:
+            found[key] = _validated(key, stored[key])
+        except VibeVoiceError:
+            logger.debug("Model Chain: a stored VibeVoice setting (%s) was ignored", key)
     if found["model_id"] not in model_ids():
         found["model_id"] = _default_model_id() or MODEL_DEFAULT
+    found["chat"] = _chat_read(stored.get("chat"))
+    # What the model the settings name can take. A stored precision it does not
+    # run in reads as its own first, and a LoRA as none, without being erased:
+    # switching back to the 7B finds the choice that was made for it.
+    precisions, takes_lora = _model_takes(found["model_id"])
+    if found["precision"] not in precisions:
+        found["precision"] = precisions[0]
+    if not takes_lora:
+        found["lora_id"] = ""
     return found
 
 
@@ -861,20 +1338,89 @@ def set_settings(values: dict) -> dict:
     An unknown key is refused rather than ignored, and so is a value out of
     range: a page that sent a step count this build does not accept and was
     answered with the unchanged settings and no error would show the old value
-    with no explanation of why its press did nothing.
+    with no explanation of why its press did nothing. ``"chat"`` is a set of
+    its own keys, merged into what is stored and validated the same way. A
+    precision or LoRA offered for a model that does not take it is refused
+    with the model's name.
     """
     offered = {str(key): value for key, value in dict(values or {}).items()}
     unknown = sorted(set(offered) - set(SETTINGS_DEFAULTS))
     if unknown:
         raise VibeVoiceError(f"{unknown[0]!r} is not a VibeVoice setting.")
+    chat_offered = offered.pop("chat", None)
     checked = {key: _validated(key, value) for key, value in offered.items()}
+    chat_checked = {}
+    if chat_offered is not None:
+        if not isinstance(chat_offered, dict):
+            raise VibeVoiceError("Voice Chat's VibeVoice settings are a set of named values.")
+        # An unknown key is refused by _validated_chat, before anything is written.
+        chat_checked = {str(key): _validated_chat(str(key), value)
+                        for key, value in chat_offered.items()}
+    model = checked.get("model_id") or settings()["model_id"]
+    precisions, takes_lora = _model_takes(model)
+    if "precision" in checked and checked["precision"] not in precisions:
+        raise VibeVoiceError(f"{_model_label(model)} runs in "
+                             f"{_precision_words(precisions)} only.")
+    if checked.get("lora_id") and not takes_lora:
+        raise VibeVoiceError(f"{_model_label(model)} takes no LoRA.")
     current = _settings_read()
     current.update(checked)
+    if chat_checked:
+        chat = dict(current.get("chat")) if isinstance(current.get("chat"), dict) else {}
+        chat.update(chat_checked)
+        current["chat"] = chat
     _settings_write(current)
-    if checked:
-        logger.info("Model Chain: VibeVoice settings changed — %s",
-                    ", ".join(sorted(checked)))
+    changed = sorted(checked) + [f"chat.{key}" for key in sorted(chat_checked)]
+    if changed:
+        logger.info("Model Chain: VibeVoice settings changed — %s", ", ".join(changed))
     return settings()
+
+
+def _chat_read(stored) -> dict:
+    """Voice Chat's block, defaults filled in, each stored value validated alone."""
+    found = dict(CHAT_DEFAULTS)
+    if not isinstance(stored, dict):
+        return found
+    for key in CHAT_DEFAULTS:
+        if key in stored:
+            try:
+                found[key] = _validated_chat(key, stored[key])
+            except VibeVoiceError:
+                logger.debug("Model Chain: a stored Voice Chat VibeVoice setting (%s) was "
+                             "ignored", key)
+    return found
+
+
+def _validated_chat(key: str, value):
+    """One of Voice Chat's keys. The precision is one some model here runs in; which
+    model a reply is spoken by is the voice's to say, and the Realtime model ignores
+    precision and LoRA whatever is stored."""
+    if key in ("card_uuid", "lora_id", "lora_scale"):
+        return _validated(key, value)
+    if key == "precision":
+        found = _validated("precision", value)
+        offered = set()
+        for name in model_ids():
+            offered.update(_model_takes(name)[0])
+        if offered and found not in offered:
+            raise VibeVoiceError(f"No VibeVoice model here runs in {PRECISION_LABELS[found]}.")
+        return found
+    raise VibeVoiceError(f"{key!r} is not one of Voice Chat's VibeVoice settings.")
+
+
+def _model_takes(identifier: str) -> tuple:
+    """``(precisions, takes_lora)`` for ``identifier``; full precision and no LoRA for a
+    model this build cannot read, which is the one shape every model has."""
+    try:
+        entry = bundle(identifier)
+    except VibeVoiceError:
+        return (PRECISION_DEFAULT,), False
+    return tuple(entry.precisions), bool(entry.lora)
+
+
+def _precision_words(precisions) -> str:
+    names = [PRECISION_LABELS.get(name, name) for name in precisions]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
 
 
 def _validated(key: str, value):
@@ -931,6 +1477,28 @@ def _validated(key: str, value):
         if text not in model_ids():
             raise VibeVoiceError(f"{text!r} is not a VibeVoice model this build has recorded.")
         return text
+    if key == "precision":
+        text = str(value or "").strip().lower()
+        if text not in PRECISIONS:
+            raise VibeVoiceError(f"Precision is {_precision_words(PRECISIONS)} "
+                                 f"({', '.join(PRECISIONS)}).")
+        return text
+    if key == "lora_id":
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if not _lora_known(text):
+            raise VibeVoiceError("That LoRA is not in the library.")
+        return text
+    if key == "lora_scale":
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = float("nan")
+        if isinstance(value, bool) or not LORA_SCALE_MIN <= number <= LORA_SCALE_MAX:
+            raise VibeVoiceError(f"LoRA strength is a number from {LORA_SCALE_MIN:.1f} to "
+                                 f"{LORA_SCALE_MAX:.1f}.")
+        return round(number, 3)
     raise VibeVoiceError(f"{key!r} is not a VibeVoice setting.")
 
 
@@ -969,7 +1537,13 @@ def _settings_write(found: dict) -> None:
 
 
 def calibration() -> dict:
-    """``{model id: {"peak_bytes", "rss_bytes", "renders", "updated"}}`` observed here."""
+    """``{"<model id>@<precision>": {"peak_bytes", "rss_bytes", "renders", "updated"}}``.
+
+    What renders have cost on this machine, per model *and precision*, because an
+    8-bit 7B and a full one are different amounts of card. A key with no
+    precision in it is one an earlier build wrote, before there were precisions,
+    and is read as bf16 -- the only precision there was.
+    """
     found = _read_json(paths.vibevoice_calibration_path()) or {}
     out = {}
     for name, entry in (found.get("models") or {}).items():
@@ -983,32 +1557,51 @@ def calibration() -> dict:
     return out
 
 
-def note_peak(identifier: str, peak_bytes: int, rss_bytes: int = 0) -> None:
+def calibration_key(identifier: str, precision: str = "") -> str:
+    """Where a render of ``identifier`` at ``precision`` is recorded."""
+    return f"{identifier}@{str(precision or '').strip().lower() or PRECISION_DEFAULT}"
+
+
+def _observed(identifier: str, precision: str, measure: str) -> int:
+    found = calibration()
+    values = [int((found.get(calibration_key(identifier, precision)) or {}).get(measure) or 0)]
+    if precision == PRECISION_DEFAULT:
+        values.append(int((found.get(identifier) or {}).get(measure) or 0))
+    return max(values)
+
+
+def note_peak(identifier: str, peak_bytes: int, rss_bytes: int = 0,
+              precision: str = "") -> None:
     """Remember the most a render has cost on this machine. Never raises.
 
-    Called by the runtime after every render with torch's peak reserved bytes
-    and the worker's resident set. The highest of each is kept, and written
-    atomically: this file is read before every turn request, and a half-written
-    one would be an estimate nobody made.
+    Called after every render with torch's peak reserved bytes, the worker's
+    resident set when there is one, and the precision the model was loaded at
+    (blank is bf16). The highest of each is kept under
+    :func:`calibration_key`, and written atomically: this file is read before
+    every turn request, and a half-written one would be an estimate nobody
+    made. A precision this build does not know is ignored rather than recorded
+    under a key nothing will ever read.
     """
     name = str(identifier or "").strip()
+    wanted = str(precision or "").strip().lower() or PRECISION_DEFAULT
     try:
         peak = max(int(peak_bytes or 0), 0)
         rss = max(int(rss_bytes or 0), 0)
     except (TypeError, ValueError):
         return
     if not name or len(name) > 64 or not all(c.isalnum() or c in "-_." for c in name) \
-            or (peak <= 0 and rss <= 0):
+            or wanted not in PRECISIONS or (peak <= 0 and rss <= 0):
         return
+    key = calibration_key(name, wanted)
     with _lock:
         found = _read_json(paths.vibevoice_calibration_path()) or {}
         entries = found.get("models") if isinstance(found.get("models"), dict) else {}
-        current = dict(entries.get(name) or {}) if isinstance(entries.get(name), dict) else {}
+        current = dict(entries.get(key) or {}) if isinstance(entries.get(key), dict) else {}
         current["peak_bytes"] = max(int(current.get("peak_bytes") or 0), peak)
         current["rss_bytes"] = max(int(current.get("rss_bytes") or 0), rss)
         current["renders"] = int(current.get("renders") or 0) + 1
         current["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        entries[name] = current
+        entries[key] = current
         try:
             _write_json(paths.vibevoice_calibration_path(),
                         {"schema": SCHEMA, "models": entries})
@@ -1017,31 +1610,61 @@ def note_peak(identifier: str, peak_bytes: int, rss_bytes: int = 0) -> None:
                          exc_info=True)
 
 
-def need_vram_bytes(identifier: str = "") -> int:
+def _precision_for(entry: Bundle, precision: str = "") -> str:
+    """The precision a question about ``entry`` is asked at.
+
+    Blank is the settings' precision when ``entry`` runs in it, else the
+    model's own first -- bf16. A precision the model does not run in is a
+    refusal with its name, never a silent substitute: a turn asked for too
+    little card is the failure this whole estimate exists to prevent.
+    """
+    wanted = str(precision or "").strip().lower()
+    if not wanted:
+        stored = str(settings().get("precision") or "")
+        return stored if stored in entry.precisions else entry.precisions[0]
+    if wanted not in entry.precisions:
+        raise VibeVoiceError(f"{entry.label} runs in {_precision_words(entry.precisions)} "
+                             f"only.")
+    return wanted
+
+
+def need_vram_bytes(identifier: str = "", precision: str = "") -> int:
     """What to ask the turn for: the estimate, or the peak a render has reached.
 
-    The estimate is the weights -- the shards' committed sizes when the manifest
-    lists them, else what earlier installs recorded, else the model card's
-    figure -- plus the working set. The calibration's observed peak takes over
-    once it is larger, because a measurement of this machine beats an estimate
-    of any machine.
+    The estimate is the weights at that precision -- for bf16 the shards'
+    committed sizes when the manifest lists them, else what earlier installs
+    recorded, else the model card's figure; for 8-bit and 4-bit the manifest's
+    own figure -- plus the working set. The calibration's observed peak for that
+    model at that precision takes over once it is larger, because a measurement
+    of this machine beats an estimate of any machine.
     """
     entry = bundle(identifier)
+    wanted = _precision_for(entry, precision)
     working = int(entry.estimates.get("working_bytes") or WORKING_BYTES_DEFAULT)
-    estimate = _weights_bytes(entry) + working
-    observed = int(calibration().get(entry.identifier, {}).get("peak_bytes") or 0)
-    return max(estimate, observed)
+    estimate = _weights_bytes(entry, wanted) + working
+    return max(estimate, _observed(entry.identifier, wanted, "peak_bytes"))
 
 
-def need_ram_bytes(identifier: str = "") -> int:
+def need_ram_bytes(identifier: str = "", precision: str = "") -> int:
+    """The system RAM a load of ``identifier`` at ``precision`` is asked to find."""
     entry = bundle(identifier)
+    wanted = _precision_for(entry, precision)
     estimate = int(entry.estimates.get("ram_bytes") or RAM_BYTES_DEFAULT)
-    observed = int(calibration().get(entry.identifier, {}).get("rss_bytes") or 0)
-    return max(estimate, observed)
+    return max(estimate, _observed(entry.identifier, wanted, "rss_bytes"))
 
 
-def _weights_bytes(entry: Bundle) -> int:
-    """The shards' total: committed sizes, then recorded sizes, then the estimate."""
+def _weights_bytes(entry: Bundle, precision: str = PRECISION_DEFAULT) -> int:
+    """The weights at ``precision``.
+
+    bf16: the shards' total -- committed sizes, then recorded sizes, then the
+    estimate. A quantised precision: the manifest's figure for it, else the
+    bf16 total scaled by :data:`QUANTISED_SHARE`.
+    """
+    if precision != PRECISION_DEFAULT:
+        figure = (entry.estimates.get("weights_by_precision") or {}).get(precision)
+        if isinstance(figure, (int, float)) and not isinstance(figure, bool) and figure > 0:
+            return int(figure)
+        return int(_weights_bytes(entry) * QUANTISED_SHARE.get(precision, 1.0))
     if entry.weights_bytes:
         return entry.weights_bytes
     root = paths.vibevoice_model_root(entry.identifier)
@@ -1059,6 +1682,9 @@ def _weights_bytes(entry: Bundle) -> int:
         sizes = [int(recorded.get(name) or 0) for name in names]
         if all(sizes):
             return sum(sizes)
+    figure = (entry.estimates.get("weights_by_precision") or {}).get(PRECISION_DEFAULT)
+    if isinstance(figure, (int, float)) and not isinstance(figure, bool) and figure > 0:
+        return int(figure)
     return int(entry.estimates.get("weights_bytes") or WEIGHTS_BYTES_DEFAULT)
 
 
@@ -1096,31 +1722,49 @@ def _install_refusal(manual: bool = False) -> str:
     return ""
 
 
-def refusal(manual: bool = False) -> str:
-    """Why a render cannot run now, in one sentence the page can show, or ``""``.
+def refusal(manual: bool = False, model_id: str = "") -> str:
+    """Why a render of ``model_id`` cannot run now, in one sentence, or ``""``.
 
-    Asked before anything is started and separately from starting it, because
-    the two questions have different audiences: this one answers a browser that
-    needs a sentence, and the install transaction answers a log. ``manual``
-    means the caller can fall back to a folder install, so an unpinned closure
-    is not a refusal for them.
+    ``model_id`` ``""`` is the model the settings name. Asked before anything is
+    started and separately from starting it, because the two questions have
+    different audiences: this one answers a browser that needs a sentence, and
+    the install transaction answers a log. ``manual`` means the caller can fall
+    back to a folder install, so an unpinned closure is not a refusal for them.
+
+    Each sentence names the one thing that is missing for *that* model -- the
+    runtime every model shares, the model, its tokenizer, or (for the Realtime
+    model) its preset voices -- because a form that clones through the 7B and
+    one that speaks through the Realtime model ask the same question about
+    different things.
     """
     found = _install_refusal(manual)
     if found:
         return found
     try:
-        current = _status()
+        current = _status(model_id)
     except VibeVoiceError as exc:
         return str(exc)
     if not _nvidia_present():
         return ("VibeVoice needs an NVIDIA card, and this machine has no NVIDIA driver "
                 "(nvidia-smi was not found).")
     if not current.runtime_installed:
+        if current.runtime_stale:
+            return ("VibeVoice's runtime was installed by an earlier build and has to be "
+                    "installed again — install it below.")
         return "VibeVoice's runtime is not installed — install it below."
+    label = current.model_label or LABEL
     if not current.model_installed:
-        return f"The {current.model_label or LABEL} model is not installed — install it below."
+        entry = bundle(current.model_id)
+        root = paths.vibevoice_model_root(entry.identifier)
+        missing = _model_missing(entry, root, current.installed_model)
+        if current.installed_model and missing:
+            return f"The {label} model is missing {missing[0]} — install it again below."
+        return f"The {label} model is not installed — install it below."
     if not current.tokenizer_installed:
-        return "VibeVoice's tokenizer is not installed — install the model again."
+        return f"The {label} model's tokenizer is not installed — install the model again."
+    if not current.presets_ready:
+        return (f"None of the {label} model's preset voices are installed — install the "
+                f"model again.")
     return ""
 
 
@@ -1132,8 +1776,14 @@ def refusal(manual: bool = False) -> str:
 PARTS = ("runtime", "model")
 
 
-def sources(part: str = "runtime") -> list:
-    """Where a person would go to fetch VibeVoice's files by hand."""
+def sources(part: str = "runtime", model_id: str = "") -> list:
+    """Where a person would go to fetch VibeVoice's files by hand.
+
+    The runtime's wheels, its torch wheel and the five overlay files (saved under
+    their own names, anywhere in the folder); or one model's files, its weights,
+    its tokenizer in a subfolder and, for the Realtime model, its preset voices
+    in ``voices/``.
+    """
     if part == "runtime":
         chosen = platform()
         found = [{"filename": item.filename, "url": item.url, "save_as": item.local_name,
@@ -1144,30 +1794,39 @@ def sources(part: str = "runtime") -> list:
                 f"{resolve['package']}-{full_torch_version(resolve)}-cp313-cp313-win_amd64.whl")
             found.append({"filename": name, "url": resolve["index"], "save_as": name,
                           "archive": False})
+        found += [{"filename": item.basename, "url": item.artifact.url,
+                   "save_as": item.basename, "archive": False} for item in overlay_files()]
         return found
-    entry = bundle()
+    entry = bundle(model_id)
+    weights = list(entry.shards) or ([entry.single] if entry.single is not None else [])
     found = [{"filename": item.filename, "url": item.url, "save_as": item.local_name,
-              "archive": False} for item in entry.artifacts + entry.shards]
+              "archive": False} for item in tuple(entry.artifacts) + tuple(weights)]
     found += [{"filename": item.filename, "url": item.url,
                "save_as": f"{entry.tokenizer.dirname}/{item.local_name}", "archive": False}
               for item in entry.tokenizer.artifacts]
+    found += [{"filename": item.filename, "url": item.artifact.url,
+               "save_as": f"{paths.VIBEVOICE_VOICES_DIRNAME}/{item.filename}",
+               "archive": False} for item in entry.voices]
     return found
 
 
-def install(part: str = "", on_status=None, on_progress=None) -> Status:
-    """Install what is missing: the runtime, the model with its tokenizer, or both.
+def install(part: str = "", on_status=None, on_progress=None, model_id: str = "") -> Status:
+    """Install what is missing: the runtime, a model with its tokenizer, or both.
 
-    A transaction per part. Nothing outside a staging directory is touched until
-    every byte has arrived and matched what was expected, each part is promoted
-    by a directory rename, and a failure leaves the installation as it was.
+    ``part`` ``"runtime"``, ``"model"`` or ``""`` for both; ``model_id`` names
+    the model (``""`` is the one the settings name). A transaction per part.
+    Nothing outside a staging directory is touched until every byte has arrived
+    and matched what was expected, each part is promoted by a directory rename,
+    and a failure leaves the installation as it was.
     """
     wanted = str(part or "").strip().lower()
     if wanted and wanted not in PARTS:
-        raise VibeVoiceError("VibeVoice installs its runtime or its model (with its "
+        raise VibeVoiceError("VibeVoice installs its runtime or a model (with its "
                              "tokenizer).")
+    entry = bundle(model_id)
     say = models._narrator(KIND, on_status)
     tick = models._ticker(KIND, on_progress)
-    with models._claim(KIND, say, bundle().identifier):
+    with models._claim(KIND, say, entry.identifier):
         if wanted in ("", "runtime"):
             say("Checking the VibeVoice runtime…")
             share = 0.15 if not wanted else 1.0
@@ -1175,33 +1834,38 @@ def install(part: str = "", on_status=None, on_progress=None) -> Status:
         if wanted in ("", "model"):
             base = 0.15 if not wanted else 0.0
             install_model(on_status=say,
-                          on_progress=lambda f: tick(base + f * (1.0 - base)))
+                          on_progress=lambda f: tick(base + f * (1.0 - base)),
+                          model_id=entry.identifier)
         tick(1.0)
         say("VibeVoice installed.")
-        return status()
+        return status(entry.identifier)
 
 
-def install_from(part: str, folder: str, on_status=None, on_progress=None) -> Status:
+def install_from(part: str, folder: str, on_status=None, on_progress=None,
+                 model_id: str = "") -> Status:
     """Install from files already on this machine. The escape hatch.
 
-    A folder of the runtime's wheels (the pinned ones and the torch wheel), or a
-    folder holding the mirror's files -- config, index, shards, optionally the
-    processor config and a tokenizer subfolder. A pinned artifact is checked
-    against the hash committed here; an unpinned one has its digest recorded and
-    becomes the constant the next install is checked against.
+    A folder of the runtime's wheels (the pinned ones and the torch wheel) and
+    the overlay files, or a folder holding a model's files -- config, index or
+    single weights, shards, optionally the processor config, a tokenizer
+    subfolder and, for the Realtime model, its preset voices. A pinned artifact
+    is checked against the hash committed here; an unpinned one has its digest
+    recorded and becomes the constant the next install is checked against.
     """
     wanted = str(part or "").strip().lower()
     if wanted not in PARTS:
-        raise VibeVoiceError("VibeVoice installs its runtime or its model (with its "
+        raise VibeVoiceError("VibeVoice installs its runtime or a model (with its "
                              "tokenizer).")
+    entry = bundle(model_id)
     say = models._narrator(KIND, on_status)
     tick = models._ticker(KIND, on_progress)
-    with models._claim(KIND, say, bundle().identifier):
+    with models._claim(KIND, say, entry.identifier):
         if wanted == "runtime":
             install_runtime(on_status=say, on_progress=tick, folder=folder)
         else:
-            install_model(on_status=say, on_progress=tick, folder=folder)
-        return status()
+            install_model(on_status=say, on_progress=tick, folder=folder,
+                          model_id=entry.identifier)
+        return status(entry.identifier)
 
 
 def _folder(folder) -> Path:
@@ -1216,12 +1880,16 @@ def _folder(folder) -> Path:
 
 
 def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
-    """The isolated CUDA closure: an interpreter of its own and the wheels unpacked.
+    """The isolated CUDA closure: an interpreter of its own, the wheels unpacked, the overlay.
 
     Built the way every voice runtime is -- a virtual environment without pip,
     the verified wheels unpacked rather than installed by a package manager --
     with one wheel more than the manifest can name: torch, resolved from the
-    publisher's index on this machine (:func:`_resolve_torch`).
+    publisher's index on this machine (:func:`_resolve_torch`). Then the five
+    overlay files, each checked against its committed digest, are written over
+    the unpacked package (:func:`_apply_overlay`), and only then is the staged
+    runtime asked to import itself: the self-test runs against the code the
+    worker will run.
     """
     say = on_status or (lambda _text: None)
     tick = on_progress or (lambda _fraction: None)
@@ -1231,6 +1899,11 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
     if not chosen.artifacts:
         raise VibeVoiceError(_install_refusal(manual=bool(folder))
                              or "This build has not recorded a VibeVoice runtime closure.")
+    overlay = overlay_files()
+    if not overlay:
+        raise VibeVoiceError("This build has not recorded the VibeVoice runtime's overlay "
+                             "(the streaming model's code), so it installs no runtime. This "
+                             "is a problem with the extension rather than your installation.")
     resolve = torch_resolve()
     if resolve is None:
         raise VibeVoiceError("The VibeVoice manifest names no torch wheel for this platform.")
@@ -1244,6 +1917,7 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
     _stop_runtime("the VibeVoice runtime is being installed")
     staging = paths.vibevoice_staging_for("runtime", uuid.uuid4().hex[:8])
     wheels = staging / "wheels"
+    patches = staging / "overlay"
     shutil.rmtree(staging, ignore_errors=True)
     wheels.mkdir(parents=True, exist_ok=True)
     try:
@@ -1251,6 +1925,7 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
             source = _folder(folder)
             _adopt(chosen.artifacts, source, wheels, say, "VibeVoice runtime wheel")
             torch_item = _adopt_torch(resolve, source, wheels, say)
+            _adopt_overlay(overlay, source, patches, say)
             tick(0.7)
         else:
             say("Asking the publisher which torch wheel this machine needs…")
@@ -1265,16 +1940,20 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
                     _runtime_bytes(None, resolve), torch_item.sha256, "an estimate")
             models._make_room(everything, staging, room)
             models._fetch_all(everything, wheels, say, tick, 0.7, expectations)
+            _fetch_overlay(overlay, patches, say)
         digest = _digest(wheels / torch_item.local_name)
+        torch_bytes = (wheels / torch_item.local_name).stat().st_size
         say("Building the isolated VibeVoice runtime…")
         _build_environment(staging, wheels, models.RuntimePlatform(
             identifier=chosen.identifier, system=chosen.system, machines=chosen.machines,
             python=chosen.python, artifacts=tuple(chosen.artifacts) + (torch_item,)))
+        _apply_overlay(staging, patches, overlay, say)
         tick(0.85)
         say("Checking that VibeVoice imports on this machine…")
         report = _smoke_test(staging)
         tick(0.95)
         shutil.rmtree(wheels, ignore_errors=True)
+        shutil.rmtree(patches, ignore_errors=True)
         runtime = manifest()["runtime"]
         _write_json(staging / paths.INSTALLED_FILENAME, {
             "schema": SCHEMA,
@@ -1288,22 +1967,147 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
                                         or runtime.get("transformers_version") or ""),
             "cuda": report.get("cuda"),
             "torch_wheel": {"filename": torch_item.filename, "sha256": digest,
-                            "bytes": (wheels / torch_item.local_name).stat().st_size
-                            if (wheels / torch_item.local_name).exists() else
-                            int(torch_item.size or 0),
+                            "bytes": int(torch_bytes or torch_item.size or 0),
                             "index": resolve["index"]},
             "artifacts": {item.local_name: item.sha256 for item in chosen.artifacts},
+            "overlay": {item.path: item.artifact.sha256 for item in overlay},
+            "overlay_source": {"repository": overlay[0].repository,
+                               "commit": overlay[0].commit},
+            # What the self-test found it could do. Reported rather than
+            # required, as the worker reports them: a runtime whose PEFT or
+            # bitsandbytes will not import still renders at full precision.
+            "features": {name: report.get(name) for name in ("realtime", "lora",
+                                                             "quantisation")},
+            "peft_version": str(report.get("peft") or ""),
+            "bitsandbytes_version": str(report.get("bitsandbytes") or ""),
             "license": runtime.get("license") or "",
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
         models._promote(staging, paths.vibevoice_runtime_root())
         say("The VibeVoice runtime is installed.")
         tick(1.0)
-        logger.info("Model Chain: the VibeVoice runtime is installed — %s, torch %s (%s)",
-                    chosen.identifier, report.get("torch") or full_torch_version(resolve),
-                    torch_item.filename)
+        logger.info("Model Chain: the VibeVoice runtime is installed — %s, torch %s (%s), "
+                    "with %d overlay file(s) from %s at %s", chosen.identifier,
+                    report.get("torch") or full_torch_version(resolve), torch_item.filename,
+                    len(overlay), overlay[0].repository or "Microsoft's repository",
+                    (overlay[0].commit or "?")[:12])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _fetch_overlay(items, destination: Path, say) -> None:
+    """Download each overlay file, keeping it only if it is the committed bytes.
+
+    Through the shared downloader, so a file that arrives at the wrong size or
+    with the wrong digest is thrown away rather than written anywhere near the
+    runtime. raw.githubusercontent.com states no digest of its own; the one
+    checked is this repository's.
+    """
+    for index, item in enumerate(items, start=1):
+        say(f"Fetching {item.basename} from Microsoft's VibeVoice repository ({index} of "
+            f"{len(items)})…")
+        models._download(item.artifact, destination / item.path, lambda _received: None,
+                         models.Expected(item.artifact.size, item.artifact.sha256,
+                                         "this extension's manifest"))
+
+
+def _adopt_overlay(items, source: Path, destination: Path, say) -> None:
+    """The overlay out of a folder somebody filled themselves.
+
+    Each file is looked for under its path in the package (a copy of the
+    repository's tree, or a clone of it), then under its own name anywhere a few
+    levels down, and the first candidate whose bytes are the committed ones is
+    taken. A file of the right name with other contents -- the wheel's own
+    ``configuration_vibevoice.py``, say -- is passed over, and only refused when
+    nothing else matches.
+    """
+    for item in items:
+        candidates = _overlay_candidates(source, item)
+        chosen = None
+        for candidate in candidates:
+            try:
+                if candidate.stat().st_size == int(item.artifact.size or 0) \
+                        and _digest(candidate) == item.artifact.sha256:
+                    chosen = candidate
+                    break
+            except OSError:
+                continue
+        if chosen is None:
+            if candidates:
+                raise VibeVoiceError(
+                    f"{item.basename} is in that folder, but its contents are not the ones "
+                    f"this extension pins (Microsoft's VibeVoice repository at commit "
+                    f"{item.commit[:12] or '?'}). Nothing was installed.")
+            raise VibeVoiceError(f"{item.basename} is not in {source}. It comes from "
+                                 f"{item.artifact.url}. Nothing was installed.")
+        say(f"Taking {item.path} from {chosen.parent}…")
+        target = destination / item.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(chosen, target)
+
+
+_OVERLAY_SEARCH_DEPTH = 6
+_OVERLAY_SEARCH_FILES = 50000
+
+
+def _overlay_candidates(source: Path, item) -> list:
+    """Every file under ``source`` that could be ``item``, most likely first."""
+    found = []
+    for candidate in (source / item.path, source / "VibeVoice" / item.path,
+                      source / item.basename):
+        if candidate.is_file() and candidate not in found:
+            found.append(candidate)
+    wanted = item.basename.casefold()
+    seen = 0
+    base = len(source.parts)
+    for folder, children, files in os.walk(source):
+        depth = len(Path(folder).parts) - base
+        children[:] = sorted(name for name in children
+                             if not name.startswith(".") and depth < _OVERLAY_SEARCH_DEPTH)
+        for name in sorted(files):
+            seen += 1
+            if name.casefold() == wanted:
+                candidate = Path(folder) / name
+                if candidate not in found:
+                    found.append(candidate)
+        if seen > _OVERLAY_SEARCH_FILES:
+            break
+    return found
+
+
+def _apply_overlay(staging: Path, patches: Path, items, say) -> None:
+    """Write each overlay file over the unpacked package, and check what was written.
+
+    Only ever inside ``site-packages/vibevoice``: a path the manifest could name
+    is already held to one module of the package (:data:`_OVERLAY_PATH`), and the
+    resolved target is checked again here, because this is the one place this
+    installer writes code it did not unpack from a wheel.
+    """
+    target = models.site_packages(staging / "env")
+    package = (target / "vibevoice").resolve()
+    if not package.is_dir():
+        raise VibeVoiceError("The staged VibeVoice runtime has no vibevoice package to "
+                             "complete. Nothing was installed.")
+    say(f"Writing {len(items)} files from Microsoft's VibeVoice repository over the "
+        f"package…")
+    for item in items:
+        where = (target / item.path).resolve()
+        try:
+            where.relative_to(package)
+        except ValueError:
+            raise VibeVoiceError(f"The overlay file {item.path} would be written outside the "
+                                 f"vibevoice package. Nothing was installed.") from None
+        origin = patches / item.path
+        if not origin.is_file():
+            raise VibeVoiceError(f"{item.basename} is missing from the staged download. "
+                                 f"Nothing was installed.")
+        where.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(origin, where)
+        if _digest(where) != item.artifact.sha256:
+            raise VibeVoiceError(f"{item.path} was written into the staged runtime and did "
+                                 f"not read back as the pinned bytes. Nothing was installed.")
+    logger.info("Model Chain: VibeVoice's overlay was written over the package — %s",
+                ", ".join(item.path for item in items))
 
 
 def _resolve_torch(resolve: dict, chosen, say) -> models.Artifact:
@@ -1365,31 +2169,41 @@ def _adopt_torch(resolve: dict, source: Path, wheels: Path, say) -> models.Artif
                            url=resolve["index"], size=found.stat().st_size, sha256=digest)
 
 
-def install_model(on_status=None, on_progress=None, folder=None) -> None:
-    """The model's files, its shards from its own index, and its tokenizer.
+def install_model(on_status=None, on_progress=None, folder=None, model_id: str = "") -> None:
+    """A model's files, its weights (from its own index, or its one file), its
+    tokenizer and, for the Realtime model, its preset voices.
 
-    One staging directory and one promote for all three, so a model is either
-    there with its tokenizer and its local configuration or not there at all.
+    One staging directory and one promote for all of it, so a model is either
+    there with its tokenizer, its voices and its local configuration or not
+    there at all. Two things are repaired in place instead: the processor
+    configuration this module writes itself, and preset voices that went
+    missing from an otherwise complete model -- a few megabytes each, not a
+    reason to fetch two gigabytes of weights again.
     """
     say = on_status or (lambda _text: None)
     tick = on_progress or (lambda _fraction: None)
-    entry = bundle()
+    entry = bundle(model_id)
     target = paths.vibevoice_model_root(entry.identifier)
     marker = _read_json(target / paths.INSTALLED_FILENAME)
     missing = _model_missing(entry, target, marker)
-    if marker and not missing and _tokenizer_present(entry, target):
+    absent = [item for item in entry.voices if not _preset_present(entry, item, target)]
+    tokenizer = _tokenizer_present(entry, target)
+    if marker and not missing and tokenizer and not absent:
         say(f"{entry.label} is already installed.")
         tick(1.0)
         return
-    if marker and missing == [paths.VIBEVOICE_LOCAL_CONFIG] and _tokenizer_present(entry,
-                                                                                   target):
-        # Everything is in place but the one file this module writes itself.
-        say(f"Writing {entry.label}'s processor configuration…")
-        _write_local_config(entry)
+    if marker and set(missing) <= {paths.VIBEVOICE_LOCAL_CONFIG} and tokenizer:
+        # Everything is in place but what this module writes itself, and
+        # perhaps some of the preset voices.
+        if missing:
+            say(f"Writing {entry.label}'s processor configuration…")
+            _write_local_config(entry)
+        if absent:
+            _repair_presets(entry, absent, target, marker, folder, say, tick)
         tick(1.0)
         return
 
-    _stop_runtime("the VibeVoice model is being installed")
+    _stop_workers_holding(entry.identifier, "the VibeVoice model is being installed")
     staging = paths.vibevoice_staging_for(entry.identifier, uuid.uuid4().hex[:8])
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True, exist_ok=True)
@@ -1399,13 +2213,16 @@ def install_model(on_status=None, on_progress=None, folder=None) -> None:
         else:
             record = _download_model(entry, staging, say, tick)
         shards = list(record["shards"])
-        required = tuple(entry.required_paths) + tuple(shards) + tuple(entry.tokenizer.paths)
+        voices = [f"{paths.VIBEVOICE_VOICES_DIRNAME}/{item.filename}" for item in entry.voices]
+        required = (tuple(entry.required_paths) + tuple(shards) + tuple(entry.tokenizer.paths)
+                    + tuple(voices))
         say(f"Checking {entry.label} is complete…")
         _sanity_check(staging, required, entry.label)
         _write_json(staging / paths.INSTALLED_FILENAME, {
             "schema": SCHEMA,
             "id": entry.identifier,
             "label": entry.label,
+            "kind": entry.kind,
             "repo": record["repo"],
             "repos": record["repos"],
             "revision": entry.revision,
@@ -1417,8 +2234,10 @@ def install_model(on_status=None, on_progress=None, folder=None) -> None:
             "bytes": {name: size for name, size in sorted(record["sizes"].items())},
             "verified_by": {name: how for name, how in sorted(record["verified"].items())},
             "shards": shards,
+            "weights": record.get("weights", "index"),
             "tokenizer": {"repo": entry.tokenizer.repo, "revision": entry.tokenizer.revision,
                           "dirname": entry.tokenizer.dirname},
+            "voices": [item.identifier for item in entry.voices],
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
         # Into the staging tree, naming the tokenizer where it will *be*, so the
@@ -1430,19 +2249,24 @@ def install_model(on_status=None, on_progress=None, folder=None) -> None:
         _record_pins(entry, record)
         say(f"{entry.label} is installed.")
         tick(1.0)
-        logger.info("Model Chain: the VibeVoice model %s is installed — %d shard(s) from %s",
-                    entry.identifier, len(shards), record["repo"])
+        logger.info("Model Chain: the VibeVoice model %s is installed — %d shard(s) from %s%s",
+                    entry.identifier, len(shards), record["repo"],
+                    f", {len(entry.voices)} preset voices" if entry.voices else "")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
 
 def _new_record(entry: Bundle, source: str) -> dict:
     return {"digests": {}, "sizes": {}, "verified": {}, "repos": {}, "shards": [],
-            "repo": entry.repo, "source": source}
+            "repo": entry.repo, "source": source, "weights": "index"}
+
+
+INDEX_FILENAME = "model.safetensors.index.json"
 
 
 def _download_model(entry: Bundle, staging: Path, say, tick) -> dict:
-    """Config and index first, then every shard the index names, then the tokenizer."""
+    """Config and index first, then the weights the index names (or the one weights
+    file a model without an index publishes), then the tokenizer, then the voices."""
     record = _new_record(entry, "hub")
     heads = [item for item in entry.artifacts if item.local_name not in entry.optional]
     extras = [item for item in entry.artifacts if item.local_name in entry.optional]
@@ -1451,20 +2275,156 @@ def _download_model(entry: Bundle, staging: Path, say, tick) -> dict:
         try:
             _fetch(entry, [item], staging, say, tick, 0.02, 0.0, record)
         except models.VoiceError as exc:
+            if item.filename == INDEX_FILENAME:
+                say(f"{entry.label} publishes no {INDEX_FILENAME}; its weights are one file "
+                    f"({exc}).")
+                logger.info("Model Chain: VibeVoice's %s has no safetensors index; taking its "
+                            "single weights file", entry.identifier)
+                continue
             say(f"{item.filename} is not published by the mirror; the defaults will be "
                 f"written ({exc}).")
             logger.info("Model Chain: VibeVoice's mirror has no %s; the local processor "
                         "configuration is written from defaults", item.filename)
-    shards = _shards_named(_read_index(staging / "model.safetensors.index.json"))
-    record["shards"] = list(shards)
-    say(f"The index names {len(shards)} shard{'s' if len(shards) != 1 else ''}.")
-    _fetch(entry, _shard_artifacts(entry, shards), staging, say, tick, 0.02, 0.93, record)
+    shards = _weights_named(entry, staging, record)
+    if record["weights"] == "single":
+        say(f"{entry.label}'s weights are one file, {shards[0]}.")
+    else:
+        say(f"The index names {len(shards)} shard{'s' if len(shards) != 1 else ''}.")
+    _fetch(entry, _shard_artifacts(entry, shards), staging, say, tick, 0.02, 0.88, record)
     tokenizer_root = staging / entry.tokenizer.dirname
-    _fetch(entry, list(entry.tokenizer.artifacts), tokenizer_root, say, tick, 0.95, 0.05,
+    _fetch(entry, list(entry.tokenizer.artifacts), tokenizer_root, say, tick, 0.90, 0.03,
            record, prefix=entry.tokenizer.dirname + "/")
+    if entry.voices:
+        say(f"Fetching {entry.label}'s {len(entry.voices)} preset voices…")
+        _fetch(entry, [item.artifact for item in entry.voices],
+               staging / paths.VIBEVOICE_VOICES_DIRNAME, say, tick, 0.93, 0.05, record,
+               prefix=paths.VIBEVOICE_VOICES_DIRNAME + "/")
     used = [record["repos"].get(name) for name in shards]
     record["repo"] = next((repo for repo in used if repo), entry.repo)
     return record
+
+
+def _weights_named(entry: Bundle, staging: Path, record: dict) -> list:
+    """The weights files: the index's shards, or the model's one file when it has
+    no index and the manifest says that is how it ships."""
+    if (staging / INDEX_FILENAME).is_file():
+        shards = _shards_named(_read_index(staging / INDEX_FILENAME))
+        record["weights"] = "index"
+    elif entry.single is not None and entry.index_optional:
+        shards = [entry.single.local_name]
+        record["weights"] = "single"
+    else:
+        raise VibeVoiceError(f"{entry.label} arrived without {INDEX_FILENAME}, so its weights "
+                             f"cannot be listed. Nothing was installed.")
+    record["shards"] = list(shards)
+    return list(shards)
+
+
+def _repair_presets(entry: Bundle, wanted, target: Path, marker: dict, folder, say,
+                    tick) -> None:
+    """Put back the preset voices an otherwise complete model is missing.
+
+    Each is checked against its committed digest in a staging directory and only
+    then moved into place, and the model's record says what was put back.
+    """
+    staging = paths.vibevoice_staging_for(f"{entry.identifier}-voices", uuid.uuid4().hex[:8])
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    record = _new_record(entry, "local" if folder else "hub")
+    try:
+        say(f"{len(wanted)} of {entry.label}'s preset voices are missing; putting "
+            f"{'it' if len(wanted) == 1 else 'them'} back…")
+        _gather_presets(entry, wanted, _folder(folder) if folder else None, staging, say,
+                        tick, record)
+        names = [f"{paths.VIBEVOICE_VOICES_DIRNAME}/{item.filename}" for item in wanted]
+        _sanity_check(staging, names, entry.label)
+        (target / paths.VIBEVOICE_VOICES_DIRNAME).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            os.replace(staging / name, target / name)
+        updated = dict(marker or {})
+        for key in ("digests", "bytes", "verified_by"):
+            updated[key] = dict(updated.get(key) or {})
+        for name in names:
+            updated["digests"][name] = record["digests"].get(name, "")
+            updated["bytes"][name] = record["sizes"].get(name, 0)
+            updated["verified_by"][name] = record["verified"].get(name, "")
+        updated["voices"] = [item.identifier for item in entry.voices]
+        _write_json(target / paths.INSTALLED_FILENAME, updated)
+        say(f"{entry.label}'s preset voices are back.")
+        logger.info("Model Chain: VibeVoice put back %d preset voice(s) of %s", len(names),
+                    entry.identifier)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _gather_presets(entry: Bundle, wanted, source, staging: Path, say, tick,
+                    record: dict) -> None:
+    """``wanted`` preset voices into ``staging/voices``: from ``source`` when it has
+    them (checked against their pins), fetched from Microsoft's repository at the
+    pinned commit otherwise."""
+    destination = staging / paths.VIBEVOICE_VOICES_DIRNAME
+    destination.mkdir(parents=True, exist_ok=True)
+    prefix = paths.VIBEVOICE_VOICES_DIRNAME + "/"
+    remaining = list(wanted)
+    if source is not None:
+        found = _preset_files(source)
+        taken = []
+        for item in remaining:
+            origin = found.get(item.filename.casefold())
+            if origin is None:
+                continue
+            digest = _digest(origin)
+            if item.artifact.sha256 and digest != item.artifact.sha256:
+                raise VibeVoiceError(
+                    f"{item.filename} is in that folder, but its contents are not the preset "
+                    f"voice this extension pins. Nothing was installed.")
+            shutil.copyfile(origin, destination / item.filename)
+            record["digests"][prefix + item.filename] = digest
+            record["sizes"][prefix + item.filename] = origin.stat().st_size
+            record["verified"][prefix + item.filename] = "this extension's manifest"
+            record["repos"][prefix + item.filename] = ""
+            taken.append(item)
+        if taken:
+            say(f"Took {len(taken)} preset voice{'s' if len(taken) != 1 else ''} from the "
+                f"folder.")
+        remaining = [item for item in remaining if item not in taken]
+    if not remaining:
+        return
+    try:
+        _fetch(entry, [item.artifact for item in remaining], destination, say, tick, 0.93,
+               0.05, record, prefix=prefix)
+    except models.VoiceError as exc:
+        where = (source / paths.VIBEVOICE_VOICES_DIRNAME) if source is not None else \
+            "a voices folder beside the model's files"
+        commit = _voices_commit(entry)
+        raise VibeVoiceError(
+            f"{entry.label}'s preset voices could not be fetched ({exc}). Put the .pt files "
+            f"from demo/voices/streaming_model in Microsoft's VibeVoice repository"
+            f"{' at commit ' + commit[:12] if commit else ''} in {where} and try again. "
+            f"Nothing was installed.") from None
+
+
+def _voices_commit(entry: Bundle) -> str:
+    source = entry.raw.get("voices_source") if isinstance(entry.raw.get("voices_source"),
+                                                          dict) else {}
+    return str(source.get("commit") or "")
+
+
+def _preset_files(source: Path) -> dict:
+    """``{lower-case file name: path}`` of the ``.pt`` files where a person would have
+    put preset voices: a ``voices`` folder, upstream's own tree, or the folder itself."""
+    found = {}
+    folders = [source / paths.VIBEVOICE_VOICES_DIRNAME,
+               source / "demo" / "voices" / "streaming_model",
+               source / "VibeVoice" / "demo" / "voices" / "streaming_model",
+               source / "streaming_model", source]
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for child in sorted(folder.iterdir()):
+            if child.is_file() and child.suffix.casefold() == ".pt":
+                found.setdefault(child.name.casefold(), child)
+    return found
 
 
 def _shard_artifacts(entry: Bundle, shards) -> list:
@@ -1484,6 +2444,8 @@ def _shard_artifacts(entry: Bundle, shards) -> list:
                 f"the pin; a maintainer runs tools/pin_vibevoice_models.py --model. Nothing "
                 f"was installed.")
         return [listed[name] for name in shards]
+    if entry.single is not None and list(shards) == [entry.single.local_name]:
+        return [entry.single]
     return [_artifact({"filename": name, "local_name": name,
                        "url": _hub_url(entry.repo, entry.revision, name)},
                       f"{entry.identifier} shards", entry.repo) for name in shards]
@@ -1517,6 +2479,11 @@ def _committed_digest(entry: Bundle, filename: str):
     """``(sha256, bytes)`` the manifest itself commits for ``filename``, or ``None``."""
     rows = list(entry.raw.get("files") or ()) + list(entry.raw.get("shards") or ())
     rows += list((entry.raw.get("tokenizer") or {}).get("files") or ())
+    if isinstance(entry.raw.get("single_weights"), dict):
+        rows.append(entry.raw["single_weights"])
+    rows += [{"filename": f"{row.get('id')}.pt", "sha256": row.get("sha256"),
+              "bytes": row.get("bytes")}
+             for row in (entry.raw.get("voices") or ()) if isinstance(row, dict)]
     for row in rows:
         if str(row.get("filename") or "") == filename and row.get("sha256") \
                 and int(row.get("bytes") or 0) > 0:
@@ -1614,12 +2581,15 @@ def _adopt_model(entry: Bundle, source: Path, staging: Path, say, tick) -> dict:
             continue
         found = models._find(source, [item.filename, item.local_name])
         if found is None:
-            say(f"{item.filename} is not in the folder; the defaults will be written.")
+            if item.filename == INDEX_FILENAME:
+                say(f"{item.filename} is not in the folder; {entry.label}'s weights are one "
+                    f"file.")
+            else:
+                say(f"{item.filename} is not in the folder; the defaults will be written.")
             continue
         record_digests(record, _adopt([item], found.parent, staging, say, entry.label),
                        staging)
-    shards = _shards_named(_read_index(staging / "model.safetensors.index.json"))
-    record["shards"] = list(shards)
+    shards = _weights_named(entry, staging, record)
     items = _shard_artifacts(entry, shards)
     for index, item in enumerate(items, start=1):
         say(f"Checking shard {index} of {len(items)} — {item.filename}…")
@@ -1633,16 +2603,19 @@ def _adopt_model(entry: Bundle, source: Path, staging: Path, say, tick) -> dict:
                                       say, f"{entry.label} tokenizer"),
                        tokenizer_root, prefix=entry.tokenizer.dirname + "/")
     else:
-        say("The folder has no tokenizer; fetching Qwen2.5-7B's four tokenizer files…")
+        say(f"The folder has no tokenizer; fetching {entry.tokenizer.repo}'s four tokenizer "
+            f"files…")
         try:
             _fetch(entry, list(entry.tokenizer.artifacts), tokenizer_root, say, tick, 0.9,
-                   0.05, record, prefix=entry.tokenizer.dirname + "/")
+                   0.03, record, prefix=entry.tokenizer.dirname + "/")
         except models.VoiceError as exc:
             raise VibeVoiceError(
                 f"{entry.label}'s tokenizer could not be fetched ({exc}). Put "
                 f"tokenizer.json, tokenizer_config.json, vocab.json and merges.txt from "
                 f"huggingface.co/{entry.tokenizer.repo} in {source / entry.tokenizer.dirname} "
                 f"and try again. Nothing was installed.") from None
+    if entry.voices:
+        _gather_presets(entry, entry.voices, source, staging, say, tick, record)
     for name in record["digests"]:
         record["repos"].setdefault(name, "")
         record["verified"].setdefault(name, "your own files")
@@ -1724,6 +2697,8 @@ def _record_pins(entry: Bundle, record: dict) -> None:
     added = 0
     prefix = entry.tokenizer.dirname + "/"
     for name, digest in record["digests"].items():
+        if name.startswith(paths.VIBEVOICE_VOICES_DIRNAME + "/"):
+            continue  # every preset voice is pinned in the manifest itself
         filename = name[len(prefix):] if name.startswith(prefix) else name
         for item in entry.artifacts + entry.shards + entry.tokenizer.artifacts:
             if item.local_name == filename:
@@ -1816,6 +2791,13 @@ def _sanity_check(staging: Path, required, label: str) -> None:
             except (OSError, ValueError):
                 raise VibeVoiceError(f"{name} is not readable JSON. Nothing was "
                                      f"installed.") from None
+        elif name.endswith(".pt"):
+            # A voice prompt is a torch.save archive, which is a zip.
+            with open(path, "rb") as handle:
+                head = handle.read(4)
+            if head != b"PK\x03\x04":
+                raise VibeVoiceError(f"{name} is not a saved voice prompt. Nothing was "
+                                     f"installed.")
         elif size < SAFETENSORS_MIN:
             raise VibeVoiceError(f"{name} is too small to be what it claims. Nothing was "
                                  f"installed.")
@@ -1998,6 +2980,42 @@ def _stop_runtime(reason: str) -> None:
         logger.debug("Model Chain: could not stop VibeVoice before %s", reason, exc_info=True)
 
 
+def _stop_workers_holding(identifier: str, reason: str) -> None:
+    """Stop only the workers that hold ``identifier``, before its files are replaced.
+
+    Two models share one runtime now, and installing the Realtime model must not
+    end a render the 7B is halfway through on another card. A runtime that can
+    say what each worker holds (``loaded(card)``) is asked; one that cannot is
+    stopped whole, which is what installing a model always did. Never raises.
+    """
+    try:
+        import mc_voice_vibevoice_runtime as runtime
+    except Exception:
+        return
+    ask = getattr(runtime, "loaded", None)
+    if not callable(ask):
+        _stop_runtime(reason)
+        return
+    try:
+        cards = dict((runtime.status() or {}).get("cards") or {})
+    except Exception:
+        logger.debug("Model Chain: could not read which VibeVoice workers are running",
+                     exc_info=True)
+        cards = {}
+    for key, card in cards.items():
+        uuid_text = str((card or {}).get("uuid") or key)
+        try:
+            held = ask(uuid_text)
+        except Exception:
+            held = None
+        if isinstance(held, dict) and str(held.get("model_id") or "") == identifier:
+            try:
+                runtime.stop(uuid_text, reason)
+            except Exception:
+                logger.debug("Model Chain: could not stop VibeVoice on %s before %s",
+                             uuid_text, reason, exc_info=True)
+
+
 def progress() -> dict:
     """What the install is doing, for the page. One flat record for this guest."""
     found = models.progress().get(KIND) or {}
@@ -2008,6 +3026,337 @@ def progress() -> dict:
         "failed": bool(found.get("failed")),
         "model": str(found.get("model") or ""),
     }
+
+
+# --------------------------------------------------------------------------- #
+# The LoRA library
+# --------------------------------------------------------------------------- #
+
+
+def loras() -> list:
+    """Every adapter in the library, oldest first: ``[{"id", "name", "base", "bytes",
+    "parts", "created", "adapter"}]``.
+
+    Read from disk on every call. A directory without its record or without the
+    language model's adapter -- an add that was interrupted, a hand-edited
+    folder -- is left out rather than offered as something that would fail.
+    """
+    root = paths.vibevoice_loras_root()
+    found = []
+    try:
+        children = sorted(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        children = []
+    for folder in children:
+        if not folder.is_dir() or not _SAFE_LORA.match(folder.name):
+            continue
+        meta = _read_json(folder / paths.VIBEVOICE_LORA_META)
+        if not meta or not _adapter_pair(folder):
+            continue
+        found.append(_lora_record(folder.name, meta))
+    found.sort(key=lambda item: (item["created"], item["name"].casefold()))
+    return found
+
+
+def lora_dir(identifier: str) -> Path:
+    """Where one adapter of the library is. Validated, never a caller's path."""
+    text = str(identifier or "").strip()
+    if not _lora_known(text):
+        raise VibeVoiceError("That LoRA is not in the library.")
+    return paths.vibevoice_lora_root(text)
+
+
+def add_lora(folder: str, name: str = "") -> dict:
+    """Copy a LoRA from a folder on this PC into the library, after checking it.
+
+    Accepted: a PEFT LoRA adapter for the 7B's language model --
+    ``adapter_config.json`` saying ``"peft_type": "LORA"`` and
+    ``adapter_model.safetensors`` or ``adapter_model.bin`` -- at the folder's
+    root or in its ``lora/`` or ``language_model/`` subfolder, with
+    ``diffusion_head/``, ``acoustic_connector/`` and ``semantic_connector/``
+    copied when present beside it (each holding a full state dict or a PEFT
+    adapter pair). Anything else, or more than :data:`LORA_BYTES_MAX` in all, is
+    refused with a sentence and nothing is written. The copy is normalised so
+    the language model's adapter is at the root of its directory, and lands by
+    one rename, so the library never holds half an adapter.
+    """
+    source = _lora_source(folder)
+    adapter, config = _find_adapter(source)
+    files = {name_: adapter / name_ for name_ in _adapter_pair(adapter)}
+    parts = ["llm"]
+    extras = {}
+    for part in LORA_PARTS[1:]:
+        found = _find_extra(part, adapter, source)
+        if found is not None:
+            extras[part] = found
+            parts.append(part)
+    total = sum(path.stat().st_size for path in files.values())
+    total += sum(path.stat().st_size for chosen in extras.values() for path in chosen.values())
+    if total > LORA_BYTES_MAX:
+        raise VibeVoiceError(f"That LoRA is {models._bytes_label(total)}, and one in the "
+                             f"library is at most {models._bytes_label(LORA_BYTES_MAX)}. "
+                             f"Nothing was added.")
+    wanted = str(name or "").strip()
+    derived = not wanted
+    if derived:
+        # The folder's own name, or its parent's when the folder given is the
+        # adapter's conventional subfolder rather than the training run.
+        wanted = (source.parent.name if source.name.casefold() in ("lora", "language_model")
+                  else source.name) or "LoRA"
+    with _lora_lock:
+        label = _lora_name(wanted, derived=derived)
+        identifier = uuid.uuid4().hex[:12]
+        root = paths.vibevoice_loras_root()
+        root.mkdir(parents=True, exist_ok=True)
+        staging = root / f".adding-{identifier}"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        try:
+            for target, origin in files.items():
+                shutil.copyfile(origin, staging / target)
+            for part, chosen in extras.items():
+                (staging / part).mkdir()
+                for target, origin in chosen.items():
+                    shutil.copyfile(origin, staging / part / target)
+            copied = sum(item.stat().st_size for item in staging.rglob("*") if item.is_file())
+            meta = {
+                "schema": SCHEMA,
+                "id": identifier,
+                "name": label,
+                "base": MODEL_7B,
+                "parts": parts,
+                "bytes": copied,
+                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "source_folder": str(source),
+                "adapter": {key: config.get(key) for key in
+                            ("base_model_name_or_path", "r", "lora_alpha", "target_modules")},
+            }
+            _write_json(staging / paths.VIBEVOICE_LORA_META, meta)
+            os.replace(staging, paths.vibevoice_lora_root(identifier))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    logger.info("Model Chain: VibeVoice added the LoRA “%s” (%s, %s) from %s", label,
+                ", ".join(parts), models._bytes_label(copied), source)
+    return _lora_record(identifier, meta)
+
+
+def rename_lora(identifier: str, name: str) -> dict:
+    """Give an adapter in the library a new name. Names are unique, ignoring case."""
+    with _lora_lock:
+        folder = lora_dir(identifier)
+        meta = _read_json(folder / paths.VIBEVOICE_LORA_META) or {}
+        label = _lora_name(name, derived=False, keep=folder.name)
+        meta["name"] = label
+        _write_json(folder / paths.VIBEVOICE_LORA_META, meta)
+    logger.info("Model Chain: VibeVoice renamed a LoRA to “%s”", label)
+    return _lora_record(folder.name, meta)
+
+
+def delete_lora(identifier: str) -> dict:
+    """Remove an adapter from the library, and from any setting that chose it.
+
+    Returns the adapter as it was. The settings that named it read as no LoRA
+    from then on, and the stored value is cleared too, so a later adapter can
+    never inherit a choice somebody made for this one.
+    """
+    with _lora_lock:
+        folder = lora_dir(identifier)
+        meta = _read_json(folder / paths.VIBEVOICE_LORA_META) or {}
+        record = _lora_record(folder.name, meta)
+        if not paths.vibevoice_inside(folder):
+            raise VibeVoiceError("That LoRA is not in the library.")
+        try:
+            shutil.rmtree(folder)
+        except OSError as exc:
+            raise VibeVoiceError(f"The LoRA “{record['name']}” could not be removed ({exc}). "
+                                 f"If VibeVoice is using it, unload it first.") from None
+        with _lock:
+            # Each scope that named it -- the Voice Box's default and Voice Chat's
+            # -- goes back to no LoRA at full strength, in this same call.
+            stored = _settings_read()
+            changed = False
+            if stored.get("lora_id") == record["id"]:
+                stored["lora_id"] = ""
+                stored["lora_scale"] = LORA_SCALE_DEFAULT
+                changed = True
+            chat = stored.get("chat")
+            if isinstance(chat, dict) and chat.get("lora_id") == record["id"]:
+                chat["lora_id"] = ""
+                chat["lora_scale"] = LORA_SCALE_DEFAULT
+                changed = True
+            if changed:
+                _settings_write(stored)
+    logger.info("Model Chain: VibeVoice removed the LoRA “%s”", record["name"])
+    return record
+
+
+def _lora_known(identifier: str) -> bool:
+    text = str(identifier or "").strip()
+    if not _SAFE_LORA.match(text):
+        return False
+    try:
+        folder = paths.vibevoice_lora_root(text)
+    except ValueError:
+        return False
+    return (folder / paths.VIBEVOICE_LORA_META).is_file() and bool(_adapter_pair(folder))
+
+
+def _lora_record(identifier: str, meta: dict) -> dict:
+    parts = [part for part in (meta.get("parts") or ["llm"]) if part in LORA_PARTS]
+    adapter = meta.get("adapter") if isinstance(meta.get("adapter"), dict) else {}
+    return {
+        "id": identifier,
+        "name": str(meta.get("name") or identifier),
+        "base": str(meta.get("base") or MODEL_7B),
+        "bytes": int(meta.get("bytes") or 0),
+        "parts": parts or ["llm"],
+        "created": str(meta.get("created") or ""),
+        "adapter": {key: adapter.get(key) for key in
+                    ("base_model_name_or_path", "r", "lora_alpha", "target_modules")},
+    }
+
+
+def _lora_name(name, derived: bool, keep: str = "") -> str:
+    """A name for the library: one line, not blank, at most :data:`LORA_NAME_MAX`
+    characters, and not another adapter's. A name made from the folder is made
+    unique with a number; one somebody typed is refused instead."""
+    text = " ".join(str(name or "").split())
+    if any(ord(character) < 32 for character in str(name or "")) and not derived:
+        raise VibeVoiceError("A LoRA's name is one line of text.")
+    if not text:
+        raise VibeVoiceError("A LoRA needs a name.")
+    if len(text) > LORA_NAME_MAX:
+        if not derived:
+            raise VibeVoiceError(f"A LoRA's name is at most {LORA_NAME_MAX} characters.")
+        text = text[:LORA_NAME_MAX].rstrip()
+    taken = {item["name"].casefold() for item in loras() if item["id"] != keep}
+    if text.casefold() not in taken:
+        return text
+    if not derived:
+        raise VibeVoiceError(f"A LoRA called “{text}” is already in the library.")
+    number = 2
+    while f"{text} ({number})".casefold() in taken:
+        number += 1
+    return f"{text} ({number})"
+
+
+def _lora_source(folder) -> Path:
+    text = str(folder or "").strip().strip('"')
+    if not text:
+        raise VibeVoiceError("Give the folder that holds the LoRA.")
+    source = Path(text).expanduser()
+    if source.is_file():
+        source = source.parent
+    if not source.is_dir():
+        raise VibeVoiceError(f"{source} is not a folder this machine can read.")
+    return source
+
+
+def _adapter_pair(folder: Path) -> list:
+    """``["adapter_config.json", <weights>]`` when ``folder`` holds a PEFT adapter pair."""
+    if not (folder / ADAPTER_CONFIG).is_file():
+        return []
+    weights = next((name for name in ADAPTER_WEIGHTS if (folder / name).is_file()), "")
+    return [ADAPTER_CONFIG, weights] if weights else []
+
+
+def _find_adapter(source: Path) -> tuple:
+    """``(folder, config)`` of the language model's adapter, checked, or a refusal."""
+    half = None
+    for folder in (source, source / "lora", source / "language_model"):
+        if not folder.is_dir():
+            continue
+        if _adapter_pair(folder):
+            return folder, _checked_adapter(folder, "the language model's adapter")
+        if (folder / ADAPTER_CONFIG).is_file() and half is None:
+            half = folder
+    if half is not None:
+        raise VibeVoiceError(f"{half} has an adapter_config.json but no adapter_model."
+                             f"safetensors or adapter_model.bin beside it. Nothing was added.")
+    raise VibeVoiceError(f"{source} holds no LoRA adapter: VibeVoice looks for "
+                         f"adapter_config.json with adapter_model.safetensors (or .bin) in "
+                         f"the folder itself, or in its lora or language_model subfolder. "
+                         f"Nothing was added.")
+
+
+def _checked_adapter(folder: Path, what: str) -> dict:
+    """The adapter's configuration, after checking that it is a LoRA and that its
+    weights are the kind of file they claim to be."""
+    try:
+        config = json.loads((folder / ADAPTER_CONFIG).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise VibeVoiceError(f"The adapter_config.json of {what} is not readable JSON. "
+                             f"Nothing was added.") from None
+    if not isinstance(config, dict):
+        raise VibeVoiceError(f"The adapter_config.json of {what} is not an adapter "
+                             f"configuration. Nothing was added.")
+    kind = str(config.get("peft_type") or "")
+    if kind.upper() != "LORA":
+        raise VibeVoiceError(f"{what[0].upper() + what[1:]} is a PEFT "
+                             f"{kind or 'adapter of no stated type'}, and VibeVoice takes LoRA "
+                             f"adapters only. Nothing was added.")
+    rank = config.get("r")
+    if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0):
+        raise VibeVoiceError(f"{what[0].upper() + what[1:]} gives a rank ({rank!r}) that is "
+                             f"not a positive whole number. Nothing was added.")
+    weights = folder / _adapter_pair(folder)[1]
+    _check_weights(weights, what)
+    return config
+
+
+def _check_weights(path: Path, what: str) -> None:
+    """Whether a weights file is the kind of file its name says: a safetensors file
+    with a readable header, or a non-empty torch archive. Not a hash -- nobody has
+    vouched for these bytes -- but it catches the saved error page and the LFS
+    pointer a plain clone leaves behind."""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as handle:
+            head = handle.read(8)
+            if path.suffix == ".safetensors":
+                if len(head) < 8:
+                    raise ValueError("short")
+                (declared,) = struct.unpack("<Q", head)
+                if declared <= 0 or declared + 8 > size or declared > 64 * 1024 * 1024:
+                    raise ValueError("header")
+                header = json.loads(handle.read(declared).decode("utf-8"))
+                if not isinstance(header, dict):
+                    raise ValueError("header")
+            elif size < SAFETENSORS_MIN or (head[:4] != b"PK\x03\x04" and head[:1] != b"\x80"):
+                # torch.save writes a zip archive; a legacy one is a pickle.
+                raise ValueError("torch")
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise VibeVoiceError(f"{path.name} of {what} is not a readable weights file. Nothing "
+                             f"was added.") from None
+
+
+def _find_extra(part: str, adapter: Path, source: Path):
+    """``{file name: path}`` of an optional part beside the adapter (or in the
+    folder given), or ``None`` when there is no such folder. A folder by that name
+    holding nothing VibeVoice can load is refused rather than skipped: whoever
+    trained it meant that part to be used."""
+    places = [adapter / part, source / part]
+    if source.name.casefold() in ("lora", "language_model"):
+        places.append(source.parent / part)  # the training run's folder, one up
+    for folder in places:
+        if not folder.is_dir():
+            continue
+        chosen = {}
+        pair = _adapter_pair(folder)
+        if pair:
+            _checked_adapter(folder, f"the {part.replace('_', ' ')}'s adapter")
+            chosen.update({name: folder / name for name in pair})
+        for name in LORA_EXTRA_FILES:
+            if (folder / name).is_file():
+                _check_weights(folder / name, f"the {part.replace('_', ' ')}")
+                chosen[name] = folder / name
+        if not chosen:
+            raise VibeVoiceError(
+                f"{folder} holds none of {', '.join(LORA_EXTRA_FILES)} or a PEFT adapter, so "
+                f"there is nothing of the {part.replace('_', ' ')} to load. Nothing was "
+                f"added.")
+        return chosen
+    return None
 
 
 # --------------------------------------------------------------------------- #

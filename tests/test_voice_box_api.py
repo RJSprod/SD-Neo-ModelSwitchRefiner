@@ -257,6 +257,50 @@ class TestRenderingOverTheWire:
         assert post(client, api.RUNTIME_ROUTE, key, {"action": "dance"}).status_code == 400
 
 
+class TestTheLoRALibraryOverTheWire:
+    def test_the_library_is_listed_added_to_renamed_and_emptied(self, client, key):
+        assert [entry["name"] for entry in post(client, api.LORAS_ROUTE, key).json()["loras"]] \
+            == ["Narrator"]
+        added = post(client, api.LORA_ADD_ROUTE, key, {"folder": "C:/loras/warm", "name": "Warm"})
+        assert added.status_code == 200 and added.json()["lora"]["name"] == "Warm"
+        assert len(added.json()["loras"]) == 2
+        renamed = post(client, api.LORA_RENAME_ROUTE, key, {"id": "fedcba9876543210",
+                                                            "name": "Warmer"}).json()
+        assert renamed["lora"]["name"] == "Warmer"
+        gone = post(client, api.LORA_DELETE_ROUTE, key, {"id": "fedcba9876543210"}).json()
+        assert [entry["id"] for entry in gone["loras"]] == ["0123456789abcdef"]
+
+    def test_a_deleted_lora_leaves_the_configurations_that_used_it(self, client, key):
+        saved = post(client, api.CONFIGURATION_SAVE_ROUTE, key,
+                     {"configuration": {"name": "Warm", "lora_id": "0123456789abcdef",
+                                        "lora_scale": 0.5}}).json()["configuration"]
+        gone = post(client, api.LORA_DELETE_ROUTE, key, {"id": "0123456789abcdef"}).json()
+        assert gone["configurations"] == [saved["id"]]
+        listed = post(client, api.CONFIGURATIONS_ROUTE, key).json()["configurations"]
+        assert [(entry["lora_id"], entry["lora_scale"]) for entry in listed] == [("", 1.0)]
+
+    def test_a_folder_the_engine_refuses_is_a_400_with_its_sentence(self, client, key):
+        refused = post(client, api.LORA_ADD_ROUTE, key, {"folder": "C:/bad"})
+        assert refused.status_code == 400 and "no LoRA adapter" in refused.json()["error"]
+        missing = post(client, api.LORA_ADD_ROUTE, key, {"folder": ""})
+        assert missing.status_code == 400 and "folder" in missing.json()["error"]
+        unknown = post(client, api.LORA_DELETE_ROUTE, key, {"id": "nope"})
+        assert unknown.status_code == 400 and "no longer in the library" in unknown.json()["error"]
+
+    def test_the_status_carries_the_library_and_an_install_names_its_model(self, client, key,
+                                                                            monkeypatch):
+        assert post(client, api.STATUS_ROUTE, key).json()["loras"][0]["name"] == "Narrator"
+        engine = api._engine()
+        post(client, api.INSTALL_ROUTE, key, {"part": "model",
+                                              "model_id": "vibevoice-realtime-0.5b"})
+        import time
+
+        deadline = time.monotonic() + 2.0
+        while not engine.installed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert engine.installed == [("model", "vibevoice-realtime-0.5b")]
+
+
 class TestPromptsAndPipelinesOverTheWire:
     def test_prompts_round_trip(self, client, key):
         added = post(client, api.PROMPT_ADD_ROUTE, key, {"text": "Speaker 1: Hi"}).json()
