@@ -592,6 +592,17 @@ function type(node, value) {
     node.value = value;
     node.dispatchEvent({type: "input"});
 }
+function choose(selector, value) {
+    const node = find(selector);
+    if (!node) throw new Error("no select " + selector);
+    node.value = value;
+    node.dispatchEvent({type: "change"});
+    return node;
+}
+function shown(selector) {
+    const node = find(selector);
+    return !!node && !node.hidden;
+}
 function focusFrom(owner, kind) {
     document.dispatchEvent(new CustomEvent("mc:audio-focus", {detail: {owner, kind}}));
 }
@@ -679,6 +690,52 @@ def status_with(**changes) -> dict:
     found = json.loads(json.dumps(STATUS))
     found.update(changes)
     return found
+
+
+# The engine as it describes its models (mc_voice_vibevoice.models_info) and its
+# LoRA library (loras()). The presets arrive in the manifest's order, German
+# before English, which is what makes the grouping's order worth asserting.
+REALTIME = "vibevoice-realtime-0.5b"
+PRESETS = [
+    {"id": "de-Spk0_man", "name": "Spk0", "language": "de", "language_label": "German",
+     "gender": "man", "experimental": True, "installed": True},
+    {"id": "en-Carter_man", "name": "Carter", "language": "en", "language_label": "English",
+     "gender": "man", "experimental": False, "installed": True},
+    {"id": "en-Emma_woman", "name": "Emma", "language": "en", "language_label": "English",
+     "gender": "woman", "experimental": False, "installed": True},
+    {"id": "jp-Spk1_woman", "name": "Spk1", "language": "jp", "language_label": "Japanese",
+     "gender": "woman", "experimental": True, "installed": False},
+]
+MODEL_7B = {"id": "vibevoice-7b", "label": "VibeVoice 7B", "kind": "longform", "installed": True,
+            "runtime_installed": True, "precisions": ["bf16", "int8", "nf4"], "lora": True,
+            "max_speakers": 4, "voices": "samples", "defaults": {"steps": 10, "cfg_scale": 1.3},
+            "need_vram_bytes": {"bf16": 20_000_000_000, "int8": 13_000_000_000,
+                                "nf4": 9_000_000_000},
+            "need_ram_bytes": 3_000_000_000, "presets": [], "message": "", "download_bytes": 0}
+MODEL_REALTIME = {"id": REALTIME, "label": "VibeVoice Realtime 0.5B", "kind": "realtime",
+                  "installed": True, "runtime_installed": True, "precisions": ["bf16"],
+                  "lora": False, "max_speakers": 1, "voices": "presets",
+                  "defaults": {"steps": 5, "cfg_scale": 1.5},
+                  "need_vram_bytes": {"bf16": 3_000_000_000}, "need_ram_bytes": 2_000_000_000,
+                  "presets": PRESETS, "message": "", "download_bytes": 0}
+LORA = {"id": "0123456789abcdef", "name": "Narrator", "base": "vibevoice-7b", "bytes": 83_886_080,
+        "parts": ["llm", "diffusion_head"], "created": 1.0}
+WARM = {"id": "fedcba9876543210", "name": "Warm", "base": "vibevoice-7b", "bytes": 2_500_000_000,
+        "parts": ["llm"], "created": 2.0}
+
+
+def described(*models, loras=None, settings=None, **engine) -> dict:
+    """The answers of a page whose engine describes its models and its LoRAs."""
+    found = status_with(loras=[LORA] if loras is None else loras)
+    found["engine"].update({
+        "models": list(models or (MODEL_7B, MODEL_REALTIME)), "runtime_installed": True,
+        "parts": [{"id": "runtime", "installed": True, "bytes": 4_300_000_000, "message": ""},
+                  {"id": "model", "installed": True, "bytes": 0, "message": ""}]})
+    found["engine"].update(engine)
+    if settings:
+        found["settings"].update(settings)
+        found["engine_settings"].update(settings)
+    return {"/status": {"json": found}}
 
 
 def _node(harness: str) -> dict:
@@ -1693,6 +1750,663 @@ class TestPipelines:
 
         assert [r["body"] for r in found["made"]] == [{"name": "Pipeline 1"}]
         assert found["state"]["pipelineId"] == "p1"
+
+
+# --------------------------------------------------------------------------- #
+# The models: what each supports, its defaults, its voices
+# --------------------------------------------------------------------------- #
+
+# What the configuration shows, read off the page.
+SHOWN = """
+    const shownFields = () => ({
+        precision: shown('[data-field-wrap="precision"]'),
+        lora: shown('[data-field-wrap="lora_id"]'),
+        strength: shown('[data-field-wrap="lora_scale"]'),
+        slots: all(".mc-voice-box-speaker[data-speaker]").filter((s) => !s.hidden)
+            .map((s) => s.getAttribute("data-speaker")),
+        steps: find('[data-field="steps"]').value,
+        cfg: find('[data-field="cfg_scale"]').value,
+    });
+"""
+
+
+class TestTheModels:
+    def test_the_model_select_lists_the_engines_models_and_says_which_are_not_installed(self):
+        realtime = dict(MODEL_REALTIME, installed=False,
+                        message="VibeVoice Realtime 0.5B is not installed.")
+        found = run("""
+            await flush();
+            const select = find('[data-field="model_id"]');
+            report({models: select.options.map((o) => [o.value, o.textContent]),
+                    chosen: select.value});
+        """, answers=described(MODEL_7B, realtime))
+
+        assert found["models"] == [["vibevoice-7b", "VibeVoice 7B"],
+                                   [REALTIME, "VibeVoice Realtime 0.5B — not installed"]]
+        assert found["chosen"] == "vibevoice-7b"
+
+    def test_choosing_a_model_applies_its_defaults_and_shows_only_what_it_supports(self):
+        found = run(SHOWN + """
+            await flush();
+            const before = shownFields();
+            const precisions = find('[data-field="precision"]').options.map((o) => o.textContent);
+            const loras = find('[data-field="lora_id"]').options.map((o) => o.textContent);
+            const strength = find('[data-field="lora_scale"]');
+            const scale = {disabled: strength.disabled, min: strength.getAttribute("min"),
+                           max: strength.getAttribute("max"), step: strength.getAttribute("step")};
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            await flush();
+            const working = globalThis.mcVoiceBox.state().working;
+            report({before, precisions, loras, scale, after: shownFields(),
+                    steps: working.steps, cfg: working.cfg_scale,
+                    settings: requestsTo("/settings").map((r) => r.body)});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        assert found["before"] == {"precision": True, "lora": True, "strength": True,
+                                   "slots": ["1", "2", "3", "4"], "steps": "10", "cfg": "1.3"}
+        assert found["precisions"] == ["Full (bf16) · 20.0 GB", "8-bit · 13.0 GB",
+                                       "4-bit (NF4) · 9.0 GB"]
+        assert found["loras"] == ["(no LoRA)", "Narrator"]
+        assert found["scale"] == {"disabled": True, "min": "0", "max": "2", "step": "0.05"}
+        assert found["after"] == {"precision": False, "lora": False, "strength": False,
+                                  "slots": ["preset"], "steps": "5", "cfg": "1.5"}
+        assert (found["steps"], found["cfg"]) == (5, 1.5)
+        assert found["settings"] == [{"model_id": REALTIME}]
+        assert found["state"]["dirty"]["configuration"] is True
+
+    def test_an_engine_that_describes_no_model_shows_what_it_always_did(self):
+        """mc_voice_box._FALLBACK_MODEL: the 7B's shape at full precision."""
+        found = run(SHOWN + """
+            await flush();
+            report({fields: shownFields(), library: shown(".mc-voice-box-lora-library"),
+                    preset: shown(".mc-voice-box-speaker-preset"),
+                    installs: shown(".mc-voice-box-installs")});
+        """)
+
+        assert found["fields"] == {"precision": False, "lora": False, "strength": False,
+                                   "slots": ["1", "2", "3", "4"], "steps": "10", "cfg": "1.3"}
+        assert found["library"] is False
+        assert found["preset"] is False
+        assert found["installs"] is False
+
+    def test_a_model_with_fewer_speakers_shows_fewer_slots_and_says_so_in_the_plural(self):
+        duo = dict(MODEL_7B, id="duo", label="Duo", max_speakers=2)
+        found = run(SHOWN + """
+            await flush();
+            choose('[data-field="model_id"]', "duo");
+            await flush();
+            type(find(".mc-voice-box-prompt"), "Speaker 1: a\\nSpeaker 3: b");
+            report({fields: shownFields(),
+                    assign: all(".mc-voice-box-sample-speaker").map((b) => b.disabled),
+                    summary: find(".mc-voice-box-prompt-summary").textContent,
+                    why: find(".mc-voice-box-render-reason").textContent});
+        """, answers=described(MODEL_7B, duo))
+
+        assert found["fields"]["slots"] == ["1", "2"]
+        assert found["assign"] == [False, False, True, True]
+        assert found["why"] == "Duo speaks with up to 2 voices, and the script names Speaker 3."
+        assert found["summary"].endswith("— " + found["why"])
+
+    def test_the_preset_select_is_grouped_by_language_with_experimental_marked(self):
+        found = run("""
+            await flush();
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            await flush();
+            const select = find(".mc-voice-box-preset-select");
+            const groups = select.querySelectorAll("optgroup").map((g) => [
+                g.getAttribute("label"),
+                g.querySelectorAll("option").map((o) => [o.value, o.textContent, o.disabled])]);
+            const lead = [select.children[0].value, select.children[0].textContent];
+            const assign = all(".mc-voice-box-sample-speaker").map((b) => b.disabled);
+            choose(".mc-voice-box-preset-select", "preset:en-Carter_man");
+            await flush();
+            report({groups, lead, assign, speakers: globalThis.mcVoiceBox.state().working.speakers});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        assert found["groups"] == [
+            ["English", [["preset:en-Carter_man", "Carter (man)", False],
+                         ["preset:en-Emma_woman", "Emma (woman)", False]]],
+            ["German", [["preset:de-Spk0_man", "Spk0 (man) · experimental", False]]],
+            ["Japanese", [["preset:jp-Spk1_woman", "Spk1 (woman) · experimental · not installed",
+                           True]]]]
+        assert found["lead"] == ["", "(choose a voice)"]
+        assert found["assign"] == [True, True, True, True]
+        assert found["speakers"] == {"1": "preset:en-Carter_man"}
+        assert found["status"] == "Speaker 1 is Carter. Save the configuration to keep it."
+
+    def test_a_new_configuration_starts_from_its_models_defaults(self):
+        found = run("await flush(); report();", answers=dict(
+            described(settings={"model_id": REALTIME}),
+            **{"/configurations": {"json": {"ok": True, "configurations": []}}}))
+
+        working = found["state"]["working"]
+        assert working["model_id"] == REALTIME
+        assert (working["steps"], working["cfg_scale"]) == (5, 1.5)
+        assert (working["precision"], working["lora_id"], working["lora_scale"]) == ("bf16", "", 1)
+
+    def test_a_poll_brings_the_engines_news_a_voice_installed_and_a_lora_added(self):
+        installed = [dict(preset, installed=True) for preset in PRESETS]
+        later = described(MODEL_7B, dict(MODEL_REALTIME, presets=installed),
+                          loras=[LORA, WARM])["/status"]["json"]
+        found = run("""
+            await flush();
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            await flush();
+            const japanese = () => find(".mc-voice-box-preset-select")
+                .querySelectorAll("option").filter((o) => o.value === "preset:jp-Spk1_woman")[0].disabled;
+            const before = {japanese: japanese(), loras: texts(".mc-voice-box-lora-name")};
+            answers["/status"] = {json: LATER};
+            advance(15000);
+            await flush();
+            report({before, after: {japanese: japanese(), loras: texts(".mc-voice-box-lora-name")}});
+        """.replace("REALTIME_ID", REALTIME).replace("LATER", json.dumps(later)),
+            answers=described())
+
+        assert found["before"] == {"japanese": True, "loras": ["Narrator"]}
+        assert found["after"] == {"japanese": False, "loras": ["Narrator", "Warm"]}
+
+    def test_a_poll_does_not_rebuild_a_select_whose_options_are_unchanged(self):
+        """A select rebuilt under an open dropdown closes it; the poll repaints
+        the configuration every fifteen seconds."""
+        found = run("""
+            await flush();
+            const first = find('[data-field="precision"]').children[0];
+            const statuses = requestsTo("/status").length;
+            advance(15000);
+            await flush();
+            report({polled: requestsTo("/status").length - statuses,
+                    same: find('[data-field="precision"]').children[0] === first});
+        """, answers=described())
+
+        assert found["polled"] == 1
+        assert found["same"] is True
+
+
+class TestTheSavedConfiguration:
+    def test_the_save_carries_the_precision_the_lora_and_its_strength(self):
+        found = run("""
+            await flush();
+            choose('[data-field="precision"]', "int8");
+            choose('[data-field="lora_id"]', "0123456789abcdef");
+            const strength = find('[data-field="lora_scale"]');
+            const enabled = !strength.disabled;
+            type(strength, "0.75");
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({enabled, save: requestsTo("/configurations/save").map((r) => r.body)});
+        """, answers=described())
+
+        assert found["enabled"] is True
+        save = found["save"][0]
+        assert save["id"] == "c1" and save["name"] == "Default"
+        assert save["model_id"] == "vibevoice-7b"
+        assert (save["precision"], save["lora_id"], save["lora_scale"]) == \
+            ("int8", "0123456789abcdef", 0.75)
+        assert save["speakers"] == {"1": "s1"}
+
+    def test_a_preset_model_is_saved_at_its_own_precision_with_no_lora_and_a_preset(self):
+        """What the working copy holds for the 7B -- a quantised precision, a
+        LoRA, a sample on speaker 1 -- is not what the Realtime model takes."""
+        found = run("""
+            await flush();
+            choose('[data-field="precision"]', "nf4");
+            choose('[data-field="lora_id"]', "0123456789abcdef");
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            choose(".mc-voice-box-preset-select", "preset:en-Carter_man");
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({save: requestsTo("/configurations/save").map((r) => r.body)});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        save = found["save"][0]
+        assert save["model_id"] == REALTIME
+        assert (save["precision"], save["lora_id"], save["lora_scale"]) == ("bf16", "", 1)
+        assert save["speakers"] == {"1": "preset:en-Carter_man"}
+        assert (save["steps"], save["cfg_scale"]) == (5, 1.5)
+
+    def test_an_unsaved_preset_configuration_renders_inline_in_the_same_form(self):
+        found = run("""
+            await flush();
+            choose('[data-field="precision"]', "int8");
+            choose('[data-field="lora_id"]', "0123456789abcdef");
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            choose(".mc-voice-box-preset-select", "preset:en-Carter_man");
+            press("Render");
+            await flush();
+            report({render: requestsTo("/render").map((r) => r.body)});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        body = found["render"][0]
+        assert body["configuration_id"] == "c1"
+        inline = body["configuration"]
+        assert inline["model_id"] == REALTIME
+        assert inline["speakers"] == {"1": "preset:en-Carter_man"}
+        assert (inline["precision"], inline["lora_id"], inline["lora_scale"]) == ("bf16", "", 1)
+
+    def test_the_speakers_of_the_other_kind_of_model_wait_on_the_shelf(self):
+        found = run("""
+            await flush();
+            const speakers = () => JSON.parse(JSON.stringify(globalThis.mcVoiceBox.state().working.speakers));
+            const seen = [speakers()];
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            seen.push(speakers());
+            choose(".mc-voice-box-preset-select", "preset:en-Carter_man");
+            choose('[data-field="model_id"]', "vibevoice-7b");
+            seen.push(speakers());
+            const slot = find('.mc-voice-box-speaker[data-speaker="1"] .mc-voice-box-speaker-title').textContent;
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            seen.push(speakers());
+            report({seen, slot, preset: find(".mc-voice-box-preset-select").value});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        assert found["seen"] == [{"1": "s1"}, {}, {"1": "s1"}, {"1": "preset:en-Carter_man"}]
+        assert found["slot"] == "Ada"
+        assert found["preset"] == "preset:en-Carter_man"
+
+    def test_the_save_leaves_out_slots_past_the_models_last_speaker(self):
+        duo = dict(MODEL_7B, id="duo", label="Duo", max_speakers=2)
+        found = run("""
+            await flush();
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({save: requestsTo("/configurations/save").map((r) => r.body)});
+        """, answers=dict(described(MODEL_7B, duo), **{"/configurations": {"json": {
+            "ok": True, "configurations": [dict(CONFIGURATION, model_id="duo",
+                                                speakers={"1": "s1", "4": "s1"})]}}}))
+
+        assert found["save"][0]["speakers"] == {"1": "s1"}
+
+    def test_a_lora_chosen_while_its_strength_is_empty_starts_at_full_strength(self):
+        found = run("""
+            await flush();
+            choose('[data-field="lora_id"]', "0123456789abcdef");
+            type(find('[data-field="lora_scale"]'), "");
+            const emptied = globalThis.mcVoiceBox.state().working.lora_scale;
+            choose('[data-field="lora_id"]', "");
+            choose('[data-field="lora_id"]', "0123456789abcdef");
+            report({emptied, box: find('[data-field="lora_scale"]').value,
+                    scale: globalThis.mcVoiceBox.state().working.lora_scale});
+        """, answers=described())
+
+        assert found["emptied"] is None
+        assert found["scale"] == 1
+        assert found["box"] == "1"
+
+    def test_a_deleted_sample_leaves_the_shelf_too(self):
+        found = run("""
+            await flush();
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            press("Delete", find(".mc-voice-box-sample"));
+            await flush();
+            choose('[data-field="model_id"]', "vibevoice-7b");
+            report({speakers: globalThis.mcVoiceBox.state().working.speakers});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        assert found["speakers"] == {}
+
+
+class TestTheSpeakerLimit:
+    def test_the_summary_warns_and_render_says_why_when_the_script_names_too_many(self):
+        found = run("""
+            await flush();
+            const look = () => ({text: find(".mc-voice-box-prompt-summary").textContent,
+                                 kind: find(".mc-voice-box-prompt-summary").getAttribute("data-kind"),
+                                 disabled: find(".mc-voice-box-render").disabled,
+                                 why: find(".mc-voice-box-render-reason").textContent});
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            choose(".mc-voice-box-preset-select", "preset:en-Carter_man");
+            type(find(".mc-voice-box-prompt"), "Speaker 1: Hello.\\nSpeaker 2: Hi there.");
+            const warned = look();
+            press("Render");
+            await flush();
+            type(find(".mc-voice-box-prompt"), "Speaker 1: Hello there.");
+            const fine = look();
+            type(find(".mc-voice-box-prompt"), "Speaker 1: Hello.\\nSpeaker 2: Hi there.");
+            choose('[data-field="model_id"]', "vibevoice-7b");
+            const seven = look();
+            report({warned, fine, seven, renders: requestsTo("/render").length});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        sentence = "VibeVoice Realtime 0.5B speaks with one voice, and the script names Speaker 2."
+        assert found["warned"] == {"text": "2 speakers, 0 pauses, ~3 words — " + sentence,
+                                   "kind": "warn", "disabled": True, "why": sentence}
+        assert found["renders"] == 0
+        assert found["fine"] == {"text": "1 speaker, 0 pauses, ~2 words", "kind": "info",
+                                 "disabled": False, "why": ""}
+        assert found["seven"] == {"text": "2 speakers, 0 pauses, ~3 words", "kind": "info",
+                                  "disabled": True, "why": "Speaker 2 has no sample."}
+
+    def test_a_preset_model_asks_for_a_voice_before_it_renders(self):
+        found = run("""
+            await flush();
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            report({why: find(".mc-voice-box-render-reason").textContent,
+                    disabled: find(".mc-voice-box-render").disabled});
+        """.replace("REALTIME_ID", REALTIME), answers=described())
+
+        assert found["why"] == "Choose a voice for Speaker 1 in the configuration."
+        assert found["disabled"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The LoRA library
+# --------------------------------------------------------------------------- #
+
+
+class TestTheLoRALibrary:
+    def test_the_library_lists_each_lora_with_its_size_and_parts(self):
+        found = run("""
+            await flush();
+            report({shown: shown(".mc-voice-box-lora-library"),
+                    summary: find(".mc-voice-box-lora-summary").textContent,
+                    names: texts(".mc-voice-box-lora-name"), meta: texts(".mc-voice-box-lora-meta"),
+                    heading: find(".mc-voice-box-lora-add .mc-voice-box-subtitle").textContent});
+        """, answers=described(loras=[LORA, WARM]))
+
+        assert found["shown"] is True
+        assert found["summary"] == "LoRA library · 2 LoRAs"
+        assert found["names"] == ["Narrator", "Warm"]
+        assert found["meta"] == ["84 MB · language model, diffusion head", "2.5 GB · language model"]
+        assert found["heading"] == "Add a LoRA from a folder on this PC"
+
+    def test_add_copies_a_folder_with_the_long_deadline_and_a_second_press_waits(self):
+        found = run("""
+            await flush();
+            find(".mc-voice-box-lora-folder").value = "D:/loras/warm";
+            find(".mc-voice-box-lora-add-name").value = "Warm";
+            find(".mc-voice-box-lora-add-button").click();
+            find(".mc-voice-box-lora-add-button").click();
+            await flush();
+            const during = {count: requestsTo("/loras/add").length, delays: pendingDelays(),
+                            status: find(".mc-voice-box-status").textContent};
+            release("/loras/add");
+            await flush();
+            report({during, add: requestsTo("/loras/add").map(plain),
+                    names: texts(".mc-voice-box-lora-name"),
+                    boxes: [find(".mc-voice-box-lora-folder").value,
+                            find(".mc-voice-box-lora-add-name").value],
+                    offered: find('[data-field="lora_id"]').options.map((o) => o.textContent)});
+        """, answers=dict(described(), **{"/loras/add": {"json": {
+            "ok": True, "lora": WARM, "loras": [LORA, WARM]}}}), held=["/loras/add"])
+
+        assert found["during"]["count"] == 1
+        assert 120000 in found["during"]["delays"]
+        assert found["during"]["status"] == "Copying the LoRA from D:/loras/warm…"
+        add = found["add"][0]
+        assert add["body"] == {"folder": "D:/loras/warm", "name": "Warm"}
+        assert add["headers"]["x-model-chain-voice"] == TOKEN and add["signal"] is True
+        assert found["names"] == ["Narrator", "Warm"]
+        assert found["boxes"] == ["", ""]
+        assert found["offered"] == ["(no LoRA)", "Narrator", "Warm"]
+        assert found["status"] == "Added the LoRA Warm."
+
+    def test_a_folder_the_server_refuses_is_said_in_the_status_line(self):
+        found = run("""
+            await flush();
+            find(".mc-voice-box-lora-folder").value = "D:/music";
+            find(".mc-voice-box-lora-add-button").click();
+            await flush();
+            report({names: texts(".mc-voice-box-lora-name"),
+                    folder: find(".mc-voice-box-lora-folder").value});
+        """, answers=dict(described(), **{"/loras/add": {"status": 400, "json": {
+            "ok": False, "error": "That folder holds no LoRA adapter for the language model."}}}))
+
+        assert found["status"] == "That folder holds no LoRA adapter for the language model."
+        assert found["state"]["messageKind"] == "error"
+        assert found["names"] == ["Narrator"]
+        assert found["folder"] == "D:/music"
+
+    def test_an_empty_folder_box_is_not_sent(self):
+        found = run("""
+            await flush();
+            find(".mc-voice-box-lora-add-button").click();
+            await flush();
+            report({adds: requestsTo("/loras/add").length});
+        """, answers=described())
+
+        assert found["adds"] == 0
+        assert found["status"] == "Give the folder that holds the LoRA."
+
+    def test_an_add_with_no_answer_says_the_copy_may_still_be_running(self):
+        found = run("""
+            await flush();
+            find(".mc-voice-box-lora-folder").value = "D:/loras/huge";
+            find(".mc-voice-box-lora-add-button").click();
+            await flush();
+            advance(120000);
+            await flush();
+            report({aborted: requestsTo("/loras/add")[0].aborted});
+        """, answers=dict(described(), **{"/loras/add": {"never": True}}))
+
+        assert found["aborted"] is True
+        assert found["status"] == ("No answer within 120 s. The copy may still be running; "
+                                   "the library shows the LoRA when it is done.")
+
+    def test_rename_and_delete_and_the_chosen_lora_lets_go(self):
+        found = run("""
+            await flush();
+            press("Rename", find(".mc-voice-box-lora"));
+            const box = find(".mc-voice-box-rename");
+            box.value = "Storyteller";
+            box.dispatchEvent({type: "keydown", key: "Enter"});
+            await flush();
+            const renamed = texts(".mc-voice-box-lora-name");
+            choose('[data-field="lora_id"]', "0123456789abcdef");
+            const chosen = globalThis.mcVoiceBox.state().working.lora_id;
+            press("Delete", find(".mc-voice-box-lora"));
+            await flush();
+            report({renamed, chosen, rename: requestsTo("/loras/rename").map(plain),
+                    remove: requestsTo("/loras/delete").map(plain),
+                    after: globalThis.mcVoiceBox.state().working.lora_id,
+                    empty: texts(".mc-voice-box-loras .mc-voice-box-empty"),
+                    offered: find('[data-field="lora_id"]').options.map((o) => o.textContent),
+                    lists: requestsTo("/loras").length});
+        """, answers=dict(described(), **{
+            "/loras/rename": {"json": {"ok": True, "lora": dict(LORA, name="Storyteller"),
+                                       "loras": [dict(LORA, name="Storyteller")]}},
+            "/loras/delete": {"json": {"ok": True, "loras": []}}}))
+
+        assert [r["body"] for r in found["rename"]] == [{"id": "0123456789abcdef",
+                                                         "name": "Storyteller"}]
+        assert found["renamed"] == ["Storyteller"]
+        assert [r["body"] for r in found["remove"]] == [{"id": "0123456789abcdef"}]
+        for request in found["rename"] + found["remove"]:
+            assert request["headers"]["x-model-chain-voice"] == TOKEN and request["signal"] is True
+        assert found["chosen"] == "0123456789abcdef"
+        assert found["after"] == ""
+        assert found["state"]["dirty"]["configuration"] is True
+        assert found["empty"] == ["No LoRAs yet. Add one from a folder on this PC."]
+        assert found["offered"] == ["(no LoRA)"]
+        assert found["lists"] == 0
+
+    def test_a_saved_configuration_the_server_cleared_is_not_left_unsaved(self):
+        """The server takes a deleted LoRA out of the configurations that used it
+        (mc_voice_box.forget_lora); the page reads them again, and a working copy
+        that agrees with its saved configuration is not marked unsaved."""
+        found = run("""
+            await flush();
+            const before = globalThis.mcVoiceBox.state().working.lora_id;
+            const reads = requestsTo("/configurations").length;
+            press("Delete", find(".mc-voice-box-lora"));
+            await flush();
+            const working = globalThis.mcVoiceBox.state().working;
+            report({before, after: working.lora_id, scale: working.lora_scale,
+                    reads: requestsTo("/configurations").length - reads,
+                    save: find(".mc-voice-box-configuration-save").textContent});
+        """, answers=dict(described(), **{
+            "/configurations": {"json": {"ok": True, "configurations": [dict(
+                CONFIGURATION, lora_id="0123456789abcdef", lora_scale=0.5)]}},
+            "/loras/delete": {"json": {"ok": True, "loras": [], "configurations": ["c1"]}}}))
+
+        assert found["before"] == "0123456789abcdef"
+        assert (found["after"], found["scale"]) == ("", 1)
+        assert found["state"]["dirty"]["configuration"] is False
+        assert found["save"] == "Save"
+        assert found["reads"] == 1
+
+    def test_an_answer_without_the_library_is_followed_by_a_read_of_it(self):
+        found = run("""
+            await flush();
+            press("Delete", find(".mc-voice-box-lora"));
+            await flush();
+            report({lists: requestsTo("/loras").map(plain), names: texts(".mc-voice-box-lora-name")});
+        """, answers=dict(described(), **{"/loras/delete": {"json": {"ok": True}},
+                                          "/loras": {"json": {"ok": True, "loras": [WARM]}}}))
+
+        assert [r["body"] for r in found["lists"]] == [{}]
+        assert found["names"] == ["Warm"]
+
+    def test_a_poll_leaves_a_rename_in_progress_alone(self):
+        found = run("""
+            await flush();
+            press("Rename", find(".mc-voice-box-lora"));
+            const statuses = requestsTo("/status").length;
+            advance(15000);
+            await flush();
+            const box = find(".mc-voice-box-rename");
+            const survived = !!box;
+            if (box) {
+                box.value = "Storyteller";
+                box.dispatchEvent({type: "keydown", key: "Enter"});
+                await flush();
+            }
+            report({polled: requestsTo("/status").length - statuses, survived,
+                    rename: requestsTo("/loras/rename").map((r) => r.body)});
+        """, answers=described())
+
+        assert found["polled"] == 1
+        assert found["survived"] is True
+        assert found["rename"] == [{"id": "0123456789abcdef", "name": "Storyteller"}]
+
+    def test_a_lora_made_for_another_model_is_not_offered(self):
+        found = run("""
+            await flush();
+            report({offered: find('[data-field="lora_id"]').options.map((o) => o.textContent)});
+        """, answers=described(loras=[LORA, dict(WARM, base="another-model")]))
+
+        assert found["offered"] == ["(no LoRA)", "Narrator"]
+
+
+# --------------------------------------------------------------------------- #
+# Installing, model by model
+# --------------------------------------------------------------------------- #
+
+NOT_INSTALLED = dict(MODEL_REALTIME, installed=False, runtime_installed=False,
+                     download_bytes=2_100_000_000,
+                     message="VibeVoice Realtime 0.5B is not installed — install it below.")
+
+
+class TestInstallingModelByModel:
+    def test_the_footer_offers_the_runtime_and_each_missing_model(self):
+        runtime_missing = dict(MODEL_7B, runtime_installed=False,
+                               message="VibeVoice's runtime still to install.")
+        found = run("""
+            await flush();
+            const offers = all(".mc-voice-box-install-part").map((b) => [
+                b.textContent, b.getAttribute("data-part"), b.getAttribute("data-model"), b.disabled]);
+            const legacy = shown(".mc-voice-box-install");
+            all(".mc-voice-box-install-part").forEach((b) => b.click());
+            await flush();
+            report({offers, legacy, installs: requestsTo("/install").map(plain),
+                    why: find(".mc-voice-box-render-reason").textContent});
+        """, answers=described(runtime_missing, NOT_INSTALLED, runtime_installed=False, ready=False,
+                               parts=[{"id": "runtime", "installed": False,
+                                       "bytes": 4_300_000_000, "message": ""}]))
+
+        assert found["offers"] == [
+            ["Install the VibeVoice runtime (4.3 GB)", "runtime", None, False],
+            ["Install VibeVoice Realtime 0.5B (2.1 GB)", "model", REALTIME, False]]
+        assert found["legacy"] is False
+        assert [r["body"] for r in found["installs"]] == [
+            {"part": "runtime", "folder": "", "model_id": ""},
+            {"part": "model", "folder": "", "model_id": REALTIME}]
+        for request in found["installs"]:
+            assert request["headers"]["x-model-chain-voice"] == TOKEN and request["signal"] is True
+        assert found["why"] == "VibeVoice's runtime still to install."
+        assert found["status"] == "Installing VibeVoice Realtime 0.5B… progress shows below."
+
+    def test_while_an_install_runs_the_other_offers_wait(self):
+        found = run("""
+            await flush();
+            const offers = all(".mc-voice-box-install-part").map((b) => b.disabled);
+            all(".mc-voice-box-install-part").forEach((b) => b.click());
+            await flush();
+            const first = find(".mc-voice-box-install-part");
+            advance(15000);
+            await flush();
+            report({offers, installs: requestsTo("/install").length,
+                    kept: find(".mc-voice-box-install-part") === first,
+                    progress: find(".mc-voice-box-install-progress").textContent});
+        """, answers=dict(described(MODEL_7B, NOT_INSTALLED), **{"/status": {"json": dict(
+            described(MODEL_7B, NOT_INSTALLED)["/status"]["json"],
+            progress={"running": True, "text": "Downloading the 7B", "fraction": 0.5,
+                      "failed": False, "model": "vibevoice-7b"})}}))
+
+        assert found["offers"] == [True]
+        assert found["installs"] == 0
+        assert found["kept"] is True, "a poll rebuilt an offer that had not changed"
+        assert found["progress"] == "Downloading the 7B (50%)"
+
+    def test_an_install_already_running_on_the_server_is_said(self):
+        found = run("""
+            await flush();
+            find(".mc-voice-box-install-part").click();
+            await flush();
+            report();
+        """, answers=dict(described(MODEL_7B, NOT_INSTALLED),
+                          **{"/install": {"json": {"ok": True, "already": True}}}))
+
+        assert found["status"] == "Another install is running; press again when it has finished."
+
+    def test_render_waits_on_the_chosen_models_own_installation(self):
+        """The engine's `ready` speaks for the settings model. A render with an
+        installed model is not held back by another model that is not."""
+        found = run("""
+            await flush();
+            const seven = {disabled: find(".mc-voice-box-render").disabled,
+                           why: find(".mc-voice-box-render-reason").textContent};
+            choose('[data-field="model_id"]', "REALTIME_ID");
+            report({seven, realtime: find(".mc-voice-box-render-reason").textContent});
+        """.replace("REALTIME_ID", REALTIME), answers=described(
+            MODEL_7B, NOT_INSTALLED, ready=False, message="Setup required."))
+
+        assert found["seven"] == {"disabled": False, "why": ""}
+        assert found["realtime"] == "VibeVoice Realtime 0.5B is not installed — install it below."
+
+
+# --------------------------------------------------------------------------- #
+# Samples made in Voice Chat, and what a render was made with
+# --------------------------------------------------------------------------- #
+
+
+class TestWhereThingsCameFrom:
+    def test_a_sample_made_in_voice_chat_says_so(self):
+        found = run("""
+            await flush();
+            report({rows: all(".mc-voice-box-sample").map((row) => [
+                row.querySelector(".mc-voice-box-sample-title").textContent,
+                row.querySelector(".mc-voice-box-sample-origin")
+                    ? row.querySelector(".mc-voice-box-sample-origin").textContent : null])});
+        """, answers={"/samples": {"json": {"ok": True, "samples": [
+            SAMPLE, dict(SAMPLE, id="s2", title="Warm", source="voice-chat", created=2)]}}})
+
+        assert found["rows"] == [["Ada", None], ["Warm", "made in Voice Chat"]]
+
+    def test_a_lane_names_the_model_its_precision_its_lora_and_a_preset_voice(self):
+        quantised = dict(OUTPUT, render=dict(OUTPUT["render"], model="VibeVoice 7B",
+                                             precision="nf4",
+                                             lora={"id": LORA["id"], "name": "Narrator",
+                                                   "scale": 0.75}))
+        realtime = dict(OUTPUT, id="o2", name="Take 2", created=3, render=dict(
+            OUTPUT["render"], model="VibeVoice Realtime 0.5B", precision="bf16", lora=None,
+            speakers=[{"n": 1, "sample_id": "", "title": "", "preset": "en-Carter_man"}]))
+        found = run("await flush(); report({meta: texts('.mc-voice-box-lane-meta')});",
+                    answers={"/outputs": {"json": {"ok": True, "outputs": [quantised, realtime]}}})
+
+        assert found["meta"] == [
+            "VibeVoice Realtime 0.5B · seed 42 · 10 steps · CFG 1.3 · S1 en-Carter_man · 4.5 s · GPU-a",
+            "VibeVoice 7B · 4-bit (NF4) · LoRA Narrator ×0.75 · seed 42 · 10 steps · CFG 1.3 · "
+            "S1 Ada · 4.5 s · GPU-a"]
 
 
 # --------------------------------------------------------------------------- #

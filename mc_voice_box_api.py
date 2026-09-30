@@ -67,6 +67,10 @@ OUTPUT_DELETE_ROUTE = f"{PREFIX}/outputs/delete"
 OUTPUT_SAVE_ROUTE = f"{PREFIX}/outputs/save"
 OUTPUT_AUDIO_ROUTE = f"{PREFIX}/outputs/audio"
 RUNTIME_ROUTE = f"{PREFIX}/runtime"
+LORAS_ROUTE = f"{PREFIX}/loras"
+LORA_ADD_ROUTE = f"{PREFIX}/loras/add"
+LORA_RENAME_ROUTE = f"{PREFIX}/loras/rename"
+LORA_DELETE_ROUTE = f"{PREFIX}/loras/delete"
 
 ROUTES = (STATUS_ROUTE, INSTALL_ROUTE, SETTINGS_ROUTE, FOLDER_ROUTE, SAMPLES_ROUTE,
           SAMPLE_UPLOAD_ROUTE, SAMPLE_RENAME_ROUTE, SAMPLE_DELETE_ROUTE, SAMPLE_AUDIO_ROUTE,
@@ -75,7 +79,7 @@ ROUTES = (STATUS_ROUTE, INSTALL_ROUTE, SETTINGS_ROUTE, FOLDER_ROUTE, SAMPLES_ROU
           PIPELINES_ROUTE, PIPELINE_NEW_ROUTE, PIPELINE_SAVE_ROUTE, PIPELINE_DELETE_ROUTE,
           RENDER_ROUTE, JOBS_ROUTE, JOB_CANCEL_ROUTE, OUTPUTS_ROUTE, OUTPUT_RENAME_ROUTE,
           OUTPUT_LOOP_ROUTE, OUTPUT_DELETE_ROUTE, OUTPUT_SAVE_ROUTE, OUTPUT_AUDIO_ROUTE,
-          RUNTIME_ROUTE)
+          RUNTIME_ROUTE, LORAS_ROUTE, LORA_ADD_ROUTE, LORA_RENAME_ROUTE, LORA_DELETE_ROUTE)
 
 TITLE_HEADER = "x-mc-title"
 """A sample's title on an upload, percent-encoded UTF-8 (headers are Latin-1)."""
@@ -129,7 +133,27 @@ def status_payload() -> dict:
         "runtime": _part("the runtime", lambda: _runtime().status(), {"cards": {}}),
         "turns": _part("the cards' turns", lambda: client.snapshot() if client else [], []),
         "jobs": _part("the jobs", box.jobs, []),
+        "loras": _part("the LoRAs", lambda: _engine().loras(), []),
     }
+
+
+def _engine_says(call, *args, **kwargs):
+    """Call the engine, turning its refusal into the Voice Box's, sentence kept.
+
+    The engine refuses with its own error type -- a folder that holds no
+    adapter, a LoRA already deleted -- and those are the caller's mistakes to be
+    told about, a 400 with the sentence, not a 500 that hides it.
+    """
+    engine = _engine()
+    refusal = getattr(engine, "VibeVoiceError", None)
+    try:
+        return call(*args, **kwargs)
+    except box.VoiceBoxError:
+        raise
+    except Exception as exc:
+        if refusal is not None and isinstance(exc, refusal):
+            raise box.VoiceBoxError(str(exc) or "VibeVoice refused that.") from None
+        raise
 
 
 def install_payload(values: dict) -> dict:
@@ -137,16 +161,18 @@ def install_payload(values: dict) -> dict:
     engine = _engine()
     part = str(values.get("part") or "").strip()
     folder = str(values.get("folder") or "").strip()
+    model_id = str(values.get("model_id") or "").strip()
     already = (engine.progress() or {}).get("running")
     if already:
         return {"ok": True, "already": True}
+    extra = {"model_id": model_id} if model_id else {}
 
     def run():
         try:
             if folder:
-                engine.install_from(part or "runtime", folder)
+                engine.install_from(part or "runtime", folder, **extra)
             else:
-                engine.install(part)
+                engine.install(part, **extra)
         except Exception:
             # Logged with its reason where the page's progress reads it.
             logger.debug("Model Chain: the VibeVoice install thread ended on an error",
@@ -170,7 +196,8 @@ def settings_payload(values: dict) -> dict:
     of range -- so a refused value leaves both files as they were.
     """
     theirs = {key: values[key] for key in ENGINE_KEYS if key in values}
-    engine_settings = _engine().set_settings(theirs) if theirs else _engine().settings()
+    engine_settings = (_engine_says(_engine().set_settings, theirs) if theirs
+                       else _engine().settings())
     own = {key: values[key] for key in box.SETTINGS_DEFAULTS if key in values}
     found = box.set_settings(own) if own else box.settings()
     return {"ok": True, "settings": found, "engine_settings": engine_settings}
@@ -291,6 +318,33 @@ def save_output_payload(values: dict) -> dict:
             raise Refused(409, str(exc)) from None
         raise
     return {"ok": True, "path": path, "save_folder": box.settings().get("save_folder", "")}
+
+
+def loras_payload(_values: dict) -> dict:
+    return {"ok": True, "loras": _engine().loras()}
+
+
+def add_lora_payload(values: dict) -> dict:
+    """Copy a LoRA from a folder on this PC into the library. A folder, never an upload:
+    adapters are hundreds of megabytes and already on the machine the WebUI runs on."""
+    folder = str(values.get("folder") or "").strip()
+    if not folder:
+        raise Refused(400, "Give the folder that holds the LoRA.")
+    found = _engine_says(_engine().add_lora, folder, str(values.get("name") or ""))
+    return {"ok": True, "lora": found, "loras": _engine().loras()}
+
+
+def rename_lora_payload(values: dict) -> dict:
+    found = _engine_says(_engine().rename_lora, str(values.get("id") or ""),
+                         str(values.get("name") or ""))
+    return {"ok": True, "lora": found, "loras": _engine().loras()}
+
+
+def delete_lora_payload(values: dict) -> dict:
+    """Delete a LoRA, and take it out of the configurations that used it."""
+    identifier = str(values.get("id") or "")
+    _engine_says(_engine().delete_lora, identifier)
+    return {"ok": True, "loras": _engine().loras(), "configurations": box.forget_lora(identifier)}
 
 
 def runtime_payload(values: dict) -> dict:
@@ -449,6 +503,10 @@ def install(_demo=None, app=None) -> bool:
         (OUTPUT_DELETE_ROUTE, delete_output_payload, "The render could not be deleted."),
         (OUTPUT_SAVE_ROUTE, save_output_payload, "The render could not be saved."),
         (RUNTIME_ROUTE, runtime_payload, "The runtime could not be changed."),
+        (LORAS_ROUTE, loras_payload, "The LoRAs could not be listed."),
+        (LORA_ADD_ROUTE, add_lora_payload, "That LoRA could not be added."),
+        (LORA_RENAME_ROUTE, rename_lora_payload, "That LoRA could not be renamed."),
+        (LORA_DELETE_ROUTE, delete_lora_payload, "That LoRA could not be deleted."),
     )
     for route, call, failure in posts:
         if route not in existing:

@@ -44,11 +44,14 @@ What a voice id is
     sopro:clone:<uuid>
     pocket:official:alba
     pocket:clone:<uuid>
+    vibevoice:preset:<stem>        one of the Realtime 0.5B's preset voices
+    vibevoice:sample:<sample id>   a Voice Box sample, which the 7B speaks from
 
 Backend first, always, so that no caller outside an adapter can be handed a
 voice and not know whose it is. A Sopro or Pocket id contains a server-generated
 UUID and never a filesystem path, a display name or anything a browser supplied
-(I-10, I-PKT-20, section 57).
+(I-10, I-PKT-20, section 57); a VibeVoice sample id is the one the Voice Box
+minted, and a preset's stem is checked against the installer's own list.
 
 Legacy ids -- ``official:af_heart``, ``clone:<uuid>``, and the bare speaker
 names V1 wrote -- are Kokoro's, read as Kokoro's, and are *not* rewritten on
@@ -98,6 +101,7 @@ prefix. A rename here is a migration, not a tidy-up.
 KOKORO = "kokoro"
 SOPRO = "sopro"
 POCKET = "pocket"
+VIBEVOICE = "vibevoice"
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,15 @@ SPECS = (
         adapter="mc_voice_pocket",
         runtime="mc_voice_pocket_runtime",
         profiles="mc_voice_pocket_profile",
+    ),
+    EngineSpec(
+        id=VIBEVOICE,
+        label="VibeVoice",
+        blurb="Runs on a graphics card through a turn on it — the Realtime 0.5B with "
+              "Microsoft's preset voices, or the 7B with a Voice Box sample.",
+        adapter="mc_voice_vibevoice_chat",
+        runtime="mc_voice_vibevoice_speech",
+        profiles="mc_voice_vibevoice_profile",
     ),
 )
 """Every engine this build knows, in selector order.

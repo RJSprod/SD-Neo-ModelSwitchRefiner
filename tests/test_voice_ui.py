@@ -1051,15 +1051,17 @@ class TestTheRendererRegistry:
         assert mc_voice_ui._delivery_note("not-an-engine") == ""
 
     def test_each_engine_gets_its_own_delivery_paragraph(self):
-        """Section 37. The same labels mean different things on three engines,
+        """Section 37. The same labels mean different things on each engine,
         and the paragraph that told a PocketTTS user Kokoro exposes speed was
-        wrong about every sentence in it."""
+        wrong about every sentence in it. VibeVoice's controls are different
+        ones altogether, and its paragraph says why the other four are absent."""
         notes = {name: mc_voice_ui._delivery_note(name)
-                 for name in ("kokoro", "sopro", "pocket")}
-        assert len(set(notes.values())) == 3
+                 for name in ("kokoro", "sopro", "pocket", "vibevoice")}
+        assert len(set(notes.values())) == 4
         assert "Kokoro exposes one of these itself" in notes["kokoro"]
         assert "Sopro has no speaking-rate input of its own" in notes["sopro"]
         assert "are Voice Chat" in notes["pocket"]
+        assert "There is no Speed, Pitch, Volume or Pause on this engine" in notes["vibevoice"]
 
 
 class TestTheCharacterEditorFollowsTheEngine:

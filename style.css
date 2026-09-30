@@ -7592,6 +7592,13 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     font-size: var(--text-xs, 0.8em);
 }
 
+/* A sample made from a recording in Voice Chat's VibeVoice panel says so. */
+#mc-voice-box .mc-voice-box-sample-origin {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-xs, 0.8em);
+    font-style: italic;
+}
+
 #mc-voice-box .mc-voice-box-sample-speakers {
     display: inline-flex;
     gap: 0.2em;
@@ -7622,6 +7629,11 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 
 #mc-voice-box .mc-voice-box-prompt-summary {
     font-weight: 600;
+}
+
+/* The script names a speaker the chosen model does not have. */
+#mc-voice-box .mc-voice-box-prompt-summary[data-kind="warn"] {
+    color: var(--error-text-color, inherit);
 }
 
 #mc-voice-box .mc-voice-box-prompt-lists {
@@ -7713,6 +7725,69 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     white-space: nowrap;
 }
 
+/* A model with preset voices has one speaker, chosen from a select. */
+#mc-voice-box .mc-voice-box-preset-select {
+    flex: 1 1 12em;
+    min-width: 0;
+}
+
+/* The LoRA library: a disclosure under the configuration's fields. Spaced with
+   margins rather than as a flex box, which a <details> has not always honoured. */
+#mc-voice-box .mc-voice-box-lora-library {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0.4em 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-lora-summary {
+    cursor: pointer;
+    font-size: var(--text-sm, 0.85em);
+    font-weight: 600;
+}
+
+#mc-voice-box .mc-voice-box-lora-library .mc-voice-box-loras {
+    margin: 0.4em 0;
+}
+
+#mc-voice-box .mc-voice-box-lora {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+}
+
+#mc-voice-box .mc-voice-box-lora-name {
+    cursor: text;
+    flex: 1 1 8em;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#mc-voice-box .mc-voice-box-lora-meta,
+#mc-voice-box .mc-voice-box-lora-help {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-xs, 0.8em);
+}
+
+#mc-voice-box .mc-voice-box-lora-add {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+}
+
+#mc-voice-box .mc-voice-box-lora-folder {
+    flex: 2 1 14em;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-lora-add-name {
+    flex: 1 1 8em;
+    min-width: 0;
+}
+
 /* -- OUTPUTS --------------------------------------------------------------- */
 
 #mc-voice-box .mc-voice-box-lane-head {
@@ -7734,6 +7809,13 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: flex;
     flex-wrap: wrap;
     gap: 0.6em;
+}
+
+/* One Install per missing part: the runtime, then each model. */
+#mc-voice-box .mc-voice-box-installs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
 }
 
 #mc-voice-box .mc-voice-box-render-reason,
