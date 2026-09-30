@@ -5497,15 +5497,22 @@ percentage height inside Gradio's containers means nothing. It never goes below
 420 pixels: in a window smaller than that the page may scroll after all, and
 each stage then scrolls as a whole.
 
-On a narrow screen — the tab under 900 pixels wide, a phone — the stages stack
-instead, each as wide and as tall as the screen, and the page moves a whole stage
-at a time: swipe up for the next stage, down for the one before. A list inside a
-stage still scrolls first, and carries on to the next stage at its end.
+On a narrow screen — the tab under 900 pixels wide, a phone — the stages are
+cards side by side, each as wide and as tall as the screen: **swipe left or
+right** to move a whole stage at a time, and **scroll up and down** inside a
+stage, its lists included. The two never fight, because the direction of the
+swipe decides. A bar above the cards — **Input · Prompt · Config · Outputs** —
+marks the stage in view, and a tap on it moves there. On the phone each card
+scrolls as one piece: the lists have no scroll areas of their own and the script
+box grows with its text, while the card's title (and, on Configuration, Render
+and the status line) stays put. Sideways drags that belong to something stay
+with it: the trimmer's waveform and handles, a slider, and the waveform that is
+playing; a sideways swipe over any other waveform turns the page.
 
-**Render** is at the top of the Outputs stage (disabled with the reason when it
-cannot run — the engine not installed or its install failed, an empty script, a
-speaker without a sample, no card), with **Install** beside it while a part is
-missing, and under it **one status line** says the one thing that matters most
+**Render** is at the top of the Configuration stage (disabled with the reason
+when it cannot run — the engine not installed or its install failed, an empty
+script, a speaker without a sample, no card), with **Install** beside it while a
+part is missing, and under it **one status line** says the one thing that matters most
 right now: an install and how far it has got; the render that is running — its
 phase, its section when it has more than one, the time since it started, and
 how many wait behind it — with **Cancel** and, when renders are queued, **Clear
@@ -5573,32 +5580,62 @@ the card (each named, and marked when it is the image model's card or WanGP's),
 **diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
 a **seed** (blank for a different one each time — drawn when the render is
 queued and written on its output, so every render has a seed that makes it
-again), **max new tokens** (blank for the model's own limit), and the four
-**speaker** slots, each holding one sample.
+again), **max new tokens** (blank for the model's own limit), **sampling**
+with its **temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by
+default, and the four **speaker** slots, each holding one sample.
+
+Sampling is off by default, and then temperature and top-p are greyed out and
+not used. Off, the model makes its own most likely choices, as its publisher
+ships it. VibeVoice has two parts: the voice — tone, texture, how each word
+comes out, which the seed, CFG and steps shape — and a pacer that decides,
+every eighth of a second of speech, whether to keep talking, take a break or
+stop. Sampling only touches the pacer: with it on, pauses land in different
+places and lines are timed a little differently from take to take, and set too
+high it can stop before the script ends or run on past it (the output then
+says it reached its token budget). The seed still makes a sampled take again
+exactly. Temperature and top-p keep their values while sampling is off, so
+turning it back on brings them back.
+
 An edit marks the configuration *Save •* until you save it, and Render never
 saves for you: an unsaved configuration is sent along with the render as it
 stands. The card and model you pick become the defaults for the next
 configuration. The values a render actually used are written on its output.
 Controls the model cannot honour are not on the page.
 
+### Players
+
+Every sound on the page — each sample in the library, the trimmer's selection,
+the chosen output — has the same icon buttons: **Play/Pause**, **Play from the
+start** and **Stop**, which pauses and goes back to the beginning (for the
+trimmer, the selection's start), and **Loop** where a player loops. Only one
+sound plays at a time, and only the one you last started and have not stopped —
+playing, or paused with its own Pause — shows a playhead and can be scrubbed by
+pressing or dragging along its waveform. Every other waveform ignores presses and
+drags, so scrolling or swiping over a list never moves a sound you did not
+start. On a touch screen a press on a waveform waits until the finger moves
+along it or lifts, so a scroll that begins there scrolls. Play resumes where a
+sound was paused; Play from the start starts over.
+
 ### Outputs
 
 Every render is a lane. Until you choose it, a lane is its waveform and one
 compact line — when it was made, in your own time, and its name (rename on a
-double click) — with its samples' tint along its edge; the playhead shows on it
-only while it plays. Tap or click a lane to choose it (one at a time; Enter or
-Space does it from the keyboard) and it opens: the playhead,
-**Play**, **Loop** (remembered per output), **Trim to sample** — the same
+double click) — with its samples' tint along its edge. Tap or click a lane to
+choose it (one at a time; Enter or Space does it from the keyboard) and it
+opens: the player's buttons (Play/Pause, Play from the start, Stop, **Loop**,
+remembered per output), **Trim to sample** — the same
 trimmer as the input stage, on the render, so a phrase you like becomes a voice
 sample without leaving the page — **Save**, **Download**, **Delete**, a line of
 metadata (model, seed, steps, CFG, the speakers' samples, the length, how long it
-took), and its **infotext**. A render you just made opens by itself when it
-lands, and the list — only the list — scrolls to it.
+took, and, when it sampled, its temperature and top-p), and its **infotext**. A
+render you just made opens by itself when it lands, and the list — only the list
+— scrolls to it.
 
 The **infotext** is the render's fingerprint, written the way a WebUI writes an
 image's: the prompt as it was, then one line — `Steps: 10, CFG scale: 1.3,
 Seed: 1234567, Model: vibevoice-7b, Speaker 1: Ada, Speaker 2: Brook, Sections:
-2, Length: 41.3 s, Render time: 95.0 s`. **Copy** puts it on the clipboard. It
+2, Length: 41.3 s, Render time: 95.0 s`, with `Temperature: 0.95, Top-p: 0.95`
+after the seed when the render sampled. **Copy** puts it on the clipboard. It
 is also written into the file itself, so a render saved or downloaded says what
 made it wherever it goes: in the MP3's ID3 comment (with the whole record as
 JSON under `voicebox`), or in a WAV's `INFO` chunk. A render made before seeds
@@ -5608,8 +5645,10 @@ were recorded has no seed to give, and its line says nothing of one.
 **Reuse settings** puts back what made the render: its prompt, and its
 configuration as unsaved changes — the configuration it came from, when it
 still exists, with the render's values over it (its seed included, so Render
-makes the same take again; clear the seed for a new one), or a new unsaved
-configuration named after the render when that one is gone. A speaker whose
+makes the same take again; clear the seed for a new one; its sampling,
+temperature and top-p too, and a render made before sampling existed turns
+sampling off), or a new unsaved configuration named after the render when that
+one is gone. A speaker whose
 sample has since been deleted is left empty, and the page says which.
 
 A render is kept as an **MP3** — constant 128 kb/s, mono, at the model's own

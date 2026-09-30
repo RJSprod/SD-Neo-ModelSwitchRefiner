@@ -100,6 +100,8 @@ PAUSE_MAX_MS = 10_000
 
 STEPS_RANGE = (1, 50)
 CFG_RANGE = (1.0, 3.0)
+TEMPERATURE_RANGE = (0.1, 2.0)
+TOP_P_RANGE = (0.05, 1.0)
 SEED_MAX = 2**31 - 1
 TOKENS_MAX = 65_536
 
@@ -587,10 +589,19 @@ CONFIGURATION_DEFAULTS = {
     "cfg_scale": 1.3,
     "seed": None,
     "max_new_tokens": None,
+    "sampling": False,
+    "temperature": 0.95,
+    "top_p": 0.95,
     "speakers": {},
 }
 """A configuration's fields. ``model_id`` and ``card_uuid`` empty mean the
-engine's default model and the card chosen in Voice Box's settings."""
+engine's default model and the card chosen in Voice Box's settings.
+
+``sampling`` off is the model's own greedy choice, as upstream ships it;
+``temperature`` and ``top_p`` are kept either way, and used only while it is
+on. The model's language part only picks control tokens -- keep speaking, end
+a stretch of speech, stop -- so sampling varies the pacing from take to take,
+never the voice; a seeded render samples the same way every time."""
 
 
 def _configurations_root() -> Path:
@@ -638,12 +649,35 @@ def _clean_speakers(value) -> dict:
     return found
 
 
+def _sampling_value(value, bounds: tuple, what: str, strict: bool, fallback: float) -> float:
+    """Temperature or top-p: checked while sampling is on, held in range while it is off.
+
+    Off, the page greys the field out, so a value typed out of range before
+    sampling was switched off could not be corrected there, and refusing it
+    would refuse every Save and Render until sampling was switched on again to
+    fix a number that is not being used. It is brought into range instead; a
+    value that is not a number goes back to its default.
+    """
+    if strict:
+        return _bounded_float(value, *bounds, what=what)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if number != number:
+        return fallback
+    return round(min(max(number, bounds[0]), bounds[1]), 3)
+
+
 def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
     base = dict(existing or CONFIGURATION_DEFAULTS)
     merged = dict(base)
     for key in CONFIGURATION_DEFAULTS:
         if key in values:
             merged[key] = values[key]
+    # Only a real ``true``, as the worker reads it: anything else is the
+    # model's own greedy choice.
+    sampling = merged.get("sampling") is True
     return {
         "name": _title(merged.get("name"), base.get("name") or "Configuration"),
         "model_id": str(merged.get("model_id") or "")[:64],
@@ -653,14 +687,28 @@ def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
         "seed": _bounded_int(merged.get("seed"), 0, SEED_MAX, what="The seed", none_ok=True),
         "max_new_tokens": _bounded_int(merged.get("max_new_tokens"), 1, TOKENS_MAX,
                                        what="Max new tokens", none_ok=True),
+        "sampling": sampling,
+        "temperature": _sampling_value(merged.get("temperature"), TEMPERATURE_RANGE,
+                                       "Temperature", sampling,
+                                       CONFIGURATION_DEFAULTS["temperature"]),
+        "top_p": _sampling_value(merged.get("top_p"), TOP_P_RANGE, "Top-p", sampling,
+                                 CONFIGURATION_DEFAULTS["top_p"]),
         "speakers": _clean_speakers(merged.get("speakers")),
     }
+
+
+def _complete(entry: dict) -> dict:
+    """A stored configuration with every field, those it predates at their defaults."""
+    found = dict(CONFIGURATION_DEFAULTS)
+    found.update(entry)
+    found["speakers"] = dict(found.get("speakers") or {})
+    return found
 
 
 def configurations() -> list[dict]:
     with _lock:
         found = [_read_json(path, {}) for path in sorted(_configurations_root().glob("*.json"))]
-    found = [entry for entry in found if entry.get("id")]
+    found = [_complete(entry) for entry in found if entry.get("id")]
     found.sort(key=lambda entry: (entry.get("name", "").lower(), entry.get("created", 0)))
     return found
 
@@ -670,7 +718,7 @@ def configuration(identifier: str) -> dict:
     entry = _read_json(_configuration_path(identifier), {})
     if not entry.get("id"):
         raise NotFound("That configuration no longer exists.")
-    return entry
+    return _complete(entry)
 
 
 def save_configuration(values: dict) -> dict:
@@ -841,10 +889,15 @@ def infotext(entry: dict) -> str:
         if value not in (None, ""):
             parts.append(f"{label}: {_quoted(value)}")
 
+    def number(value):
+        return f"{float(value):g}" if isinstance(value, (int, float)) else value
+
     add("Steps", render.get("steps"))
-    cfg = render.get("cfg_scale")
-    add("CFG scale", f"{float(cfg):g}" if isinstance(cfg, (int, float)) else cfg)
+    add("CFG scale", number(render.get("cfg_scale")))
     add("Seed", render.get("seed"))
+    if render.get("sampling"):
+        add("Temperature", number(render.get("temperature")))
+        add("Top-p", number(render.get("top_p")))
     add("Model", render.get("model_id"))
     for speaker in render.get("speakers") or ():
         if isinstance(speaker, dict):
@@ -1469,6 +1522,7 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
     runtime.load(job.card)
     pieces: list[bytes] = []
     total_seconds = 0.0
+    sampling = bool(job.configuration.get("sampling"))
     peak = 0
     rate = SAMPLE_RATE
     render_seconds = 0.0
@@ -1497,7 +1551,10 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
             cfg_scale=float(job.configuration["cfg_scale"]),
             steps=int(job.configuration["steps"]),
             seed=job.seed,
-            max_new_tokens=job.configuration.get("max_new_tokens"))
+            max_new_tokens=job.configuration.get("max_new_tokens"),
+            sampling=sampling,
+            temperature=job.configuration.get("temperature") if sampling else None,
+            top_p=job.configuration.get("top_p") if sampling else None)
         result = runtime.render(job.card, request, on_progress=progressed)
         peak = max(peak, int(getattr(result, "peak_bytes", 0) or 0))
         render_seconds += float(getattr(result, "render_seconds", 0.0) or 0.0)
@@ -1522,6 +1579,9 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
         "steps": configured["steps"],
         "cfg_scale": configured["cfg_scale"],
         "max_new_tokens": configured.get("max_new_tokens"),
+        "sampling": sampling,
+        "temperature": configured.get("temperature") if sampling else None,
+        "top_p": configured.get("top_p") if sampling else None,
         "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
                      for number, voice in sorted(voices.items())],
         "prompt": job.prompt,
@@ -1542,6 +1602,9 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
             "cfg_scale": configured["cfg_scale"],
             "seed": job.seed,
             "max_new_tokens": configured.get("max_new_tokens"),
+            "sampling": sampling,
+            "temperature": configured.get("temperature"),
+            "top_p": configured.get("top_p"),
             "speakers": dict(configured.get("speakers") or {}),
         },
     }

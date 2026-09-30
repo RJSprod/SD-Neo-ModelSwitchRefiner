@@ -580,7 +580,17 @@ class TestLoadingAndRendering:
         assert sent["payload_bytes"] == 4 * 18000
         assert header["seed"] == 7 and header["cfg_scale"] == 1.5 and header["steps"] == 12
         assert header["max_new_tokens"] is None
+        assert (header["sampling"], header["temperature"], header["top_p"]) == (False, None, None)
         assert progress and all("seconds" in one for one in progress)
+
+    def test_a_sampling_render_sends_its_temperature_and_top_p_and_only_then(self, stub):
+        runtime.load(CARD)
+        runtime.render(CARD, job_for(sampling=True, temperature=0.8, top_p=0.9))
+        runtime.render(CARD, job_for("job-2", sampling=False, temperature=0.8, top_p=0.9))
+        first, second = (sent["header"] for sent in stub.renders()[:2])
+        assert (first["sampling"], first["temperature"], first["top_p"]) == (True, 0.8, 0.9)
+        assert (second["sampling"], second["temperature"], second["top_p"]) == \
+            (False, None, None), "the values are not sent when sampling is off"
 
     def test_a_render_marks_the_card_rendering_for_its_duration(self, stub):
         stub.plan["render_seconds"] = 1.0

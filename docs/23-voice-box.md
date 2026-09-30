@@ -579,6 +579,46 @@ descriptor 1 with standard output pointed at the log; the Voice Box noted every
 render's peak a second time; and two renders queued as one ended could share a
 name.
 
+**The second UX round (after #240, at the user's request).**
+
+1. *"Let's move it to the configuration stage."* Render, Install and the
+   status line (unchanged in behaviour) head the Configuration stage; Outputs
+   is its title, the lanes and the empty-pipeline sentence.
+2. *"We need an explicit 'sampling' control, and when off, it disables top-p and
+   temperature."* A configuration has `sampling` (off by default), `temperature`
+   (0.1–2.0) and `top_p` (0.05–1.0), both 0.95. Off, the worker hands `generate`
+   `{"do_sample": false}` as upstream does; on, `{"do_sample": true, "temperature",
+   "top_p"}`. The model's language part only chooses control tokens — keep
+   speaking, end a stretch of speech, stop — while the voice comes from the
+   diffusion head, so sampling varies the pacing, never the timbre, and the seed
+   still reproduces a sampled take. Only a real `true` turns it on, in the
+   configuration and in the worker; while it is off the two values are kept for
+   turning it on again, and one out of range is brought into range rather than
+   refused, because the page greys the field out. Each output records
+   `render.sampling`, `render.temperature`, `render.top_p` (null when greedy) and the
+   configuration's own three; the infotext gains `Temperature, Top-p` after the seed
+   when the render sampled.
+3. *"Horizontal card scrolling makes a lot of sense."* Under 900 px the stages are
+   cards in a horizontal scroll-snap container (x mandatory, one full card at a
+   time) with a stage bar (*Input · Prompt · Config · Outputs*, `aria-current`,
+   smooth or, under reduced motion, instant); each card is the one vertical
+   scroller (its header outside the scrolling body, not `sticky`, because the
+   positioned rows would paint over a sticky header without a z-index), lists have
+   no scroll areas of their own there and the script box grows. This replaces the
+   first round's vertical snap, whose inner lists took the swipe that should have
+   changed stage.
+4. *"That scrubbing should be avoidable for all not-playing audio."* One active
+   player — the one last started and not stopped, playing or paused by its own
+   Pause — seeks on a press or a drag, draws a playhead and, on a touch screen,
+   keeps sideways drags (`touch-action: pan-y`); every other waveform ignores them.
+   A finger's press waits until it moves along the waveform or lifts, so a
+   vertical scroll that starts there scrolls.
+5. *"Buttons with icons … start from the beginning, and another for STOP."* Every
+   player (sample rows, the trimmer, the selected lane): Play/Pause, Play from the
+   start (the trimmer's selection start), Stop (pause, back to the beginning, no
+   longer active), Loop where it was; inline SVG in `currentColor`, with
+   `aria-label` and `title`.
+
 ---
 
 ## 9. Voice Chat

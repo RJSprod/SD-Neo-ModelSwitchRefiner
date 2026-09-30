@@ -478,6 +478,27 @@ function heights(node) {
     return node.style.writes.filter((write) => write[0] === "height").map((write) => write[1]);
 }
 
+// Across as well as down: a box's left is a number the scenario sets
+// (`boxLeft`), the way a phone's cards sit once the row of them has scrolled.
+const baseRect = El.prototype.getBoundingClientRect;
+El.prototype.getBoundingClientRect = function () {
+    const box = baseRect.call(this);
+    const left = this.boxLeft || 0;
+    return Object.assign(box, {left, right: left + box.width});
+};
+// scrollTo, recorded with the box it was asked of, and taken.
+const scrolls = [];
+El.prototype.scrollTo = function (options) {
+    scrolls.push({className: this.className, options: Object.assign({}, options)});
+    if (options && typeof options.left === "number") this.scrollLeft = options.left;
+    if (options && typeof options.top === "number") this.scrollTop = options.top;
+};
+// prefers-reduced-motion, as the scenario sets it.
+let reducedMotion = false;
+globalThis.matchMedia = (query) => ({
+    media: query, matches: reducedMotion && /prefers-reduced-motion:\s*reduce/.test(query),
+    addEventListener() {}, removeEventListener() {}});
+
 // Recording: a MediaRecorder that hands its one chunk over on stop.
 const recorders = [];
 globalThis.MediaRecorder = class {
@@ -696,9 +717,14 @@ function shown(node) {
     }
     return true;
 }
+// A button's name is its words, or -- for one whose face is an icon -- its
+// label, which is what anybody pressing it by name would call it.
+function nameOf(button) {
+    return button.textContent || button.getAttribute("aria-label") || "";
+}
 function buttonNamed(label, within) {
     return (within || document).querySelectorAll("button")
-        .filter((b) => b.textContent === label && shown(b))[0] || null;
+        .filter((b) => nameOf(b) === label && shown(b))[0] || null;
 }
 function press(label, within) {
     const found = buttonNamed(label, within);
@@ -707,7 +733,14 @@ function press(label, within) {
     return found;
 }
 function labels(within) {
-    return within.querySelectorAll("button").filter(shown).map((b) => b.textContent);
+    return within.querySelectorAll("button").filter(shown).map(nameOf);
+}
+// What a player's buttons say: each icon button's label, title and picture,
+// and whether a toggle is pressed.
+function faces(within) {
+    return within.querySelectorAll("button").filter((b) => b.hasAttribute("data-icon") && shown(b))
+        .map((b) => ({label: b.getAttribute("aria-label"), title: b.getAttribute("title"),
+                      icon: b.getAttribute("data-icon"), pressed: b.getAttribute("aria-pressed")}));
 }
 // A press on something inside a lane, travelling up to the lane the way a
 // real one does (the harness's own click() does not bubble).
@@ -788,6 +821,8 @@ OLD_OUTPUT = {"id": "o0", "name": "Old take", "pipeline_id": "p1", "seconds": 3.
                          "prompt": "Speaker 1: Before.", "render_seconds": 2.0,
                          "peak_bytes": 1, "sections": 1}}
 """One made before seeds and configurations were recorded, with a blank seed."""
+SAMPLING_CONFIGURATION = dict(CONFIGURATION, sampling=True, temperature=1.4, top_p=0.6)
+"""A configuration saved with Sampling on, the way the server hands one out now."""
 JOB = {"id": "j1", "name": "Pipeline 1 2", "pipeline_id": "p1", "phase": "queued", "reason": "",
        "warning": "", "progress": {}, "output_id": "", "created": 3, "started": None,
        "ended": None, "card": "GPU-a", "live": True, "elapsed": None, "seed": 42,
@@ -908,13 +943,17 @@ def test_the_files_under_test_avoid_the_placeholders():
 
 
 class TestBoot:
-    def test_it_draws_the_pipeline_bar_the_four_stages_in_order_and_the_outputs_header(self):
-        """Render and the status line moved from a footer into the Outputs
-        stage's header, and the footer went."""
+    def test_it_draws_the_pipeline_bar_the_four_stages_in_order_and_the_configuration_header(self):
+        """Render and the status line are the Configuration stage's header's
+        (round one had them in the Outputs stage's, and a footer before that);
+        the Outputs stage keeps its title alone in its header. A stage bar sits
+        between the pipeline bar and the stages; the stylesheet shows it only
+        on a phone."""
         found = run("""
             await flush();
             const stages = find(".mc-voice-box-stages");
-            const head = find(".mc-voice-box-stage-outputs .mc-voice-box-stage-head");
+            const head = find(".mc-voice-box-stage-configuration .mc-voice-box-stage-head");
+            const outputs = find(".mc-voice-box-stage-outputs .mc-voice-box-stage-head");
             report({
                 title: find(".mc-voice-box-title").textContent,
                 bar: texts(".mc-voice-box-pipeline-bar button"),
@@ -922,9 +961,18 @@ class TestBoot:
                 stages: texts(".mc-voice-box-stage-title"),
                 row: stages.children.map((child) => child.className.split(" ")[0]),
                 render: !!head.querySelector(".mc-voice-box-render"),
+                install: !!head.querySelector(".mc-voice-box-install"),
                 line: !!head.querySelector(".mc-voice-box-status-line .mc-voice-box-status"),
+                headOrder: head.children.map((child) => child.className),
+                outputsHead: outputs.children.map((child) => child.className),
+                outputsRender: !!find(".mc-voice-box-stage-outputs .mc-voice-box-render"),
+                outputsLine: !!find(".mc-voice-box-stage-outputs .mc-voice-box-status-line"),
+                renders: all(".mc-voice-box-render").length,
+                lines: all(".mc-voice-box-status-line").length,
                 footer: !!find(".mc-voice-box-footer"),
                 rootChildren: find("#mc-voice-box").children.map((child) => child.className),
+                stagebar: texts(".mc-voice-box-stagebar button"),
+                stagebarNames: all(".mc-voice-box-stagebar button").map((b) => b.getAttribute("aria-label")),
                 help: find(".mc-voice-box-prompt-help").textContent,
             });
         """)
@@ -938,9 +986,19 @@ class TestBoot:
         assert found["pipelines"] == ["Pipeline 1"]
         assert found["title"] == "Voice Box · Pipeline 1"
         assert found["render"] is True
+        assert found["install"] is True
         assert found["line"] is True
+        assert found["headOrder"] == ["mc-voice-box-stage-title", "mc-voice-box-stage-actions",
+                                      "mc-voice-box-status-line"]
+        assert found["outputsHead"] == ["mc-voice-box-stage-title"]
+        assert found["outputsRender"] is False
+        assert found["outputsLine"] is False
+        assert (found["renders"], found["lines"]) == (1, 1)
         assert found["footer"] is False
-        assert found["rootChildren"] == ["mc-voice-box-head", "mc-voice-box-stages"]
+        assert found["rootChildren"] == ["mc-voice-box-head", "mc-voice-box-stagebar",
+                                         "mc-voice-box-stages"]
+        assert found["stagebar"] == ["Input", "Prompt", "Config", "Outputs"]
+        assert found["stagebarNames"] == ["Input", "Prompt", "Configuration", "Outputs"]
         assert found["status"] == "Ready"
         assert "[pause:1500]" in found["help"]
         assert found["warnings"] == []
@@ -1251,7 +1309,7 @@ class TestTheTrimmer:
     def test_the_trimmer_plays_the_selection_and_pauses_at_its_end(self):
         found = run(self.CHOOSE + """
             const audio = find(".mc-voice-box-trimmer-audio");
-            press("Play selection");
+            press("Play", find(".mc-voice-box-trimmer"));
             await flush();
             const plays = audio.plays;
             audio.currentTime = 9.99;
@@ -1307,7 +1365,7 @@ class TestAudioFocus:
         found = run(self.PLAY_LANE + """
             const fetched = requestsTo("/outputs/audio")[0];
             report({plays: audio.plays, paused: audio.paused, src: audio.src,
-                    label: lane.querySelector(".mc-voice-box-lane-play").textContent,
+                    label: lane.querySelector(".mc-voice-box-lane-play").getAttribute("aria-label"),
                     fetched: fetched ? plain(fetched) : null});
         """)
 
@@ -1325,7 +1383,7 @@ class TestAudioFocus:
         found = run(self.PLAY_LANE + """
             focusFrom("voice-chat", "speech");
             report({paused: audio.paused, pauses: audio.pauses,
-                    label: lane.querySelector(".mc-voice-box-lane-play").textContent,
+                    label: lane.querySelector(".mc-voice-box-lane-play").getAttribute("aria-label"),
                     last: globalThis.mcVoiceBox.focusEvent().last});
         """)
 
@@ -1690,15 +1748,18 @@ class TestOutputs:
         assert found["source"] == "output:o1"
         assert found["title"] == "Take%201"
 
-    def test_a_press_on_the_waveform_seeks(self):
-        """On the selected lane; on a compact one the press only selects it
-        (TestTheLanes)."""
+    def test_a_press_on_the_active_players_waveform_seeks(self):
+        """Round one sought on the selected lane; now the lane has to be the
+        active player -- started with Play -- and a lane that is not seeks
+        nothing (TestTheActivePlayer)."""
         found = run("""
             await flush();
             const lane = find(".mc-voice-box-lane");
             const audio = lane.querySelector("audio");
             audio.duration = 4.5;
             lane.click();
+            press("Play", lane);
+            await flush();
             lane.querySelector(".mc-voice-box-lane-wave").dispatchEvent(
                 {type: "pointerdown", clientX: 120, pointerId: 1, preventDefault() {}});
             report({at: audio.currentTime});
@@ -2121,6 +2182,103 @@ class TestFittingTheWindow:
         assert found["steady"] == found["first"]
         assert found["after"] == ["900px", "740px", "715px", "840px", "815px"]
 
+    def test_on_a_phone_the_script_box_grows_with_its_words(self):
+        """On the cards the Prompt stage's body is its one scroller, so the box
+        is as tall as its words; side by side it keeps the stylesheet's height
+        and scrolls inside itself -- or the height its own resize handle was
+        given, which typing does not take away. Measuring it at no height
+        shortens the stage for a moment -- the browser clamps the stage's
+        scroll then, which the scenario's box does too -- and the stage's
+        scroll is put back."""
+        found = run("""
+            await flush();
+            runFrames();
+            const prompt = find(".mc-voice-box-prompt");
+            const body = find(".mc-voice-box-stage-prompt .mc-voice-box-stage-body");
+            body.scrollTop = 120;
+            Object.defineProperty(prompt, "scrollHeight", {configurable: true, get() {
+                if (prompt.style.height === "0px") body.scrollTop = 0;
+                return 300;
+            }});
+            type(prompt, "Speaker 1: A script long enough to need the room.");
+            const stacked = {height: prompt.style.height, scrolled: body.scrollTop};
+            const root = find("#mc-voice-box");
+            root.clientWidth = 1440;
+            fireWindow("resize");
+            runFrames();
+            const columns = prompt.style.height;
+            type(prompt, "Speaker 1: Typed side by side.");
+            const typed = prompt.style.height;
+            // The box's own handle, dragged side by side: the browser writes
+            // the height on the element.
+            prompt.style.height = "250px";
+            type(prompt, "Speaker 1: Typed after a resize.");
+            const handled = prompt.style.height;
+            root.clientWidth = 390;
+            fireWindow("resize");
+            runFrames();
+            report({stacked, columns, typed, handled, again: prompt.style.height});
+        """, root_width=390)
+
+        assert found["stacked"] == {"height": "300px", "scrolled": 120}
+        assert found["columns"] == ""
+        assert found["typed"] == ""
+        assert found["handled"] == "250px"
+        assert found["again"] == "300px"
+
+    def test_a_rebuilt_list_keeps_its_own_scroll_and_its_stages(self):
+        """A speaker pressed far down the sample library rebuilds the list; the
+        list (side by side) and the stage's body (on a phone) both keep their
+        place, though drawing the new rows' waveforms laid the page out while
+        the list was short and the browser clamped both then."""
+        found = run("""
+            await flush();
+            const samples = find(".mc-voice-box-samples");
+            const body = find(".mc-voice-box-stage-input .mc-voice-box-stage-body");
+            samples.scrollTop = 40;
+            body.scrollTop = 500;
+            const rect = El.prototype.getBoundingClientRect;
+            El.prototype.getBoundingClientRect = function () {
+                if (this.tagName === "CANVAS" && this.parentNode && this.parentNode.parentNode === samples) {
+                    samples.scrollTop = 0;
+                    body.scrollTop = 0;
+                }
+                return rect.call(this);
+            };
+            press("2", find(".mc-voice-box-sample"));
+            El.prototype.getBoundingClientRect = rect;
+            report({list: samples.scrollTop, stage: body.scrollTop});
+        """)
+
+        assert (found["list"], found["stage"]) == (40, 500)
+
+    def test_a_lane_is_revealed_by_what_scrolls_it_the_list_or_on_a_phone_the_stage(self):
+        """Side by side the lanes list scrolls; on the cards the Outputs stage's
+        body does, and the list has no scroll of its own to move."""
+        scenario = """
+            await flush();
+            runFrames();
+            const list = find(".mc-voice-box-lanes");
+            const body = find(".mc-voice-box-stage-outputs .mc-voice-box-stage-body");
+            const lanes = all(".mc-voice-box-lane");
+            for (const node of [list, body]) {
+                node.clientHeight = 300;
+                node.boxTop = 100;
+                node.scrollTop = 0;
+            }
+            lanes[1].boxTop = 900;
+            lanes[1].clientHeight = 120;
+            lanes[1].click();
+            report({stage: body.scrollTop, list: list.scrollTop});
+        """
+        phone = run(scenario, answers=TWO_OUTPUTS, root_width=390)
+        desktop = run(scenario, answers=TWO_OUTPUTS, root_width=1440)
+
+        # The lane's top is 800 px down the scroll; all of it in view puts its
+        # bottom at the scroller's.
+        assert (phone["stage"], phone["list"]) == (800 + 120 - 300, 0)
+        assert (desktop["stage"], desktop["list"]) == (0, 800 + 120 - 300)
+
     def test_the_waveforms_are_drawn_again_when_the_width_moves_and_only_then(self):
         found = run("""
             await flush();
@@ -2182,8 +2340,9 @@ class TestTheLanes:
                                     "datetime": "2020-09-21T13:33:20.000Z", "wave": True,
                                     "buttons": [], "meta": False, "infotext": False}
         assert found["open"] == {"expanded": "true",
-                                 "buttons": ["Play", "Loop", "Trim to sample", "Save", "Download",
-                                             "Delete", "Copy", "Use seed", "Reuse settings"],
+                                 "buttons": ["Play", "Play from the start", "Stop", "Loop",
+                                             "Trim to sample", "Save", "Download", "Delete", "Copy",
+                                             "Use seed", "Reuse settings"],
                                  "meta": True, "infotext": INFOTEXT}
         assert found["state"]["selectedOutput"] == "o1"
 
@@ -2211,6 +2370,31 @@ class TestTheLanes:
                                   "text": "No renders in this pipeline yet."}
         assert found["list"] is True
         assert found["sentence"] is False
+
+    def test_a_pipeline_switch_shows_none_of_the_pipeline_befores_renders(self):
+        """Its lanes go at once and are not drawn again from its list while the
+        new pipeline's list is on its way."""
+        found = run("""
+            await flush();
+            const before = texts(".mc-voice-box-lane-name");
+            answers["/outputs"] = {json: {ok: true, outputs: [NEWER]}};
+            held.add("/outputs");
+            press("New");
+            await flush();
+            const during = {lanes: texts(".mc-voice-box-lane-name"), asked: requestsTo("/outputs").length,
+                            title: find(".mc-voice-box-title").textContent};
+            release("/outputs");
+            await flush();
+            report({before, during, after: texts(".mc-voice-box-lane-name")});
+        """.replace("NEWER", json.dumps(dict(OUTPUT, id="o5", name="Take 5", pipeline_id="p2"))),
+            answers={"/pipelines/new": {"json": {"ok": True, "pipeline": dict(PIPELINE, id="p2", name="Two")}},
+                     "/pipelines": {"sequence": [
+                         {"json": {"ok": True, "pipelines": [PIPELINE]}},
+                         {"json": {"ok": True, "pipelines": [PIPELINE, dict(PIPELINE, id="p2", name="Two")]}}]}})
+
+        assert found["before"] == ["Take 1"]
+        assert found["during"] == {"lanes": [], "asked": 2, "title": "Voice Box · Two"}
+        assert found["after"] == ["Take 5"]
 
     def test_a_date_of_this_year_leaves_the_year_out(self):
         import re
@@ -2376,6 +2560,792 @@ class TestTheLanes:
 
 
 # --------------------------------------------------------------------------- #
+# The active player, the transports and who takes a sideways drag
+# --------------------------------------------------------------------------- #
+
+PLAY = {"label": "Play", "title": "Play", "icon": "play", "pressed": None}
+PAUSE = {"label": "Pause", "title": "Pause", "icon": "pause", "pressed": None}
+FROM_START = {"label": "Play from the start", "title": "Play from the start", "icon": "start",
+              "pressed": None}
+STOP = {"label": "Stop", "title": "Stop", "icon": "stop", "pressed": None}
+
+
+class TestTheActivePlayer:
+    """The one audio last started with Play and not stopped since: only its
+    waveform seeks, only it draws a playhead, only it takes sideways drags."""
+
+    def test_only_the_active_players_waveform_seeks_and_another_lanes_press_only_selects(self):
+        found = run("""
+            await flush();
+            const lanes = all(".mc-voice-box-lane");
+            const audios = lanes.map((lane) => lane.querySelector("audio"));
+            audios.forEach((audio) => { audio.duration = 4.5; });
+            const waves = lanes.map((lane) => lane.querySelector(".mc-voice-box-lane-wave"));
+            lanes[0].click();
+            press("Play", lanes[0]);
+            await flush();
+            // A press, a drag and a move after letting go, along the active lane.
+            waves[0].dispatchEvent({type: "pointerdown", clientX: 120, pointerId: 1, preventDefault() {}});
+            const pressedAt = audios[0].currentTime;
+            waves[0].dispatchEvent({type: "pointermove", clientX: 60, pointerId: 1});
+            const draggedTo = audios[0].currentTime;
+            waves[0].dispatchEvent({type: "pointerup", pointerId: 1});
+            waves[0].dispatchEvent({type: "pointermove", clientX: 200, pointerId: 1});
+            const afterUp = audios[0].currentTime;
+            // The other lane's waveform: pressed, dragged along, let go.
+            waves[1].dispatchEvent({type: "pointerdown", clientX: 180, pointerId: 2, preventDefault() {}});
+            waves[1].dispatchEvent({type: "pointermove", clientX: 190, pointerId: 2});
+            waves[1].dispatchEvent({type: "pointerup", pointerId: 2});
+            tap(waves[1], {clientX: 180, clientY: 0});
+            report({pressedAt, draggedTo, afterUp, other: audios[1].currentTime,
+                    first: audios[0].currentTime,
+                    expanded: lanes.map((lane) => lane.getAttribute("aria-expanded")),
+                    active: globalThis.mcVoiceBox.state().activePlayer,
+                    playing: audios.map((audio) => !audio.paused)});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["pressedAt"] == 2.25
+        assert found["draggedTo"] == 1.125
+        assert found["afterUp"] == 1.125
+        assert found["other"] == 0
+        assert found["first"] == 1.125
+        assert found["expanded"] == ["false", "true"]
+        assert found["active"] == {"kind": "output", "id": "o2"}
+        assert found["playing"] == [True, False]
+
+    def test_starting_another_player_moves_the_active_state_its_playhead_and_its_drags(self):
+        """The lane is paused -- not stopped: it keeps its place -- and is no
+        longer the active player; the sample row is."""
+        found = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            const laneAudio = lane.querySelector("audio");
+            laneAudio.duration = 4.5;
+            const laneWave = lane.querySelector(".mc-voice-box-lane-wave");
+            const sampleWave = find(".mc-voice-box-sample-wave");
+            const sampleAudio = find(".mc-voice-box-sample-audio");
+            const look = () => ({active: globalThis.mcVoiceBox.state().activePlayer,
+                                 heads: [laneWave.mcVoiceBoxHead, sampleWave.mcVoiceBoxHead],
+                                 touch: [laneWave.style.touchAction || "", sampleWave.style.touchAction || ""],
+                                 playing: [!laneAudio.paused, !sampleAudio.paused]});
+            const idle = look();
+            lane.click();
+            press("Play", lane);
+            await flush();
+            laneAudio.currentTime = 1.5;
+            laneAudio.dispatchEvent({type: "timeupdate"});
+            const lanePlaying = look();
+            press("Play", find(".mc-voice-box-sample"));
+            await flush();
+            report({idle, lanePlaying, samplePlaying: look(), laneAt: laneAudio.currentTime});
+        """)
+
+        assert found["idle"] == {"active": None, "heads": [-1, -1], "touch": ["", ""],
+                                 "playing": [False, False]}
+        assert found["lanePlaying"] == {"active": {"kind": "output", "id": "o1"},
+                                        "heads": [pytest.approx(1.5 / 4.5), -1],
+                                        "touch": ["pan-y", ""], "playing": [True, False]}
+        assert found["samplePlaying"] == {"active": {"kind": "sample", "id": "s1"}, "heads": [-1, 0],
+                                          "touch": ["", "pan-y"], "playing": [False, True]}
+        assert found["laneAt"] == 1.5
+
+    def test_stop_ends_the_active_state_and_takes_the_playhead_away(self):
+        found = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            const audio = lane.querySelector("audio");
+            audio.duration = 4.5;
+            const wave = lane.querySelector(".mc-voice-box-lane-wave");
+            lane.click();
+            press("Play", lane);
+            await flush();
+            audio.currentTime = 3;
+            audio.dispatchEvent({type: "timeupdate"});
+            const during = {head: wave.mcVoiceBoxHead, touch: wave.style.touchAction};
+            press("Stop", lane);
+            const stopped = {paused: audio.paused, at: audio.currentTime, head: wave.mcVoiceBoxHead,
+                             touch: wave.style.touchAction || "",
+                             active: globalThis.mcVoiceBox.state().activePlayer, face: faces(lane)[0]};
+            wave.dispatchEvent({type: "pointerdown", clientX: 120, pointerId: 1, preventDefault() {}});
+            report({during, stopped, after: audio.currentTime});
+        """)
+
+        assert found["during"] == {"head": pytest.approx(3 / 4.5), "touch": "pan-y"}
+        assert found["stopped"] == {"paused": True, "at": 0, "head": -1, "touch": "", "active": None,
+                                    "face": PLAY}
+        assert found["after"] == 0
+
+    def test_a_finger_seeks_when_it_moves_along_or_lifts_and_not_when_it_scrolls(self):
+        """The active waveform leaves up and down to the page: a finger that
+        lands on it and scrolls the stage (which the browser ends with
+        pointercancel) moves nothing; one that lifts where it landed, or moves
+        along, seeks. A mouse's press seeks at once."""
+        found = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            const audio = lane.querySelector("audio");
+            audio.duration = 4.5;
+            const wave = lane.querySelector(".mc-voice-box-lane-wave");
+            lane.click();
+            press("Play", lane);
+            await flush();
+            const finger = (type, x) => wave.dispatchEvent({type, clientX: x, pointerId: 7, pointerType: "touch",
+                                                            preventDefault() {}});
+            finger("pointerdown", 120);
+            const landed = audio.currentTime;
+            finger("pointercancel", 120);
+            const scrolled = audio.currentTime;
+            finger("pointerdown", 60);
+            finger("pointerup", 60);
+            const lifted = audio.currentTime;
+            finger("pointerdown", 180);
+            finger("pointermove", 200);
+            const moved = audio.currentTime;
+            finger("pointerup", 200);
+            report({landed, scrolled, lifted, moved});
+        """)
+
+        assert (found["landed"], found["scrolled"]) == (0, 0)
+        assert found["lifted"] == 1.125
+        assert found["moved"] == 3.75
+
+    def test_a_finger_on_the_trimmer_moves_a_handle_only_along_the_waveform(self):
+        found = run(TestTheTrimmer.CHOOSE + """
+            const wave = find(".mc-voice-box-trimmer-wave");
+            const readout = () => find(".mc-voice-box-trimmer-readout").textContent;
+            const finger = (type, x) => wave.dispatchEvent({type, clientX: x, pointerId: 7, pointerType: "touch",
+                                                            preventDefault() {}});
+            finger("pointerdown", 120);
+            const landed = readout();
+            finger("pointercancel", 120);
+            const scrolled = readout();
+            finger("pointerdown", 120);
+            finger("pointerup", 120);
+            const lifted = readout();
+            finger("pointerdown", 230);
+            finger("pointermove", 216);
+            finger("pointerup", 216);
+            report({landed, scrolled, lifted, dragged: readout()});
+        """)
+
+        assert found["landed"] == found["scrolled"] == "0.0 s to 10.0 s (10.0 s of 10.0 s)"
+        assert found["lifted"] == "5.0 s to 10.0 s (5.0 s of 10.0 s)"
+        assert found["dragged"] == "5.0 s to 9.0 s (4.0 s of 10.0 s)"
+
+    def test_a_paused_player_stays_active_and_voice_chat_pausing_it_ends_nothing(self):
+        """Paused by its own Pause, or by Voice Chat speaking, a player is still
+        the active one: its playhead stays where it stopped and it still seeks."""
+        found = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            const audio = lane.querySelector("audio");
+            audio.duration = 4.5;
+            const wave = lane.querySelector(".mc-voice-box-lane-wave");
+            lane.click();
+            press("Play", lane);
+            await flush();
+            audio.currentTime = 1.5;
+            press("Pause", lane);
+            const paused = {active: globalThis.mcVoiceBox.state().activePlayer, head: wave.mcVoiceBoxHead};
+            press("Play", lane);
+            await flush();
+            focusFrom("voice-chat", "speech");
+            const spoken = {paused: audio.paused, active: globalThis.mcVoiceBox.state().activePlayer};
+            wave.dispatchEvent({type: "pointerdown", clientX: 60, pointerId: 1, preventDefault() {}});
+            report({paused, spoken, at: audio.currentTime});
+        """)
+
+        assert found["paused"] == {"active": {"kind": "output", "id": "o1"},
+                                   "head": pytest.approx(1.5 / 4.5)}
+        assert found["spoken"] == {"paused": True, "active": {"kind": "output", "id": "o1"}}
+        assert found["at"] == 1.125
+
+    def test_a_sample_rows_waveform_seeks_only_while_its_sample_is_the_active_player(self):
+        found = run("""
+            await flush();
+            const row = find(".mc-voice-box-sample");
+            const wave = row.querySelector(".mc-voice-box-sample-wave");
+            const audio = find(".mc-voice-box-sample-audio");
+            const down = (x) => {
+                wave.dispatchEvent({type: "pointerdown", clientX: x, pointerId: 1, preventDefault() {}});
+                wave.dispatchEvent({type: "pointerup", pointerId: 1});
+            };
+            down(120);
+            const idle = {at: audio.currentTime, src: audio.src, plays: audio.plays,
+                          active: globalThis.mcVoiceBox.state().activePlayer,
+                          fetched: requestsTo("/samples/audio").length};
+            press("Play", row);
+            await flush();
+            down(60);
+            report({idle, at: audio.currentTime, head: wave.mcVoiceBoxHead});
+        """)
+
+        assert found["idle"] == {"at": 0, "src": "", "plays": 0, "active": None, "fetched": 0}
+        # A quarter of the way along the sample's 8 s.
+        assert found["at"] == 2.0
+        assert found["head"] == 0.25
+
+    def test_a_lane_that_goes_away_takes_the_active_state_with_it(self):
+        """Deleted, or gone with the pipeline it belonged to."""
+        deleted = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            lane.click();
+            press("Play", lane);
+            await flush();
+            const before = globalThis.mcVoiceBox.state().activePlayer;
+            answers["/outputs"] = {json: {ok: true, outputs: []}};
+            press("Delete", lane);
+            await flush();
+            report({before, after: globalThis.mcVoiceBox.state().activePlayer,
+                    paused: lane.querySelector("audio").paused});
+        """)
+        switched = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            lane.click();
+            press("Play", lane);
+            await flush();
+            const before = globalThis.mcVoiceBox.state().activePlayer;
+            answers["/outputs"] = {json: {ok: true, outputs: []}};
+            press("New");
+            await flush();
+            report({before, after: globalThis.mcVoiceBox.state().activePlayer,
+                    paused: lane.querySelector("audio").paused});
+        """, answers={"/pipelines/new": {"json": {"ok": True, "pipeline": dict(PIPELINE, id="p2", name="Two")}},
+                      "/pipelines": {"sequence": [
+                          {"json": {"ok": True, "pipelines": [PIPELINE]}},
+                          {"json": {"ok": True, "pipelines": [PIPELINE, dict(PIPELINE, id="p2", name="Two")]}}]}})
+
+        for found in (deleted, switched):
+            assert found["before"] == {"kind": "output", "id": "o1"}
+            assert found["after"] is None
+            assert found["paused"] is True
+
+    def test_a_trimmer_discarded_or_a_sample_deleted_takes_the_active_state_with_it(self):
+        discarded = run(TestTheTrimmer.CHOOSE + """
+            press("Play", find(".mc-voice-box-trimmer"));
+            await flush();
+            const before = globalThis.mcVoiceBox.state().activePlayer;
+            press("Discard");
+            report({before, after: globalThis.mcVoiceBox.state().activePlayer,
+                    paused: find(".mc-voice-box-trimmer-audio").paused});
+        """)
+        deleted = run("""
+            await flush();
+            press("Play", find(".mc-voice-box-sample"));
+            await flush();
+            const before = globalThis.mcVoiceBox.state().activePlayer;
+            press("Delete", find(".mc-voice-box-sample"));
+            await flush();
+            report({before, after: globalThis.mcVoiceBox.state().activePlayer,
+                    paused: find(".mc-voice-box-sample-audio").paused});
+        """)
+
+        assert discarded["before"] == {"kind": "trimmer", "id": ""}
+        assert deleted["before"] == {"kind": "sample", "id": "s1"}
+        for found in (discarded, deleted):
+            assert found["after"] is None
+            assert found["paused"] is True
+
+    def test_a_capture_is_the_trimmers_playback_and_stop_ends_it_unsaved(self):
+        """Save as sample on a file the browser will not decode plays the
+        selection through: the trimmer is the active player while it does, its
+        Play/Pause says Pause, and Stop ends the capture with nothing saved."""
+        found = run("""
+            await flush();
+            find(".mc-voice-box-trimmer-audio").duration = 30;
+            const input = find(".mc-voice-box-file-input");
+            input.files = [new File([new Uint8Array(1000)], "long.mkv", {type: "video/x-matroska"})];
+            input.dispatchEvent({type: "change"});
+            await flush();
+            const box = find(".mc-voice-box-trimmer");
+            press("Save as sample");
+            await flush();
+            const during = {active: globalThis.mcVoiceBox.state().activePlayer, face: faces(box)[0],
+                            capturing: globalThis.mcVoiceBox.state().capturing};
+            press("Stop", box);
+            await flush(10);
+            report({during, capturing: globalThis.mcVoiceBox.state().capturing,
+                    active: globalThis.mcVoiceBox.state().activePlayer,
+                    paused: find(".mc-voice-box-trimmer-audio").paused,
+                    uploads: requestsTo("/samples/upload").length, line: line()});
+        """, decode_works=False)
+
+        assert found["during"] == {"active": {"kind": "trimmer", "id": ""}, "face": PAUSE, "capturing": True}
+        assert found["capturing"] is False
+        assert found["active"] is None
+        assert found["paused"] is True
+        assert found["uploads"] == 0
+        assert (found["line"]["text"], found["line"]["kind"]) == (
+            "The capture was stopped; nothing was saved.", "warn")
+
+    def test_stop_on_a_sample_row_that_is_not_playing_leaves_the_one_that_is(self):
+        """One element plays every sample: Stop on another row must not stop
+        the sample it is playing."""
+        found = run("""
+            await flush();
+            const rows = all(".mc-voice-box-sample");
+            const audio = find(".mc-voice-box-sample-audio");
+            press("Play", rows[0]);
+            await flush();
+            audio.currentTime = 2;
+            press("Stop", rows[1]);
+            report({paused: audio.paused, at: audio.currentTime,
+                    active: globalThis.mcVoiceBox.state().activePlayer});
+        """, answers={"/samples": {"json": {"ok": True, "samples": [SAMPLE, dict(SAMPLE, id="s2", title="Bo")]}}})
+
+        assert found["paused"] is False
+        assert found["at"] == 2
+        assert found["active"] == {"kind": "sample", "id": "s1"}
+
+
+class TestTheTransport:
+    """Play/Pause, From the start and Stop on every player, as icons with a
+    label and a tooltip; Loop an icon toggle where there was one."""
+
+    def test_a_sample_rows_transport(self):
+        found = run("""
+            await flush();
+            const row = find(".mc-voice-box-sample");
+            const audio = find(".mc-voice-box-sample-audio");
+            const initial = faces(row);
+            press("Play", row);
+            await flush();
+            const playing = {face: faces(row)[0], paused: audio.paused, src: audio.src};
+            press("Pause", row);
+            const paused = {paused: audio.paused, face: faces(row)[0],
+                            active: globalThis.mcVoiceBox.state().activePlayer};
+            audio.currentTime = 3;
+            press("Play", row);
+            await flush();
+            const resumed = {at: audio.currentTime, paused: audio.paused};
+            press("Play from the start", row);
+            await flush();
+            const fromStart = {at: audio.currentTime, paused: audio.paused, plays: audio.plays};
+            audio.currentTime = 5;
+            press("Stop", row);
+            report({initial, playing, paused, resumed, fromStart,
+                    stopped: {at: audio.currentTime, paused: audio.paused, face: faces(row)[0],
+                              active: globalThis.mcVoiceBox.state().activePlayer}});
+        """)
+
+        assert found["initial"] == [PLAY, FROM_START, STOP]
+        assert found["playing"] == {"face": PAUSE, "paused": False, "src": "blob:test-1"}
+        assert found["paused"] == {"paused": True, "face": PLAY, "active": {"kind": "sample", "id": "s1"}}
+        assert found["resumed"] == {"at": 3, "paused": False}
+        assert found["fromStart"] == {"at": 0, "paused": False, "plays": 3}
+        assert found["stopped"] == {"at": 0, "paused": True, "face": PLAY, "active": None}
+
+    def test_the_trimmers_transport_begins_at_the_selections_start(self):
+        """From the start and Stop go back to the selection's start, which is
+        the trimmer's beginning; Play goes on from a pause inside it."""
+        found = run(TestTheTrimmer.CHOOSE + """
+            const box = find(".mc-voice-box-trimmer");
+            const audio = find(".mc-voice-box-trimmer-audio");
+            const wave = find(".mc-voice-box-trimmer-wave");
+            // The in handle to 5 s of the 10 s file.
+            wave.dispatchEvent({type: "pointerdown", clientX: 120, pointerId: 1, preventDefault() {}});
+            wave.dispatchEvent({type: "pointerup", pointerId: 1});
+            const initial = faces(box);
+            press("Play", box);
+            await flush();
+            const started = {at: audio.currentTime, paused: audio.paused, face: faces(box)[0],
+                             head: wave.mcVoiceBoxHead};
+            audio.currentTime = 7;
+            press("Pause", box);
+            const paused = {paused: audio.paused, face: faces(box)[0], head: wave.mcVoiceBoxHead};
+            press("Play", box);
+            await flush();
+            const resumed = {at: audio.currentTime, paused: audio.paused};
+            press("Play from the start", box);
+            await flush();
+            const fromStart = {at: audio.currentTime, paused: audio.paused};
+            audio.currentTime = 8;
+            press("Stop", box);
+            report({initial, started, paused, resumed, fromStart,
+                    stopped: {at: audio.currentTime, paused: audio.paused, head: wave.mcVoiceBoxHead,
+                              face: faces(box)[0], active: globalThis.mcVoiceBox.state().activePlayer}});
+        """)
+
+        assert found["initial"] == [PLAY, FROM_START, STOP,
+                                    {"label": "Loop", "title": "Loop", "icon": "loop", "pressed": "false"}]
+        assert found["started"] == {"at": 5, "paused": False, "face": PAUSE, "head": 0.5}
+        # Paused by its own Pause it is still the active player: the playhead
+        # stays where it stopped.
+        assert found["paused"] == {"paused": True, "face": PLAY, "head": 0.7}
+        assert found["resumed"] == {"at": 7, "paused": False}
+        assert found["fromStart"] == {"at": 5, "paused": False}
+        assert found["stopped"] == {"at": 5, "paused": True, "head": -1, "face": PLAY, "active": None}
+
+    def test_the_trimmers_loop_is_an_icon_toggle(self):
+        found = run(TestTheTrimmer.CHOOSE + """
+            const box = find(".mc-voice-box-trimmer");
+            press("Loop", box);
+            const on = faces(box)[3];
+            const audio = find(".mc-voice-box-trimmer-audio");
+            press("Play", box);
+            await flush();
+            audio.currentTime = 9.99;
+            audio.dispatchEvent({type: "timeupdate"});
+            report({on, looped: {at: audio.currentTime, paused: audio.paused}});
+        """)
+
+        assert found["on"] == {"label": "Loop", "title": "Loop", "icon": "loop", "pressed": "true"}
+        assert found["looped"] == {"at": 0, "paused": False}
+
+    def test_the_selected_lanes_transport(self):
+        found = run("""
+            await flush();
+            const lane = find(".mc-voice-box-lane");
+            const audio = lane.querySelector("audio");
+            lane.click();
+            const initial = faces(lane);
+            press("Play", lane);
+            await flush();
+            const playing = faces(lane)[0];
+            press("Pause", lane);
+            const paused = {paused: audio.paused, face: faces(lane)[0]};
+            audio.currentTime = 2;
+            press("Play from the start", lane);
+            await flush();
+            const fromStart = {at: audio.currentTime, paused: audio.paused};
+            audio.currentTime = 3;
+            press("Stop", lane);
+            report({initial, playing, paused, fromStart,
+                    stopped: {at: audio.currentTime, paused: audio.paused, face: faces(lane)[0]}});
+        """)
+
+        assert found["initial"] == [PLAY, FROM_START, STOP,
+                                    {"label": "Loop", "title": "Loop", "icon": "loop", "pressed": "false"}]
+        assert found["playing"] == PAUSE
+        assert found["paused"] == {"paused": True, "face": PLAY}
+        assert found["fromStart"] == {"at": 0, "paused": False}
+        assert found["stopped"] == {"at": 0, "paused": True, "face": PLAY}
+
+    def test_the_icons_are_inline_pictures_in_the_buttons_own_colour(self):
+        """No emoji, no icon font, nothing fetched: an SVG of the button's own
+        colour, hidden from assistive technology, whose name is the button's
+        label -- and the button is one of the section's."""
+        found = run("""
+            await flush();
+            find(".mc-voice-box-lane").click();
+            const pictures = all("button").filter((b) => b.hasAttribute("data-icon")).map((b) => {
+                const svg = b.children[0];
+                return {count: b.children.length, tag: svg.tagName, viewBox: svg.getAttribute("viewBox"),
+                        size: [svg.getAttribute("width"), svg.getAttribute("height")],
+                        fill: svg.getAttribute("fill"), hidden: svg.getAttribute("aria-hidden"),
+                        focusable: svg.getAttribute("focusable"), parts: svg.children.length,
+                        text: b.textContent, type: b.getAttribute("type"), classes: b.className.split(" ")};
+            });
+            report({pictures, icons: all("button").filter((b) => b.hasAttribute("data-icon"))
+                                   .map((b) => b.getAttribute("data-icon"))});
+        """)
+
+        # The trimmer's four (hidden until a file is open), a sample row's
+        # three and the lane's four.
+        assert found["icons"] == ["play", "start", "stop", "loop", "play", "start", "stop",
+                                  "play", "start", "stop", "loop"]
+        for picture in found["pictures"]:
+            assert (picture["count"], picture["tag"], picture["viewBox"]) == (1, "SVG", "0 0 16 16"), picture
+            assert picture["size"] == ["16", "16"] and picture["fill"] == "currentColor", picture
+            assert (picture["hidden"], picture["focusable"]) == ("true", "false"), picture
+            assert picture["parts"] >= 1 and picture["text"] == "", picture
+            assert picture["type"] == "button", picture
+            assert {"mc-voice-box-button", "mc-voice-box-icon"} <= set(picture["classes"]), picture
+
+
+class TestTouchAction:
+    def test_only_the_trimmer_and_the_active_players_waveform_take_sideways_drags(self):
+        found = run(TestTheTrimmer.CHOOSE + """
+            const touching = () => all("*").filter((node) => node.style && node.style.touchAction)
+                .map((node) => [node.className.split(" ").pop(), node.style.touchAction]);
+            const opened = touching();
+            const lane = find(".mc-voice-box-lane");
+            lane.click();
+            press("Play", lane);
+            await flush();
+            const lanePlaying = touching();
+            press("Play", find(".mc-voice-box-sample"));
+            await flush();
+            const samplePlaying = touching();
+            press("Stop", find(".mc-voice-box-sample"));
+            report({opened, lanePlaying, samplePlaying, stopped: touching()});
+        """)
+
+        trimmer = ["mc-voice-box-trimmer-wave", "pan-y"]
+        assert found["opened"] == [trimmer]
+        assert found["lanePlaying"] == [trimmer, ["mc-voice-box-lane-wave", "pan-y"]]
+        assert found["samplePlaying"] == [trimmer, ["mc-voice-box-sample-wave", "pan-y"]]
+        assert found["stopped"] == [trimmer]
+
+
+# --------------------------------------------------------------------------- #
+# The phone's stage bar
+# --------------------------------------------------------------------------- #
+
+
+class TestTheStageBar:
+    """The Node DOM has no layout, so a scenario puts the cards where a scroll
+    of the row would have left them: four cards 390 px wide, 8 px apart."""
+
+    PLACE = """
+        const container = find(".mc-voice-box-stages");
+        const cards = all(".mc-voice-box-stage");
+        const place = (scrolled) => {
+            container.scrollLeft = scrolled;
+            container.boxLeft = 0;
+            cards.forEach((card, index) => { card.boxLeft = index * 398 - scrolled; });
+        };
+        const marked = () => all(".mc-voice-box-stagebar button")
+            .filter((b) => b.getAttribute("aria-current") === "true").map((b) => b.textContent);
+    """
+
+    def test_the_card_in_view_is_marked_as_the_cards_scroll_once_a_frame(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            const first = marked();
+            place(796);
+            for (let index = 0; index < 5; index += 1) container.dispatchEvent({type: "scroll"});
+            const queued = rafs.length;
+            const before = marked();
+            runFrames();
+            const settled = marked();
+            // Most of the way to Outputs: the nearest card is the one in view.
+            place(1100);
+            container.dispatchEvent({type: "scroll"});
+            runFrames();
+            report({first, queued, before, settled, near: marked(),
+                    current: all(".mc-voice-box-stagebar button").map((b) => b.getAttribute("aria-current"))});
+        """, root_width=390)
+
+        assert found["first"] == ["Input"]
+        assert found["queued"] == 1
+        assert found["before"] == ["Input"]
+        assert found["settled"] == ["Config"]
+        assert found["near"] == ["Outputs"]
+        assert found["current"] == [None, None, None, "true"]
+        assert found["state"]["stage"] == "outputs"
+
+    def test_a_press_goes_to_the_card_smoothly_and_at_once_under_reduced_motion(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            place(398);
+            press("Outputs");
+            const smooth = {scrolls: scrolls.slice(), marked: marked()};
+            place(1194);
+            reducedMotion = true;
+            press("Input");
+            report({smooth, reduced: scrolls.slice(1), marked: marked()});
+        """, root_width=390)
+
+        assert found["smooth"] == {"scrolls": [{"className": "mc-voice-box-stages",
+                                                "options": {"left": 1194, "behavior": "smooth"}}],
+                                   "marked": ["Outputs"]}
+        assert found["reduced"] == [{"className": "mc-voice-box-stages",
+                                     "options": {"left": 0, "behavior": "auto"}}]
+        assert found["marked"] == ["Input"]
+
+    def test_the_bar_marks_the_card_in_view_when_the_window_narrows_to_cards(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            const wide = marked();
+            place(398);
+            const root = find("#mc-voice-box");
+            root.clientWidth = 390;
+            fireWindow("resize");
+            runFrames();
+            report({wide, narrow: marked(), layout: root.getAttribute("data-layout")});
+        """, root_width=1440)
+
+        assert found["wide"] == ["Input"]
+        assert found["layout"] == "stack"
+        assert found["narrow"] == ["Prompt"]
+
+
+# --------------------------------------------------------------------------- #
+# Sampling, Temperature and Top-p
+# --------------------------------------------------------------------------- #
+
+
+class TestSampling:
+    FIELDS = """
+        const field = (key) => find('[data-field="' + key + '"]');
+        const read = () => {
+            const one = (key) => ({value: field(key).value, disabled: field(key).disabled,
+                                   greyed: field(key).parentNode.getAttribute("data-disabled")});
+            return {sampling: field("sampling").checked, temperature: one("temperature"),
+                    top_p: one("top_p"), save: find(".mc-voice-box-configuration-save").textContent};
+        };
+        const tick = (on) => { field("sampling").checked = on; field("sampling").dispatchEvent({type: "change"}); };
+        const set = (key, value) => { field(key).value = value; field(key).dispatchEvent({type: "input"}); };
+    """
+
+    def test_off_disables_temperature_and_top_p_and_keeps_their_values(self):
+        found = run(self.FIELDS + """
+            await flush();
+            const off = read();
+            tick(true);
+            const on = read();
+            set("temperature", "1.2");
+            set("top_p", "0.8");
+            tick(false);
+            const offAgain = read();
+            tick(true);
+            const hint = find(".mc-voice-box-field-hint");
+            report({off, on, offAgain, onAgain: read(), hint: hint.textContent, hintId: hint.getAttribute("id"),
+                    described: field("sampling").getAttribute("aria-describedby"),
+                    order: all("[data-field]").map((input) => input.getAttribute("data-field")),
+                    kinds: ["sampling", "temperature", "top_p"].map((key) =>
+                        [field(key).type, field(key).getAttribute("min"), field(key).getAttribute("max"),
+                         field(key).getAttribute("step")]),
+                    wide: field("sampling").parentNode.parentNode.className});
+        """)
+
+        assert found["off"] == {"sampling": False,
+                                "temperature": {"value": "0.95", "disabled": True, "greyed": "true"},
+                                "top_p": {"value": "0.95", "disabled": True, "greyed": "true"},
+                                "save": "Save"}
+        assert found["on"] == {"sampling": True,
+                               "temperature": {"value": "0.95", "disabled": False, "greyed": "false"},
+                               "top_p": {"value": "0.95", "disabled": False, "greyed": "false"},
+                               "save": "Save •"}
+        assert found["offAgain"]["temperature"] == {"value": "1.2", "disabled": True, "greyed": "true"}
+        assert found["offAgain"]["top_p"] == {"value": "0.8", "disabled": True, "greyed": "true"}
+        assert found["onAgain"]["temperature"] == {"value": "1.2", "disabled": False, "greyed": "false"}
+        assert found["onAgain"]["top_p"] == {"value": "0.8", "disabled": False, "greyed": "false"}
+        working = found["state"]["working"]
+        assert (working["sampling"], working["temperature"], working["top_p"]) == (True, 1.2, 0.8)
+        assert found["hint"] == "Varies the pacing — where pauses and endings fall — from take to take."
+        assert found["described"] == found["hintId"] == "mc-voice-box-hint-sampling"
+        assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "seed", "max_new_tokens",
+                                  "sampling", "temperature", "top_p"]
+        assert found["kinds"] == [["checkbox", None, None, None], ["number", "0.1", "2", "0.05"],
+                                  ["number", "0.05", "1", "0.01"]]
+        assert "mc-voice-box-field-wide" in found["wide"].split()
+
+    def test_each_of_the_three_marks_the_configuration_unsaved(self):
+        found = run(self.FIELDS + """
+            await flush();
+            const marks = {};
+            const reset = () => {
+                const select = find(".mc-voice-box-configuration-select");
+                select.value = "c1";
+                select.dispatchEvent({type: "change"});
+            };
+            for (const [key, change] of [["sampling", () => tick(false)],
+                                         ["temperature", () => set("temperature", "1.1")],
+                                         ["top_p", () => set("top_p", "0.5")]]) {
+                reset();
+                const before = read().save;
+                change();
+                marks[key] = [before, read().save];
+            }
+            report({marks});
+        """, answers={"/configurations": {"json": {"ok": True, "configurations": [SAMPLING_CONFIGURATION]}}})
+
+        assert found["marks"] == {"sampling": ["Save", "Save •"], "temperature": ["Save", "Save •"],
+                                  "top_p": ["Save", "Save •"]}
+
+    def test_they_are_sent_inline_with_a_render_and_saved_with_the_configuration(self):
+        on = run(self.FIELDS + """
+            await flush();
+            tick(true);
+            set("temperature", "1.25");
+            set("top_p", "0.9");
+            press("Render");
+            await flush();
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({render: requestsTo("/render").map((r) => r.body),
+                    saved: requestsTo("/configurations/save").map((r) => r.body)});
+        """)
+        off = run(self.FIELDS + """
+            await flush();
+            const before = read();
+            tick(false);
+            press("Render");
+            await flush();
+            report({before, render: requestsTo("/render").map((r) => r.body)});
+        """, answers={"/configurations": {"json": {"ok": True, "configurations": [SAMPLING_CONFIGURATION]}}})
+
+        inline = on["render"][0]["configuration"]
+        assert on["render"][0]["configuration_id"] == "c1"
+        assert (inline["sampling"], inline["temperature"], inline["top_p"]) == (True, 1.25, 0.9)
+        saved = on["saved"][0]
+        assert (saved["id"], saved["sampling"], saved["temperature"], saved["top_p"]) == ("c1", True, 1.25, 0.9)
+        # Off is sent as off, with the values the configuration keeps.
+        assert off["before"]["temperature"] == {"value": "1.4", "disabled": False, "greyed": "false"}
+        inline = off["render"][0]["configuration"]
+        assert (inline["sampling"], inline["temperature"], inline["top_p"]) == (False, 1.4, 0.6)
+
+    def test_reuse_puts_back_how_the_render_sampled(self):
+        render = dict(OUTPUT["render"], sampling=True, temperature=1.1, top_p=0.7,
+                      configuration=dict(OUTPUT["render"]["configuration"], sampling=True,
+                                         temperature=1.1, top_p=0.7))
+        found = run(self.FIELDS + TestReuseSettings.REUSE + "report({fields: read()});",
+                    answers={"/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
+
+        working = found["state"]["working"]
+        assert (working["sampling"], working["temperature"], working["top_p"]) == (True, 1.1, 0.7)
+        assert found["fields"] == {"sampling": True,
+                                   "temperature": {"value": "1.1", "disabled": False, "greyed": "false"},
+                                   "top_p": {"value": "0.7", "disabled": False, "greyed": "false"},
+                                   "save": "Save •"}
+
+    def test_reuse_of_a_render_made_before_sampling_turns_it_off_and_leaves_the_editors_values(self):
+        """OUTPUT's recorded configuration has no sampling fields: the render
+        was greedy, and the editor's Temperature and Top-p stay as they are."""
+        found = run(self.FIELDS + TestReuseSettings.REUSE + "report({fields: read()});",
+                    answers={"/configurations": {"json": {"ok": True,
+                                                          "configurations": [SAMPLING_CONFIGURATION]}}})
+
+        working = found["state"]["working"]
+        assert (working["sampling"], working["temperature"], working["top_p"]) == (False, 1.4, 0.6)
+        assert found["fields"] == {"sampling": False,
+                                   "temperature": {"value": "1.4", "disabled": True, "greyed": "true"},
+                                   "top_p": {"value": "0.6", "disabled": True, "greyed": "true"},
+                                   "save": "Save •"}
+
+    def test_reuse_compares_the_three_with_the_saved_configuration(self):
+        """A render that sampled as the configuration stands leaves nothing to
+        save; one whose temperature differs does."""
+        saved = dict(SAMPLING_CONFIGURATION, seed=42)
+
+        def reused(temperature):
+            render = dict(OUTPUT["render"], sampling=True, temperature=temperature, top_p=0.6,
+                          configuration=dict(OUTPUT["render"]["configuration"], sampling=True,
+                                             temperature=temperature, top_p=0.6))
+            return run(self.FIELDS + TestReuseSettings.REUSE + "report({fields: read()});",
+                       answers={"/configurations": {"json": {"ok": True, "configurations": [saved]}},
+                                "/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
+
+        same, other = reused(1.4), reused(1.5)
+
+        assert same["fields"]["save"] == "Save"
+        assert same["state"]["dirty"]["configuration"] is False
+        assert other["fields"]["save"] == "Save •"
+
+    def test_the_selected_lanes_metadata_says_how_it_sampled(self):
+        sampled = dict(OUTPUT, id="o2", name="Take 2", created=OUTPUT["created"] + 60,
+                       render=dict(OUTPUT["render"], sampling=True, temperature=0.95, top_p=0.95))
+        greedy = dict(OUTPUT, render=dict(OUTPUT["render"], sampling=False, temperature=None,
+                                          top_p=None))
+        found = run("""
+            await flush();
+            report({meta: all(".mc-voice-box-lane-meta").map((node) => node.textContent)});
+        """, answers={"/outputs": {"json": {"ok": True, "outputs": [sampled, greedy]}}})
+
+        assert found["meta"] == [
+            "vibevoice-7b · seed 42 · 10 steps · CFG 1.3 · sampling · temperature 0.95 · top-p 0.95"
+            " · S1 Ada · 4.5 s · GPU-a",
+            "vibevoice-7b · seed 42 · 10 steps · CFG 1.3 · S1 Ada · 4.5 s · GPU-a"]
+
+
+# --------------------------------------------------------------------------- #
 # A render's infotext, its seed and its settings
 # --------------------------------------------------------------------------- #
 
@@ -2428,8 +3398,8 @@ class TestTheInfotext:
             report({buttons: labels(lane), shown: shown(lane.querySelector(".mc-voice-box-infotext"))});
         """, answers={"/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, infotext="")]}}})
 
-        assert found["buttons"] == ["Play", "Loop", "Trim to sample", "Save", "Download", "Delete",
-                                    "Use seed", "Reuse settings"]
+        assert found["buttons"] == ["Play", "Play from the start", "Stop", "Loop", "Trim to sample",
+                                    "Save", "Download", "Delete", "Use seed", "Reuse settings"]
         assert found["shown"] is False
 
 
@@ -2681,7 +3651,7 @@ class TestTheTint:
 
 
 # --------------------------------------------------------------------------- #
-# The Outputs header's one status line
+# The Configuration header's one status line
 # --------------------------------------------------------------------------- #
 
 WARM = {"cards": {"abc": {"running": True, "loaded": True, "rendering": False, "job": "",

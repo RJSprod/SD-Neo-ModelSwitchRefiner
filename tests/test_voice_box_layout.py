@@ -3,10 +3,10 @@
 The Node harness in ``test_voice_box_js.py`` proves what the page script writes
 -- the height in pixels, ``data-layout`` -- but it has no layout, so it cannot
 say whether the stylesheet then fits four stages into that height, whether a
-long list scrolls inside its stage or lengthens the page, or whether the
-stacked stages snap. Those were the user's words ("nothing should render
-taller than browser view and force a scroll of the entire page"; "swipe up to
-get to next stage"), and only a browser answers them.
+long list scrolls inside its stage or lengthens the page, or whether a phone's
+cards snap. Those were the user's words ("nothing should render taller than
+browser view and force a scroll of the entire page"; "horizontal card
+scrolling makes a lot of sense"), and only a browser answers them.
 
 So this renders the tab the way Forge frames it -- a 160 px header above the
 root and a 60 px footer below it, the root exactly as ``mc_voice_box_ui``
@@ -16,12 +16,19 @@ samples, history entries and outputs, and measures:
 
     at 1440 x 900   the page does not scroll; the root is 900 - 160 - 60 px,
                     written in pixels on itself; the four stages sit side by
-                    side inside the window; the sample library, the history
-                    and the output lanes each scroll inside their stage; the
-                    Render header is on screen and nothing covers it;
-    at 390 x 844    the stages stack, each as tall and as wide as the column
-                    they scroll in, which snaps to a stage's start; the page
-                    again does not scroll;
+                    side inside the window and there is no stage bar; the
+                    sample library, the history and the output lanes each
+                    scroll inside their stage; Render is in the Configuration
+                    stage's header, on screen, and nothing covers it; a
+                    selected lane's transport is square icon buttons;
+    at 390 x 844    the stages are cards side by side, each exactly as wide
+                    and as tall as the row they scroll in, which snaps to a
+                    card's start; the stage bar marks the card in view and a
+                    press on it goes to a card; each card scrolls up and down
+                    inside itself while the page does not, and nothing in it
+                    is a scroll area of its own; the Configuration card's
+                    header (Render and the status line) stays in view while
+                    the card scrolls;
     resized         the height follows the window, and the layout its width.
 
 It needs the ``playwright`` package and a Chromium, and skips without either
@@ -263,20 +270,42 @@ MEASURE = """() => {
     const r = render.getBoundingClientRect();
     const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
     const container = root.querySelector(".mc-voice-box-stages");
+    const rowStyle = getComputedStyle(container);
+    const bar = root.querySelector(".mc-voice-box-stagebar");
     return {
-        innerWidth, innerHeight, scrollY,
+        innerWidth, innerHeight, scrollY, scrollX,
         pageScroll: document.documentElement.scrollHeight,
         pageClient: document.documentElement.clientHeight,
+        pageWide: document.documentElement.scrollWidth,
         layout: root.getAttribute("data-layout"),
         inlineHeight: root.style.height,
         root: box(root),
+        head: box(root.querySelector(".mc-voice-box-head")),
         container: {box: box(container), client: container.clientHeight, clientWidth: container.clientWidth,
-                    scrollTop: container.scrollTop, snap: getComputedStyle(container).scrollSnapType},
-        stages: stages.map((stage) => Object.assign(box(stage), {key: stage.dataset.stage,
-                                                                  top0: stage.offsetTop})),
+                    scrollTop: container.scrollTop, scrollLeft: container.scrollLeft,
+                    snap: rowStyle.scrollSnapType, overflowX: rowStyle.overflowX,
+                    overflowY: rowStyle.overflowY},
+        stagebar: {display: getComputedStyle(bar).display, box: box(bar),
+                   buttons: [...bar.querySelectorAll("button")].map((b) => ({
+                       text: b.textContent, current: b.getAttribute("aria-current"),
+                       fits: b.scrollWidth <= b.clientWidth + 1}))},
+        stages: stages.map((stage) => {
+            const body = stage.querySelector(".mc-voice-box-stage-body");
+            const style = getComputedStyle(stage);
+            return Object.assign(box(stage), {
+                key: stage.dataset.stage, top0: stage.offsetTop,
+                snapAlign: style.scrollSnapAlign, snapStop: style.scrollSnapStop,
+                body: {overflowY: getComputedStyle(body).overflowY, scroll: body.scrollHeight,
+                       client: body.clientHeight}});
+        }),
+        connectors: [...root.querySelectorAll(".mc-voice-box-connector")].map((c) => getComputedStyle(c).display),
         lists,
         render: {box: box(render), hit: !!hit && (hit === render || render.contains(hit)),
-                 inStage: render.closest(".mc-voice-box-stage").dataset.stage},
+                 inStage: render.closest(".mc-voice-box-stage").dataset.stage,
+                 inHead: !!render.closest(".mc-voice-box-stage-head")},
+        renders: root.querySelectorAll(".mc-voice-box-render").length,
+        line: {inStage: root.querySelector(".mc-voice-box-status-line").closest(".mc-voice-box-stage").dataset.stage,
+               inHead: !!root.querySelector(".mc-voice-box-status-line").closest(".mc-voice-box-stage-head")},
         status: root.querySelector(".mc-voice-box-status").textContent,
     };
 }"""
@@ -317,6 +346,10 @@ class TestDesktop:
             assert stage["left"] >= 0 and stage["right"] <= found["innerWidth"], stage
             assert stage["bottom"] <= found["root"]["bottom"] + 1, stage
             assert stage["width"] > 200, stage
+        # The stage bar is a phone's; side by side it takes no room at all.
+        assert found["stagebar"]["display"] == "none"
+        assert found["stagebar"]["box"]["height"] == 0
+        assert set(found["connectors"]) != {"none"}
 
     def test_every_long_list_scrolls_inside_its_stage(self, browser):
         page = open_tab(browser, 1440, 900)
@@ -341,7 +374,9 @@ class TestDesktop:
         page.close()
 
         render = found["render"]
-        assert render["inStage"] == "outputs"
+        assert render["inStage"] == "configuration" and render["inHead"] is True
+        assert found["line"] == {"inStage": "configuration", "inHead": True}
+        assert found["renders"] == 1
         assert render["box"]["top"] >= found["root"]["top"]
         assert render["box"]["bottom"] <= found["innerHeight"]
         assert render["box"]["right"] <= found["innerWidth"]
@@ -367,6 +402,30 @@ class TestDesktop:
         assert found["details"] != "none"
         assert found["inView"] is True
         assert found["pageScroll"] <= found["innerHeight"] + 1
+
+    def test_a_selected_lanes_transport_is_square_icon_buttons_as_tall_as_the_others(self, browser):
+        page = open_tab(browser, 1440, 900)
+        page.locator("#mc-voice-box .mc-voice-box-lane").nth(0).click()
+        settle(page)
+        found = page.evaluate("""() => {
+            const lane = document.querySelector("#mc-voice-box .mc-voice-box-lane");
+            const size = (node) => { const r = node.getBoundingClientRect();
+                                     return {width: r.width, height: r.height}; };
+            return {icons: [...lane.querySelectorAll(".mc-voice-box-icon")].map((b) => Object.assign(size(b), {
+                        label: b.getAttribute("aria-label"), svg: size(b.querySelector("svg")),
+                        ink: getComputedStyle(b.querySelector("svg")).fill,
+                        colour: getComputedStyle(b).color})),
+                    trim: size(lane.querySelector(".mc-voice-box-lane-trim"))};
+        }""")
+        page.close()
+
+        assert [icon["label"] for icon in found["icons"]] == ["Play", "Play from the start", "Stop", "Loop"]
+        for icon in found["icons"]:
+            assert _near(icon["width"], icon["height"]), icon
+            assert _near(icon["height"], found["trim"]["height"]), (icon, found["trim"])
+            assert (round(icon["svg"]["width"]), round(icon["svg"]["height"])) == (16, 16), icon
+            # Drawn in the button's own colour.
+            assert icon["ink"] == icon["colour"], icon
 
     def test_the_tint_is_an_edge_of_equal_segments_and_quieter_in_the_dark(self, browser):
         colours = {}
@@ -404,56 +463,263 @@ class TestDesktop:
 
 
 class TestPhone:
-    def test_the_stages_stack_one_screen_each_and_the_page_does_not_scroll(self, browser):
+    def test_the_stages_are_cards_side_by_side_at_full_width_and_the_page_does_not_scroll(self, browser):
         page = open_tab(browser, 390, 844)
         found = measure(page)
         page.close()
 
         assert found["layout"] == "stack"
         assert found["pageScroll"] <= found["innerHeight"] + 1, found
+        assert found["pageWide"] <= found["innerWidth"] + 1, found
         assert found["inlineHeight"] == f"{844 - HEADER - FOOTER}px"
         container = found["container"]
-        assert container["snap"].startswith("y") and "mandatory" in container["snap"]
-        for stage in found["stages"]:
-            assert _near(stage["height"], container["client"]), (stage, container)
+        assert container["snap"].startswith("x") and "mandatory" in container["snap"], container
+        assert (container["overflowX"], container["overflowY"]) == ("auto", "hidden"), container
+        stages = found["stages"]
+        assert [stage["key"] for stage in stages] == ["input", "prompt", "configuration", "outputs"]
+        for stage in stages:
             assert _near(stage["width"], container["clientWidth"]), (stage, container)
-        tops = [stage["top"] for stage in found["stages"]]
-        assert tops == sorted(tops) and len(set(round(top) for top in tops)) == 4
-        assert [stage["key"] for stage in found["stages"]] == ["input", "prompt", "configuration",
-                                                               "outputs"]
+            assert _near(stage["height"], container["client"]), (stage, container)
+            assert _near(stage["top"], stages[0]["top"]), stage
+            assert (stage["snapAlign"], stage["snapStop"]) == ("start", "always"), stage
+        # In pipeline order, left to right, the first filling the row's view
+        # and the rest beyond its right edge until they are swiped in.
+        assert _near(stages[0]["left"], container["box"]["left"])
+        assert all(stages[index]["left"] >= stages[index - 1]["right"] for index in range(1, 4))
+        assert all(stage["left"] >= container["box"]["right"] - 1 for stage in stages[1:])
+        assert set(found["connectors"]) == {"none"}
 
-    def test_the_column_snaps_to_a_stages_start(self, browser):
+    def test_the_stage_bar_sits_between_the_pipeline_bar_and_the_cards_and_its_words_fit(self, browser):
+        seen = {}
+        for width in (390, 360):
+            page = open_tab(browser, width, 844)
+            seen[width] = measure(page)
+            page.close()
+
+        for width, found in seen.items():
+            bar = found["stagebar"]
+            assert bar["display"] == "flex", (width, bar)
+            assert bar["box"]["top"] >= found["head"]["bottom"] - 1, (width, bar, found["head"])
+            assert bar["box"]["bottom"] <= found["container"]["box"]["top"] + 1, (width, bar)
+            assert [button["text"] for button in bar["buttons"]] == ["Input", "Prompt", "Config", "Outputs"]
+            assert all(button["fits"] for button in bar["buttons"]), (width, bar)
+            assert [button["current"] for button in bar["buttons"]] == ["true", None, None, None]
+
+    def test_the_row_snaps_to_a_cards_start(self, browser):
         page = open_tab(browser, 390, 844)
         found = page.evaluate("""async () => {
             const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
             const starts = [...container.querySelectorAll(".mc-voice-box-stage")].map((stage) =>
-                stage.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop);
+                stage.getBoundingClientRect().left - container.getBoundingClientRect().left + container.scrollLeft);
             const settled = [];
             for (const aim of [starts[1] + 40, starts[3] - 30, starts[2] + 25]) {
-                container.scrollTo({top: aim});
+                container.scrollTo({left: aim});
                 await new Promise((done) => setTimeout(done, 250));
-                settled.push(container.scrollTop);
+                settled.push(container.scrollLeft);
             }
-            return {starts, settled};
+            return {starts, settled, scrollY};
         }""")
         page.close()
 
         starts = found["starts"]
+        assert len({round(start) for start in starts}) == 4
         assert [round(value) for value in found["settled"]] == [round(starts[1]), round(starts[3]),
                                                                 round(starts[2])], found
+        assert found["scrollY"] == 0
 
-    def test_a_list_inside_a_stage_still_scrolls_inside_it(self, browser):
+    def test_the_stage_bar_marks_the_card_in_view_and_a_press_moves_to_it(self, browser):
         page = open_tab(browser, 390, 844)
-        found = measure(page)
+        script = """async (index) => {
+            const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+            const buttons = [...document.querySelectorAll("#mc-voice-box .mc-voice-box-stagebar button")];
+            const cards = [...container.querySelectorAll(".mc-voice-box-stage")];
+            const marked = () => buttons.filter((b) => b.getAttribute("aria-current") === "true")
+                .map((b) => b.textContent);
+            const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+            const start = (card) => card.getBoundingClientRect().left - container.getBoundingClientRect().left
+                + container.scrollLeft;
+            if (index === null) {
+                // Swiped -- scrolled -- to the third card: the bar follows.
+                container.scrollTo({left: start(cards[2])});
+                await wait(250);
+                await frames();
+                return {marked: marked(), at: container.scrollLeft, want: start(cards[2])};
+            }
+            buttons[index].click();
+            const at = container.scrollLeft;
+            const want = start(cards[index]);
+            for (let tries = 0; tries < 80 && Math.abs(container.scrollLeft - want) > 1; tries += 1) await wait(50);
+            await frames();
+            return {at, landed: container.scrollLeft, want, marked: marked(),
+                    left: cards[index].getBoundingClientRect().left - container.getBoundingClientRect().left};
+        }"""
+        swiped = page.evaluate(script, None)
+        pressed = page.evaluate(script, 3)
+        page.emulate_media(reduced_motion="reduce")
+        reduced = page.evaluate(script, 1)
         page.close()
 
-        for name in ("samples", "lanes"):
-            entry = found["lists"][name]
-            # The list is the scroller, not the stage around it.
-            assert entry["overflowY"] == "auto", (name, entry)
-            assert entry["scroll"] > entry["client"] > 40, (name, entry)
-            assert entry["box"]["bottom"] <= entry["stage"]["bottom"] + 1, (name, entry)
+        assert swiped["marked"] == ["Config"], swiped
+        assert _near(pressed["landed"], pressed["want"]), pressed
+        assert _near(pressed["left"], 0), pressed
+        assert pressed["marked"] == ["Outputs"], pressed
+        # Under reduced motion the press is a jump: there at once.
+        assert _near(reduced["at"], reduced["want"]), reduced
+        assert reduced["marked"] == ["Prompt"], reduced
+
+    def test_a_stage_scrolls_up_and_down_inside_itself_while_the_page_does_not(self, browser):
+        page = open_tab(browser, 390, 844)
+        before = measure(page)
+        page.mouse.move(195, 560)
+        page.mouse.wheel(0, 700)
+        page.wait_for_timeout(400)
+        found = page.evaluate("""() => {
+            const body = document.querySelector("#mc-voice-box .mc-voice-box-stage-input .mc-voice-box-stage-body");
+            const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+            return {body: body.scrollTop, row: container.scrollLeft, rowTop: container.scrollTop, scrollY,
+                    pageScroll: document.documentElement.scrollHeight, innerHeight};
+        }""")
+        page.close()
+
+        # Every card is taller inside than the room it has, and scrolls itself.
+        for stage in before["stages"]:
+            assert stage["body"]["overflowY"] == "auto", stage
+            assert stage["body"]["scroll"] > stage["body"]["client"] + 1, stage
+        assert found["body"] > 100, found
+        assert (found["row"], found["rowTop"], found["scrollY"]) == (0, 0, 0), found
+        assert found["pageScroll"] <= found["innerHeight"] + 1, found
+
+    def test_nothing_inside_a_stage_is_a_scroll_area_of_its_own(self, browser):
+        """The sample library, the history and favourites, the configuration
+        form and the lanes take the height they need; so do a selected lane's
+        infotext and the script box, which grows with a long script."""
+        page = open_tab(browser, 390, 844)
+        page.evaluate("""() => {
+            document.querySelector("#mc-voice-box .mc-voice-box-lane").click();
+            const box = document.querySelector("#mc-voice-box .mc-voice-box-prompt");
+            box.value = Array.from({length: 30}, (_, index) =>
+                "Speaker " + (index % 2 + 1) + ": line " + (index + 1) + " of a long script.").join("\\n");
+            box.dispatchEvent(new Event("input", {bubbles: true}));
+        }""")
+        settle(page)
+        found = measure(page)
+        extra = page.evaluate("""() => {
+            const root = document.getElementById("mc-voice-box");
+            const scrollers = [];
+            for (const body of root.querySelectorAll(".mc-voice-box-stage-body")) {
+                for (const node of body.querySelectorAll("*")) {
+                    const style = getComputedStyle(node);
+                    if (/(auto|scroll)/.test(style.overflowY) || /(auto|scroll)/.test(style.overflowX)) {
+                        scrollers.push(node.className || node.tagName);
+                    }
+                }
+            }
+            const box = root.querySelector(".mc-voice-box-prompt");
+            const infotext = root.querySelector(".mc-voice-box-lane[aria-expanded='true'] .mc-voice-box-infotext");
+            return {scrollers,
+                    prompt: {overflowY: getComputedStyle(box).overflowY, scroll: box.scrollHeight,
+                             client: box.clientHeight, resize: getComputedStyle(box).resize},
+                    infotext: {overflowY: getComputedStyle(infotext).overflowY, scroll: infotext.scrollHeight,
+                               client: infotext.clientHeight}};
+        }""")
+        page.close()
+
+        assert extra["scrollers"] == [], extra
+        for name, entry in found["lists"].items():
+            assert entry["overflowY"] == "visible", (name, entry)
+            assert entry["scroll"] <= entry["client"] + 1, (name, entry)
             assert entry["clipped"] == 0, (name, entry)
+        for name in ("samples", "history", "lanes"):
+            assert found["lists"][name]["rows"] > 10, name
+        prompt = extra["prompt"]
+        assert prompt["overflowY"] == "hidden" and prompt["resize"] == "none", prompt
+        assert prompt["scroll"] <= prompt["client"] + 1, prompt
+        assert prompt["client"] > 300, prompt
+        assert extra["infotext"]["overflowY"] == "visible", extra
+        assert extra["infotext"]["scroll"] <= extra["infotext"]["client"] + 1, extra
+
+    def test_a_lane_selected_below_the_fold_is_brought_into_view_by_its_card(self, browser):
+        """The Outputs card's body is what scrolls on a phone, so that is what
+        brings a selected lane into view; the lanes list, the row of cards and
+        the page stay where they are."""
+        page = open_tab(browser, 390, 844)
+        found = page.evaluate("""async () => {
+            const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+            const stage = container.querySelector(".mc-voice-box-stage-outputs");
+            const body = stage.querySelector(".mc-voice-box-stage-body");
+            container.scrollTo({left: stage.getBoundingClientRect().left - container.getBoundingClientRect().left
+                                      + container.scrollLeft});
+            await new Promise((done) => setTimeout(done, 250));
+            const rowLeft = container.scrollLeft;
+            const lane = stage.querySelectorAll(".mc-voice-box-lane")[30];
+            const before = body.scrollTop;
+            lane.click();
+            await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const l = lane.getBoundingClientRect(), b = body.getBoundingClientRect();
+            return {before, after: body.scrollTop, expanded: lane.getAttribute("aria-expanded"),
+                    inView: l.top >= b.top - 1 && l.bottom <= b.bottom + 1, height: l.height, room: b.height,
+                    rowLeft, rowAfter: container.scrollLeft, scrollY,
+                    list: stage.querySelector(".mc-voice-box-lanes").scrollTop};
+        }""")
+        page.close()
+
+        assert found["expanded"] == "true"
+        assert found["height"] < found["room"], found
+        assert found["before"] == 0 and found["after"] > 0, found
+        assert found["inView"] is True, found
+        assert found["rowAfter"] == found["rowLeft"]
+        assert (found["scrollY"], found["list"]) == (0, 0)
+
+    def test_the_configuration_header_stays_in_view_while_its_stage_scrolls(self, browser):
+        page = open_tab(browser, 390, 844)
+        found = page.evaluate("""async () => {
+            const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+            const stage = container.querySelector(".mc-voice-box-stage-configuration");
+            const body = stage.querySelector(".mc-voice-box-stage-body");
+            const head = stage.querySelector(".mc-voice-box-stage-head");
+            const render = head.querySelector(".mc-voice-box-render");
+            const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+            container.scrollTo({left: stage.getBoundingClientRect().left - container.getBoundingClientRect().left
+                                      + container.scrollLeft});
+            await wait(250);
+            const look = () => {
+                const r = render.getBoundingClientRect();
+                const line = head.querySelector(".mc-voice-box-status-line").getBoundingClientRect();
+                const s = stage.getBoundingClientRect();
+                const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                return {render: {top: r.top, bottom: r.bottom, left: r.left, right: r.right},
+                        line: {top: line.top, bottom: line.bottom, height: line.height},
+                        stage: {top: s.top, bottom: s.bottom, left: s.left, right: s.right},
+                        hit: !!hit && (hit === render || render.contains(hit)),
+                        bodyTop: body.getBoundingClientRect().top,
+                        firstTop: body.firstElementChild.getBoundingClientRect().top,
+                        scrollTop: body.scrollTop, scrolls: body.scrollHeight > body.clientHeight + 1};
+            };
+            const before = look();
+            body.scrollTop = body.scrollHeight;
+            await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+            return {before, after: look(), status: head.querySelector(".mc-voice-box-status").textContent};
+        }""")
+        page.close()
+
+        before, after = found["before"], found["after"]
+        assert before["scrolls"] is True, before
+        assert after["scrollTop"] > 0, after
+        # The configuration went up under the header ...
+        assert after["firstTop"] < after["bodyTop"] - 20, after
+        # ... and the header -- Render and the status line -- stayed.
+        for look in (before, after):
+            assert look["hit"] is True, look
+            assert look["render"]["top"] >= look["stage"]["top"], look
+            assert look["render"]["bottom"] <= look["bodyTop"] + 1, look
+            assert look["render"]["left"] >= look["stage"]["left"] - 1, look
+            assert look["render"]["right"] <= look["stage"]["right"] + 1, look
+            assert look["line"]["height"] > 10, look
+            assert look["line"]["top"] >= look["stage"]["top"] and look["line"]["bottom"] <= look["bodyTop"] + 1, look
+        assert _near(before["render"]["top"], after["render"]["top"])
+        assert _near(before["line"]["top"], after["line"]["top"])
+        assert found["status"] == "Ready"
 
 
 class TestBelowTheFloor:
