@@ -60,6 +60,7 @@ PIPELINE_DELETE_ROUTE = f"{PREFIX}/pipelines/delete"
 RENDER_ROUTE = f"{PREFIX}/render"
 JOBS_ROUTE = f"{PREFIX}/jobs"
 JOB_CANCEL_ROUTE = f"{PREFIX}/jobs/cancel"
+JOBS_CLEAR_ROUTE = f"{PREFIX}/jobs/clear"
 OUTPUTS_ROUTE = f"{PREFIX}/outputs"
 OUTPUT_RENAME_ROUTE = f"{PREFIX}/outputs/rename"
 OUTPUT_LOOP_ROUTE = f"{PREFIX}/outputs/loop"
@@ -73,9 +74,9 @@ ROUTES = (STATUS_ROUTE, INSTALL_ROUTE, SETTINGS_ROUTE, FOLDER_ROUTE, SAMPLES_ROU
           PROMPTS_ROUTE, PROMPT_ADD_ROUTE, PROMPT_FAVOURITE_ROUTE, PROMPT_DELETE_ROUTE,
           CONFIGURATIONS_ROUTE, CONFIGURATION_SAVE_ROUTE, CONFIGURATION_DELETE_ROUTE,
           PIPELINES_ROUTE, PIPELINE_NEW_ROUTE, PIPELINE_SAVE_ROUTE, PIPELINE_DELETE_ROUTE,
-          RENDER_ROUTE, JOBS_ROUTE, JOB_CANCEL_ROUTE, OUTPUTS_ROUTE, OUTPUT_RENAME_ROUTE,
-          OUTPUT_LOOP_ROUTE, OUTPUT_DELETE_ROUTE, OUTPUT_SAVE_ROUTE, OUTPUT_AUDIO_ROUTE,
-          RUNTIME_ROUTE)
+          RENDER_ROUTE, JOBS_ROUTE, JOB_CANCEL_ROUTE, JOBS_CLEAR_ROUTE, OUTPUTS_ROUTE,
+          OUTPUT_RENAME_ROUTE, OUTPUT_LOOP_ROUTE, OUTPUT_DELETE_ROUTE, OUTPUT_SAVE_ROUTE,
+          OUTPUT_AUDIO_ROUTE, RUNTIME_ROUTE)
 
 TITLE_HEADER = "x-mc-title"
 """A sample's title on an upload, percent-encoded UTF-8 (headers are Latin-1)."""
@@ -267,6 +268,12 @@ def cancel_job_payload(values: dict) -> dict:
     return {"ok": True, "job": box.cancel_job(values.get("id"))}
 
 
+def clear_jobs_payload(_values: dict) -> dict:
+    """Withdraw every queued render, on every card. The running one is Cancel's."""
+    cleared = box.clear_queue()
+    return {"ok": True, "cleared": cleared, "jobs": box.jobs()}
+
+
 def outputs_payload(values: dict) -> dict:
     return {"ok": True, "outputs": box.outputs(str(values.get("pipeline_id") or ""))}
 
@@ -309,14 +316,17 @@ def runtime_payload(values: dict) -> dict:
     raise Refused(400, "That runtime action is not one the Voice Box knows.")
 
 
-def sample_audio(identifier: str) -> tuple[bytes, str]:
+def sample_audio(identifier: str) -> tuple[bytes, str, str]:
+    """A sample's sound, its title and its format: always a WAV."""
     entry = box.sample(identifier)
-    return box.sample_wav(entry["id"]), str(entry.get("title") or "sample")
+    return box.sample_wav(entry["id"]), str(entry.get("title") or "sample"), "wav"
 
 
-def output_audio(identifier: str) -> tuple[bytes, str]:
+def output_audio(identifier: str) -> tuple[bytes, str, str]:
+    """A render's sound, its name and its format: an MP3, or a WAV where MP3 was not made."""
     entry = box.output(identifier)
-    return box.output_wav(entry["id"]), str(entry.get("name") or "render")
+    audio, kind = box.output_audio(entry["id"])
+    return audio, str(entry.get("name") or "render"), kind
 
 
 # --------------------------------------------------------------------------- #
@@ -386,7 +396,7 @@ def install(_demo=None, app=None) -> bool:
                 checked(request, route)
                 identifier = str(request.query_params.get("id") or "")
                 download = str(request.query_params.get("download") or "") not in ("", "0")
-                audio, name = await offload(call, identifier)
+                audio, name, kind = await offload(call, identifier)
             except Refused as exc:
                 return _refusal(exc)
             except box.VoiceBoxError as exc:
@@ -397,9 +407,9 @@ def install(_demo=None, app=None) -> bool:
             headers = {"Cache-Control": "no-store"}
             if download:
                 safe = urllib.parse.quote(box._safe_filename(name, fallback))
-                headers["Content-Disposition"] = (f"attachment; filename=\"{fallback}.wav\"; "
-                                                  f"filename*=UTF-8''{safe}.wav")
-            return Response(content=audio, media_type="audio/wav", headers=headers)
+                headers["Content-Disposition"] = (f"attachment; filename=\"{fallback}.{kind}\"; "
+                                                  f"filename*=UTF-8''{safe}.{kind}")
+            return Response(content=audio, media_type=box.MEDIA_TYPES[kind], headers=headers)
 
         return handler
 
@@ -443,6 +453,7 @@ def install(_demo=None, app=None) -> bool:
         (RENDER_ROUTE, render_payload, "The render could not be queued."),
         (JOBS_ROUTE, jobs_payload, "The jobs could not be listed."),
         (JOB_CANCEL_ROUTE, cancel_job_payload, "The job could not be cancelled."),
+        (JOBS_CLEAR_ROUTE, clear_jobs_payload, "The queue could not be cleared."),
         (OUTPUTS_ROUTE, outputs_payload, "The renders could not be listed."),
         (OUTPUT_RENAME_ROUTE, rename_output_payload, "The render could not be renamed."),
         (OUTPUT_LOOP_ROUTE, loop_output_payload, "The render's loop could not be set."),

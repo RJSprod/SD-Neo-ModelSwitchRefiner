@@ -7269,22 +7269,47 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
    put in the page. LLM Studio's three rules apply unchanged: scoped, nothing
    Gradio generated, and no colour of this file's own -- every colour is a
    var() reference to the host's theme, so a light/dark switch and a Lobe-like
-   palette arrive here without this file being told they exist.
+   palette arrive here without this file being told they exist. The one
+   exception is a sample's tint, and even that takes only a hue from the
+   script: its saturation and its two lightnesses are declared once, on the
+   root, below.
 
-   The four stage cards are a wrapping flex row with a connector glyph between
-   them -- INPUT, PROMPT, CONFIGURATION, OUTPUTS, the pipeline read left to
-   right and, when it wraps, top to bottom. Waveforms are canvases that take
-   their ink from `color`, which is why no rule below paints one. Nothing here
-   draws above the host's dialogs: the section sets no z-index at all, so Mini
-   Paint's dialog layer (2000) and the assistant's panel (1200) stay above
-   everything Voice Box shows. */
+   The page fits the window. The script writes the root's height in pixels --
+   the room the window leaves it -- and the root is a column: the pipeline
+   bar, then the stages. Every stage is a head that stays and a body whose
+   long list takes the room left and scrolls inside the stage, so the page
+   itself never scrolls because of the Voice Box. `data-layout` on the root,
+   set by the script from the root's width, picks the arrangement: "columns"
+   (the four stages side by side, a connector glyph between them) or, below
+   900 px, "stack" (one stage to a screen, snapped as the stages scroll).
+   Waveforms are canvases that take their ink from `color`, which is why no
+   rule below paints one. Nothing here draws above the host's dialogs: the
+   section sets no z-index at all, so Mini Paint's dialog layer (2000) and the
+   assistant's panel (1200) stay above everything Voice Box shows. */
 
 #mc-voice-box {
+    --mc-voice-box-tint-saturation: 40%;
+    --mc-voice-box-tint-lightness: 72%;
+    box-sizing: border-box;
     color: var(--body-text-color, inherit);
     display: flex;
     flex-direction: column;
-    gap: 0.75em;
-    padding: 0.5em 0 1em;
+    gap: 0.6em;
+    min-height: 0;
+    padding: 0.5em 0;
+}
+
+/* Forge's dark theme is `.dark` on the body (or on gradio-app). The tint is
+   quieter there: darker, and a little greyer. */
+#mc-voice-box:is(.dark *) {
+    --mc-voice-box-tint-saturation: 32%;
+    --mc-voice-box-tint-lightness: 40%;
+}
+
+#mc-voice-box *,
+#mc-voice-box *::before,
+#mc-voice-box *::after {
+    box-sizing: border-box;
 }
 
 /* `hidden` wins over anything a theme says about display. The script hides
@@ -7297,6 +7322,7 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #mc-voice-box .mc-voice-box-head {
     align-items: center;
     display: flex;
+    flex: 0 0 auto;
     flex-wrap: wrap;
     gap: 0.75em;
 }
@@ -7392,11 +7418,14 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 
 /* -- the four stages ------------------------------------------------------- */
 
+/* The stages take whatever height the root has left under the pipeline bar;
+   side by side, each is as tall as that and no taller. */
 #mc-voice-box .mc-voice-box-stages {
     align-items: stretch;
     display: flex;
-    flex-wrap: wrap;
+    flex: 1 1 0;
     gap: 0.5em;
+    min-height: 0;
 }
 
 #mc-voice-box .mc-voice-box-stage {
@@ -7404,11 +7433,24 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     border: 1px solid var(--border-color-primary, currentColor);
     border-radius: var(--radius-lg, 8px);
     display: flex;
-    flex: 1 1 280px;
+    flex: 1 1 0;
     flex-direction: column;
     gap: 0.6em;
+    min-height: 0;
     min-width: 0;
+    overflow: hidden;
     padding: 0.75em;
+}
+
+/* A stage's head stays; the Outputs stage's holds Install, Render and the
+   status line under them. */
+#mc-voice-box .mc-voice-box-stage-head {
+    align-items: center;
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 0.4em 0.6em;
+    min-width: 0;
 }
 
 #mc-voice-box .mc-voice-box-stage-title {
@@ -7419,15 +7461,34 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     margin: 0;
 }
 
+#mc-voice-box .mc-voice-box-stage-actions {
+    align-items: center;
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+    margin-left: auto;
+}
+
+/* The body under the head. What is fixed in it keeps its size; its one long
+   part takes the room left and scrolls (the rules after this one). On a
+   window too small even for that part's floor, the body scrolls whole. */
 #mc-voice-box .mc-voice-box-stage-body {
     display: flex;
+    flex: 1 1 0;
     flex-direction: column;
     gap: 0.5em;
+    min-height: 0;
     min-width: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+#mc-voice-box .mc-voice-box-stage-body > * {
+    flex: 0 0 auto;
 }
 
 /* The connector: an arrow between cards, drawn by CSS so the markup carries
-   nothing decorative. It points down when the cards stack on a phone. */
+   nothing decorative. */
 #mc-voice-box .mc-voice-box-connector {
     align-self: center;
     color: var(--body-text-color-subdued, inherit);
@@ -7442,22 +7503,33 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     content: "\2192";
 }
 
-@media (max-width: 640px) {
-    #mc-voice-box .mc-voice-box-stage {
-        flex-basis: 100%;
-    }
+/* Stacked, below 900 px: the stages are a column that scrolls, each exactly
+   as tall as it, snapped one stage at a time -- up for the next stage, down
+   for the one before. A list inside a stage still scrolls first, and carries
+   on to the next stage when it reaches its end. */
+#mc-voice-box[data-layout="stack"] .mc-voice-box-stages {
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scroll-snap-type: y mandatory;
+}
 
-    #mc-voice-box .mc-voice-box-connector {
-        width: 100%;
-    }
+#mc-voice-box[data-layout="stack"] .mc-voice-box-stage {
+    flex: 0 0 100%;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+}
 
-    #mc-voice-box .mc-voice-box-connector::before {
-        content: "\2193";
-    }
+#mc-voice-box[data-layout="stack"] .mc-voice-box-connector {
+    display: none;
+}
 
-    #mc-voice-box .mc-voice-box-pipeline-bar {
-        margin-left: 0;
-    }
+#mc-voice-box[data-layout="stack"] .mc-voice-box-pipeline-bar {
+    margin-left: 0;
+}
+
+#mc-voice-box[data-layout="stack"] .mc-voice-box-prompt {
+    height: 7em;
 }
 
 /* -- rows, lists, captions ------------------------------------------------- */
@@ -7478,8 +7550,16 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     padding: 0;
 }
 
+/* A row of a list that scrolls is never squashed to fit it: the list scrolls
+   instead. (A row that clips its own corners has no content floor, so it
+   would shrink to nothing without this.) */
+#mc-voice-box .mc-voice-box-list > * {
+    flex: 0 0 auto;
+}
+
 #mc-voice-box .mc-voice-box-subtitle {
     color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 auto;
     font-size: var(--text-sm, 0.85em);
     font-weight: 600;
     margin: 0.4em 0 0;
@@ -7527,6 +7607,49 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: none;
 }
 
+/* -- the long part of each stage ------------------------------------------- */
+
+/* Each takes the room its stage has left and scrolls in it; the floor keeps a
+   few rows in view on the smallest window. */
+#mc-voice-box .mc-voice-box-library,
+#mc-voice-box .mc-voice-box-prompt-lists {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: 0.3em;
+    min-height: 9em;
+}
+
+#mc-voice-box .mc-voice-box-samples,
+#mc-voice-box .mc-voice-box-history-list,
+#mc-voice-box .mc-voice-box-favourites-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+#mc-voice-box .mc-voice-box-configuration-form {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: 0.5em;
+    min-height: 9em;
+    overflow-y: auto;
+}
+
+#mc-voice-box .mc-voice-box-configuration-form > * {
+    flex: 0 0 auto;
+}
+
+/* `position` makes the list the lanes' offset parent, which is what the
+   script scrolls a selected lane into view by. */
+#mc-voice-box .mc-voice-box-lanes {
+    flex: 1 1 0;
+    min-height: 9em;
+    overflow-y: auto;
+    position: relative;
+}
+
 /* -- INPUT ----------------------------------------------------------------- */
 
 #mc-voice-box .mc-voice-box-trimmer {
@@ -7565,6 +7688,7 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     width: 0;
 }
 
+/* A sample and a lane are cards with a 4 px edge at their left, the tint. */
 #mc-voice-box .mc-voice-box-sample,
 #mc-voice-box .mc-voice-box-lane {
     background: var(--background-fill-primary, transparent);
@@ -7573,7 +7697,27 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: flex;
     flex-direction: column;
     gap: 0.3em;
-    padding: 0.5em;
+    overflow: hidden;
+    padding: 0.5em 0.5em 0.5em calc(0.5em + 4px);
+    position: relative;
+}
+
+/* The tint: one segment per sample, top to bottom in speaker order, each a
+   hue the script derives from the sample's id at this file's saturation and
+   lightness. Decorative, and hidden from assistive technology. */
+#mc-voice-box .mc-voice-box-edge {
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    left: 0;
+    position: absolute;
+    top: 0;
+    width: 4px;
+}
+
+#mc-voice-box .mc-voice-box-edge-segment {
+    background: hsl(var(--mc-voice-box-hue, 0) var(--mc-voice-box-tint-saturation) var(--mc-voice-box-tint-lightness));
+    flex: 1 1 0;
 }
 
 #mc-voice-box .mc-voice-box-sample-title,
@@ -7600,7 +7744,8 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #mc-voice-box .mc-voice-box-sample-speaker,
 #mc-voice-box .mc-voice-box-prompt-star,
 #mc-voice-box .mc-voice-box-prompt-delete,
-#mc-voice-box .mc-voice-box-speaker-clear {
+#mc-voice-box .mc-voice-box-speaker-clear,
+#mc-voice-box .mc-voice-box-status-dismiss {
     flex: 0 0 auto;
     min-width: 2.2em;
     padding-inline: 0.4em;
@@ -7609,7 +7754,8 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 /* -- PROMPT ---------------------------------------------------------------- */
 
 #mc-voice-box .mc-voice-box-prompt {
-    min-height: 10em;
+    height: 10em;
+    min-height: 4em;
     resize: vertical;
     width: 100%;
 }
@@ -7624,10 +7770,25 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     font-weight: 600;
 }
 
-#mc-voice-box .mc-voice-box-prompt-lists {
-    display: grid;
-    gap: 0.5em;
-    grid-template-columns: 1fr 1fr;
+/* History over favourites, one column: the favourites take what they need,
+   up to two fifths, and the history the rest; each scrolls on its own. */
+#mc-voice-box .mc-voice-box-history,
+#mc-voice-box .mc-voice-box-favourites {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    min-height: 0;
+}
+
+#mc-voice-box .mc-voice-box-history {
+    flex: 1 1 0;
+    min-height: 5em;
+}
+
+#mc-voice-box .mc-voice-box-favourites {
+    flex: 0 1 auto;
+    max-height: 40%;
+    min-height: 4em;
 }
 
 #mc-voice-box .mc-voice-box-prompt-entry {
@@ -7646,12 +7807,6 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     text-align: left;
     text-overflow: ellipsis;
     white-space: nowrap;
-}
-
-@media (max-width: 480px) {
-    #mc-voice-box .mc-voice-box-prompt-lists {
-        grid-template-columns: 1fr;
-    }
 }
 
 /* -- CONFIGURATION --------------------------------------------------------- */
@@ -7699,9 +7854,10 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 }
 
 #mc-voice-box .mc-voice-box-speaker-label {
-    flex: 0 0 5.5em;
+    flex: 0 0 auto;
     font-size: var(--text-sm, 0.85em);
     font-weight: 600;
+    white-space: nowrap;
 }
 
 #mc-voice-box .mc-voice-box-speaker-title {
@@ -7715,54 +7871,108 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 
 /* -- OUTPUTS --------------------------------------------------------------- */
 
-#mc-voice-box .mc-voice-box-lane-head {
-    justify-content: space-between;
-}
-
-/* -- the footer ------------------------------------------------------------ */
-
-#mc-voice-box .mc-voice-box-footer {
-    border-top: 1px solid var(--border-color-primary, currentColor);
+/* The one status line: its words on one line, cut with an ellipsis (the whole
+   of them is its title), and the buttons of whatever it is saying. */
+#mc-voice-box .mc-voice-box-status-line {
+    align-items: center;
     display: flex;
-    flex-direction: column;
+    flex: 1 0 100%;
     gap: 0.4em;
-    padding-top: 0.75em;
-}
-
-#mc-voice-box .mc-voice-box-footer-row {
-    align-items: center;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6em;
-}
-
-#mc-voice-box .mc-voice-box-render-reason,
-#mc-voice-box .mc-voice-box-install-progress,
-#mc-voice-box .mc-voice-box-cards {
-    color: var(--body-text-color-subdued, inherit);
-    font-size: var(--text-sm, 0.85em);
-}
-
-#mc-voice-box .mc-voice-box-job {
-    align-items: center;
-    display: flex;
-    flex-wrap: wrap;
-    font-size: var(--text-sm, 0.85em);
-    gap: 0.5em;
-}
-
-#mc-voice-box .mc-voice-box-job[data-phase="failed"] .mc-voice-box-job-text {
-    color: var(--error-text-color, inherit);
+    min-height: 2.2em;
+    min-width: 0;
 }
 
 #mc-voice-box .mc-voice-box-status {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 1 1 auto;
     font-size: var(--text-sm, 0.85em);
-    min-height: 1.4em;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 #mc-voice-box .mc-voice-box-status[data-kind="error"],
 #mc-voice-box .mc-voice-box-status[data-kind="warn"] {
     color: var(--error-text-color, inherit);
+}
+
+#mc-voice-box .mc-voice-box-status-clock {
+    font-variant-numeric: tabular-nums;
+}
+
+#mc-voice-box .mc-voice-box-status-actions,
+#mc-voice-box .mc-voice-box-status-unloads {
+    align-items: center;
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 0.3em;
+}
+
+/* A lane is pressed to select it; the selected one is outlined in the accent
+   and shows everything else it has. */
+#mc-voice-box .mc-voice-box-lane {
+    cursor: pointer;
+}
+
+#mc-voice-box .mc-voice-box-lane[aria-expanded="true"] {
+    border-color: var(--color-accent, currentColor);
+    cursor: default;
+}
+
+#mc-voice-box .mc-voice-box-lane:focus-visible {
+    outline: 2px solid var(--color-accent, currentColor);
+    outline-offset: -2px;
+}
+
+/* The compact line: when, then the name. */
+#mc-voice-box .mc-voice-box-lane-head {
+    align-items: baseline;
+    display: flex;
+    gap: 0.5em;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-lane-date {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 auto;
+    font-size: var(--text-xs, 0.8em);
+    font-variant-numeric: tabular-nums;
+}
+
+#mc-voice-box .mc-voice-box-lane-name {
+    flex: 1 1 auto;
+}
+
+#mc-voice-box .mc-voice-box-lane-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+}
+
+#mc-voice-box .mc-voice-box-lane-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+}
+
+/* The render's infotext, as the file carries it: kept as written, selectable,
+   and held to a few lines with its own scroll so a long script does not make
+   a lane longer than the list. */
+#mc-voice-box .mc-voice-box-infotext {
+    background: var(--background-fill-secondary, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    cursor: text;
+    font-family: var(--font-mono, monospace);
+    font-size: var(--text-xs, 0.8em);
+    max-height: 12em;
+    overflow-wrap: anywhere;
+    overflow-y: auto;
+    padding: 0.4em 0.5em;
+    -webkit-user-select: text;
+    user-select: text;
+    white-space: pre-wrap;
 }
 
 #mc-voice-box .mc-voice-box-rename {

@@ -343,6 +343,53 @@ def stored() -> dict:
     return clamp(found)
 
 
+def model_temperature() -> float | None:
+    """The selected model's own Variation, or ``None`` when nothing says it.
+
+    The running worker's word first -- the model it loaded is the one that
+    knows (I-PKT-25) -- and the recipe the installer wrote beside the model
+    second, which is the same file that worker read it from; neither, on an
+    installation with no model yet.
+    """
+    try:
+        import mc_voice_pocket_runtime as runtime
+
+        found = runtime.defaults().get("temperature")
+        if found is not None:
+            return float(found)
+    except Exception:
+        logger.debug("Model Chain: the Pocket worker's own temperature could not be read",
+                     exc_info=True)
+    try:
+        import mc_voice_paths as paths
+        import mc_voice_pocket as pocket
+
+        recipe = pocket._read_json(paths.pocket_upstream_config(pocket.model_id())) or {}
+        found = recipe.get("default_temperature")
+        return None if found is None else float(found)
+    except Exception:
+        return None
+
+
+def shown(values: dict) -> dict:
+    """``values`` as the character editor's sliders can hold them.
+
+    A slider has no "the model's own": handed ``None`` it sits at its minimum,
+    and a Save with Own delivery ticked then keeps that minimum as the
+    character's Variation -- the most repeatable take the model can give,
+    chosen by nobody. So a Variation left to the model shows the model's own
+    number, within the slider's range. What is *stored* is still decided by
+    the Save alone.
+    """
+    found = dict(values or {})
+    if found.get("temperature") is None:
+        own = model_temperature()
+        if own is not None:
+            control = CONTROLS["temperature"]
+            found["temperature"] = min(max(own, control["minimum"]), control["maximum"])
+    return found
+
+
 def remember(values=None, **extra) -> dict:
     """Write the Pocket default profile through to Pocket's file, and save it.
 

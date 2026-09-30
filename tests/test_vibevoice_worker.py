@@ -316,6 +316,11 @@ class FakeTensor:
         """A one-dimensional tensor iterates its elements, each with ``item()``."""
         return (types.SimpleNamespace(item=lambda value=value: value) for value in self.data)
 
+    def __getitem__(self, index):
+        """``[0, -1]``: one element, the last token of the first sequence."""
+        value = self.data[index[-1]]
+        return types.SimpleNamespace(item=lambda: value)
+
 
 class FakeCuda:
     def __init__(self, available=True, uuid=UUID):
@@ -668,6 +673,42 @@ class TestRenderingCallsUpstreamExactly:
         reply, _audio = engine.render(request_for(), threading.Event())
         assert reply["capped"] is True
 
+    def test_a_render_that_used_its_whole_budget_is_capped(self, tmp_path):
+        """Upstream's ``generate`` never raises ``reach_max_step_sample`` when
+        the budget runs out -- its loop's range ends one step before the check
+        -- so using the whole budget without ending on end-of-speech is what
+        reaching it means."""
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        reply, _audio = engine.render(request_for(max_new_tokens=6), threading.Event())
+        assert reply["tokens"] == 6 and reply["capped"] is True
+
+    def test_one_that_ended_on_end_of_speech_at_the_boundary_is_not(self, tmp_path):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        FakeProcessor.made[0].tokenizer.eos_token_id = 0
+        reply, _audio = engine.render(request_for(max_new_tokens=6), threading.Event())
+        assert reply["tokens"] == 6 and reply["capped"] is False
+
+    def test_one_with_budget_to_spare_or_cancelled_is_not(self, tmp_path):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        reply, _audio = engine.render(request_for(max_new_tokens=7), threading.Event())
+        assert reply["capped"] is False
+        cancelled = threading.Event()
+
+        def gate(step):
+            if step == 5:
+                cancelled.set()
+
+        FakeModel.made[0].gate = gate
+        reply, _audio = engine.render(request_for(max_new_tokens=5), cancelled)
+        assert reply["capped"] is False and reply["cancelled"] is True
+
+    def test_the_last_token_is_read_from_the_first_sequence(self):
+        assert worker._last_token(FakeTensor([4, 5, 9], (1, 3))) == 9
+        assert worker._last_token(None) is None
+
     def test_no_audio_at_all_is_an_empty_wav_rather_than_an_error(self, tmp_path):
         engine = BoundEngine()
         engine.load(str(tmp_path), 10)
@@ -841,10 +882,10 @@ class FakeEngine:
                 "capped": False}, worker.encode_wav(b"\x00\x00" * made, RATE)
 
 
-def run_worker(engine, feed, init=True):
+def run_worker(engine, feed, init=True, stdout=None):
     """Drive the real ``serve`` loop on a thread and return what it wrote."""
     stdin = FakeStream()
-    stdout = Collector()
+    stdout = stdout if stdout is not None else Collector()
     thread = threading.Thread(target=worker.serve, args=(stdin, stdout),
                               kwargs={"engine_factory": lambda: engine}, daemon=True)
     thread.start()
@@ -1138,17 +1179,83 @@ class TestOneRenderAtATime:
         assert len(seen) < 50, "the render stopped at the step after the shutdown"
 
 
+class TestTheRenderSlotIsFreeBeforeTheReplyIsWritten:
+    def test_a_parent_that_sends_its_next_render_on_the_reply_is_never_refused(
+            self, tmp_path, monkeypatch):
+        """Looked at from inside the write of the reply itself: by then the
+        slot must be free, or a parent that answers the reply with its next
+        section's render -- the Voice Box does -- races the lane and loses."""
+        made = []
+
+        class Recorded(worker.Worker):
+            def __init__(self, stdout):
+                super().__init__(stdout)
+                made.append(self)
+
+        monkeypatch.setattr(worker, "Worker", Recorded)
+        seen = {}
+
+        class Watching(Collector):
+            def _drain(self):
+                before = len(self.frames)
+                super()._drain()
+                for header, _payload in self.frames[before:]:
+                    if "ok" in header and header.get("id") in ("r1", "r2"):
+                        seen[header["id"]] = made[0].rendering()
+
+        def feed(stdin, out):
+            stdin.feed({"op": "load", "id": "l1", "model_dir": str(tmp_path), "steps": 10})
+            out.reply("l1")
+            for request_id, job in (("r1", "first"), ("r2", "second")):
+                head, payload = render_header(request_id, job=job)
+                stdin.feed(head, payload)
+                header, _payload = out.reply(request_id)
+                assert header["ok"] is True
+
+        run_worker(FakeEngine(), feed, stdout=Watching())
+        assert seen == {"r1": "", "r2": ""}
+
+
 class TestRunningTheFileDirectly:
     def test_selftest_dispatches_and_serve_is_the_default(self, monkeypatch):
         calls = []
+        claimed = io.BytesIO()
         monkeypatch.setattr(worker, "selftest", lambda: calls.append("selftest") or 3)
+        monkeypatch.setattr(worker, "_claim_stdout", lambda: claimed)
         monkeypatch.setattr(worker, "serve",
                             lambda stdin, stdout: calls.append(("serve", stdin, stdout)) or 0)
         assert worker.main(["--selftest"]) == 3
         assert worker.main([worker.MARKER, "--parent-pid", "12"]) == 0
         assert calls[0] == "selftest"
         assert calls[1][0] == "serve"
-        assert calls[1][1] is sys.stdin.buffer and calls[1][2] is sys.stdout.buffer
+        assert calls[1][1] is sys.stdin.buffer
+        assert calls[1][2] is claimed, "the protocol runs on the claimed copy of stdout"
+
+    def test_a_stray_print_never_reaches_the_protocol_pipe(self, tmp_path):
+        """Run as a real process: the worker's frames stay readable and every
+        stray line -- Python's or a raw write to descriptor 1 -- lands on stderr."""
+        import subprocess
+
+        program = tmp_path / "claim.py"
+        program.write_text(
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(pathlib.Path(worker.__file__).parent.parent)!r})\n"
+            "from vibevoice_worker import worker\n"
+            "pipe = worker._claim_stdout()\n"
+            "print('Reached maximum generation length 99, stopped it.')\n"
+            "os.write(1, b'a native library wrote this\\n')\n"
+            "worker.write_frame(pipe, {'id': 'r1', 'ok': True}, b'audio')\n"
+            "print('and once more after the frame')\n"
+            "worker.write_frame(pipe, {'id': 'r2', 'ok': True})\n", encoding="utf-8")
+        done = subprocess.run([sys.executable, str(program)], capture_output=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        stream = io.BytesIO(done.stdout)
+        assert worker.read_frame(stream) == ({"id": "r1", "ok": True}, b"audio")
+        assert worker.read_frame(stream) == ({"id": "r2", "ok": True}, b"")
+        assert worker.read_frame(stream) is None, "nothing else on the protocol pipe"
+        for line in (b"Reached maximum generation length", b"a native library wrote this",
+                     b"and once more after the frame"):
+            assert line in done.stderr
 
     def test_selftest_reports_a_missing_closure_rather_than_raising(self, monkeypatch):
         """Without Torch on this interpreter the report says why, on one line,

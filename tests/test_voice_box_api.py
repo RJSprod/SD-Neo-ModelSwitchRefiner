@@ -22,11 +22,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 import mc_voice_api  # noqa: E402
 import mc_voice_box as box  # noqa: E402
 import mc_voice_box_api as api  # noqa: E402
-from test_voice_box import CARD, FakeEngine, FakeRuntime, FakeTurns, spoken, settled  # noqa: E402
+from test_voice_box import (CARD, FakeEngine, FakeRuntime, FakeTurn, FakeTurns, no_mp3,  # noqa: E402
+                            spoken, settled)
 
 
 @pytest.fixture(autouse=True)
 def _fresh(voice_root, monkeypatch):
+    monkeypatch.setattr(box, "_encode_mp3", no_mp3)
     box.forget()
     engine, runtime, turns = FakeEngine(), FakeRuntime(), FakeTurns()
     box.use_engine(engine)
@@ -221,6 +223,55 @@ class TestRenderingOverTheWire:
         assert audio.status_code == 200 and audio.content[:4] == b"RIFF"
         assert audio.headers["content-disposition"].startswith('attachment; filename="render.wav"')
         assert "Hello.wav" in audio.headers["content-disposition"]
+
+    def test_an_mp3_render_is_served_and_downloaded_as_one(self, client, key, prepared,
+                                                           monkeypatch):
+        monkeypatch.setattr(box, "_encode_mp3", lambda pcm16, rate, tags: b"ID3-an-mp3")
+        job = post(client, api.RENDER_ROUTE, key, {
+            "pipeline_id": prepared["pipeline"]["id"], "prompt": "Speaker 1: Hello.",
+            "configuration_id": prepared["configuration"]["id"], "name": "Hello"}).json()["job"]
+        assert isinstance(job["seed"], int) and job["seed_drawn"] is True
+        done = settled(job["id"])
+        entry, = post(client, api.OUTPUTS_ROUTE, key,
+                      {"pipeline_id": prepared["pipeline"]["id"]}).json()["outputs"]
+        assert entry["format"] == "mp3" and entry["render"]["seed"] == job["seed"]
+        assert entry["infotext"].startswith("Speaker 1: Hello.\nSteps: 10, CFG scale: 1.3, "
+                                            f"Seed: {job['seed']}")
+
+        played = client.get(api.OUTPUT_AUDIO_ROUTE, params={"id": done["output_id"]}, headers=key)
+        assert played.headers["content-type"] == "audio/mpeg" and played.content == b"ID3-an-mp3"
+        audio = client.get(api.OUTPUT_AUDIO_ROUTE, params={"id": done["output_id"], "download": 1},
+                           headers=key)
+        assert audio.headers["content-disposition"].startswith(
+            'attachment; filename="render.mp3"')
+        assert audio.headers["content-disposition"].endswith("Hello.mp3")
+
+    def test_clearing_the_queue_withdraws_what_waits_and_answers_the_jobs(self, client, key,
+                                                                         prepared):
+        class Held(FakeTurn):
+            def wait(self, timeout=None, cancelled=None):
+                if cancelled is not None and cancelled.is_set():
+                    self.cancel()
+                    return "cancelled"
+                return "clearing"
+
+        box.turns().turn = Held()
+        body = {"pipeline_id": prepared["pipeline"]["id"], "prompt": "Speaker 1: Hi",
+                "configuration_id": prepared["configuration"]["id"]}
+        running = post(client, api.RENDER_ROUTE, key, body).json()["job"]
+        queued = post(client, api.RENDER_ROUTE, key, body).json()["job"]
+        import time
+
+        deadline = time.monotonic() + 2.0
+        while box.job(running["id"])["phase"] == "queued" and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        answer = post(client, api.JOBS_CLEAR_ROUTE, key).json()
+        assert answer["ok"] is True and answer["cleared"] == 1
+        phases = {entry["id"]: entry["phase"] for entry in answer["jobs"]}
+        assert phases == {running["id"]: "waiting", queued["id"]: "cancelled"}
+        post(client, api.JOB_CANCEL_ROUTE, key, {"id": running["id"]})
+        assert settled(running["id"])["phase"] == "cancelled"
 
     def test_a_render_that_cannot_start_is_a_400_with_the_reason(self, client, key, prepared):
         answer = post(client, api.RENDER_ROUTE, key, {

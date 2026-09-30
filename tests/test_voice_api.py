@@ -1757,6 +1757,12 @@ class TestAnAuditionIsTheDeliveryYouSet:
                 return b"RIFFfake"
 
         monkeypatch.setattr(engines, "runtime", lambda engine="": Runtime)
+        # Whether a voice happens to be installed is a different question, and
+        # an engine with none refuses before the delivery matters: PocketTTS
+        # with no official voices on disk answered "Alba is not installed", so
+        # these two failed wherever FastAPI let them run at all.
+        monkeypatch.setattr(engines, "resolve",
+                            lambda voice_id="", engine="": ("x", {"_handle": 0}))
         return seen
 
     def test_a_bare_test_speaks_the_stored_delivery(self, host, voice_root, monkeypatch):

@@ -4893,6 +4893,18 @@ had ever spoken had been spoken by Alloy. Upgrading corrects it.
 A reply snapshots its voice when it starts, so changing the default mid-answer
 applies to the next one rather than switching voices mid-sentence.
 
+On PocketTTS the list, and the character screen's picker, group the official
+voices the same way and put every official voice that is neither American nor
+British under **Official** — PocketTTS's own voices say only "English", and a
+list of the two accents alone showed none of them, only your cloned ones.
+
+A character's Save writes only the selected engine's voice and delivery and
+carries every other engine's forward as it was. The list of fields that did
+that belongs to the character format itself (`characters.VOICE_FIELDS`, held to
+the character's fields by a test); the copy the character screen used to keep
+had never gained PocketTTS's, so every Save — on any engine — dropped a
+character's PocketTTS voice and delivery.
+
 ### Sopro V2: making a voice from a recording
 
 **Settings → Voice Chat → Text-to-speech engine** has three cards. Choosing
@@ -4993,16 +5005,22 @@ Sopro, because the reviewed Pocket API has no speaking-rate input either.
 *Variation* is Pocket's own sampling temperature: higher values vary one take
 more, lower values are more repeatable, and it is **not** an emotion, warmth or
 energy control — the model has no such input. Left alone it follows the model's
-own recommendation.
+own recommendation. In a character's **Own delivery**, a Variation the character
+leaves to the model opens at the model's own number — the one the running worker
+reported, or the installed model's recipe before a worker has started — rather
+than at the slider's minimum, which a Save with Own delivery ticked used to keep
+as the character's Variation.
 
 **Precision and Generation quality are engine-wide**, not per character. They
 change how the runtime executes, so changing one stops the worker and the next
-reply starts it again. Neither precision claims to be the faster one until it
-has been measured on real hardware; the turn summary in `model_chain.log`
-reports the real-time factor either way. There is no thread control, and the
-panel says why: PocketTTS sets its own CPU thread policy internally, and a
-slider that set `OMP_NUM_THREADS` and called it a Pocket thread count would be
-telling you something untrue.
+reply starts it again. The row says what the change did at once: it used to
+read the wrong part of the answer and go blank until the page was reloaded.
+Neither precision claims to be the faster one until it has been measured on
+real hardware; the turn summary in `model_chain.log` reports the real-time
+factor either way. There is no thread control, and the panel says why:
+PocketTTS sets its own CPU thread policy internally, and a slider that set
+`OMP_NUM_THREADS` and called it a Pocket thread count would be telling you
+something untrue.
 
 **And then there is Stop.** On Kokoro and on Sopro, Stop cancels: playback stops
 and the synthesis is abandoned. Released PocketTTS cannot do that safely — its
@@ -5466,11 +5484,39 @@ Four stages in a row, read left to right like a pipeline without wires —
 bar**. A pipeline is one pass through the four stages kept the way a
 conversation is kept: a file of its own holding its prompt, the configuration
 it points at and the outputs it made, so you can have several going and come
-back to any of them. Below the stages: **Render** (disabled with the reason when it cannot run — the
-engine not installed, an empty script, a speaker without a sample, no card), the
-list of this pipeline's jobs with what each is doing and a Cancel while it is
-live, one line about what the cards are doing, and an *Unload VibeVoice from …*
-button for each card a worker is up on.
+back to any of them.
+
+The four stages fit the window: the tab takes the height the window has below
+Forge's header, and nothing in it makes the page itself scroll. What grows —
+the sample library, the prompt history and favourites, the configuration form,
+the output lanes — scrolls inside its own stage, while the part of the stage you
+work with (the file picker and trimmer, the script box, the configuration's
+header, Render) stays where it is. The height is measured and written in pixels
+whenever the window, the phone's visible area or the tab changes, because a
+percentage height inside Gradio's containers means nothing. It never goes below
+420 pixels: in a window smaller than that the page may scroll after all, and
+each stage then scrolls as a whole.
+
+On a narrow screen — the tab under 900 pixels wide, a phone — the stages stack
+instead, each as wide and as tall as the screen, and the page moves a whole stage
+at a time: swipe up for the next stage, down for the one before. A list inside a
+stage still scrolls first, and carries on to the next stage at its end.
+
+**Render** is at the top of the Outputs stage (disabled with the reason when it
+cannot run — the engine not installed or its install failed, an empty script, a
+speaker without a sample, no card), with **Install** beside it while a part is
+missing, and under it **one status line** says the one thing that matters most
+right now: an install and how far it has got; the render that is running — its
+phase, its section when it has more than one, the time since it started, and
+how many wait behind it — with **Cancel** and, when renders are queued, **Clear
+queue**; only the number queued; the last render you started having failed,
+and why; VibeVoice warm on a card, with **Unload**; why Render cannot run; or
+*Ready*. The count is of renders on every card, whichever pipeline they came
+from, and a render of this page's own is the one shown when two cards are busy.
+Something the page has to tell you — an error, *Saved to …*, *Copied* — takes
+the line for a few seconds (five, or twelve for a warning) and has a × to
+dismiss it; hovering the line shows what every card is doing, the image model
+parked or WanGP's card on lease included.
 
 The page is one block of HTML painted once and a script that owns it. Everything
 it shows it fetched from the WebUI on the page token, every request has a
@@ -5499,7 +5545,10 @@ The **sample library** underneath is a list of titles with waveforms. Each row
 plays, renames on a double click, deletes, and carries four buttons — **1 2 3
 4** — that put the sample on a speaker of the configuration being edited. A
 sample that a configuration uses can still be deleted; that speaker's slot is
-simply empty again.
+simply empty again. Each sample has a quiet tint of its own, worked out from the
+sample itself, as a thin edge on its row; every output made with it carries the
+same edge, one stripe per sample it used, so a glance says which voices a render
+was made from. The tint is only a help to the eye: the names say the same.
 
 ### Prompt
 
@@ -5522,8 +5571,10 @@ one entry. The history keeps a hundred and lets the oldest go; a prompt you
 A named set of the knobs a render takes, kept and chosen by name: the model,
 the card (each named, and marked when it is the image model's card or WanGP's),
 **diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
-a **seed** (blank for a different one each time), **max new tokens** (blank for
-the model's own limit), and the four **speaker** slots, each holding one sample.
+a **seed** (blank for a different one each time — drawn when the render is
+queued and written on its output, so every render has a seed that makes it
+again), **max new tokens** (blank for the model's own limit), and the four
+**speaker** slots, each holding one sample.
 An edit marks the configuration *Save •* until you save it, and Render never
 saves for you: an unsaved configuration is sent along with the render as it
 stands. The card and model you pick become the defaults for the next
@@ -5532,23 +5583,56 @@ Controls the model cannot honour are not on the page.
 
 ### Outputs
 
-Every render is a lane: its name (rename on a double click), its waveform with
-a playhead, **Play**, **Loop** (remembered per output), **Trim to sample** —
-the same trimmer as the input stage, on the render, so a phrase you like becomes
-a voice sample without leaving the page — **Save**, **Download**, **Delete**,
-and a line of metadata: model, seed, steps, CFG, the speakers' samples, the
-length, how long it took.
+Every render is a lane. Until you choose it, a lane is its waveform and one
+compact line — when it was made, in your own time, and its name (rename on a
+double click) — with its samples' tint along its edge; the playhead shows on it
+only while it plays. Tap or click a lane to choose it (one at a time; Enter or
+Space does it from the keyboard) and it opens: the playhead,
+**Play**, **Loop** (remembered per output), **Trim to sample** — the same
+trimmer as the input stage, on the render, so a phrase you like becomes a voice
+sample without leaving the page — **Save**, **Download**, **Delete**, a line of
+metadata (model, seed, steps, CFG, the speakers' samples, the length, how long it
+took), and its **infotext**. A render you just made opens by itself when it
+lands, and the list — only the list — scrolls to it.
 
-**Save** writes the WAV into a folder on the Forge PC that you choose **once**:
-the first press opens the machine's own folder dialog (or, when the WebUI is
-served to other machines, asks you to type a path), and every save after that
-goes there without asking. A file of the same name is never overwritten — the
-second is `name (2).wav` — and a `.json` beside each WAV carries the metadata.
-**Download** is the browser's own download of the same bytes.
+The **infotext** is the render's fingerprint, written the way a WebUI writes an
+image's: the prompt as it was, then one line — `Steps: 10, CFG scale: 1.3,
+Seed: 1234567, Model: vibevoice-7b, Speaker 1: Ada, Speaker 2: Brook, Sections:
+2, Length: 41.3 s, Render time: 95.0 s`. **Copy** puts it on the clipboard. It
+is also written into the file itself, so a render saved or downloaded says what
+made it wherever it goes: in the MP3's ID3 comment (with the whole record as
+JSON under `voicebox`), or in a WAV's `INFO` chunk. A render made before seeds
+were recorded has no seed to give, and its line says nothing of one.
+
+**Use seed** puts the render's seed into the configuration you are editing.
+**Reuse settings** puts back what made the render: its prompt, and its
+configuration as unsaved changes — the configuration it came from, when it
+still exists, with the render's values over it (its seed included, so Render
+makes the same take again; clear the seed for a new one), or a new unsaved
+configuration named after the render when that one is gone. A speaker whose
+sample has since been deleted is left empty, and the page says which.
+
+A render is kept as an **MP3** — constant 128 kb/s, mono, at the model's own
+24 kHz, about a third of the WAV's size with nothing lost that speech at that
+rate carries. The encoder's delay and padding are written into the file, so it
+decodes to exactly the samples that were rendered and a looped render has no
+gap. It is encoded in the WebUI's own process by PyAV, which Forge Neo already
+installs; nothing is added to Forge for it. A Forge that cannot encode one keeps
+the render as a WAV, as every render made before this was, and the page plays,
+trims and saves either the same way. Samples are always WAV: they are what the
+model is conditioned on.
+
+**Save** writes the render into a folder on the Forge PC that you choose
+**once**: the first press opens the machine's own folder dialog (or, when the
+WebUI is served to other machines, asks you to type a path), and every save
+after that goes there without asking. A name already taken — by a render or by
+the `.json` beside one — is never overwritten: the second is `name (2).mp3`. The
+`.json` beside each carries the metadata and the infotext. **Download** is the
+browser's own download of the same bytes, named `<name>.mp3` (or `.wav`).
 
 ### A render's life
 
-Press **Render** and the job appears in the footer. Everything that can be
+Press **Render** and the job appears in the status line. Everything that can be
 refused before a card is asked for is refused at the press, in a sentence:
 the prompt has no words, *Speaker 2 has no sample*, no card is chosen,
 VibeVoice is not installed. Then:
@@ -5563,21 +5647,30 @@ VibeVoice is not installed. Then:
 | **failed** | With the reason. A request the card or the RAM cannot hold fails here, with the turn's own warning — nothing was loaded and nothing was paged |
 | **cancelled** | Withdrawn by you, or the WebUI closed |
 
-**Cancel** withdraws a queued job at once, withdraws the turn of a waiting one —
-a queued turn holds every image job on its card, so it is not left there — and
-tells the worker of a rendering one to stop at its next step, which it does
-within a second or two. Whatever the ending, the card is handed back, and
-whether VibeVoice stays warm on it follows *Keep VibeVoice warm between
-requests* in Settings → Model Chain; Voice Box's own *Keep warm* toggle can
-decline a warm stay but never force one against that setting. A render is named
-after its pipeline and its number in it (*Trailer 3*) unless you name it.
+**Cancel**, beside the running render, withdraws its turn while it waits for
+the card — a queued turn holds every image job on its card, so it is not left
+there — and tells the worker to stop at its next step once it is rendering,
+which it does within a second or two. **Clear queue** withdraws every render
+still queued, on every card, and leaves the running one to Cancel; the queue
+is a count on the page, so queued renders go together rather than one by one.
+The time a render has been running is the server's count, carried on by the page
+between answers, so a page on another device's clock still counts right.
+Whatever the ending, the card is handed back — before the output's file is made,
+which is work for the processor that no image job waits for — and whether
+VibeVoice stays warm on it follows *Keep VibeVoice warm between requests* in
+Settings → Model Chain; Voice Box's own *Keep warm* toggle can decline a warm
+stay but never force one against that setting. A render is named after its
+pipeline and its number in it (*Trailer 3*) unless you name it; two renders
+queued as one ends can no longer be given the same number.
 
 ### Where it lives
 
 Under the voice data root, in `voice_box/`: `samples/<id>/` (the sound and its
 metadata), `prompts.json`, `configurations/<id>.json`, `pipelines/<id>.json`,
-`outputs/<id>/` and `settings.json`. Sound is always mono 16-bit WAV at 24 kHz,
-VibeVoice's own rate. Nothing is written to Forge's settings store.
+`outputs/<id>/` and `settings.json`. A sample is always mono 16-bit WAV at
+24 kHz, VibeVoice's own rate; an output is `audio.mp3` at that rate, or
+`audio.wav` where no MP3 could be made and for every render made before, beside
+its `meta.json`. Nothing is written to Forge's settings store.
 
 ### Audio focus
 
@@ -5595,8 +5688,14 @@ VibeVoice runs in a process of its own, one per card it is used on, started with
 else's. Its handshake reports the UUID of the card it actually came up on, and a
 worker on any other card is refused rather than used. It loads the model in
 bfloat16 with PyTorch's scaled-dot-product attention, sets the diffusion steps
-the configuration asks for, and renders a section at a time; a cancel is checked
-at the top of every generation step. What it holds on the card is what the turn
+the configuration asks for, and renders a section at a time, each seeded with the
+render's seed; a cancel is checked at the top of every generation step. A
+section's render slot is free before its reply is written, because the Voice Box
+asks for the next section the moment it reads the last one's reply, and a slot
+freed a moment later refused it as a second render. The protocol runs on a copy
+of the process's standard output taken for it alone; the standard output itself
+is pointed at the log, so a line some library prints can never land in the
+middle of a frame and cost the worker. What it holds on the card is what the turn
 system sees (`resident_bytes`), and *evicting* it means ending the process, so
 the card is really free — the CUDA context included — before whoever needed it
 goes next. **Unload** on the page does the same by hand, through the turn system,
@@ -5606,9 +5705,12 @@ Every render reports the highest memory the card saw; the next request asks for
 at least that much (`calibration.json` beside the engine's settings), so the
 estimate a turn is checked against — the shard sizes plus a 2 GB working
 allowance until then — learns from the machine rather than from a number written
-here. A render's output also says when the model stopped at its token budget
-rather than at the end of the script, so a truncated render is visible instead
-of silent.
+here. The peak is noted once per render, by the runtime. A render's output
+also says when the model stopped at its token budget rather than at the end of
+the script, so a truncated render is visible instead of silent: upstream's own
+flag for that is never raised by the 7B (its loop ends one step before the check
+that would), so a render that used its whole budget without ending on
+end-of-speech is what counts as stopped at it.
 
 ### Installing
 
