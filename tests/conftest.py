@@ -2509,3 +2509,52 @@ def _forget_card_turns():
     queue = sys.modules.get("modules.call_queue")
     if queue is not None:
         queue.queue_lock = queue.FIFOLock()
+
+
+# The host's data directory is "." here (``modules.paths.data_path``), so a
+# voice or LLM path that a test forgot to point at its own folder lands in the
+# directory the suite was started from -- the repository. It is the one place
+# every test and every run shares: what one test leaves there, a later test
+# or run finds (a pipeline test once wrote "whatever an earlier test left
+# behind" into its own setup), and under parallel workers two tests write the
+# same files at the same time.
+_HOST_DATA_DIRS = ("model_chain_voice", "model_chain_llm")
+
+
+def _host_data_stamp(base: Path) -> dict:
+    found = {}
+    for name in _HOST_DATA_DIRS:
+        root = base / name
+        if not root.exists():
+            found[name] = None
+            continue
+        files = set()
+        for folder, _dirs, names in os.walk(root):
+            for leaf in names:
+                path = os.path.join(folder, leaf)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                files.add((os.path.relpath(path, root), stat.st_size, stat.st_mtime_ns))
+        found[name] = frozenset(files)
+    return found
+
+
+@pytest.fixture(autouse=True)
+def _nothing_written_to_the_host_data_directory():
+    """A test that writes into the host's data directory fails.
+
+    Ask for ``voice_root`` (or point the LLM paths at ``tmp_path``) instead.
+    Under parallel workers the test named may have been running beside the
+    one that wrote; run the file on its own to find which.
+    """
+    base = Path(os.path.abspath("."))
+    before = _host_data_stamp(base)
+    yield
+    after = _host_data_stamp(base)
+    changed = [name for name in _HOST_DATA_DIRS if after[name] != before[name]]
+    if changed:
+        pytest.fail("wrote into the host's data directory, shared by every test and every "
+                    "run: " + ", ".join(str(base / name) for name in changed)
+                    + " -- use voice_root or tmp_path", pytrace=False)

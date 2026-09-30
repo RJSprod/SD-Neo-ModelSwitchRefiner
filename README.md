@@ -5949,7 +5949,10 @@ javascript/forge_assistant_store.js  the page's copy of the conversation
 javascript/forge_assistant_host.js   Forge's tabs and header, as an adapter
 javascript/forge_assistant_focus.js  workspace focus, as a reversible transaction
 tests/                pytest suite (runs without a WebUI)
+pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension
+tools/run_tests.py    the suite on every core, or only what a change reaches
+tools/affected_tests.py  which test files a change can reach
 docs/                 revised specifications for the progress and LLM work
 ```
 
@@ -6067,9 +6070,38 @@ needs no change to the orchestration code.
 ## Tests
 
 ```
-pip install pytest pillow numpy psutil httpx jinja2
-python -m pytest tests/
+pip install pytest pytest-xdist pillow numpy psutil httpx jinja2
+python3 tools/run_tests.py                       # every test, on every core
+python3 tools/run_tests.py --affected            # only the tests a change reaches
+python3 tools/run_tests.py --affected --list     # which ones, and why
 ```
+
+`tools/run_tests.py` runs the whole suite on every core with pytest-xdist: about
+two and a half minutes on four cores, against seven and a quarter on one. Where
+pytest-xdist is not installed it runs on one core and says so; `--serial` asks
+for one core, and anything after `--` goes to pytest. A Claude Code session on
+the web installs pytest-xdist as it starts (`.claude/hooks/session-start.sh`).
+
+`--affected` is for while you work. It compares the working tree with where the
+branch left `main` (`--base` names another commit) and runs only the test files
+that can reach a changed file (`tools/affected_tests.py`). A file reaches a
+test through an import, through a file named in a string (a page script, the
+stylesheet, a manifest, a worker started by its path), through a folder the
+test lists, or through a fixture of `tests/conftest.py` the test asks for. A
+change to `tests/conftest.py` or `pytest.ini` runs everything. A page script or
+a test file reaches a handful of test files; most extension modules reach about
+half the suite, because `scripts/model_chain.py` imports most of them. It was
+checked by breaking seventeen files one at a time and running everything:
+every test file that failed was one it had picked, except where the broken
+file sits under a fixture every test runs, which fails every test, the ones
+it picked included. It cannot see what one test leaves behind for the next,
+so the full run is the check before a push.
+
+A passing test's temporary folder is deleted as it passes (`pytest.ini`); a
+failing test's is kept to look at. A test that writes into the extension's own
+data folders (`model_chain_voice/` and `model_chain_llm/`, where the stand-in
+host's data path puts them) fails: every test and every run share those
+folders, and so do workers running side by side.
 
 The suite stubs the host, so it runs without a WebUI checkout or any model
 files. It covers the acceptance criteria that can be verified without a GPU:

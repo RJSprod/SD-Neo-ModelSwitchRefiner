@@ -3256,7 +3256,8 @@ class TestChoosingHowMuchDenoiserToRun:
 
         assert len(asked) == 1, asked
 
-    def test_the_worker_is_told_the_file_rather_than_the_name(self, host, monkeypatch):
+    def test_the_worker_is_told_the_file_rather_than_the_name(self, host, monkeypatch,
+                                                              voice_root):
         """The worker is handed a directory and must not have to decide which
         file in it is the model. With two networks installed side by side that
         stopped being a formality."""
@@ -3273,7 +3274,7 @@ class TestChoosingHowMuchDenoiserToRun:
         assert pipeline.stage_config("dpdfnet")["model_file"] == \
             "dpdfnet2_48khz_hr.onnx"
 
-    def test_a_network_that_is_not_on_disk_is_not_asked_for(self, host):
+    def test_a_network_that_is_not_on_disk_is_not_asked_for(self, host, voice_root):
         """An installation made before a variant existed has the setting but not
         the file. Asking for it anyway is a stage that will not load at all."""
         root = paths.pipeline_stage_root("dpdfnet")
@@ -4153,7 +4154,7 @@ class TestACardIsSomethingTheInstallerCanActuallyBuildFor:
         assert "graphics card" in message, message
 
     def test_the_installer_builds_the_closure_the_placement_asked_for(
-            self, windows, monkeypatch, host, tmp_path):
+            self, windows, monkeypatch, host, tmp_path, voice_root):
         """The end-to-end version of this class's complaint."""
         devices = self._machine(monkeypatch, [self._card()])
         devices.remember("voice-pipeline-lavasr",

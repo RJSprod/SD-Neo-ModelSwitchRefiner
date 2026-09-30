@@ -1337,8 +1337,13 @@ class TestAVramDeficitIsNeverSolvedByAHostFailure:
 
     @pytest.fixture
     def demoting(self, scoped, monkeypatch, tmp_path):
+        import mc_llm_paths
         from modules import shared
 
+        # A restart writes the server's log beside the install, and the
+        # default install is the host's data directory, which every test and
+        # every run share.
+        monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path / "data")
         shared.opts.model_chain_llm_release = runtime.RELEASE_SYSTEM_RAM
         settings = configuration_on(tmp_path, card=IMAGE_CARD, size_mb=64)
         monkeypatch.setattr(runtime, "config", lambda role="": settings)

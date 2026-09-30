@@ -250,6 +250,16 @@ def settled(identifier: str, timeout: float = 5.0) -> dict:
     raise AssertionError(f"the job never settled: {box.job(identifier)}")
 
 
+def handed_back(turn, timeout: float = 5.0) -> list:
+    """What ``turn`` was finished with, once it has been. A job cancelled, or
+    refused its card, reads as ended a moment before its thread hands the card
+    back, so asking at once is a race the test sometimes loses."""
+    deadline = time.monotonic() + timeout
+    while not turn.finished and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return list(turn.finished)
+
+
 def phase_reached(identifier: str, phase: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -557,7 +567,7 @@ class TestRendering:
 
         job = settled(found["id"])
         assert job["phase"] == "failed" and job["warning"] == "VibeVoice 7B needs 20.0 GB on the card"
-        assert box._runtime().loaded == [] and turns.turn.finished == [None]
+        assert box._runtime().loaded == [] and handed_back(turns.turn) == [None]
         assert box.outputs() == []
 
     def test_the_warm_stay_can_be_declined_but_never_forced(self, ready):
@@ -596,7 +606,7 @@ class TestRendering:
         assert box.cancel_job(second["id"])["phase"] == "cancelled"
         assert box.cancel_job(first["id"])["phase"] in ("waiting", "cancelled")
         assert settled(first["id"])["phase"] == "cancelled"
-        assert turns.turn.cancelled and turns.turn.finished == [None]
+        assert turns.turn.cancelled and handed_back(turns.turn) == [None]
         assert box._runtime().loaded == []
 
     def test_a_rendering_job_is_told_to_stop_and_the_card_handed_back(self, ready):
@@ -613,7 +623,7 @@ class TestRendering:
         job = settled(found["id"])
         assert job["phase"] == "cancelled" and box.outputs() == []
         assert runtime.cancelled == [f"{found['id']}:1"]
-        assert box.turns().turn.finished == [None]
+        assert handed_back(box.turns().turn) == [None]
 
     def test_a_worker_failure_fails_the_job_and_still_hands_the_card_back(self, ready):
         runtime = box._runtime()
@@ -622,7 +632,7 @@ class TestRendering:
 
         job = settled(found["id"])
         assert job["phase"] == "failed" and "exited during the render" in job["warning"]
-        assert box.turns().turn.finished == [None] and box.outputs() == []
+        assert handed_back(box.turns().turn) == [None] and box.outputs() == []
 
     def test_renders_on_one_card_run_in_order_and_are_listed_newest_first(self, ready):
         pipeline, configuration = ready["pipeline"]["id"], ready["configuration"]["id"]
@@ -913,6 +923,26 @@ class TestTheFiles:
         assert decoded.size == len(pcm) // 2, "the encoder's delay and padding are undone"
 
 
+class TestForgetting:
+    def test_forget_returns_only_once_a_running_render_has_ended(self, ready, runtime):
+        """It stopped the service and returned at once, so a render still going
+        finished a moment later and wrote its output wherever the voice root
+        pointed by then: the checkout, once a test's own folder was put back.
+        That is where old renders kept turning up in ``model_chain_voice/``."""
+        runtime.hold = threading.Event()
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        phase_reached(found["id"], "rendering")
+        service = box._service
+        threading.Timer(0.3, runtime.hold.set).start()
+
+        box.forget()
+
+        with service.lock:
+            threads = list(service.threads.values())
+        assert not any(thread.is_alive() for thread in threads)
+
+
 class TestTheQueue:
     def test_clear_withdraws_every_queued_job_and_leaves_the_running_one(self, ready):
         turns = box.turns()
@@ -944,6 +974,31 @@ class TestTheQueue:
         box.cancel_job(first["id"])
         assert settled(first["id"])["phase"] == "cancelled"
         assert len(turns.requests) == 1, "a withdrawn job never asks for the card"
+
+    def test_the_answer_is_the_job_as_it_was_queued_whoever_runs_first(self, ready,
+                                                                        monkeypatch):
+        """The card's thread can pick a job up before ``render`` has answered.
+        The answer read the job after that, so under load it could already say
+        the job had started, with 0.0 seconds on the clock."""
+        runtime = box._runtime()
+        runtime.hold = threading.Event()
+        service = box._service
+        original = service.submit
+
+        def submit_and_let_it_start(job):
+            original(job)
+            deadline = time.monotonic() + 5.0
+            while job.phase == "queued" and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+        monkeypatch.setattr(service, "submit", submit_and_let_it_start)
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+
+        assert found["phase"] == "queued" and found["elapsed"] is None
+        assert box.job(found["id"])["phase"] != "queued", "the thread did run first"
+        runtime.hold.set()
+        settled(found["id"])
 
     def test_a_job_says_how_long_it_has_run_by_the_servers_clock(self, ready, monkeypatch):
         clock = [1000.0]

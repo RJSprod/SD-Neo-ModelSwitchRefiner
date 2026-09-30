@@ -49,8 +49,16 @@ def _bools(key: str, values) -> bytes:
 
 def write_gguf(path, metadata: bytes, count: int, version: int = 3,
                tensors: int = 291, padding: int = 4096):
+    """The header, then ``padding`` zero bytes standing in for the weights.
+
+    The zeros are a hole rather than written bytes (``truncate`` past the end):
+    they read back the same, but a 64 MB model made in every one of dozens of
+    tests no longer writes gigabytes to disk each run.
+    """
     header = mc_gguf.MAGIC + struct.pack("<I", version) + struct.pack("<QQ", tensors, count)
-    path.write_bytes(header + metadata + b"\x00" * padding)
+    with open(path, "wb") as handle:
+        handle.write(header + metadata)
+        handle.truncate(len(header) + len(metadata) + padding)
     return path
 
 
