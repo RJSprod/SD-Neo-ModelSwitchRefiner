@@ -115,6 +115,10 @@
         cloneDiscard: "model-chain/voice/clone/discard",
         pocket: "model-chain/voice/pocket",
         pocketInstall: "model-chain/voice/pocket/install",
+        // VibeVoice's panel. A status route and nothing else: it is installed
+        // in the Voice Box tab, and its settings, voices and clone transaction
+        // go through the engine-neutral routes above.
+        vibevoice: "model-chain/voice/vibevoice",
         // One token for every engine's gated downloads. Write-only from here:
         // nothing this script can call returns it, and the status it paints
         // comes back as "stored, ends 1a2b" rather than as the token.
@@ -179,6 +183,11 @@
         speakFailed: "The reply was generated, but Voice could not read it aloud.",
         notStreaming: "The reply is being read aloud, but no audio has arrived — something "
             + "between this page and the WebUI may be buffering the whole response.",
+        // The same silence on VibeVoice is usually not a proxy at all: a reply
+        // waits for its turn on the graphics card, and on a card the language
+        // model shares that is the whole time the reply is being written.
+        cardWait: "VibeVoice is waiting for its turn on the graphics card. The reply will "
+            + "be read aloud when the card is free.",
         blocked: "Voice is enabled; tap Voice or the microphone once to allow audio playback.",
         busy: "Wait for the reply or press Stop.",
         // Section 39. Not "HTTPS is required" -- that is a claim about this
@@ -466,6 +475,7 @@
         window.clearTimeout(voicesTimer);
         window.clearTimeout(soproTimer);
         window.clearTimeout(pocketTimer);
+        window.clearTimeout(vibevoiceTimer);
         // Both new rows are inside the surface being replaced, so both of their
         // timers paint nodes that are about to be thrown away.
         window.clearTimeout(pipelineTimer);
@@ -1098,6 +1108,8 @@
                 // time somebody presses the button.
                 state.interrupt = response.headers.get("X-Model-Chain-Voice-Interrupt")
                     || "cancel";
+                // And which engine that was, for what a silent stream means.
+                state.engine = response.headers.get("X-Model-Chain-Voice-Engine") || "";
                 return pump(state, response.body.getReader(), rate);
             });
         }).catch(function (error) {
@@ -1137,7 +1149,7 @@
             }
             if (!complained && !state.started && Date.now() - opened > STREAM_SILENCE_MS) {
                 complained = true;
-                say(MESSAGES.notStreaming, "warn");
+                say(silenceMessage(state), "warn");
             }
             return reader.read().then(function (result) {
                 if (result.done) {
@@ -1171,13 +1183,23 @@
                 if (!complained && !state.started
                         && Date.now() - opened > STREAM_SILENCE_MS) {
                     complained = true;
-                    say(MESSAGES.notStreaming, "warn");
+                    say(silenceMessage(state), "warn");
                 }
                 return step();
             });
         };
 
         return step();
+    }
+
+    // Which sentence a silent stream gets. The engine is the one this reply was
+    // frozen onto, from the stream's own header -- the last status answer is
+    // only the fallback for a WebUI that does not send one, because it may be
+    // minutes old or never have been asked for. VibeVoice's silence is its card
+    // wait; every other engine's is the buffering this warning was written for.
+    function silenceMessage(state) {
+        const engine = (state && state.engine) || (readiness && readiness.engine) || "";
+        return engine === "vibevoice" ? MESSAGES.cardWait : MESSAGES.notStreaming;
     }
 
     // What this page knows and the WebUI cannot: whether the speaker actually
@@ -2953,7 +2975,8 @@
         const states = {
             unloaded: ["\u25cb", "Unloaded — loads automatically on next voice use"],
             loading: ["\u25cc", "Loading speech models…"],
-            idle: ["\u25cf", "Loaded — CPU, idle"],
+            // Where, when the engine says: VibeVoice is on a graphics card.
+            idle: ["\u25cf", "Loaded — " + (engine.where || "CPU") + ", idle"],
             stt: ["\u25cf", "Loaded — Listening"],
             tts: ["\u25cf", "Loaded — Speaking"],
             stopping: ["\u25cc", "Unloading…"],
@@ -3271,6 +3294,7 @@
         wireEngineSelector(holder);
         wireSopro(holder);
         wirePocket(holder);
+        wireVibeVoice(holder);
         wireCleanup(holder);
         wirePipeline(holder);
         wireComponents(holder);
@@ -4321,6 +4345,233 @@
         if (settled) pocketReadiness = now;
     }
 
+    // -- VibeVoice ------------------------------------------------------------- //
+    //
+    // The fourth engine's panel, and the one installed somewhere else: VibeVoice
+    // is the Voice Box's installation, so there is no Install button here and
+    // the part and model lines say what the installer says. What this panel
+    // owns is Voice Chat's choices for VibeVoice -- the card a reply takes a
+    // turn on, and the precision and LoRA the 7B speaks cloned voices at --
+    // posted through the engine-neutral settings route the way Pocket's are.
+    //
+    // Repainted from its own route while it is on screen and the page is not
+    // hidden: one request at a time, and every request with a deadline. The
+    // installs it reports happen in another tab, so the only way this panel
+    // learns of one is by asking -- and a request that never answered would
+    // otherwise hold that asking for the life of the page (the lesson of the
+    // stalled HTTP/2 connection: a request without a deadline is a bug).
+
+    let vibevoiceTimer = 0;
+    let vibevoiceAsking = false;
+    const VIBEVOICE_POLL_MS = SETTINGS_IDLE_MS;
+    const VIBEVOICE_BUSY_POLL_MS = SETTINGS_POLL_MS;
+    const VIBEVOICE_DEADLINE_MS = 15000;
+
+    // One POST that answers within `ms`, or answers that it did not. Always
+    // resolves, with an `ok` and, when that is false, an `error` somebody can
+    // read. The request itself is aborted at the deadline where the browser
+    // can abort one; the answer does not wait for the abort to be honoured.
+    function answerWithin(route, init, ms, late) {
+        if (stale) return Promise.resolve({ok: false, error: RELOAD});
+        const controller = (typeof AbortController === "function")
+            ? new AbortController() : null;
+        const options = Object.assign({method: "POST", credentials: "same-origin"},
+                                      init || {});
+        if (controller) options.signal = controller.signal;
+        let timer = 0;
+        const deadline = new Promise(function (resolve) {
+            timer = window.setTimeout(function () {
+                if (controller) {
+                    try { controller.abort(); } catch (error) { /* already settled */ }
+                }
+                resolve({ok: false, late: true, error: late});
+            }, ms);
+        });
+        const asked = fetch(url(route), options).then(refused).then(function (response) {
+            return response.json().catch(function () {
+                return {ok: false, error: "The WebUI answered HTTP " + response.status
+                                          + " with something this page cannot read."};
+            });
+        }).then(function (payload) {
+            engineChanged(payload);
+            return payload || {ok: false, error: "The WebUI sent an empty answer."};
+        }).catch(function (error) {
+            const aborted = !!(error && error.name === "AbortError");
+            return {ok: false, late: aborted,
+                    error: aborted ? late : "Could not reach this WebUI."};
+        });
+        return Promise.race([asked, deadline]).then(function (payload) {
+            window.clearTimeout(timer);
+            return payload;
+        });
+    }
+
+    function jsonBody(body, holder) {
+        return {headers: headers({"Content-Type": "application/json"}, holder),
+                body: JSON.stringify(body || {})};
+    }
+
+    function wireVibeVoice(holder) {
+        const row = holder.querySelector('[data-mc-voice-kind="vibevoice"]');
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const settings = row.querySelector("[data-mc-voice-vibevoice-settings]");
+        if (settings) {
+            // The strength's number follows the slider as it moves; the value
+            // is sent when it is let go, like every other slider on this page.
+            settings.addEventListener("input", function (event) {
+                const control = event.target.closest(
+                    '[data-mc-voice-vibevoice-setting="lora_scale"]');
+                if (control) {
+                    setText(row, "[data-mc-voice-vibevoice-strength]",
+                            Number(control.value).toFixed(2));
+                }
+            });
+            settings.addEventListener("change", function (event) {
+                const control = event.target.closest("[data-mc-voice-vibevoice-setting]");
+                if (!control) return;
+                const name = control.getAttribute("data-mc-voice-vibevoice-setting");
+                const values = {};
+                values[name] = name === "lora_scale" ? Number(control.value) : control.value;
+                answerWithin(ROUTES.engineSettings,
+                             jsonBody({engine: engineOf(holder), values: values}, holder),
+                             VIBEVOICE_DEADLINE_MS,
+                             "The WebUI did not answer in time, so that setting may not "
+                             + "have been changed.").then(function (payload) {
+                    if (payload && payload.ok && payload.vibevoice) {
+                        paintVibeVoice(row, payload.vibevoice);
+                        return;
+                    }
+                    setText(row, '[data-mc-voice-status="vibevoice"]',
+                            (payload && payload.error) || "That setting could not be changed.");
+                    // What the server holds now, rather than what was chosen.
+                    pollVibeVoice(holder, row, 0);
+                });
+            });
+        }
+        wireVibeVoiceClone(holder, row);
+        whenOnScreen(row, function () { pollVibeVoice(holder, row, 0); });
+    }
+
+    function pollVibeVoice(holder, row, delay) {
+        window.clearTimeout(vibevoiceTimer);
+        vibevoiceTimer = window.setTimeout(function () {
+            if (stale || row.isConnected === false) return;
+            // A row nobody can see is asked nothing, and looked at again in a
+            // second -- a DOM read, not a request.
+            if (document.hidden || !onScreen(row)) {
+                pollVibeVoice(holder, row, 1000);
+                return;
+            }
+            // Never a second request beside one in flight; that one schedules
+            // the next when it settles, and its deadline bounds how long that is.
+            if (vibevoiceAsking) return;
+            vibevoiceAsking = true;
+            answerWithin(ROUTES.vibevoice, jsonBody({}, holder), VIBEVOICE_DEADLINE_MS,
+                         "VibeVoice's state did not arrive in time; this panel will ask "
+                         + "again.").then(function (payload) {
+                vibevoiceAsking = false;
+                if (payload && payload.ok) paintVibeVoice(row, payload);
+                const running = !!(payload && payload.progress && payload.progress.running);
+                pollVibeVoice(holder, row, running ? VIBEVOICE_BUSY_POLL_MS : VIBEVOICE_POLL_MS);
+            });
+        }, Math.max(0, delay || 0));
+    }
+
+    // The options of a select, rebuilt only when what they would say changed,
+    // and never under somebody who has it open.
+    function fillSelect(select, options, value) {
+        if (!select || document.activeElement === select) return;
+        const signature = JSON.stringify(options);
+        if (select.dataset.mcVoiceOptions !== signature) {
+            select.dataset.mcVoiceOptions = signature;
+            select.textContent = "";
+            options.forEach(function (pair) {
+                const option = document.createElement("option");
+                option.value = pair[0];
+                option.textContent = pair[1];
+                select.appendChild(option);
+            });
+        }
+        select.value = value;
+    }
+
+    let vibevoiceCloneSaid = "";
+
+    function paintVibeVoice(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        // The trimmer's window comes from the engine, never from this file.
+        noteCloneWindow(payload);
+        const progress = payload.progress || {};
+        setText(row, '[data-mc-voice-status="vibevoice"]',
+                progress.running ? (progress.text || "Installing in the Voice Box tab…")
+                    : ((progress.failed && progress.text) || payload.message || ""));
+        setText(row, '[data-mc-voice-vibevoice-part="runtime"]', payload.runtime_message || "");
+        (payload.models || []).forEach(function (model) {
+            const line = row.querySelector('[data-mc-voice-vibevoice-model="'
+                                           + cssEscape(model.id || "") + '"]');
+            if (line) {
+                line.textContent = (model.label || model.id) + " — "
+                    + (model.message || (model.installed ? "Installed." : "Not installed."));
+            }
+        });
+
+        const chosen = payload.settings || {};
+        const cards = payload.cards || [];
+        const shared = chosen.card_source === "voice-box"
+            ? cards.filter(function (card) { return card.uuid === chosen.card_effective; })[0]
+            : null;
+        const cardOptions = [["", "The Voice Box's card" + (shared ? " (" + shared.name + ")"
+                                                                    : "")]];
+        cards.forEach(function (card) {
+            cardOptions.push([card.uuid, card.name + (card.role ? " — " + card.role : "")]);
+        });
+        if (chosen.card_uuid && !cards.some(function (card) {
+            return card.uuid === chosen.card_uuid;
+        })) {
+            cardOptions.push([chosen.card_uuid, chosen.card_uuid
+                              + " — not found on this machine"]);
+        }
+        fillSelect(row.querySelector('[data-mc-voice-vibevoice-setting="card_uuid"]'),
+                   cardOptions, chosen.card_uuid || "");
+        fillSelect(row.querySelector('[data-mc-voice-vibevoice-setting="precision"]'),
+                   (chosen.precisions || []).map(function (item) {
+                       const need = Number(item.need_vram_bytes || 0);
+                       return [item.id, item.label + (need
+                           ? " — about " + (need / 1e9).toFixed(1) + " GB on the card" : "")];
+                   }), chosen.precision || "bf16");
+        fillSelect(row.querySelector('[data-mc-voice-vibevoice-setting="lora_id"]'),
+                   [["", "None"]].concat((payload.loras || []).map(function (item) {
+                       return [item.id, item.name || item.id];
+                   })), chosen.lora_id || "");
+        const strength = row.querySelector('[data-mc-voice-vibevoice-setting="lora_scale"]');
+        if (strength && document.activeElement !== strength
+                && chosen.lora_scale !== undefined) {
+            strength.value = String(chosen.lora_scale);
+            setText(row, "[data-mc-voice-vibevoice-strength]",
+                    Number(chosen.lora_scale).toFixed(2));
+        }
+
+        // Create follows the installation, so installing the 7B in the Voice
+        // Box tab enables it here without a reload -- except while a preview is
+        // being made, when the button is that request's to give back.
+        const create = row.querySelector("[data-mc-voice-vibevoice-create]");
+        if (create && !vibevoiceCreating) create.disabled = !payload.cloning_ready;
+        const status = row.querySelector("[data-mc-voice-vibevoice-clone-status]");
+        if (status) {
+            if (!payload.cloning_ready) {
+                vibevoiceCloneSaid = payload.cloning_message || "";
+                status.textContent = vibevoiceCloneSaid;
+            } else if (vibevoiceCloneSaid && status.textContent === vibevoiceCloneSaid) {
+                // The sentence this paint wrote, and only that one: a line the
+                // clone form wrote ("Ready. Listen…") is somebody's answer.
+                vibevoiceCloneSaid = "";
+                status.textContent = "";
+            }
+        }
+    }
+
     // The poll used to be a fixed 1.5 seconds, forever, whatever happened. On a
     // WebUI that was refusing the request that meant a warning a second in the
     // console for as long as the page stayed open -- a hundred and thirty-six
@@ -4551,6 +4802,33 @@
         }, chosen);
     }
 
+    // VibeVoice's two kinds of voice, from its two models: the Realtime model's
+    // presets, English first and the experimental languages after, then the
+    // Voice Box samples the 7B speaks. Kokoro's accent split would draw none of
+    // them -- no preset is American or British -- so both lists ask here.
+    function vibevoiceGroups(voices, names) {
+        return [
+            [names[0], voices.filter(function (v) { return v.official && v.language === "en"; })],
+            [names[1], voices.filter(function (v) { return v.official && v.language !== "en"; })],
+            [names[2], voices.filter(function (v) { return !v.official; })],
+        ];
+    }
+
+    // Kokoro's bank is split by accent, and PocketTTS's official voices say
+    // only "en": a split that knew American and British alone drew none of
+    // them, in the list or in the character picker, so a Pocket installation
+    // listed its custom voices and nothing else. Every official voice lands
+    // somewhere -- the two accents first, then the rest under one heading.
+    function officialGroups(voices, names) {
+        const accented = function (v) { return v.language === "en-US" || v.language === "en-GB"; };
+        return [
+            [names[0], voices.filter(function (v) { return v.official && v.language === "en-US"; })],
+            [names[1], voices.filter(function (v) { return v.official && v.language === "en-GB"; })],
+            [names[2], voices.filter(function (v) { return v.official && !accented(v); })],
+            [names[3], voices.filter(function (v) { return !v.official; })],
+        ];
+    }
+
     function paintPicker(holder, payload) {
         if (!holder || !payload || !payload.ok) return;
         const list = holder.querySelector("[data-mc-voice-picker-list]");
@@ -4558,17 +4836,11 @@
         if (list) keepingPlace(list, function () {
             list.textContent = "";
             list.appendChild(defaultRow(chosen, payload));
-            const groups = [
-                ["American", (payload.voices || []).filter(function (v) {
-                    return v.official && v.language === "en-US";
-                })],
-                ["British", (payload.voices || []).filter(function (v) {
-                    return v.official && v.language === "en-GB";
-                })],
-                ["Custom", (payload.voices || []).filter(function (v) {
-                    return !v.official;
-                })],
-            ];
+            const groups = payload.engine === "vibevoice"
+                ? vibevoiceGroups(payload.voices || [], ["English", "Other languages",
+                                                         "Samples"])
+                : officialGroups(payload.voices || [], ["American", "British", "Official",
+                                                        "Custom"]);
             groups.forEach(function (group) {
                 if (!group[1].length) return;
                 const heading = document.createElement("div");
@@ -4860,13 +5132,14 @@
             // engine's headings over this engine's voices.
             const groups = payload.engine === "sopro"
                 ? [["Your voices", payload.voices]]
-                : [
-                    ["Official — American English",
-                     payload.voices.filter(function (v) { return v.official && v.language === "en-US"; })],
-                    ["Official — British English",
-                     payload.voices.filter(function (v) { return v.official && v.language === "en-GB"; })],
-                    ["Custom", payload.voices.filter(function (v) { return !v.official; })],
-                ];
+                : payload.engine === "vibevoice"
+                ? vibevoiceGroups(payload.voices, ["Preset voices — English",
+                                                   "Preset voices — other languages "
+                                                   + "(experimental)",
+                                                   "Voice Box samples"])
+                : officialGroups(payload.voices, ["Official — American English",
+                                                  "Official — British English", "Official",
+                                                  "Custom"]);
             groups.forEach(function (group) {
                 if (!group[1].length) return;
                 const heading = document.createElement("div");
@@ -5046,7 +5319,10 @@
         if (!panel) return found;
         Array.prototype.forEach.call(
             panel.querySelectorAll("[data-mc-voice-slider-input]"), function (input) {
-                found[input.getAttribute("data-mc-voice-slider-input")] = Number(input.value);
+                // A field that follows the model's own value is sent as that, not
+                // as the midpoint a range input shows when it has no number.
+                found[input.getAttribute("data-mc-voice-slider-input")] =
+                    input.dataset.mcVoiceUnset === "1" ? null : Number(input.value);
             });
         return found;
     }
@@ -5061,7 +5337,14 @@
                                               + cssEscape(name) + '"]');
             // Never over a slider somebody has hold of. A repaint that moved the
             // control under a finger would be a control that fights its user.
-            if (input && document.activeElement !== input) input.value = profile[name];
+            if (input && document.activeElement !== input) {
+                if (profile[name] === null || profile[name] === undefined) {
+                    input.dataset.mcVoiceUnset = "1";
+                } else {
+                    input.dataset.mcVoiceUnset = "";
+                    input.value = profile[name];
+                }
+            }
             showDeliveryValue(panel, name, profile[name]);
         });
         const summary = panel.querySelector("[data-mc-voice-delivery-summary]");
@@ -5073,6 +5356,7 @@
     // definition; this follows it, and the next paint from the server is what
     // corrects it if it ever drifts.
     function deliveryLabel(name, value) {
+        if (value === null || value === undefined || value === "") return "model default";
         const spec = deliveryControls[name];
         if (!spec) return String(value);
         const decimals = spec.decimals || 0;
@@ -5106,6 +5390,8 @@
         panel.addEventListener("input", function (event) {
             const input = event.target.closest("[data-mc-voice-slider-input]");
             if (!input) return;
+            // Moved, so it holds a number of its own from here on.
+            input.dataset.mcVoiceUnset = "";
             showDeliveryValue(panel, input.getAttribute("data-mc-voice-slider-input"),
                               input.value);
         });
@@ -5122,7 +5408,14 @@
                     function (input) {
                         const spec = deliveryControls[
                             input.getAttribute("data-mc-voice-slider-input")];
-                        if (spec) input.value = spec.default;
+                        if (!spec) return;
+                        // A default of "the model's own" is put back as that.
+                        if (spec.default === null || spec.default === undefined) {
+                            input.dataset.mcVoiceUnset = "1";
+                        } else {
+                            input.dataset.mcVoiceUnset = "";
+                            input.value = spec.default;
+                        }
                     });
                 saveDelivery(holder);
                 return;
@@ -6211,7 +6504,8 @@
     // that differs is where the caption goes.
     function recordingNote(form) {
         return form ? form.querySelector("[data-mc-voice-sopro-recording],"
-                                         + "[data-mc-voice-pocket-recording]") : null;
+                                         + "[data-mc-voice-pocket-recording],"
+                                         + "[data-mc-voice-vibevoice-recording]") : null;
     }
 
     function startSoproRecording(form, button) {
@@ -6229,13 +6523,15 @@
             if (trim) trim.hidden = true;
             button.textContent = "Stop recording";
             if (note) note.textContent = "Recording…";
-            // Stopped for them at the top of the supported window. A microphone
-            // left open by somebody who walked away is the failure this bound
-            // exists for, and twenty seconds is the longest reference Sopro
-            // uses anyway.
+            // Stopped for them at the top of this engine's window -- its own
+            // clone hints: twenty seconds on Sopro, fifteen on PocketTTS, a
+            // minute on VibeVoice. A microphone left open by somebody who
+            // walked away is the failure this bound exists for. It was Sopro's
+            // twenty for every engine, which gave VibeVoice's minute a
+            // twenty-one-second recorder.
             window.setTimeout(function () {
                 if (soproRecorder === state) stopSoproRecording(form, button);
-            }, (SOPRO_MAX_SECONDS + 1) * 1000);
+            }, ((clipWindow.max || SOPRO_MAX_SECONDS) + 1) * 1000);
         }).catch(function (error) {
             if (note) note.textContent = captureFailure(error);
         });
@@ -6645,6 +6941,197 @@
             button.disabled = false;
             say("That voice could not be created.");
         });
+    }
+
+    // -- VibeVoice: making a voice from a recording ---------------------------- //
+    //
+    // Pocket's workspace, and the same engine-neutral recorder, trimmer and WAV
+    // encoder, reused as they are. What is VibeVoice's is where it lives -- in
+    // its panel, among the settings -- and what the preview costs: Create asks
+    // for a turn on a graphics card, may have to load the 7B there, and then
+    // reads a line in the new voice. That is minutes rather than seconds the
+    // first time, so the one request has a deadline long enough for all three
+    // and no longer, a second press waits for the first rather than asking for
+    // a second card turn, and the status line says why it is taking a while.
+    //
+    // Saving makes the recording a Voice Box sample, which is what a cloned
+    // VibeVoice voice is. Nothing is written before Save; Discard forgets it.
+
+    let vibevoicePreview = null;
+    let vibevoiceCreating = null;
+    const VIBEVOICE_PREVIEW_DEADLINE_MS = 6 * 60 * 1000;
+
+    function wireVibeVoiceClone(holder, row) {
+        const form = row.querySelector("[data-mc-voice-vibevoice-form]");
+        if (!form || form.dataset.mcVoiceWired === "1") return;
+        form.dataset.mcVoiceWired = "1";
+
+        const say = function (text) {
+            setText(row, "[data-mc-voice-vibevoice-clone-status]", text);
+        };
+
+        const record = form.querySelector("[data-mc-voice-vibevoice-record]");
+        if (record) {
+            record.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (soproRecorder) {
+                    stopSoproRecording(form, record);
+                    return;
+                }
+                startSoproRecording(form, record);
+            });
+        }
+        const file = form.querySelector("[data-mc-voice-vibevoice-file]");
+        if (file) {
+            file.addEventListener("change", function () {
+                const chosen = file.files && file.files[0];
+                if (!chosen) return;
+                loadSoproClip(form, chosen, chosen.name || "that file");
+            });
+        }
+        const create = form.querySelector("[data-mc-voice-vibevoice-create]");
+        if (create) {
+            create.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                createVibeVoiceVoice(holder, row, form, create, say);
+            });
+        }
+
+        const preview = row.querySelector("[data-mc-voice-vibevoice-preview]");
+        if (preview) {
+            const play = preview.querySelector("[data-mc-voice-vibevoice-preview-play]");
+            if (play) {
+                play.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    playVibeVoicePreview();
+                });
+            }
+            const save = preview.querySelector("[data-mc-voice-vibevoice-preview-save]");
+            if (save) {
+                save.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    if (!vibevoicePreview || save.disabled) return;
+                    save.disabled = true;
+                    answerWithin(ROUTES.cloneSave,
+                                 jsonBody({token: vibevoicePreview.token,
+                                           engine: engineOf(holder)}, holder),
+                                 VIBEVOICE_DEADLINE_MS,
+                                 "The WebUI did not answer in time, so the voice may not "
+                                 + "have been saved.").then(function (payload) {
+                        save.disabled = false;
+                        if (!payload || !payload.ok) {
+                            // Left where it is: a Save the server refused has not
+                            // thrown the recording away.
+                            say((payload && payload.error) || "That voice could not be saved.");
+                            return;
+                        }
+                        const kept = vibevoicePreview ? vibevoicePreview.name : "";
+                        vibevoicePreview = null;
+                        showVibeVoicePreview(row, form);
+                        say("Saved " + kept + ". It is a sample in the Voice Box library "
+                            + "too.");
+                        const voices = voicesHolder();
+                        if (voices) applyVoices(voices, payload);
+                        pollVibeVoice(holder, row, 0);
+                    });
+                });
+            }
+            const discard = preview.querySelector(
+                "[data-mc-voice-vibevoice-preview-discard]");
+            if (discard) {
+                discard.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    const token = vibevoicePreview ? vibevoicePreview.token : "";
+                    // Cleared here whatever the server says: Discard is the
+                    // person's decision, and nothing was written to undo.
+                    vibevoicePreview = null;
+                    showVibeVoicePreview(row, form);
+                    say("Discarded.");
+                    answerWithin(ROUTES.cloneDiscard,
+                                 jsonBody({token: token, engine: engineOf(holder)}, holder),
+                                 VIBEVOICE_DEADLINE_MS, "");
+                });
+            }
+        }
+        wireTrim(form, holder);
+    }
+
+    function showVibeVoicePreview(row, form) {
+        const found = row.querySelector("[data-mc-voice-vibevoice-preview]");
+        if (!found) return;
+        found.hidden = !vibevoicePreview;
+        const note = found.querySelector("[data-mc-voice-vibevoice-preview-note]");
+        if (note) {
+            note.textContent = vibevoicePreview
+                ? ("“" + vibevoicePreview.name + "” is ready to listen to. "
+                   + "It is not saved yet.")
+                : "";
+        }
+        if (!vibevoicePreview && form) {
+            const trim = form.querySelector("[data-mc-voice-trim]");
+            if (trim) trim.hidden = true;
+        }
+    }
+
+    function playVibeVoicePreview() {
+        if (!vibevoicePreview || !vibevoicePreview.audio) return;
+        unlock();
+        play(base64ToBuffer(vibevoicePreview.audio)).catch(function () { /* silent */ });
+    }
+
+    // One preview at a time. A second press while the first is on its way does
+    // not ask for a second card turn: it is handed the first one's answer.
+    function createVibeVoiceVoice(holder, row, form, button, say) {
+        if (vibevoiceCreating) return vibevoiceCreating;
+        const name = form.querySelector("[data-mc-voice-vibevoice-name]");
+        if (!name || !(name.value || "").trim()) {
+            say("Give the voice a name.");
+            return Promise.resolve(null);
+        }
+        if (clipDuration() <= 0) {
+            say("Choose an audio file or record something first.");
+            return Promise.resolve(null);
+        }
+        const chosen = clipDuration();
+        if (chosen < clipWindow.min || chosen > clipWindow.max) {
+            say(clipWindow.label + " clones from " + clipWindow.min + " to "
+                + clipWindow.max + " seconds. " + chosen.toFixed(1) + " s is selected.");
+            return Promise.resolve(null);
+        }
+        const wav = clipToWav();
+        if (!wav) {
+            say("That selection is empty.");
+            return Promise.resolve(null);
+        }
+        button.disabled = true;
+        say("Preparing the voice… VibeVoice asks for its turn on the graphics card, and the "
+            + "first voice can take a minute or two while VibeVoice 7B loads there.");
+        const body = new FormData();
+        body.append("name", name.value);
+        body.append("engine", engineOf(holder));
+        body.append("reference", new Blob([wav], {type: "audio/wav"}), "reference.wav");
+        vibevoiceCreating = answerWithin(
+            ROUTES.clonePreview, {headers: headers({}, holder), body: body},
+            VIBEVOICE_PREVIEW_DEADLINE_MS,
+            "VibeVoice did not answer within six minutes, so this page stopped waiting. Its "
+            + "card may still be busy; try again in a moment.").then(function (payload) {
+            vibevoiceCreating = null;
+            button.disabled = false;
+            if (!payload || !payload.ok) {
+                say((payload && payload.error) || "That voice could not be created.");
+                return payload;
+            }
+            // The name, the file and the selection stay where they are: the next
+            // thing that happens may well be "try a different ten seconds".
+            vibevoicePreview = {token: payload.token || "",
+                                name: payload.name || name.value,
+                                audio: payload.audio || ""};
+            say("Ready. Listen, then Save voice or Discard.");
+            showVibeVoicePreview(row, form);
+            playVibeVoicePreview();
+            return payload;
+        });
+        return vibevoiceCreating;
     }
 
     function wireLab(holder) {
