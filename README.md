@@ -5573,8 +5573,22 @@ the card (each named, and marked when it is the image model's card or WanGP's),
 **diffusion steps** (1–50, ten by default), **CFG** (1.0–3.0, 1.3 by default),
 a **seed** (blank for a different one each time — drawn when the render is
 queued and written on its output, so every render has a seed that makes it
-again), **max new tokens** (blank for the model's own limit), and the four
-**speaker** slots, each holding one sample.
+again), **max new tokens** (blank for the model's own limit), **sampling**
+with its **temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by
+default, and the four **speaker** slots, each holding one sample.
+
+Sampling is off by default, and then temperature and top-p are greyed out and
+not used. Off, the model makes its own most likely choices, as its publisher
+ships it. VibeVoice has two parts: the voice — tone, texture, how each word
+comes out, which the seed, CFG and steps shape — and a pacer that decides,
+every eighth of a second of speech, whether to keep talking, take a break or
+stop. Sampling only touches the pacer: with it on, pauses land in different
+places and lines are timed a little differently from take to take, and set too
+high it can stop before the script ends or run on past it (the output then
+says it reached its token budget). The seed still makes a sampled take again
+exactly. Temperature and top-p keep their values while sampling is off, so
+turning it back on brings them back.
+
 An edit marks the configuration *Save •* until you save it, and Render never
 saves for you: an unsaved configuration is sent along with the render as it
 stands. The card and model you pick become the defaults for the next
@@ -5598,7 +5612,8 @@ lands, and the list — only the list — scrolls to it.
 The **infotext** is the render's fingerprint, written the way a WebUI writes an
 image's: the prompt as it was, then one line — `Steps: 10, CFG scale: 1.3,
 Seed: 1234567, Model: vibevoice-7b, Speaker 1: Ada, Speaker 2: Brook, Sections:
-2, Length: 41.3 s, Render time: 95.0 s`. **Copy** puts it on the clipboard. It
+2, Length: 41.3 s, Render time: 95.0 s`, with `Temperature: 0.95, Top-p: 0.95`
+after the seed when the render sampled. **Copy** puts it on the clipboard. It
 is also written into the file itself, so a render saved or downloaded says what
 made it wherever it goes: in the MP3's ID3 comment (with the whole record as
 JSON under `voicebox`), or in a WAV's `INFO` chunk. A render made before seeds

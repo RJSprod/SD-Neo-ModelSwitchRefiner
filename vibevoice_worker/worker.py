@@ -127,6 +127,10 @@ the handshake so the parent can refuse a build that says otherwise."""
 MAX_SPEAKERS = 4
 """How many distinct speakers one script may have. The model's own limit."""
 
+SAMPLING_TEMPERATURE = 0.95
+SAMPLING_TOP_P = 0.95
+"""What a request that asks to sample without saying how is given."""
+
 MIN_NEW_TOKENS = 512
 TOKENS_PER_TEXT_TOKEN = 8
 """The generation budget when the caller sets no ``max_new_tokens``.
@@ -494,9 +498,10 @@ class RenderRequest:
     """
 
     __slots__ = ("job", "text", "speakers", "voices", "cfg_scale", "seed",
-                 "max_new_tokens", "steps")
+                 "max_new_tokens", "steps", "sampling", "temperature", "top_p")
 
-    def __init__(self, job, text, speakers, voices, cfg_scale, seed, max_new_tokens, steps):
+    def __init__(self, job, text, speakers, voices, cfg_scale, seed, max_new_tokens, steps,
+                 sampling=False, temperature=None, top_p=None):
         self.job = job
         self.text = text
         self.speakers = speakers
@@ -505,6 +510,9 @@ class RenderRequest:
         self.seed = seed
         self.max_new_tokens = max_new_tokens
         self.steps = steps
+        self.sampling = bool(sampling)
+        self.temperature = temperature
+        self.top_p = top_p
 
     @classmethod
     def parse(cls, header: dict, payload: bytes) -> "RenderRequest":
@@ -513,11 +521,23 @@ class RenderRequest:
         max_new_tokens = _optional_int(header.get("max_new_tokens"), "max_new_tokens")
         if max_new_tokens == 0:
             max_new_tokens = None
+        # Sampling only when asked for in so many words: anything but ``true``
+        # is the model's own greedy choice, which is what upstream ships.
+        sampling = header.get("sampling") is True
+        temperature = top_p = None
+        if sampling:
+            temperature = _float(header.get("temperature"), SAMPLING_TEMPERATURE)
+            top_p = _float(header.get("top_p"), SAMPLING_TOP_P)
+            if not 0.0 < temperature <= 2.0:
+                raise Refusal("the temperature must be above 0 and at most 2")
+            if not 0.0 < top_p <= 1.0:
+                raise Refusal("top-p must be above 0 and at most 1")
         return cls(job=str(header.get("job") or ""), text=text, speakers=speakers,
                    voices=voices, cfg_scale=_float(header.get("cfg_scale"), 1.3),
                    seed=_optional_int(header.get("seed"), "the seed"),
                    max_new_tokens=max_new_tokens,
-                   steps=_optional_int(header.get("steps"), "the step count") or 0)
+                   steps=_optional_int(header.get("steps"), "the step count") or 0,
+                   sampling=sampling, temperature=temperature, top_p=top_p)
 
 
 class Progress:
@@ -769,7 +789,7 @@ class Engine:
                 max_new_tokens=max_new_tokens,
                 cfg_scale=float(request.cfg_scale),
                 tokenizer=self.processor.tokenizer,
-                generation_config={"do_sample": False},
+                generation_config=_generation(request),
                 verbose=False,
                 stop_check_fn=cancelled.is_set,
                 audio_streamer=progress,
@@ -1130,6 +1150,21 @@ def _do_render(worker: Worker, reply, request_id, request: RenderRequest,
     answer = {"ok": True}
     answer.update(found)
     reply(request_id, answer, audio)
+
+
+def _generation(request: "RenderRequest") -> dict:
+    """The generation config ``generate`` is handed.
+
+    Greedy unless the request asks to sample. The model's language part only
+    chooses among a handful of control tokens -- keep speaking, end a stretch
+    of speech, stop -- while the voice itself comes from the diffusion head,
+    so temperature and top-p change the pacing from take to take, and a
+    seeded render samples the same way every time.
+    """
+    if not request.sampling:
+        return {"do_sample": False}
+    return {"do_sample": True, "temperature": float(request.temperature),
+            "top_p": float(request.top_p)}
 
 
 def _last_token(sequences) -> "int | None":

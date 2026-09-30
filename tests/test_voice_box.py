@@ -725,6 +725,7 @@ class TestTheRecordedConfiguration:
         assert record == {"id": ready["configuration"]["id"], "name": "Studio",
                           "model_id": "vibevoice-7b", "card_uuid": CARD, "steps": 10,
                           "cfg_scale": 1.3, "seed": found["seed"], "max_new_tokens": None,
+                          "sampling": False, "temperature": 0.95, "top_p": 0.95,
                           "speakers": {"1": first["id"], "2": second["id"]}}, \
             "every slot is kept, used by this script or not"
 
@@ -979,3 +980,88 @@ class TestTheQueue:
         monkeypatch.setattr(box._service, "pending", pending)
         second = box.render(pipeline, "Speaker 1: Two", configuration)
         assert (first["name"], second["name"]) == ("Trailer 1", "Trailer 2")
+
+
+# --------------------------------------------------------------------------- #
+# Sampling
+# --------------------------------------------------------------------------- #
+
+
+class TestSampling:
+    def test_a_configuration_samples_only_when_asked_and_keeps_its_values_either_way(self):
+        made = box.save_configuration({"name": "Warm", "sampling": True, "temperature": 0.8,
+                                       "top_p": 0.9})
+        assert (made["sampling"], made["temperature"], made["top_p"]) == (True, 0.8, 0.9)
+        off = box.save_configuration({"id": made["id"], "sampling": False})
+        assert (off["sampling"], off["temperature"], off["top_p"]) == (False, 0.8, 0.9), \
+            "turning sampling off keeps the values for turning it on again"
+        assert box.save_configuration({"name": "Plain"})["sampling"] is False
+
+    @pytest.mark.parametrize("asked", ["true", 1, "yes", None])
+    def test_only_a_real_true_turns_sampling_on(self, asked):
+        assert box.save_configuration({"sampling": asked})["sampling"] is False
+
+    @pytest.mark.parametrize("values, sentence", [
+        ({"temperature": 0.05}, "Temperature must be between 0.1 and 2"),
+        ({"temperature": 2.5}, "Temperature must be between 0.1 and 2"),
+        ({"top_p": 0}, "Top-p must be between 0.05 and 1"),
+        ({"top_p": 1.2}, "Top-p must be between 0.05 and 1"),
+    ])
+    def test_values_out_of_range_are_refused(self, values, sentence):
+        with pytest.raises(box.VoiceBoxError, match=sentence):
+            box.save_configuration(dict(values, sampling=True))
+
+    def test_a_configuration_saved_before_sampling_existed_reads_with_the_defaults(self):
+        identifier = "0123456789abcdef"
+        path = box._configuration_path(identifier)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"id": identifier, "name": "Old", "model_id": "",
+                                    "card_uuid": CARD, "steps": 10, "cfg_scale": 1.3,
+                                    "seed": None, "max_new_tokens": None, "speakers": {},
+                                    "created": 1.0, "updated": 1.0}), "utf-8")
+        for found in (box.configuration(identifier), box.configurations()[0]):
+            assert (found["sampling"], found["temperature"], found["top_p"]) == \
+                (False, 0.95, 0.95)
+        saved = box.save_configuration({"id": identifier, "steps": 12})
+        assert saved["sampling"] is False and saved["steps"] == 12
+
+    def test_a_sampling_render_sends_and_records_its_values(self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"], "sampling": True,
+                                "temperature": 0.8, "top_p": 0.9})
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.\n[pause]\nSpeaker 2: Yo.",
+                           ready["configuration"]["id"])
+        entry = box.output(settled(found["id"])["output_id"])
+
+        for request in box._runtime().renders:
+            assert (request.sampling, request.temperature, request.top_p) == (True, 0.8, 0.9)
+            assert request.seed == found["seed"], "a sampled render is seeded like any other"
+        render = entry["render"]
+        assert (render["sampling"], render["temperature"], render["top_p"]) == (True, 0.8, 0.9)
+        configured = render["configuration"]
+        assert (configured["sampling"], configured["temperature"], configured["top_p"]) == \
+            (True, 0.8, 0.9)
+        assert f"Seed: {found['seed']}, Temperature: 0.8, Top-p: 0.9, Model:" in entry["infotext"]
+
+    def test_a_greedy_render_sends_no_values_and_its_infotext_says_none(self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"], "sampling": False,
+                                "temperature": 0.8, "top_p": 0.9})
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        entry = box.output(settled(found["id"])["output_id"])
+
+        request, = box._runtime().renders
+        assert (request.sampling, request.temperature, request.top_p) == (False, None, None)
+        render = entry["render"]
+        assert (render["sampling"], render["temperature"], render["top_p"]) == \
+            (False, None, None)
+        assert (render["configuration"]["temperature"], render["configuration"]["top_p"]) == \
+            (0.8, 0.9), "the configuration's own values, for Reuse settings"
+        assert "Temperature" not in entry["infotext"] and "Top-p" not in entry["infotext"]
+
+    def test_unsaved_sampling_values_are_rendered_as_shown(self, ready):
+        inline = dict(ready["configuration"], sampling=True, temperature=1.2, top_p=0.5)
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"], inline=inline)
+        settled(found["id"])
+        request, = box._runtime().renders
+        assert (request.sampling, request.temperature, request.top_p) == (True, 1.2, 0.5)

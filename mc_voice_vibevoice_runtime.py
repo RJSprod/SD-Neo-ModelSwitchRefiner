@@ -132,7 +132,9 @@ class RenderJob:
 
     ``script`` is a list of ``(speaker, text)`` pairs, speakers numbered from
     one as the user numbered them; ``voices`` maps each speaker to
-    ``(float32 little-endian mono PCM bytes, rate)``.
+    ``(float32 little-endian mono PCM bytes, rate)``. ``temperature`` and
+    ``top_p`` are sent only with ``sampling``; without it the model makes its
+    own greedy choices, as upstream ships it.
     """
 
     id: str
@@ -142,6 +144,9 @@ class RenderJob:
     steps: int = 10
     seed: "int | None" = None
     max_new_tokens: "int | None" = None
+    sampling: bool = False
+    temperature: "float | None" = None
+    top_p: "float | None" = None
 
 
 @dataclass
@@ -719,6 +724,9 @@ def _render_frame(job: RenderJob) -> "tuple[dict, bytes]":
         "seed": None if job.seed is None else int(job.seed),
         "max_new_tokens": None if not job.max_new_tokens else int(job.max_new_tokens),
         "steps": int(job.steps or 0),
+        "sampling": bool(job.sampling),
+        "temperature": float(job.temperature) if job.sampling and job.temperature else None,
+        "top_p": float(job.top_p) if job.sampling and job.top_p else None,
     }
     return header, b"".join(chunks)
 

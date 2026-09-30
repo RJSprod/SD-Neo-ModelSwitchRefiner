@@ -673,6 +673,43 @@ class TestRenderingCallsUpstreamExactly:
         reply, _audio = engine.render(request_for(), threading.Event())
         assert reply["capped"] is True
 
+    def test_a_sampling_request_samples_with_its_temperature_and_top_p(self, tmp_path):
+        """Greedy unless asked: the model's language part only picks control
+        tokens, so sampling varies the pacing, and the seed still fixes it."""
+        torch = FakeTorch()
+        engine = BoundEngine(torch)
+        engine.load(str(tmp_path), 10)
+        engine.render(request_for(sampling=True, temperature=0.8, top_p=0.9, seed=5),
+                      threading.Event())
+        engine.render(request_for(sampling=True), threading.Event())
+        first, second = FakeModel.made[0].generate_calls
+        assert first["generation_config"] == {"do_sample": True, "temperature": 0.8,
+                                              "top_p": 0.9}
+        assert second["generation_config"] == {
+            "do_sample": True, "temperature": worker.SAMPLING_TEMPERATURE,
+            "top_p": worker.SAMPLING_TOP_P}, "sampling without values takes the defaults"
+        assert torch.seeds == [5], "a sampled render is seeded like any other"
+
+    @pytest.mark.parametrize("asked", [None, False, "true", 1, "yes"])
+    def test_anything_but_true_is_the_models_own_greedy_choice(self, tmp_path, asked):
+        engine = BoundEngine()
+        engine.load(str(tmp_path), 10)
+        engine.render(request_for(sampling=asked, temperature=0.8, top_p=0.9),
+                      threading.Event())
+        assert FakeModel.made[0].generate_calls[0]["generation_config"] == {"do_sample": False}
+
+    @pytest.mark.parametrize("values, sentence", [
+        ({"temperature": 0}, "the temperature must be above 0 and at most 2"),
+        ({"temperature": 2.5}, "the temperature must be above 0 and at most 2"),
+        ({"top_p": 0}, "top-p must be above 0 and at most 1"),
+        ({"top_p": 1.5}, "top-p must be above 0 and at most 1"),
+        ({"temperature": "warm"}, "a number in the request is not a number"),
+    ])
+    def test_sampling_values_out_of_range_are_refused_in_a_sentence(self, values, sentence):
+        with pytest.raises(worker.Refusal) as raised:
+            request_for(sampling=True, **values)
+        assert str(raised.value) == sentence
+
     def test_a_render_that_used_its_whole_budget_is_capped(self, tmp_path):
         """Upstream's ``generate`` never raises ``reach_max_step_sample`` when
         the budget runs out -- its loop's range ends one step before the check
