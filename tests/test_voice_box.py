@@ -1011,6 +1011,17 @@ class TestSampling:
         with pytest.raises(box.VoiceBoxError, match=sentence):
             box.save_configuration(dict(values, sampling=True))
 
+    def test_with_sampling_off_an_unused_value_is_held_in_range_rather_than_refused(self):
+        """Off, the page greys the fields out: a value typed out of range before
+        sampling was switched off could not be corrected there, and every Save
+        and Render would be refused for a number nothing uses."""
+        found = box.save_configuration({"sampling": False, "temperature": 5, "top_p": "x"})
+        assert (found["sampling"], found["temperature"], found["top_p"]) == (False, 2.0, 0.95)
+        low = box.save_configuration({"sampling": False, "temperature": 0.01, "top_p": 0})
+        assert (low["temperature"], low["top_p"]) == (0.1, 0.05)
+        with pytest.raises(box.VoiceBoxError, match="Temperature must be between"):
+            box.save_configuration({"sampling": True, "temperature": 5})
+
     def test_a_configuration_saved_before_sampling_existed_reads_with_the_defaults(self):
         identifier = "0123456789abcdef"
         path = box._configuration_path(identifier)

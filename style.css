@@ -7276,16 +7276,21 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 
    The page fits the window. The script writes the root's height in pixels --
    the room the window leaves it -- and the root is a column: the pipeline
-   bar, then the stages. Every stage is a head that stays and a body whose
-   long list takes the room left and scrolls inside the stage, so the page
-   itself never scrolls because of the Voice Box. `data-layout` on the root,
-   set by the script from the root's width, picks the arrangement: "columns"
-   (the four stages side by side, a connector glyph between them) or, below
-   900 px, "stack" (one stage to a screen, snapped as the stages scroll).
-   Waveforms are canvases that take their ink from `color`, which is why no
-   rule below paints one. Nothing here draws above the host's dialogs: the
-   section sets no z-index at all, so Mini Paint's dialog layer (2000) and the
-   assistant's panel (1200) stay above everything Voice Box shows. */
+   bar, then the stages. Every stage is a head that stays and a body under it,
+   so the page itself never scrolls because of the Voice Box. `data-layout` on
+   the root, set by the script from the root's width, picks the arrangement:
+   "columns" (the four stages side by side, a connector glyph between them,
+   each stage's long list taking the room left and scrolling inside it) or,
+   below 900 px, "stack" (the stages as cards a screen wide, swiped left and
+   right with a stage bar over them; each card's body is its one vertical
+   scroller and nothing in it scrolls on its own). A stage's head stays at
+   the top by being outside the body that scrolls rather than sticky inside
+   it: the rows that scroll under a sticky head are positioned (their tint
+   edge needs it), so they would be painted over it, and only a z-index could
+   lift it. Waveforms are canvases that take their ink from `color`, which is
+   why no rule below paints one. Nothing here draws above the host's dialogs:
+   the section sets no z-index at all, so Mini Paint's dialog layer (2000) and
+   the assistant's panel (1200) stay above everything Voice Box shows. */
 
 #mc-voice-box {
     --mc-voice-box-tint-saturation: 40%;
@@ -7393,6 +7398,31 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     color: var(--button-primary-text-color, var(--background-fill-primary, inherit));
 }
 
+/* A transport's buttons (Play/Pause, From the start, Stop) and a Loop toggle:
+   square, as tall as the section's other buttons, the picture 16 px in the
+   button's own colour. */
+#mc-voice-box .mc-voice-box-transport {
+    align-items: center;
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 0.2em;
+}
+
+#mc-voice-box .mc-voice-box-icon {
+    flex: 0 0 auto;
+    height: 2.2em;
+    min-width: 2.2em;
+    padding: 0;
+    width: 2.2em;
+}
+
+#mc-voice-box .mc-voice-box-icon svg {
+    display: block;
+    height: 16px;
+    pointer-events: none;
+    width: 16px;
+}
+
 #mc-voice-box .mc-voice-box-render {
     background: var(--button-primary-background-fill, var(--color-accent, currentColor));
     border-color: var(--button-primary-border-color, var(--color-accent, currentColor));
@@ -7442,8 +7472,8 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     padding: 0.75em;
 }
 
-/* A stage's head stays; the Outputs stage's holds Install, Render and the
-   status line under them. */
+/* A stage's head stays; the Configuration stage's holds Install, Render and
+   the status line under them. */
 #mc-voice-box .mc-voice-box-stage-head {
     align-items: center;
     display: flex;
@@ -7503,15 +7533,18 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     content: "\2192";
 }
 
-/* Stacked, below 900 px: the stages are a column that scrolls, each exactly
-   as tall as it, snapped one stage at a time -- up for the next stage, down
-   for the one before. A list inside a stage still scrolls first, and carries
-   on to the next stage when it reaches its end. */
+/* Below 900 px: the stages are cards side by side, each exactly as wide and
+   as tall as the row they sit in, swiped left and right and snapped a card at
+   a time. Up and down belongs to the card in view, whose body is its one
+   vertical scroller: the lists in it take the height they need (the rules
+   further down), so nothing scrolls inside anything. A sideways drag is the
+   cards' everywhere but on a control that says otherwise with touch-action. */
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stages {
-    flex-direction: column;
-    overflow-x: hidden;
-    overflow-y: auto;
-    scroll-snap-type: y mandatory;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
 }
 
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stage {
@@ -7528,8 +7561,38 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     margin-left: 0;
 }
 
+/* The stage bar, between the pipeline bar and the cards, and only over the
+   cards: a press goes to a stage, and the stage in view is the one marked. */
+#mc-voice-box .mc-voice-box-stagebar {
+    display: none;
+}
+
+#mc-voice-box[data-layout="stack"] .mc-voice-box-stagebar {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.3em;
+}
+
+#mc-voice-box .mc-voice-box-stagebar-button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 0.3em;
+    white-space: nowrap;
+}
+
+#mc-voice-box .mc-voice-box-stagebar-button[aria-current="true"] {
+    background: var(--color-accent, currentColor);
+    border-color: var(--color-accent, currentColor);
+    color: var(--button-primary-text-color, var(--background-fill-primary, inherit));
+    font-weight: 600;
+}
+
+/* On the cards the script box grows with its words (the script writes its
+   height), so it is not a second scroller inside the stage. */
 #mc-voice-box[data-layout="stack"] .mc-voice-box-prompt {
-    height: 7em;
+    min-height: 7em;
+    overflow: hidden;
+    resize: none;
 }
 
 /* -- rows, lists, captions ------------------------------------------------- */
@@ -7571,8 +7634,12 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     font-style: italic;
 }
 
-/* Waveforms are canvases in the element's own colour. `touch-action: none` on
-   the trimmer's is what lets a finger drag a handle instead of scrolling. */
+/* Waveforms are canvases in the element's own colour. A waveform whose
+   sideways drag is its own -- the trimmer's, for its handles, and the active
+   player's, which the script marks -- says `touch-action: pan-y`: a finger
+   moving along it drags, one moving up or down still scrolls, and on a phone
+   no sideways swipe over it changes the card. Every other waveform leaves
+   both to the page. A range input keeps its thumb the same way. */
 #mc-voice-box .mc-voice-box-wave {
     border: 1px solid var(--border-color-primary, currentColor);
     border-radius: var(--radius-sm, 4px);
@@ -7584,7 +7651,11 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #mc-voice-box .mc-voice-box-trimmer-wave {
     cursor: col-resize;
     height: 120px;
-    touch-action: none;
+    touch-action: pan-y;
+}
+
+#mc-voice-box input[type="range"] {
+    touch-action: pan-y;
 }
 
 #mc-voice-box .mc-voice-box-sample-wave {
@@ -7641,13 +7712,29 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     flex: 0 0 auto;
 }
 
-/* `position` makes the list the lanes' offset parent, which is what the
-   script scrolls a selected lane into view by. */
 #mc-voice-box .mc-voice-box-lanes {
     flex: 1 1 0;
     min-height: 9em;
     overflow-y: auto;
-    position: relative;
+}
+
+/* On a phone's cards none of them scrolls: each takes the height it needs,
+   and the card's body is what scrolls -- the infotext included, which side
+   by side keeps a few lines with a scroll of its own. */
+#mc-voice-box[data-layout="stack"] .mc-voice-box-library,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-prompt-lists,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-history,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-favourites,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-samples,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-history-list,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-favourites-list,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-configuration-form,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-lanes,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-infotext {
+    flex: 0 0 auto;
+    max-height: none;
+    min-height: 0;
+    overflow: visible;
 }
 
 /* -- INPUT ----------------------------------------------------------------- */
@@ -7840,6 +7927,33 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     width: auto;
 }
 
+/* A field across the whole row: Sampling, with its hint under it. */
+#mc-voice-box .mc-voice-box-field-wide {
+    grid-column: 1 / -1;
+}
+
+#mc-voice-box .mc-voice-box-field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15em;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-field-hint {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-xs, 0.8em);
+}
+
+/* A field that means nothing while its checkbox is off -- Temperature and
+   Top-p without Sampling -- is greyed, and its input takes no press. */
+#mc-voice-box .mc-voice-box-field[data-disabled="true"] {
+    opacity: 0.55;
+}
+
+#mc-voice-box .mc-voice-box-field-input:disabled {
+    cursor: not-allowed;
+}
+
 #mc-voice-box .mc-voice-box-speakers {
     display: flex;
     flex-direction: column;
@@ -7868,8 +7982,6 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-
-/* -- OUTPUTS --------------------------------------------------------------- */
 
 /* The one status line: its words on one line, cut with an ellipsis (the whole
    of them is its title), and the buttons of whatever it is saying. */
@@ -7908,6 +8020,8 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     flex: 0 0 auto;
     gap: 0.3em;
 }
+
+/* -- OUTPUTS --------------------------------------------------------------- */
 
 /* A lane is pressed to select it; the selected one is outlined in the accent
    and shows everything else it has. */

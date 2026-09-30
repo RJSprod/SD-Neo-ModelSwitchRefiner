@@ -204,6 +204,19 @@ class TestTheStylesheetSection:
         above everything the tab draws."""
         assert "z-index" not in self._rules()
 
+    def test_only_the_trimmer_and_a_range_input_keep_their_sideways_drags(self):
+        """On a phone a sideways swipe changes the card everywhere except on a
+        control whose drag is sideways: the trimmer's waveform (its handles)
+        and a range input, here -- the active player's waveform gets the same
+        `pan-y` from the script. No other rule names a touch-action, so every
+        other waveform leaves the swipe to the cards."""
+        declared = re.findall(r"([^{}]+)\{[^}]*?touch-action:\s*([^;]+);", self._rules())
+
+        assert sorted((selector.strip(), value.strip()) for selector, value in declared) == [
+            ("#mc-voice-box .mc-voice-box-trimmer-wave", "pan-y"),
+            ('#mc-voice-box input[type="range"]', "pan-y"),
+        ]
+
 
 @pytest.mark.parametrize("attribute", ["data-mc-voice-key", "data-mc-voice-box-prefix",
                                        "data-mc-voice-box-boot"])

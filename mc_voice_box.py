@@ -649,12 +649,35 @@ def _clean_speakers(value) -> dict:
     return found
 
 
+def _sampling_value(value, bounds: tuple, what: str, strict: bool, fallback: float) -> float:
+    """Temperature or top-p: checked while sampling is on, held in range while it is off.
+
+    Off, the page greys the field out, so a value typed out of range before
+    sampling was switched off could not be corrected there, and refusing it
+    would refuse every Save and Render until sampling was switched on again to
+    fix a number that is not being used. It is brought into range instead; a
+    value that is not a number goes back to its default.
+    """
+    if strict:
+        return _bounded_float(value, *bounds, what=what)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if number != number:
+        return fallback
+    return round(min(max(number, bounds[0]), bounds[1]), 3)
+
+
 def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
     base = dict(existing or CONFIGURATION_DEFAULTS)
     merged = dict(base)
     for key in CONFIGURATION_DEFAULTS:
         if key in values:
             merged[key] = values[key]
+    # Only a real ``true``, as the worker reads it: anything else is the
+    # model's own greedy choice.
+    sampling = merged.get("sampling") is True
     return {
         "name": _title(merged.get("name"), base.get("name") or "Configuration"),
         "model_id": str(merged.get("model_id") or "")[:64],
@@ -664,12 +687,12 @@ def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
         "seed": _bounded_int(merged.get("seed"), 0, SEED_MAX, what="The seed", none_ok=True),
         "max_new_tokens": _bounded_int(merged.get("max_new_tokens"), 1, TOKENS_MAX,
                                        what="Max new tokens", none_ok=True),
-        # Only a real ``true``, as the worker reads it: anything else is the
-        # model's own greedy choice.
-        "sampling": merged.get("sampling") is True,
-        "temperature": _bounded_float(merged.get("temperature"), *TEMPERATURE_RANGE,
-                                      what="Temperature"),
-        "top_p": _bounded_float(merged.get("top_p"), *TOP_P_RANGE, what="Top-p"),
+        "sampling": sampling,
+        "temperature": _sampling_value(merged.get("temperature"), TEMPERATURE_RANGE,
+                                       "Temperature", sampling,
+                                       CONFIGURATION_DEFAULTS["temperature"]),
+        "top_p": _sampling_value(merged.get("top_p"), TOP_P_RANGE, "Top-p", sampling,
+                                 CONFIGURATION_DEFAULTS["top_p"]),
         "speakers": _clean_speakers(merged.get("speakers")),
     }
 

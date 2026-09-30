@@ -26,20 +26,28 @@
 // measured and written in pixels on the root itself (a percentage height
 // inside Gradio's containers resolves to auto -- Mini Paint NEO's lesson), each
 // long list scrolls inside its own stage, and below a root width of 900 px the
-// stages stack, one screen each, with vertical scroll-snap between them;
-// `data-layout` ("columns" or "stack") on the root says which, for the
-// stylesheet. Nothing observes the root's size, because the root is the box
-// this file resizes: the height is worked out again on the window's and the
-// visual viewport's resize, an orientation change, the tab coming into view
-// (an IntersectionObserver, which watches visibility, not size), the fonts
-// arriving and the first data paint -- once per animation frame, and written
-// only when it changed.
+// stages are cards side by side, one screen wide each, swiped left and right
+// with horizontal scroll-snap and a stage bar over them that marks the one in
+// view; there each stage's body is its one vertical scroller and nothing in
+// it scrolls on its own. `data-layout` ("columns" or "stack") on the root says
+// which, for the stylesheet. Nothing observes the root's size, because the
+// root is the box this file resizes: the height is worked out again on the
+// window's and the visual viewport's resize, an orientation change, the tab
+// coming into view (an IntersectionObserver, which watches visibility, not
+// size), the fonts arriving and the first data paint -- once per animation
+// frame, and written only when it changed.
 //
-// Render, the Install button and one status line live in the Outputs stage's
-// header. The line shows the first of: a message a press just caused (for a
-// few seconds), an install running, the job on a card with its time ticking
-// from the server's own count, the queue, the last render this page started
-// having failed, VibeVoice warm on a card, why Render is disabled, Ready.
+// Render, the Install button and one status line live in the Configuration
+// stage's header. The line shows the first of: a message a press just caused
+// (for a few seconds), an install running, the job on a card with its time
+// ticking from the server's own count, the queue, the last render this page
+// started having failed, VibeVoice warm on a card, why Render is disabled,
+// Ready.
+//
+// Every player -- a sample row, the trimmer, the selected output lane -- has
+// the same transport: Play/Pause, From the start and Stop, as icons. One
+// player at a time is the active one (the one last started and not stopped),
+// and only its waveform seeks and draws a playhead.
 //
 // The file is loaded by Forge on every page, like every extension script, so
 // nothing here touches the DOM until the root exists.
@@ -82,11 +90,13 @@
     const DRAG_PX = 8;
     const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
                     "Nov", "Dec"];
+    // `bar` is the stage's word in the phone's stage bar, short enough for
+    // four of them across 360 px; `name` is the whole of it, for its label.
     const STAGES = [
-        {key: "input", title: "INPUT"},
-        {key: "prompt", title: "PROMPT"},
-        {key: "configuration", title: "CONFIGURATION"},
-        {key: "outputs", title: "OUTPUTS"},
+        {key: "input", title: "INPUT", bar: "Input", name: "Input"},
+        {key: "prompt", title: "PROMPT", bar: "Prompt", name: "Prompt"},
+        {key: "configuration", title: "CONFIGURATION", bar: "Config", name: "Configuration"},
+        {key: "outputs", title: "OUTPUTS", bar: "Outputs", name: "Outputs"},
     ];
     const PROMPT_HELP = "Speaker 1: to Speaker 4: start a line ([2]: works too); a line "
         + "without one is Speaker 1. [pause] is 700 ms and [pause:1500] is 1500 ms of "
@@ -166,6 +176,12 @@
         answeredAt: 0,
         statusLine: "",
         layout: {mode: "", width: 0, height: 0, raw: 0, correction: 0, writes: 0},
+        // The one player last started with Play and not stopped since:
+        // {kind: "sample" | "trimmer" | "output", id}, or null. Only its
+        // waveform seeks, draws a playhead and takes sideways drags.
+        activePlayer: null,
+        // The stage the phone's stage bar marks: the one in view.
+        stage: "input",
     };
 
     const nodes = {lanes: {}};
@@ -173,7 +189,7 @@
     const players = [];
     const inflight = {};
     const timers = {prompt: 0, poll: 0, tick: 0, message: 0};
-    const frames = {fit: 0};
+    const frames = {fit: 0, track: 0};
 
     // -- small helpers --------------------------------------------------------- //
 
@@ -262,7 +278,7 @@
     // -- the status line ------------------------------------------------------- //
 
     // A message is what a press just did, or why it could not: it holds the
-    // Outputs header's one status line for a few seconds (MESSAGE_MS), and the
+    // Configuration header's one status line for a few seconds (MESSAGE_MS), and the
     // line then goes back to what the page is doing (renderStatus).
     function say(text, kind) {
         state.message = text || "";
@@ -556,11 +572,18 @@
         delete cache.blobs[key];
     }
 
-    function startPlayback(audio, address) {
+    // Plays `audio` from `address`: from where it is, or from `at` seconds
+    // when that is given (From the start). Every other player is paused first.
+    function startPlayback(audio, address, at) {
         pauseAll(audio);
         if (audio.mcVoiceBoxSource !== address) {
             audio.src = address;
             audio.mcVoiceBoxSource = address;
+        }
+        if (typeof at === "number") {
+            // Before the file's length is known this is where playback will
+            // begin, which is all From the start needs.
+            try { audio.currentTime = at; } catch (error) { /* not seekable yet */ }
         }
         claimFocus("playback");
         let started;
@@ -572,6 +595,165 @@
         return Promise.resolve(started).catch(function (error) {
             throw new Error("Playback was refused by the browser: " + describe(error));
         });
+    }
+
+    // -- the active player ----------------------------------------------------- //
+    //
+    // One player at a time is active: the one last started with Play (or From
+    // the start) and not stopped since -- playing, or paused by its own Pause.
+    // Starting another makes that one active, the first having been paused by
+    // startPlayback; Stop ends it. Only the active player's waveform seeks when
+    // pressed or dragged, only it draws a playhead, and only it takes sideways
+    // drags on a touch screen (touch-action: pan-y), so a swipe over any other
+    // waveform is the phone's stage pager's.
+
+    function isActivePlayer(kind, id) {
+        const active = state.activePlayer;
+        return !!active && active.kind === kind && (kind === "trimmer" || active.id === id);
+    }
+
+    function setActivePlayer(kind, id) {
+        state.activePlayer = kind ? {kind: kind, id: id || ""} : null;
+        refreshPlayers();
+    }
+
+    // Every player's waveform and transport, after the active one changed.
+    function refreshPlayers() {
+        Object.keys(nodes.lanes).forEach(function (key) {
+            const lane = nodes.lanes[key] && nodes.lanes[key].mcVoiceBoxLane;
+            if (lane) drawLane(lane);
+        });
+        drawSampleRows();
+        drawTrimmer();
+    }
+
+    function setTouch(canvas, on) {
+        if (!canvas || !canvas.style) return;
+        const wanted = on ? "pan-y" : "";
+        if ((canvas.style.touchAction || "") !== wanted) canvas.style.touchAction = wanted;
+    }
+
+    // A finger that lands on a waveform may be starting to scroll the stage
+    // (the waveform leaves up and down to the page): its press counts once
+    // it moves along the waveform or lifts, and a scroll -- which the browser
+    // ends with pointercancel -- changes nothing. A mouse's press counts at once.
+    function byFinger(event) {
+        return !!event && event.pointerType === "touch";
+    }
+
+    // A press or a drag along a waveform seeks -- on the active player's only;
+    // anywhere else the press is left to whatever else it does (on a lane, to
+    // select it).
+    function wireScrub(canvas, active, seekTo) {
+        let held = false;
+        let waiting = false;
+        canvas.addEventListener("pointerdown", function (event) {
+            if (!active()) return;
+            held = true;
+            try {
+                if (typeof canvas.setPointerCapture === "function" && event.pointerId !== undefined) {
+                    canvas.setPointerCapture(event.pointerId);
+                }
+            } catch (error) { /* not every pointer can be captured */ }
+            waiting = byFinger(event);
+            if (!waiting) seekTo(fractionAt(canvas, event));
+        });
+        canvas.addEventListener("pointermove", function (event) {
+            if (!held || !active()) return;
+            waiting = false;
+            seekTo(fractionAt(canvas, event));
+        });
+        canvas.addEventListener("pointerup", function (event) {
+            if (held && waiting && active()) seekTo(fractionAt(canvas, event));
+            held = false;
+            waiting = false;
+        });
+        canvas.addEventListener("pointercancel", function () {
+            held = false;
+            waiting = false;
+        });
+    }
+
+    function seekAudio(audio, fraction, fallbackSeconds) {
+        const total = Number(audio.duration) || Number(fallbackSeconds) || 0;
+        if (!total) return;
+        try { audio.currentTime = fraction * total; } catch (error) { /* not seekable yet */ }
+    }
+
+    // Stop's half that is the element's: paused, and back at `at` seconds.
+    function stopAudio(audio, at) {
+        try {
+            if (!audio.paused && typeof audio.pause === "function") audio.pause();
+        } catch (error) { /* an element with no source */ }
+        try { audio.currentTime = at || 0; } catch (error) { /* not seekable yet */ }
+    }
+
+    // -- transports: play/pause, from the start, stop, loop --------------------- //
+
+    const SVG = "http://www.w3.org/2000/svg";
+    // 16 x 16, in currentColor: nothing fetched, no icon font, no emoji.
+    const ICONS = {
+        play: [["path", {d: "M4.5 2.5v11l9-5.5z"}]],
+        pause: [["rect", {x: "3.5", y: "2.5", width: "3", height: "11"}],
+                ["rect", {x: "9.5", y: "2.5", width: "3", height: "11"}]],
+        start: [["rect", {x: "2.5", y: "2.5", width: "2", height: "11"}],
+                ["path", {d: "M13.5 2.5v11L5.5 8z"}]],
+        stop: [["rect", {x: "3", y: "3", width: "10", height: "10"}]],
+        loop: [["path", {d: "M12.6 8.6A4.7 4.7 0 1 1 11 4.3", fill: "none", stroke: "currentColor",
+                         "stroke-width": "1.8", "stroke-linecap": "round"}],
+               ["path", {d: "M13.8 1.8v4.6H9.2z"}]],
+    };
+
+    function svgNode(tag, attributes) {
+        const node = typeof document.createElementNS === "function"
+            ? document.createElementNS(SVG, tag) : document.createElement(tag);
+        Object.keys(attributes || {}).forEach(function (name) {
+            node.setAttribute(name, attributes[name]);
+        });
+        return node;
+    }
+
+    function icon(name) {
+        const svg = svgNode("svg", {viewBox: "0 0 16 16", width: "16", height: "16",
+                                    fill: "currentColor", "aria-hidden": "true", focusable: "false"});
+        (ICONS[name] || []).forEach(function (part) { svg.appendChild(svgNode(part[0], part[1])); });
+        return svg;
+    }
+
+    // Its picture and its name; the name is both the label read out and the
+    // tooltip. A player redraws several times a second while it plays, so
+    // each is written only when it changes.
+    function setIcon(node, name, label) {
+        if (node.getAttribute("data-icon") !== name) {
+            clear(node);
+            node.appendChild(icon(name));
+            node.setAttribute("data-icon", name);
+        }
+        if (node.getAttribute("aria-label") !== label) node.setAttribute("aria-label", label);
+        if (node.getAttribute("title") !== label) node.setAttribute("title", label);
+    }
+
+    // A square button the size of the section's others, with an icon for a face.
+    function iconButton(name, label, onClick, className) {
+        const node = button("", label, onClick, "mc-voice-box-icon " + className);
+        setIcon(node, name, label);
+        return node;
+    }
+
+    // Play/Pause, From the start and Stop, for one player; `prefix` names its
+    // buttons' classes (mc-voice-box-lane-play and so on).
+    function transport(prefix, handlers) {
+        const box = el("span", "mc-voice-box-transport");
+        const play = iconButton("play", "Play", handlers.play, prefix + "-play");
+        const start = iconButton("start", "Play from the start", handlers.start, prefix + "-start");
+        const stop = iconButton("stop", "Stop", handlers.stop, prefix + "-stop");
+        [play, start, stop].forEach(function (node) { box.appendChild(node); });
+        return {box: box, play: play, start: start, stop: stop};
+    }
+
+    // The Play/Pause button's face and name follow its player.
+    function showPlaying(controls, on) {
+        if (controls && controls.play) setIcon(controls.play, on ? "pause" : "play", on ? "Pause" : "Play");
     }
 
     // -- waveforms ------------------------------------------------------------- //
@@ -616,6 +798,9 @@
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
         const settings = options || {};
+        // Where the playhead was drawn, -1 for none: the picture itself cannot
+        // be read back, and whether a waveform shows a head is a rule.
+        canvas.mcVoiceBoxHead = typeof settings.head === "number" && settings.head >= 0 ? settings.head : -1;
         let width = 0;
         let height = 0;
         try {
@@ -669,13 +854,7 @@
             const lane = nodes.lanes[id].mcVoiceBoxLane;
             if (lane) drawLane(lane);
         });
-        if (nodes.samples) {
-            const rows = nodes.samples.children || [];
-            for (let index = 0; index < rows.length; index += 1) {
-                const row = rows[index];
-                if (row.mcVoiceBoxSample) draw(row.mcVoiceBoxSample.wave, row.mcVoiceBoxSample.peaks);
-            }
-        }
+        drawSampleRows();
         drawSpeakers();
         drawTrimmer();
     }
@@ -988,8 +1167,26 @@
         head.appendChild(bar);
         root.appendChild(head);
 
-        // Each stage is a head that stays and a body under it; the long list
-        // in a body takes what room is left and scrolls inside it.
+        // The phone's stage bar (the stylesheet shows it only when the stages
+        // are cards swiped left and right): a press goes to a stage, and the
+        // stage in view is the one marked.
+        const stagebar = el("nav", "mc-voice-box-stagebar");
+        stagebar.setAttribute("aria-label", "Stages");
+        nodes.stagebar = {};
+        STAGES.forEach(function (stage) {
+            const node = button(stage.bar, stage.name, function () { goToStage(stage.key); },
+                                "mc-voice-box-stagebar-button");
+            node.setAttribute("data-stage", stage.key);
+            node.setAttribute("title", stage.name);
+            nodes.stagebar[stage.key] = node;
+            stagebar.appendChild(node);
+        });
+        root.appendChild(stagebar);
+
+        // Each stage is a head that stays and a body under it, the stage's one
+        // vertical scroller. Side by side, the long list in a body takes what
+        // room is left and scrolls inside it; as a phone's cards, the body
+        // scrolls whole and nothing inside it scrolls on its own.
         const stages = el("div", "mc-voice-box-stages");
         STAGES.forEach(function (stage, index) {
             if (index) {
@@ -1006,15 +1203,99 @@
             card.appendChild(body);
             nodes["stage_" + stage.key] = body;
             nodes["stageHead_" + stage.key] = top;
+            nodes["stageCard_" + stage.key] = card;
             stages.appendChild(card);
         });
+        stages.addEventListener("scroll", scheduleTrack);
         nodes.stages = stages;
         root.appendChild(stages);
 
         buildInput(nodes.stage_input);
         buildPrompt(nodes.stage_prompt);
-        buildConfiguration(nodes.stage_configuration);
-        buildOutputs(nodes.stage_outputs, nodes.stageHead_outputs);
+        buildConfiguration(nodes.stage_configuration, nodes.stageHead_configuration);
+        buildOutputs(nodes.stage_outputs);
+        markStage(state.stage);
+    }
+
+    // -- the phone's stage bar ----------------------------------------------------- //
+
+    // The stage whose left edge is nearest the stages' own: the one in view.
+    function stageInView() {
+        const container = nodes.stages;
+        if (!container) return "";
+        let origin = 0;
+        try {
+            origin = Number(container.getBoundingClientRect().left) || 0;
+        } catch (error) {
+            return "";
+        }
+        let found = "";
+        let nearest = Infinity;
+        STAGES.forEach(function (stage) {
+            const card = nodes["stageCard_" + stage.key];
+            let left = 0;
+            try {
+                left = (Number(card.getBoundingClientRect().left) || 0) - origin;
+            } catch (error) {
+                return;
+            }
+            if (Math.abs(left) < nearest) {
+                nearest = Math.abs(left);
+                found = stage.key;
+            }
+        });
+        return found;
+    }
+
+    function markStage(key) {
+        if (key) state.stage = key;
+        STAGES.forEach(function (stage) {
+            const node = nodes.stagebar && nodes.stagebar[stage.key];
+            if (!node) return;
+            if (stage.key === state.stage) node.setAttribute("aria-current", "true");
+            else node.removeAttribute("aria-current");
+        });
+    }
+
+    // The stages scroll: the bar follows once per frame, however many scroll
+    // events the frame had.
+    function scheduleTrack() {
+        if (frames.track) return;
+        if (typeof window.requestAnimationFrame !== "function") {
+            markStage(stageInView());
+            return;
+        }
+        frames.track = window.requestAnimationFrame(function () {
+            frames.track = 0;
+            markStage(stageInView());
+        });
+    }
+
+    function reducedMotion() {
+        try {
+            return typeof window.matchMedia === "function"
+                && !!window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function goToStage(key) {
+        const container = nodes.stages;
+        const card = nodes["stageCard_" + key];
+        if (!container || !card) return;
+        let left = 0;
+        try {
+            left = (Number(card.getBoundingClientRect().left) || 0)
+                - (Number(container.getBoundingClientRect().left) || 0)
+                + (Number(container.scrollLeft) || 0);
+        } catch (error) {
+            return;
+        }
+        const behavior = reducedMotion() ? "auto" : "smooth";
+        if (typeof container.scrollTo === "function") container.scrollTo({left: left, behavior: behavior});
+        else container.scrollLeft = left;
+        markStage(key);
     }
 
     // -- INPUT: a file or a recording, the trimmer, the sample library ----------- //
@@ -1062,14 +1343,16 @@
         box.appendChild(nodes.trimmerSource);
         nodes.trimmerWave = canvasOf("mc-voice-box-trimmer-wave");
         wireHandles(nodes.trimmerWave);
+        // Its handles take sideways drags on a touch screen, always: up and
+        // down still scroll the stage.
+        setTouch(nodes.trimmerWave, true);
         box.appendChild(nodes.trimmerWave);
         nodes.trimmerReadout = el("div", "mc-voice-box-trimmer-readout", "");
         box.appendChild(nodes.trimmerReadout);
         const row = el("div", "mc-voice-box-row mc-voice-box-trimmer-row");
-        nodes.trimmerPlay = button("Play selection", "Play the selection", playSelection,
-                                   "mc-voice-box-trimmer-play");
-        nodes.trimmerLoop = button("Loop selection", "Loop the selection while it plays",
-                                   toggleTrimmerLoop, "mc-voice-box-trimmer-loop");
+        nodes.trimmerControls = transport("mc-voice-box-trimmer", {
+            play: playTrimmer, start: playTrimmerFromStart, stop: stopTrimmer});
+        nodes.trimmerLoop = iconButton("loop", "Loop", toggleTrimmerLoop, "mc-voice-box-trimmer-loop");
         pressed(nodes.trimmerLoop, false);
         nodes.trimmerName = el("input", "mc-voice-box-trimmer-name");
         nodes.trimmerName.setAttribute("type", "text");
@@ -1080,7 +1363,7 @@
                                    saveSelection, "mc-voice-box-trimmer-save");
         nodes.trimmerDiscard = button("Discard", "Discard this file", closeTrimmer,
                                       "mc-voice-box-trimmer-discard");
-        row.appendChild(nodes.trimmerPlay);
+        row.appendChild(nodes.trimmerControls.box);
         row.appendChild(nodes.trimmerLoop);
         row.appendChild(nodes.trimmerName);
         row.appendChild(nodes.trimmerSave);
@@ -1094,8 +1377,9 @@
         box.appendChild(nodes.trimmerProgress);
         nodes.trimmerAudio = player("mc-voice-box-trimmer-audio");
         nodes.trimmerAudio.addEventListener("timeupdate", followSelection);
-        nodes.trimmerAudio.addEventListener("pause", function () { drawTrimmer(); });
-        nodes.trimmerAudio.addEventListener("ended", function () { drawTrimmer(); });
+        ["play", "pause", "ended"].forEach(function (type) {
+            nodes.trimmerAudio.addEventListener(type, function () { drawTrimmer(); });
+        });
         box.appendChild(nodes.trimmerAudio);
         show(box, false);
         body.appendChild(box);
@@ -1104,19 +1388,37 @@
         library.appendChild(el("h4", "mc-voice-box-subtitle", "Sample library"));
         nodes.samples = el("ul", "mc-voice-box-list mc-voice-box-samples");
         library.appendChild(nodes.samples);
+        // One element plays every sample; the row whose sample it holds is
+        // the active player while it is one.
         nodes.sampleAudio = player("mc-voice-box-sample-audio");
-        nodes.sampleAudio.addEventListener("pause", function () { markSamplePlaying(""); });
-        nodes.sampleAudio.addEventListener("ended", function () { markSamplePlaying(""); });
+        ["timeupdate", "play", "pause", "ended"].forEach(function (type) {
+            nodes.sampleAudio.addEventListener(type, drawActiveSample);
+        });
         library.appendChild(nodes.sampleAudio);
         body.appendChild(library);
     }
 
-    // The list is rebuilt whole, and it scrolls inside its stage: its scroll
-    // position is put back afterwards, or pressing a speaker button on a
-    // sample far down the list would throw the list back to its top.
+    // What a scroller has scrolled, put back after the list in it is rebuilt:
+    // drawing the new rows' waveforms lays the page out while the list is
+    // still short, and the browser clamps the scroll to that.
+    function keepScroll(scrollers) {
+        const kept = scrollers.filter(Boolean).map(function (node) {
+            return {node: node, at: Number(node.scrollTop) || 0};
+        });
+        return function () {
+            kept.forEach(function (entry) {
+                if (entry.at && entry.node.scrollTop !== entry.at) entry.node.scrollTop = entry.at;
+            });
+        };
+    }
+
+    // The list is rebuilt whole, and it scrolls inside its stage (or, on a
+    // phone, the stage's body does): the scroll is put back afterwards, or
+    // pressing a speaker button on a sample far down the list would throw the
+    // list back to its top.
     function renderSamples() {
         if (!nodes.samples) return;
-        const scrolled = Number(nodes.samples.scrollTop) || 0;
+        const restore = keepScroll([nodes.samples, nodes.stage_input]);
         clear(nodes.samples);
         if (!state.samples.length) {
             nodes.samples.appendChild(el("li", "mc-voice-box-empty",
@@ -1131,6 +1433,10 @@
             const edge = edgeOf([sample.id]);
             if (edge) row.appendChild(edge);
             const wave = canvasOf("mc-voice-box-sample-wave");
+            wireScrub(wave, function () { return isActivePlayer("sample", sample.id); }, function (fraction) {
+                seekAudio(nodes.sampleAudio, fraction, sample.seconds);
+                drawActiveSample();
+            });
             row.appendChild(wave);
             const line = el("div", "mc-voice-box-row");
             const title = el("span", "mc-voice-box-sample-title", sample.title || "Untitled");
@@ -1146,10 +1452,12 @@
             const meta = el("span", "mc-voice-box-sample-meta",
                             sample.seconds ? seconds(sample.seconds) : "");
             line.appendChild(meta);
-            const play = button("Play", "Play " + (sample.title || "this sample"), function () {
-                return playSample(sample);
-            }, "mc-voice-box-sample-play");
-            line.appendChild(play);
+            const controls = transport("mc-voice-box-sample", {
+                play: function () { return playSample(sample); },
+                start: function () { return playSampleFromStart(sample); },
+                stop: function () { stopSample(sample); },
+            });
+            line.appendChild(controls.box);
             const assign = el("span", "mc-voice-box-sample-speakers");
             [1, 2, 3, 4].forEach(function (number) {
                 const slot = button(String(number), "Assign to speaker " + number, function () {
@@ -1163,12 +1471,12 @@
                                     function () { return deleteSample(sample); },
                                     "mc-voice-box-sample-delete"));
             row.appendChild(line);
-            row.mcVoiceBoxSample = {wave: wave, peaks: sample.peaks || [], play: play};
+            row.mcVoiceBoxSample = {id: sample.id, seconds: sample.seconds, wave: wave,
+                                    peaks: sample.peaks || [], controls: controls};
             nodes.samples.appendChild(row);
-            draw(wave, sample.peaks || []);
+            drawSampleRow(row);
         });
-        markSamplePlaying(state.playingSample || "");
-        if (scrolled) nodes.samples.scrollTop = scrolled;
+        restore();
     }
 
     // -- the tint a sample carries onto its outputs ---------------------------- //
@@ -1225,35 +1533,83 @@
         return speakers.map(function (speaker) { return speaker && speaker.sample_id; });
     }
 
-    function markSamplePlaying(id) {
-        state.playingSample = id || "";
-        if (!nodes.samples) return;
-        const rows = nodes.samples.children || [];
+    // -- a sample row as a player ---------------------------------------------- //
+
+    function sampleRows() {
+        const found = [];
+        const rows = (nodes.samples && nodes.samples.children) || [];
         for (let index = 0; index < rows.length; index += 1) {
-            const row = rows[index];
-            if (!row.mcVoiceBoxSample) continue;
-            const on = !!id && row.getAttribute("data-id") === id && playing(nodes.sampleAudio);
-            row.mcVoiceBoxSample.play.textContent = on ? "Pause" : "Play";
+            if (rows[index].mcVoiceBoxSample) found.push(rows[index]);
         }
+        return found;
     }
 
+    // Its waveform with the playhead while it is the active player (and the
+    // sideways drags that go with it), and its Play/Pause face.
+    function drawSampleRow(row) {
+        const entry = row.mcVoiceBoxSample;
+        const audio = nodes.sampleAudio;
+        const active = isActivePlayer("sample", entry.id);
+        const total = Number(audio && audio.duration) || Number(entry.seconds) || 0;
+        const head = active && total ? Math.min(1, (Number(audio.currentTime) || 0) / total) : -1;
+        draw(entry.wave, entry.peaks, {head: head});
+        setTouch(entry.wave, active);
+        showPlaying(entry.controls, active && playing(audio));
+    }
+
+    function drawSampleRows() {
+        sampleRows().forEach(drawSampleRow);
+    }
+
+    // The shared element's events concern the active sample's row alone.
+    function drawActiveSample() {
+        const active = state.activePlayer;
+        if (!active || active.kind !== "sample") return;
+        sampleRows().forEach(function (row) {
+            if (row.mcVoiceBoxSample.id === active.id) drawSampleRow(row);
+        });
+    }
+
+    function sampleAddress(sample) {
+        return audioUrl("sample:" + sample.id,
+                        ROUTES.sampleAudio + "?id=" + encodeURIComponent(sample.id));
+    }
+
+    // Play pauses the sample while it plays; otherwise it plays on from where
+    // it was paused -- the start, for a sample the element does not hold.
     function playSample(sample) {
         const audio = nodes.sampleAudio;
-        if (state.playingSample === sample.id && playing(audio)) {
+        if (isActivePlayer("sample", sample.id) && playing(audio)) {
             audio.pause();
             return Promise.resolve();
         }
-        return audioUrl("sample:" + sample.id,
-                        ROUTES.sampleAudio + "?id=" + encodeURIComponent(sample.id))
-            .then(function (address) {
-                return startPlayback(audio, address);
-            })
-            .then(function () {
-                markSamplePlaying(sample.id);
-            });
+        return sampleAddress(sample).then(function (address) {
+            setActivePlayer("sample", sample.id);
+            return startPlayback(audio, address);
+        });
+    }
+
+    function playSampleFromStart(sample) {
+        return sampleAddress(sample).then(function (address) {
+            setActivePlayer("sample", sample.id);
+            return startPlayback(nodes.sampleAudio, address, 0);
+        });
+    }
+
+    // The element is stopped only when it holds this sample: it may be
+    // another's.
+    function stopSample(sample) {
+        const audio = nodes.sampleAudio;
+        const address = cache.urls["sample:" + sample.id];
+        if (address && audio.mcVoiceBoxSource === address) stopAudio(audio, 0);
+        if (isActivePlayer("sample", sample.id)) setActivePlayer(null);
     }
 
     function deleteSample(sample) {
+        if (isActivePlayer("sample", sample.id)) {
+            stopAudio(nodes.sampleAudio, 0);
+            state.activePlayer = null;
+        }
         forget("sample:" + sample.id);
         return request("samples/delete:" + sample.id, ROUTES.sampleDelete, {body: {id: sample.id}})
             .then(function () {
@@ -1445,6 +1801,7 @@
         trimmer.mediaUrl = "";
         trimmer.dragging = null;
         state.trimming = null;
+        if (isActivePlayer("trimmer")) setActivePlayer(null);
         if (nodes.trimmer) show(nodes.trimmer, false);
     }
 
@@ -1454,18 +1811,20 @@
                 to: trimmer.selection.out / trimmer.duration};
     }
 
+    // The trimmer's waveform is its handles' and never seeks; its playhead
+    // shows while it is the active player.
     function drawTrimmer() {
         if (!nodes.trimmerWave || !trimmer.source) return;
         const audio = nodes.trimmerAudio;
-        const head = trimmer.duration && playing(audio)
-            ? (Number(audio.currentTime) || 0) / trimmer.duration : -1;
+        const head = trimmer.duration && isActivePlayer("trimmer")
+            ? Math.min(1, (Number(audio.currentTime) || 0) / trimmer.duration) : -1;
         draw(nodes.trimmerWave, trimmer.peaks, {selection: selectionFractions(), head: head});
         if (nodes.trimmerReadout) {
             nodes.trimmerReadout.textContent = seconds(trimmer.selection.in) + " to "
                 + seconds(trimmer.selection.out) + " (" + seconds(trimmer.selection.out - trimmer.selection.in)
                 + " of " + seconds(trimmer.duration) + ")";
         }
-        if (nodes.trimmerPlay) nodes.trimmerPlay.textContent = playing(audio) ? "Pause" : "Play selection";
+        showPlaying(nodes.trimmerControls, playing(audio));
     }
 
     // Where along a waveform a pointer is, 0..1.
@@ -1485,38 +1844,64 @@
         return fractionAt(canvas, event) * trimmer.duration;
     }
 
+    // The handle nearest a press moves to it and follows the drag. A finger's
+    // press waits until it moves along the waveform or lifts (byFinger): the
+    // waveform leaves up and down to the page, so a finger scrolling the
+    // stage moves no handle.
     function wireHandles(canvas) {
-        const down = function (event) {
-            if (!trimmer.source || !trimmer.duration) return;
+        let waiting = null;
+        const grab = function (event) {
             const at = timeAt(canvas, event);
             const toIn = Math.abs(at - trimmer.selection.in);
             const toOut = Math.abs(at - trimmer.selection.out);
             trimmer.dragging = toIn <= toOut ? "in" : "out";
             trimmer.selection = clampSelection(trimmer.selection, trimmer.dragging, at, trimmer.duration);
+            drawTrimmer();
+        };
+        const down = function (event) {
+            if (!trimmer.source || !trimmer.duration) return;
             try {
                 if (typeof canvas.setPointerCapture === "function" && event.pointerId !== undefined) {
                     canvas.setPointerCapture(event.pointerId);
                 }
             } catch (error) { /* not every pointer can be captured */ }
+            if (byFinger(event)) {
+                waiting = event;
+                return;
+            }
             if (typeof event.preventDefault === "function") event.preventDefault();
-            drawTrimmer();
+            grab(event);
         };
         const move = function (event) {
+            if (waiting) {
+                const first = waiting;
+                waiting = null;
+                if (trimmer.source && trimmer.duration) grab(first);
+            }
             if (!trimmer.dragging || !trimmer.duration) return;
             trimmer.selection = clampSelection(trimmer.selection, trimmer.dragging,
                                                timeAt(canvas, event), trimmer.duration);
             drawTrimmer();
         };
-        const up = function () {
+        const up = function (event) {
+            if (waiting && trimmer.source && trimmer.duration) grab(event);
+            waiting = null;
+            trimmer.dragging = null;
+        };
+        const cancel = function () {
+            waiting = null;
             trimmer.dragging = null;
         };
         canvas.addEventListener("pointerdown", down);
         canvas.addEventListener("pointermove", move);
         canvas.addEventListener("pointerup", up);
-        canvas.addEventListener("pointercancel", up);
+        canvas.addEventListener("pointercancel", cancel);
     }
 
-    function playSelection() {
+    // Play pauses the selection while it plays; otherwise it plays on from
+    // where it was paused inside the selection, or from the selection's start
+    // (never started, stopped, or run to the out point).
+    function playTrimmer() {
         const audio = nodes.trimmerAudio;
         if (!trimmer.source || !trimmer.mediaUrl) return Promise.resolve();
         if (playing(audio)) {
@@ -1524,8 +1909,31 @@
             drawTrimmer();
             return Promise.resolve();
         }
-        try { audio.currentTime = trimmer.selection.in; } catch (error) { /* not seekable yet */ }
-        return startPlayback(audio, trimmer.mediaUrl).then(drawTrimmer);
+        const at = Number(audio.currentTime) || 0;
+        const inside = at >= trimmer.selection.in && at < trimmer.selection.out - 0.05;
+        return beginTrimmer(inside ? undefined : trimmer.selection.in);
+    }
+
+    // The beginning, for the trimmer, is the selection's start. A capture in
+    // progress (Save as sample on a long file) is a playthrough of the
+    // selection, so From the start and Stop end it, and nothing is saved.
+    function playTrimmerFromStart() {
+        if (!trimmer.source || !trimmer.mediaUrl) return Promise.resolve();
+        stopCapture("The capture was stopped; nothing was saved.");
+        return beginTrimmer(trimmer.selection.in);
+    }
+
+    function beginTrimmer(at) {
+        setActivePlayer("trimmer", "");
+        return startPlayback(nodes.trimmerAudio, trimmer.mediaUrl, at).then(drawTrimmer);
+    }
+
+    function stopTrimmer() {
+        stopCapture("The capture was stopped; nothing was saved.");
+        if (!trimmer.source) return;
+        stopAudio(nodes.trimmerAudio, trimmer.selection.in);
+        if (isActivePlayer("trimmer")) setActivePlayer(null);
+        else drawTrimmer();
     }
 
     function toggleTrimmerLoop() {
@@ -1677,6 +2085,9 @@
                 const wasLooping = trimmer.loop;
                 record.wasLooping = wasLooping;
                 trimmer.loop = false;
+                // The capture plays the selection through: the trimmer is the
+                // player playing, and its Play/Pause holds the capture.
+                setActivePlayer("trimmer", "");
                 startPlayback(audio, trimmer.mediaUrl).catch(function (error) {
                     if (trimmer.capture === record && trimmer.source === source) {
                         stopCapture("");
@@ -1835,9 +2246,37 @@
         body.appendChild(lists);
     }
 
+    // On a phone the script box grows with its words, so the Prompt stage's
+    // body stays its only scroller; side by side the box keeps the
+    // stylesheet's height and scrolls inside itself, and only the height this
+    // function wrote is taken back there -- one the user set with the box's
+    // own handle stays. It is measured at no height (the stylesheet's floor
+    // holds it), which shortens the stage for a moment: the stage's own
+    // scroll is put back after.
+    function fitPrompt() {
+        const box = nodes.prompt;
+        if (!box || !box.style) return;
+        if (state.layout.mode !== "stack") {
+            if (box.mcVoiceBoxGrown) {
+                box.style.height = "";
+                box.mcVoiceBoxGrown = false;
+            }
+            return;
+        }
+        const restore = keepScroll([nodes.stage_prompt]);
+        box.style.height = "0px";
+        const style = styleOf(box);
+        const wanted = Math.ceil((Number(box.scrollHeight) || 0)
+                                 + pixels(style.borderTopWidth) + pixels(style.borderBottomWidth));
+        box.style.height = wanted + "px";
+        box.mcVoiceBoxGrown = true;
+        restore();
+    }
+
     function promptChanged() {
         state.prompt = nodes.prompt.value || "";
         nodes.summary.textContent = summarize(state.prompt);
+        fitPrompt();
         state.dirty.prompt = true;
         if (timers.prompt) window.clearTimeout(timers.prompt);
         timers.prompt = window.setTimeout(function () {
@@ -1865,6 +2304,7 @@
             nodes.prompt.value = state.prompt;
         }
         nodes.summary.textContent = summarize(state.prompt);
+        fitPrompt();
     }
 
     function promptEntry(entry, favourite) {
@@ -1897,10 +2337,9 @@
 
     function renderPromptLists() {
         if (!nodes.history) return;
-        // Both lists scroll inside the stage; a star pressed far down one
-        // must not throw it back to its top.
-        const scrolled = {history: Number(nodes.history.scrollTop) || 0,
-                          favourites: Number(nodes.favourites.scrollTop) || 0};
+        // Both lists scroll inside the stage (on a phone, the stage's body
+        // does); a star pressed far down one must not throw it back to its top.
+        const restore = keepScroll([nodes.history, nodes.favourites, nodes.stage_prompt]);
         clear(nodes.history);
         clear(nodes.favourites);
         const history = state.prompts.history || [];
@@ -1909,12 +2348,13 @@
         history.forEach(function (entry) { nodes.history.appendChild(promptEntry(entry, false)); });
         if (!favourites.length) nodes.favourites.appendChild(el("li", "mc-voice-box-empty", "Star a prompt to keep it here."));
         favourites.forEach(function (entry) { nodes.favourites.appendChild(promptEntry(entry, true)); });
-        if (scrolled.history) nodes.history.scrollTop = scrolled.history;
-        if (scrolled.favourites) nodes.favourites.scrollTop = scrolled.favourites;
+        restore();
     }
 
     // -- CONFIGURATION --------------------------------------------------------- //
 
+    // `needs` names the checkbox a field means nothing without: while it is
+    // off the field is disabled, and keeps its value for when it is on again.
     const FIELDS = [
         {key: "model_id", label: "Model", kind: "select"},
         {key: "card_uuid", label: "Card", kind: "select"},
@@ -1922,9 +2362,53 @@
         {key: "cfg_scale", label: "CFG", kind: "number", min: 1, max: 3, step: 0.1},
         {key: "seed", label: "Seed", kind: "text", placeholder: "random"},
         {key: "max_new_tokens", label: "Max new tokens", kind: "text", placeholder: "automatic"},
+        {key: "sampling", label: "Sampling", kind: "checkbox", wide: true,
+         hint: "Varies the pacing — where pauses and endings fall — from take to take."},
+        {key: "temperature", label: "Temperature", kind: "number", min: 0.1, max: 2, step: 0.05,
+         needs: "sampling"},
+        {key: "top_p", label: "Top-p", kind: "number", min: 0.05, max: 1, step: 0.01, needs: "sampling"},
     ];
+    // The server's defaults for them (mc_voice_box.CONFIGURATION_DEFAULTS):
+    // off is the model's own greedy choice.
+    const SAMPLING = {sampling: false, temperature: 0.95, top_p: 0.95};
 
-    function buildConfiguration(body) {
+    // Render, Install and the one status line with its buttons sit in the
+    // stage's header, above the configuration, and stay there while the
+    // configuration scrolls under them.
+    function buildRenderBlock(head) {
+        const actions = el("span", "mc-voice-box-stage-actions");
+        nodes.install = button("Install VibeVoice", "Install the VibeVoice runtime and model",
+                               installEngine, "mc-voice-box-install");
+        show(nodes.install, false);
+        nodes.render = button("Render", "Render this pipeline", renderNow, "mc-voice-box-render");
+        actions.appendChild(nodes.install);
+        actions.appendChild(nodes.render);
+        head.appendChild(actions);
+
+        const line = el("div", "mc-voice-box-status-line");
+        nodes.status = el("span", "mc-voice-box-status", "");
+        nodes.status.setAttribute("role", "status");
+        nodes.status.setAttribute("aria-live", "polite");
+        line.appendChild(nodes.status);
+        const buttons = el("span", "mc-voice-box-status-actions");
+        nodes.statusCancel = button("Cancel", "Cancel the running render", cancelRunning,
+                                    "mc-voice-box-status-cancel");
+        nodes.statusClear = button("Clear queue", "Withdraw every queued render", clearQueue,
+                                   "mc-voice-box-status-clear");
+        nodes.statusDismiss = button("×", "Dismiss", dismissStatus, "mc-voice-box-status-dismiss");
+        nodes.statusUnloads = el("span", "mc-voice-box-status-unloads");
+        [nodes.statusCancel, nodes.statusClear, nodes.statusDismiss, nodes.statusUnloads]
+            .forEach(function (node) {
+                show(node, false);
+                buttons.appendChild(node);
+            });
+        line.appendChild(buttons);
+        nodes.statusLine = line;
+        head.appendChild(line);
+    }
+
+    function buildConfiguration(body, head) {
+        buildRenderBlock(head);
         const bar = el("div", "mc-voice-box-row mc-voice-box-configuration-bar");
         nodes.configurationSelect = el("select", "mc-voice-box-configuration-select");
         nodes.configurationSelect.setAttribute("aria-label", "Configuration");
@@ -1952,6 +2436,7 @@
 
         const fields = el("div", "mc-voice-box-fields");
         nodes.fields = {};
+        nodes.fieldBoxes = {};
         FIELDS.forEach(function (field) {
             const wrap = el("label", "mc-voice-box-field" + (field.kind === "checkbox" ? " mc-voice-box-field-check" : ""));
             const caption = el("span", "mc-voice-box-field-label", field.label);
@@ -1980,7 +2465,20 @@
                 wrap.appendChild(input);
             }
             nodes.fields[field.key] = input;
-            fields.appendChild(wrap);
+            nodes.fieldBoxes[field.key] = wrap;
+            // A field with a hint is the field and the hint under it, across
+            // the whole row when it is `wide`; the hint is its description.
+            let holder = wrap;
+            if (field.hint) {
+                holder = el("div", "mc-voice-box-field-group");
+                holder.appendChild(wrap);
+                const hint = el("div", "mc-voice-box-field-hint", field.hint);
+                hint.setAttribute("id", "mc-voice-box-hint-" + field.key);
+                input.setAttribute("aria-describedby", "mc-voice-box-hint-" + field.key);
+                holder.appendChild(hint);
+            }
+            if (field.wide) holder.classList.add("mc-voice-box-field-wide");
+            fields.appendChild(holder);
         });
         form.appendChild(fields);
 
@@ -2036,6 +2534,7 @@
         if (working[field.key] === value) return;
         working[field.key] = value;
         markConfigurationDirty();
+        if (field.kind === "checkbox") syncNeeds();
         // The card and the model chosen last become Voice Box's defaults as
         // well, so the next configuration -- and a render with none -- starts
         // from them (design intent section 9: the chosen card is stored).
@@ -2103,6 +2602,9 @@
             cfg_scale: pick(engineSettings.cfg_scale, 1.3),
             seed: pick(engineSettings.seed, null),
             max_new_tokens: pick(engineSettings.max_new_tokens, null),
+            sampling: SAMPLING.sampling,
+            temperature: SAMPLING.temperature,
+            top_p: SAMPLING.top_p,
             speakers: {},
         };
     }
@@ -2261,15 +2763,33 @@
                 fillSelect(input, options, working.card_uuid || "");
                 return;
             }
+            if (field.kind === "checkbox") {
+                input.checked = working[field.key] === true;
+                return;
+            }
             if (focused(input)) return;
             const value = working[field.key];
             const text = value === null || value === undefined ? "" : String(value);
             if (input.value !== text) input.value = text;
         });
+        syncNeeds();
         if (nodes.keepWarm && !focused(nodes.keepWarm)) {
             const settings = (state.status && state.status.settings) || {};
             nodes.keepWarm.checked = settings.keep_warm !== false;
         }
+    }
+
+    // Temperature and Top-p while Sampling is off: greyed and not editable,
+    // their values kept in the fields and in the configuration.
+    function syncNeeds() {
+        if (!nodes.fields) return;
+        const working = ensureWorking();
+        FIELDS.forEach(function (field) {
+            if (!field.needs) return;
+            const off = working[field.needs] !== true;
+            nodes.fields[field.key].disabled = off;
+            nodes.fieldBoxes[field.key].setAttribute("data-disabled", off ? "true" : "false");
+        });
     }
 
     function drawSpeakers() {
@@ -2292,40 +2812,9 @@
 
     // -- OUTPUTS --------------------------------------------------------------- //
 
-    // The stage's header holds Render, the Install button while a part is
-    // missing, and the one status line with the buttons of whatever it is
-    // showing (renderStatus). The lanes under it scroll inside the stage.
-    function buildOutputs(body, head) {
-        const actions = el("span", "mc-voice-box-stage-actions");
-        nodes.install = button("Install VibeVoice", "Install the VibeVoice runtime and model",
-                               installEngine, "mc-voice-box-install");
-        show(nodes.install, false);
-        nodes.render = button("Render", "Render this pipeline", renderNow, "mc-voice-box-render");
-        actions.appendChild(nodes.install);
-        actions.appendChild(nodes.render);
-        head.appendChild(actions);
-
-        const line = el("div", "mc-voice-box-status-line");
-        nodes.status = el("span", "mc-voice-box-status", "");
-        nodes.status.setAttribute("role", "status");
-        nodes.status.setAttribute("aria-live", "polite");
-        line.appendChild(nodes.status);
-        const buttons = el("span", "mc-voice-box-status-actions");
-        nodes.statusCancel = button("Cancel", "Cancel the running render", cancelRunning,
-                                    "mc-voice-box-status-cancel");
-        nodes.statusClear = button("Clear queue", "Withdraw every queued render", clearQueue,
-                                   "mc-voice-box-status-clear");
-        nodes.statusDismiss = button("×", "Dismiss", dismissStatus, "mc-voice-box-status-dismiss");
-        nodes.statusUnloads = el("span", "mc-voice-box-status-unloads");
-        [nodes.statusCancel, nodes.statusClear, nodes.statusDismiss, nodes.statusUnloads]
-            .forEach(function (node) {
-                show(node, false);
-                buttons.appendChild(node);
-            });
-        line.appendChild(buttons);
-        nodes.statusLine = line;
-        head.appendChild(line);
-
+    // The stage is its title, the lanes (scrolling inside the stage) and the
+    // sentence an empty pipeline shows instead of them.
+    function buildOutputs(body) {
         nodes.lanesList = el("ul", "mc-voice-box-list mc-voice-box-lanes");
         body.appendChild(nodes.lanesList);
         nodes.lanesEmpty = el("div", "mc-voice-box-empty", "No renders in this pipeline yet.");
@@ -2343,6 +2832,13 @@
         if (render.seed !== undefined && render.seed !== null) parts.push("seed " + render.seed);
         if (render.steps) parts.push(render.steps + " steps");
         if (render.cfg_scale) parts.push("CFG " + render.cfg_scale);
+        // "sampling · temperature 0.95 · top-p 0.95", for a render that
+        // sampled; a greedy one (or one made before the choice) says nothing.
+        if (render.sampling === true) {
+            parts.push("sampling");
+            if (typeof render.temperature === "number") parts.push("temperature " + render.temperature);
+            if (typeof render.top_p === "number") parts.push("top-p " + render.top_p);
+        }
         if (Array.isArray(render.speakers) && render.speakers.length) {
             parts.push(render.speakers.map(function (speaker) {
                 return "S" + speaker.n + " " + (speaker.title || speaker.sample_id || "?");
@@ -2391,24 +2887,25 @@
         return !!lane && !!lane.output && state.selectedOutput === lane.output.id;
     }
 
+    // The playhead is the active player's, selected or compact: it shows
+    // where that lane plays or was paused, and on no other lane.
     function drawLane(lane) {
         const audio = lane.audio;
+        const active = isActivePlayer("output", lane.output.id);
         const total = Number(audio.duration) || Number(lane.output.seconds) || 0;
-        // A compact lane is its waveform alone: the playhead shows on it only
-        // while it plays; the selected lane keeps it where playback stopped.
-        const shown = playing(audio) || (selected(lane) && Number(audio.currentTime) > 0);
-        const head = total && shown ? Math.min(1, (Number(audio.currentTime) || 0) / total) : -1;
+        const head = active && total ? Math.min(1, (Number(audio.currentTime) || 0) / total) : -1;
         draw(lane.wave, lane.output.peaks || [], {head: head});
-        lane.play.textContent = playing(audio) ? "Pause" : "Play";
-        lane.play.setAttribute("aria-label", (playing(audio) ? "Pause " : "Play ") + (lane.output.name || "this render"));
+        setTouch(lane.wave, active);
+        showPlaying(lane.controls, playing(audio));
     }
 
     // A lane that is not the selected one shows the tint of its speakers'
     // samples, its waveform at full size and one line: when it was made and
-    // its name (a double click renames it). Everything else -- the playhead,
-    // the buttons, the metadata, the infotext with Copy, Use seed and Reuse
-    // settings -- is in `details`, shown while the lane is selected. Lanes
-    // are kept rather than rebuilt (renderOutputs), so a playing one plays on.
+    // its name (a double click renames it). Everything else -- the transport
+    // and the other buttons, the metadata, the infotext with Copy, Use seed
+    // and Reuse settings -- is in `details`, shown while the lane is
+    // selected. Lanes are kept rather than rebuilt (renderOutputs), so a
+    // playing one plays on.
     function laneNode(output) {
         const row = el("li", "mc-voice-box-lane");
         row.setAttribute("data-id", output.id);
@@ -2442,12 +2939,13 @@
         const meta = el("div", "mc-voice-box-lane-meta", metadata(output));
         details.appendChild(meta);
         const actions = el("div", "mc-voice-box-row mc-voice-box-lane-actions");
-        const play = button("Play", "Play " + (output.name || "this render"), function () {
-            return toggleLane(lane);
-        }, "mc-voice-box-lane-play");
-        const loop = button("Loop", "Loop " + (output.name || "this render"), function () {
-            return toggleLoop(lane);
-        }, "mc-voice-box-lane-loop");
+        const controls = transport("mc-voice-box-lane", {
+            play: function () { return toggleLane(lane); },
+            start: function () { return playLaneFromStart(lane); },
+            stop: function () { stopLane(lane); },
+        });
+        const loop = iconButton("loop", "Loop", function () { return toggleLoop(lane); },
+                                "mc-voice-box-lane-loop");
         pressed(loop, !!output.loop);
         const trim = button("Trim to sample", "Open " + (output.name || "this render") + " in the trimmer",
                             function () { return trimOutput(lane); }, "mc-voice-box-lane-trim");
@@ -2457,7 +2955,7 @@
                                 function () { return downloadOutput(lane); }, "mc-voice-box-lane-download");
         const remove = button("Delete", "Delete " + (output.name || "this render"),
                               function () { return deleteOutput(lane); }, "mc-voice-box-lane-delete");
-        [play, loop, trim, save, download, remove].forEach(function (node) { actions.appendChild(node); });
+        [controls.box, loop, trim, save, download, remove].forEach(function (node) { actions.appendChild(node); });
         details.appendChild(actions);
         const info = el("div", "mc-voice-box-lane-info");
         const infotext = el("div", "mc-voice-box-infotext", "");
@@ -2478,8 +2976,8 @@
         row.appendChild(details);
 
         const lane = {output: output, row: row, name: name, date: date, meta: meta, wave: wave,
-                      audio: audio, play: play, loop: loop, details: details, infotext: infotext,
-                      copy: copy, seed: seed, reuse: reuse};
+                      audio: audio, controls: controls, loop: loop, details: details,
+                      infotext: infotext, copy: copy, seed: seed, reuse: reuse};
         row.mcVoiceBoxLane = lane;
         wireLane(lane);
         audio.addEventListener("timeupdate", function () { drawLane(lane); });
@@ -2506,9 +3004,9 @@
     }
 
     // A press on a lane that is neither a drag nor on one of its controls
-    // selects it, and so do Enter and Space on the lane itself. On the
-    // selected lane a press on the waveform seeks, as it always has; on any
-    // other it is only the press that selects.
+    // selects it, and so do Enter and Space on the lane itself. On the active
+    // player's waveform a press or a drag seeks as well; on any other lane's
+    // it is only the press that selects.
     function wireLane(lane) {
         const row = lane.row;
         const press = {down: false, x: 0, y: 0};
@@ -2532,13 +3030,11 @@
             if (typeof event.preventDefault === "function") event.preventDefault();
             selectOutput(lane.output.id);
         });
-        lane.wave.addEventListener("pointerdown", function (event) {
-            if (!selected(lane)) return;
-            const total = Number(lane.audio.duration) || Number(lane.output.seconds) || 0;
-            if (!total) return;
-            try { lane.audio.currentTime = fractionAt(lane.wave, event) * total; } catch (error) { /* not seekable */ }
-            drawLane(lane);
-        });
+        wireScrub(lane.wave, function () { return isActivePlayer("output", lane.output.id); },
+                  function (fraction) {
+                      seekAudio(lane.audio, fraction, lane.output.seconds);
+                      drawLane(lane);
+                  });
     }
 
     // A button, a field -- the rename box above all -- or a link inside the
@@ -2573,19 +3069,28 @@
         drawLane(lane);
     }
 
-    // Scrolls the lanes list -- and nothing around it, so a stacked page is
-    // never carried to another stage -- until a lane is in view: all of it
-    // where it fits, its top where it does not.
+    // Scrolls what holds the lanes -- the list side by side, the Outputs
+    // stage's body on a phone -- and nothing around it, so a phone is never
+    // carried to another stage, until a lane is in view: all of it where it
+    // fits, its top where it does not.
     function revealLane(lane) {
-        const list = nodes.lanesList;
-        if (!list || !lane || !lane.row) return;
-        const view = Number(list.clientHeight) || 0;
+        const scroller = state.layout.mode === "stack" ? nodes.stage_outputs : nodes.lanesList;
+        if (!scroller || !lane || !lane.row) return;
+        const view = Number(scroller.clientHeight) || 0;
         if (!view) return;
-        const top = Number(lane.row.offsetTop) || 0;
-        const height = Number(lane.row.offsetHeight) || 0;
-        const at = Number(list.scrollTop) || 0;
-        if (top < at) list.scrollTop = top;
-        else if (top + height > at + view) list.scrollTop = Math.min(top, top + height - view);
+        const at = Number(scroller.scrollTop) || 0;
+        let top = 0;
+        let height = 0;
+        try {
+            const box = scroller.getBoundingClientRect();
+            const row = lane.row.getBoundingClientRect();
+            top = (Number(row.top) || 0) - (Number(box.top) || 0) - (Number(scroller.clientTop) || 0) + at;
+            height = Number(row.height) || 0;
+        } catch (error) {
+            return;
+        }
+        if (top < at) scroller.scrollTop = top;
+        else if (top + height > at + view) scroller.scrollTop = Math.min(top, top + height - view);
     }
 
     // Lanes are kept, not rebuilt: a playing <audio> would stop if its element
@@ -2603,6 +3108,7 @@
             if (wanted[id]) return;
             const row = nodes.lanes[id];
             try { row.mcVoiceBoxLane.audio.pause(); } catch (error) { /* ignore */ }
+            if (isActivePlayer("output", id)) state.activePlayer = null;
             forget("output:" + id);
             if (row.parentNode) row.parentNode.removeChild(row);
             delete nodes.lanes[id];
@@ -2647,21 +3153,46 @@
         Object.keys(nodes.lanes).forEach(function (id) {
             const row = nodes.lanes[id];
             try { row.mcVoiceBoxLane.audio.pause(); } catch (error) { /* ignore */ }
+            if (isActivePlayer("output", id)) state.activePlayer = null;
             forget("output:" + id);
             if (row.parentNode) row.parentNode.removeChild(row);
         });
         nodes.lanes = {};
     }
 
+    function laneAddress(lane) {
+        return audioUrl("output:" + lane.output.id,
+                        ROUTES.outputAudio + "?id=" + encodeURIComponent(lane.output.id));
+    }
+
+    // Play pauses the lane while it plays; otherwise it plays on from where
+    // it was paused (from the start once it has run to its end).
     function toggleLane(lane) {
         if (playing(lane.audio)) {
             lane.audio.pause();
             return Promise.resolve();
         }
-        return audioUrl("output:" + lane.output.id,
-                        ROUTES.outputAudio + "?id=" + encodeURIComponent(lane.output.id))
-            .then(function (address) { return startPlayback(lane.audio, address); })
+        return laneAddress(lane)
+            .then(function (address) {
+                setActivePlayer("output", lane.output.id);
+                return startPlayback(lane.audio, address);
+            })
             .then(function () { drawLane(lane); });
+    }
+
+    function playLaneFromStart(lane) {
+        return laneAddress(lane)
+            .then(function (address) {
+                setActivePlayer("output", lane.output.id);
+                return startPlayback(lane.audio, address, 0);
+            })
+            .then(function () { drawLane(lane); });
+    }
+
+    function stopLane(lane) {
+        stopAudio(lane.audio, 0);
+        if (isActivePlayer("output", lane.output.id)) setActivePlayer(null);
+        else drawLane(lane);
     }
 
     function toggleLoop(lane) {
@@ -2818,10 +3349,12 @@
     }
 
     const REUSED = ["model_id", "card_uuid", "steps", "cfg_scale", "seed", "max_new_tokens"];
+    const SAMPLED = ["sampling", "temperature", "top_p"];
 
     // The configuration a render used: the one it recorded, or -- for a render
     // made before configurations were recorded -- rebuilt from the fields it
-    // did record.
+    // did record. Sampling, Temperature and Top-p are there only when the
+    // render recorded them.
     function renderedConfiguration(output) {
         const render = (output && output.render) || {};
         const recorded = render.configuration && typeof render.configuration === "object"
@@ -2829,7 +3362,7 @@
         if (recorded) {
             const found = {id: String(recorded.id || ""),
                            speakers: Object.assign({}, recorded.speakers || {})};
-            REUSED.forEach(function (key) { found[key] = recorded[key]; });
+            REUSED.concat(SAMPLED).forEach(function (key) { found[key] = recorded[key]; });
             return found;
         }
         const speakers = {};
@@ -2840,12 +3373,13 @@
         });
         return {id: "", model_id: render.model_id, card_uuid: render.card, steps: render.steps,
                 cfg_scale: render.cfg_scale, seed: render.seed, max_new_tokens: render.max_new_tokens,
+                sampling: render.sampling, temperature: render.temperature, top_p: render.top_p,
                 speakers: speakers};
     }
 
     function sameConfiguration(working, saved) {
         if (!working || !saved) return false;
-        const same = REUSED.every(function (key) {
+        const same = REUSED.concat(SAMPLED).every(function (key) {
             return pick(working[key], null) === pick(saved[key], null);
         });
         const a = working.speakers || {};
@@ -2879,6 +3413,14 @@
             if (value === "" && (key === "model_id" || key === "card_uuid")) return;
             working[key] = value === "" ? null : value;
         });
+        // Sampling is on only when the render says it was: one made before
+        // the choice existed was greedy. Temperature and Top-p are taken when
+        // recorded, and otherwise the editor keeps its own.
+        working.sampling = values.sampling === true;
+        ["temperature", "top_p"].forEach(function (key) {
+            const value = values[key];
+            if (typeof value === "number" && isFinite(value)) working[key] = value;
+        });
         working.speakers = {};
         const missing = [];
         Object.keys(values.speakers || {}).sort(function (a, b) { return Number(a) - Number(b); })
@@ -2895,7 +3437,9 @@
                 missing.push("Speaker " + number + "'s sample “" + ((spoken && spoken.title) || id)
                              + "” is no longer in the library.");
             });
-        state.dirty.configuration = !existing || !sameConfiguration(working, existing);
+        // Against the saved configuration as the editor would hold it, so a
+        // field it was saved before is read at its default.
+        state.dirty.configuration = !existing || !sameConfiguration(working, copyConfiguration(existing));
         renderConfiguration();
         renderSamples();
         renderStatus();
@@ -2940,7 +3484,13 @@
                 : (state.configurations[0] ? state.configurations[0].id : "");
             loadWorking();
         }
-        if (changed) clearLanes();
+        if (changed) {
+            // The pipeline before's renders go with their lanes; drawn again
+            // from its list, they would show under this one until its own
+            // list arrives.
+            clearLanes();
+            state.outputs = [];
+        }
         renderAll();
         return refreshOutputs();
     }
@@ -3097,7 +3647,7 @@
         renderStatus();
     }
 
-    // -- the Outputs header: Render, Install and the one status line ------------ //
+    // -- the Configuration header: Render, Install and the one status line ----- //
 
     function renderBlocker() {
         if (!state.status) return "Loading…";
@@ -3598,7 +4148,11 @@
         const width = box ? Math.round(Number(box.width) || 0) : 0;
         if (!width) return;
         const mode = width < STACK_BELOW ? "stack" : "columns";
-        if (root.getAttribute("data-layout") !== mode) root.setAttribute("data-layout", mode);
+        if (root.getAttribute("data-layout") !== mode) {
+            root.setAttribute("data-layout", mode);
+            // The stage bar marks the card in view once the cards are laid out.
+            if (mode === "stack") scheduleTrack();
+        }
         state.layout.mode = mode;
         const top = (Number(box.top) || 0) + pageScroll();
         const raw = Math.floor(viewportHeight() - top - belowRoot(root));
@@ -3618,6 +4172,7 @@
         if (width !== state.layout.width) {
             state.layout.width = width;
             redrawAll();
+            fitPrompt();
         }
     }
 
