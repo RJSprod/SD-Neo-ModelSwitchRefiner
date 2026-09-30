@@ -5013,12 +5013,14 @@ as the character's Variation.
 
 **Precision and Generation quality are engine-wide**, not per character. They
 change how the runtime executes, so changing one stops the worker and the next
-reply starts it again. Neither precision claims to be the faster one until it
-has been measured on real hardware; the turn summary in `model_chain.log`
-reports the real-time factor either way. There is no thread control, and the
-panel says why: PocketTTS sets its own CPU thread policy internally, and a
-slider that set `OMP_NUM_THREADS` and called it a Pocket thread count would be
-telling you something untrue.
+reply starts it again. The row says what the change did at once: it used to
+read the wrong part of the answer and go blank until the page was reloaded.
+Neither precision claims to be the faster one until it has been measured on
+real hardware; the turn summary in `model_chain.log` reports the real-time
+factor either way. There is no thread control, and the panel says why:
+PocketTTS sets its own CPU thread policy internally, and a slider that set
+`OMP_NUM_THREADS` and called it a Pocket thread count would be telling you
+something untrue.
 
 **And then there is Stop.** On Kokoro and on Sopro, Stop cancels: playback stops
 and the synthesis is abandoned. Released PocketTTS cannot do that safely — its

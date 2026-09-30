@@ -1,15 +1,22 @@
-"""Voice Chat's two voice lists, drawn from the server's own markup, in node.
-
-The Voices panel's list and the character editor's picker are painted by
-``javascript/voice_chat.js`` from ``/voice/voices``. Kokoro's official voices
-say ``en-US`` or ``en-GB`` and were grouped by accent; PocketTTS's say only
-``en``, and a list built from the two accents alone drew none of them: a Pocket
-installation listed its custom voices and nothing else, in both places.
+"""Voice Chat's surfaces, drawn from the server's own markup, in node.
 
 The markup is the server's (``mc_voice_ui``), built into the Voice Box
-harness's element tree, so the check reads what a page with PocketTTS selected
-paints -- not a copy of the grouping. These run under node, which is not a
+harness's element tree, and ``javascript/voice_chat.js`` runs over it against
+answers shaped like the routes' -- so these read what a page with PocketTTS
+selected paints, not a copy of the logic. They run under node, which is not a
 Forge dependency, so they skip without it.
+
+Two things a PocketTTS page got wrong:
+
+* The Voices panel's list and the character editor's picker are painted from
+  ``/voice/voices``. Kokoro's official voices say ``en-US`` or ``en-GB`` and
+  were grouped by accent; PocketTTS's say only ``en``, and a list built from
+  the two accents alone drew none of them: a Pocket installation listed its
+  custom voices and nothing else, in both places.
+* Changing a PocketTTS engine setting (precision, generation quality, the
+  model) answers with Pocket's status under its own name beside the settings
+  it applied, and the row painted the envelope: every line of it went blank,
+  and nothing polled it back until the page was reloaded.
 """
 
 from __future__ import annotations
@@ -82,20 +89,29 @@ function build(spec) {
     Object.keys(spec.attrs).forEach((name) => node.setAttribute(name, spec.attrs[name]));
     if (Object.prototype.hasOwnProperty.call(spec.attrs, "value")) node.value = spec.attrs.value;
     spec.children.forEach((child) => node.appendChild(build(child)));
+    if (node.tagName === "SELECT") {
+        const chosen = node.options.filter((option) => option.hasAttribute("selected"))[0]
+            || node.options[0];
+        node.value = chosen ? (chosen.getAttribute("value") || chosen.textContent) : "";
+    }
     return node;
 }
 TREES.forEach((markup) => markup.children.forEach((child) => {
     document.body.appendChild(build(child));
 }));
 
-globalThis.fetch = function (address) {
+const requests = [];
+globalThis.fetch = function (address, init) {
     const route = String(address).replace(/^.*model-chain\//, "");
+    let body = null;
+    try { body = JSON.parse((init && init.body) || "null"); } catch (error) { body = null; }
+    requests.push({route, body});
     const answer = Object.prototype.hasOwnProperty.call(REPLIES, route)
         ? REPLIES[route] : {json: {ok: true}};
-    const body = JSON.parse(JSON.stringify(answer.json));
+    const json = JSON.parse(JSON.stringify(answer.json));
     return Promise.resolve({ok: true, status: 200, headers: {get: () => null},
-                            json: () => Promise.resolve(body),
-                            text: () => Promise.resolve(JSON.stringify(body)),
+                            json: () => Promise.resolve(json),
+                            text: () => Promise.resolve(JSON.stringify(json)),
                             arrayBuffer: () => Promise.resolve(new ArrayBuffer(64))});
 };
 globalThis.AudioContext = function () {
@@ -112,21 +128,31 @@ globalThis.onAfterUiUpdate = () => {};
 
 loaded.forEach((fn) => fn());
 
+function q(selector) { return document.querySelector(selector); }
+function text(selector) { const node = q(selector); return node ? node.textContent : null; }
 function rows(selector, key) {
-    const list = document.querySelector(selector);
+    const list = q(selector);
     return list ? list.children.map((child) => child.hasAttribute(key)
         ? child.getAttribute(key) : "# " + child.textContent) : null;
+}
+function report(extra) {
+    realConsole.log(JSON.stringify(Object.assign({requests}, extra || {})));
 }
 
 await (async function () {
     advance(0);
     await flush(12);
-    realConsole.log(JSON.stringify({
-        listed: rows("[data-mc-voice-list]", "data-mc-voice-id"),
-        picked: rows("[data-mc-voice-picker-list]", "data-mc-voice-pick"),
-    }));
+@@SCENARIO@@
 })();
 """
+
+
+def run(markup: list[str], answers: dict, scenario: str) -> dict:
+    harness = (HARNESS.replace("@@TREES@@", json.dumps([tree(one) for one in markup]))
+               .replace("@@ANSWERS@@", json.dumps(answers))
+               .replace("@@SOURCE@@", SCRIPT.read_text(encoding="utf-8"))
+               .replace("@@SCENARIO@@", scenario))
+    return _node(harness)
 
 
 def voice(identifier: str, name: str, official: bool, language: str) -> dict:
@@ -138,17 +164,17 @@ def voice(identifier: str, name: str, official: bool, language: str) -> dict:
 def painted(voices: list[dict]) -> dict:
     """Both lists as a page drawn for PocketTTS paints them from ``voices``."""
     engines.select("pocket")
-    markup = [tree(mc_voice_ui.voices_html()),
-              tree('<div id="mc-llm-chat-character-voice-list">'
-                   + mc_voice_ui.character_voices_html() + "</div>")]
+    markup = [mc_voice_ui.voices_html(),
+              '<div id="mc-llm-chat-character-voice-list">'
+              + mc_voice_ui.character_voices_html() + "</div>"]
     answers = {"voice/voices": {"json": {"ok": True, "engine": "pocket",
                                          "default": "pocket:official:alba",
                                          "voices": voices}},
                "voice/profile": {"json": {"ok": True, "engine": "pocket"}}}
-    harness = (HARNESS.replace("@@TREES@@", json.dumps(markup))
-               .replace("@@ANSWERS@@", json.dumps(answers))
-               .replace("@@SOURCE@@", SCRIPT.read_text(encoding="utf-8")))
-    return _node(harness)
+    return run(markup, answers, """
+    report({listed: rows("[data-mc-voice-list]", "data-mc-voice-id"),
+            picked: rows("[data-mc-voice-picker-list]", "data-mc-voice-pick")});
+""")
 
 
 class TestAnOfficialVoiceOfNeitherAccentIsListed:
@@ -172,3 +198,53 @@ class TestAnOfficialVoiceOfNeitherAccentIsListed:
                                    "# Official — British English", "pocket:official:gb"]
         assert found["picked"] == ["", "# American", "pocket:official:us",
                                    "# British", "pocket:official:gb"]
+
+
+def pocket_status(**changes) -> dict:
+    """``/voice/pocket``'s answer, the shape ``mc_voice_api.pocket_payload`` gives."""
+    found = {"ok": True, "platform_supported": True, "runtime_ready": True,
+             "speech_model_ready": True, "official_voices_ready": True,
+             "cloning_ready": False, "runtime_message": "Installed",
+             "model_message": "Installed — the English model",
+             "cloning_message": "Not installed. Gated.", "message": "Installed.",
+             "progress": {"pocket": {}}}
+    found.update(changes)
+    return found
+
+
+class TestChangingAPocketSettingKeepsTheRowSaid:
+    def test_the_row_is_painted_from_the_status_the_settings_route_returns(self, voice_root):
+        engines.select("pocket")
+        after = pocket_status(runtime_message="Installed — will restart at the next speech",
+                              message="Precision changed.")
+        answers = {"voice/pocket": {"json": pocket_status()},
+                   "voice/engine/settings": {"json": {"ok": True, "engine": "pocket",
+                                                      "settings": {"precision": "int8"},
+                                                      "pocket": after}}}
+        found = run([mc_voice_ui.settings_html()], answers, """
+    const before = {runtime: text("[data-mc-voice-pocket-runtime]"),
+                    status: text('[data-mc-voice-status="pocket"]')};
+    const select = document.querySelector("[data-mc-voice-pocket-setting]");
+    const name = select ? select.getAttribute("data-mc-voice-pocket-setting") : "";
+    if (select) {
+        select.value = select.options[select.options.length - 1].getAttribute("value")
+            || select.options[select.options.length - 1].textContent;
+        select.dispatchEvent({type: "change", bubbles: true, target: select,
+                              preventDefault() {}});
+    }
+    advance(0);
+    await flush(12);
+    report({name, before, after: {runtime: text("[data-mc-voice-pocket-runtime]"),
+                                  model: text("[data-mc-voice-pocket-model]"),
+                                  cloning: text("[data-mc-voice-pocket-cloning]"),
+                                  status: text('[data-mc-voice-status="pocket"]')}});
+""")
+
+        assert found["name"], "the Pocket row draws its engine settings"
+        assert found["before"] == {"runtime": "Installed", "status": "Installed."}
+        sent = [one for one in found["requests"] if one["route"] == "voice/engine/settings"]
+        assert len(sent) == 1 and sent[0]["body"]["engine"] == "pocket"
+        assert found["after"] == {"runtime": "Installed — will restart at the next speech",
+                                  "model": "Installed — the English model",
+                                  "cloning": "Not installed. Gated.",
+                                  "status": "Precision changed."}

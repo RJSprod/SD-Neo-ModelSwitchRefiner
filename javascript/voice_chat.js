@@ -4241,9 +4241,14 @@
                 if (!select) return;
                 const values = {};
                 values[select.getAttribute("data-mc-voice-pocket-setting")] = select.value;
+                // The route answers with Pocket's status under its own name,
+                // beside the settings it applied; painted from the envelope,
+                // every line of the row went blank until the page was reloaded.
                 post(ROUTES.engineSettings,
                      {engine: engineOf(holder), values: values}, holder)
-                    .then(function (payload) { paintPocket(row, payload); });
+                    .then(function (payload) {
+                        paintPocket(row, (payload && payload.pocket) || payload);
+                    });
             });
         }
         whenOnScreen(row, function () { pollPocket(holder, row, 0); });
