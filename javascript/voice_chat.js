@@ -4551,6 +4551,20 @@
         }, chosen);
     }
 
+    // An engine's official voices by accent, and every official voice the
+    // accents do not cover in a group of its own: PocketTTS says its voices are
+    // "en", neither en-US nor en-GB, and a list of the two accents alone never
+    // showed them at all.
+    function officialGroups(voices, names) {
+        const accented = function (v) { return v.language === "en-US" || v.language === "en-GB"; };
+        return [
+            [names[0], voices.filter(function (v) { return v.official && v.language === "en-US"; })],
+            [names[1], voices.filter(function (v) { return v.official && v.language === "en-GB"; })],
+            [names[2], voices.filter(function (v) { return v.official && !accented(v); })],
+            [names[3], voices.filter(function (v) { return !v.official; })],
+        ];
+    }
+
     function paintPicker(holder, payload) {
         if (!holder || !payload || !payload.ok) return;
         const list = holder.querySelector("[data-mc-voice-picker-list]");
@@ -4558,17 +4572,8 @@
         if (list) keepingPlace(list, function () {
             list.textContent = "";
             list.appendChild(defaultRow(chosen, payload));
-            const groups = [
-                ["American", (payload.voices || []).filter(function (v) {
-                    return v.official && v.language === "en-US";
-                })],
-                ["British", (payload.voices || []).filter(function (v) {
-                    return v.official && v.language === "en-GB";
-                })],
-                ["Custom", (payload.voices || []).filter(function (v) {
-                    return !v.official;
-                })],
-            ];
+            const groups = officialGroups(payload.voices || [], ["American", "British", "Official",
+                                                                 "Custom"]);
             groups.forEach(function (group) {
                 if (!group[1].length) return;
                 const heading = document.createElement("div");
@@ -4860,13 +4865,9 @@
             // engine's headings over this engine's voices.
             const groups = payload.engine === "sopro"
                 ? [["Your voices", payload.voices]]
-                : [
-                    ["Official — American English",
-                     payload.voices.filter(function (v) { return v.official && v.language === "en-US"; })],
-                    ["Official — British English",
-                     payload.voices.filter(function (v) { return v.official && v.language === "en-GB"; })],
-                    ["Custom", payload.voices.filter(function (v) { return !v.official; })],
-                ];
+                : officialGroups(payload.voices, ["Official — American English",
+                                                  "Official — British English", "Official",
+                                                  "Custom"]);
             groups.forEach(function (group) {
                 if (!group[1].length) return;
                 const heading = document.createElement("div");

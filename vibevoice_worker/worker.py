@@ -797,6 +797,13 @@ class Engine:
                         else bool(any(reached))
                 except Exception:  # noqa: BLE001 - a shape this build does not have
                     capped = False
+            if not capped and not cancelled.is_set() and tokens >= int(max_new_tokens):
+                # Upstream's generate never raises its own flag when the budget
+                # runs out: its loop's range ends one step before the check
+                # that would. Having used the whole budget without ending on
+                # end-of-speech is what reaching it means.
+                capped = _last_token(sequences) != \
+                    getattr(self.processor.tokenizer, "eos_token_id", None)
             peak = int(torch.cuda.max_memory_reserved(0))
             pcm = pcm16(samples)
             seconds = len(samples) / float(SAMPLE_RATE)
@@ -1114,11 +1121,23 @@ def _do_render(worker: Worker, reply, request_id, request: RenderRequest,
             worker.send({"id": request_id, "progress": dict(progress)})
 
         found, audio = worker.engine.render(request, cancelled, report)
-        answer = {"ok": True}
-        answer.update(found)
-        reply(request_id, answer, audio)
     finally:
+        # Freed *before* the reply goes out: a parent that sends its next
+        # render the moment it reads this one's reply -- the Voice Box renders
+        # a script's sections back to back -- would otherwise race this line
+        # and be refused "one render at a time" for a render that had ended.
         worker.end_render()
+    answer = {"ok": True}
+    answer.update(found)
+    reply(request_id, answer, audio)
+
+
+def _last_token(sequences) -> "int | None":
+    """The last token of the first sequence ``generate`` returned, or ``None``."""
+    try:
+        return int(sequences[0, -1].item())
+    except Exception:  # noqa: BLE001 - no sequences, or a shape this build does not have
+        return None
 
 
 def _package_version(name: str) -> str:
@@ -1167,6 +1186,31 @@ def selftest() -> int:
     return 0 if report["ok"] else 1
 
 
+def _claim_stdout():
+    """The pipe to the parent, taken away from everything that prints.
+
+    The protocol runs over this process's standard output, and upstream code
+    prints to it: ``generate`` has an unconditional ``print`` for a render that
+    reaches its length limit (not reached with the arguments this file passes
+    today), and a library's print is not this file's to rule out. A line of
+    text in the middle of the frame stream is a header length the parent
+    cannot read, and the parent would lose its worker over it. So descriptor 1
+    is duplicated for the protocol alone, and descriptor 1 itself -- with
+    Python's ``sys.stdout`` -- is pointed at standard error, which the parent
+    reads line by line into its log. Anything that prints now prints there,
+    whether it prints from Python or from a native library.
+    """
+    sys.stdout.flush()
+    descriptor = os.dup(sys.stdout.fileno())
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.setmode(descriptor, os.O_BINARY)
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    sys.stdout = sys.stderr
+    return os.fdopen(descriptor, "wb")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(MARKER, action="store_true", dest="marker")
@@ -1175,7 +1219,7 @@ def main(argv=None) -> int:
     found, _rest = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
     if found.selftest:
         return selftest()
-    return serve(sys.stdin.buffer, sys.stdout.buffer)
+    return serve(sys.stdin.buffer, _claim_stdout())
 
 
 if __name__ == "__main__":

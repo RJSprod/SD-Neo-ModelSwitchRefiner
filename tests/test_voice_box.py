@@ -189,8 +189,19 @@ class FakeEngine:
         return None
 
 
+REAL_MP3 = box._encode_mp3
+"""The real encoder, before any test puts its stand-in there."""
+
+
+def no_mp3(pcm16, rate, tags):
+    return None
+
+
 @pytest.fixture(autouse=True)
-def _fresh(voice_root):
+def _fresh(voice_root, monkeypatch):
+    # Whether this machine can make an MP3 is PyAV's business, not a test's:
+    # every test keeps WAVs unless it puts an encoder in place itself.
+    monkeypatch.setattr(box, "_encode_mp3", no_mp3)
     box.forget()
     yield
     box.forget()
@@ -296,7 +307,7 @@ class TestSamples:
         with pytest.raises(box.NotFound, match="not in the Voice Box"):
             box.sample("../../etc/passwd")
         with pytest.raises(box.NotFound, match="not in the Voice Box"):
-            box.output_wav("")
+            box.output_audio("")
 
 
 # --------------------------------------------------------------------------- #
@@ -408,8 +419,9 @@ class TestOutputs:
         assert box.set_loop(entry["id"], True)["loop"] is True
         assert box.rename_output(entry["id"], "Final")["name"] == "Final"
         assert box.outputs(owner["id"])[0]["name"] == "Final"
-        pcm, rate = box.pcm_of(box.output_wav(entry["id"]))
-        assert rate == 24000 and len(pcm) == len(tone_pcm(2.0))
+        data, kind = box.output_audio(entry["id"])
+        pcm, rate = box.pcm_of(data)
+        assert kind == "wav" and rate == 24000 and len(pcm) == len(tone_pcm(2.0))
 
         box.delete_output(entry["id"])
         assert box.outputs() == [] and box.pipeline(owner["id"])["outputs"] == []
@@ -517,7 +529,8 @@ class TestRendering:
         assert entry["render"]["sections"] == 2 and entry["render"]["peak_bytes"] == 19 * _GB
         assert [s["title"] for s in entry["render"]["speakers"]] == ["Ada", "Brook"]
         assert box.pipeline(ready["pipeline"]["id"])["outputs"] == [entry["id"]]
-        assert engine.peaks == [("vibevoice-7b", 19 * _GB)]
+        assert engine.peaks == [], ("the runtime notes every render's peak itself; a note "
+                                    "here would count the render twice")
         assert engine.values["model_id"] == "vibevoice-7b", "the engine loads what it is told"
         assert box.prompts()["history"][0]["text"].startswith("Speaker 1: Hi.")
         assert job["progress"]["sections"] == 2
@@ -662,3 +675,307 @@ class TestSound:
         assert peaks[0] == pytest.approx(300 / 32768) and peaks[3] == pytest.approx(30000 / 32768)
         assert box.peaks_of(b"", count=3) == [0.0, 0.0, 0.0]
         assert len(box.silence(700)) == 2 * int(24000 * 0.7)
+
+
+# --------------------------------------------------------------------------- #
+# Seeds, the recorded configuration and the infotext
+# --------------------------------------------------------------------------- #
+
+
+class TestSeeds:
+    def test_a_blank_seed_is_drawn_once_and_every_section_renders_with_it(self, ready):
+        assert ready["configuration"]["seed"] is None
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.\n[pause]\nSpeaker 2: Yo.",
+                           ready["configuration"]["id"])
+        assert isinstance(found["seed"], int) and 0 <= found["seed"] <= box.SEED_MAX
+        assert found["seed_drawn"] is True
+
+        job = settled(found["id"])
+        runtime = box._runtime()
+        assert [request.seed for request in runtime.renders] == [found["seed"]] * 2
+        render = box.output(job["output_id"])["render"]
+        assert render["seed"] == found["seed"] and render["seed_drawn"] is True
+        assert render["configuration"]["seed"] == found["seed"], \
+            "Reuse settings makes the same render again"
+
+    def test_a_configured_seed_is_the_one_used_and_is_not_drawn(self, ready):
+        box.save_configuration({"id": ready["configuration"]["id"], "seed": 1234})
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        assert found["seed"] == 1234 and found["seed_drawn"] is False
+
+        job = settled(found["id"])
+        assert box._runtime().renders[0].seed == 1234
+        render = box.output(job["output_id"])["render"]
+        assert render["seed"] == 1234 and render["seed_drawn"] is False
+
+    def test_two_blank_renders_draw_their_own_seeds(self, ready):
+        seeds = {box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                            ready["configuration"]["id"])["seed"] for _ in range(4)}
+        assert len(seeds) > 1
+
+
+class TestTheRecordedConfiguration:
+    def test_an_output_records_the_configuration_it_was_made_with(self, ready):
+        first, second = ready["samples"]
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        record = box.output(settled(found["id"])["output_id"])["render"]["configuration"]
+
+        assert record == {"id": ready["configuration"]["id"], "name": "Studio",
+                          "model_id": "vibevoice-7b", "card_uuid": CARD, "steps": 10,
+                          "cfg_scale": 1.3, "seed": found["seed"], "max_new_tokens": None,
+                          "speakers": {"1": first["id"], "2": second["id"]}}, \
+            "every slot is kept, used by this script or not"
+
+    def test_unsaved_changes_are_recorded_with_the_configuration_they_changed(self, ready):
+        inline = dict(ready["configuration"], steps=20, cfg_scale=2.0, name="Studio")
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"], inline=inline)
+        record = box.output(settled(found["id"])["output_id"])["render"]["configuration"]
+        assert record["id"] == ready["configuration"]["id"]
+        assert record["steps"] == 20 and record["cfg_scale"] == 2.0
+        assert box._runtime().renders[0].steps == 20
+
+    def test_changes_to_a_deleted_configuration_still_render_and_name_none(self, ready):
+        box.delete_configuration(ready["configuration"]["id"])
+        inline = dict(ready["configuration"], steps=12)
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"], inline=inline)
+        record = box.output(settled(found["id"])["output_id"])["render"]["configuration"]
+        assert record["id"] == "" and record["steps"] == 12
+        with pytest.raises(box.NotFound):
+            box.render(ready["pipeline"]["id"], "Speaker 1: Hi.", ready["configuration"]["id"])
+
+    def test_a_blank_model_is_recorded_as_the_model_the_engine_loads(self, ready, monkeypatch):
+        box.save_configuration({"id": ready["configuration"]["id"], "model_id": ""})
+        monkeypatch.setattr(box._engine(), "model_id", lambda: "vibevoice-7b", raising=False)
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        render = box.output(settled(found["id"])["output_id"])["render"]
+        assert render["model_id"] == "vibevoice-7b"
+        assert render["configuration"]["model_id"] == "", "the configuration's own choice"
+
+
+class TestInfotext:
+    RENDER = {"prompt": "Speaker 1: Hello there.\n[pause]\nSpeaker 2: Hi.", "steps": 10,
+              "cfg_scale": 1.3, "seed": 1234, "seed_drawn": True, "model_id": "vibevoice-7b",
+              "speakers": [{"n": 1, "sample_id": "a" * 16, "title": "Ada"},
+                           {"n": 2, "sample_id": "b" * 16, "title": "Brook, take two"}],
+              "max_new_tokens": None, "sections": 2, "render_seconds": 45.25}
+
+    def test_the_prompt_then_one_line_of_parameters(self):
+        entry = box.add_output(tone_pcm(2.0), 24000, "Take", "", dict(self.RENDER))
+        assert entry["infotext"] == (
+            "Speaker 1: Hello there.\n[pause]\nSpeaker 2: Hi.\n"
+            'Steps: 10, CFG scale: 1.3, Seed: 1234, Model: vibevoice-7b, Speaker 1: Ada, '
+            'Speaker 2: "Brook, take two", Sections: 2, Length: 2.0 s, Render time: 45.2 s')
+
+    def test_an_output_from_before_seeds_were_recorded_says_nothing_of_one(self):
+        entry = box.add_output(tone_pcm(0.5), 24000, "Old", "",
+                               {"steps": 10, "cfg_scale": 1.3, "seed": None,
+                                "max_new_tokens": 900, "prompt": "Hi"})
+        assert entry["infotext"] == ("Hi\nSteps: 10, CFG scale: 1.3, Max new tokens: 900, "
+                                     "Length: 0.5 s")
+
+    def test_every_output_handed_out_carries_its_format_and_infotext_and_none_is_stored(self):
+        entry = box.add_output(tone_pcm(0.5), 24000, "Take", "", dict(self.RENDER))
+        assert entry["format"] == "wav"
+        for found in (box.output(entry["id"]), box.outputs()[0],
+                      box.rename_output(entry["id"], "Final"), box.set_loop(entry["id"], True)):
+            assert found["format"] == "wav" and found["infotext"] == entry["infotext"]
+        stored = json.loads((box._outputs_root() / entry["id"] / box.META_FILENAME)
+                            .read_text("utf-8"))
+        assert "infotext" not in stored and "format" not in stored
+        assert stored["name"] == "Final" and stored["loop"] is True
+
+
+def _info_chunk(data: bytes) -> dict:
+    """The ``INFO`` fields of a RIFF file, read chunk by chunk."""
+    found, at = {}, 12
+    while at + 8 <= len(data):
+        kind, size = data[at:at + 4], struct.unpack("<I", data[at + 4:at + 8])[0]
+        body = data[at + 8:at + 8 + size]
+        if kind == b"LIST" and body[:4] == b"INFO":
+            inner = 4
+            while inner + 8 <= len(body):
+                key = body[inner:inner + 4].decode("ascii")
+                length = struct.unpack("<I", body[inner + 4:inner + 8])[0]
+                found[key] = body[inner + 8:inner + 8 + length].rstrip(b"\x00").decode("utf-8")
+                inner += 8 + length + (length % 2)
+        at += 8 + size + (size % 2)
+    assert at == len(data), "the RIFF size and the chunks agree"
+    return found
+
+
+class TestTheFiles:
+    def test_an_output_is_an_mp3_carrying_its_infotext_when_one_can_be_made(self, monkeypatch,
+                                                                             tmp_path):
+        asked = []
+
+        def encoder(pcm16, rate, tags):
+            asked.append((len(pcm16), rate, dict(tags)))
+            return b"ID3-the-encoded-render"
+
+        monkeypatch.setattr(box, "_encode_mp3", encoder)
+        entry = box.add_output(tone_pcm(1.0), 24000, "Take", "", dict(TestInfotext.RENDER))
+
+        assert entry["format"] == "mp3"
+        assert box.output_audio(entry["id"]) == (b"ID3-the-encoded-render", "mp3")
+        assert not (box._outputs_root() / entry["id"] / box.AUDIO_FILENAME).exists()
+        (size, rate, tags), = asked
+        assert size == len(tone_pcm(1.0)) and rate == 24000
+        assert tags["comment"] == entry["infotext"] and "title" not in tags, \
+            "a rename would leave a title saying the old name"
+        assert json.loads(tags["voicebox"]) == {"id": entry["id"], "render": entry["render"]}
+
+        box.set_settings({"save_folder": str(tmp_path)})
+        saved = box.save_output(entry["id"])
+        assert saved.endswith("Take.mp3")
+        assert (tmp_path / "Take.mp3").read_bytes() == b"ID3-the-encoded-render"
+        sidecar = json.loads((tmp_path / "Take.json").read_text("utf-8"))
+        assert sidecar["infotext"] == entry["infotext"] and sidecar["format"] == "mp3"
+
+    def test_a_wav_carries_the_infotext_in_its_info_chunk_and_reads_as_before(self):
+        entry = box.add_output(tone_pcm(1.0), 24000, "Take", "", dict(TestInfotext.RENDER))
+        data, kind = box.output_audio(entry["id"])
+
+        assert kind == "wav" and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+        assert struct.unpack("<I", data[4:8])[0] == len(data) - 8
+        info = _info_chunk(data)
+        assert info == {"ICMT": entry["infotext"], "ISFT": box.SOFTWARE}
+        pcm, rate = box.pcm_of(data)
+        assert rate == 24000 and pcm == tone_pcm(1.0)
+
+    def test_a_render_from_before_mp3s_is_listed_played_and_saved_as_a_wav(self, tmp_path):
+        identifier = "0123456789abcdef"
+        folder = box._outputs_root() / identifier
+        folder.mkdir(parents=True)
+        (folder / box.AUDIO_FILENAME).write_bytes(box.wav_bytes(tone_pcm(0.5)))
+        (folder / box.META_FILENAME).write_text(json.dumps({
+            "id": identifier, "name": "Old take", "pipeline_id": "", "seconds": 0.5,
+            "rate": 24000, "peaks": [0.1], "loop": False, "created": 1.0,
+            "render": {"steps": 10, "cfg_scale": 1.3, "seed": None, "prompt": "Hi"}}), "utf-8")
+
+        listed = box.outputs()
+        assert [entry["id"] for entry in listed] == [identifier]
+        assert listed[0]["format"] == "wav" and listed[0]["infotext"].startswith("Hi\nSteps: 10")
+        assert box.output_audio(identifier)[1] == "wav"
+        box.set_settings({"save_folder": str(tmp_path)})
+        assert box.save_output(identifier).endswith("Old take.wav")
+
+    def test_a_name_taken_by_another_formats_sidecar_is_not_overwritten(self, monkeypatch,
+                                                                         tmp_path):
+        box.set_settings({"save_folder": str(tmp_path)})
+        monkeypatch.setattr(box, "_encode_mp3", lambda pcm16, rate, tags: b"ID3")
+        first = box.save_output(box.add_output(tone_pcm(0.5), 24000, "Take", "", {})["id"])
+        monkeypatch.setattr(box, "_encode_mp3", no_mp3)
+        second = box.save_output(box.add_output(tone_pcm(0.5), 24000, "Take", "", {})["id"])
+        assert first.endswith("Take.mp3") and second.endswith("Take (2).wav")
+        assert json.loads((tmp_path / "Take.json").read_text("utf-8"))["format"] == "mp3"
+
+    def test_the_card_is_handed_back_before_the_file_is_made(self, ready, monkeypatch):
+        turns = box.turns()
+        seen = []
+
+        def encoder(pcm16, rate, tags):
+            seen.append(list(turns.turn.finished))
+            return None
+
+        monkeypatch.setattr(box, "_encode_mp3", encoder)
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        assert settled(found["id"])["phase"] == "done"
+        assert seen == [[None]], "the turn was finished before the encoder ran"
+
+    @pytest.mark.skipif(not __import__("importlib").util.find_spec("av"),
+                        reason="PyAV is not installed here (Forge Neo ships it)")
+    def test_the_real_encoder_makes_an_mp3_that_decodes_to_every_sample(self):
+        import av
+        import numpy
+
+        pcm = tone_pcm(3.0)
+        text = "Speaker 1: Hi, there.\nSteps: 10, Seed: 7"
+        encoded = REAL_MP3(pcm, 24000, {"comment": text, "encoded_by": box.SOFTWARE,
+                                        "voicebox": json.dumps({"seed": 7})})
+        assert encoded is not None and encoded[:3] == b"ID3"
+        assert len(encoded) < len(box.wav_bytes(pcm)) / 2.5
+
+        with av.open(io.BytesIO(encoded)) as container:
+            stream = container.streams.audio[0]
+            assert (container.format.name, stream.rate) == ("mp3", 24000)
+            assert stream.codec_context.layout.name == "mono"
+            assert container.metadata["comment"] == text
+            assert json.loads(container.metadata["voicebox"]) == {"seed": 7}
+            decoded = numpy.concatenate([frame.to_ndarray().reshape(-1)
+                                         for frame in container.decode(stream)])
+        assert decoded.size == len(pcm) // 2, "the encoder's delay and padding are undone"
+
+
+class TestTheQueue:
+    def test_clear_withdraws_every_queued_job_and_leaves_the_running_one(self, ready):
+        turns = box.turns()
+        gate = threading.Event()
+
+        class Held(FakeTurn):
+            def wait(self, timeout=None, cancelled=None):
+                gate.set()
+                if cancelled is not None and cancelled.is_set():
+                    self.cancel()
+                    return "cancelled"
+                time.sleep(0.005)
+                return "clearing"
+
+        turns.turn = Held()
+        pipeline, configuration = ready["pipeline"]["id"], ready["configuration"]["id"]
+        first = box.render(pipeline, "Speaker 1: One", configuration)
+        second = box.render(pipeline, "Speaker 1: Two", configuration)
+        third = box.render(pipeline, "Speaker 1: Three", configuration)
+        assert gate.wait(2.0)
+
+        box.cancel_job(third["id"])
+        assert box.clear_queue() == 1, "a job withdrawn already is not counted again"
+        assert box.job(second["id"])["phase"] == "cancelled"
+        assert box.job(third["id"])["phase"] == "cancelled"
+        assert box.job(first["id"])["phase"] == "waiting", "Cancel is for the running one"
+        assert box.clear_queue() == 0
+
+        box.cancel_job(first["id"])
+        assert settled(first["id"])["phase"] == "cancelled"
+        assert len(turns.requests) == 1, "a withdrawn job never asks for the card"
+
+    def test_a_job_says_how_long_it_has_run_by_the_servers_clock(self, ready, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr(box, "_now", lambda: clock[0])
+        runtime = box._runtime()
+        runtime.hold = threading.Event()
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"])
+        assert found["elapsed"] is None, "not started"
+
+        phase_reached(found["id"], "rendering")
+        clock[0] = 1042.5
+        assert box.job(found["id"])["elapsed"] == 42.5
+        runtime.hold.set()
+        settled(found["id"])
+        clock[0] = 2000.0
+        assert box.job(found["id"])["elapsed"] == 42.5, "an ended job's time stops"
+
+    def test_a_render_ending_while_the_next_is_named_leaves_no_two_one_name(self, ready,
+                                                                             monkeypatch):
+        runtime = box._runtime()
+        runtime.hold = threading.Event()
+        pipeline, configuration = ready["pipeline"]["id"], ready["configuration"]["id"]
+        first = box.render(pipeline, "Speaker 1: One", configuration)
+        phase_reached(first["id"], "rendering")
+        real = box._service.pending
+
+        def pending(pipeline_id):
+            # The first render ends exactly while the second is being named.
+            runtime.hold.set()
+            settled(first["id"])
+            return real(pipeline_id)
+
+        monkeypatch.setattr(box._service, "pending", pending)
+        second = box.render(pipeline, "Speaker 1: Two", configuration)
+        assert (first["name"], second["name"]) == ("Trailer 1", "Trailer 2")

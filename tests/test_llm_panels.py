@@ -3459,6 +3459,25 @@ class TestACharacterHasItsOwnVoice:
         assert loaded.voice_profiles["sopro"]["speed"] == 0.9
         assert loaded.voices["kokoro"] == "kokoro:official:af_nicole"
 
+    def test_a_save_on_any_engine_keeps_every_other_engines_voice(self, characters):
+        """The list of fields a Save carries forward lived in the panel and never
+        gained PocketTTS's six: every Save dropped a character's Pocket voice and
+        delivery, whichever engine was selected. It is the character format's
+        own list now."""
+        from prompt_master.chat.characters import Character
+
+        characters.save(Character(name="Ada", sopro_voice="sopro:clone:abc",
+                                  pocket_voice="pocket:official:alba", pocket_temperature=0.6,
+                                  pocket_speed=1.1))
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
+        loaded = characters.load("Ada")
+        assert loaded.voices == {"kokoro": "kokoro:official:af_nicole",
+                                 "sopro": "sopro:clone:abc",
+                                 "pocket": "pocket:official:alba"}
+        assert loaded.voice_profiles["pocket"]["temperature"] == 0.6
+        assert loaded.voice_profiles["pocket"]["speed"] == 1.1
+
     def test_two_characters_can_have_two_voices(self, characters):
         from prompt_master.chat.characters import Character
 

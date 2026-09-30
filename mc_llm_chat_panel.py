@@ -2898,18 +2898,6 @@ def _editor_fields(character, editing: str, note: str, kind: str = "info") -> li
             _face_value(_character_face(character.name))] + _voice_fields(character)
 
 
-VOICE_ENGINE_FIELDS = ("voice", "voice_speed", "voice_pitch", "voice_gain", "voice_pause",
-                       "sopro_voice", "sopro_speed", "sopro_pitch", "sopro_gain",
-                       "sopro_pause", "sopro_temperature", "sopro_top_p", "sopro_top_k",
-                       "sopro_language")
-"""Every field on a character that belongs to one text-to-speech engine.
-
-Named here because a save has to carry *all* of them forward and only edit the
-active engine's -- and a list built by remembering to add to it is a list that
-loses somebody's Sopro voice the first time a field is added.
-"""
-
-
 def _voice_engine_fields(existing_name: str, voice, delivery: dict) -> dict:
     """The character's voice fields after an edit, scoped to the active engine.
 
@@ -2923,7 +2911,10 @@ def _voice_engine_fields(existing_name: str, voice, delivery: dict) -> dict:
     engine that was edited, which is the same thing a brand-new character has.
     """
     import mc_voice_engines as engines
-    from prompt_master.chat.characters import Character
+    # Every engine's fields, from the character format itself
+    # (``characters.VOICE_FIELDS``): the list that lived here never gained
+    # PocketTTS's, so each Save dropped a character's Pocket voice.
+    from prompt_master.chat.characters import VOICE_FIELDS, Character
 
     found = {}
     try:
@@ -2931,7 +2922,7 @@ def _voice_engine_fields(existing_name: str, voice, delivery: dict) -> dict:
     except Exception:
         character = None
     if character is not None:
-        for name in VOICE_ENGINE_FIELDS:
+        for name in VOICE_FIELDS:
             found[name] = getattr(character, name, None)
     try:
         active = engines.active()
@@ -2947,7 +2938,7 @@ def _voice_engine_fields(existing_name: str, voice, delivery: dict) -> dict:
                        "engine", exc_info=True)
         found.update(Character.voice_fields("kokoro", str(voice or "").strip(), delivery))
     return {name: found.get(name) if name in found else None
-            for name in VOICE_ENGINE_FIELDS}
+            for name in VOICE_FIELDS}
 
 
 def _voice_fields(character) -> list:

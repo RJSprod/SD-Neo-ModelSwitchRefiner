@@ -336,6 +336,22 @@ class Character:
         )
 
 
+VOICE_FIELDS = ("voice", "voice_speed", "voice_pitch", "voice_gain", "voice_pause",
+                "sopro_voice", "sopro_speed", "sopro_pitch", "sopro_gain", "sopro_pause",
+                "sopro_temperature", "sopro_top_p", "sopro_top_k", "sopro_language",
+                "pocket_voice", "pocket_speed", "pocket_pitch", "pocket_gain",
+                "pocket_pause", "pocket_temperature")
+"""Every field of :class:`Character` that belongs to one text-to-speech engine.
+
+Here, beside the fields, because a save has to carry *all* of them forward and
+edit only the active engine's -- and the list that did that used to live in the
+panel, where PocketTTS's six were never added: every character Save dropped a
+character's Pocket voice and delivery, whichever engine was selected. A test
+holds this tuple to the dataclass, so a field added for another engine and
+forgotten here fails there rather than on somebody's character.
+"""
+
+
 @dataclass
 class Persona:
     """Whoever is typing — optional, and empty until it is filled in."""

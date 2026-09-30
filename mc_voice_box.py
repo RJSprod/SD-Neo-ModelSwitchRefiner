@@ -71,6 +71,10 @@ OUTPUTS_DIRNAME = "outputs"
 PROMPTS_FILENAME = "prompts.json"
 SETTINGS_FILENAME = "settings.json"
 AUDIO_FILENAME = "audio.wav"
+MP3_FILENAME = "audio.mp3"
+"""An output's sound is an MP3 when this Forge can encode one and a WAV when it
+cannot -- and for every render made before outputs were MP3s. A sample is
+always a WAV: it is what the model is conditioned on, and never lossy."""
 META_FILENAME = "meta.json"
 
 SAMPLE_RATE = 24000
@@ -98,6 +102,14 @@ STEPS_RANGE = (1, 50)
 CFG_RANGE = (1.0, 3.0)
 SEED_MAX = 2**31 - 1
 TOKENS_MAX = 65_536
+
+MP3_BITRATE = 128_000
+"""Constant 128 kb/s, mono, at the model's 24 kHz: a third of the WAV's size,
+and speech at this rate loses nothing anyone hears. The encoder's delay and
+padding are written into the file's own header, so a decoder gives back
+exactly the samples that went in and a looped render has no gap."""
+MEDIA_TYPES = {"mp3": "audio/mpeg", "wav": "audio/wav"}
+SOFTWARE = "Voice Box (VibeVoice)"
 
 ENVELOPE = reference.Envelope(engine="VibeVoice", minimum_seconds=SAMPLE_MIN_SECONDS,
                               maximum_seconds=SAMPLE_MAX_SECONDS,
@@ -326,6 +338,74 @@ def float32_of(pcm16: bytes) -> bytes:
     if struct.pack("<f", 1.0) != struct.pack("=f", 1.0):
         floats.byteswap()
     return floats.tobytes()
+
+
+_mp3_refused = False
+
+
+def _encode_mp3(pcm16: bytes, rate: int, tags: dict) -> bytes | None:
+    """``pcm16`` as a constant-bitrate MP3 carrying ``tags`` as ID3, or ``None``.
+
+    Encoded in this process by PyAV, which Forge Neo installs for its own video
+    work and which carries FFmpeg's LAME, so nothing is added to Forge's
+    environment for it -- the voice side never adds anything there. ``None``
+    (no PyAV, a build without the encoder, a failure) keeps the output a WAV,
+    said once in the log.
+    """
+    global _mp3_refused
+    try:
+        import av
+        import numpy
+    except ImportError:
+        return None
+    try:
+        buffer = io.BytesIO()
+        with av.open(buffer, mode="w", format="mp3") as container:
+            for key, value in tags.items():
+                container.metadata[key] = str(value)
+            stream = container.add_stream("libmp3lame", rate=int(rate))
+            stream.bit_rate = MP3_BITRATE
+            stream.layout = "mono"
+            size = stream.codec_context.frame_size or 1152
+            samples = numpy.frombuffer(pcm16[:len(pcm16) // 2 * 2], dtype="<i2")
+            fifo = av.AudioFifo()
+            if samples.size:
+                frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16",
+                                                   layout="mono")
+                frame.sample_rate = int(rate)
+                fifo.write(frame)
+            while fifo.samples >= size:
+                for packet in stream.encode(fifo.read(size)):
+                    container.mux(packet)
+            tail = fifo.read()
+            if tail is not None:
+                for packet in stream.encode(tail):
+                    container.mux(packet)
+            for packet in stream.encode(None):
+                container.mux(packet)
+        return buffer.getvalue()
+    except Exception:
+        if not _mp3_refused:
+            _mp3_refused = True
+            logger.warning("Model Chain: Voice Box could not encode an MP3 on this Forge, so "
+                           "its renders are kept as WAV", exc_info=True)
+        return None
+
+
+def _with_info(wav: bytes, fields: dict) -> bytes:
+    """``wav`` with a ``LIST``/``INFO`` chunk after its sound: the tags a WAV can carry.
+
+    After the sound, not before it, so every reader that stops at the ``data``
+    chunk -- Python's :mod:`wave` among them -- reads the sound as it was.
+    """
+    body = b"INFO"
+    for key, text in fields.items():
+        data = str(text).encode("utf-8") + b"\x00"
+        body += key.encode("ascii") + struct.pack("<I", len(data)) + data
+        if len(data) % 2:
+            body += b"\x00"
+    tagged = wav + b"LIST" + struct.pack("<I", len(body)) + body
+    return tagged[:4] + struct.pack("<I", len(tagged) - 8) + tagged[8:]
 
 
 # --------------------------------------------------------------------------- #
@@ -725,11 +805,88 @@ def _output_meta(identifier: str) -> Path:
     return _outputs_root() / identifier / META_FILENAME
 
 
-def _output_audio(identifier: str) -> Path:
-    return _outputs_root() / identifier / AUDIO_FILENAME
+def _audio_in(folder: Path) -> Path | None:
+    """The sound file of the output in ``folder``: its MP3, else its WAV, else none."""
+    for name in (MP3_FILENAME, AUDIO_FILENAME):
+        if (folder / name).exists():
+            return folder / name
+    return None
+
+
+def _format_of(path: Path) -> str:
+    return "mp3" if path.name == MP3_FILENAME else "wav"
+
+
+def _quoted(value) -> str:
+    """A parameter's value as a WebUI's infotext writes one: quoted only when it must be."""
+    text = str(value)
+    if not any(mark in text for mark in ',:"\n'):
+        return text
+    return json.dumps(text, ensure_ascii=False)
+
+
+def infotext(entry: dict) -> str:
+    """What made an output, the way a WebUI prints what made an image.
+
+    The prompt as it was written, then one line of parameters -- enough to make
+    the same render again: the seed is the one the render used, drawn when its
+    configuration left the seed blank. Written into the file itself (the MP3's
+    comment, the WAV's ``ICMT``) and shown on the page. An output made before
+    seeds were recorded has none to give, and its line says nothing of one.
+    """
+    render = entry.get("render") if isinstance(entry.get("render"), dict) else {}
+    parts: list[str] = []
+
+    def add(label: str, value) -> None:
+        if value not in (None, ""):
+            parts.append(f"{label}: {_quoted(value)}")
+
+    add("Steps", render.get("steps"))
+    cfg = render.get("cfg_scale")
+    add("CFG scale", f"{float(cfg):g}" if isinstance(cfg, (int, float)) else cfg)
+    add("Seed", render.get("seed"))
+    add("Model", render.get("model_id"))
+    for speaker in render.get("speakers") or ():
+        if isinstance(speaker, dict):
+            add(f"Speaker {speaker.get('n')}", speaker.get("title") or speaker.get("sample_id"))
+    add("Max new tokens", render.get("max_new_tokens"))
+    sections = render.get("sections")
+    add("Sections", sections if isinstance(sections, int) and sections > 1 else None)
+    if entry.get("seconds") is not None:
+        add("Length", f"{float(entry['seconds']):.1f} s")
+    if render.get("render_seconds"):
+        add("Render time", f"{float(render['render_seconds']):.1f} s")
+    line = ", ".join(parts)
+    prompt = str(render.get("prompt") or "").strip()
+    return f"{prompt}\n{line}".strip() if prompt else line
+
+
+def _shown(entry: dict, audio: Path) -> dict:
+    """An output as it is handed out: the stored record, its sound's format and its infotext."""
+    found = dict(entry)
+    found["format"] = _format_of(audio)
+    found["infotext"] = infotext(found)
+    return found
+
+
+def _stored_output(identifier: str) -> tuple[dict, Path]:
+    identifier = _identifier(identifier)
+    entry = _read_json(_output_meta(identifier), {})
+    audio = _audio_in(_outputs_root() / identifier)
+    if not entry.get("id") or audio is None:
+        raise NotFound("That render is no longer in the Voice Box.")
+    return entry, audio
 
 
 def add_output(pcm16: bytes, rate: int, name: str, pipeline_id: str, render: dict) -> dict:
+    """Keep a render: its sound as an MP3 (a WAV where MP3 cannot be made), its record beside it.
+
+    The file carries its own infotext -- the MP3 in ID3 (the comment, and the
+    whole record as JSON under ``voicebox``), the WAV in its ``INFO`` chunk --
+    so a render downloaded or saved says what made it wherever it goes. The
+    name is not written into the file: a rename would leave it saying the old
+    one, and a player shows the file's name when there is no title.
+    """
     identifier = _new_id()
     entry = {
         "id": identifier,
@@ -742,12 +899,26 @@ def add_output(pcm16: bytes, rate: int, name: str, pipeline_id: str, render: dic
         "created": _now(),
         "render": dict(render or {}),
     }
+    text = infotext(entry)
+    encoded = _encode_mp3(pcm16, rate, {
+        "comment": text,
+        "encoded_by": SOFTWARE,
+        "voicebox": json.dumps({"id": identifier, "render": entry["render"]},
+                               ensure_ascii=False),
+    })
+    folder = _outputs_root() / identifier
     with _lock:
-        _write_bytes(_output_audio(identifier), wav_bytes(pcm16, rate))
+        if encoded is not None:
+            audio = folder / MP3_FILENAME
+            _write_bytes(audio, encoded)
+        else:
+            audio = folder / AUDIO_FILENAME
+            _write_bytes(audio, _with_info(wav_bytes(pcm16, rate),
+                                           {"ICMT": text, "ISFT": SOFTWARE}))
         _write_json(_output_meta(identifier), entry)
     if pipeline_id:
         _attach_output(pipeline_id, identifier)
-    return entry
+    return _shown(entry, audio)
 
 
 def outputs(pipeline_id: str = "") -> list[dict]:
@@ -755,8 +926,9 @@ def outputs(pipeline_id: str = "") -> list[dict]:
         found = []
         for child in sorted(_outputs_root().iterdir()) if _outputs_root().exists() else []:
             entry = _read_json(child / META_FILENAME, {})
-            if entry.get("id") and (child / AUDIO_FILENAME).exists():
-                found.append(entry)
+            audio = _audio_in(child)
+            if entry.get("id") and audio is not None:
+                found.append(_shown(entry, audio))
     if pipeline_id:
         found = [entry for entry in found if entry.get("pipeline_id") == pipeline_id]
     found.sort(key=lambda entry: entry.get("created", 0), reverse=True)
@@ -764,32 +936,28 @@ def outputs(pipeline_id: str = "") -> list[dict]:
 
 
 def output(identifier: str) -> dict:
-    identifier = _identifier(identifier)
-    entry = _read_json(_output_meta(identifier), {})
-    if not entry.get("id") or not _output_audio(identifier).exists():
-        raise NotFound("That render is no longer in the Voice Box.")
-    return entry
+    return _shown(*_stored_output(identifier))
 
 
 def rename_output(identifier: str, name: str) -> dict:
     with _lock:
-        entry = output(identifier)
+        entry, audio = _stored_output(identifier)
         entry["name"] = _title(name, entry.get("name") or "Render")
         _write_json(_output_meta(entry["id"]), entry)
-    return entry
+    return _shown(entry, audio)
 
 
 def set_loop(identifier: str, loop: bool) -> dict:
     with _lock:
-        entry = output(identifier)
+        entry, audio = _stored_output(identifier)
         entry["loop"] = bool(loop)
         _write_json(_output_meta(entry["id"]), entry)
-    return entry
+    return _shown(entry, audio)
 
 
 def delete_output(identifier: str) -> dict:
     with _lock:
-        entry = output(identifier)
+        entry, _audio = _stored_output(identifier)
         shutil.rmtree(_outputs_root() / entry["id"], ignore_errors=True)
         if entry.get("pipeline_id"):
             try:
@@ -801,8 +969,10 @@ def delete_output(identifier: str) -> dict:
     return {"deleted": entry["id"]}
 
 
-def output_wav(identifier: str) -> bytes:
-    return _output_audio(output(identifier)["id"]).read_bytes()
+def output_audio(identifier: str) -> tuple[bytes, str]:
+    """An output's sound file as stored, and its format (``"mp3"`` or ``"wav"``)."""
+    _entry, audio = _stored_output(identifier)
+    return audio.read_bytes(), _format_of(audio)
 
 
 def save_output(identifier: str) -> str:
@@ -812,7 +982,8 @@ def save_output(identifier: str) -> str:
     with none chosen is refused with the sentence that tells the page to ask.
     A name already taken gets a number, never an overwrite.
     """
-    entry = output(identifier)
+    stored, audio = _stored_output(identifier)
+    entry = _shown(stored, audio)
     folder = str(settings().get("save_folder") or "")
     if not folder:
         raise VoiceBoxError("Choose a folder to save renders into first.")
@@ -822,11 +993,12 @@ def save_output(identifier: str) -> str:
     except OSError as exc:
         raise VoiceBoxError(f"The save folder cannot be used: {exc.strerror or exc}") from None
     stem = _safe_filename(entry.get("name"))
-    candidate, number = target / f"{stem}.wav", 2
-    while candidate.exists():
-        candidate = target / f"{stem} ({number}).wav"
+    suffix = f".{entry['format']}"
+    candidate, number = target / f"{stem}{suffix}", 2
+    while candidate.exists() or candidate.with_suffix(".json").exists():
+        candidate = target / f"{stem} ({number}){suffix}"
         number += 1
-    shutil.copyfile(_output_audio(entry["id"]), candidate)
+    shutil.copyfile(audio, candidate)
     sidecar = {key: value for key, value in entry.items() if key != "peaks"}
     _write_json(candidate.with_suffix(".json"), sidecar)
     logger.info("Model Chain: Voice Box saved “%s” to %s", entry["name"], candidate)
@@ -1006,6 +1178,14 @@ class Job:
     prompt: str
     configuration: dict
     card: str
+    configuration_id: str = ""
+    """The saved configuration the page was showing, kept for the output's record
+    even when the render ran on the page's unsaved changes to it."""
+    seed: int | None = None
+    seed_drawn: bool = False
+    """The seed every section renders with: the configuration's, or one drawn for
+    this job when the configuration left it blank -- so every render has a seed
+    that makes it again."""
     phase: str = QUEUED
     reason: str = ""
     warning: str = ""
@@ -1022,11 +1202,23 @@ class Job:
     def cancelled(self) -> bool:
         return self.cancel_event.is_set()
 
+    def elapsed(self) -> float | None:
+        """Seconds since the job left the queue, to its end; ``None`` while it is queued.
+
+        Worked out here, when the server answers, so a page counts on from a
+        figure of the server's and never sets its own clock against the
+        server's timestamps.
+        """
+        if self.started is None:
+            return None
+        return round(max((self.ended or _now()) - self.started, 0.0), 1)
+
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "pipeline_id": self.pipeline_id,
                 "phase": self.phase, "reason": self.reason, "warning": self.warning,
                 "progress": dict(self.progress), "output_id": self.output_id,
                 "created": self.created, "started": self.started, "ended": self.ended,
+                "elapsed": self.elapsed(), "seed": self.seed, "seed_drawn": self.seed_drawn,
                 "card": self.card, "live": self.phase in LIVE}
 
 
@@ -1087,6 +1279,22 @@ class _Service:
             return sum(1 for job in self.jobs
                        if job.pipeline_id == pipeline_id and job.phase in LIVE)
 
+    def clear(self) -> int:
+        """Withdraw every job still queued, on every card; how many were. Running ones stay."""
+        with self.lock:
+            withdrawn = []
+            for queue in self.queues.values():
+                while queue:
+                    withdrawn.append(queue.popleft())
+        cleared = 0
+        for job in withdrawn:
+            if not job.cancelled and job.phase == QUEUED:
+                cleared += 1
+            job.cancel_event.set()
+            if job.phase in LIVE:
+                _end(job, CANCELLED)
+        return cleared
+
     def stop(self) -> None:
         with self.lock:
             for queue in self.queues.values():
@@ -1138,16 +1346,28 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     prompt is parsed, the configuration read, the speakers checked against the
     samples, the card decided. What follows -- the turn, the load, the render --
     happens on the card's own thread and is read back from the job.
+
+    A configuration with no seed gets one drawn here, so the job says from the
+    start which seed it renders with and its output records it.
     """
     if _turns is None:
         raise VoiceBoxError("Voice Box is not connected to the cards on this WebUI.")
     owner = pipeline(pipeline_id)
     sections = parse_script(prompt)
+    source = ""
     if inline is not None:
         chosen = _clean_configuration(dict(inline))
+        if configuration_id:
+            # Unsaved changes to a saved configuration: rendered as shown, and
+            # the output still says which configuration they were made to.
+            try:
+                source = configuration(configuration_id)["id"]
+            except NotFound:
+                source = ""
     elif configuration_id:
         stored = configuration(configuration_id)
         chosen = dict(stored, **_clean_configuration(stored, stored))
+        source = stored["id"]
     else:
         chosen = _clean_configuration({})
     wanted = sorted({number for section in sections for number in section.speakers})
@@ -1164,10 +1384,20 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
         raise VoiceBoxError(refused)
     remember_prompt(prompt)
     if not name:
-        number = len(owner.get("outputs") or []) + _service.pending(owner["id"]) + 1
-        name = f"{owner.get('name') or 'Render'} {number}"
+        # Counted in this order, the pipeline read after the jobs: a job keeps
+        # its output before it ends, so one that ends in between is found by
+        # the second read. The other order let it slip between the two, and
+        # two renders took one name.
+        waiting = _service.pending(owner["id"])
+        made = len(pipeline(owner["id"]).get("outputs") or [])
+        name = f"{owner.get('name') or 'Render'} {made + waiting + 1}"
+    seed = chosen.get("seed")
+    drawn = seed is None
+    if drawn:
+        seed = secrets.randbelow(SEED_MAX + 1)
     job = Job(id=_new_id(), name=_title(name, "Render"), pipeline_id=owner["id"],
-              prompt=str(prompt), configuration=chosen, card=card)
+              prompt=str(prompt), configuration=chosen, card=card, configuration_id=source,
+              seed=int(seed), seed_drawn=drawn)
     _service.submit(job)
     logger.info("Model Chain: Voice Box queued “%s” (%d section%s, %d speaker%s)", job.name,
                 len(sections), "" if len(sections) == 1 else "s", len(wanted),
@@ -1197,6 +1427,7 @@ def _perform(job: Job) -> None:
     turn = _turns.request(job.card, need_vram=int(engine.need_vram_bytes(model_id)),
                           need_ram=int(engine.need_ram_bytes(model_id)),
                           label=f"{engine.LABEL} — {job.name}")
+    made = None
     try:
         while True:
             phase = turn.wait(timeout=_wait, cancelled=job.cancel_event)
@@ -1214,16 +1445,21 @@ def _perform(job: Job) -> None:
             turn.cancel()
             _end(job, CANCELLED)
             return
-        _render_granted(job, sections, voices, model_id, engine, runtime)
+        made = _render_granted(job, sections, voices, model_id, engine, runtime)
     finally:
         try:
             turn.finish(keep_warm=None if settings().get("keep_warm", True) else False)
         except Exception:
             logger.warning("Model Chain: could not hand the card back after a render",
                            exc_info=True)
+    if made is not None:
+        # The card is handed back first: making the file is work for the
+        # processor, and an image job has no reason to wait for it.
+        _keep(job, *made)
 
 
-def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) -> None:
+def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
+    """Load, render every section, and return ``(pcm16, rate, record)``; ``None`` when cancelled."""
     job.phase = LOADING
     job.reason = "loading the model"
     if model_id:
@@ -1260,7 +1496,7 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) 
                     if number in section.speakers},
             cfg_scale=float(job.configuration["cfg_scale"]),
             steps=int(job.configuration["steps"]),
-            seed=job.configuration.get("seed"),
+            seed=job.seed,
             max_new_tokens=job.configuration.get("max_new_tokens"))
         result = runtime.render(job.card, request, on_progress=progressed)
         peak = max(peak, int(getattr(result, "peak_bytes", 0) or 0))
@@ -1274,14 +1510,18 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) 
         total_seconds += seconds_of(pcm16, rate)
     if job.cancelled or not pieces:
         _end(job, CANCELLED)
-        return
-    entry = add_output(b"".join(pieces), rate, job.name, job.pipeline_id, {
-        "model_id": model_id,
+        return None
+    # The calibration figure is not noted here: the runtime notes every
+    # render's peak itself, and a second note would count each render twice.
+    configured = job.configuration
+    return b"".join(pieces), rate, {
+        "model_id": model_id or _model_in_use(engine),
         "card": job.card,
-        "seed": job.configuration.get("seed"),
-        "steps": job.configuration["steps"],
-        "cfg_scale": job.configuration["cfg_scale"],
-        "max_new_tokens": job.configuration.get("max_new_tokens"),
+        "seed": job.seed,
+        "seed_drawn": job.seed_drawn,
+        "steps": configured["steps"],
+        "cfg_scale": configured["cfg_scale"],
+        "max_new_tokens": configured.get("max_new_tokens"),
         "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
                      for number, voice in sorted(voices.items())],
         "prompt": job.prompt,
@@ -1289,18 +1529,44 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime) 
         "render_seconds": round(render_seconds, 1),
         "peak_bytes": peak,
         "tokens": tokens,
-    })
-    job.output_id = entry["id"]
-    job.progress = {"section": len(sections), "sections": len(sections),
-                    "seconds": entry["seconds"]}
+        # The configuration as the render used it, to be put back by the page's
+        # Reuse settings: the seed is the one used, so the same render comes
+        # out again; model and card are the configuration's own ("" is the
+        # default), and every speaker slot is kept, used by this script or not.
+        "configuration": {
+            "id": job.configuration_id,
+            "name": str(configured.get("name") or ""),
+            "model_id": str(configured.get("model_id") or ""),
+            "card_uuid": str(configured.get("card_uuid") or ""),
+            "steps": configured["steps"],
+            "cfg_scale": configured["cfg_scale"],
+            "seed": job.seed,
+            "max_new_tokens": configured.get("max_new_tokens"),
+            "speakers": dict(configured.get("speakers") or {}),
+        },
+    }
+
+
+def _model_in_use(engine) -> str:
+    """The model the engine loads when neither the configuration nor the settings name one."""
+    ask = getattr(engine, "model_id", None)
     try:
-        if peak:
-            engine.note_peak(model_id, peak)
+        return str(ask() or "") if callable(ask) else ""
     except Exception:
-        logger.debug("Model Chain: could not record the render's peak", exc_info=True)
+        return ""
+
+
+def _keep(job: Job, pcm16: bytes, rate: int, record: dict) -> None:
+    """Make the render's output and end the job done."""
+    job.reason = "saving the render"
+    entry = add_output(pcm16, rate, job.name, job.pipeline_id, record)
+    job.output_id = entry["id"]
+    sections = int(record.get("sections") or 1)
+    job.progress = {"section": sections, "sections": sections, "seconds": entry["seconds"]}
     _end(job, DONE)
-    logger.info("Model Chain: Voice Box rendered “%s” — %.1f s of speech in %.0f s", job.name,
-                entry["seconds"], render_seconds)
+    logger.info("Model Chain: Voice Box rendered “%s” — %.1f s of speech in %.0f s (%s)",
+                job.name, entry["seconds"], float(record.get("render_seconds") or 0.0),
+                entry["format"].upper())
 
 
 def jobs() -> list[dict]:
@@ -1326,6 +1592,15 @@ def cancel_job(identifier: str) -> dict:
     if found.phase == QUEUED:
         _end(found, CANCELLED)
     return found.to_dict()
+
+
+def clear_queue() -> int:
+    """Withdraw every queued job on every card; how many were. The running ones are left alone."""
+    cleared = _service.clear()
+    if cleared:
+        logger.info("Model Chain: Voice Box withdrew %d queued render%s", cleared,
+                    "" if cleared == 1 else "s")
+    return cleared
 
 
 def stop() -> None:

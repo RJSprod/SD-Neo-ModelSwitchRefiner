@@ -507,6 +507,12 @@ def character_state(character) -> dict:
         # sliders open where the sound the user is listening to actually is,
         # rather than at a neutral they are not.
         effective = profiles.resolve(overrides)
+        # A field left to "the model's own" has no number a slider can show;
+        # an engine that knows its model's says it here (PocketTTS's
+        # Variation), or the slider opens at its minimum and is saved there.
+        show = getattr(profiles, "shown", None)
+        if callable(show):
+            effective = show(effective)
         names = profiles.FIELDS
     except Exception:
         logger.debug("Model Chain: could not read a character's delivery", exc_info=True)

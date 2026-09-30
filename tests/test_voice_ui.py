@@ -1112,6 +1112,46 @@ class TestTheCharacterEditorFollowsTheEngine:
         assert found["voice"] == ""
         assert len(found["values"]) == len(profile.FIELDS)
 
+    def test_a_variation_left_to_the_model_opens_at_the_models_own(self, monkeypatch):
+        """A slider handed ``None`` sits at its minimum, and a Save with Own
+        delivery ticked kept that minimum as the character's Variation. Left to
+        the model, it opens at the number the model runs at; a character's own
+        is its own; a model's number outside the range is held to it."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket_profile as profile
+        import mc_voice_pocket_runtime as runtime
+        from prompt_master.chat.characters import Character
+
+        engines.select("pocket")
+        at = list(profile.FIELDS).index("temperature")
+        monkeypatch.setattr(runtime, "defaults", lambda: {"temperature": 0.7})
+        found = mc_voice_ui.character_state(Character(name="Ada"))
+        assert found["values"][at] == 0.7 and found["custom"] is False
+        own = mc_voice_ui.character_state(Character(name="Ada", pocket_temperature=0.4))
+        assert own["values"][at] == 0.4 and own["custom"] is True
+        monkeypatch.setattr(runtime, "defaults", lambda: {"temperature": 5.0})
+        assert mc_voice_ui.character_state(Character(name="Ada"))["values"][at] == \
+            profile.CONTROLS["temperature"]["maximum"]
+        assert profile.resolve({})["temperature"] is None, "only what is shown changes"
+
+    def test_before_a_worker_has_run_the_installed_recipe_says_it(self, monkeypatch,
+                                                                    voice_root):
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+        import mc_voice_pocket_profile as profile
+        import mc_voice_pocket_runtime as runtime
+        from prompt_master.chat.characters import Character
+
+        engines.select("pocket")
+        at = list(profile.FIELDS).index("temperature")
+        monkeypatch.setattr(runtime, "defaults", lambda: {})
+        assert mc_voice_ui.character_state(Character(name="Ada"))["values"][at] is None, \
+            "nothing installed, nothing to say"
+        recipe = paths.pocket_upstream_config(pocket.model_id())
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text('{"default_temperature": 0.3}', encoding="utf-8")
+        assert mc_voice_ui.character_state(Character(name="Ada"))["values"][at] == 0.3
+
 
 class TestACharactersDeliveryControlsAreTheEnginesOwn:
     """The contract ``javascript/voice_chat.js`` reads the field list through.

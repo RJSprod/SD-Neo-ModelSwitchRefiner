@@ -512,6 +512,69 @@ JSON sidecar and never overwritten, and downloaded through the token-checked
 route. Files live under `<voice data root>/voice_box/`. The routes are under
 `/model-chain/voice-box` on Voice Chat's page token.
 
+**The UX round (after phase 2, at the user's request).** Six changes, each the
+user's own words first:
+
+1. *"Nothing should render taller than browser view and force a scroll of the
+   entire page."* The root takes the height the window has below it (window
+   height, less the root's top, less whatever the document lays out under it,
+   at least 420 px), measured and written in pixels — a percentage inside
+   Gradio's containers resolves to auto — on resize, on the visual viewport's
+   resize, on a tab switch and after fonts and data paint; never by observing
+   the box it sizes. Every long list scrolls inside its stage.
+2. *"On mobile … swipe up to get to next stage, swipe down to previous."* Under
+   900 px of root width the layout is `stack` (`data-layout` on the root): the
+   stages container scroll-snaps vertically, each stage the container's full
+   height and width, `scroll-snap-stop: always`, scroll chaining left on.
+3. *"Options are not shown until selected … the current waveform size is great,
+   I just want that alone with compact date and name."* An unselected lane is its
+   tint edge, its waveform at the size it had, and one line of date and name; a
+   press that is not a drag selects it (one at a time, kept across polls by id,
+   Enter or Space from the keyboard, `aria-expanded`), and the selected lane has
+   everything a lane had plus the infotext, *Use seed* and *Reuse settings*. A
+   render the page started is selected when it lands.
+4. *"A seed … available for all output … an infotext sort of like a fingerprint
+   … the ability to reload its configuration and prompt"*, and *"smaller files …
+   maybe some .mp3 type"*. A blank seed is drawn when the job is queued
+   (`secrets.randbelow`, 0 to 2³¹−1), sent to every section, and recorded with
+   `seed_drawn`; the output's `render.configuration` is the configuration as the
+   render used it — the saved one's id even when the render ran on unsaved
+   changes to it, the seed used, every speaker slot — for *Reuse settings*. The
+   infotext is WebUI-shaped (the prompt, then `Steps: …, CFG scale: …, Seed: …,
+   Model: …, Speaker n: …, Max new tokens: …, Sections: …, Length: …, Render
+   time: …`, a value quoted only when it holds a comma, colon, quote or newline),
+   computed from the record whenever an output is handed out and never stored,
+   and written into the file. Outputs are MP3 — 128 kb/s CBR mono at 24 kHz,
+   encoded in the Forge process by PyAV (Forge Neo ships `av`; nothing is added
+   to its environment) with the infotext as the ID3 comment and the record as
+   JSON in a `voicebox` TXXX frame, and no title, which a rename would leave
+   stale. LAME's delay and padding are in the file's info header, so a decoder
+   gives back exactly the rendered samples. Where PyAV cannot encode, the output
+   is a WAV with an `INFO` chunk (`ICMT`, `ISFT`) after its sound; renders from
+   before are WAVs and are listed, played and saved as such (`format`). The card
+   is handed back before the file is encoded.
+5. *"Some sort of transparent light touch color applied from input file to all
+   output that use them."* A hue from a stable hash of the sample's id at a fixed
+   low saturation (one lightness for the light theme, one for the dark): a 4 px
+   edge on the sample's row, and on every output an edge of equal stripes, one
+   per sample it used, in speaker order. Decorative only.
+6. *"Move the render button and queue to the Outputs. Make the queue just a
+   counter … installing and warmed up status."* The footer is gone; Render sits
+   in the Outputs header with one status line whose first applicable state is
+   shown: an install; the running job (phase, section, elapsed from the server's
+   `elapsed`, `· n queued`) with Cancel and Clear queue (`/jobs/clear`, every
+   queued job on every card, the running one left to Cancel); only queued jobs;
+   the last failure of a render this page started; VibeVoice warm on a card, with
+   Unload; why Render cannot run; *Ready*.
+
+Fixed in the same round: the worker freed a section's render slot only after
+writing its reply, so a parent that asked for the next section on reading it
+could be refused "one render at a time"; the 7B's `capped` never fired (upstream's
+loop ends one step before its own check); the protocol now runs on a duplicate of
+descriptor 1 with standard output pointed at the log; the Voice Box noted every
+render's peak a second time; and two renders queued as one ended could share a
+name.
+
 ---
 
 ## 9. Voice Chat
@@ -529,8 +592,8 @@ that is busy rendering or generating, a spoken reply starts when that work ends.
 | **1a** | This document; the per-card turn system (`mc_turns`), the gate on txt2img and img2img, parking and return of the image model with its setting, the keep-warm setting, the voice family in the broker, the LLM's side of a turn; Mini Paint's lease, executor gate and bridge 1.12.0 |
 | **1b** | The VibeVoice runtime: the closure and installer (a community mirror or a folder; torch from the CUDA 12.8 index at a pinned version, no torchaudio; the Qwen tokenizer beside the weights and a local processor config that points at it), the worker with a handshake that proves its card, one worker per card, registration as a guest through `mc_turns_guests`, calibration of the estimates from every render's peak |
 | **2** | The Voice Box page: samples and local trim, prompts with history and favourites, configurations, outputs with loop, save, download and trim-to-sample, pipelines, audio focus, up to four speakers, the render service and its routes |
-| 3 | VibeVoice as a Voice Chat engine — not built: a spoken reply from an eighteen-gigabyte guest that has to take a turn on a card is a different latency class from the CPU engines, and the completed-reply-first design of section 9 wants a measurement of the first real renders before it is worth a fourth engine |
-| 4 | Realtime 0.5B, quantised 7B, LoRA, speaking while the LLM writes — not built, for the same reason and one more: the 0.5B and the quantised weights are different checkpoints with different memory figures, and the manifest's pins for the 7B have not been made on a machine that reaches the hub yet |
+| 3 | VibeVoice as a Voice Chat engine — built in handoff 33 and rolled back at the user's request; as first judged, not built: a spoken reply from an eighteen-gigabyte guest that has to take a turn on a card is a different latency class from the CPU engines, and the completed-reply-first design of section 9 wants a measurement of the first real renders before it is worth a fourth engine |
+| 4 | Realtime 0.5B, quantised 7B, LoRA, speaking while the LLM writes — built in handoff 33 and rolled back with phase 3; as first judged, not built, for the same reason and one more: the 0.5B and the quantised weights are different checkpoints with different memory figures, and the manifest's pins for the 7B have not been made on a machine that reaches the hub yet |
 
 Phase 1a has no guest in it: until 1b registers VibeVoice, the gate is a
 dictionary lookup and nothing changes for anybody. It was built first because it
