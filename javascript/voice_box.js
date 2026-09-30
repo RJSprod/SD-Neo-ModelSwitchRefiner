@@ -22,15 +22,6 @@
 // player paused, the recorder stopped -- to any owner that is not itself. Voice
 // Chat's side is in javascript/voice_chat.js.
 //
-// The models are the engine's to describe (mc_voice_vibevoice.models_info, in
-// /status as `engine.models`): which precisions each runs at and what each
-// needs on the card, whether it takes a LoRA, how many speakers it has, and
-// whether it clones from the sample library or speaks with preset voices of
-// its own. The configuration shows only what the chosen model can honour, and
-// a field the engine leaves out is read the way mc_voice_box._model_info reads
-// it -- the 7B at full precision -- so a page talking to an engine that
-// describes nothing is the page as it was before models were described.
-//
 // The file is loaded by Forge on every page, like every extension script, so
 // nothing here touches the DOM until the root exists.
 
@@ -66,22 +57,6 @@
     const PROMPT_HELP = "Speaker 1: to Speaker 4: start a line ([2]: works too); a line "
         + "without one is Speaker 1. [pause] is 700 ms and [pause:1500] is 1500 ms of "
         + "silence between separately rendered sections.";
-    // mc_voice_vibevoice.PRECISION_LABELS: how a model's language model is held
-    // on the card. The engine names the precisions a model takes; the words are
-    // the page's.
-    const PRECISION_LABELS = {bf16: "Full (bf16)", int8: "8-bit", nf4: "4-bit (NF4)"};
-    // The parts a LoRA folder can carry besides the language model's adapter.
-    const PART_LABELS = {llm: "language model", diffusion_head: "diffusion head",
-                         acoustic_connector: "acoustic connector",
-                         semantic_connector: "semantic connector"};
-    // A speaker slot holds a sample id, or this prefix and a preset voice's stem
-    // for a model that speaks with voices of its own (mc_voice_box.PRESET_PREFIX).
-    const PRESET_PREFIX = "preset:";
-    const LORA_HELP = "A folder holding a PEFT LoRA for the model's language model: "
-        + "adapter_config.json with adapter_model.safetensors (or .bin), at its top or in a "
-        + "lora or language_model folder, and optionally diffusion_head, acoustic_connector "
-        + "and semantic_connector folders. It is copied into the library; the folder itself "
-        + "stays where it is.";
 
     const ROUTES = {
         status: "/status",
@@ -113,10 +88,6 @@
         outputSave: "/outputs/save",
         outputAudio: "/outputs/audio",
         runtime: "/runtime",
-        loras: "/loras",
-        loraAdd: "/loras/add",
-        loraRename: "/loras/rename",
-        loraDelete: "/loras/delete",
     };
 
     // -- state ----------------------------------------------------------------- //
@@ -147,12 +118,6 @@
         message: "",
         messageKind: "",
         focus: {last: null, sent: []},
-        // The speaker slots of the kind of voice the working copy is not
-        // using right now -- the samples while a preset model is chosen, and
-        // the other way round -- so trying another model and coming back
-        // does not lose four assignments. Emptied whenever a configuration
-        // is loaded.
-        shelf: {},
     };
 
     const nodes = {lanes: {}};
@@ -165,16 +130,6 @@
 
     function pick(value, fallback) {
         return value === undefined || value === null ? fallback : value;
-    }
-
-    // A number, or null for anything that is not one -- `Number(null)` is 0,
-    // which is why this is not `isFinite(Number(value))`.
-    function numberOrNull(value) {
-        if (value === undefined || value === null || value === "" || typeof value === "boolean") {
-            return null;
-        }
-        const number = Number(value);
-        return isFinite(number) ? number : null;
     }
 
     function el(tag, className, text) {
@@ -225,14 +180,6 @@
 
     function gigabytes(bytes) {
         return (Math.round((Number(bytes) || 0) / 1e8) / 10).toFixed(1) + " GB";
-    }
-
-    // A file's size at the scale it lives at: a LoRA is kilobytes to gigabytes.
-    function sizeOf(bytes) {
-        const number = Math.max(0, Number(bytes) || 0);
-        if (number >= 1e9) return gigabytes(number);
-        if (number >= 1e6) return Math.round(number / 1e6) + " MB";
-        return Math.max(1, Math.round(number / 1e3)) + " KB";
     }
 
     function safeName(name) {
@@ -970,13 +917,10 @@
         nodes.install = button("Install VibeVoice", "Install the VibeVoice runtime and model",
                                installEngine, "mc-voice-box-install");
         show(nodes.install, false);
-        nodes.installs = el("span", "mc-voice-box-installs");
-        show(nodes.installs, false);
         nodes.installProgress = el("span", "mc-voice-box-install-progress", "");
         row.appendChild(nodes.render);
         row.appendChild(nodes.renderReason);
         row.appendChild(nodes.install);
-        row.appendChild(nodes.installs);
         row.appendChild(nodes.installProgress);
         footer.appendChild(row);
         nodes.jobs = el("ul", "mc-voice-box-list mc-voice-box-jobs");
@@ -1096,10 +1040,6 @@
             return;
         }
         const speakers = (state.working && state.working.speakers) || {};
-        // A model that speaks with preset voices takes no sample, and a model
-        // with fewer speakers than four takes none past its last.
-        const model = currentModel();
-        const cloning = model.voices !== "presets";
         state.samples.forEach(function (sample) {
             const row = el("li", "mc-voice-box-sample");
             row.setAttribute("data-id", sample.id);
@@ -1116,11 +1056,6 @@
                 });
             });
             line.appendChild(title);
-            // A voice made from a recording in Voice Chat's VibeVoice panel is a
-            // sample like any other; this says where it came from.
-            if (sample.source === "voice-chat") {
-                line.appendChild(el("span", "mc-voice-box-sample-origin", "made in Voice Chat"));
-            }
             const meta = el("span", "mc-voice-box-sample-meta",
                             sample.seconds ? seconds(sample.seconds) : "");
             line.appendChild(meta);
@@ -1133,11 +1068,7 @@
                 const slot = button(String(number), "Assign to speaker " + number, function () {
                     assignSpeaker(number, sample.id);
                 }, "mc-voice-box-sample-speaker");
-                pressed(slot, cloning && speakers[String(number)] === sample.id);
-                slot.disabled = !cloning || number > model.max_speakers;
-                if (!cloning) {
-                    slot.setAttribute("title", model.label + " speaks with its own preset voices.");
-                }
+                pressed(slot, speakers[String(number)] === sample.id);
                 assign.appendChild(slot);
             });
             line.appendChild(assign);
@@ -1185,15 +1116,14 @@
         return request("samples/delete:" + sample.id, ROUTES.sampleDelete, {body: {id: sample.id}})
             .then(function () {
                 // A configuration that referred to it has had the reference dropped
-                // on the server; the working copy follows, and so do the slots
-                // set aside while a preset model was chosen.
-                [state.working ? state.working.speakers : null]
-                    .concat(Object.keys(state.shelf).map(function (kind) { return state.shelf[kind]; }))
-                    .forEach(function (speakers) {
-                        Object.keys(speakers || {}).forEach(function (number) {
-                            if (speakers[number] === sample.id) delete speakers[number];
-                        });
+                // on the server; the working copy follows.
+                if (state.working) {
+                    Object.keys(state.working.speakers).forEach(function (number) {
+                        if (state.working.speakers[number] === sample.id) {
+                            delete state.working.speakers[number];
+                        }
                     });
+                }
                 return Promise.all([refreshSamples(), refreshConfigurations()]);
             });
     }
@@ -1765,7 +1695,7 @@
 
     function promptChanged() {
         state.prompt = nodes.prompt.value || "";
-        renderSummary();
+        nodes.summary.textContent = summarize(state.prompt);
         state.dirty.prompt = true;
         if (timers.prompt) window.clearTimeout(timers.prompt);
         timers.prompt = window.setTimeout(function () {
@@ -1792,33 +1722,7 @@
         if (nodes.prompt.value !== state.prompt && !focused(nodes.prompt)) {
             nodes.prompt.value = state.prompt;
         }
-        renderSummary();
-    }
-
-    // The counts, and the warning mc_voice_box.render would refuse the press
-    // with when the script names a speaker the chosen model does not have.
-    function renderSummary() {
-        if (!nodes.summary) return;
-        const text = summarize(state.prompt);
-        const parsed = parseScript(state.prompt);
-        const warning = parsed.error || !parsed.words ? "" : speakerLimit(parsed, currentModel());
-        nodes.summary.textContent = warning ? text + " — " + warning : text;
-        nodes.summary.setAttribute("data-kind", warning ? "warn" : "info");
-    }
-
-    // mc_voice_box.render's sentence, word for word: the highest speaker the
-    // script names against the number the model speaks with.
-    function speakerLimit(parsed, model) {
-        const numbers = Object.keys((parsed && parsed.speakers) || {}).map(Number);
-        if (!numbers.length) return "";
-        const highest = Math.max.apply(null, numbers);
-        const limit = model.max_speakers;
-        if (highest <= limit) return "";
-        const label = model.label || "That model";
-        return limit === 1
-            ? label + " speaks with one voice, and the script names Speaker " + highest + "."
-            : label + " speaks with up to " + limit + " voices, and the script names Speaker "
-                + highest + ".";
+        nodes.summary.textContent = summarize(state.prompt);
     }
 
     function promptEntry(entry, favourite) {
@@ -1863,21 +1767,13 @@
 
     // -- CONFIGURATION --------------------------------------------------------- //
 
-    // `when` is what a model has to support for the field to be shown; a field
-    // without one is every model's.
     const FIELDS = [
         {key: "model_id", label: "Model", kind: "select"},
-        {key: "precision", label: "Precision", kind: "select",
-         when: function (model) { return model.precisions.length > 1; }},
         {key: "card_uuid", label: "Card", kind: "select"},
         {key: "steps", label: "Diffusion steps", kind: "number", min: 1, max: 50, step: 1},
         {key: "cfg_scale", label: "CFG", kind: "number", min: 1, max: 3, step: 0.1},
         {key: "seed", label: "Seed", kind: "text", placeholder: "random"},
         {key: "max_new_tokens", label: "Max new tokens", kind: "text", placeholder: "automatic"},
-        {key: "lora_id", label: "LoRA", kind: "select",
-         when: function (model) { return model.lora; }},
-        {key: "lora_scale", label: "LoRA strength", kind: "number", min: 0, max: 2, step: 0.05,
-         when: function (model) { return model.lora; }},
     ];
 
     function buildConfiguration(body) {
@@ -1903,11 +1799,8 @@
 
         const fields = el("div", "mc-voice-box-fields");
         nodes.fields = {};
-        nodes.fieldWraps = {};
         FIELDS.forEach(function (field) {
             const wrap = el("label", "mc-voice-box-field" + (field.kind === "checkbox" ? " mc-voice-box-field-check" : ""));
-            wrap.setAttribute("data-field-wrap", field.key);
-            nodes.fieldWraps[field.key] = wrap;
             const caption = el("span", "mc-voice-box-field-label", field.label);
             let input;
             if (field.kind === "select") {
@@ -1966,60 +1859,10 @@
                 clearSpeaker(number);
             }, "mc-voice-box-speaker-clear");
             slot.appendChild(clearButton);
-            nodes.speakers[number] = {row: slot, wave: wave, title: title, clear: clearButton};
+            nodes.speakers[number] = {wave: wave, title: title, clear: clearButton};
             speakers.appendChild(slot);
         });
-        // A model with preset voices of its own has one speaker and no sample
-        // slot: its voice is chosen here, from the voices the engine lists.
-        nodes.presetRow = el("div", "mc-voice-box-speaker mc-voice-box-speaker-preset");
-        nodes.presetRow.setAttribute("data-speaker", "preset");
-        nodes.presetRow.appendChild(el("span", "mc-voice-box-speaker-label", "Speaker 1"));
-        nodes.presetSelect = el("select", "mc-voice-box-preset-select");
-        nodes.presetSelect.setAttribute("aria-label", "Speaker 1's voice");
-        nodes.presetSelect.addEventListener("change", function () {
-            choosePreset(nodes.presetSelect.value || "");
-        });
-        nodes.presetRow.appendChild(nodes.presetSelect);
-        show(nodes.presetRow, false);
-        speakers.appendChild(nodes.presetRow);
         body.appendChild(speakers);
-
-        buildLoraLibrary(body);
-    }
-
-    // The LoRA library: adapters copied in from folders on this PC, offered
-    // to every model that takes one. A disclosure, closed until wanted.
-    function buildLoraLibrary(body) {
-        const library = el("details", "mc-voice-box-lora-library");
-        nodes.loraLibrary = library;
-        nodes.loraSummary = el("summary", "mc-voice-box-lora-summary", "LoRA library");
-        library.appendChild(nodes.loraSummary);
-        nodes.loras = el("ul", "mc-voice-box-list mc-voice-box-loras");
-        library.appendChild(nodes.loras);
-        const add = el("div", "mc-voice-box-lora-add");
-        add.appendChild(el("h4", "mc-voice-box-subtitle", "Add a LoRA from a folder on this PC"));
-        const row = el("div", "mc-voice-box-row");
-        nodes.loraFolder = el("input", "mc-voice-box-lora-folder");
-        nodes.loraFolder.setAttribute("type", "text");
-        nodes.loraFolder.type = "text";
-        nodes.loraFolder.setAttribute("aria-label", "The folder that holds the LoRA");
-        nodes.loraFolder.setAttribute("placeholder", "Folder on this PC");
-        nodes.loraName = el("input", "mc-voice-box-lora-add-name");
-        nodes.loraName.setAttribute("type", "text");
-        nodes.loraName.type = "text";
-        nodes.loraName.setAttribute("aria-label", "The LoRA's name");
-        nodes.loraName.setAttribute("placeholder", "Name (optional)");
-        nodes.loraName.setAttribute("maxlength", "80");
-        nodes.loraAdd = button("Add", "Add the LoRA in that folder to the library", addLora,
-                               "mc-voice-box-lora-add-button");
-        row.appendChild(nodes.loraFolder);
-        row.appendChild(nodes.loraName);
-        row.appendChild(nodes.loraAdd);
-        add.appendChild(row);
-        add.appendChild(el("div", "mc-voice-box-lora-help", LORA_HELP));
-        library.appendChild(add);
-        show(library, false);
-        body.appendChild(library);
     }
 
     function fieldChanged(field, input) {
@@ -2038,17 +1881,8 @@
             value = input.value;
         }
         if (working[field.key] === value) return;
-        if (field.key === "model_id") {
-            changeModel(value);
-        } else {
-            working[field.key] = value;
-            // A LoRA chosen while its strength box is empty starts at full strength.
-            if (field.key === "lora_id" && value && numberOrNull(working.lora_scale) === null) {
-                working.lora_scale = 1;
-            }
-            markConfigurationDirty();
-            if (field.key === "lora_id") renderConfigurationFields();
-        }
+        working[field.key] = value;
+        markConfigurationDirty();
         // The card and the model chosen last become Voice Box's defaults as
         // well, so the next configuration -- and a render with none -- starts
         // from them (design intent section 9: the chosen card is stored).
@@ -2057,41 +1891,6 @@
             change[field.key] = value || "";
             saveSettings(change).catch(report);
         }
-    }
-
-    // Choosing a model puts its own steps and CFG in the boxes and shows only
-    // what it can honour. Its precision, LoRA and speakers are read through
-    // the model (precisionFor, loraFor, speakersFor), so the choices made for
-    // another model wait in the working copy -- and the slots of the other
-    // kind of voice on the shelf -- until that model is chosen again.
-    function changeModel(id) {
-        const working = ensureWorking();
-        const before = modelOf(working.model_id);
-        const after = modelOf(id);
-        working.model_id = id;
-        const defaults = after.defaults || {};
-        ["steps", "cfg_scale"].forEach(function (key) {
-            const value = numberOrNull(defaults[key]);
-            if (value !== null) working[key] = value;
-        });
-        if (before.voices !== after.voices) {
-            state.shelf[before.voices] = working.speakers || {};
-            working.speakers = Object.assign({}, state.shelf[after.voices] || {});
-            delete state.shelf[after.voices];
-        }
-        markConfigurationDirty();
-        renderConfiguration();
-        renderSamples();
-        renderFooter();
-    }
-
-    function choosePreset(value) {
-        const working = ensureWorking();
-        if (value) working.speakers["1"] = value; else delete working.speakers["1"];
-        markConfigurationDirty();
-        renderFooter();
-        const preset = presetById(currentModel(), value);
-        if (preset) say("Speaker 1 is " + (preset.name || preset.id) + ". Save the configuration to keep it.", "info");
     }
 
     function saveSettings(values) {
@@ -2103,131 +1902,17 @@
         });
     }
 
-    // -- the models, as the engine describes them ------------------------------ //
-
-    // One entry of `engine.models`, every field present. What the engine leaves
-    // out is what mc_voice_box._FALLBACK_MODEL says: longform, samples, four
-    // speakers, full precision only, no LoRA. `installed` stays null when the
-    // engine does not say, which is not the same as false.
-    function describeModel(raw) {
-        const found = raw || {};
-        const precisions = (Array.isArray(found.precisions) ? found.precisions : [])
-            .map(String).filter(Boolean);
-        const limit = Math.round(Number(found.max_speakers) || MAX_SPEAKERS);
-        const flag = function (value) { return typeof value === "boolean" ? value : null; };
-        return {
-            id: String(found.id || ""),
-            label: String(found.label || found.id || "VibeVoice"),
-            installed: flag(found.installed),
-            runtime_installed: flag(found.runtime_installed),
-            precisions: precisions.length ? precisions : ["bf16"],
-            lora: found.lora === true,
-            max_speakers: Math.max(1, Math.min(MAX_SPEAKERS, limit)),
-            voices: found.voices === "presets" ? "presets" : "samples",
-            defaults: found.defaults && typeof found.defaults === "object" ? found.defaults : null,
-            need: found.need_vram_bytes && typeof found.need_vram_bytes === "object"
-                ? found.need_vram_bytes : {},
-            presets: (Array.isArray(found.presets) ? found.presets : []).filter(function (preset) {
-                return preset && preset.id;
-            }),
-            message: String(found.message || ""),
-            download_bytes: Number(found.download_bytes) || 0,
-        };
-    }
-
     function engineModels() {
         const engine = (state.status && state.status.engine) || {};
         const found = [];
-        (Array.isArray(engine.models) ? engine.models : []).forEach(function (model) {
-            if (model && model.id) found.push(describeModel(model));
+        (engine.models || []).forEach(function (model) {
+            if (model && model.id) found.push({id: model.id, label: model.label || model.id});
         });
         const chosen = engine.model_id || "vibevoice-7b";
         if (!found.some(function (model) { return model.id === chosen; })) {
-            found.unshift(describeModel({id: chosen,
-                                         label: engine.model_label || engine.label || chosen}));
+            found.unshift({id: chosen, label: engine.model_label || engine.label || chosen});
         }
         return found;
-    }
-
-    // `""` is the model Voice Box's settings name, as it is to the server.
-    function modelOf(id) {
-        const models = engineModels();
-        const status = state.status || {};
-        const wanted = id || (status.settings || {}).model_id
-            || (status.engine_settings || {}).model_id || (status.engine || {}).model_id || "";
-        const found = models.filter(function (model) { return model.id === wanted; })[0];
-        if (found) return found;
-        return id ? describeModel({id: id, label: id}) : models[0];
-    }
-
-    function currentModel() {
-        return modelOf(state.working ? state.working.model_id : "");
-    }
-
-    function presetById(model, value) {
-        const stem = String(value || "").indexOf(PRESET_PREFIX) === 0
-            ? String(value).slice(PRESET_PREFIX.length) : "";
-        if (!stem) return null;
-        return model.presets.filter(function (preset) { return preset.id === stem; })[0] || null;
-    }
-
-    function lorasOf() {
-        const status = state.status || {};
-        const found = Array.isArray(status.loras) ? status.loras
-            : ((status.engine && Array.isArray(status.engine.loras)) ? status.engine.loras : []);
-        return found.filter(function (lora) { return lora && lora.id; });
-    }
-
-    function loraById(id) {
-        return lorasOf().filter(function (lora) { return lora.id === id; })[0] || null;
-    }
-
-    // The configuration as the chosen model reads it. A precision the model
-    // does not run at is its first; a model that takes no LoRA has none at
-    // full strength; a LoRA made for another model does not apply.
-    function precisionFor(model, working) {
-        return model.precisions.indexOf(working.precision) >= 0
-            ? working.precision : model.precisions[0];
-    }
-
-    function loraFor(model, working) {
-        const scale = working.lora_scale;
-        const plain = pick(numberOrNull(scale), 1);
-        if (!model.lora) return {id: "", scale: 1};
-        const id = String(working.lora_id || "");
-        const entry = id ? loraById(id) : null;
-        if (!id || (entry && entry.base && entry.base !== model.id)) return {id: "", scale: plain};
-        // A chosen LoRA's strength is sent as it stands: a box emptied by hand
-        // is the server's to refuse, in its own sentence.
-        return {id: id, scale: scale === undefined ? 1 : scale};
-    }
-
-    // Speaker slots in the form the model takes -- sample ids for a model that
-    // clones, "preset:<stem>" for one with voices of its own -- and none past
-    // its last speaker.
-    function speakersFor(model, speakers) {
-        const found = {};
-        const presets = model.voices === "presets";
-        Object.keys(speakers || {}).forEach(function (key) {
-            const number = Number(key);
-            const value = String(speakers[key] || "");
-            if (!value || !(number >= 1 && number <= model.max_speakers)) return;
-            if ((value.indexOf(PRESET_PREFIX) === 0) === presets) found[String(number)] = value;
-        });
-        return found;
-    }
-
-    // What a save or an inline render sends: the working copy, read through
-    // its model.
-    function configurationBody(working) {
-        const model = modelOf(working.model_id);
-        const lora = loraFor(model, working);
-        return Object.assign({}, working, {
-            precision: precisionFor(model, working),
-            lora_id: lora.id,
-            lora_scale: lora.scale,
-            speakers: speakersFor(model, working.speakers),
-        });
     }
 
     function cardLabel(card) {
@@ -2237,75 +1922,34 @@
         return (card.name || card.uuid || "card") + (roles.length ? " — " + roles.join(", ") : "");
     }
 
-    function optionNode(option) {
-        const node = el("option", "", option.label);
-        node.value = option.value;
-        node.setAttribute("value", option.value);
-        if (option.disabled) {
-            node.disabled = true;
-            node.setAttribute("disabled", "");
-        }
-        return node;
-    }
-
-    // Options are rebuilt only when they changed: the status poll repaints the
-    // configuration every fifteen seconds, and a select rebuilt under an open
-    // dropdown closes it.
     function fillSelect(select, options, value) {
-        const signature = JSON.stringify(options.map(function (option) {
-            return [option.value, option.label, !!option.disabled];
-        }));
-        if (select.mcVoiceBoxOptions !== signature) {
-            clear(select);
-            options.forEach(function (option) { select.appendChild(optionNode(option)); });
-            select.mcVoiceBoxOptions = signature;
-        }
-        if (select.value !== value) select.value = value;
-    }
-
-    // The same, with the options in labelled groups: `groups` is
-    // [{label, options: [...]}], and `lead` an option before the first group.
-    function fillGroupedSelect(select, lead, groups, value) {
-        const signature = JSON.stringify([lead, groups]);
-        if (select.mcVoiceBoxOptions !== signature) {
-            clear(select);
-            if (lead) select.appendChild(optionNode(lead));
-            groups.forEach(function (group) {
-                const node = el("optgroup", "mc-voice-box-optgroup");
-                node.label = group.label;
-                node.setAttribute("label", group.label);
-                group.options.forEach(function (option) { node.appendChild(optionNode(option)); });
-                select.appendChild(node);
-            });
-            select.mcVoiceBoxOptions = signature;
-        }
-        if (select.value !== value) select.value = value;
+        clear(select);
+        options.forEach(function (option) {
+            const node = el("option", "", option.label);
+            node.value = option.value;
+            node.setAttribute("value", option.value);
+            select.appendChild(node);
+        });
+        select.value = value;
     }
 
     // A new configuration starts from Voice Box's settings (the card and model
-    // chosen last), that model's own steps and CFG where the engine names them
-    // and the engine's settings where it does not, and the server's defaults
-    // for the rest (mc_voice_box.CONFIGURATION_DEFAULTS: full precision, no LoRA).
+    // chosen last) and the engine's (its steps, CFG, seed and token cap).
     function defaultConfiguration() {
         const status = state.status || {};
         const settings = status.settings || {};
         const engineSettings = status.engine_settings || {};
         const cards = status.cards || [];
-        const modelId = settings.model_id || engineSettings.model_id || engineModels()[0].id;
-        const defaults = modelOf(modelId).defaults || {};
         return {
             id: "",
             name: "",
-            model_id: modelId,
+            model_id: settings.model_id || engineSettings.model_id || engineModels()[0].id,
             card_uuid: settings.card_uuid || engineSettings.card_uuid
                 || (cards[0] ? cards[0].uuid : ""),
-            steps: pick(defaults.steps, pick(engineSettings.steps, 10)),
-            cfg_scale: pick(defaults.cfg_scale, pick(engineSettings.cfg_scale, 1.3)),
+            steps: pick(engineSettings.steps, 10),
+            cfg_scale: pick(engineSettings.cfg_scale, 1.3),
             seed: pick(engineSettings.seed, null),
             max_new_tokens: pick(engineSettings.max_new_tokens, null),
-            precision: "bf16",
-            lora_id: "",
-            lora_scale: 1,
             speakers: {},
         };
     }
@@ -2332,7 +1976,6 @@
     function loadWorking() {
         state.working = copyConfiguration(configurationById(state.configurationId));
         state.dirty.configuration = false;
-        state.shelf = {};
     }
 
     function markConfigurationDirty() {
@@ -2368,7 +2011,7 @@
                        "Configuration " + (state.configurations.length + 1));
             if (name === null) return Promise.resolve(null);
         }
-        const body = Object.assign(configurationBody(working), {name: name});
+        const body = Object.assign({}, working, {name: name});
         if (existing) body.id = existing.id; else delete body.id;
         return request("configurations/save", ROUTES.configurationSave, {body: body, queue: true})
             .then(function (reply) {
@@ -2435,61 +2078,18 @@
         nodes.configurationDelete.disabled = !state.configurationId;
     }
 
-    function modelOptions(working) {
-        const models = engineModels();
-        const options = models.map(function (model) {
-            return {value: model.id,
-                    label: model.label + (model.installed === false ? " — not installed" : "")};
-        });
-        if (working.model_id && !models.some(function (model) { return model.id === working.model_id; })) {
-            options.push({value: working.model_id, label: working.model_id});
-        }
-        return options;
-    }
-
-    // Each precision the model runs at, with what it needs on the card there.
-    function precisionOptions(model) {
-        return model.precisions.map(function (precision) {
-            const need = Number(model.need[precision]) || 0;
-            return {value: precision,
-                    label: (PRECISION_LABELS[precision] || precision) + (need ? " · " + gigabytes(need) : "")};
-        });
-    }
-
-    function loraOptions(model, chosen) {
-        const options = [{value: "", label: "(no LoRA)"}];
-        lorasOf().forEach(function (lora) {
-            if (lora.base && lora.base !== model.id) return;
-            options.push({value: lora.id, label: lora.name || lora.id});
-        });
-        if (chosen && !options.some(function (option) { return option.value === chosen; })) {
-            options.push({value: chosen, label: "(no longer in the library)"});
-        }
-        return options;
-    }
-
     function renderConfigurationFields() {
         if (!nodes.fields) return;
         const working = ensureWorking();
-        const model = modelOf(working.model_id);
         const cards = (state.status && state.status.cards) || [];
         FIELDS.forEach(function (field) {
             const input = nodes.fields[field.key];
-            show(nodes.fieldWraps[field.key], !field.when || field.when(model));
             if (field.key === "model_id") {
-                fillSelect(input, modelOptions(working), working.model_id || model.id);
+                fillSelect(input, engineModels().map(function (model) {
+                    return {value: model.id, label: model.label};
+                }), working.model_id || "");
                 return;
             }
-            if (field.key === "precision") {
-                fillSelect(input, precisionOptions(model), precisionFor(model, working));
-                return;
-            }
-            if (field.key === "lora_id") {
-                const chosen = loraFor(model, working).id;
-                fillSelect(input, loraOptions(model, chosen), chosen);
-                return;
-            }
-            if (field.key === "lora_scale") input.disabled = !loraFor(model, working).id;
             if (field.key === "card_uuid") {
                 const options = cards.map(function (card) {
                     return {value: card.uuid || "", label: cardLabel(card)};
@@ -2512,184 +2112,22 @@
         }
     }
 
-    // Sample slots up to the model's last speaker for a model that clones; the
-    // one preset select for a model with voices of its own.
     function drawSpeakers() {
         if (!nodes.speakers) return;
         const working = ensureWorking();
-        const model = modelOf(working.model_id);
-        const presets = model.voices === "presets";
-        const chosen = speakersFor(model, working.speakers);
         [1, 2, 3, 4].forEach(function (number) {
             const slot = nodes.speakers[number];
-            show(slot.row, !presets && number <= model.max_speakers);
-            const sample = presets ? null : sampleById(chosen[String(number)]);
+            const sample = sampleById(working.speakers[String(number)]);
             slot.title.textContent = sample ? (sample.title || "Untitled") : "no sample";
             slot.clear.disabled = !sample;
-            if (!presets) draw(slot.wave, sample ? (sample.peaks || []) : []);
+            draw(slot.wave, sample ? (sample.peaks || []) : []);
         });
-        show(nodes.presetRow, presets);
-        if (presets) renderPresets(model, chosen["1"] || "");
-    }
-
-    // The model's voices by language: the languages it speaks well first, the
-    // experimental ones after, each in the engine's order. A voice whose file
-    // is not installed is listed and cannot be chosen.
-    function renderPresets(model, value) {
-        const groups = [];
-        const byLabel = {};
-        model.presets.forEach(function (preset) {
-            const label = String(preset.language_label || preset.language || "Other");
-            if (!byLabel[label]) {
-                byLabel[label] = {label: label, experimental: true, options: []};
-                groups.push(byLabel[label]);
-            }
-            let text = String(preset.name || preset.id);
-            if (preset.gender) text += " (" + preset.gender + ")";
-            if (preset.experimental) text += " · experimental";
-            if (preset.installed === false) text += " · not installed";
-            byLabel[label].options.push({value: PRESET_PREFIX + preset.id, label: text,
-                                         disabled: preset.installed === false});
-            if (!preset.experimental) byLabel[label].experimental = false;
-        });
-        const ordered = groups.filter(function (group) { return !group.experimental; })
-            .concat(groups.filter(function (group) { return group.experimental; }))
-            .map(function (group) { return {label: group.label, options: group.options}; });
-        const lead = {value: "", label: model.presets.length ? "(choose a voice)"
-            : "(no voices listed — install " + model.label + ")"};
-        fillGroupedSelect(nodes.presetSelect, lead, ordered, value);
     }
 
     function renderConfiguration() {
         renderConfigurationBar();
         renderConfigurationFields();
         drawSpeakers();
-        renderLoras();
-    }
-
-    // -- the LoRA library ------------------------------------------------------ //
-
-    function loraMeta(lora) {
-        const parts = (Array.isArray(lora.parts) ? lora.parts : []).map(function (part) {
-            return PART_LABELS[part] || String(part).replace(/_/g, " ");
-        });
-        return [lora.bytes ? sizeOf(lora.bytes) : "", parts.join(", ")].filter(Boolean).join(" · ");
-    }
-
-    // Shown when a model takes a LoRA. Rebuilt only when the library changed,
-    // so the status poll never takes a rename out from under the keyboard.
-    function renderLoras() {
-        if (!nodes.loras) return;
-        const loras = lorasOf();
-        show(nodes.loraLibrary, engineModels().some(function (model) { return model.lora; }));
-        nodes.loraSummary.textContent = "LoRA library · " + count(loras.length, "LoRA", "LoRAs");
-        const signature = JSON.stringify(loras.map(function (lora) {
-            return [lora.id, lora.name, lora.bytes, lora.parts];
-        }));
-        if (nodes.loras.mcVoiceBoxSignature === signature) return;
-        nodes.loras.mcVoiceBoxSignature = signature;
-        clear(nodes.loras);
-        if (!loras.length) {
-            nodes.loras.appendChild(el("li", "mc-voice-box-empty",
-                                       "No LoRAs yet. Add one from a folder on this PC."));
-            return;
-        }
-        loras.forEach(function (lora) {
-            const row = el("li", "mc-voice-box-lora");
-            row.setAttribute("data-id", lora.id);
-            const name = el("span", "mc-voice-box-lora-name", lora.name || "Untitled");
-            name.setAttribute("title", "Double-click to rename");
-            const rename = function () {
-                renameInline(name, lora.name || "", function (text) { return renameLora(lora, text); });
-            };
-            name.addEventListener("dblclick", rename);
-            row.appendChild(name);
-            row.appendChild(el("span", "mc-voice-box-lora-meta", loraMeta(lora)));
-            row.appendChild(button("Rename", "Rename " + (lora.name || "this LoRA"), rename,
-                                   "mc-voice-box-lora-rename"));
-            row.appendChild(button("Delete", "Delete " + (lora.name || "this LoRA"), function () {
-                return deleteLora(lora);
-            }, "mc-voice-box-lora-delete"));
-            nodes.loras.appendChild(row);
-        });
-    }
-
-    function setLoras(list) {
-        if (!state.status) state.status = {};
-        state.status.loras = list;
-        renderLoras();
-        renderConfigurationFields();
-        renderFooter();
-    }
-
-    // Every LoRA route answers with the library as it now is; one that does
-    // not is followed by a plain read of it.
-    function applyLoras(reply) {
-        if (reply && Array.isArray(reply.loras)) {
-            setLoras(reply.loras);
-            return Promise.resolve();
-        }
-        return request("loras", ROUTES.loras, {body: {}}).then(function (found) {
-            setLoras(listOf(found, "loras"));
-        });
-    }
-
-    // A copy from a folder on the Forge PC, never an upload: an adapter is
-    // hundreds of megabytes and already on that machine. Copying can take a
-    // while, so the request gets the page's long deadline, and a copy that
-    // outlasts it is said to be possibly still running -- an unanswered request
-    // is not a failed one.
-    function addLora() {
-        const folder = String(nodes.loraFolder.value || "").trim();
-        const name = String(nodes.loraName.value || "").trim();
-        if (!folder) {
-            say("Give the folder that holds the LoRA.", "warn");
-            return Promise.resolve(null);
-        }
-        say("Copying the LoRA from " + folder + "…", "info");
-        return request("loras/add", ROUTES.loraAdd,
-                       {body: {folder: folder, name: name}, deadline: DEADLINE.audio})
-            .then(function (reply) {
-                const made = recordOf(reply, "lora");
-                nodes.loraFolder.value = "";
-                nodes.loraName.value = "";
-                say("Added the LoRA " + (made.name || name || folder) + ".", "info");
-                return applyLoras(reply);
-            }, function (error) {
-                if (error instanceof RequestError && error.timedOut) {
-                    throw new RequestError("No answer within " + Math.round(DEADLINE.audio / 1000)
-                                           + " s. The copy may still be running; the library "
-                                           + "shows the LoRA when it is done.", 0, true);
-                }
-                throw error;
-            });
-    }
-
-    function renameLora(lora, name) {
-        return request("loras/rename", ROUTES.loraRename,
-                       {body: {id: lora.id, name: name}, queue: true})
-            .then(applyLoras);
-    }
-
-    function deleteLora(lora) {
-        return request("loras/delete:" + lora.id, ROUTES.loraDelete, {body: {id: lora.id}})
-            .then(function (reply) {
-                // The server takes it out of every saved configuration that
-                // used it (mc_voice_box.forget_lora) and says which. The working
-                // copy lets go of it too, and is unsaved only when the saved one
-                // it came from was not among them -- otherwise the two already
-                // agree, and "Save •" would claim a change nobody has to save.
-                const cleared = listOf(reply, "configurations");
-                if (state.working && state.working.lora_id === lora.id) {
-                    state.working.lora_id = "";
-                    state.working.lora_scale = 1;
-                    if (cleared.indexOf(state.configurationId) < 0) markConfigurationDirty();
-                    else renderConfigurationBar();
-                }
-                say("Deleted the LoRA " + (lora.name || "") + ".", "info");
-                const listed = applyLoras(reply);
-                return cleared.length ? listed.then(refreshConfigurations) : listed;
-            });
     }
 
     // -- OUTPUTS --------------------------------------------------------------- //
@@ -2705,27 +2143,16 @@
         return state.outputs.filter(function (output) { return output.id === id; })[0] || null;
     }
 
-    // What the render record says it was made with (mc_voice_box._render_granted):
-    // the model, a precision below full, the LoRA and its strength, the rest.
     function metadata(output) {
         const render = output.render || {};
         const parts = [];
-        if (render.model || render.model_id) parts.push(render.model || render.model_id);
-        if (render.precision && render.precision !== "bf16") {
-            parts.push(PRECISION_LABELS[render.precision] || render.precision);
-        }
-        const lora = render.lora && typeof render.lora === "object" ? render.lora : null;
-        if (lora && (lora.name || lora.id)) {
-            const scale = numberOrNull(lora.scale);
-            parts.push("LoRA " + (lora.name || lora.id)
-                       + (scale !== null && scale !== 1 ? " ×" + scale : ""));
-        }
+        if (render.model_id) parts.push(render.model_id);
         if (render.seed !== undefined && render.seed !== null) parts.push("seed " + render.seed);
         if (render.steps) parts.push(render.steps + " steps");
         if (render.cfg_scale) parts.push("CFG " + render.cfg_scale);
         if (Array.isArray(render.speakers) && render.speakers.length) {
             parts.push(render.speakers.map(function (speaker) {
-                return "S" + speaker.n + " " + (speaker.title || speaker.sample_id || speaker.preset || "?");
+                return "S" + speaker.n + " " + (speaker.title || speaker.sample_id || "?");
             }).join(", "));
         }
         if (output.seconds) parts.push(seconds(output.seconds));
@@ -3050,10 +2477,6 @@
             state.jobs = Array.isArray(state.status.jobs) ? state.status.jobs : [];
             renderFooter();
             renderConfigurationFields();
-            // What the engine says about its models and its LoRAs can change
-            // between two polls: an install finished, a LoRA added elsewhere.
-            drawSpeakers();
-            renderLoras();
             const finished = before.filter(function (id) {
                 return !isLive(jobById(id));
             });
@@ -3128,44 +2551,23 @@
 
     // -- the footer: Render, the jobs, the cards -------------------------------- //
 
-    // Why the chosen model cannot render yet, in the engine's words: its own
-    // record when the engine describes it, the engine's readiness when not.
-    function installBlocker(model, engine) {
-        if (model.installed === null && model.runtime_installed === null) {
-            return engine.ready === false ? (engine.message || "VibeVoice is not installed.") : "";
-        }
-        const runtimeMissing = model.runtime_installed === false
-            || (model.runtime_installed === null && engine.runtime_installed === false);
-        if (model.installed !== false && !runtimeMissing) return "";
-        if (model.message) return model.message;
-        return runtimeMissing ? (engine.runtime_message || "VibeVoice's runtime is not installed.")
-            : model.label + " is not installed.";
-    }
-
     function renderBlocker() {
         if (!state.status) return "Loading…";
         const engine = state.status.engine || {};
-        const model = currentModel();
-        const missing = installBlocker(model, engine);
-        if (missing) return missing;
+        if (engine.ready === false) {
+            return engine.message || "VibeVoice is not installed.";
+        }
         if (!state.pipelineId) return "No pipeline.";
         const parsed = parseScript(state.prompt);
         if (parsed.error) return parsed.error;
         if (!parsed.words) return "Write a script first.";
-        const beyond = speakerLimit(parsed, model);
-        if (beyond) return beyond;
         const working = ensureWorking();
         const settings = state.status.settings || {};
         if (!working.card_uuid && !settings.card_uuid) return "Choose the card VibeVoice renders on.";
-        const chosen = speakersFor(model, working.speakers);
         const numbers = Object.keys(parsed.speakers).map(Number).sort();
         for (let index = 0; index < numbers.length; index += 1) {
             const number = numbers[index];
-            if (model.voices === "presets") {
-                if (!presetById(model, chosen[String(number)])) {
-                    return "Choose a voice for Speaker " + number + " in the configuration.";
-                }
-            } else if (!sampleById(chosen[String(number)])) {
+            if (!sampleById(working.speakers[String(number)])) {
                 return "Speaker " + number + " has no sample.";
             }
         }
@@ -3194,7 +2596,7 @@
         return flushSaves().then(function () {
             const body = {pipeline_id: pipelineId, prompt: state.prompt,
                           configuration_id: state.configurationId, name: ""};
-            if (unsaved) body.configuration = configurationBody(working);
+            if (unsaved) body.configuration = Object.assign({}, working);
             return request("render", ROUTES.render, {body: body});
         }).then(function (reply) {
             const job = recordOf(reply, "job");
@@ -3214,68 +2616,6 @@
             say("Installing VibeVoice… progress shows below.", "info");
             return refreshStatus();
         });
-    }
-
-    // What can be installed from here, one press each: the runtime when it is
-    // missing, then every model the engine lists as not installed. `null` for
-    // an engine that describes no model's installation, which keeps the one
-    // Install VibeVoice button it always had.
-    function installTargets(engine) {
-        const models = Array.isArray(engine.models) ? engine.models : [];
-        if (!models.some(function (model) { return model && typeof model.installed === "boolean"; })) {
-            return null;
-        }
-        const found = [];
-        const runtime = (Array.isArray(engine.parts) ? engine.parts : []).filter(function (part) {
-            return part && part.id === "runtime";
-        })[0] || {};
-        if (engine.runtime_installed === false || runtime.installed === false) {
-            found.push({key: "runtime", part: "runtime", model_id: "",
-                        label: "the VibeVoice runtime", bytes: Number(runtime.bytes) || 0});
-        }
-        models.forEach(function (raw) {
-            if (!raw || !raw.id || raw.installed !== false) return;
-            const model = describeModel(raw);
-            found.push({key: "model:" + model.id, part: "model", model_id: model.id,
-                        label: model.label, bytes: model.download_bytes});
-        });
-        return found;
-    }
-
-    function installPart(target) {
-        return request("install:" + target.key, ROUTES.install,
-                       {body: {part: target.part, folder: "", model_id: target.model_id}})
-            .then(function (reply) {
-                if (reply && reply.already) {
-                    say("Another install is running; press again when it has finished.", "warn");
-                } else {
-                    say("Installing " + target.label + "… progress shows below.", "info");
-                }
-                return refreshStatus();
-            });
-    }
-
-    // Rebuilt only when the offer changed: the footer is repainted on every
-    // keystroke in the prompt, and a button rebuilt under a press loses it.
-    function renderInstalls(targets, running) {
-        const signature = JSON.stringify(targets);
-        if (nodes.installs.mcVoiceBoxSignature !== signature) {
-            nodes.installs.mcVoiceBoxSignature = signature;
-            clear(nodes.installs);
-            targets.forEach(function (target) {
-                const text = "Install " + target.label
-                    + (target.bytes ? " (" + gigabytes(target.bytes) + ")" : "");
-                const node = button(text, text, function () { return installPart(target); },
-                                    "mc-voice-box-install-part");
-                node.setAttribute("data-part", target.part);
-                if (target.model_id) node.setAttribute("data-model", target.model_id);
-                nodes.installs.appendChild(node);
-            });
-        }
-        // One install at a time on the server: while one runs, the rest wait.
-        const made = nodes.installs.children || [];
-        for (let index = 0; index < made.length; index += 1) made[index].disabled = !!running;
-        show(nodes.installs, targets.length > 0);
     }
 
     function cancelJob(job) {
@@ -3317,17 +2657,13 @@
 
     function renderFooter() {
         if (!nodes.render) return;
-        renderSummary();
         const status = state.status || {};
         const engine = status.engine || {};
         const why = renderBlocker();
         nodes.render.disabled = !!why;
         nodes.render.setAttribute("aria-disabled", why ? "true" : "false");
         nodes.renderReason.textContent = why;
-        const targets = state.status && engine.supported !== false ? installTargets(engine) : null;
-        renderInstalls(targets || [], !!(status.progress && status.progress.running));
-        const installable = state.status && !targets && engine.ready === false
-            && engine.supported !== false;
+        const installable = state.status && engine.ready === false && engine.supported !== false;
         show(nodes.install, !!installable);
         if (installable) {
             nodes.install.textContent = "Install VibeVoice"

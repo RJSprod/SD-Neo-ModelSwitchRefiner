@@ -30,26 +30,6 @@ speaking another protocol or claiming another name, and -- off Windows, where
 the parent arranged the job object itself -- one that could not arrange its own
 death with this process.
 
-What a load is, and who fills in its blanks
-------------------------------------------
-Two models share one worker per card: the long-form 7B (recordings cloned into
-up to four voices, three precisions, LoRAs) and the Realtime 0.5B (one preset
-voice, full precision only). A :func:`load` names an *identity* -- model,
-precision, LoRA, strength -- and the worker replaces whatever other identity it
-holds. The installer (``mc_voice_vibevoice``) turns those names into paths and
-says what each model takes; an argument left empty falls back to the Voice Box
-settings, except that a caller who names its model and no LoRA gets no LoRA.
-:func:`loaded` says what is on a card, in those same names.
-
-Renders that stream
--------------------
-Voice Chat speaks a reply while it is still being rendered. A render given
-``on_audio`` asks the worker for its audio as it is made; the frames arrive on
-this module's reader thread and are handed to ``on_audio`` there, in order,
-before the reply that ends the render -- which is why ``on_audio`` must only
-pass them on, and why a ``False`` from it cancels the render from a thread of
-its own rather than from the reader, which would be waiting on itself.
-
 What this module does not do
 ----------------------------
 It never holds a lock while it waits for the worker: every wait is on a queue
@@ -148,39 +128,25 @@ class Handshake:
 
 @dataclass
 class RenderJob:
-    """One render as the render service (or Voice Chat) hands it over.
+    """One render as the render service hands it over.
 
     ``script`` is a list of ``(speaker, text)`` pairs, speakers numbered from
-    one as the user numbered them; ``voices`` maps each speaker to either
-    ``(float32 little-endian mono PCM bytes, rate)`` -- a recording the 7B
-    clones, which is also how Voice Chat's clone preview speaks -- or
-    ``{"preset": "<stem>"}``, one of the Realtime model's preset voices.
-
-    ``cfg_scale`` of ``None`` is the loaded model's own guidance, and ``steps``
-    of ``0`` keeps the step count the model was loaded with. ``stream`` asks
-    for the audio as it is made; a render given ``on_audio`` streams anyway.
+    one as the user numbered them; ``voices`` maps each speaker to
+    ``(float32 little-endian mono PCM bytes, rate)``.
     """
 
     id: str
     script: list = field(default_factory=list)
     voices: dict = field(default_factory=dict)
-    cfg_scale: "float | None" = 1.3
+    cfg_scale: float = 1.3
     steps: int = 10
     seed: "int | None" = None
     max_new_tokens: "int | None" = None
-    stream: bool = False
 
 
 @dataclass
 class RenderResult:
-    """What one render produced.
-
-    ``wav`` is a complete mono PCM16 file -- or ``b""`` for a render whose
-    frames went to an ``on_audio`` callback (``streamed``). ``first_audio_ms``
-    is how long after the request was sent the first frame arrived here, the
-    wait a listener has; ``0`` for a render that was not streamed or made no
-    sound.
-    """
+    """What one render produced. ``wav`` is a complete mono PCM16 file."""
 
     wav: bytes
     seconds: float
@@ -190,8 +156,6 @@ class RenderResult:
     cancelled: bool
     tokens: int
     capped: bool = False
-    first_audio_ms: int = 0
-    streamed: bool = False
 
 
 def card_key(card_uuid) -> str:
@@ -221,10 +185,6 @@ class _Process:
     once per start and never reused: a stale reader thread therefore cannot
     deliver a frame to a successor's request, because the successor is a
     different record with a different ``pending`` table.
-
-    ``sinks`` holds, per streamed render in flight, where its audio frames go;
-    ``identity`` is what the last successful load put on the card, in the
-    parent's own terms (model id, LoRA id) rather than the worker's paths.
     """
 
     def __init__(self, key: str, card_uuid: str, process):
@@ -234,11 +194,9 @@ class _Process:
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
         self.pending: dict = {}
-        self.sinks: dict = {}
         self.next_id = 0
         self.handshake: "Handshake | None" = None
         self.loaded = False
-        self.identity: "dict | None" = None
         self.rendering = False
         self.job = ""
         self.resident_bytes = 0
@@ -283,8 +241,7 @@ def status(card_uuid: str = "") -> dict:
 
     ``running`` is whether the process exists, ``loaded`` whether it has said
     it holds a model, ``rendering`` whether a render call is in flight on that
-    card from this side, ``model`` what :func:`loaded` would answer. No path,
-    no pid, no command line.
+    card from this side. No path, no pid, no command line.
     """
     wanted = card_key(card_uuid)
     with _table_lock:
@@ -297,36 +254,17 @@ def status(card_uuid: str = "") -> dict:
         with record.lock:
             running = record.alive()
             handshake = record.handshake
-            loaded_now = bool(record.loaded and running)
             cards[record.key] = {
                 "running": running,
-                "loaded": loaded_now,
+                "loaded": bool(record.loaded and running),
                 "rendering": bool(record.rendering),
                 "job": record.job,
                 "resident_bytes": record.resident_bytes if running else 0,
                 "peak_bytes": record.peak_bytes,
                 "device_name": handshake.device_name if handshake else "",
                 "uuid": record.uuid,
-                "model": dict(record.identity) if loaded_now and record.identity else None,
             }
     return {"cards": cards, "last_error": error}
-
-
-def loaded(card_uuid: str) -> "dict | None":
-    """What is loaded on that card, or ``None``. A pure read; never blocks.
-
-    ``{"model_id", "kind", "precision", "lora_id", "lora_scale"}`` as the last
-    successful :func:`load` named it. ``None`` when no worker runs there, when
-    it holds no model, and after a load that failed -- a failed load may have
-    unloaded what was there first, so this side does not guess.
-    """
-    record = _live(card_key(card_uuid))
-    if record is None:
-        return None
-    with record.lock:
-        if not record.loaded or not record.identity:
-            return None
-        return dict(record.identity)
 
 
 def rendering(card_uuid: str) -> bool:
@@ -421,51 +359,17 @@ def _installer():
     return vibevoice
 
 
-def _refusal(vibevoice, model_id: str = "") -> str:
-    """Why a worker cannot start now, in the installer's own words, or ``""``.
-
-    For a named model the question is about *that* model: the Realtime model
-    may be installed while the settings' 7B is not, and asking about the
-    settings would refuse a load that can happen. An installer from before
-    there were two models answers for its one.
-    """
+def _refusal(vibevoice) -> str:
+    """Why a worker cannot start now, in the installer's own words, or ``""``."""
     ask = getattr(vibevoice, "refusal", None)
     if ask is None:
         return ""
     try:
-        if model_id:
-            try:
-                return str(ask(model_id=model_id) or "")
-            except TypeError:
-                return str(ask() or "")
         return str(ask() or "")
     except Exception:
         logger.debug("Model Chain: the VibeVoice installer could not say whether it is "
                      "ready", exc_info=True)
         return ""
-
-
-def _ask(vibevoice, name: str, *arguments, what: str = "that"):
-    """One call into the installer, its refusals kept as the sentences they are.
-
-    The installer raises its own ``VibeVoiceError`` with a sentence for the
-    user -- an unknown LoRA, a model this build has not recorded -- and that
-    sentence is the answer. Anything else is a fault in a module this one
-    only reads from, logged and put as a general sentence.
-    """
-    ask = getattr(vibevoice, name, None)
-    if ask is None:
-        raise VibeVoiceRuntimeError("The VibeVoice installer is older than its runtime. "
-                                    "Restart the WebUI.")
-    try:
-        return ask(*arguments)
-    except Exception as exc:
-        error = getattr(vibevoice, "VibeVoiceError", None)
-        if isinstance(error, type) and isinstance(exc, error):
-            raise VibeVoiceRuntimeError(str(exc)) from None
-        logger.debug("Model Chain: the VibeVoice installer could not answer %s", name,
-                     exc_info=True)
-        raise VibeVoiceRuntimeError(f"VibeVoice could not work out {what}.") from None
 
 
 def _settings(vibevoice) -> dict:
@@ -487,18 +391,13 @@ def _worker_script(vibevoice):
     return paths.extension_root() / "vibevoice_worker" / "worker.py"
 
 
-def _note_peak(vibevoice, identifier: str, peak: int, precision: str = "") -> None:
-    """The calibration figure, handed to the installer's file. Never raises.
-
-    Kept per model *and precision*: an 8-bit 7B peaks gigabytes below a full
-    one, and one figure for both would either starve the full model's turn or
-    over-ask for the quantised one.
-    """
+def _note_peak(vibevoice, identifier: str, peak: int) -> None:
+    """The calibration figure, handed to the installer's file. Never raises."""
     ask = getattr(vibevoice, "note_peak", None)
     if ask is None or peak <= 0:
         return
     try:
-        ask(identifier, int(peak), 0, str(precision or ""))
+        ask(identifier, int(peak))
     except Exception:
         logger.debug("Model Chain: the VibeVoice peak could not be recorded", exc_info=True)
 
@@ -521,12 +420,8 @@ def _expected_containment() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def ensure_started(card_uuid: str, *, model_id: str = "") -> Handshake:
+def ensure_started(card_uuid: str) -> Handshake:
     """Start the worker on that card if it is not running. Idempotent per card.
-
-    ``model_id`` is the model the start is for, so the installer is asked
-    whether *that* model can run (see :func:`_refusal`); empty is the
-    settings' model, as before there were two.
 
     Every failure path is written so that a process which has been started is
     stopped before its handle is dropped: ownership begins at ``Popen``, not at
@@ -554,7 +449,7 @@ def ensure_started(card_uuid: str, *, model_id: str = "") -> Handshake:
             _discard(stale, "a previous VibeVoice worker had already exited")
         _guard_crash_loop(key)
 
-        reason = _refusal(vibevoice, model_id)
+        reason = _refusal(vibevoice)
         if reason:
             raise VibeVoiceRuntimeError(reason)
         interpreter = vibevoice.runtime_python()
@@ -687,149 +582,37 @@ def _handshake_with(record: _Process, key: str) -> Handshake:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
-class _Plan:
-    """One load, resolved: the parent's names and the worker's paths."""
+def load(card_uuid: str) -> dict:
+    """Start the card's worker if need be and have it load the model.
 
-    model_id: str
-    label: str
-    kind: str
-    precision: str
-    lora_id: str
-    lora_scale: float
-    model_dir: str
-    lora_dir: str
-    voices_dir: str
-    steps: int
-
-    def identity(self) -> dict:
-        return {"model_id": self.model_id, "kind": self.kind, "precision": self.precision,
-                "lora_id": self.lora_id, "lora_scale": self.lora_scale}
-
-
-def _plan(vibevoice, model_id: str, precision: str, lora_id: str, lora_scale) -> _Plan:
-    """What to load, from the arguments and, where they are empty, the settings.
-
-    The model is the one named, else the settings' model. The precision is
-    the one named -- refused when the model does not take it -- else the
-    settings' when the model takes that, else the model's first (the Realtime
-    model is only ever full precision). The LoRA is the one named -- refused
-    for a model that takes none -- and the settings' LoRA is used only when no
-    model was named either: a caller that names its model and no LoRA, as the
-    render service does for a configuration without one, is asking for none,
-    and must not be handed whatever the Voice Box settings last held.
-    """
-    settings = _settings(vibevoice)
-    named = str(model_id or "").strip()
-    model = named or str(settings.get("model_id") or "") \
-        or str(getattr(vibevoice, "MODEL_DEFAULT", "") or "")
-    info = _ask(vibevoice, "model_info", model, what="which model to load")
-    info = info if isinstance(info, dict) else {}
-    model = str(info.get("id") or model)
-    label = str(info.get("label") or model or "VibeVoice")
-    kind = str(info.get("kind") or protocol.KIND_LONGFORM)
-    if kind not in protocol.KINDS:
-        raise VibeVoiceRuntimeError(f"{label} is not a kind of model this build loads.")
-    precisions = [str(one) for one in (info.get("precisions") or ("bf16",))]
-    wanted = str(precision or "").strip()
-    if wanted:
-        if wanted not in precisions:
-            raise VibeVoiceRuntimeError(f"{label} does not load at that precision.")
-    else:
-        stored = str(settings.get("precision") or "")
-        wanted = stored if stored in precisions else precisions[0]
-    takes_lora = bool(info.get("lora"))
-    chosen = str(lora_id or "").strip()
-    scale = lora_scale
-    if chosen:
-        if not takes_lora:
-            raise VibeVoiceRuntimeError(f"{label} does not take a LoRA.")
-    elif not named and takes_lora:
-        chosen = str(settings.get("lora_id") or "").strip()
-        if chosen:
-            scale = settings.get("lora_scale", 1.0)
-    try:
-        scale = float(1.0 if scale is None else scale)
-    except (TypeError, ValueError):
-        scale = float("nan")
-    if not chosen:
-        scale = 1.0
-    elif not 0.0 <= scale <= protocol.LORA_SCALE_MAX:
-        raise VibeVoiceRuntimeError(
-            f"A LoRA's strength is from 0 to {protocol.LORA_SCALE_MAX:g}.")
-    lora_dir = str(_ask(vibevoice, "lora_dir", chosen, what="where that LoRA is")) \
-        if chosen else ""
-    voices_dir = str(_ask(vibevoice, "voices_dir", model, what="where the preset voices are")) \
-        if kind == protocol.KIND_REALTIME else ""
-    model_dir = str(_ask(vibevoice, "model_dir", model, what="where the model is"))
-    # The settings' step count belongs to the settings' model; any other model
-    # loads with its own, and every render names its steps anyway.
-    steps = 0
-    try:
-        if model == str(settings.get("model_id") or ""):
-            steps = int(settings.get("steps") or 0)
-        if not steps:
-            defaults = info.get("defaults") if isinstance(info.get("defaults"), dict) else {}
-            steps = int(defaults.get("steps") or 0)
-    except (TypeError, ValueError):
-        steps = 0
-    return _Plan(model_id=model, label=label, kind=kind, precision=wanted, lora_id=chosen,
-                 lora_scale=scale, model_dir=model_dir, lora_dir=lora_dir,
-                 voices_dir=voices_dir, steps=max(0, steps))
-
-
-def load(card_uuid: str, *, model_id: str = "", precision: str = "", lora_id: str = "",
-         lora_scale: float = 1.0) -> dict:
-    """Start the card's worker if need be and have it load a model.
-
-    What is loaded is an identity -- model, precision, LoRA and its strength --
-    resolved by :func:`_plan` through the installer (``model_info``,
-    ``model_dir``, ``voices_dir`` for the Realtime model, ``lora_dir`` for a
-    LoRA) before any process is started, so a load that was always going to
-    be refused starts nothing. The worker answers at once when it already
-    holds that identity and unloads first when it holds another. Attention is
-    SDPA and the device the card, by this build (design section 3).
-
-    Returns ``{"loaded", "resident_bytes", "weights_bytes", "load_seconds"}``;
-    :func:`loaded` says what it was.
+    The directory and the step count come from the installer's settings, the
+    precision and attention from this build: bf16 and SDPA (design section 3).
+    A worker that already holds the model answers at once.
     """
     key = card_key(card_uuid)
-    vibevoice = _installer()
-    plan = _plan(vibevoice, model_id, precision, lora_id, lora_scale)
-    reason = _refusal(vibevoice, plan.model_id)
-    if reason:
-        raise VibeVoiceRuntimeError(reason)
-    ensure_started(card_uuid, model_id=plan.model_id)
+    ensure_started(card_uuid)
     record = _live(key)
     if record is None:
         raise VibeVoiceRuntimeError("VibeVoice is not running on that card.")
     with record.lock:
         if record.rendering:
             raise VibeVoiceRuntimeError("VibeVoice is rendering on that card.")
-    header = {"op": "load", "model_dir": plan.model_dir, "steps": plan.steps,
-              "dtype": "bf16", "attention": "sdpa", "kind": plan.kind,
-              "precision": plan.precision, "lora_dir": plan.lora_dir or None,
-              "lora_scale": plan.lora_scale, "voices_dir": plan.voices_dir,
-              "device": "cuda"}
+    vibevoice = _installer()
+    settings = _settings(vibevoice)
+    model_dir = str(vibevoice.model_dir(str(settings.get("model_id") or "")))
+    header = {"op": "load", "model_dir": model_dir, "steps": int(settings.get("steps") or 10),
+              "dtype": "bf16", "attention": "sdpa"}
     try:
         reply, _body = _exchange(record, header, b"", LOAD_TIMEOUT)
     except _WorkerGone as exc:
         _lost(record, f"the VibeVoice worker was lost while loading ({exc})")
         raise VibeVoiceRuntimeError(
             "VibeVoice stopped while it was loading its model. Try again.") from None
-    except VibeVoiceRuntimeError:
-        # The worker may have let go of what it held before it refused.
-        with record.lock:
-            record.loaded = False
-            record.identity = None
-        raise
     with record.lock:
         record.loaded = True
-        record.identity = plan.identity()
     if not reply.get("already_loaded"):
-        logger.info("Model Chain: VibeVoice loaded %s (%s%s) on %s in %.1f s — %.1f GiB of "
-                    "weights, %.1f GiB held", plan.label, plan.precision,
-                    f", LoRA at {plan.lora_scale:g}" if plan.lora_id else "", record.label(),
+        logger.info("Model Chain: VibeVoice loaded its model on %s in %.1f s — %.1f GiB of "
+                    "weights, %.1f GiB held", record.label(),
                     float(reply.get("load_seconds") or 0.0),
                     int(reply.get("weights_bytes") or 0) / float(1 << 30),
                     int(reply.get("resident_bytes") or 0) / float(1 << 30))
@@ -839,7 +622,7 @@ def load(card_uuid: str, *, model_id: str = "", precision: str = "", lora_id: st
             "load_seconds": float(reply.get("load_seconds") or 0.0)}
 
 
-def render(card_uuid: str, job: RenderJob, on_progress=None, on_audio=None) -> RenderResult:
+def render(card_uuid: str, job: RenderJob, on_progress=None) -> RenderResult:
     """One script through the card's worker. Marks the card rendering meanwhile.
 
     ``on_progress`` is called with each progress frame's dict (``{"seconds":
@@ -847,25 +630,11 @@ def render(card_uuid: str, job: RenderJob, on_progress=None, on_audio=None) -> R
     error naming that, and the card's state is reset; the render is never
     retried, because a retry would be another long generation nobody asked
     for a second time.
-
-    Given ``on_audio`` (or a job with ``stream``) the render is *streamed*:
-    the worker sends the audio as it is made, and ``on_audio(pcm16, rate)`` is
-    called for every frame, in order, on this module's reader thread -- so it
-    must hand the audio on rather than work on it. A ``False`` return (or an
-    exception) means nobody wants the rest: no further frame is delivered and
-    the render is cancelled, from a thread of its own, because the reader
-    cannot wait for the answer to a cancel it would itself have to read. The
-    result's ``wav`` is then ``b""``; a job that asked to stream with no
-    ``on_audio`` gets its frames back as the WAV. Every frame has been
-    delivered by the time this returns: they come down the pipe before the
-    reply that ends the render, and one thread reads both.
     """
     key = card_key(card_uuid)
     record = _live(key)
     if record is None:
         raise VibeVoiceRuntimeError("VibeVoice is not loaded on that card.")
-    streamed = on_audio is not None or bool(getattr(job, "stream", False))
-    sink = _AudioSink(on_audio, card_uuid, str(job.id or "")) if streamed else None
     with record.lock:
         if record.closing:
             raise VibeVoiceRuntimeError("VibeVoice is stopping on that card.")
@@ -874,12 +643,10 @@ def render(card_uuid: str, job: RenderJob, on_progress=None, on_audio=None) -> R
                 "VibeVoice is already rendering on that card; one render at a time.")
         record.rendering = True
         record.job = str(job.id or "")
-        identity = dict(record.identity or {})
     try:
-        header, payload = _render_frame(job, stream=streamed)
+        header, payload = _render_frame(job)
         try:
-            reply, body = _exchange(record, header, payload, RENDER_TIMEOUT, on_progress,
-                                    sink=sink)
+            reply, body = _exchange(record, header, payload, RENDER_TIMEOUT, on_progress)
         except _WorkerGone as exc:
             if exc.timed_out:
                 _lost(record, "the VibeVoice worker did not finish a render in time")
@@ -889,41 +656,26 @@ def render(card_uuid: str, job: RenderJob, on_progress=None, on_audio=None) -> R
             _lost(record, "the VibeVoice worker exited during a render")
             raise VibeVoiceRuntimeError(
                 "the VibeVoice worker exited during the render") from None
-        wav = bytes(body or b"")
-        first_audio_ms = 0
-        seconds = float(reply.get("seconds") or 0.0)
-        if sink is not None:
-            wav = sink.wav() if on_audio is None else b""
-            first_audio_ms = sink.first_ms or int(reply.get("first_audio_ms") or 0)
-            seconds = seconds or sink.samples / float(sink.rate or protocol.SAMPLE_RATE)
         result = RenderResult(
-            wav=wav,
-            seconds=seconds,
+            wav=bytes(body or b""),
+            seconds=float(reply.get("seconds") or 0.0),
             sample_rate=int(reply.get("sample_rate") or protocol.SAMPLE_RATE),
             render_seconds=float(reply.get("render_seconds") or 0.0),
             peak_bytes=int(reply.get("peak_bytes") or 0),
-            cancelled=bool(reply.get("cancelled")) or bool(sink is not None and sink.refused),
+            cancelled=bool(reply.get("cancelled")),
             tokens=int(reply.get("tokens") or 0),
-            capped=bool(reply.get("capped")),
-            first_audio_ms=int(first_audio_ms),
-            streamed=bool(streamed))
+            capped=bool(reply.get("capped")))
         with record.lock:
             record.peak_bytes = max(record.peak_bytes, result.peak_bytes)
         with _table_lock:
             _peaks[key] = max(int(_peaks.get(key, 0)), result.peak_bytes)
         vibevoice = _installer()
-        if not identity:
-            settings = _settings(vibevoice)
-            identity = {"model_id": str(settings.get("model_id") or ""),
-                        "precision": str(settings.get("precision") or "bf16")}
-        _note_peak(vibevoice, str(identity.get("model_id") or ""), result.peak_bytes,
-                   str(identity.get("precision") or "bf16"))
+        _note_peak(vibevoice, str(_settings(vibevoice).get("model_id") or ""),
+                   result.peak_bytes)
         logger.info("Model Chain: VibeVoice rendered %.1f s of audio on %s in %.1f s — "
-                    "%d token(s), peak %.1f GiB%s%s%s", result.seconds, record.label(),
+                    "%d token(s), peak %.1f GiB%s%s", result.seconds, record.label(),
                     result.render_seconds, result.tokens,
                     result.peak_bytes / float(1 << 30),
-                    (f", streamed in {sink.frames} frame(s), the first after "
-                     f"{result.first_audio_ms} ms") if sink is not None else "",
                     ", cancelled" if result.cancelled else "",
                     ", reached its token budget" if result.capped else "")
         return result
@@ -933,12 +685,11 @@ def render(card_uuid: str, job: RenderJob, on_progress=None, on_audio=None) -> R
             record.job = ""
 
 
-def _render_frame(job: RenderJob, stream: bool = False) -> "tuple[dict, bytes]":
+def _render_frame(job: RenderJob) -> "tuple[dict, bytes]":
     """The render request as the worker reads it: a header and one PCM payload.
 
     The voices' float32 PCM is concatenated in ascending speaker order and each
-    voice entry says where its samples begin and how many there are; a preset
-    voice is named instead and carries no audio.
+    voice entry says where its samples begin and how many there are.
     """
     script = []
     for entry in job.script or ():
@@ -951,15 +702,7 @@ def _render_frame(job: RenderJob, stream: bool = False) -> "tuple[dict, bytes]":
     chunks = []
     offset = 0
     for speaker in sorted(job.voices or {}, key=lambda one: int(one)):
-        value = job.voices[speaker]
-        if isinstance(value, dict):
-            stem = value.get("preset")
-            if not isinstance(stem, str) or not stem:
-                raise VibeVoiceRuntimeError(
-                    f"Speaker {int(speaker)}'s voice is neither a recording nor a preset.")
-            voices.append({"speaker": int(speaker), "preset": stem})
-            continue
-        pcm, rate = value
+        pcm, rate = job.voices[speaker]
         data = bytes(pcm or b"")
         count = len(data) // 4
         data = data[:count * 4]
@@ -972,65 +715,12 @@ def _render_frame(job: RenderJob, stream: bool = False) -> "tuple[dict, bytes]":
         "job": str(job.id or ""),
         "script": script,
         "voices": voices,
-        "cfg_scale": None if job.cfg_scale is None else float(job.cfg_scale),
+        "cfg_scale": float(job.cfg_scale),
         "seed": None if job.seed is None else int(job.seed),
         "max_new_tokens": None if not job.max_new_tokens else int(job.max_new_tokens),
         "steps": int(job.steps or 0),
-        "stream": bool(stream),
     }
     return header, b"".join(chunks)
-
-
-class _AudioSink:
-    """Where one streamed render's frames go, and what they added up to.
-
-    ``deliver`` runs on the reader thread, once per frame, in the order the
-    worker wrote them. With an ``on_audio`` it hands each frame straight on;
-    without one it keeps the frames so the render can still answer with a WAV.
-    """
-
-    def __init__(self, on_audio, card_uuid: str, job_id: str):
-        self.on_audio = on_audio
-        self.card_uuid = str(card_uuid or "")
-        self.job_id = str(job_id or "")
-        self.started = time.monotonic()
-        self.frames = 0
-        self.samples = 0
-        self.first_ms = 0
-        self.rate = protocol.SAMPLE_RATE
-        self.refused = False
-        self.pieces = [] if on_audio is None else None
-
-    def deliver(self, header: dict, payload: bytes) -> None:
-        if self.refused:
-            return
-        info = header.get("audio") if isinstance(header.get("audio"), dict) else {}
-        try:
-            rate = int(info.get("rate") or protocol.SAMPLE_RATE)
-        except (TypeError, ValueError):
-            rate = protocol.SAMPLE_RATE
-        data = bytes(payload or b"")
-        self.frames += 1
-        self.samples += len(data) // 2
-        self.rate = rate
-        if self.frames == 1:
-            self.first_ms = max(1, int(round((time.monotonic() - self.started) * 1000.0)))
-        if self.pieces is not None:
-            self.pieces.append(data)
-            return
-        try:
-            wanted = self.on_audio(data, rate)
-        except Exception:
-            logger.warning("Model Chain: the consumer of a streamed VibeVoice render failed, "
-                           "so the render was cancelled", exc_info=True)
-            wanted = False
-        if wanted is False:
-            self.refused = True
-            threading.Thread(target=cancel, args=(self.card_uuid, self.job_id),
-                             name="mc-vibevoice-cancel", daemon=True).start()
-
-    def wav(self) -> bytes:
-        return protocol.encode_wav(b"".join(self.pieces or ()), self.rate)
 
 
 def cancel(card_uuid: str, job_id: str) -> bool:
@@ -1072,7 +762,6 @@ def unload(card_uuid: str, reason: str = "") -> dict:
         raise VibeVoiceRuntimeError("VibeVoice stopped while it was unloading.") from None
     with record.lock:
         record.loaded = False
-        record.identity = None
     logger.info("Model Chain: VibeVoice unloaded its model on %s — %s", record.label(),
                 reason or "no reason given")
     return status(card_uuid)
@@ -1113,15 +802,12 @@ def evict(card_uuid: str, reason: str = "") -> int:
 
 
 def _exchange(record: _Process, header: dict, payload: bytes, timeout: float,
-              on_progress=None, sink: "_AudioSink | None" = None):
+              on_progress=None):
     """Write one frame and wait for the reply that carries its id.
 
     The waiting is on a queue this call owns, so two callers cannot receive one
     another's answers even in principle. Progress frames for the same id are
     handed to ``on_progress`` and the wait goes on, against one deadline.
-    Audio frames never reach this queue: the reader hands them to ``sink``
-    itself. A frame with no ``ok`` that is neither is skipped rather than
-    taken for the reply.
     """
     with record.lock:
         if record.closing:
@@ -1130,13 +816,9 @@ def _exchange(record: _Process, header: dict, payload: bytes, timeout: float,
         request_id = f"{record.key[:6]}-{record.next_id}"
         answers: queue.Queue = queue.Queue()
         record.pending[request_id] = answers
-        if sink is not None:
-            record.sinks[request_id] = sink
     try:
         message = dict(header)
         message["id"] = request_id
-        if sink is not None:
-            sink.started = time.monotonic()
         _write(record, message, payload)
         deadline = time.monotonic() + float(timeout)
         while True:
@@ -1152,21 +834,20 @@ def _exchange(record: _Process, header: dict, payload: bytes, timeout: float,
             if found is None:
                 raise _WorkerGone("the VibeVoice worker stopped")
             reply, body = found
-            if "ok" not in reply:
-                if "progress" in reply and on_progress is not None:
+            if "ok" not in reply and "progress" in reply:
+                if on_progress is not None:
                     try:
                         on_progress(dict(reply.get("progress") or {}))
                     except Exception:
                         logger.debug("Model Chain: a VibeVoice progress callback failed",
                                      exc_info=True)
                 continue
-            if not reply.get("ok"):
+            if not reply.get("ok", True):
                 raise VibeVoiceRuntimeError(_readable(str(reply.get("error") or "")))
             return reply, body
     finally:
         with record.lock:
             record.pending.pop(request_id, None)
-            record.sinks.pop(request_id, None)
 
 
 def _write(record: _Process, header: dict, payload: bytes) -> None:
@@ -1206,12 +887,7 @@ def _readable(reason: str) -> str:
 
 
 def _read_frames(record: _Process) -> None:
-    """The one reader per worker. Every reply to its request, every figure absorbed.
-
-    A streamed render's audio frame goes to its render's sink on this thread,
-    outside the record's lock, before the next frame is even read -- which is
-    what keeps the frames in order and ahead of the reply that follows them.
-    """
+    """The one reader per worker. Every reply to its request, every figure absorbed."""
     stream = record.process.stdout
     try:
         while True:
@@ -1221,13 +897,8 @@ def _read_frames(record: _Process) -> None:
             header, payload = frame
             with record.lock:
                 _absorb(record, header)
-                request_id = header.get("id")
-                sink = record.sinks.get(request_id) \
-                    if "audio" in header and "ok" not in header else None
-                answers = None if sink is not None else record.pending.get(request_id)
-            if sink is not None:
-                sink.deliver(header, payload)
-            elif answers is not None:
+                answers = record.pending.get(header.get("id"))
+            if answers is not None:
                 answers.put((header, payload))
     except Exception:
         logger.debug("Model Chain: the VibeVoice worker's pipe ended", exc_info=True)
@@ -1259,9 +930,7 @@ def _fail_everything(record: _Process) -> None:
     with record.lock:
         waiting = list(record.pending.values())
         record.pending.clear()
-        record.sinks.clear()
         record.loaded = False
-        record.identity = None
     for answers in waiting:
         try:
             answers.put(None)
@@ -1358,7 +1027,6 @@ def _discard(record: _Process, reason: str) -> None:
             record.closing = True
             waiting = list(record.pending.values())
             record.pending.clear()
-            record.sinks.clear()
             record.rendering = False
             record.job = ""
         for answers in waiting:
@@ -1403,7 +1071,6 @@ def _discard(record: _Process, reason: str) -> None:
                 del _processes[record.key]
         with record.lock:
             record.loaded = False
-            record.identity = None
         logger.info("Model Chain: the VibeVoice worker on %s stopped — %s", record.label(),
                     reason or "no reason given")
 

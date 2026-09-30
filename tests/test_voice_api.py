@@ -1757,12 +1757,6 @@ class TestAnAuditionIsTheDeliveryYouSet:
                 return b"RIFFfake"
 
         monkeypatch.setattr(engines, "runtime", lambda engine="": Runtime)
-        # Whether a voice happens to be installed is a different question, and
-        # an engine with none refuses before the delivery matters: PocketTTS
-        # with no official voices on disk answered "Alba is not installed", so
-        # these two failed wherever FastAPI let them run at all.
-        monkeypatch.setattr(engines, "resolve",
-                            lambda voice_id="", engine="": ("x", {"_handle": 0}))
         return seen
 
     def test_a_bare_test_speaks_the_stored_delivery(self, host, voice_root, monkeypatch):
@@ -1804,14 +1798,10 @@ class TestAnAuditionIsTheDeliveryYouSet:
         for engine in engines.ENGINES:
             engines.select(engine)
             profiles = engines.profiles(engine)
-            # Speed where the engine has one. VibeVoice has none (its worker
-            # applies no signal processing); its first control, Guidance, takes
-            # the same number, and the rule under test is the same rule.
-            field = "speed" if "speed" in profiles.FIELDS else profiles.FIELDS[0]
-            profiles.remember({field: 1.3})
+            profiles.remember({"speed": 1.3})
             seen = self.spoken(monkeypatch)
             api.test_voice("", text="Hello.")
-            assert seen["profile"][field] == 1.3, engine
+            assert seen["profile"]["speed"] == 1.3, engine
 
     def test_something_that_is_not_a_profile_is_still_refused(self, host, voice_root):
         import mc_voice_engines as engines

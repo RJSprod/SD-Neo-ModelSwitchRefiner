@@ -70,7 +70,6 @@ import mc_voice_pocket_profile
 import mc_voice_pocket_runtime
 import mc_voice_vibevoice
 import mc_voice_vibevoice_runtime
-import mc_voice_vibevoice_speech
 import mc_voice_pipeline
 import mc_voice_pipeline_runtime
 import mc_voice_state
@@ -4156,11 +4155,9 @@ def _on_script_unloaded():
     # prevent, and section 34 says so in as many words: a failure in one must
     # not stop the cleanup of the others.
     for name, stop in (
-            # Voice Chat's VibeVoice speech and the Voice Box's renders first,
-            # so that nothing asks for a card while the door is closing, then
-            # VibeVoice's worker, which holds a card's worth of memory and is a
-            # process of its own (docs/23).
-            ("VibeVoice in Voice Chat", mc_voice_vibevoice_speech.shutdown),
+            # The Voice Box's renders first, so that no job asks for a card
+            # while the door is closing, then VibeVoice's worker, which holds a
+            # card's worth of memory and is a process of its own (docs/23).
             ("the Voice Box's renders", mc_voice_box.stop),
             ("VibeVoice", mc_voice_vibevoice_runtime.shutdown),
             ("Kokoro", mc_voice_runtime.shutdown),

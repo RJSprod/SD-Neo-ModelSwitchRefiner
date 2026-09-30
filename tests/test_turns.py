@@ -691,15 +691,7 @@ class TestClearing:
         rather than stopping a llama-server under a reply."""
         speaker(machine)
         stopped = []
-
-        def stop(target):
-            # An idle server that gives its room back, on a card short without it.
-            stopped.append(1)
-            machine.free[OTHER_CARD] += 12 * _GB
-            return 12 * _GB
-
-        monkeypatch.setattr(mc_turns, "_stop_idle_llm", stop)
-        machine.free[OTHER_CARD] = 10 * _GB
+        monkeypatch.setattr(mc_turns, "_stop_idle_llm", lambda target: stopped.append(1))
         turn = ask(WANGP_UUID)
         assert step(turn) == mc_turns.MAKING_ROOM
         with mc_broker.workload(mc_broker.FAMILY_LLM, "Krea's writer",
@@ -1158,106 +1150,6 @@ class TestParking:
 
         assert turn.phase == mc_turns.DONE and guest.evictions
         assert machine.armed == []
-
-
-class IdleServer:
-    """Our own llama-server, idle on a card: declared, and stopped when asked."""
-
-    def __init__(self, machine: Machine, card: int, size_gb: float):
-        self.machine = machine
-        self.card = card
-        self.size = int(size_gb * _GB)
-        self.stops: list[str] = []
-        mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, self)
-        mc_broker.declare(mc_broker.FAMILY_LLM, "llm:server", "llama-server", self.size,
-                          rank=mc_broker.RANK_HOT, card=card)
-
-    def release(self, needed_bytes, reason="", *, card=mc_broker.ANY_CARD):
-        if not self.size:
-            return 0
-        self.stops.append(reason)
-        freed, self.size = self.size, 0
-        self.machine.free[self.card] += freed
-        mc_broker.retire("llm:server")
-        return freed
-
-    def resident_bytes(self, *, card=mc_broker.ANY_CARD):
-        return self.size
-
-
-@pytest.fixture
-def idle_server(machine):
-    yield lambda card, size_gb: IdleServer(machine, card, size_gb)
-    mc_broker.unregister_reclaimer(mc_broker.FAMILY_LLM)
-
-
-class TestMovingOnlyWhatIsNeeded:
-    """Making room is a ladder climbed only while the card is still short:
-    an idle llama-server first, then the image model, then WanGP. A guest that
-    fits beside what is there moves nothing -- the Realtime 0.5B or the 7B at
-    four bits usually does, and stopping the model about to write the next reply
-    for room nobody needed is the cost the ladder exists to avoid."""
-
-    def test_a_request_that_fits_beside_everything_moves_nothing(self, machine, host,
-                                                                 idle_server):
-        guest = speaker(machine)
-        server = idle_server(IMAGE_CARD, 6.0)
-        machine.free[IMAGE_CARD] = 5 * _GB
-        turn = ask(need=3.0)
-
-        assert until(turn, mc_turns.GRANTED) == mc_turns.GRANTED
-        assert server.stops == [] and machine.moved == []
-        assert card_of(turn).parked == ""
-        render(turn, guest, keep_warm=False)
-        assert machine.armed == [], "nothing was parked, so nothing comes back"
-
-    def test_an_idle_server_is_stopped_only_when_the_card_is_short_without_it(
-            self, machine, idle_server):
-        speaker(machine)
-        server = idle_server(OTHER_CARD, 12.0)
-        machine.free[OTHER_CARD] = 10 * _GB
-        turn = ask(WANGP_UUID)
-
-        assert until(turn, mc_turns.GRANTED) == mc_turns.GRANTED
-        assert server.stops == ["VibeVoice's turn on NVIDIA GeForce RTX 5090"]
-
-    def test_the_idle_server_goes_before_the_image_model(self, machine, host, idle_server):
-        """The cheaper rung first: a llama-server reloads in seconds and keeps no
-        state a person made, where the checkpoint is what the next generation needs."""
-        speaker(machine)
-        server = idle_server(IMAGE_CARD, 16.0)
-        turn = ask()
-
-        assert until(turn, mc_turns.GRANTED) == mc_turns.GRANTED
-        assert len(server.stops) == 1 and machine.moved == []
-
-    def test_the_image_model_is_parked_when_the_idle_server_is_not_enough(
-            self, machine, host, idle_server):
-        speaker(machine)
-        server = idle_server(IMAGE_CARD, 4.0)
-        turn = ask()
-
-        assert until(turn, mc_turns.GRANTED) == mc_turns.GRANTED
-        assert len(server.stops) == 1
-        assert [kind for kind, _ in machine.moved] == [mc_memory.PARKED_RAM]
-
-    def test_a_small_guest_beside_the_image_model_is_not_a_reason_to_park_it(
-            self, machine, host):
-        speaker(machine)
-        turn = ask(need=2.0)
-
-        assert until(turn, mc_turns.GRANTED) == mc_turns.GRANTED
-        assert machine.moved == [] and machine.image > 0
-
-    def test_nothing_is_moved_for_a_request_the_ram_refuses(self, machine, idle_server):
-        speaker(machine)
-        server = idle_server(OTHER_CARD, 12.0)
-        machine.free[OTHER_CARD] = 10 * _GB
-        machine.ram = 5 * _GB
-        turn = ask(WANGP_UUID, ram=3.0)
-
-        assert until(turn, mc_turns.BLOCKED) == mc_turns.BLOCKED
-        assert server.stops == []
 
 
 # --------------------------------------------------------------------------- #
