@@ -1357,6 +1357,14 @@ class _Service:
         for key, job in live:
             _interrupt(job)
 
+    def join(self, timeout: float) -> None:
+        """Wait, up to ``timeout`` seconds in all, for every card's thread to end."""
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            threads = list(self.threads.values())
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
 
 def _interrupt(job: Job) -> None:
     """Withdraw or cut short ``job``, whatever it is doing right now."""
@@ -1451,11 +1459,14 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     job = Job(id=_new_id(), name=_title(name, "Render"), pipeline_id=owner["id"],
               prompt=str(prompt), configuration=chosen, card=card, configuration_id=source,
               seed=int(seed), seed_drawn=drawn)
+    # The answer is the job as it was queued. Read after the card's thread has
+    # it, it could already say the job had started, depending on who ran first.
+    queued = job.to_dict()
     _service.submit(job)
     logger.info("Model Chain: Voice Box queued “%s” (%d section%s, %d speaker%s)", job.name,
                 len(sections), "" if len(sections) == 1 else "s", len(wanted),
                 "" if len(wanted) == 1 else "s")
-    return job.to_dict()
+    return queued
 
 
 def _perform(job: Job) -> None:
@@ -1672,9 +1683,15 @@ def stop() -> None:
 
 
 def forget() -> None:
-    """Drop the service's memory of jobs. For tests."""
+    """Drop the service's memory of jobs, once its renders have ended. For tests.
+
+    Waiting matters: a render still going when a test ends finishes a moment
+    later and writes its output wherever the voice root points by then, which
+    is the checkout once the test's own folder is put back.
+    """
     global _service, _turns, _runtime_module, _engine_module
     _service.stop()
+    _service.join(timeout=10.0)
     _service = _Service()
     _turns = None
     _runtime_module = None

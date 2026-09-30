@@ -146,7 +146,7 @@ class TestTheTurnReachesTheBrowser:
 
 
 class TestTheStopButton:
-    def test_stop_answers_with_exactly_what_its_click_declares(self, host):
+    def test_stop_answers_with_exactly_what_its_click_declares(self, host, store):
         """The bug this exists for: ``_cancel`` grew two return values when the
         composer gained its hidden run state, the click's outputs did not, and
         Gradio refuses a handler whose arity disagrees -- so Stop raised instead

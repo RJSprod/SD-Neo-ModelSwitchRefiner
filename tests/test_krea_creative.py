@@ -703,6 +703,10 @@ class TestTheImageModelKeepsItsRoom:
         monkeypatch.setattr(mc_memory, "vram_required_bytes",
                             lambda name, *a, **k: 8 * 1024 ** 3)
         monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 0)
+        # Nothing reported either: what the image side holds is the larger of
+        # the two, and a checkpoint an earlier test warmed (test_warming.py)
+        # is reported until something clears it.
+        monkeypatch.setattr(mc_broker, "reported_bytes", lambda family=None, **_: 0)
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         from modules import shared
 
