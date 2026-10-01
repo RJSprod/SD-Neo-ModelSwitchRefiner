@@ -1975,6 +1975,25 @@ inside would have hidden a live control behind Edit.
 holds the screen to that: no `info` under a box, the three accordions, no
 prose.
 
+## 3.26 What is free, in the header
+
+Asked for from use: the grip's empty space shows free system RAM and each
+NVIDIA card's free VRAM, grey and italic, "just numbers, really quick to read",
+with no new live connection. `GET /memory` on the conversation prefix answers
+`{ram: {free, total} | null, cards: [{index, name, full_name, free, total}]}`:
+RAM from `mc_broker.free_ram_bytes()` (the OS's available figure), cards from
+one nvidia-smi run (`detect_gpus`) rather than torch, because a torch reading
+makes a CUDA context on every card it reads, WanGP's included. A reading
+answers every page for a second, and the route is a plain `def` so the
+subprocess runs in Starlette's threadpool, not on the event loop. The panel
+asks once on opening and then every five seconds, timed from each answer, with
+a four-second deadline; a closed panel and a hidden page ask for nothing, and an
+answer arriving after either is dropped. A failed ask leaves the last figures,
+dimmed (`forge-assistant-memory-stale`). The figures are `pointer-events: none`
+inside the grip, so they drag like the rest of it and take part in the header's
+two and three presses. An integrated Intel GPU has no VRAM of its own: its
+memory is the RAM figure.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

@@ -534,3 +534,89 @@ class TestWorkspaces:
         monkeypatch.setattr(mc_llm_studio, "enabled", lambda: False)
 
         assert api.workspaces()["workspaces"] == []
+
+
+class TestFreeMemory:
+    """The header's reading: free RAM and each card's free VRAM, on request."""
+
+    @pytest.fixture(autouse=True)
+    def fresh(self, monkeypatch):
+        import mc_broker
+        from prompt_master.core.models import GpuInfo
+        from prompt_master.inference import device_detection
+
+        api.forget_memory_reading()
+        self.smi_runs = 0
+
+        def detect(timeout=15):
+            self.smi_runs += 1
+            return [GpuInfo(0, "GPU-a", "NVIDIA GeForce RTX 5090", 32607, 18000, "580"),
+                    GpuInfo(1, "GPU-b", "NVIDIA GeForce RTX 3090", 24576, 7000, "580")]
+
+        monkeypatch.setattr(device_detection, "detect_gpus", detect)
+        monkeypatch.setattr(mc_broker, "free_ram_bytes", lambda: 60 * 2 ** 30)
+        monkeypatch.setattr(mc_broker, "total_ram_bytes", lambda: 96 * 2 ** 30)
+        yield
+        api.forget_memory_reading()
+
+    def test_it_reads_ram_and_every_card_by_a_short_name(self):
+        found = api.memory()
+
+        assert found["ram"] == {"free": 60 * 2 ** 30, "total": 96 * 2 ** 30}
+        assert [(card["name"], card["free"]) for card in found["cards"]] == [
+            ("5090", 18000 * 2 ** 20), ("3090", 7000 * 2 ** 20)]
+        assert found["cards"][0]["full_name"] == "NVIDIA GeForce RTX 5090"
+
+    def test_two_cards_of_one_model_are_told_apart(self, monkeypatch):
+        from prompt_master.core.models import GpuInfo
+        from prompt_master.inference import device_detection
+
+        monkeypatch.setattr(device_detection, "detect_gpus", lambda timeout=15: [
+            GpuInfo(0, "a", "NVIDIA GeForce RTX 3090", 24576, 1, "580"),
+            GpuInfo(1, "b", "NVIDIA GeForce RTX 3090", 24576, 2, "580")])
+
+        assert [card["name"] for card in api.memory()["cards"]] == ["3090:0", "3090:1"]
+
+    def test_a_reading_answers_every_page_for_a_second(self, monkeypatch):
+        api.memory()
+        api.memory()
+
+        assert self.smi_runs == 1
+
+    def test_no_nvidia_smi_still_reads_the_ram(self, monkeypatch):
+        from prompt_master.inference import device_detection
+
+        def missing(timeout=15):
+            raise RuntimeError("nvidia-smi is not available")
+
+        monkeypatch.setattr(device_detection, "detect_gpus", missing)
+
+        found = api.memory()
+
+        assert found["cards"] == []
+        assert found["ram"]["free"] == 60 * 2 ** 30
+
+    def test_the_route_is_registered_and_is_not_a_coroutine(self):
+        """nvidia-smi is a subprocess: in a coroutine it would hold up every
+        other request on the server while it ran."""
+        import inspect
+
+        class App:
+            routes = []
+            added = {}
+
+            def add_api_route(self, path, handler, methods):
+                self.added[path] = handler
+
+        if api.Request is None:
+            pytest.skip("FastAPI is not installed")
+        app = App()
+        api.install(app=app)
+
+        assert api.MEMORY_ROUTE in api.ROUTES
+        assert not inspect.iscoroutinefunction(app.added[api.MEMORY_ROUTE])
+
+    def test_short_names(self):
+        assert api.short_card_name("NVIDIA GeForce RTX 5090", 0) == "5090"
+        assert api.short_card_name("NVIDIA RTX A6000", 1) == "A6000"
+        assert api.short_card_name("", 2) == "GPU 2"

@@ -3360,7 +3360,14 @@ by the character's name, and its **Threads** entry lists the threads with the
 one you are on marked. The space between the **⋯** and the **✕** is what you
 drag the panel by, and it has the launcher's two quick actions: press it twice
 to go back to the workspace you were in before, three times to turn focus mode
-on or off (see *Focus*); the buttons in that row stay buttons. **✕** puts the panel back to the
+on or off (see *Focus*); the buttons in that row stay buttons. That space also
+says what is free, in small grey italics: system RAM and each NVIDIA card's
+VRAM, in gigabytes — `RAM 61.2  5090 18.4  3090 7.1` — with the full names and
+totals as a tooltip. It is read with one short request every five seconds while
+the panel is open and the page is visible, and not at all otherwise; nothing is
+held open for it. The card figures are nvidia-smi's, the whole card's, so
+llama-server's and WanGP's allocations count; a figure the last request could
+not refresh stays, dimmer, until the next one does. **✕** puts the panel back to the
 launcher, at the same place; pressing the launcher brings it back there. Both
 rows — this one and the composer's, where **Send** is a glyph too — are 36
 pixels tall rather than a full finger, so a collapsed panel is little more than

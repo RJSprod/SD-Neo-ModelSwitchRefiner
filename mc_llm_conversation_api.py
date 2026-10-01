@@ -72,11 +72,12 @@ SERVED_ROUTE = f"{PREFIX}/attachment/{{ticket}}"
 UNLOAD_ROUTE = f"{PREFIX}/unload"
 READ_ALOUD_ROUTE = f"{PREFIX}/read-aloud"
 SYSTEM_PROMPT_ROUTE = f"{PREFIX}/system-prompt"
+MEMORY_ROUTE = f"{PREFIX}/memory"
 
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
           WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE,
-          SYSTEM_PROMPT_ROUTE)
+          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -305,6 +306,100 @@ def workspaces() -> dict:
     except Exception:
         logger.debug("Model Chain: could not describe the LLM Studio tab", exc_info=True)
     return {"ok": True, "workspaces": found, "server_epoch": service.SERVER_EPOCH}
+
+
+# --------------------------------------------------------------------------- #
+# What is free, for the header's reading
+# --------------------------------------------------------------------------- #
+
+MEMORY_READING_SECONDS = 1.0
+"""How long one reading answers every page that asks.
+
+The panel asks every few seconds while it is open, and two windows of the same
+WebUI would otherwise each pay for an nvidia-smi run; a second is still a live
+figure for somebody deciding what to load next.
+"""
+
+MEMORY_SMI_TIMEOUT = 3.0
+"""How long nvidia-smi may take before the reading goes without the cards."""
+
+_memory_reading: tuple[float, dict] = (0.0, {})
+_memory_guard = threading.Lock()
+
+_NAME_NOISE = {"nvidia", "geforce", "rtx", "gtx", "laptop", "gpu"}
+
+
+def short_card_name(name: str, index: int) -> str:
+    """"NVIDIA GeForce RTX 5090" as "5090": the part that tells cards apart."""
+    words = [word for word in str(name or "").split() if word.lower() not in _NAME_NOISE]
+    return " ".join(words) or f"GPU {index}"
+
+
+def _read_cards() -> list:
+    """Every NVIDIA card's free and total VRAM, through nvidia-smi.
+
+    nvidia-smi rather than torch, for the reason ``mc_turns._free_on`` gives: a
+    torch reading creates a CUDA context on the card it reads, and this one
+    reads every card, the one WanGP owns included. It is also the driver's
+    figure for the whole card, llama-server's and WanGP's allocations included,
+    which is what somebody deciding what fits wants to know.
+    """
+    from prompt_master.inference.device_detection import detect_gpus
+
+    found = []
+    for card in detect_gpus(timeout=MEMORY_SMI_TIMEOUT):
+        index = int(card.physical_index)
+        found.append({"index": index,
+                      "name": short_card_name(card.name, index),
+                      "full_name": str(card.name or ""),
+                      "free": max(int(card.memory_free_mb), 0) * 1024 * 1024,
+                      "total": max(int(card.memory_total_mb), 0) * 1024 * 1024})
+    names = [card["name"] for card in found]
+    for card in found:
+        if names.count(card["name"]) > 1:
+            card["name"] = f"{card['name']}:{card['index']}"
+    return found
+
+
+def memory() -> dict:
+    """Free system RAM and free VRAM on every NVIDIA card, right now.
+
+    A plain answer to a plain request: the header asks while the panel is on
+    screen, and nothing is held open for it. A part that cannot be read is
+    left out (``cards`` empty, ``ram`` null) rather than failing the rest.
+    """
+    global _memory_reading
+
+    with _memory_guard:
+        when, found = _memory_reading
+        now = time.monotonic()
+        if found and now - when < MEMORY_READING_SECONDS:
+            return found
+        import mc_broker
+
+        ram = None
+        try:
+            free = int(mc_broker.free_ram_bytes())
+            total = int(mc_broker.total_ram_bytes())
+            if free > 0:
+                ram = {"free": free, "total": max(total, 0)}
+        except Exception:
+            logger.debug("Model Chain: could not read free RAM for the header", exc_info=True)
+        try:
+            cards = _read_cards()
+        except Exception:
+            logger.debug("Model Chain: could not read free VRAM for the header", exc_info=True)
+            cards = []
+        found = {"ok": True, "ram": ram, "cards": cards}
+        _memory_reading = (now, found)
+        return found
+
+
+def forget_memory_reading() -> None:
+    global _memory_reading
+
+    with _memory_guard:
+        _memory_reading = (0.0, {})
 
 
 ALL = "all"
@@ -722,6 +817,19 @@ def install(_demo=None, app=None) -> bool:
             return _refusal(exc)
         return _json(workspaces())
 
+    def memory_route(request: Request):
+        # A plain `def`, so Starlette runs it in its threadpool: nvidia-smi is
+        # a subprocess, and in a coroutine it would hold up every other request
+        # on the server -- the conversation, Forge's own queue -- while it ran.
+        try:
+            checked(request)
+        except Refused as exc:
+            return _refusal(exc)
+        try:
+            return _json(memory())
+        except Exception:
+            return _failed("could not read free memory", "Free memory could not be read.")
+
     async def served_route(request: Request):
         """One stored picture, by ticket. The flyout's transcript reads these.
 
@@ -763,6 +871,7 @@ def install(_demo=None, app=None) -> bool:
                 (UNLOAD_ROUTE, unload_route, ["POST"]),
                 (READ_ALOUD_ROUTE, read_aloud_route, ["POST"]),
                 (SYSTEM_PROMPT_ROUTE, system_prompt_route, ["GET", "POST"]),
+                (MEMORY_ROUTE, memory_route, ["GET"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

@@ -114,6 +114,15 @@
     // event (docs/23-voice-box.md section 8); the flyout only listens.
     const AUDIO_FOCUS = "mc:audio-focus";
 
+    // What is free, in the header's empty space: system RAM and each card's
+    // VRAM, in gigabytes, read every MEMORY_EVERY while the panel is on screen
+    // and the page is visible. A plain request each time, with a deadline --
+    // nothing is held open for it, and a closed panel or a hidden page asks
+    // for nothing. One request at a time: the next is timed from the answer.
+    const MEMORY_ROUTE = "/memory";
+    const MEMORY_EVERY = 5000;
+    const MEMORY_DEADLINE = 4000;
+
     // -- geometry ---------------------------------------------------------- //
 
     function viewport() {
@@ -631,6 +640,11 @@
         utilities.setAttribute("aria-expanded", "false");
         const grip = element("div", "forge-assistant-grip");
         grip.setAttribute("aria-hidden", "true");
+        // The grip's space carries what is free (`readMemory`). Text and not a
+        // control: a press on it is still a press on the grip, so it drags,
+        // and two or three presses still go back or toggle focus.
+        const reading = element("span", "forge-assistant-memory");
+        grip.appendChild(reading);
         const minimize = iconButton("forge-assistant-icon-button", "✕",
                                     "Minimize the assistant");
         minimize.title = "Minimize";
@@ -640,7 +654,8 @@
         header.appendChild(grip);
         header.appendChild(minimize);
         panel.appendChild(header);
-        Object.assign(this.nodes, {header, minimize, picker, chat, utilities, grip});
+        Object.assign(this.nodes, {header, minimize, picker, chat, utilities, grip,
+                                   reading});
 
         // The menus' box, in the panel's column between the header and the
         // conversation: a menu takes the conversation's place while it is
@@ -1451,12 +1466,14 @@
         this.on(document, "visibilitychange", () => {
             if (document.hidden) {
                 this.cancelGestures();
+                this.stopMemory();
                 // Nothing held open while away: see `Store.sleep`.
                 this.store.sleep();
                 return;
             }
             this.heal();
             this.store.wake();
+            if (this.state.panelOpen && !this._memoryBusy) this.readMemory();
         });
         this.on(window, "blur", () => this.cancelGestures());
         this.on(window, "focus", () => {
@@ -1574,6 +1591,56 @@
         if (this.store && typeof this.store.setShown === "function") {
             this.store.setShown(!!open);
         }
+        // Called again by every repair (`heal`), so it starts the reading only
+        // when nothing is already asking or waiting to.
+        if (!open) this.stopMemory();
+        else if (!this._memoryTimer && !this._memoryBusy) this.readMemory();
+    };
+
+    // -- what is free ----------------------------------------------------------- //
+
+    /** Ask what is free now, paint it, and ask again MEMORY_EVERY after the
+     * answer -- for as long as the panel is open and the page visible. */
+    Shell.prototype.readMemory = function () {
+        this.stopMemory();
+        if (!this.state.panelOpen || document.hidden || !this.store
+            || typeof this.store.request !== "function") return;
+        const asked = this._memoryAsk = (this._memoryAsk || 0) + 1;
+        this._memoryBusy = true;
+        this.store.request(MEMORY_ROUTE, {deadline: MEMORY_DEADLINE})
+            .then((found) => {
+                if (asked === this._memoryAsk) this.paintMemory(found, true);
+            }, () => {
+                if (asked === this._memoryAsk) this.paintMemory(null, false);
+            })
+            .then(() => {
+                if (asked !== this._memoryAsk) return;
+                this._memoryBusy = false;
+                if (!this.state.panelOpen || document.hidden) return;
+                this._memoryTimer = window.setTimeout(() => this.readMemory(), MEMORY_EVERY);
+            });
+    };
+
+    /** Stop asking. An answer already on its way is not painted. */
+    Shell.prototype.stopMemory = function () {
+        if (this._memoryTimer) window.clearTimeout(this._memoryTimer);
+        this._memoryTimer = 0;
+        this._memoryBusy = false;
+        this._memoryAsk = (this._memoryAsk || 0) + 1;
+    };
+
+    /** The reading, or -- when the last ask failed -- the one before it, dimmer,
+     * so a stale figure never passes for a live one. */
+    Shell.prototype.paintMemory = function (found, fresh) {
+        const node = this.nodes && this.nodes.reading;
+        if (!node) return;
+        if (fresh) {
+            const said = memoryText(found);
+            node.textContent = said.text;
+            node.title = said.title;
+            if (this.nodes.grip) this.nodes.grip.title = said.title;
+        }
+        node.classList.toggle("forge-assistant-memory-stale", !fresh);
     };
 
     Shell.prototype.open = function () {
@@ -4169,6 +4236,7 @@
     };
 
     Shell.prototype.dispose = function () {
+        this.stopMemory();
         this.resetTaps();
         this.resetHeaderTaps();
         this.disposers.forEach((off) => {
@@ -4182,6 +4250,29 @@
         }
         this.nodes = {};
     };
+
+    /** Free memory as the header shows it: "RAM 61.2  5090 18.4  3090 7.1",
+     * gigabytes to one place, each figure held to its name so a narrow panel
+     * wraps between them, and the long form for the tooltip. */
+    function memoryText(found) {
+        const gb = (bytes) => (Math.max(0, Number(bytes) || 0) / 1073741824).toFixed(1);
+        const parts = [];
+        const long = [];
+        const ram = found && found.ram;
+        if (ram && ram.free > 0) {
+            parts.push("RAM\u00a0" + gb(ram.free));
+            long.push("System RAM " + gb(ram.free) + (ram.total ? " of " + gb(ram.total) : "")
+                      + " GB");
+        }
+        ((found && found.cards) || []).forEach((card) => {
+            if (!card || !card.name) return;
+            parts.push(String(card.name).replace(/ /g, "\u00a0") + "\u00a0" + gb(card.free));
+            long.push((card.full_name || card.name) + " " + gb(card.free)
+                      + (card.total ? " of " + gb(card.total) : "") + " GB");
+        });
+        return {text: parts.join("\u2002"),
+                title: long.length ? "Free: " + long.join("; ") : ""};
+    }
 
     // -- mounting --------------------------------------------------------------- //
 
@@ -4255,6 +4346,7 @@
         store.start();
     }
 
+    NS.memoryText = memoryText;
     NS.anchorPoint = anchorPoint;
     NS.nearestAnchor = nearestAnchor;
     NS.renderMarkdown = renderMarkdown;

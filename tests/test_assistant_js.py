@@ -2745,13 +2745,14 @@ class TestTheHeaderIsOneRow:
             console.log(JSON.stringify({
                 tag: shell.nodes.grip.tagName,
                 hidden: shell.nodes.grip.getAttribute("aria-hidden"),
-                text: shell.nodes.grip.textContent,
+                children: (shell.nodes.grip.children || []).map((node) => node.tagName),
             }));
         """, sources=("shell",))
 
         assert found["tag"] == "DIV"
         assert found["hidden"] == "true"
-        assert found["text"] == ""
+        # It carries the free-memory reading now, as text: a span, no control.
+        assert found["children"] == ["SPAN"]
 
     def test_the_grip_can_take_the_rows_leftover_room(self):
         css = (pathlib.Path(__file__).resolve().parent.parent
