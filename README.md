@@ -3367,7 +3367,15 @@ totals as a tooltip. It is read with one short request every five seconds while
 the panel is open and the page is visible, and not at all otherwise; nothing is
 held open for it. The card figures are nvidia-smi's, the whole card's, so
 llama-server's and WanGP's allocations count; a figure the last request could
-not refresh stays, dimmer, until the next one does. **✕** puts the panel back to the
+not refresh stays, dimmer, until the next one does. On Mini Paint NEO's
+**WanGP** tab a **▶** sits beside the **⋯**: it is WanGP's own Generate for the
+page as it is — started at once when WanGP is idle, added to WanGP's queue when
+it is busy — with nothing overridden and nothing composed from saved settings.
+It is greyed until WanGP's page has answered, takes one press at a time, and
+says what happened on itself for three seconds (green taken, red refused, the
+words as its tooltip), since the status line may be put away with the
+conversation. It needs Mini Paint NEO with `minipaintWanGP.generate()`.
+**✕** puts the panel back to the
 launcher, at the same place; pressing the launcher brings it back there. Both
 rows — this one and the composer's, where **Send** is a glyph too — are 36
 pixels tall rather than a full finger, so a collapsed panel is little more than

@@ -1994,6 +1994,26 @@ inside the grip, so they drag like the rest of it and take part in the header's
 two and three presses. An integrated Intel GPU has no VRAM of its own: its
 memory is the RAM figure.
 
+## 3.27 WanGP's Generate, in the header
+
+Asked for from use: on the WanGP tab, a button beside the ⋯ that generates
+"whatever is on the page", and adds it to the queue when something is already
+generating, because WanGP's own buttons sit somewhere else on its page. It is
+`window.minipaintWanGP.generate()`, Mini Paint NEO's (its
+`docs/wangp/CONTRACTS.md`): a queue request with nothing overridden, so the
+bridge writes WanGP's own generate trigger when idle and its add-to-queue
+trigger when busy, and WanGP's own chain reads the live form. Not
+`minipaintInterop.wangp.enqueue`: the outbox composes a job from WanGP's
+*recorded* form (or the model's defaults, with inheritance off), which is not
+what is on screen.
+
+Shown only when the active workspace is `tab_wangp` and the bundle offers
+`generate`; disabled until `state()` says ready with the queue. Looked at
+again on every navigation, on opening, and on the free-memory reading's beat,
+since nothing announces WanGP coming up. One press at a time; the answer
+(`started`, `queued`, or the refusal's own message) is the button's
+`data-state` and tooltip for three seconds and a held status line.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

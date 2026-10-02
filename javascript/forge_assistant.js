@@ -123,6 +123,16 @@
     const MEMORY_EVERY = 5000;
     const MEMORY_DEADLINE = 4000;
 
+    // WanGP's own Generate, from the header, on Mini Paint NEO's WanGP tab.
+    // The tab's id is Forge's "tab_" and Mini Paint's TAB_ID; `generate()` on
+    // its `window.minipaintWanGP` is the contract (its docs/wangp/CONTRACTS.md).
+    // The answer stays on the button for GENERATE_SHOWN, because the status
+    // line is inside the conversation and may well be put away.
+    const WANGP_WORKSPACE = "tab_wangp";
+    const GENERATE_GLYPH = "\u25b6\ufe0e";  // a play triangle, text style
+    const GENERATE_LABEL = "Generate in WanGP";
+    const GENERATE_SHOWN = 3000;
+
     // -- geometry ---------------------------------------------------------- //
 
     function viewport() {
@@ -638,6 +648,10 @@
                                      "⋯", "More actions");
         utilities.setAttribute("aria-haspopup", "menu");
         utilities.setAttribute("aria-expanded", "false");
+        // Only on the WanGP tab, with WanGP there to press it (`applyGenerate`).
+        const generate = iconButton("forge-assistant-nav-button forge-assistant-generate",
+                                    GENERATE_GLYPH, GENERATE_LABEL);
+        generate.hidden = true;
         const grip = element("div", "forge-assistant-grip");
         grip.setAttribute("aria-hidden", "true");
         // The grip's space carries what is free (`readMemory`). Text and not a
@@ -651,11 +665,12 @@
         header.appendChild(picker);
         header.appendChild(chat);
         header.appendChild(utilities);
+        header.appendChild(generate);
         header.appendChild(grip);
         header.appendChild(minimize);
         panel.appendChild(header);
-        Object.assign(this.nodes, {header, minimize, picker, chat, utilities, grip,
-                                   reading});
+        Object.assign(this.nodes, {header, minimize, picker, chat, utilities, generate,
+                                   grip, reading});
 
         // The menus' box, in the panel's column between the header and the
         // conversation: a menu takes the conversation's place while it is
@@ -1391,6 +1406,7 @@
         this.on(nodes.chat, "click", () => this.toggleChat());
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
+        this.on(nodes.generate, "click", () => this.generateInWanGP());
         // The row's own space, counted from the panel and not from the row:
         // the drag takes pointer capture, and a captured pointer's click lands
         // on the panel rather than on the header the press began in. See
@@ -1537,6 +1553,7 @@
         }));
         this.disposers.push(this.host.subscribeNavigation((active) => {
             this.noteWorkspace(active);
+            this.applyGenerate();
             this.applySuppression();
             this.renderWorkspaces();
             if (this.state.focusEnabled && active && this.focus.isActive()
@@ -1593,8 +1610,77 @@
         }
         // Called again by every repair (`heal`), so it starts the reading only
         // when nothing is already asking or waiting to.
+        if (open) this.applyGenerate();
         if (!open) this.stopMemory();
         else if (!this._memoryTimer && !this._memoryBusy) this.readMemory();
+    };
+
+    // -- WanGP's Generate --------------------------------------------------------- //
+
+    /** Mini Paint NEO's WanGP bundle, when it offers `generate()`. */
+    function wangp() {
+        const bridge = window.minipaintWanGP;
+        return bridge && typeof bridge.generate === "function" ? bridge : null;
+    }
+
+    /** Shown on the WanGP tab when Mini Paint NEO can press WanGP's Generate;
+     * pressable once WanGP's page has answered. */
+    Shell.prototype.applyGenerate = function () {
+        const button = this.nodes && this.nodes.generate;
+        if (!button) return;
+        const bridge = wangp();
+        const active = this.activeWorkspace
+            || (this.host && typeof this.host.getActiveWorkspace === "function"
+                ? this.host.getActiveWorkspace() : "");
+        button.hidden = !bridge || active !== WANGP_WORKSPACE;
+        if (button.hidden) return;
+        let ready = false;
+        try {
+            const found = bridge.state();
+            ready = !!(found && found.ready && found.queue);
+        } catch (error) { /* not ready */ }
+        button.disabled = !ready || !!this._generating;
+        if (!button.dataset.state) {
+            button.title = ready ? GENERATE_LABEL : "WanGP is not loaded yet";
+        }
+    };
+
+    /** Press WanGP's own Generate: the page as it is, started now when WanGP
+     * is idle, added to its queue when it is busy. One press at a time. */
+    Shell.prototype.generateInWanGP = function () {
+        const bridge = wangp();
+        const button = this.nodes.generate;
+        if (!bridge || this._generating) return Promise.resolve(null);
+        this._generating = true;
+        window.clearTimeout(this._generateShown);
+        button.dataset.state = "busy";
+        button.setAttribute("aria-busy", "true");
+        button.title = "Asking WanGP\u2026";
+        this.applyGenerate();
+        let asked;
+        try {
+            asked = Promise.resolve(bridge.generate());
+        } catch (error) {
+            asked = Promise.reject(error);
+        }
+        return asked.then((found) => found, () => null).then((found) => {
+            this._generating = false;
+            button.removeAttribute("aria-busy");
+            const ok = !!(found && found.ok);
+            const said = ok
+                ? (found.status === "started" ? "Generating in WanGP."
+                    : "Added to WanGP's queue.")
+                : (found && found.message) || "WanGP did not take it.";
+            button.dataset.state = ok ? "done" : "failed";
+            button.title = said;
+            this.tell(said, ok ? "info" : "warn");
+            this._generateShown = window.setTimeout(() => {
+                delete button.dataset.state;
+                this.applyGenerate();
+            }, GENERATE_SHOWN);
+            this.applyGenerate();
+            return found;
+        });
     };
 
     // -- what is free ----------------------------------------------------------- //
@@ -1605,6 +1691,9 @@
         this.stopMemory();
         if (!this.state.panelOpen || document.hidden || !this.store
             || typeof this.store.request !== "function") return;
+        // WanGP coming up or going away is said by nothing; the reading's
+        // beat is when the button looks again.
+        this.applyGenerate();
         const asked = this._memoryAsk = (this._memoryAsk || 0) + 1;
         this._memoryBusy = true;
         this.store.request(MEMORY_ROUTE, {deadline: MEMORY_DEADLINE})
@@ -4237,6 +4326,7 @@
 
     Shell.prototype.dispose = function () {
         this.stopMemory();
+        window.clearTimeout(this._generateShown);
         this.resetTaps();
         this.resetHeaderTaps();
         this.disposers.forEach((off) => {
