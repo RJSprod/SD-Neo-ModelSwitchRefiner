@@ -3371,10 +3371,13 @@ not refresh stays, dimmer, until the next one does. On Mini Paint NEO's
 **WanGP** tab a **▶** sits beside the **⋯**: it is WanGP's own Generate for the
 page as it is — started at once when WanGP is idle, added to WanGP's queue when
 it is busy — with nothing overridden and nothing composed from saved settings.
-It is greyed until WanGP's page has answered, takes one press at a time, and
-says what happened on itself for three seconds (green taken, red refused, the
-words as its tooltip), since the status line may be put away with the
-conversation. It needs Mini Paint NEO with `minipaintWanGP.generate()`.
+It is greyed until WanGP's page has answered and never locks after that:
+press it as often as you like and every press counts. WanGP's page takes one
+request at a time, so the presses line up and go to it one after another, with
+how many are still to go on the button's corner. When the line is empty the
+button says how it went for three seconds (green taken, red if any press was
+refused, the words as its tooltip), since the status line may be put away with
+the conversation. It needs Mini Paint NEO with `minipaintWanGP.generate()`.
 **✕** puts the panel back to the
 launcher, at the same place; pressing the launcher brings it back there. Both
 rows — this one and the composer's, where **Send** is a glyph too — are 36

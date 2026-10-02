@@ -126,8 +126,9 @@
     // WanGP's own Generate, from the header, on Mini Paint NEO's WanGP tab.
     // The tab's id is Forge's "tab_" and Mini Paint's TAB_ID; `generate()` on
     // its `window.minipaintWanGP` is the contract (its docs/wangp/CONTRACTS.md).
-    // The answer stays on the button for GENERATE_SHOWN, because the status
-    // line is inside the conversation and may well be put away.
+    // Presses line up and are sent one after another (`generateInWanGP`);
+    // the last answer stays on the button for GENERATE_SHOWN, because the
+    // status line is inside the conversation and may well be put away.
     const WANGP_WORKSPACE = "tab_wangp";
     const GENERATE_GLYPH = "\u25b6\ufe0e";  // a play triangle, text style
     const GENERATE_LABEL = "Generate in WanGP";
@@ -1639,48 +1640,105 @@
             const found = bridge.state();
             ready = !!(found && found.ready && found.queue);
         } catch (error) { /* not ready */ }
-        button.disabled = !ready || !!this._generating;
+        // Never locked by presses in line: only WanGP not being there yet.
+        button.disabled = !ready;
         if (!button.dataset.state) {
             button.title = ready ? GENERATE_LABEL : "WanGP is not loaded yet";
         }
     };
 
     /** Press WanGP's own Generate: the page as it is, started now when WanGP
-     * is idle, added to its queue when it is busy. One press at a time. */
+     * is idle, added to its queue when it is busy.
+     *
+     * Every press counts and the button never locks. The bridge holds WanGP's
+     * live form for one request at a time and answers a second with
+     * QUEUE_BUSY until the first is confirmed, so presses line up here and
+     * go to WanGP one after another; the button carries how many are still
+     * to go. Resolves when this press has been answered. */
     Shell.prototype.generateInWanGP = function () {
         const bridge = wangp();
-        const button = this.nodes.generate;
-        if (!bridge || this._generating) return Promise.resolve(null);
-        this._generating = true;
-        window.clearTimeout(this._generateShown);
-        button.dataset.state = "busy";
-        button.setAttribute("aria-busy", "true");
-        button.title = "Asking WanGP\u2026";
-        this.applyGenerate();
-        let asked;
-        try {
-            asked = Promise.resolve(bridge.generate());
-        } catch (error) {
-            asked = Promise.reject(error);
-        }
-        return asked.then((found) => found, () => null).then((found) => {
-            this._generating = false;
-            button.removeAttribute("aria-busy");
-            const ok = !!(found && found.ok);
-            const said = ok
-                ? (found.status === "started" ? "Generating in WanGP."
-                    : "Added to WanGP's queue.")
-                : (found && found.message) || "WanGP did not take it.";
-            button.dataset.state = ok ? "done" : "failed";
-            button.title = said;
-            this.tell(said, ok ? "info" : "warn");
-            this._generateShown = window.setTimeout(() => {
-                delete button.dataset.state;
-                this.applyGenerate();
-            }, GENERATE_SHOWN);
-            this.applyGenerate();
-            return found;
+        if (!bridge) return Promise.resolve(null);
+        const press = new Promise((resolve) => {
+            (this._generateLine = this._generateLine || []).push(resolve);
         });
+        this.paintGenerateLine();
+        if (!this._generatePumping) {
+            this._generatePumping = true;
+            this.pumpGenerate();
+        }
+        return press;
+    };
+
+    /** Send the presses waiting in line, one at a time, until none is left. */
+    Shell.prototype.pumpGenerate = function () {
+        const next = () => {
+            const line = this._generateLine || [];
+            // Cleared in the same turn the line is found empty: a press that
+            // lands after this starts the next pump, and one before it is
+            // already in the line this one is reading.
+            if (!line.length) {
+                this._generatePumping = false;
+                return Promise.resolve();
+            }
+            const resolve = line[0];
+            const bridge = wangp();
+            let asked;
+            try {
+                asked = Promise.resolve(bridge ? bridge.generate() : null);
+            } catch (error) {
+                asked = Promise.reject(error);
+            }
+            return asked.then((found) => found, () => null).then((found) => {
+                line.shift();
+                this.answerGenerate(found);
+                resolve(found);
+                return next();
+            });
+        };
+        return next();
+    };
+
+    /** How many presses are still to go, on the button. */
+    Shell.prototype.paintGenerateLine = function () {
+        const button = this.nodes && this.nodes.generate;
+        if (!button) return;
+        const waiting = (this._generateLine || []).length;
+        window.clearTimeout(this._generateShown);
+        if (waiting) {
+            button.dataset.state = "busy";
+            button.setAttribute("aria-busy", "true");
+            button.title = waiting > 1 ? "Sending " + waiting + " to WanGP\u2026"
+                : "Asking WanGP\u2026";
+        } else {
+            button.removeAttribute("aria-busy");
+        }
+        if (waiting > 1) button.dataset.count = String(waiting);
+        else delete button.dataset.count;
+    };
+
+    /** One press answered: said on the line and, once the line is empty, on
+     * the button for GENERATE_SHOWN. */
+    Shell.prototype.answerGenerate = function (found) {
+        const button = this.nodes && this.nodes.generate;
+        const ok = !!(found && found.ok);
+        const said = ok
+            ? (found.status === "started" ? "Generating in WanGP."
+                : "Added to WanGP's queue.")
+            : (found && found.message) || "WanGP did not take it.";
+        this.tell(said, ok ? "info" : "warn");
+        if (!button) return;
+        if (!ok) this._generateFailed = said;
+        this.paintGenerateLine();
+        if ((this._generateLine || []).length) return;
+        const failed = this._generateFailed;
+        this._generateFailed = "";
+        button.dataset.state = failed ? "failed" : "done";
+        button.title = failed || said;
+        this._generateShown = window.setTimeout(() => {
+            delete button.dataset.state;
+            this.applyGenerate();
+        }, GENERATE_SHOWN);
+        this.applyGenerate();
     };
 
     // -- what is free ----------------------------------------------------------- //

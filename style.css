@@ -6503,12 +6503,12 @@
     box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
 }
 
-/* WanGP's Generate, on the WanGP tab only. Its answer stays on it for a few
-   seconds, because the status line may be put away with the conversation:
-   the accent while it asks, then green for taken and red for refused. */
+/* WanGP's Generate, on the WanGP tab only. It never locks: presses line up
+   and go one after another. The last answer stays on it for a few seconds,
+   because the status line may be put away with the conversation: the accent
+   while it asks, then green for taken and red if any press was refused. */
 .forge-assistant-generate[data-state="busy"] {
     border-color: var(--color-accent, #2563eb);
-    opacity: 0.7;
 }
 
 .forge-assistant-generate[data-state="done"] {
@@ -6519,6 +6519,27 @@
 .forge-assistant-generate[data-state="failed"] {
     border-color: var(--color-red-500, #ef4444);
     box-shadow: inset 0 0 0 1px var(--color-red-500, #ef4444);
+}
+
+/* Presses still in line, counted on the button's corner. */
+.forge-assistant-generate {
+    position: relative;
+}
+
+.forge-assistant-generate[data-count]::after {
+    content: attr(data-count);
+    position: absolute;
+    top: -0.35em;
+    right: -0.35em;
+    min-width: 1.4em;
+    padding: 0 0.25em;
+    border-radius: 999px;
+    background: var(--color-accent, #2563eb);
+    color: var(--button-primary-text-color, #fff);
+    font-size: 0.6em;
+    line-height: 1.4em;
+    text-align: center;
+    pointer-events: none;
 }
 
 .forge-assistant-generate:disabled:not([data-state]) {

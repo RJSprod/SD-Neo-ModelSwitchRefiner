@@ -2010,9 +2010,16 @@ what is on screen.
 Shown only when the active workspace is `tab_wangp` and the bundle offers
 `generate`; disabled until `state()` says ready with the queue. Looked at
 again on every navigation, on opening, and on the free-memory reading's beat,
-since nothing announces WanGP coming up. One press at a time; the answer
-(`started`, `queued`, or the refusal's own message) is the button's
-`data-state` and tooltip for three seconds and a held status line.
+since nothing announces WanGP coming up. It never locks ("I should be able to
+spam the button"): the bridge holds WanGP's live form for one request per page
+and answers a second with `QUEUE_BUSY` until the first is confirmed, so presses
+line up in the panel (`_generateLine`) and are sent one after another, each
+answered in its turn, with the count still to go as the button's `data-count`.
+The sender stops in the same turn it finds the line empty, so a press landing
+just after starts the next one rather than waiting on one that ended. Each
+answer (`started`, `queued`, or the refusal's own message) is a held status
+line; once the line is empty the button's `data-state` and tooltip say how it
+went for three seconds, `failed` if any press in it was refused.
 
 ## 4. Deliberate deviations
 
