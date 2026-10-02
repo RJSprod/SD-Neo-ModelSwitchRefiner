@@ -2714,7 +2714,9 @@ class TestTheHeaderIsOneRow:
             }));
         """, sources=("shell",))
 
-        assert found["order"] == ["Workspace", "Chat", "More actions",
+        # Generate in WanGP is in the row on every tab and shown only on
+        # WanGP's (test_assistant_generate_js).
+        assert found["order"] == ["Workspace", "Chat", "More actions", "Generate in WanGP",
                                  "forge-assistant-grip", "Minimize the assistant"]
         # Glyphs, every one: nothing in the row is a word.
         assert all(len(word) <= 2 for word in found["words"]), found["words"]

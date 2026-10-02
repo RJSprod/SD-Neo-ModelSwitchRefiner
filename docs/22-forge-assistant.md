@@ -1994,6 +1994,33 @@ inside the grip, so they drag like the rest of it and take part in the header's
 two and three presses. An integrated Intel GPU has no VRAM of its own: its
 memory is the RAM figure.
 
+## 3.27 WanGP's Generate, in the header
+
+Asked for from use: on the WanGP tab, a button beside the ⋯ that generates
+"whatever is on the page", and adds it to the queue when something is already
+generating, because WanGP's own buttons sit somewhere else on its page. It is
+`window.minipaintWanGP.generate()`, Mini Paint NEO's (its
+`docs/wangp/CONTRACTS.md`): a queue request with nothing overridden, so the
+bridge writes WanGP's own generate trigger when idle and its add-to-queue
+trigger when busy, and WanGP's own chain reads the live form. Not
+`minipaintInterop.wangp.enqueue`: the outbox composes a job from WanGP's
+*recorded* form (or the model's defaults, with inheritance off), which is not
+what is on screen.
+
+Shown only when the active workspace is `tab_wangp` and the bundle offers
+`generate`; disabled until `state()` says ready with the queue. Looked at
+again on every navigation, on opening, and on the free-memory reading's beat,
+since nothing announces WanGP coming up. It never locks ("I should be able to
+spam the button"): the bridge holds WanGP's live form for one request per page
+and answers a second with `QUEUE_BUSY` until the first is confirmed, so presses
+line up in the panel (`_generateLine`) and are sent one after another, each
+answered in its turn, with the count still to go as the button's `data-count`.
+The sender stops in the same turn it finds the line empty, so a press landing
+just after starts the next one rather than waiting on one that ended. Each
+answer (`started`, `queued`, or the refusal's own message) is a held status
+line; once the line is empty the button's `data-state` and tooltip say how it
+went for three seconds, `failed` if any press in it was refused.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).
