@@ -6432,6 +6432,31 @@
     flex: 1 1 auto;
     align-self: stretch;
     min-width: 1.5em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+/* What is free, written in the grip's space: gray, italic, small, and out of
+   the way of the hand -- `pointer-events: none`, so a press on the figures is
+   a press on the grip and drags the panel like any other. A reading the last
+   ask could not refresh is dimmer still. */
+
+.forge-assistant-memory {
+    color: var(--body-text-color-subdued, #8a8a8a);
+    font-size: 0.72em;
+    font-style: italic;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.25;
+    text-align: center;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.forge-assistant-memory-stale {
+    opacity: 0.5;
 }
 
 .forge-assistant-icon-button,
