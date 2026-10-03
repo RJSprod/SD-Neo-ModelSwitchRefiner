@@ -1252,6 +1252,33 @@ def shares_the_image_card(card: int | None, configuration: Config | None = None)
     return mine.card == image.card
 
 
+def image_card_reserve(configuration: Config, reserve: int) -> int:
+    """How much of a caller's image reserve a placement can take room from.
+
+    ``reserve`` is VRAM a caller keeps clear on the image card for the
+    generation that follows it -- Creative Mode's, the Neutralizer's and the
+    Composer's, all :func:`mc_creative_krea.image_reserve_bytes` -- and only a
+    placement on that card can take any of it. The same rule as the plan's
+    cap in :func:`_spendable`, which stopped capping a placement on another
+    card long ago; the reserve went on being charged everywhere.
+
+    What that cost, from a user's log: Creative Mode on the Intel GPU, the
+    Krea checkpoint about to load onto a 3090 with 20.4 GB "protected for the
+    image plan", and the writer's server charged that as *shared system
+    memory* -- 11.1 GB of model and 20.4 GB of another card, refused with
+    18.6 GB safe, so the roll fell back to the typed prompt. The image side is
+    always a CUDA card (:func:`mc_broker.image_execution_domain`), so the
+    processor and an Intel GPU never take from it; a CUDA placement does when
+    it is on that card, or when nobody can tell -- the conservative answer
+    :func:`shares_the_image_card` gives, which costs a smaller language model
+    rather than an image generation that runs out of memory.
+    """
+    reserve = max(int(reserve or 0), 0)
+    if reserve <= 0 or not configuration.uses_cuda_compute:
+        return 0
+    return reserve if shares_the_image_card(card_of(configuration), configuration) else 0
+
+
 def _spendable(already_ours: int = 0, card: int | None = None, *,
                image_budget: bool = True, configuration: "Config | None" = None) -> int:
     """What this placement may actually spend, which is not the same as what is free.
@@ -4636,7 +4663,10 @@ class Runtime:
         later, an image generation on a checkpoint that needs several
         gigabytes. Without the reserve llama.cpp sizes itself to an empty card
         and the checkpoint gets the remainder, which on a 24 GB card is the
-        difference between "both fit" and "the image model does not".
+        difference between "both fit" and "the image model does not". It is
+        room on the *image* card, so a server placed anywhere else -- another
+        card, the processor, an Intel GPU -- is not charged it
+        (:func:`image_card_reserve`).
 
         ``image_reclaim`` is whether this request may use the one authority a
         configuration can carry to release image residency for the language
@@ -4722,6 +4752,9 @@ class Runtime:
                     raise RuntimeError(f"Configured {label} is missing: {path}")
             if needs_vision and projector is None:
                 raise RuntimeError(mc_llm_vision.NO_PROJECTOR)
+            # Room for an image generation is room on the image card, and a
+            # server anywhere else takes none of it -- see image_card_reserve.
+            reserve = image_card_reserve(configuration, reserve)
 
             # Which mechanism this request can use, before anything is measured
             # and before anything is stopped. A forced accelerator that is

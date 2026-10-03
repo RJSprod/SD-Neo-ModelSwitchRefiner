@@ -2743,7 +2743,8 @@ feature than a larger model reading from system RAM.
 model, which on a fresh restart means it meets an empty card. It is told how
 much to leave clear for the checkpoint that follows, so both fit — but that
 reserve is only as good as the checkpoint you have selected when you press
-Generate. Switching to a much larger checkpoint while a language model is
+Generate. The reserve is room on the image model's card, so a writer placed
+anywhere else — another card, the processor, an Intel GPU — is not charged it. Switching to a much larger checkpoint while a language model is
 already resident is the case that still costs a restart of `llama-server`, and
 the console says so when it happens.
 
@@ -4550,9 +4551,15 @@ which is what the `system RAM` lines' *in our language models* figure and
 stopping the server both mean — never as VRAM on any card. So it never asks for
 an NVIDIA checkpoint to leave the 3090 to make itself fit — not even under LLM
 priority — and an image generation short of system RAM may stop an idle Intel
-server exactly as it may stop an idle processor one. The charge is its own:
-another server mapping the same GGUF saves an Intel start nothing, because the
-Intel server does not map it. The status line says "Shared system memory: about
+server exactly as it may stop an idle processor one. Nor is it charged the room
+Creative Mode keeps on the image card for the generation after its roll: from a
+user's log, a writer on the Arc was refused because 20.4 GB of the 3090's room
+had been added to its 11.1 GB of system memory. The charge is its own: another
+server mapping the same GGUF saves an Intel start nothing, because the Intel
+server does not map it — and two Intel servers of one model are two copies of
+it, because each copies the weights into device buffers of its own. One server
+serves every mode that shares its settings, each mode's prompt warm in a cache
+of its own. The status line says "Shared system memory: about
 17.2 GB (estimated)" rather than a VRAM figure, because nothing outside the
 process can measure what it took from the shared pool.
 

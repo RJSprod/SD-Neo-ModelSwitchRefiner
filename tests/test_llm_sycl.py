@@ -1148,6 +1148,22 @@ class TestIntelMemoryIsHostRam:
 
         assert asked == [runtime.host_ram_demand(configuration, managed.placement())]
 
+    def test_room_kept_on_the_image_card_is_not_charged_to_an_intel_server(
+            self, placed, server, tmp_path, monkeypatch):
+        """From a user's log: Creative Mode keeps room on the 3090 for the Krea
+        generation that follows its roll (20.4 GB "protected for the image
+        plan"), and the writer's server on the Intel GPU was charged that as
+        shared system memory -- 11.1 GB of model and 20.4 GB of another card,
+        refused with 18.6 GB safe, so the roll fell back to the typed prompt."""
+        managed, started = server
+        configure_intel(monkeypatch, tmp_path)
+        budget_of(monkeypatch, host_gb=8)
+
+        managed.client(reserve=20 * _GB)
+
+        assert len(started) == 1
+        assert managed.running()
+
     def test_a_vram_shortage_never_stops_an_intel_server(self, placed, server, tmp_path,
                                                          monkeypatch):
         """The broker treats a machine with one NVIDIA card as single-card and

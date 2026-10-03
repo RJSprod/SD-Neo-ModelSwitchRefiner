@@ -999,6 +999,33 @@ class TestARoleOnAnotherCardIsNotTheImageCardsProblem:
         assert runtime._spendable(0, 0) == 3 * _GB
         assert runtime._spendable(0, 1) == 30 * _GB
 
+    def test_the_image_reserve_is_charged_only_on_the_image_card(self, tmp_path, monkeypatch):
+        """Creative Mode keeps room on the image card for the generation after
+        its roll. A writer on another card takes none of that room, so it is
+        not charged it -- the plan's cap stopped applying there long ago, and
+        the reserve went on being charged."""
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: 0)
+
+        assert runtime.image_card_reserve(configured(tmp_path, gpu_index=0), 5 * _GB) == 5 * _GB
+        assert runtime.image_card_reserve(
+            configured(tmp_path, gpu_index=1, device="CUDA1"), 5 * _GB) == 0
+
+    def test_nor_on_the_processor_or_an_intel_gpu(self, tmp_path, monkeypatch):
+        """The image side is always a CUDA card, so neither takes from it."""
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: 0)
+
+        assert runtime.image_card_reserve(
+            configured(tmp_path, mode="cpu", device="none"), 5 * _GB) == 0
+        assert runtime.image_card_reserve(
+            configured(tmp_path, device="SYCL0", compute_backend="sycl"), 5 * _GB) == 0
+
+    def test_a_card_nobody_can_place_is_charged_it(self, tmp_path, monkeypatch):
+        """Conservative, as shares_the_image_card is: a smaller language model
+        rather than an image generation that runs out of memory."""
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: -1)
+
+        assert runtime.image_card_reserve(configured(tmp_path, gpu_index=1), 5 * _GB) == 5 * _GB
+
     def test_a_processor_placement_has_no_card_to_ask_about(self, tmp_path):
         assert runtime.card_of(configured(tmp_path, mode="cpu", device="none")) is None
         assert runtime.card_of(configured(tmp_path, mode="gpu", gpu_index=1)) == 1
