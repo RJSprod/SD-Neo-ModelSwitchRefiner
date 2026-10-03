@@ -14,6 +14,7 @@ VRAM on any card.
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from pathlib import Path
 
@@ -1025,7 +1026,27 @@ class TestTheIntelGpuIsItsOwnProcessor:
 
 
 class TestIntelMemoryIsHostRam:
-    def test_the_placement_is_charged_to_host_ram_in_full(self, tmp_path):
+    def test_the_placement_is_charged_to_host_ram_in_full(self, placed, tmp_path,
+                                                          monkeypatch):
+        """Weights, cache and compute buffers: the whole device footprint, and the
+        projector when one is loaded. Not the file size -- the file is read into
+        those buffers and not kept (``--no-mmap``)."""
+        configuration = configure_intel(monkeypatch, tmp_path)
+        projector = tmp_path / "mmproj.gguf"
+        projector.write_bytes(b"x" * 4096)
+        configuration = dataclasses.replace(configuration, mmproj=projector)
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True, uma=True)
+        found = ctx.estimate(configuration.model, placement)
+
+        assert found.kv_bytes > 0
+        assert runtime.host_ram_demand(configuration, placement) == found.total_bytes
+        assert runtime.host_ram_demand(configuration, placement, vision=True) == (
+            found.total_bytes + runtime.projector_bytes(configuration, True))
+        # Before a placement is decided, the file stands in as it always did.
+        assert runtime.host_ram_demand(configuration, None) == (
+            configuration.model.stat().st_size)
+
+    def test_an_unsizeable_model_is_charged_its_file(self, tmp_path):
         configuration = configured(tmp_path, device="SYCL0", compute_backend="sycl")
         configuration.model.write_bytes(b"x" * 4096)
         placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True, uma=True)
@@ -1044,8 +1065,13 @@ class TestIntelMemoryIsHostRam:
         assert managed.running()
         assert managed.resident_bytes() == 0
         assert mc_broker.resident_bytes(mc_broker.FAMILY_LLM) == 0
-        assert managed.host_ram_bytes() == managed.configuration().model.stat().st_size
-        assert managed.host_ram_claim()[1] == managed.host_ram_bytes()
+        assert managed.host_ram_bytes() == managed.report.estimate.total_bytes
+        assert managed.host_ram_bytes() > managed.configuration().model.stat().st_size
+        # Its own buffers, not a mapping of the file: keyed on nothing, so no
+        # other server's claim on the same GGUF is merged with it.
+        assert managed.host_ram_claim() == ("", managed.host_ram_bytes())
+        assert runtime.registry.mapped_host_ram_bytes(
+            str(managed.configuration().model)) == 0
 
     def test_it_is_never_a_vram_victim_for_any_card(self, placed, server, tmp_path, monkeypatch):
         managed, _started = server
@@ -1103,7 +1129,24 @@ class TestIntelMemoryIsHostRam:
 
         managed.client()
 
-        assert asked == [configuration.model.stat().st_size]
+        assert asked == [runtime.host_ram_demand(configuration, managed.placement())]
+
+    def test_another_servers_mapping_of_the_file_saves_an_intel_start_nothing(
+            self, placed, server, tmp_path, monkeypatch):
+        """The Intel server reads the file into buffers of its own, so a
+        processor server mapping the same GGUF leaves it all to find."""
+        managed, _started = server
+        configuration = configure_intel(monkeypatch, tmp_path)
+        budget_of(monkeypatch, 40)
+        asked = []
+        monkeypatch.setattr(mc_broker, "host_ram_fits",
+                            lambda needed, reserve=None: asked.append(needed) or True)
+        monkeypatch.setattr(runtime.registry, "mapped_host_ram_bytes",
+                            lambda model, excluding=None: 10 * _GB)
+
+        managed.client()
+
+        assert asked == [runtime.host_ram_demand(configuration, managed.placement())]
 
     def test_a_vram_shortage_never_stops_an_intel_server(self, placed, server, tmp_path,
                                                          monkeypatch):
@@ -1134,7 +1177,7 @@ class TestIntelMemoryIsHostRam:
         # is in life, where the file on disk and its header agree.
         budget_of(monkeypatch, host_gb=6)
         monkeypatch.setattr(runtime, "host_ram_demand",
-                            lambda configuration, placement=None: 17 * _GB)
+                            lambda configuration, placement=None, **kwargs: 17 * _GB)
         import dataclasses
 
         changed = dataclasses.replace(configuration, context_size=4096)

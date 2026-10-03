@@ -1127,7 +1127,8 @@ def mapped_key(model: str | None) -> str:
 
 
 def host_ram_demand(configuration: Config | None,
-                    placement: mc_llm_context.Placement | None = None) -> int:
+                    placement: mc_llm_context.Placement | None = None, *,
+                    vision: bool = False) -> int:
     """Host RAM this placement materially needs, as an estimate (section 10.7).
 
     Coarse on purpose, and it says so in the log rather than pretending to
@@ -1135,9 +1136,16 @@ def host_ram_demand(configuration: Config | None,
 
     * a processor placement, or Mixed Conservative, needs the model in system
       RAM. That is a real, model-size-scale claim on the host pool and is
-      counted in full. So does an Intel GPU reached through SYCL: its "device
-      memory" is the same pool, and counting it anywhere else would be the
-      double count design intent section 4.4 forbids;
+      counted in full;
+    * an Intel GPU reached through SYCL needs its whole device footprint --
+      weights, cache and compute buffers, and the vision projector when
+      ``vision`` says one is loaded -- because its "device memory" is the same
+      pool, and counting it anywhere else would be the double count design
+      intent section 4.4 forbids. It is the estimate the placement was admitted
+      against, not the file size: the file is read into those buffers once
+      (:data:`NO_MMAP_FLAG`) and not kept, so the buffers are what the server
+      holds and what stopping it gives back. Before a placement is decided the
+      file size stands in, as it always did;
     * a partial offload needs the share that is not on the card. Counted in
       proportion to the layers left behind, which is coarse and is far closer
       than either extreme;
@@ -1159,6 +1167,8 @@ def host_ram_demand(configuration: Config | None,
     if size <= 0:
         return 0
 
+    if getattr(placement, "uma", False):
+        return _device_footprint(configuration, placement, vision) or size
     if not configuration.uses_cuda_compute or is_conservative(configuration):
         return size
 
@@ -1182,6 +1192,20 @@ def host_ram_demand(configuration: Config | None,
     if total <= 0 or placed <= 0 or placed >= total:
         return 0
     return int(size * (total - placed) / total)
+
+
+def _device_footprint(configuration: Config, placement: mc_llm_context.Placement,
+                      vision: bool) -> int:
+    """An Intel placement's buffers, as estimated: 0 when the model cannot be sized."""
+    try:
+        found = mc_llm_context.estimate(configuration.model, placement).total_bytes
+    except Exception:
+        logger.debug("Model Chain: could not estimate an Intel placement's memory",
+                     exc_info=True)
+        return 0
+    if found <= 0:
+        return 0
+    return int(found) + projector_bytes(configuration, vision)
 
 
 def shares_the_image_card(card: int | None, configuration: Config | None = None) -> bool:
@@ -1891,16 +1915,28 @@ FLASH_ATTENTION_FLAG = "--flash-attn"
 NO_MMAP_FLAG = "--no-mmap"
 """Read the weights into memory instead of mapping the file.
 
-Added for one placement and no other: the one that overrides some tensors to
-the processor while the rest stay on the card. llama.cpp warns about that
-combination itself -- ``tensor overrides to CPU are used with mmap enabled --
-consider using --no-mmap for better performance`` -- because an overridden
-tensor is reached through the page cache on every token rather than out of a
-buffer of its own.
+Added for two placements and no other.
+
+The one that overrides some tensors to the processor while the rest stay on
+the card. llama.cpp warns about that combination itself -- ``tensor overrides
+to CPU are used with mmap enabled -- consider using --no-mmap for better
+performance`` -- because an overridden tensor is reached through the page cache
+on every token rather than out of a buffer of its own.
+
+And the Intel GPU, whose "device memory" is system RAM. A mapped load copies
+each tensor out of the mapping into a SYCL buffer, and llama.cpp cannot give
+back the parts of a mapping it has finished with on Windows, so the whole file
+stayed in the process beside the device's copy: the model was in system RAM
+twice. From a user's log, a 12.5 GB Gemma 4 on the Arc took 34.4 GB of free RAM
+at every start -- 19.4 GiB of device buffers and the 12.5 GiB file again. The
+mapping bought nothing in return: every token reads the device's copy. Without
+it the file is read once into the buffers it ends up in, and the server holds
+what :func:`host_ram_demand` charges for it.
 
 It is not added to a placement that is entirely in system RAM. That is
 llama.cpp's ordinary processor path, mapping is its default there for good
-reasons, and the flag would trade a slower start for nothing.
+reasons -- the mapping *is* the weights there, shared by every server that
+names the file -- and the flag would trade a slower start for nothing.
 """
 
 NO_KV_OFFLOAD_FLAG = "--no-kv-offload"
@@ -2292,13 +2328,14 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
         return flags
     experts = expert_flags(configuration, placement)
     flags.extend(experts)
-    if experts and runtime_supports(NO_MMAP_FLAG, configuration):
+    uma = bool(getattr(placement, "uma", False))
+    if (experts or uma) and runtime_supports(NO_MMAP_FLAG, configuration):
         flags.append(NO_MMAP_FLAG)
     if placement.gpu_layers == mc_llm_context.NO_LAYERS:
         return flags
     if runtime_supports(FLASH_ATTENTION_FLAG, configuration):
         takes_value = _flash_attention_takes_a_value(configuration)
-        if getattr(placement, "uma", False):
+        if uma:
             # Asked for, not insisted on. The SYCL backend supports the fused
             # kernel for some head shapes and not others, and ``on`` for a
             # shape it lacks is attention computed somewhere slow; ``auto``
@@ -4566,7 +4603,8 @@ class Runtime:
         if not self._running:
             return 0
         try:
-            return max(int(host_ram_demand(self.configuration(), self._placement)), 0)
+            return max(int(host_ram_demand(self.configuration(), self._placement,
+                                           vision=self._projector is not None)), 0)
         except Exception:
             logger.debug("Model Chain: could not size the running server's host RAM",
                          exc_info=True)
@@ -4947,7 +4985,10 @@ class Runtime:
         # The image side reached this conclusion first and states it in as many
         # words (see mc_memory.make_host_ram_room): "the weights that are in
         # system RAM are a stake, not a demand". Same rule, other family.
-        shared = registry.mapped_host_ram_bytes(
+        # Not for an Intel placement, which reads the file into buffers of its
+        # own (NO_MMAP_FLAG): another server's mapping of it saves that start
+        # nothing.
+        shared = 0 if getattr(placement, "uma", False) else registry.mapped_host_ram_bytes(
             getattr(configuration, "model", None), excluding=self)
         adding = max(wanted - shared, 0)
 
@@ -5860,7 +5901,8 @@ class Runtime:
         try:
             if not self._running:
                 return 0
-            return host_ram_demand(self.configuration(), self._placement)
+            return host_ram_demand(self.configuration(), self._placement,
+                                   vision=self._projector is not None)
         finally:
             self._lock.release()
 
@@ -5876,7 +5918,8 @@ class Runtime:
 
         ``("", 0)`` when the runtime is busy, stopped, or cannot be sized, for
         the same reason zero is safe there: an unknown claim matches no other
-        server's and is counted on its own.
+        server's and is counted on its own. An Intel server names no file
+        either, with its size: its weights are in buffers of its own.
         """
         if not self._lock.acquire(timeout=HOST_RAM_READ_TIMEOUT):
             logger.debug("Model Chain: the runtime was busy, so its host-RAM claim reads "
@@ -5886,9 +5929,15 @@ class Runtime:
             if not self._running:
                 return "", 0
             configuration = self.configuration()
-            held = host_ram_demand(configuration, self._placement)
+            held = host_ram_demand(configuration, self._placement,
+                                   vision=self._projector is not None)
             if held <= 0:
                 return "", 0
+            if getattr(self._placement, "uma", False):
+                # Its own buffers, read out of the file rather than mapped from
+                # it (NO_MMAP_FLAG): nothing another server holds is shared, so
+                # the claim is keyed on nothing and counted on its own.
+                return "", held
             return mapped_key(getattr(configuration, "model", None)), held
         finally:
             self._lock.release()

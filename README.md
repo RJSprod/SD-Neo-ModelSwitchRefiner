@@ -4187,9 +4187,11 @@ servers for nothing.
 llama.cpp reads a GGUF through `mmap`. That is deliberate and it is the warm
 tier for language models: after one load the file's pages are in RAM, stopping
 the server does not evict them, and the next start reads at memory bandwidth
-instead of off the disk. `--no-mmap` is added for exactly one placement — the
-one that overrides some tensors to the processor while the rest stay on the card
-— and never for a placement that is entirely in system RAM.
+instead of off the disk. `--no-mmap` is added for two placements — the one that
+overrides some tensors to the processor while the rest stay on the card, and the
+Intel GPU, whose buffers are a copy of their own (see
+[Intel Arc through SYCL](#intel-arc-through-sycl)) — and never for a placement
+that is entirely in system RAM.
 
 It follows that **two servers naming one file are two mappings of one set of
 pages.** Roles are separate processes, so a Neutralizer and a Creative on the
@@ -4530,13 +4532,29 @@ The requested model and context need 18.4 GB of shared system memory; 4.0 GB is
 currently safe after the 2.0 GB host-RAM reserve, within the 54.4 GB shared GPU limit.
 ```
 
-An Intel server's weights are charged as **host RAM**, never as VRAM on any
-card. So it never asks for an NVIDIA checkpoint to leave the 3090 to make
-itself fit — not even under LLM priority — and an image generation short of
-system RAM may stop an idle Intel server exactly as it may stop an idle
-processor one. The status line says "Shared system memory: about 17.2 GB
-(estimated)" rather than a VRAM figure, because nothing outside the process
-can measure what it took from the shared pool.
+**The model is in system RAM once.** llama.cpp loads a GGUF by mapping the
+file and copying each tensor into the device's buffers, and on Windows it cannot
+give back the parts of a mapping it has finished with — so a mapped load left
+the whole file in the process beside the Arc's copy, and both copies were system
+RAM. From a user's log, a 12.5 GB Gemma 4 with six warm caches and its vision
+projector took **34.4 GB** of free RAM at every start: about 19.4 GiB of device
+buffers (weights 12.5, cache 5.5, projector and compute 1.4) and the 12.5 GiB
+file again. No token ever read the mapping. An Intel server is therefore started
+with `--no-mmap`: the file is read once into the buffers it ends up in, and the
+second copy is gone. The start takes about as long — every byte was read either
+way — and the file's pages stay in the OS cache for the next one.
+
+An Intel server is charged as **host RAM** — its whole device footprint, the
+weights, the cache, the compute buffers and the projector when one is loaded,
+which is what the `system RAM` lines' *in our language models* figure and
+stopping the server both mean — never as VRAM on any card. So it never asks for
+an NVIDIA checkpoint to leave the 3090 to make itself fit — not even under LLM
+priority — and an image generation short of system RAM may stop an idle Intel
+server exactly as it may stop an idle processor one. The charge is its own:
+another server mapping the same GGUF saves an Intel start nothing, because the
+Intel server does not map it. The status line says "Shared system memory: about
+17.2 GB (estimated)" rather than a VRAM figure, because nothing outside the
+process can measure what it took from the shared pool.
 
 **A different processor.** An Intel LLM and an NVIDIA image generation share
 no processor, so they run at the same time; two Intel requests still take turns.
