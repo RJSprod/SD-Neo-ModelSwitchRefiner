@@ -4666,11 +4666,19 @@ start is a sentence in the status line; a reclaim that fails costs an eviction,
 not a generation. If you never open LLM Studio, none of it runs — and the
 Settings toggle removes the tab entirely.
 
-### Other extensions can ask for MiniMax H3 prompts
+### Other extensions can ask for MiniMax H3 and LTX 2.3 prompts
 
 Another extension in the same WebUI can have H3 prompts written for it, without
 a person opening this tab. It imports `mc_llm_api`, hands over a prompt and up
 to three pictures, and gets back an id it can track, subscribe to and cancel.
+It can ask for **LTX 2.3** prompts the same way — Mini Paint NEO's Clipboard tab
+does, for WanGP's LTX 2.3 Distilled models — with a first frame the language
+model is shown directly (it needs a model with vision), under instructions
+written from Lightricks' own LTX prompt enhancer without its biases: no style,
+camera move, mood or look of the writer's own, structured notes turned into
+LTX's single chronological paragraph with nothing dropped, and the soundtrack
+woven in. The answer is always one line, because WanGP reads an LTX prompt one
+line per prompt.
 The full contract is in [`docs/21-external-llm-api.md`](docs/21-external-llm-api.md);
 what matters from this side of the screen is the following.
 
@@ -4681,20 +4689,27 @@ workload lock, so one that arrives while you are mid-way through a MiniMax,
 Krea or Conversation run waits for yours to finish, and they wait for an image
 generation on the same card exactly as a Krea roll does.
 
-**MiniMax H3 goes inert while they run.** Open the workspace during one and the
-Enhance button is disabled behind a banner saying which extension is asking, how
-long its request has been going, its id, and how many more are behind it. Two
-buttons sit under it: **Stop the running request**, and **Cancel all queued**.
-So the card is never held by something you cannot see and cannot stop.
+**MiniMax H3 goes inert while its requests run.** Open the workspace during an
+external MiniMax request and the Enhance button is disabled behind a banner
+saying which extension is asking, how long its request has been going, its id,
+and how many more are behind it. Two buttons sit under it: **Stop the running
+request**, and **Cancel all queued**. So the card is never held by something
+you cannot see and cannot stop. An external LTX 2.3 request does not hold the
+MiniMax panel; a run you start anywhere while one is writing waits for it, and
+says what it is waiting for.
 
-**They appear in Saved prompts.** A finished external prompt is filed in
-MiniMax's own history like one you asked for, unless the calling extension opts
-out — which a caller writing hundreds of them should. Nothing else is written
-down: the records live in memory for fifteen minutes and are gone at a restart,
-and no picture is ever kept.
+**They appear in your history.** A finished external MiniMax prompt is filed in
+MiniMax's own Saved prompts like one you asked for. A finished LTX 2.3 prompt is
+filed in **Prompt Studio → Saved generations**, marked **[No settings]**: it was
+written from a typed prompt and a picture rather than from Prompt Studio's
+controls, so loading it brings back your words and the written prompt and leaves
+every control exactly as it is. A calling extension can opt out of either — which
+a caller writing hundreds of them should. Nothing else is written down: the
+records live in memory for fifteen minutes and are gone at a restart, and no
+picture is ever kept.
 
-Only MiniMax H3 is exposed. Prompt Studio, Conversation and Krea 2 have no
-external surface. The API adds no web server, no port and no password — it is an
+Only these two writers are exposed. Prompt Studio's own control-driven
+generation, Conversation and Krea 2 have no external surface. The API adds no web server, no port and no password — it is an
 import, usable only by code already running inside this WebUI. Turning LLM
 Studio off in Settings turns this off with it: a request made while the tab does
 not exist is refused, not queued. A request carrying a picture is refused the

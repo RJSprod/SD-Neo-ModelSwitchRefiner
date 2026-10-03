@@ -805,6 +805,69 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
 
 
 # --------------------------------------------------------------------------- #
+# LTX 2.3, for the external API
+# --------------------------------------------------------------------------- #
+
+
+def _ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
+         system: str | None = None):
+    """One LTX 2.3 prompt, the way Lightricks' own enhancer asks for it.
+
+    One pass, not two: with a first frame the picture is *in* the request, and
+    the model writes while looking at it -- Lightricks' ``enhance_i2v`` shape,
+    and what was asked for. MiniMax's caption-then-write is WanGP's convention
+    for H3 and is not borrowed here, so there is no CAPTION event: the run
+    streams the prompt and ends.
+
+    The prompt is cleaned onto one line (:func:`mc_llm_ltx.clean`), because
+    WanGP reads an LTX prompt one line per prompt.
+    """
+    import mc_llm_ltx as ltx_writer
+
+    gpu = _Gpu("an LTX 2.3 prompt", cancel)
+    try:
+        acquired = yield from gpu.acquire()
+        if not acquired:
+            gpu.release()
+            yield Event(CANCELLED, "Cancelled")
+            return
+
+        yield Event(STATUS, _preparing())
+        client = _client(image is not None, cancel=cancel.event)
+        for event in _placement_notes():
+            yield event
+
+        yield Event(STATUS, f"{ltx_writer.label(image is not None)}…")
+        written = ""
+        for chunk, result in _streamed(
+                lambda on_text: client.stream_chat(
+                    ltx_writer.messages(prompt, image_data_url=image, system=system),
+                    ltx_writer.MAX_TOKENS, seed, on_text, cancel.event,
+                    temperature=ltx_writer.TEMPERATURE, top_p=ltx_writer.TOP_P),
+                when_done=gpu.release):
+            if chunk is not None:
+                yield Event(CHUNK, chunk)
+            else:
+                written = result or ""
+
+        if cancel.is_set():
+            gpu.release()
+            yield Event(CANCELLED, "Cancelled")
+            return
+        cleaned = ltx_writer.clean(written)
+        if not cleaned:
+            raise RuntimeError("The model returned an empty prompt.")
+        gpu.release()
+        yield Event(DONE, cleaned)
+    except Exception as exc:
+        logger.debug("Model Chain: LTX 2.3 run failed", exc_info=True)
+        gpu.release()
+        yield Event(FAILED, str(exc))
+    finally:
+        gpu.release()
+
+
+# --------------------------------------------------------------------------- #
 # Krea 2
 # --------------------------------------------------------------------------- #
 
@@ -1264,6 +1327,22 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int,
                        + (" under caller instructions" if system is not None else "")
                        + (f" ({trace})" if trace else ""),
                        _minimax(prompt, variant, image, seed, cancel, system))
+
+
+def ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
+        system: str | None = None, trace: str = ""):
+    """One LTX 2.3 prompt for the external API. See :func:`_ltx`.
+
+    Named on the console the way a MiniMax request is: what kind of run, whether
+    a first frame was shown, whether the caller replaced the instructions, and
+    the external queue's name for the request. Never the prompt, the picture or
+    the override.
+    """
+    yield from _traced("an LTX 2.3 prompt"
+                       + (" from a first frame" if image is not None else "")
+                       + (" under caller instructions" if system is not None else "")
+                       + (f" ({trace})" if trace else ""),
+                       _ltx(prompt, image, seed, cancel, system))
 
 
 def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None,

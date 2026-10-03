@@ -1,4 +1,4 @@
-"""The surface another extension imports. MiniMax H3 only, deliberately.
+"""The surface another extension imports: MiniMax H3 prompts, and LTX 2.3 ones.
 
 ``docs/21-external-llm-api.md`` is the document written for whoever is on the
 other end of this; what follows is why it is shaped the way it is.
@@ -9,6 +9,18 @@ other end of this; what follows is why it is shaped the way it is.
     for event in mc_llm_api.subscribe(job).events():
         ...
     print(mc_llm_api.status(job)["prompt"])
+
+    job = mc_llm_api.submit_ltx("she turns and waves", first_frame=picture)
+
+Two writers, one queue. MiniMax H3 was the first and is the reason the queue
+exists; LTX 2.3 came second, for Mini Paint NEO's Clipboard tab sending to
+WanGP's LTX 2.3 Distilled models. Its instructions are this extension's own,
+written from Lightricks' prompt enhancer (:mod:`mc_llm_ltx` says how and where
+from), its run is :func:`mc_llm_sessions.ltx`, and its finished prompts go in
+Prompt Studio's Saved generations as *no settings* entries -- Prompt Studio is
+LLM Studio's LTX workspace. Everything else -- the queue, the record, the feed,
+cancellation, the refusals at the door -- is shared, because it is the same
+promise about the same card.
 
 An import and not a URL
 -----------------------
@@ -101,6 +113,12 @@ gets a prompt written about the picture it actually sent rather than a
 text-only prompt and no explanation.
 """
 
+LTX = "ltx23"
+"""The LTX 2.3 writer's name, beside MiniMax's two variants: what
+:func:`system_prompt` and :func:`system_prompts` key it under and what a
+request's ``variant`` reads. Its own constant in :mod:`mc_llm_ltx`; spelled here
+too so a caller has it without a second import."""
+
 Rejected = jobs.Rejected
 """Re-exported so a caller catches one name rather than importing two modules."""
 
@@ -187,6 +205,64 @@ def submit_minimax(prompt: str, *, variant: str = "", first_frame=None, last_fra
         seed=resolved, system=override, images=filled, image_used=used,
         image_ignored=tuple(slot for slot in filled if slot != used),
         image_name=_image_name(supplied[used], used) if used else "",
+        remember=bool(remember), _image=image)).identifier
+
+
+def submit_ltx(prompt: str, *, first_frame=None, system_prompt: str | None = None, seed=None,
+               origin: str = "", remember: bool = True) -> str:
+    """Queue one LTX 2.3 prompt. Returns the id to track it by.
+
+    The same door as :func:`submit_minimax`, with the same refusals, and two
+    differences that are the whole of what LTX 2.3 is here:
+
+    *One picture slot, shown rather than described.* ``first_frame`` is the
+    video's first frame, and the model is given the picture itself in the same
+    request it writes the prompt in -- a vision request, as Lightricks' own
+    enhancer makes one. There is no caption pass and no ``caption`` on the
+    record. Any of the four shapes :func:`submit_minimax` takes; a picture
+    needs a model with a vision projector, and a request carrying one is
+    refused with ``no_vision`` when the configured model has none.
+
+    *A different history.* ``remember`` files the finished prompt in Prompt
+    Studio's Saved generations, marked *no settings* -- LLM Studio's LTX
+    workspace, where an LTX prompt is looked for.
+
+    ``system_prompt`` replaces the writer's instructions for this request --
+    the one with a first frame or the one without, whichever it would have
+    used -- and ``@`` / ``@@`` in the prompt text still append to or replace
+    it, as for MiniMax. ``seed`` is drawn per request unless given.
+    """
+    if not _enabled():
+        raise Rejected("LLM Studio is switched off in this WebUI's settings, so nothing "
+                       "can write a prompt. Turn it on under Settings → Model Chain.",
+                       "disabled")
+    from prompt_master.core.models import RANDOM_SEED, draw_seed
+
+    text = str(prompt or "").strip()
+    if not text:
+        raise Rejected("A prompt is required — the writer writes from one.",
+                       "empty_prompt")
+
+    used = FIRST_FRAME if first_frame is not None else ""
+    if used and _sees() is False:
+        raise Rejected("The model running has no vision projector, so a picture cannot be "
+                       "sent to it. Choose one in LLM Studio → Setup, or send the prompt "
+                       "without pictures.", "no_vision")
+    image = _data_url(first_frame, used) if used else None
+
+    resolved = RANDOM_SEED if seed is None else int(seed)
+    if resolved == RANDOM_SEED:
+        resolved = draw_seed()
+
+    override = None if system_prompt is None else str(system_prompt)
+    if override is not None and not override.strip():
+        raise Rejected("A system prompt override cannot be blank. Leave it out to use "
+                       "the default instructions.", "empty_system_prompt")
+
+    return jobs.submit(jobs.Job(
+        kind=jobs.KIND_LTX, origin=str(origin or "")[:120], variant=LTX, prompt=text,
+        seed=resolved, system=override, images=(used,) if used else (), image_used=used,
+        image_ignored=(), image_name=_image_name(first_frame, used) if used else "",
         remember=bool(remember), _image=image)).identifier
 
 
@@ -360,7 +436,12 @@ def forget(job_id: str) -> bool:
 
 
 def variants() -> tuple:
-    """``(("fl2va", "FL2VA — from text or a frame"), ...)``."""
+    """``(("fl2va", "FL2VA — from text or a frame"), ...)``.
+
+    MiniMax's two, as ever: this is what :func:`submit_minimax`'s ``variant``
+    takes. The LTX 2.3 writer is not a variant of anything and has its own
+    function; :data:`LTX` is its name in :func:`system_prompts`.
+    """
     from prompt_master.minimax import enhancer
 
     return tuple(enhancer.VARIANTS)
@@ -373,29 +454,48 @@ def system_prompt(variant: str = "", *, has_image: bool = False) -> str:
     instruction set when the generation has a picture than when it does not, and
     a caller that asked for "the FL2VA system prompt" without saying which would
     be handed one of them arbitrarily.
+
+    ``"ltx23"`` (:data:`LTX`) answers with the LTX 2.3 writer's two, the same
+    way: with a first frame or without one. Anything else resolves to a MiniMax
+    variant, as it always did.
     """
+    chosen = str(variant or "").strip().casefold()
+    if chosen == LTX:
+        import mc_llm_ltx
+
+        return mc_llm_ltx.instructions(bool(has_image))
     from prompt_master.minimax import enhancer
 
-    return enhancer.instructions(enhancer.variant_of(str(variant or "").strip().casefold()),
-                                 bool(has_image))
+    return enhancer.instructions(enhancer.variant_of(chosen), bool(has_image))
 
 
 def system_prompts() -> dict:
-    """All four defaults, keyed by variant and then by ``"text"``/``"image"``.
+    """Every default, keyed by variant and then by ``"text"``/``"image"``.
 
     Alongside each, what that variant's prompt is *made of* -- the structure
     guide WanGP shows beside its own prompt box -- because a caller writing an
     override is the one caller that most needs to know what the default was
     trying to produce.
+
+    MiniMax's two variants and, under ``"ltx23"``, the LTX 2.3 writer's pair,
+    with Lightricks' prompting guide as its structure. A caller written before
+    the LTX writer existed reads the keys it knows and ignores the new one.
     """
+    import mc_llm_ltx
     from prompt_master.minimax import enhancer
 
-    return {variant: {"label": label,
-                      "text": enhancer.instructions(variant, False),
-                      "image": enhancer.instructions(variant, True),
-                      "structure": enhancer.infos(variant),
-                      "max_tokens": enhancer.max_tokens(variant)}
-            for variant, label in enhancer.VARIANTS}
+    found = {variant: {"label": label,
+                       "text": enhancer.instructions(variant, False),
+                       "image": enhancer.instructions(variant, True),
+                       "structure": enhancer.infos(variant),
+                       "max_tokens": enhancer.max_tokens(variant)}
+             for variant, label in enhancer.VARIANTS}
+    found[LTX] = {"label": mc_llm_ltx.LABEL,
+                  "text": mc_llm_ltx.instructions(False),
+                  "image": mc_llm_ltx.instructions(True),
+                  "structure": mc_llm_ltx.STRUCTURE,
+                  "max_tokens": mc_llm_ltx.MAX_TOKENS}
+    return found
 
 
 def capabilities() -> dict:
@@ -409,7 +509,7 @@ def capabilities() -> dict:
     """
     found = {
         "api_version": API_VERSION,
-        "kinds": ["minimax"],
+        "kinds": list(jobs.KINDS),
         "enabled": _enabled(),
         "variants": [value for value, _ in variants()],
         "slots": list(SLOTS),

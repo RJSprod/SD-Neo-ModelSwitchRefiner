@@ -408,7 +408,9 @@ class TestSystemPrompts:
     def test_both_variants_publish_both_of_their_default_instructions(self):
         found = api.system_prompts()
 
-        assert set(found) == {enhancer.FL2VA, enhancer.REF2VA}
+        # The two MiniMax variants, and the LTX 2.3 writer's pair beside them
+        # (TestLtx says what that one holds).
+        assert set(found) == {enhancer.FL2VA, enhancer.REF2VA, api.LTX}
         for variant in (enhancer.FL2VA, enhancer.REF2VA):
             assert found[variant]["text"] == enhancer.instructions(variant, False)
             assert found[variant]["image"] == enhancer.instructions(variant, True)
@@ -1264,7 +1266,7 @@ class TestThePanelIsBlocked:
     def test_stopping_with_nothing_running_says_so_rather_than_failing(self):
         *_updates, status = mc_llm_minimax_panel._stop_external()
 
-        assert "Nothing external is running" in status
+        assert "No external MiniMax request is running" in status
 
     def test_the_panel_can_clear_the_whole_queue(self, written):
         for index in range(3):
@@ -1319,3 +1321,361 @@ class TestThePanelIsBlocked:
 
         assert len(built["gate"]) == 3
         assert len(built["on_mode"]("minimax")) == 3
+
+
+# --------------------------------------------------------------------------- #
+# LTX 2.3
+# --------------------------------------------------------------------------- #
+
+
+def ltx_writing(text: str = "She lifts the cup.", *, chunks: int = 2, fail: str = "",
+                record: list | None = None):
+    """A stand-in for one LTX 2.3 run, in the real event order: no caption."""
+
+    def double(prompt, image, seed, cancel, system=None, trace=""):
+        if record is not None:
+            record.append({"prompt": prompt, "image": image, "seed": seed,
+                           "system": system, "trace": trace})
+        yield sessions.Event(sessions.STATUS, "Preparing the model…")
+        for index in range(chunks):
+            yield sessions.Event(sessions.CHUNK, f"part{index} ")
+        if fail:
+            yield sessions.Event(sessions.FAILED, fail)
+            return
+        yield sessions.Event(sessions.DONE, text)
+
+    return double
+
+
+@pytest.fixture
+def ltx_written(monkeypatch):
+    monkeypatch.setattr(sessions, "ltx", ltx_writing())
+
+
+class TestLtx:
+    """The LTX 2.3 writer: the same queue and door, a picture shown, Prompt Studio's history."""
+
+    def test_a_request_is_an_ltx_request_on_the_shared_queue(self, ltx_written):
+        identifier = api.submit_ltx("she turns and waves", origin="minipaint-clipboard")
+
+        found = api.status(identifier)
+        assert found["kind"] == "ltx"
+        assert found["variant"] == api.LTX
+        assert found["state"] == jobs.QUEUED
+        assert found["origin"] == "minipaint-clipboard"
+
+    def test_it_waits_its_turn_behind_a_minimax_request(self, written, ltx_written):
+        """One line for both kinds: they share a server, a lock and a card."""
+        first = api.submit_minimax("a car chase")
+        second = api.submit_ltx("she turns and waves")
+
+        assert jobs.position_of(first) == 1
+        assert jobs.position_of(second) == 2
+
+    def test_the_same_refusals_at_the_door(self, ltx_written, monkeypatch, tmp_path):
+        with pytest.raises(api.Rejected) as blank:
+            api.submit_ltx("   ")
+        with pytest.raises(api.Rejected) as empty_override:
+            api.submit_ltx("she waves", system_prompt="  ")
+        monkeypatch.setattr(api, "_sees", lambda: False)
+        with pytest.raises(api.Rejected) as blind:
+            api.submit_ltx("she waves", first_frame=picture(tmp_path))
+
+        assert blank.value.code == "empty_prompt"
+        assert empty_override.value.code == "empty_system_prompt"
+        assert blind.value.code == "no_vision"
+        assert jobs.active() is False
+
+    def test_a_blind_model_still_takes_a_text_only_request(self, ltx_written, monkeypatch):
+        monkeypatch.setattr(api, "_sees", lambda: False)
+
+        assert api.status(api.submit_ltx("she waves"))["state"] == jobs.QUEUED
+
+    def test_llm_studio_switched_off_refuses_it_too(self, ltx_written, monkeypatch):
+        import mc_llm_studio
+
+        monkeypatch.setattr(mc_llm_studio, "enabled", lambda: False)
+
+        with pytest.raises(api.Rejected) as raised:
+            api.submit_ltx("she waves")
+
+        assert raised.value.code == "disabled"
+
+    def test_the_first_frame_is_recorded_and_its_bytes_are_not(self, ltx_written, sighted,
+                                                               tmp_path):
+        identifier = api.submit_ltx("she waves", first_frame=picture(tmp_path))
+        jobs.drain_once()
+
+        found = api.status(identifier)
+        assert found["images"] == [api.FIRST_FRAME]
+        assert found["image_used"] == api.FIRST_FRAME
+        assert found["caption"] == ""
+        assert "data:image" not in repr(found)
+        assert jobs.job(identifier)._image is None
+
+    def test_the_picture_reaches_the_run_as_a_data_url(self, monkeypatch, sighted, tmp_path):
+        seen: list = []
+        monkeypatch.setattr(sessions, "ltx", ltx_writing(record=seen))
+        api.submit_ltx("she waves", first_frame=picture(tmp_path), system_prompt="Be brief.")
+        jobs.drain_once()
+
+        assert seen[0]["image"].startswith("data:image/")
+        assert seen[0]["system"] == "Be brief."
+        assert "request" in seen[0]["trace"]
+
+    def test_the_feed_carries_no_caption_event(self, ltx_written, sighted, tmp_path):
+        identifier = api.submit_ltx("she waves", first_frame=picture(tmp_path))
+        jobs.drain_once()
+
+        names = [event["event"] for event in api.subscribe(identifier).poll()]
+        assert "caption" not in names
+        assert names[-1] == "done"
+
+    def test_a_writer_that_raises_as_it_is_called_fails_its_request(self, monkeypatch):
+        """With the writer's own words, and nothing thrown out of the worker:
+        choosing the writer is inside the run's own failure handling, for
+        either kind, not left to the last-resort "ended without saying how"."""
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("the writer is not here")
+
+        monkeypatch.setattr(sessions, "ltx", broken)
+        identifier = api.submit_ltx("she waves")
+        jobs.drain_once()
+
+        found = api.status(identifier)
+        assert found["state"] == jobs.FAILED
+        assert "the writer is not here" in found["error"]
+        assert not jobs.active()
+
+    def test_capabilities_name_both_kinds(self):
+        assert api.capabilities()["kinds"] == ["minimax", "ltx"]
+
+    def test_its_two_defaults_are_published_with_lightricks_structure(self):
+        import mc_llm_ltx
+
+        found = api.system_prompts()[api.LTX]
+
+        assert found["image"] == mc_llm_ltx.IMAGE_SYSTEM_PROMPT
+        assert found["text"] == mc_llm_ltx.TEXT_SYSTEM_PROMPT
+        assert found["image"] != found["text"]
+        assert "single sentence" in found["structure"]
+        assert found["max_tokens"] == mc_llm_ltx.MAX_TOKENS
+        assert api.system_prompt("LTX23", has_image=True) == mc_llm_ltx.IMAGE_SYSTEM_PROMPT
+        assert api.system_prompt("ltx23") == mc_llm_ltx.TEXT_SYSTEM_PROMPT
+
+    def test_a_minimax_variant_is_still_what_anything_else_resolves_to(self):
+        assert api.system_prompt("h4") == enhancer.instructions(enhancer.FL2VA, False)
+
+
+class TestLtxInstructions:
+    """What the LTX 2.3 writer asks for, and what it asks the model not to do."""
+
+    def test_the_first_frame_prompt_is_about_a_first_frame_and_only_what_changes(self):
+        import mc_llm_ltx
+
+        text = mc_llm_ltx.IMAGE_SYSTEM_PROMPT
+        assert "exact first frame" in text
+        assert "Describe what happens, not what is already there" in text
+        assert "One single paragraph" in text
+
+    @pytest.mark.parametrize("which", ["image", "text"])
+    def test_neither_prompt_brings_a_style_or_a_camera_of_its_own(self, which):
+        """Lightricks' text-to-video original defaults to cinematic-realistic;
+        this writer was asked to have no bias, so it adds no look and no camera."""
+        import mc_llm_ltx
+
+        text = mc_llm_ltx.instructions(which == "image")
+        assert "cinematic" not in text.lower()
+        assert "Default to" not in text
+        assert "only when the user asks for them. Do not add any of your own." in text
+        assert "add no mood, genre, era" in text or "Do not add people, objects, events, a genre, a mood, an era" in text
+
+    @pytest.mark.parametrize("which", ["image", "text"])
+    def test_structured_input_is_turned_into_the_paragraph_with_nothing_dropped(self, which):
+        import mc_llm_ltx
+
+        text = mc_llm_ltx.instructions(which == "image")
+        assert "structured notes" in text
+        assert "Turn labels, lists and numbered beats into flowing prose" in text
+
+    def test_with_a_picture_the_turn_is_the_picture_then_lightricks_line(self):
+        import mc_llm_ltx
+
+        built = mc_llm_ltx.messages("she waves", image_data_url="data:image/png;base64,AA==")
+
+        assert built[0]["content"] == mc_llm_ltx.IMAGE_SYSTEM_PROMPT.rstrip()
+        content = built[1]["content"]
+        assert content[0] == {"type": "image_url",
+                              "image_url": {"url": "data:image/png;base64,AA=="}}
+        assert content[1] == {"type": "text", "text": "User Raw Input Prompt: she waves."}
+
+    def test_without_one_it_is_lightricks_text_line(self):
+        import mc_llm_ltx
+
+        built = mc_llm_ltx.messages("she waves")
+
+        assert built[0]["content"] == mc_llm_ltx.TEXT_SYSTEM_PROMPT.rstrip()
+        assert built[1]["content"] == "user prompt: she waves"
+
+    def test_wangps_dialect_applies_on_top_of_an_override(self):
+        import mc_llm_ltx
+
+        appended = mc_llm_ltx.messages("she waves @ keep it short", system="Write plainly.")
+        replaced = mc_llm_ltx.messages("she waves @@ only this", system="Write plainly.")
+
+        assert appended[0]["content"].startswith("Write plainly.")
+        assert "keep it short" in appended[0]["content"]
+        assert appended[1]["content"] == "user prompt: she waves"
+        assert replaced[0]["content"] == "only this"
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("She lifts the cup.\n\nThen she drinks.", "She lifts the cup. Then she drinks."),
+        ("```\nShe lifts the cup.\n```", "She lifts the cup."),
+        ("<think>hmm</think>Prompt: She lifts the cup.", "She lifts the cup."),
+        ("**Enhanced prompt:** She lifts the cup.", "She lifts the cup."),
+        ('"She lifts the cup."', "She lifts the cup."),
+        ('She says "hello" and "bye".', 'She says "hello" and "bye".'),
+    ])
+    def test_the_finished_prompt_is_one_clean_line(self, raw, expected):
+        """WanGP reads an LTX prompt one line per prompt: two lines are two videos."""
+        import mc_llm_ltx
+
+        assert mc_llm_ltx.clean(raw) == expected
+
+
+class TestLtxRun:
+    """All the way down: the queue, the real run, the messages, the history."""
+
+    def test_one_request_with_the_picture_in_it_and_no_caption_pass(self, client, sighted,
+                                                                    tmp_path):
+        import mc_llm_ltx
+
+        client.answers = ["She lifts the cup.\nSteam rises."]
+        identifier = api.submit_ltx("she drinks", first_frame=picture(tmp_path))
+        jobs.drain_once()
+
+        assert len(client.calls) == 1
+        sent = client.calls[0]["messages"]
+        assert sent[0]["content"] == mc_llm_ltx.IMAGE_SYSTEM_PROMPT.rstrip()
+        assert sent[1]["content"][0]["type"] == "image_url"
+        assert sent[1]["content"][0]["image_url"]["url"].startswith("data:image/")
+        assert sent[1]["content"][1]["text"] == "User Raw Input Prompt: she drinks."
+        assert api.status(identifier)["prompt"] == "She lifts the cup. Steam rises."
+
+    def test_a_text_request_runs_under_the_text_instructions(self, client):
+        import mc_llm_ltx
+
+        api.submit_ltx("a dog runs on a beach")
+        jobs.drain_once()
+
+        assert client.system == mc_llm_ltx.TEXT_SYSTEM_PROMPT.rstrip()
+        assert client.calls[0]["messages"][1]["content"] == "user prompt: a dog runs on a beach"
+
+    def test_an_override_really_reaches_the_messages(self, client):
+        api.submit_ltx("a dog runs", system_prompt="Write plainly.")
+        jobs.drain_once()
+
+        assert client.system == "Write plainly."
+
+
+class TestLtxHistory:
+    """Saved in Prompt Studio's Saved generations, as a special no-settings entry."""
+
+    def test_a_finished_prompt_is_a_no_settings_entry_in_prompt_studio(self, ltx_written,
+                                                                      sighted, tmp_path):
+        identifier = api.submit_ltx("she waves", first_frame=picture(tmp_path, "frame.png"),
+                                    seed=77, origin="minipaint-clipboard")
+        jobs.drain_once()
+
+        saved = mc_llm_state.prompt_sessions()
+        assert len(saved) == 1
+        entry = saved[0]
+        assert entry.no_settings is True
+        assert entry.origin == "minipaint-clipboard"
+        assert entry.intent == "she waves"
+        assert entry.positive == api.status(identifier)["prompt"] == "She lifts the cup."
+        assert entry.negative == ""
+        assert entry.controls == {}
+        assert entry.seed == 77
+        assert entry.image_name == "frame.png"
+        assert "[No settings]" in entry.label
+
+    def test_it_is_not_filed_with_minimax(self, ltx_written):
+        api.submit_ltx("she waves")
+        jobs.drain_once()
+
+        assert mc_llm_state.minimax_sessions() == []
+
+    def test_a_minimax_prompt_is_still_filed_with_minimax_and_nowhere_else(self, written):
+        api.submit_minimax("a car chase")
+        jobs.drain_once()
+
+        assert len(mc_llm_state.minimax_sessions()) == 1
+        assert mc_llm_state.prompt_sessions() == []
+
+    def test_remember_false_files_nothing(self, ltx_written):
+        api.submit_ltx("she waves", remember=False)
+        jobs.drain_once()
+
+        assert mc_llm_state.prompt_sessions() == []
+
+    def test_a_failed_request_files_nothing(self, monkeypatch):
+        monkeypatch.setattr(sessions, "ltx", ltx_writing(fail="no server"))
+        identifier = api.submit_ltx("she waves")
+        jobs.drain_once()
+
+        assert api.status(identifier)["state"] == jobs.FAILED
+        assert mc_llm_state.prompt_sessions() == []
+
+    def test_an_entry_written_before_the_field_existed_reads_back_as_a_panel_run(self):
+        entry = mc_llm_state.PromptSession(intent="old", positive="p")
+        mc_llm_state.save_prompt_session(entry)
+
+        found = mc_llm_state.prompt_sessions()[0]
+        assert found.no_settings is False
+        assert "[No settings]" not in found.label
+
+    def test_loading_it_in_prompt_studio_leaves_every_control_as_it_is(self, ltx_written):
+        import mc_llm_prompt_panel
+
+        api.submit_ltx("she waves", origin="minipaint-clipboard")
+        jobs.drain_once()
+        entry = mc_llm_state.prompt_sessions()[0]
+
+        intent, positive, negative, notice, *controls = mc_llm_prompt_panel._load_session(
+            entry.identifier)
+
+        assert (intent, positive, negative) == ("she waves", "She lifts the cup.", "")
+        assert "no settings" in notice
+        assert "minipaint-clipboard" in notice
+        assert controls and all("value" not in update for update in controls)
+
+
+class TestTheMinimaxPanelAndLtx:
+    """The MiniMax panel is held by MiniMax requests, not by LTX 2.3 ones."""
+
+    def test_an_ltx_request_does_not_block_the_minimax_panel(self, ltx_written):
+        api.submit_ltx("she waves")
+
+        assert jobs.active() is True
+        assert mc_llm_minimax_panel.jobs_active() is False
+        assert mc_llm_minimax_panel._gate()[2]["interactive"] is True
+
+    def test_a_minimax_request_still_does(self, written, ltx_written):
+        api.submit_ltx("she waves")
+        api.submit_minimax("a car chase")
+
+        assert mc_llm_minimax_panel.jobs_active() is True
+        assert "1 external MiniMax request waiting" in mc_llm_minimax_panel._banner()
+
+    def test_clearing_from_the_minimax_panel_leaves_ltx_requests_alone(self, written,
+                                                                       ltx_written):
+        kept = api.submit_ltx("she waves")
+        gone = api.submit_minimax("a car chase")
+
+        *_updates, status = mc_llm_minimax_panel._clear_external()
+
+        assert "Cancelled 1 external request" in status
+        assert api.status(gone)["state"] == jobs.CANCELLED
+        assert api.status(kept)["state"] == jobs.QUEUED

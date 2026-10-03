@@ -446,11 +446,28 @@ class PromptSession:
     seed: int = 0
     image_name: str = ""
     controls: dict = field(default_factory=dict)
+    no_settings: bool = False
+    """An LTX 2.3 prompt another extension asked the external API for.
+
+    Written from a typed prompt (and a first frame) by the external writer, not
+    from Prompt Studio's controls, so there are none to keep: ``controls`` is
+    empty, loading the entry leaves the controls as they are, and its label
+    says *no settings* so it is never mistaken for a run that can be
+    reproduced by loading it. An entry written before the field existed reads
+    back as False, which is what it was."""
+    origin: str = ""
+    """Who asked, for a no-settings entry -- the external API's origin label
+    (``minipaint-clipboard``). Empty for every run of the panel itself."""
+
+    NO_SETTINGS_MARK = "No settings"
 
     @property
     def label(self) -> str:
         stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created))
-        return f"{stamp} — {self.title or self.intent[:48] or 'untitled'}"
+        name = self.title or self.intent[:48] or "untitled"
+        if self.no_settings:
+            return f"{stamp} — [{self.NO_SETTINGS_MARK}] {name}"
+        return f"{stamp} — {name}"
 
 
 @dataclass

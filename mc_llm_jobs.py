@@ -1,6 +1,8 @@
 """The external request queue: one FIFO, one worker, one record per request.
 
-Another extension in this WebUI wants MiniMax H3 prompts written for it. What
+Another extension in this WebUI wants prompts written for it: MiniMax H3
+prompts, and since Mini Paint NEO's Clipboard tab learned to send to LTX 2.3,
+LTX 2.3 prompts (``kind`` ``"minimax"`` or ``"ltx"`` on each record). What
 it must *not* be able to do is take the card out from under a job that is
 already running, and what it must be able to do is find out what happened
 afterwards. Those two sentences are the whole module.
@@ -64,9 +66,10 @@ seconds, and a feed bound to one request closes itself once it has delivered
 that request's terminal event.
 
 Nothing here is written to disk. Job records live in this process's RAM and are
-forgotten on the schedule in :func:`_reap`; the finished prompt is saved to the
-MiniMax history only because that is what the panel does with one, and only
-when the caller asked for it.
+forgotten on the schedule in :func:`_reap`; the finished prompt is saved to
+LLM Studio's history -- MiniMax's, or Prompt Studio's for an LTX 2.3 prompt --
+only because that is what a panel does with one, and only when the caller asked
+for it.
 """
 
 from __future__ import annotations
@@ -153,6 +156,22 @@ holding anything open five minutes later.
 
 WAKE_SECONDS = 0.5
 """How often the worker looks around while it has nothing to do."""
+
+# -- kinds ------------------------------------------------------------------ #
+
+KIND_MINIMAX = "minimax"
+KIND_LTX = "ltx"
+KINDS = (KIND_MINIMAX, KIND_LTX)
+"""What a request asks for. One queue for both, in arrival order: they share one
+llama-server, one workload lock and one card, so two lines would only be two
+ways of taking turns at the same door."""
+
+KIND_NAMES = {KIND_MINIMAX: "MiniMax", KIND_LTX: "LTX 2.3"}
+"""How the console names a request of each kind."""
+
+
+def kind_name(kind: str) -> str:
+    return KIND_NAMES.get(kind, "LLM")
 
 
 class Rejected(Exception):
@@ -358,16 +377,16 @@ def submit(job: Job) -> Job:
         waiting = len(_pending)
         if waiting >= MAX_QUEUED:
             raise Rejected(
-                f"The MiniMax queue is full ({waiting} requests waiting). Try again once "
-                f"some of them have finished.", "queue_full")
+                f"The external prompt queue is full ({waiting} requests waiting). Try "
+                f"again once some of them have finished.", "queue_full")
         _reap_locked()
         _jobs[job.identifier] = job
         _pending.append(job.identifier)
         _emit_locked(job, EV_QUEUED, {"position": len(_pending), "waiting": len(_pending),
                                       "running": bool(_running)})
         _wake.notify_all()
-    logger.info("Model Chain: MiniMax request %s queued at position %d%s",
-                job.identifier, position_of(job.identifier),
+    logger.info("Model Chain: %s request %s queued at position %d%s",
+                kind_name(job.kind), job.identifier, position_of(job.identifier),
                 f" for {job.origin}" if job.origin else "")
     _ensure_worker()
     return job
@@ -408,18 +427,32 @@ def position_of(identifier: str) -> int:
             return 0
 
 
-def running() -> Job | None:
+def running(kind: str | None = None) -> Job | None:
+    """The request on the card, if any -- of ``kind`` only, when one is named."""
     with _lock:
-        return _jobs.get(_running) if _running else None
+        found = _jobs.get(_running) if _running else None
+        if found is not None and kind is not None and found.kind != kind:
+            return None
+        return found
 
 
-def active() -> bool:
-    """Whether anything external is running or waiting. The panel's gate."""
+def active(kind: str | None = None) -> bool:
+    """Whether anything external is running or waiting. The panel's gate.
+
+    ``kind`` narrows it to one kind of request: the MiniMax panel is held by
+    MiniMax requests and not by an LTX 2.3 one, which is Prompt Studio's kind
+    of work and holds nothing but the workload lock every panel run already
+    waits on.
+    """
     with _lock:
-        return bool(_running) or bool(_pending)
+        if kind is None:
+            return bool(_running) or bool(_pending)
+        if _running and _running in _jobs and _jobs[_running].kind == kind:
+            return True
+        return any(key in _jobs and _jobs[key].kind == kind for key in _pending)
 
 
-def snapshot(*, limit: int = 20, origin: str | None = None) -> dict:
+def snapshot(*, limit: int = 20, origin: str | None = None, kind: str | None = None) -> dict:
     """Everything a queue view needs, in one consistent read.
 
     One function rather than three, because a banner assembled from separate
@@ -432,6 +465,9 @@ def snapshot(*, limit: int = 20, origin: str | None = None) -> dict:
     the whole queue's: a caller with nothing of its own in the line is still
     behind everything that is there, and a count that said otherwise would be
     the number it would use to predict how long its next request takes.
+
+    ``kind`` narrows the whole answer to one kind of request, counts included:
+    it is what a panel that is held by one kind draws its banner from.
     """
     with _lock:
         _reap_locked()
@@ -439,6 +475,10 @@ def snapshot(*, limit: int = 20, origin: str | None = None) -> dict:
         waiting = [_jobs[key] for key in _pending if key in _jobs]
         recent = sorted((found for found in _jobs.values() if found.terminal),
                         key=lambda found: found.finished, reverse=True)
+        if kind is not None:
+            current = current if current is not None and current.kind == kind else None
+            waiting = [found for found in waiting if found.kind == kind]
+            recent = [found for found in recent if found.kind == kind]
 
         def mine(found) -> bool:
             return origin is None or found.origin == origin
@@ -453,6 +493,7 @@ def snapshot(*, limit: int = 20, origin: str | None = None) -> dict:
                        for found in recent if mine(found)][:limit],
             "capacity": MAX_QUEUED,
             "origin": origin,
+            "kind": kind,
         }
 
 
@@ -488,18 +529,21 @@ def cancel(identifier: str, reason: str = "") -> dict:
             # noticing the answer arrived early.
             _announce_positions_locked()
             _wake.notify_all()
-            logger.info("Model Chain: MiniMax request %s cancelled while queued", key)
+            logger.info("Model Chain: %s request %s cancelled while queued",
+                        kind_name(found.kind), key)
             return {"ok": True, "state": CANCELLED, "was": QUEUED}
         found.cancelling = True
         found.cancel_reason = reason or "cancelled"
         _wake.notify_all()
     if found._cancel is not None:
         found._cancel.cancel()
-    logger.info("Model Chain: MiniMax request %s is being cancelled while running", key)
+    logger.info("Model Chain: %s request %s is being cancelled while running",
+                kind_name(found.kind), key)
     return {"ok": True, "state": "cancelling", "was": RUNNING}
 
 
-def cancel_all(reason: str = "", *, origin: str | None = None) -> dict:
+def cancel_all(reason: str = "", *, origin: str | None = None,
+               kind: str | None = None) -> dict:
     """Cancel the running request and everything waiting behind it.
 
     What the panel's banner offers, and the only bulk operation there is. It
@@ -510,10 +554,14 @@ def cancel_all(reason: str = "", *, origin: str | None = None) -> dict:
     when its own panel closes and everything it asked for should go with it.
     Nobody checks that the origin is really theirs, and nothing here pretends
     to; see :mod:`mc_llm_api` on what ``origin`` is and is not.
+
+    ``kind`` limits it to one kind of request -- the MiniMax panel's banner
+    cancels MiniMax requests and leaves an LTX 2.3 one alone.
     """
     with _lock:
         keys = [key for key in list(_pending) + ([_running] if _running else [])
-                if origin is None or (key in _jobs and _jobs[key].origin == origin)]
+                if (origin is None or (key in _jobs and _jobs[key].origin == origin))
+                and (kind is None or (key in _jobs and _jobs[key].kind == kind))]
     stopped = [key for key in keys if cancel(key, reason).get("ok")]
     return {"ok": True, "cancelled": len(stopped), "ids": stopped}
 
@@ -735,7 +783,7 @@ def _drain() -> None:
                     _reap_locked()
                     _expire_feeds_locked()
         except Exception:
-            logger.warning("Model Chain: the MiniMax request queue hit an unexpected "
+            logger.warning("Model Chain: the external prompt queue hit an unexpected "
                            "error; it is still running", exc_info=True)
             time.sleep(WAKE_SECONDS)
 
@@ -799,7 +847,12 @@ def _run(found: Job) -> None:
     ``mc_llm_sessions`` is imported here and read off the module rather than
     bound at import time, for two reasons: this module must be importable in a
     host that has not finished setting up the LLM side, and the tests replace
-    ``minimax`` with a generator of their own.
+    ``minimax`` and ``ltx`` with generators of their own.
+
+    Which generator runs is the request's ``kind``: MiniMax's caption-then-write,
+    or the LTX 2.3 writer, which is shown the first frame itself and emits no
+    caption. Everything around the generator -- the record, the feed, the
+    history -- is the same for both.
     """
     import mc_llm_sessions as sessions
 
@@ -812,9 +865,17 @@ def _run(found: Job) -> None:
     text, caption = "", ""
     trace = f"request {found.identifier}" + (f" from {found.origin}" if found.origin else "")
     try:
-        for event in sessions.minimax(found.prompt, found.variant, found._image,
+        # Asked for inside the ``try``: a writer that raises as it is called,
+        # rather than as it is read, is a failed request with its own words,
+        # not an exception out of the worker.
+        if found.kind == KIND_LTX:
+            events = sessions.ltx(found.prompt, found._image, found.seed, cancel_token,
+                                  system=found.system, trace=trace)
+        else:
+            events = sessions.minimax(found.prompt, found.variant, found._image,
                                       found.seed, cancel_token,
-                                      system=found.system, trace=trace):
+                                      system=found.system, trace=trace)
+        for event in events:
             if event.kind == sessions.CHUNK:
                 text += event.text or ""
                 with _wake:
@@ -844,8 +905,8 @@ def _run(found: Job) -> None:
                     _finish_locked(found, FAILED, error=event.text or "The run failed.")
                 return
     except Exception as exc:
-        logger.debug("Model Chain: MiniMax request %s failed", found.identifier,
-                     exc_info=True)
+        logger.debug("Model Chain: %s request %s failed", kind_name(found.kind),
+                     found.identifier, exc_info=True)
         with _wake:
             _finish_locked(found, FAILED, error=str(exc) or exc.__class__.__name__)
         return
@@ -881,20 +942,30 @@ def _finish_locked(found: Job, state: str, error: str = "", reason: str = "") ->
         payload = {"reason": found.cancel_reason}
     _emit_locked(found, {DONE: EV_DONE, FAILED: EV_FAILED,
                          CANCELLED: EV_CANCELLED}[state], payload)
-    logger.info("Model Chain: MiniMax request %s %s after %.1fs%s",
-                found.identifier, state, found.elapsed,
+    logger.info("Model Chain: %s request %s %s after %.1fs%s",
+                kind_name(found.kind), found.identifier, state, found.elapsed,
                 f" — {found.error}" if state == FAILED else "")
 
 
 def _remember(found: Job) -> None:
-    """File the finished prompt in the MiniMax history, as the panel would.
+    """File the finished prompt in LLM Studio's history, as the panel would.
 
     "As if the user had gone to LLM Studio and asked for it" is the whole brief,
     and a prompt that never appeared in Saved prompts would be the one visible
     place that sentence stopped being true. A caller that is driving this in
     bulk turns it off, which is why it is a flag rather than an assumption.
+
+    A MiniMax prompt goes in MiniMax's Saved prompts. An LTX 2.3 prompt goes in
+    Prompt Studio's Saved generations -- Prompt Studio is LLM Studio's LTX
+    workspace -- as an entry marked *no settings*: it was written by the
+    external writer from a typed prompt and a picture, not from Prompt Studio's
+    controls, so loading it brings back the words and leaves the controls as
+    they are.
     """
     if not found.remember:
+        return
+    if found.kind == KIND_LTX:
+        _remember_ltx(found)
         return
     try:
         import mc_llm_state
@@ -905,6 +976,20 @@ def _remember(found: Job) -> None:
             image_name=found.image_name or found.image_used))
     except Exception:
         logger.debug("Model Chain: could not save the MiniMax session for request %s",
+                     found.identifier, exc_info=True)
+
+
+def _remember_ltx(found: Job) -> None:
+    """One *no settings* entry in Prompt Studio's Saved generations."""
+    try:
+        import mc_llm_state
+
+        mc_llm_state.save_prompt_session(mc_llm_state.PromptSession(
+            title="", intent=found.prompt, positive=found.result, negative="",
+            seed=int(found.seed), image_name=found.image_name or found.image_used,
+            controls={}, no_settings=True, origin=found.origin))
+    except Exception:
+        logger.debug("Model Chain: could not save the LTX 2.3 prompt for request %s",
                      found.identifier, exc_info=True)
 
 
