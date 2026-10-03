@@ -423,12 +423,13 @@ def _client(needs_vision: bool, reserve: int = 0, role: str = "", cancel=None,
     default alone.
     """
     chosen = _runtime_for(role)
-    if role:
-        try:
-            chosen.registry.make_room_for(role, chosen.configuration)
-        except Exception:
-            logger.debug("Model Chain: could not check the other roles' runtimes",
-                         exc_info=True)
+    # The shared server as much as a role's: taking turns has to work in both
+    # directions, or the next Conversation or external-API prompt finds the
+    # memory a role's server took and cannot start.
+    try:
+        chosen.registry.make_room_for(role, chosen.configuration)
+    except Exception:
+        logger.debug("Model Chain: could not check the other runtimes", exc_info=True)
     if not image_reclaim:
         return chosen.runtime.client(needs_vision, reserve=reserve, cancel=cancel,
                                      image_reclaim=False)

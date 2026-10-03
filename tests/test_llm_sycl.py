@@ -1148,6 +1148,22 @@ class TestIntelMemoryIsHostRam:
 
         assert asked == [runtime.host_ram_demand(configuration, managed.placement())]
 
+    def test_room_kept_on_the_image_card_is_not_charged_to_an_intel_server(
+            self, placed, server, tmp_path, monkeypatch):
+        """From a user's log: Creative Mode keeps room on the 3090 for the Krea
+        generation that follows its roll (20.4 GB "protected for the image
+        plan"), and the writer's server on the Intel GPU was charged that as
+        shared system memory -- 11.1 GB of model and 20.4 GB of another card,
+        refused with 18.6 GB safe, so the roll fell back to the typed prompt."""
+        managed, started = server
+        configure_intel(monkeypatch, tmp_path)
+        budget_of(monkeypatch, host_gb=8)
+
+        managed.client(reserve=20 * _GB)
+
+        assert len(started) == 1
+        assert managed.running()
+
     def test_a_vram_shortage_never_stops_an_intel_server(self, placed, server, tmp_path,
                                                          monkeypatch):
         """The broker treats a machine with one NVIDIA card as single-card and
@@ -1200,6 +1216,156 @@ class TestIntelMemoryIsHostRam:
 
         assert freed == size
         assert not managed.running()
+
+
+class TestTakingTurnsOnTheIntelGpu:
+    """Asked for: one llama-server evicting another when the memory is needed.
+
+    "Take turns" and Automatic's turn-taking in system RAM stood the other
+    server down through ``release()``, which gives back VRAM and answers zero
+    for a server whose memory is system RAM: on the Intel GPU nothing ever
+    moved, while the log said a server had been stood down. From a user's
+    log, Creative Mode could not start beside the shared server it should
+    have stood down.
+    """
+
+    @pytest.fixture
+    def turns(self, placed, server, tmp_path, monkeypatch):
+        """The shared server up on the Intel GPU, every role a server of its own."""
+        managed, _started = server
+        configuration = configure_intel(monkeypatch, tmp_path)
+        budget_of(monkeypatch, 40)
+        managed.client()
+        monkeypatch.setattr(runtime, "separate_processes", lambda: True)
+        found = runtime.RuntimeRegistry()
+        found._runtimes[found.key_for(roles.SHARED, configuration)] = managed
+        return found, managed, configuration
+
+    def test_take_turns_stops_the_other_server_while_this_role_holds_its_turn(
+            self, turns, monkeypatch):
+        """The role asking already holds the language model's turn on this
+        device -- every caller takes it before asking for room -- which is
+        exactly when the image side's stop refuses."""
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_TAKE_TURNS)
+        held = managed.host_ram_bytes()
+
+        with mc_broker.workload(mc_broker.FAMILY_LLM, "a Krea prompt", timeout=0,
+                                domain=runtime.execution_domain(configuration)):
+            freed = found.make_room_for(roles.CREATIVE, configuration)
+
+        assert not managed.running()
+        assert freed == held > 0
+
+    def test_automatic_takes_turns_when_system_ram_cannot_hold_both(self, turns, monkeypatch):
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_AUTO)
+        monkeypatch.setattr(found, "_can_coexist_in_ram", lambda role, settings: False)
+
+        found.make_room_for(roles.CREATIVE, configuration)
+
+        assert not managed.running()
+
+    def test_and_lets_them_coexist_while_it_can(self, turns, monkeypatch):
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_AUTO)
+        monkeypatch.setattr(found, "_can_coexist_in_ram", lambda role, settings: True)
+
+        assert found.make_room_for(roles.CREATIVE, configuration) == 0
+        assert managed.running()
+
+    def test_coexist_never_stops_anything(self, turns, monkeypatch):
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_COEXIST)
+        monkeypatch.setattr(found, "_can_coexist_in_ram", lambda role, settings: False)
+
+        assert found.make_room_for(roles.CREATIVE, configuration) == 0
+        assert managed.running()
+
+    def test_a_role_whose_server_is_already_up_loads_nothing_and_stops_nobody(
+            self, turns, monkeypatch):
+        """Its own model is already in "used", so asking whether it fits beside
+        the others would count it twice -- and, once standing down works, stop
+        the other server on every turn."""
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_AUTO)
+        monkeypatch.setattr(found, "_can_coexist_in_ram",
+                            lambda role, settings: pytest.fail("nothing is loading"))
+        mine = types.SimpleNamespace(running=lambda: True, roles=(roles.CREATIVE,))
+        found._runtimes[found.key_for(roles.CREATIVE, configuration)] = mine
+
+        assert found.make_room_for(roles.CREATIVE, configuration) == 0
+        assert managed.running()
+
+    def test_with_nobody_else_up_it_weighs_nothing(self, turns, monkeypatch):
+        """No contention, so no admission -- which can drop warm image cache --
+        and no line about servers that are not there."""
+        found, managed, configuration = turns
+        managed.stop()
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_AUTO)
+        monkeypatch.setattr(found, "_can_coexist_in_ram",
+                            lambda role, settings: pytest.fail("nobody else is up"))
+
+        assert found.make_room_for(roles.CREATIVE, configuration) == 0
+
+    def test_a_server_answering_on_another_processor_is_left_up(
+            self, turns, tmp_path, monkeypatch):
+        """The one thing a stand-down must never do is end a reply somebody is
+        watching arrive. A role on the processor asking for room while the
+        Intel server is in the middle of one leaves it be."""
+        found, managed, intel = turns
+        processor = dataclasses.replace(intel, device="none", mode="cpu",
+                                        compute_backend="")
+        monkeypatch.setattr(runtime, "config",
+                            lambda role="": processor if role == roles.CREATIVE else intel)
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_TAKE_TURNS)
+        assert runtime.pool(processor) == runtime.pool(intel) == runtime.POOL_SYSTEM_RAM
+
+        with mc_broker.workload(mc_broker.FAMILY_LLM, "a conversation reply", timeout=0,
+                                domain=runtime.execution_domain(intel)):
+            freed = found.make_room_for(roles.CREATIVE, processor)
+
+        assert freed == 0
+        assert managed.running()
+
+    def test_the_shared_server_takes_its_turn_too(self, turns, monkeypatch):
+        """Conversation, MiniMax and the external API's prompts run on the shared
+        server; a role's server left up in its way is stood down when it starts."""
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_TAKE_TURNS)
+        found._runtimes.clear()
+        managed.roles = (roles.CREATIVE,)
+        found._runtimes[found.key_for(roles.CREATIVE, configuration)] = managed
+
+        found.make_room_for(roles.SHARED, configuration)
+
+        assert not managed.running()
+
+    def test_the_shared_server_never_stands_itself_down(self, turns, monkeypatch):
+        """Filed under a key the installation has since left, it is still the
+        server this request is about to use."""
+        found, managed, configuration = turns
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_TAKE_TURNS)
+        found._runtimes.clear()
+        monkeypatch.setattr(runtime, "runtime", managed)
+
+        found.make_room_for(roles.SHARED, configuration)
+
+        assert managed.running()
+
+    def test_every_request_asks_for_room_the_shared_one_included(self, monkeypatch):
+        import mc_llm_sessions as sessions
+
+        asked: list = []
+        registry = types.SimpleNamespace(
+            make_room_for=lambda role, settings: asked.append(role) or 0)
+        server = types.SimpleNamespace(client=lambda *args, **kwargs: "client")
+        monkeypatch.setattr(sessions, "_runtime_for", lambda role="": sessions._Resolved(
+            server, object(), registry))
+
+        assert sessions._client(False) == "client"
+        assert sessions._client(False, 0, roles.CREATIVE) == "client"
+        assert asked == [roles.SHARED, roles.CREATIVE]
 
 
 class TestThePlacementSpeaksTheMemorysLanguage:

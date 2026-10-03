@@ -1252,6 +1252,33 @@ def shares_the_image_card(card: int | None, configuration: Config | None = None)
     return mine.card == image.card
 
 
+def image_card_reserve(configuration: Config, reserve: int) -> int:
+    """How much of a caller's image reserve a placement can take room from.
+
+    ``reserve`` is VRAM a caller keeps clear on the image card for the
+    generation that follows it -- Creative Mode's, the Neutralizer's and the
+    Composer's, all :func:`mc_creative_krea.image_reserve_bytes` -- and only a
+    placement on that card can take any of it. The same rule as the plan's
+    cap in :func:`_spendable`, which stopped capping a placement on another
+    card long ago; the reserve went on being charged everywhere.
+
+    What that cost, from a user's log: Creative Mode on the Intel GPU, the
+    Krea checkpoint about to load onto a 3090 with 20.4 GB "protected for the
+    image plan", and the writer's server charged that as *shared system
+    memory* -- 11.1 GB of model and 20.4 GB of another card, refused with
+    18.6 GB safe, so the roll fell back to the typed prompt. The image side is
+    always a CUDA card (:func:`mc_broker.image_execution_domain`), so the
+    processor and an Intel GPU never take from it; a CUDA placement does when
+    it is on that card, or when nobody can tell -- the conservative answer
+    :func:`shares_the_image_card` gives, which costs a smaller language model
+    rather than an image generation that runs out of memory.
+    """
+    reserve = max(int(reserve or 0), 0)
+    if reserve <= 0 or not configuration.uses_cuda_compute:
+        return 0
+    return reserve if shares_the_image_card(card_of(configuration), configuration) else 0
+
+
 def _spendable(already_ours: int = 0, card: int | None = None, *,
                image_budget: bool = True, configuration: "Config | None" = None) -> int:
     """What this placement may actually spend, which is not the same as what is free.
@@ -4636,7 +4663,10 @@ class Runtime:
         later, an image generation on a checkpoint that needs several
         gigabytes. Without the reserve llama.cpp sizes itself to an empty card
         and the checkpoint gets the remainder, which on a 24 GB card is the
-        difference between "both fit" and "the image model does not".
+        difference between "both fit" and "the image model does not". It is
+        room on the *image* card, so a server placed anywhere else -- another
+        card, the processor, an Intel GPU -- is not charged it
+        (:func:`image_card_reserve`).
 
         ``image_reclaim`` is whether this request may use the one authority a
         configuration can carry to release image residency for the language
@@ -4722,6 +4752,9 @@ class Runtime:
                     raise RuntimeError(f"Configured {label} is missing: {path}")
             if needs_vision and projector is None:
                 raise RuntimeError(mc_llm_vision.NO_PROJECTOR)
+            # Room for an image generation is room on the image card, and a
+            # server anywhere else takes none of it -- see image_card_reserve.
+            reserve = image_card_reserve(configuration, reserve)
 
             # Which mechanism this request can use, before anything is measured
             # and before anything is stopped. A forced accelerator that is
@@ -6015,6 +6048,34 @@ class Runtime:
         finally:
             self._lock.release()
 
+    def give_way(self, reason: str = "") -> int:
+        """Stop this server so another of ours can have its system RAM. What it held.
+
+        Taking turns, for a server whose memory is system RAM -- on the
+        processor or an Intel GPU. :meth:`release` gives back VRAM and answers
+        zero for both, which is right for the image side and left "Take turns"
+        doing nothing at all in system RAM: from a user's log, Creative Mode on
+        the Intel GPU could not start beside the shared server, and the server
+        it was meant to stand down never moved. Nor is it
+        :meth:`release_host_ram`, which stands down for the *image* side and so
+        refuses while any language model is answering -- and the role asking
+        here holds the language model's turn itself. Whether this server is in
+        the middle of a reply is the registry's question, asked before this is
+        (:func:`_answering`).
+        """
+        if not self._lock.acquire(timeout=RELEASE_LOCK_TIMEOUT):
+            logger.warning("Model Chain: %sllama-server was busy and could not make way for %s",
+                           self._said_for(), reason or "another of our language models")
+            return 0
+        try:
+            if not self._running:
+                return 0
+            held = max(int(self.host_ram_bytes() or 0), 0)
+            self._stop_locked(reason or "another of our language models needed the memory")
+            return held
+        finally:
+            self._lock.release()
+
     def release_host_ram(self, needed_bytes: int, reason: str = "") -> int:
         """Stop this server when its weights are in system RAM and it is idle.
 
@@ -6471,6 +6532,28 @@ def resolved_sharing(where: str, chosen: str = "") -> str:
     return SHARE_COEXIST if where == POOL_SYSTEM_RAM else SHARE_TAKE_TURNS
 
 
+def _answering(other, asking: mc_broker.ExecutionDomain) -> bool:
+    """Whether ``other`` is in the middle of a reply, as far as the workload lock can say.
+
+    Language-model turns on one processor are serialised by the workload lock,
+    and every caller of :meth:`RuntimeRegistry.make_room_for` takes its turn
+    before it asks for room -- so a turn on the asking role's own processor is
+    the asking role's. A turn on another processor that ``other`` runs on is
+    somebody's reply. A server that cannot say where it runs is taken to be
+    answering and left up, which costs this start the room and nothing else.
+    """
+    try:
+        theirs = execution_domain(other.configuration())
+    except Exception:
+        logger.debug("Model Chain: could not tell where another llama-server runs",
+                     exc_info=True)
+        return True
+    return any(found.family == mc_broker.FAMILY_LLM
+               and found.domain.conflicts_with(theirs)
+               and not found.domain.conflicts_with(asking)
+               for found in mc_broker.active_workloads())
+
+
 class RuntimeRegistry:
     """The llama-servers this installation is running, one per distinct identity.
 
@@ -6746,15 +6829,31 @@ class RuntimeRegistry:
         Returns bytes released, and does nothing at all in the two cases that
         are not a contention: roles that share a runtime, and roles in different
         pools.
+
+        The shared server asks too (``role`` empty): Conversation, Prompt
+        Studio, MiniMax and the external API's prompts all run on it, and a
+        policy that let a role stand it down but never the other way round
+        left the next shared start to find the memory still taken.
         """
         import mc_llm_roles
 
         chosen = mc_llm_roles.named(role)
-        if not chosen:
-            return 0
         where = pool(configuration)
         sharing = resolved_sharing(where)
+        mine = self.key_for(chosen, configuration)
+        if not any(_is_running(other) for other in self.all()
+                   if other is not self._runtimes.get(mine)):
+            # Nobody else is up: no contention, and no reason to weigh this
+            # start against servers that are not there.
+            return 0
         if sharing != SHARE_TAKE_TURNS:
+            if where == POOL_SYSTEM_RAM and self._runtimes.get(mine) is not None \
+                    and _is_running(self._runtimes[mine]):
+                # Already up, so nothing is about to load and there is nothing
+                # to make room for. Asking anyway would count this server's
+                # own model as memory it still needs -- it is in "used"
+                # already -- and stand somebody down on every turn.
+                return 0
             if where == POOL_SYSTEM_RAM and not self._can_coexist_in_ram(chosen, configuration):
                 # Section 11.4. "Coexist" is a preference about *warmth*, not a
                 # licence to ignore the host's safety floor -- a second
@@ -6776,12 +6875,15 @@ class RuntimeRegistry:
                             mc_llm_roles.prefix(chosen))
             else:
                 return 0
-        mine = self.key_for(chosen, configuration)
+        asking = execution_domain(configuration)
+        who = mc_llm_roles.label(chosen) if chosen else "shared LLM"
         freed = 0
         stood_down = 0
         for other in self.all():
             if other is self._runtimes.get(mine) or not other.running():
                 continue
+            if not chosen and other is runtime:
+                continue  # the shared server, filed under a key it has since left
             serves = _roles_of(other)
             if serves and not [name for name in serves if name != chosen]:
                 continue  # this role's own server, under another key
@@ -6801,9 +6903,24 @@ class RuntimeRegistry:
                 elsewhere = next((name for name in serves if name != chosen), "")
                 if pool(config(elsewhere)) != where:
                     continue
-                freed += int(other.release(0, f"the {mc_llm_roles.label(chosen)} runtime "
-                                              f"needs the same memory") or 0)
-                stood_down += 1
+                reason = f"the {who} runtime needs the same memory"
+                if where == POOL_SYSTEM_RAM:
+                    # Its memory is system RAM, which release() does not give
+                    # back -- see Runtime.give_way. Never in the middle of a
+                    # reply somebody is watching arrive.
+                    if _answering(other, asking):
+                        logger.info("Model Chain: %sthe llama-server in the way is answering "
+                                    "a request, so it was left up; this one may not fit",
+                                    mc_llm_roles.prefix(chosen))
+                        continue
+                    given = int(other.give_way(reason) or 0)
+                else:
+                    given = int(other.release(0, reason) or 0)
+                freed += given
+                # Counted only when it really went: the line below used to say
+                # a server had been stood down when release() had declined.
+                if given > 0 or not other.running():
+                    stood_down += 1
             except Exception:
                 logger.debug("Model Chain: could not stand down the other runtime",
                              exc_info=True)
@@ -6834,7 +6951,7 @@ class RuntimeRegistry:
         if mc_broker.host_ram_fits(wanted):
             return True
         admission = mc_broker.admit_host_ram(
-            wanted, reason=f"the {role} role's model in system RAM")
+            wanted, reason=f"the {role or 'shared'} role's model in system RAM")
         return admission.fits
 
     # -- the broker's reclaimer, fanned out ------------------------------- #

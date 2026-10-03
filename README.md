@@ -2743,7 +2743,8 @@ feature than a larger model reading from system RAM.
 model, which on a fresh restart means it meets an empty card. It is told how
 much to leave clear for the checkpoint that follows, so both fit — but that
 reserve is only as good as the checkpoint you have selected when you press
-Generate. Switching to a much larger checkpoint while a language model is
+Generate. The reserve is room on the image model's card, so a writer placed
+anywhere else — another card, the processor, an Intel GPU — is not charged it. Switching to a much larger checkpoint while a language model is
 already resident is the case that still costs a restart of `llama-server`, and
 the console says so when it happens.
 
@@ -4241,6 +4242,30 @@ in the same words it used: **the weights that are in system RAM are a stake, not
 a demand.** Asking whether there is room for memory that is already committed
 gets "no" on a full machine, every time, for a request that needed nothing.
 
+That sharing is the processor's. A placement on a card or on the Intel GPU
+copies the weights into device buffers the process allocates for itself
+(llama.cpp computes straight from a mapped file only on a device that can, and
+neither its SYCL nor its Vulkan backend does on an integrated GPU), so two such
+servers of one model are two copies of it.
+
+#### More than one llama-server: the two settings
+
+Two settings in **Settings → Model Chain** decide how many servers there are and
+what happens when they want the same memory:
+
+| Setting | Choices | What it decides |
+| --- | --- | --- |
+| **When the Neutralizer, Creative and Spatial roles are configured identically** | *One server* (default) · *One each* | Whether roles with identical settings share the shared server. One server is one process and one copy of the weights; each mode keeps its own system prompt warm in a cache of its own on it (*Warm prompt caches llama-server keeps*). One each gives every role a server of its own, and on a card or the Intel GPU a copy of the model each. |
+| **When two roles want the same memory** | *Automatic* (default) · *Take turns* · *Coexist* | What a start does about another of our servers in the same memory. Take turns stops the others first, every time. Coexist never stops anything. Automatic takes turns on one card, and in system RAM — the processor and the Intel GPU — lets them coexist until a start would not fit, and then takes turns. |
+
+Taking turns works in both directions — a role's start stands the shared server
+down and the shared server's start stands a role's down — and never stops a
+server in the middle of a reply. A server whose own model is already up asks
+nothing of the others. Each switch between two servers costs a model load, which
+is why identical roles are better on one server than taking turns. In system RAM
+it used to do nothing at all: it asked the other server to give back VRAM, which
+a server in system RAM declines, and the log still said one had been stood down.
+
 ### Why the second prompt is faster than the first
 
 llama.cpp keeps the last prompt and resumes the next one at their common prefix.
@@ -4550,9 +4575,15 @@ which is what the `system RAM` lines' *in our language models* figure and
 stopping the server both mean — never as VRAM on any card. So it never asks for
 an NVIDIA checkpoint to leave the 3090 to make itself fit — not even under LLM
 priority — and an image generation short of system RAM may stop an idle Intel
-server exactly as it may stop an idle processor one. The charge is its own:
-another server mapping the same GGUF saves an Intel start nothing, because the
-Intel server does not map it. The status line says "Shared system memory: about
+server exactly as it may stop an idle processor one. Nor is it charged the room
+Creative Mode keeps on the image card for the generation after its roll: from a
+user's log, a writer on the Arc was refused because 20.4 GB of the 3090's room
+had been added to its 11.1 GB of system memory. The charge is its own: another
+server mapping the same GGUF saves an Intel start nothing, because the Intel
+server does not map it — and two Intel servers of one model are two copies of
+it, because each copies the weights into device buffers of its own. One server
+serves every mode that shares its settings, each mode's prompt warm in a cache
+of its own. The status line says "Shared system memory: about
 17.2 GB (estimated)" rather than a VRAM figure, because nothing outside the
 process can measure what it took from the shared pool.
 
