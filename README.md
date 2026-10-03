@@ -4242,6 +4242,30 @@ in the same words it used: **the weights that are in system RAM are a stake, not
 a demand.** Asking whether there is room for memory that is already committed
 gets "no" on a full machine, every time, for a request that needed nothing.
 
+That sharing is the processor's. A placement on a card or on the Intel GPU
+copies the weights into device buffers the process allocates for itself
+(llama.cpp computes straight from a mapped file only on a device that can, and
+neither its SYCL nor its Vulkan backend does on an integrated GPU), so two such
+servers of one model are two copies of it.
+
+#### More than one llama-server: the two settings
+
+Two settings in **Settings → Model Chain** decide how many servers there are and
+what happens when they want the same memory:
+
+| Setting | Choices | What it decides |
+| --- | --- | --- |
+| **When the Neutralizer, Creative and Spatial roles are configured identically** | *One server* (default) · *One each* | Whether roles with identical settings share the shared server. One server is one process and one copy of the weights; each mode keeps its own system prompt warm in a cache of its own on it (*Warm prompt caches llama-server keeps*). One each gives every role a server of its own, and on a card or the Intel GPU a copy of the model each. |
+| **When two roles want the same memory** | *Automatic* (default) · *Take turns* · *Coexist* | What a start does about another of our servers in the same memory. Take turns stops the others first, every time. Coexist never stops anything. Automatic takes turns on one card, and in system RAM — the processor and the Intel GPU — lets them coexist until a start would not fit, and then takes turns. |
+
+Taking turns works in both directions — a role's start stands the shared server
+down and the shared server's start stands a role's down — and never stops a
+server in the middle of a reply. A server whose own model is already up asks
+nothing of the others. Each switch between two servers costs a model load, which
+is why identical roles are better on one server than taking turns. In system RAM
+it used to do nothing at all: it asked the other server to give back VRAM, which
+a server in system RAM declines, and the log still said one had been stood down.
+
 ### Why the second prompt is faster than the first
 
 llama.cpp keeps the last prompt and resumes the next one at their common prefix.

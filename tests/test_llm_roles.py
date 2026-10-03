@@ -615,6 +615,23 @@ class TestWhenBothRolesWantTheSameMemory:
         assert freed == _GB
         assert released and "Spatial Composer" in released[0]
 
+    def test_a_server_that_declined_is_not_reported_as_stood_down(
+            self, tmp_path, monkeypatch, caplog):
+        """The log said "stood 1 other llama-server(s) down" about a server
+        that had declined and was still running."""
+        creative = configured(tmp_path, mode="gpu", gpu_index=0)
+        spatial = configured(tmp_path, mode="gpu", gpu_index=0, model_name="B.gguf")
+        registry = pair(monkeypatch, creative, spatial)
+        monkeypatch.setattr(runtime, "_sharing_mode", lambda: runtime.SHARE_TAKE_TURNS)
+        theirs = registry.for_role(roles.CREATIVE)
+        monkeypatch.setattr(theirs, "running", lambda: True)
+        monkeypatch.setattr(theirs, "release", lambda needed, reason="": 0)
+
+        with caplog.at_level("INFO"):
+            assert registry.make_room_for(roles.SPATIAL, spatial) == 0
+
+        assert "stood" not in caplog.text
+
     def test_coexisting_stands_nobody_down(self, tmp_path, monkeypatch):
         creative = configured(tmp_path, mode="gpu", gpu_index=0)
         spatial = configured(tmp_path, mode="gpu", gpu_index=0, model_name="B.gguf")

@@ -657,12 +657,12 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_llm_runtime.PROCESS_MODES]},
             ).info(
-                "identical roles resolve to one llama-server by default: one process, one copy "
-                "of the weights, one prompt cache. The cost is that the passes use different "
-                "system prompts on it, so each switch re-reads a prefix another pass just "
-                "cached. A card or a machine with room for more than one server can give each "
-                "role its own instead — every one stays warm, and no pass ever re-reads "
-                "another's prompt"
+                "identical roles resolve to one llama-server by default: one process and one "
+                "copy of the weights, and each pass's system prompt stays warm in a prompt "
+                "cache of its own on it (see Warm prompt caches) — only with a single cache "
+                "does a switch re-read a prefix another pass just cached. One each gives every "
+                "role a server of its own, and on a card or the Intel GPU each server holds a "
+                "copy of the model of its own: servers share one copy only on the processor"
             ),
             mc_llm_runtime.OPT_ROLE_SHARING: shared.OptionInfo(
                 mc_llm_runtime.SHARE_AUTO,
@@ -670,14 +670,16 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_llm_runtime.SHARING_MODES]},
             ).info(
-                "only reached when roles are configured differently and still land in the "
-                "same place. Configure them identically and they share one llama-server "
-                "whatever this says; put them on different devices and they never meet. Two "
-                "servers cannot share a process, so taking turns means stopping one before "
-                "starting another — a model load per role switch, in exchange for never "
-                "competing. Coexisting leaves every server up and lets the existing memory "
-                "rules sort it out, which on one card means loading and unloading as they "
-                "fight for what is left"
+                "only reached when two of our servers land in the same memory — roles "
+                "configured differently, or identically with One each above. Configure them "
+                "identically with One server and they share one llama-server whatever this "
+                "says; put them on different devices and they never meet. Taking turns means "
+                "stopping one before starting another, in either direction and never in the "
+                "middle of a reply — a model load per switch, in exchange for never "
+                "competing. Coexisting leaves every server up, which on one card means "
+                "loading and unloading as they fight for what is left, and in system RAM a "
+                "start that does not fit. Automatic takes turns on one card, and in system RAM "
+                "(the processor and the Intel GPU) coexists until a start would not fit"
             ),
             mc_llm_paths.OPT_ROOT: shared.OptionInfo(
                 "",
