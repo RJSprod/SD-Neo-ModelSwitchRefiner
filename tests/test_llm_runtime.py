@@ -1956,6 +1956,21 @@ class TestMappingIsTurnedOffForATensorOverride:
 
         assert runtime.accelerator_flags(configuration, placement) == [runtime.CPU_MOE_FLAG]
 
+    def test_the_intel_gpu_reads_the_file_rather_than_mapping_it(self, build):
+        """Its device memory is system RAM. A mapped load kept the whole file in
+        the process beside the device's copy -- 12.5 GB of a 12.5 GB model held
+        twice, from a user's log -- and no token ever reads the mapping."""
+        configuration = build(runtime.NO_MMAP_FLAG)
+
+        assert runtime.NO_MMAP_FLAG in runtime.accelerator_flags(
+            configuration, ctx.Placement(uma=True))
+
+    def test_the_intel_gpu_on_a_build_without_it_is_not_given_it(self, build):
+        configuration = build(runtime.CPU_MOE_FLAG)
+
+        assert runtime.NO_MMAP_FLAG not in runtime.accelerator_flags(
+            configuration, ctx.Placement(uma=True))
+
 
 class TestNothingOutlivesTheWebUI:
     """Reported: "if I kill the webui process, there tends to be
