@@ -1,4 +1,4 @@
-# External LLM API — MiniMax H3 prompts, V1
+# External LLM API — MiniMax H3 and LTX 2.3 prompts, V1
 
 **For developers of other Forge / SD WebUI Neo extensions.**
 
@@ -6,8 +6,11 @@ This document is the contract. `mc_llm_api` is the module you import,
 `tests/test_llm_external_api.py` is the executable version of everything below,
 and if the two ever disagree the tests are right and this file is a bug.
 
-**Scope: MiniMax H3 prompt enhancement only.** Prompt Studio, Conversation and
-Krea 2 have no external surface and are not planned for V1.
+**Scope: prompt writing for two video models.** MiniMax H3 prompt enhancement
+(§1–§13), and an LTX 2.3 prompt writer (§14) added for Mini Paint NEO's
+Clipboard tab sending to WanGP's LTX 2.3 Distilled models. Prompt Studio,
+Conversation and Krea 2 have no external surface of their own; the LTX writer's
+finished prompts are filed in Prompt Studio's history (§14.4).
 
 
 ## 1. What it is, in one sentence
@@ -117,6 +120,8 @@ you can act on. It carries a `.code`:
 | `no_vision` | A picture was sent but the model running has no vision projector. Nothing was queued. The same refusal the panel makes before starting. |
 | `queue_full` | `MAX_QUEUED` (32) requests are already waiting. Retry later. |
 | `empty_origin` | `cancel_all()` was called without an origin (§9). |
+
+`submit_ltx` (§14) raises the same codes for the same reasons.
 | `unknown_job` | `subscribe()` was given an id that does not exist (§7). |
 
 New codes may be added; treat one you do not recognise as a refusal you cannot
@@ -373,7 +378,7 @@ loses some of the typewriter effect and none of the answer.
 ```python
 mc_llm_api.capabilities()
 # {"api_version": 1,
-#  "kinds": ("minimax",),
+#  "kinds": ["minimax", "ltx"],
 #  "variants": ["fl2va", "ref2va"],
 #  "slots": ["first_frame", "last_frame", "reference"],
 #  "events": [...],
@@ -456,14 +461,18 @@ prompts*, when `remember=True`.
 
 ## 10. What the user sees
 
-While anything external is running or waiting, **LLM Studio → MiniMax H3 is
-inert**: the Enhance button is disabled behind a banner naming who is asking,
-how long the running request has taken, its id, and how many are behind it.
+While an external **MiniMax** request is running or waiting, **LLM Studio →
+MiniMax H3 is inert**: the Enhance button is disabled behind a banner naming who
+is asking, how long the running request has taken, its id, and how many are
+behind it. An LTX 2.3 request (§14) does not hold the panel and is not offered
+for cancelling there: it is Prompt Studio's kind of work, and a panel run that
+starts while one is on the card waits for the workload lock like any other.
 
 The banner offers two buttons:
 
-* **Stop the running request** — cancels the one on the card, leaves the queue.
-* **Cancel all queued** — cancels everything external.
+* **Stop the running request** — cancels the MiniMax request on the card, leaves
+  the queue.
+* **Cancel all queued** — cancels every external MiniMax request.
 
 So a person is never blocked without being told why or given a way out. This
 matters for you in one direction: **your request can be cancelled by the user
@@ -559,6 +568,8 @@ reaches a terminal value and stays there until retention drops the record.
 | `mc_llm_sessions.py` | The run itself, shared with the panel. |
 | `mc_llm_minimax_panel.py` | The panel and its gate. |
 | `prompt_master/minimax/` | The vendored WanGP instructions. |
+| `mc_llm_ltx.py` | The LTX 2.3 writer's instructions and calling convention (§14). |
+| `mc_llm_prompt_panel.py` | Prompt Studio, where an LTX 2.3 prompt is filed and loaded (§14.4). |
 | `tests/test_llm_external_api.py` | This document, executable. |
 
 `mc_llm_jobs` is not private, and reading it is fine — `mc_llm_jobs.feeds()`
@@ -571,6 +582,18 @@ and the state constants are useful. But `mc_llm_api` is the part that carries
 Everything below is additive. `API_VERSION` is still `1`; a caller written
 against the first revision keeps working unchanged, and one that matches on
 refusal codes exhaustively should read the note under §3.
+
+**V1, third revision** — the LTX 2.3 writer:
+
+| Added | Where |
+|---|---|
+| `submit_ltx(prompt, first_frame=, system_prompt=, seed=, origin=, remember=)` and `LTX = "ltx23"` | §14 |
+| `capabilities()["kinds"]` is `["minimax", "ltx"]` | §8, §14.1 |
+| `system_prompts()["ltx23"]` and `system_prompt("ltx23", has_image=)` | §14.3 |
+| A record's `kind` is `"ltx"` for one, its `variant` `"ltx23"`, and it has no `caption` | §14.2 |
+| A finished LTX 2.3 prompt is filed in Prompt Studio's Saved generations as a *no settings* entry | §14.4 |
+| The MiniMax panel's gate, banner, Stop and Cancel all are about MiniMax requests only | §10 |
+| "The MiniMax queue is full" reads "The external prompt queue is full", and the console names a request by its kind | §3, §10 |
 
 **V1, second revision** — after review against the original brief:
 
@@ -591,3 +614,91 @@ refusal codes exhaustively should read the note under §3.
 **V1, first revision** — the original surface: `submit_minimax`, `status`,
 `result`, `queue`, `busy`, `cancel`, `forget`, `subscribe`, `system_prompt`,
 `system_prompts`, `variants`, `capabilities`.
+
+
+## 14. LTX 2.3 prompts
+
+Added for Mini Paint NEO's Clipboard tab, which sends to WanGP's **LTX 2.3
+Distilled** models (and its gallery's Send to WanGP popup, which builds the
+same request). The queue, the record, the feed, cancellation and every refusal
+at the door are §3–§9's, unchanged; what differs is below.
+
+### 14.1 Asking
+
+```python
+job_id = mc_llm_api.submit_ltx(
+    "she turns from the window and waves",
+    first_frame=opening_frame,          # optional; the only picture slot
+    system_prompt=None,                 # optional override
+    seed=None,                          # optional; drawn per request
+    origin="my-extension",              # optional label
+    remember=True,                      # file it in Prompt Studio
+)
+```
+
+`capabilities()["kinds"]` contains `"ltx"` on an installation that has the
+writer; a caller that must work against an older one checks for it, or for
+`hasattr(mc_llm_api, "submit_ltx")`.
+
+### 14.2 One picture, shown
+
+`first_frame` takes the four shapes of §4. It is the video's first frame, and
+the model is **shown** it: the picture is part of the one request the prompt is
+written in — a vision request, the way Lightricks' own LTX enhancer asks — not
+captioned first. So there is no caption pass, no `caption` event, and the
+record's `caption` is empty. A picture needs a model with a vision projector,
+exactly as in §4 (`no_vision` at the door). There is no last-frame or reference
+slot: a caller with a last frame sends it to the video model, not here.
+
+The record reads `kind: "ltx"`, `variant: "ltx23"`, `images: ["first_frame"]` and
+`image_used: "first_frame"` when a picture was sent.
+
+### 14.3 The instructions
+
+Two defaults, with a first frame and without one:
+
+```python
+mc_llm_api.system_prompts()["ltx23"]
+# {"label": "LTX 2.3 — from text or a first frame",
+#  "text": "…", "image": "…", "structure": "…Lightricks' prompting guide…",
+#  "max_tokens": 768}
+mc_llm_api.system_prompt("ltx23", has_image=True)
+```
+
+They are written from Lightricks' LTX-2 prompt enhancer — the Gemma 3 pair
+LTX 2.3 runs (`gemma3_i2v_system_prompt.txt`, `gemma3_t2v_system_prompt.txt`)
+and the README's prompting guide, at LTX-2 commit `9ec55f9` — and depart from
+them to carry **no bias**: no default style (the original falls back to
+"cinematic-realistic"), no camera of the writer's own, no added mood, genre, era
+or aesthetic, plain detail where the input leaves something open, and
+structured input (labelled fields, lists, numbered beats, dialogue lines)
+turned into the paragraph with nothing dropped. `mc_llm_ltx.py`'s docstring has
+the full account. The user turn is Lightricks': the picture and then
+`User Raw Input Prompt: <prompt>.`, or `user prompt: <prompt>` without one.
+`system_prompt=` replaces whichever of the two applies; `@` and `@@` work as in
+§6.
+
+**The answer is one line.** WanGP reads an LTX prompt one line per prompt, so a
+reply in two paragraphs would be two videos. The finished prompt is folded onto
+one line, with any leaked reasoning, code fence or leading "Prompt:" label
+removed.
+
+### 14.4 Where it is filed
+
+With `remember=True`, a finished LTX 2.3 prompt goes in **LLM Studio → Prompt
+Studio → Saved generations** — Prompt Studio is LLM Studio's LTX workspace — as
+an entry marked **[No settings]**: the typed prompt as its intent, the written
+prompt as its positive, no negative, and no controls, because it was not written
+from Prompt Studio's controls. Loading it brings the words back, leaves every
+control as it is, and says so. It never appears in MiniMax's Saved prompts.
+
+### 14.5 What the user sees
+
+An LTX 2.3 request runs under the workload lock like any other run and holds no
+panel (§10). The console names it as one:
+
+```
+Model Chain: LTX 2.3 request 3fa2c1d07b6e4a19 queued at position 1 for minipaint-clipboard
+Model Chain: LLM run started — an LTX 2.3 prompt from a first frame (request 3fa2c1d07b6e4a19 from minipaint-clipboard)
+Model Chain: LTX 2.3 request 3fa2c1d07b6e4a19 done after 12.0s
+```

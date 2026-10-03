@@ -218,14 +218,20 @@ def build() -> dict:
 
 
 def jobs_active() -> bool:
-    """Whether an external request is running or waiting. Never raises.
+    """Whether an external MiniMax request is running or waiting. Never raises.
 
     Called while the panel is being built, so it has to survive an LLM side that
     is not up yet: a gate that raised here would take the whole tab down to
     report that nothing was queued.
+
+    MiniMax requests only. The external queue also carries LTX 2.3 requests
+    (Mini Paint's Clipboard, sending to LTX 2.3 Distilled), and those are
+    Prompt Studio's kind of work: this panel neither waits behind them nor
+    offers to cancel them. A press here during one waits for the workload lock
+    like any other panel run and says so.
     """
     try:
-        return mc_llm_jobs.active()
+        return mc_llm_jobs.active(kind=mc_llm_jobs.KIND_MINIMAX)
     except Exception:
         logger.debug("Model Chain: could not read the external MiniMax queue",
                      exc_info=True)
@@ -240,7 +246,7 @@ def _banner() -> str:
     a blocked button into a queue somebody can decide what to do about.
     """
     try:
-        found = mc_llm_jobs.snapshot(limit=0)
+        found = mc_llm_jobs.snapshot(limit=0, kind=mc_llm_jobs.KIND_MINIMAX)
     except Exception:
         logger.debug("Model Chain: could not describe the external MiniMax queue",
                      exc_info=True)
@@ -280,9 +286,9 @@ def _stop_external() -> tuple:
     somebody who wants the card back for the prompt they are typing now, not
     somebody who wants to throw away another extension's whole queue.
     """
-    current = mc_llm_jobs.running()
+    current = mc_llm_jobs.running(kind=mc_llm_jobs.KIND_MINIMAX)
     if current is None:
-        return _gate() + (ui.notice("Nothing external is running.", "warn"),)
+        return _gate() + (ui.notice("No external MiniMax request is running.", "warn"),)
     found = mc_llm_jobs.cancel(current.identifier, "stopped from LLM Studio")
     said = (f"Stopping external request {current.identifier}."
             if found.get("ok") else found.get("error", "That request could not be stopped."))
@@ -290,8 +296,9 @@ def _stop_external() -> tuple:
 
 
 def _clear_external() -> tuple:
-    """Cancel everything external: the running request and the whole queue."""
-    found = mc_llm_jobs.cancel_all("cancelled from LLM Studio")
+    """Cancel every external MiniMax request: the running one and the queue."""
+    found = mc_llm_jobs.cancel_all("cancelled from LLM Studio",
+                                   kind=mc_llm_jobs.KIND_MINIMAX)
     count = found.get("cancelled", 0)
     return _gate() + (ui.notice(
         f"Cancelled {count} external request{'' if count == 1 else 's'}."
