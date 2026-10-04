@@ -2444,6 +2444,42 @@ def _llm_ram_note() -> str:
             f"{held / _GB:.1f} GB of it")
 
 
+def _rebuild_reason(entry: _Entry, stage: str) -> str | None:
+    """Why a restored model may not keep its prepared LoRA state, or "" when it
+    may, or None when there is no LoRA state either way.
+
+    Pure: it decides and touches nothing, so the two restore paths can ask it
+    before they install a model -- which matters for a blob (see
+    :mod:`mc_lora_ram`), where the answer to "rebuild" is not an invalidation
+    but a reload from disk, decided while the cache entry is still a cache
+    entry and not the loaded model.
+    """
+    model = entry.sd_model
+    live = mc_lora.state_of(model)
+
+    if live is None and entry.lora_state is None:
+        return None
+
+    if not option(OPT_PRESERVE_LORA, True):
+        return "preserving prepared LoRA state is disabled in Settings"
+
+    if not entry.lora_preservable:
+        return "this backend rebuilds its LoRA state rather than moving it"
+
+    if entry.stage and stage and entry.stage != stage:
+        # Same checkpoint on both stages. The state on the object belongs to
+        # whichever stage last ran; handing it to the other one is exactly the
+        # cross-stage leak this extension must not have.
+        return f"the prepared state belongs to {entry.stage}, not {stage}"
+
+    if live != entry.lora_state:
+        # Something moved the hash on while the model sat in the cache. We do
+        # not know what, so we do not trust it.
+        return "its LoRA state changed while it was cached"
+
+    return ""
+
+
 def _restore_prepared_state(entry: _Entry, stage: str) -> str:
     """Decide whether a restored model may keep its prepared LoRA state.
 
@@ -2454,34 +2490,29 @@ def _restore_prepared_state(entry: _Entry, stage: str) -> str:
     Returns ``"preserved"``, ``"rebuilt"`` or ``"none"`` (there was no LoRA
     state either way), which is what the caller logs.
     """
-    model = entry.sd_model
-    live = mc_lora.state_of(model)
-
-    if live is None and entry.lora_state is None:
+    reason = _rebuild_reason(entry, stage)
+    if reason is None:
         return "none"
-
-    def rebuild(reason: str) -> str:
-        mc_lora.invalidate(model, f"{entry.checkpoint_name}: {reason}")
+    if reason:
+        mc_lora.invalidate(entry.sd_model, f"{entry.checkpoint_name}: {reason}")
         return "rebuilt"
-
-    if not option(OPT_PRESERVE_LORA, True):
-        return rebuild("preserving prepared LoRA state is disabled in Settings")
-
-    if not entry.lora_preservable:
-        return rebuild("this backend rebuilds its LoRA state rather than moving it")
-
-    if entry.stage and stage and entry.stage != stage:
-        # Same checkpoint on both stages. The state on the object belongs to
-        # whichever stage last ran; handing it to the other one is exactly the
-        # cross-stage leak this extension must not have.
-        return rebuild(f"the prepared state belongs to {entry.stage}, not {stage}")
-
-    if live != entry.lora_state:
-        # Something moved the hash on while the model sat in the cache. We do
-        # not know what, so we do not trust it.
-        return rebuild("its LoRA state changed while it was cached")
-
     return "preserved"
+
+
+def _blob_barred(entry: _Entry, stage: str) -> str:
+    """Why a cached *blob* cannot come back as it is, or "".
+
+    A blob's merged weights are the model (:mod:`mc_lora_ram`), so "rebuild its
+    LoRA state" -- the answer for an ordinary model whose state cannot be
+    trusted -- would have the host merge the next set on top of the one baked
+    in. For a blob the only honest rebuild is the checkpoint read from disk, so
+    the entry is dropped and the caller takes its cold path.
+    """
+    import mc_lora_ram
+
+    if not mc_lora_ram.is_blob(entry.sd_model):
+        return ""
+    return _rebuild_reason(entry, stage) or ""
 
 
 def _log_restored(entry: _Entry, prepared: str) -> None:
@@ -2506,8 +2537,14 @@ def invalidate_prepared_state(reason: str = "") -> bool:
     caused it. Throwing the belief away costs one re-application.
     """
     try:
+        import mc_lora_ram
         from modules.sd_models import model_data
 
+        if mc_lora_ram.is_blob(model_data.sd_model):
+            # A blob has no state to rebuild from: its merged weights are the
+            # model. The one way to make the host start over is the checkpoint
+            # read again, and nothing is ever merged on top of a blob.
+            return bool(drop_image_model(f"Cold LoRA — {reason or 'its LoRA state cannot be trusted'}"))
         return mc_lora.invalidate(model_data.sd_model, reason)
     except Exception:
         logger.debug("Model Chain: could not invalidate the prepared LoRA state", exc_info=True)
@@ -2577,6 +2614,19 @@ def ensure_resident(name: str, modules=None) -> str:
 
         target_key = _loading_parameters_key()
         entry = _cache.get(target_key)
+
+        if entry is not None and _is_real_model(entry.sd_model):
+            barred = _blob_barred(entry, STAGE_2)
+            if barred:
+                # A blob that may not keep its baked LoRA has no warm path: the
+                # host must read the checkpoint, so the entry goes and the
+                # reload below is the cold one it would have been without a
+                # cache. Nothing is merged on top of a blob.
+                _cache.drop(target_key)
+                logger.info("Model Chain: %s carries a cold LoRA and %s — reloading it from "
+                            "disk rather than merging on top of it", entry.checkpoint_name,
+                            barred)
+                entry = None
 
         if entry is not None and _is_real_model(entry.sd_model):
             # Warm path: pointer swap. forge_model_reload() will return early, so no
@@ -2654,6 +2704,19 @@ def reinstate_pending() -> bool:
         # the cache, and Stage 2's arrival is exactly when the budget runs out
         # -- so the entry must not be re-read afterwards.
         restored = entry.sd_model
+
+        barred = _blob_barred(entry, STAGE_1)
+        if barred:
+            # See ensure_resident: a blob whose baked LoRA may not come back as
+            # it is has no warm path. Stage 2's model is still put away, and the
+            # host reads Stage 1 from disk.
+            _cache.drop(key)
+            logger.info("Model Chain: %s carries a cold LoRA and %s — Stage 1 reloads from "
+                        "disk rather than merging on top of it", entry.checkpoint_name, barred)
+            capture_stage_2_components()
+            _stash_current(stage=STAGE_2)
+            _pending_restore = None
+            return False
 
         # The outgoing model is Stage 2's, and this is the last moment it is
         # reachable. Both the preload and an ordinary Generate come through here.

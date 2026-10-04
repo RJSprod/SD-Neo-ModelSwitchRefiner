@@ -522,6 +522,12 @@ Under **Settings → Model Chain**:
   see [Prepared LoRA state](#prepared-lora-state). Turn it off if a LoRA
   misbehaves after a switch; every restored model then rebuilds its LoRA state
   from scratch, which is slower but leaves nothing to be wrong about.
+- **LoRA originals in system RAM** (default Warm) — see
+  [Warm LoRA, Cold LoRA](#warm-lora-cold-lora). Also the **Warm LoRA / Cold
+  LoRA** switch in the Forge Assistant's ⋯ menu, which is the same setting.
+  Cold frees the un-merged weights Forge keeps after a LoRA merge, about 12 GB
+  for a Krea-sized model, at the price of a reload from disk whenever the LoRA
+  set changes.
 - **Predict progress and ETA for the whole chained job** (default on) — see
   [Progress and ETA](#progress-and-eta).
 - **Bring the image model back after VibeVoice** (default Automatic) and **Keep
@@ -1026,6 +1032,71 @@ would *match* and should not be believed.
 Invalidation is always the conservative direction — the worst it can do is make
 the host redo work it could have skipped. Nothing here ever writes a hash, only
 clears one.
+
+#### Warm LoRA, Cold LoRA
+
+Forge merges a LoRA *into* the weights, and keeps a way back: for every layer it
+patches, the original weight is filed in the patcher's `backup`, on the offload
+device — system RAM — and written back whenever the LoRA set changes or the
+model is unloaded. That is what makes a LoRA change a round trip through RAM
+(median twenty seconds in one user's log) rather than a read of the checkpoint.
+It is also RAM the machine does not get back for as long as the LoRA is merged.
+From that log, the same model on the same card:
+
+| moment | free RAM |
+| --- | --- |
+| model on the card, no LoRA | 38.6 GB |
+| the same model, first LoRA merged | 26.5 GB |
+| after a restart, no LoRA | 32.3 GB |
+| first LoRA merged again | 20.3 GB |
+
+Twelve gigabytes: the whole 12.6 GB transformer, because the LoRA touched nearly
+every layer. **Warm LoRA** is Forge's way and the default; nothing above changes.
+**Cold LoRA** frees those originals — the moment it is chosen, if nothing is
+generating, and after every generation otherwise — and the loaded model becomes
+a *blob* the extension owns: the merged weights are the model now, with no
+record of what they were.
+
+The rule that makes a blob safe is **nothing is ever merged on top of one**. A
+blob serves the LoRA set baked into it exactly as it is, and the host's own
+early return makes an unchanged set cost nothing. Any other set — a weight
+changed, a LoRA added, the set reordered, every LoRA removed — *evicts* the
+blob: the extension drops it with Forge's own Unload at the start of the
+generation, before the host parses the prompt's networks, so the host reads the
+checkpoint from disk and merges the new set into fresh weights. That cold load is
+the price, and the console says so:
+
+```
+Model Chain: Cold LoRA — the prompt asks for <lora:x:0.8> and the model carries
+             <lora:x:1.0> baked in; the checkpoint reloads from disk for this
+             generation rather than merging on top of a blob
+```
+
+The prompt is read the way the host reads it: the positive prompts, with styles
+applied and Settings' *Add network to prompt* added, and with hires fix on, the
+hires prompt as a second set when it differs — a generation that would change
+sets half way through evicts the blob too. Under that there is a net at the last
+hook before sampling: if the host has rebuilt its LoRA state over a blob
+anyway, the new patches are taken off before any weight moves, the generation
+is stopped rather than finished on the wrong weights, and the model is dropped
+at the start of the next one. The cache plays by the same rule — a cached blob
+that may not keep its state (the other stage, a state that changed while it was
+cached, the preserve setting turned off) is read from disk rather than marked
+for the rebuild an ordinary model gets, and so is a blob whose refine failed.
+
+What is never baked: a model only partly on the card (the host applies the LoRA
+to the offloaded layers at run time from the very patches a bake would clear), a
+LoRA applied on the fly (nothing is merged), and a merge the host has not
+finished (its stamp on the model does not match the patcher). Each is said on the
+console; none is an error.
+
+Turning **Warm** back on frees nothing and restores nothing: the originals are
+gone. The blob stays a blob until its next LoRA change, and from that reload on
+the originals are kept, because Warm is on. So the scenario this is built for
+reads: RAM is getting low, flip to Cold, twelve gigabytes come back; flip to Warm
+later and the *next* LoRA stays warm. The switch is in the Forge Assistant's ⋯
+menu, under **Models**, and in Settings → Model Chain → **LoRA originals in
+system RAM**; the header's free-memory tooltip says how much the originals hold.
 
 #### Keeping the image model in VRAM (experimental, off by default)
 

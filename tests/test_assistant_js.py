@@ -2479,7 +2479,8 @@ class TestFreeFloat:
         assert found["labels"] == ["Chat · Ada", "New chat", "Threads",
                                    "Composer", "Auto Attach", "Send to Generate",
                                    "Panel", "Free Float",
-                                   "Models", "Unload All Models", "Unload LLM"]
+                                   "Models", "Warm LoRA", "Cold LoRA",
+                                   "Unload All Models", "Unload LLM"]
         assert found["checked"] == "false"
         assert found["role"] == "menuitemcheckbox", (
             "it reports a state, so a screen reader can say whether it is on")
