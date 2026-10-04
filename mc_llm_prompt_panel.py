@@ -426,13 +426,16 @@ def _load_session(identifier):
                 for name in _ORDER]
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(found.created))
     if getattr(found, "no_settings", False):
-        # Written by the external API's LTX 2.3 writer, not by this panel:
-        # the words come back and the controls stay exactly as they are,
-        # because there were none -- and the line says so, so nobody takes
-        # the panel's current settings for the ones that wrote it.
+        # Written by the external API's LTX writer, not by this panel: the
+        # words come back and the controls stay exactly as they are, because
+        # there were none -- and the line says so, so nobody takes the
+        # panel's current settings for the ones that wrote it.
+        import mc_llm_ltx
+
         who = found.origin or "another extension"
+        model = mc_llm_ltx.model_name(getattr(found, "written_for", ""))
         return ([found.intent, found.positive, found.negative,
-                 ui.notice(f"Loaded an LTX 2.3 prompt written for {who} on {stamp} "
+                 ui.notice(f"Loaded an {model} prompt written for {who} on {stamp} "
                            f"(seed {found.seed}). It has no settings, so the controls "
                            f"were left as they are.")] + restored)
     return ([found.intent, found.positive, found.negative,

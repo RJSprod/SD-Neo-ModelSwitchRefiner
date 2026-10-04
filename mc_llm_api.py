@@ -1,4 +1,4 @@
-"""The surface another extension imports: MiniMax H3 prompts, and LTX 2.3 ones.
+"""The surface another extension imports: MiniMax H3 prompts, and LTX 2.3 and 2.5 ones.
 
 ``docs/21-external-llm-api.md`` is the document written for whoever is on the
 other end of this; what follows is why it is shaped the way it is.
@@ -11,12 +11,14 @@ other end of this; what follows is why it is shaped the way it is.
     print(mc_llm_api.status(job)["prompt"])
 
     job = mc_llm_api.submit_ltx("she turns and waves", first_frame=picture)
+    job = mc_llm_api.submit_ltx("she turns and waves", first_frame=picture, model="ltx25")
 
 Two writers, one queue. MiniMax H3 was the first and is the reason the queue
-exists; LTX 2.3 came second, for Mini Paint NEO's Clipboard tab sending to
-WanGP's LTX 2.3 Distilled models. Its instructions are this extension's own,
-written from Lightricks' prompt enhancer (:mod:`mc_llm_ltx` says how and where
-from), its run is :func:`mc_llm_sessions.ltx`, and its finished prompts go in
+exists; LTX came second, for Mini Paint NEO's Clipboard tab sending to WanGP's
+LTX 2.3 Distilled models, and since 2026-10-04 its LTX 2.5 Distilled ones too.
+Its instructions are this extension's own, written from Lightricks' prompt
+enhancer (:mod:`mc_llm_ltx` says how and where from) and the same for both
+models, its run is :func:`mc_llm_sessions.ltx`, and its finished prompts go in
 Prompt Studio's Saved generations as *no settings* entries -- Prompt Studio is
 LLM Studio's LTX workspace. Everything else -- the queue, the record, the feed,
 cancellation, the refusals at the door -- is shared, because it is the same
@@ -119,6 +121,14 @@ LTX = "ltx23"
 request's ``variant`` reads. Its own constant in :mod:`mc_llm_ltx`; spelled here
 too so a caller has it without a second import."""
 
+LTX25 = "ltx25"
+"""LTX 2.5, the second model :func:`submit_ltx` writes for (its ``model``). Its
+prompts are written under LTX 2.3's instructions, so :func:`system_prompt` and
+:func:`system_prompts` answer it with the same pair."""
+
+LTX_MODELS = (LTX, LTX25)
+"""What :func:`submit_ltx`'s ``model`` takes, as :func:`capabilities` lists it."""
+
 Rejected = jobs.Rejected
 """Re-exported so a caller catches one name rather than importing two modules."""
 
@@ -209,11 +219,11 @@ def submit_minimax(prompt: str, *, variant: str = "", first_frame=None, last_fra
 
 
 def submit_ltx(prompt: str, *, first_frame=None, system_prompt: str | None = None, seed=None,
-               origin: str = "", remember: bool = True) -> str:
-    """Queue one LTX 2.3 prompt. Returns the id to track it by.
+               origin: str = "", remember: bool = True, model: str = LTX) -> str:
+    """Queue one LTX prompt. Returns the id to track it by.
 
     The same door as :func:`submit_minimax`, with the same refusals, and two
-    differences that are the whole of what LTX 2.3 is here:
+    differences that are the whole of what LTX is here:
 
     *One picture slot, shown rather than described.* ``first_frame`` is the
     video's first frame, and the model is given the picture itself in the same
@@ -231,6 +241,15 @@ def submit_ltx(prompt: str, *, first_frame=None, system_prompt: str | None = Non
     the one with a first frame or the one without, whichever it would have
     used -- and ``@`` / ``@@`` in the prompt text still append to or replace
     it, as for MiniMax. ``seed`` is drawn per request unless given.
+
+    ``model`` is the LTX model the prompt is for: ``"ltx23"`` (the default, and
+    what every caller written before LTX 2.5 means) or ``"ltx25"``. Both are
+    written under the same instructions -- the user's choice, see
+    :mod:`mc_llm_ltx` -- so the model changes what the request is called and
+    nothing it is asked: its ``variant``, its status line, the console and
+    Prompt Studio's history say which. Anything else is refused with
+    ``unknown_model`` rather than written under another model's name;
+    :func:`capabilities` lists the ones this installation takes.
     """
     if not _enabled():
         raise Rejected("LLM Studio is switched off in this WebUI's settings, so nothing "
@@ -242,6 +261,11 @@ def submit_ltx(prompt: str, *, first_frame=None, system_prompt: str | None = Non
     if not text:
         raise Rejected("A prompt is required — the writer writes from one.",
                        "empty_prompt")
+
+    chosen = str(model or LTX).strip().casefold()
+    if chosen not in LTX_MODELS:
+        raise Rejected(f"There is no LTX model called {str(model)[:40]!r} here. Use one of "
+                       f"{', '.join(LTX_MODELS)}.", "unknown_model")
 
     used = FIRST_FRAME if first_frame is not None else ""
     if used and _sees() is False:
@@ -260,7 +284,7 @@ def submit_ltx(prompt: str, *, first_frame=None, system_prompt: str | None = Non
                        "the default instructions.", "empty_system_prompt")
 
     return jobs.submit(jobs.Job(
-        kind=jobs.KIND_LTX, origin=str(origin or "")[:120], variant=LTX, prompt=text,
+        kind=jobs.KIND_LTX, origin=str(origin or "")[:120], variant=chosen, prompt=text,
         seed=resolved, system=override, images=(used,) if used else (), image_used=used,
         image_ignored=(), image_name=_image_name(first_frame, used) if used else "",
         remember=bool(remember), _image=image)).identifier
@@ -439,8 +463,9 @@ def variants() -> tuple:
     """``(("fl2va", "FL2VA — from text or a frame"), ...)``.
 
     MiniMax's two, as ever: this is what :func:`submit_minimax`'s ``variant``
-    takes. The LTX 2.3 writer is not a variant of anything and has its own
-    function; :data:`LTX` is its name in :func:`system_prompts`.
+    takes. The LTX writer is not a variant of anything and has its own
+    function; :data:`LTX` and :data:`LTX25` are its names in
+    :func:`system_prompts`.
     """
     from prompt_master.minimax import enhancer
 
@@ -455,12 +480,13 @@ def system_prompt(variant: str = "", *, has_image: bool = False) -> str:
     a caller that asked for "the FL2VA system prompt" without saying which would
     be handed one of them arbitrarily.
 
-    ``"ltx23"`` (:data:`LTX`) answers with the LTX 2.3 writer's two, the same
-    way: with a first frame or without one. Anything else resolves to a MiniMax
-    variant, as it always did.
+    ``"ltx23"`` (:data:`LTX`) answers with the LTX writer's two, the same
+    way: with a first frame or without one. ``"ltx25"`` answers with the very
+    same two, because LTX 2.5 is written for under LTX 2.3's instructions.
+    Anything else resolves to a MiniMax variant, as it always did.
     """
     chosen = str(variant or "").strip().casefold()
-    if chosen == LTX:
+    if chosen in LTX_MODELS:
         import mc_llm_ltx
 
         return mc_llm_ltx.instructions(bool(has_image))
@@ -477,9 +503,11 @@ def system_prompts() -> dict:
     override is the one caller that most needs to know what the default was
     trying to produce.
 
-    MiniMax's two variants and, under ``"ltx23"``, the LTX 2.3 writer's pair,
-    with Lightricks' prompting guide as its structure. A caller written before
-    the LTX writer existed reads the keys it knows and ignores the new one.
+    MiniMax's two variants and, under ``"ltx23"``, the LTX writer's pair,
+    with Lightricks' prompting guide as its structure. ``"ltx25"`` holds the
+    same pair and says so with ``same_as``: one set of instructions serves both
+    LTX models, so a caller keeping an override keeps one for both. A caller
+    written before either existed reads the keys it knows and ignores the rest.
     """
     import mc_llm_ltx
     from prompt_master.minimax import enhancer
@@ -495,6 +523,7 @@ def system_prompts() -> dict:
                   "image": mc_llm_ltx.instructions(True),
                   "structure": mc_llm_ltx.STRUCTURE,
                   "max_tokens": mc_llm_ltx.MAX_TOKENS}
+    found[LTX25] = dict(found[LTX], same_as=LTX)
     return found
 
 
@@ -510,6 +539,7 @@ def capabilities() -> dict:
     found = {
         "api_version": API_VERSION,
         "kinds": list(jobs.KINDS),
+        "ltx_models": list(LTX_MODELS),
         "enabled": _enabled(),
         "variants": [value for value, _ in variants()],
         "slots": list(SLOTS),

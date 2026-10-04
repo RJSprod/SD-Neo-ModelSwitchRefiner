@@ -120,9 +120,10 @@ you can act on. It carries a `.code`:
 | `no_vision` | A picture was sent but the model running has no vision projector. Nothing was queued. The same refusal the panel makes before starting. |
 | `queue_full` | `MAX_QUEUED` (32) requests are already waiting. Retry later. |
 | `empty_origin` | `cancel_all()` was called without an origin (§9). |
+| `unknown_job` | `subscribe()` was given an id that does not exist (§7). |
+| `unknown_model` | `submit_ltx()` was given a `model` this installation does not write for (§14.1). Nothing was queued. |
 
 `submit_ltx` (§14) raises the same codes for the same reasons.
-| `unknown_job` | `subscribe()` was given an id that does not exist (§7). |
 
 New codes may be added; treat one you do not recognise as a refusal you cannot
 retry your way past, and show its message.
@@ -379,6 +380,7 @@ loses some of the typewriter effect and none of the answer.
 mc_llm_api.capabilities()
 # {"api_version": 1,
 #  "kinds": ["minimax", "ltx"],
+#  "ltx_models": ["ltx23", "ltx25"],
 #  "variants": ["fl2va", "ref2va"],
 #  "slots": ["first_frame", "last_frame", "reference"],
 #  "events": [...],
@@ -583,6 +585,15 @@ Everything below is additive. `API_VERSION` is still `1`; a caller written
 against the first revision keeps working unchanged, and one that matches on
 refusal codes exhaustively should read the note under §3.
 
+**V1, fourth revision** — LTX 2.5, under the LTX 2.3 writer's instructions:
+
+| Added | Where |
+|---|---|
+| `submit_ltx(..., model=)`: `"ltx23"` (the default) or `"ltx25"`; anything else is `Rejected("unknown_model")`. `LTX25 = "ltx25"`, `LTX_MODELS` | §14.1 |
+| `capabilities()["ltx_models"]` is `["ltx23", "ltx25"]` | §8, §14.1 |
+| `system_prompt("ltx25", has_image=)` answers LTX 2.3's two; `system_prompts()["ltx25"]` holds the same pair with `same_as: "ltx23"` | §14.3 |
+| A record's `variant` is the model, `"ltx23"` or `"ltx25"`; its stage, the console and Prompt Studio's entry name it ("LTX 2.5") | §14.2, §14.4, §14.5 |
+
 **V1, third revision** — the LTX 2.3 writer:
 
 | Added | Where |
@@ -616,12 +627,21 @@ refusal codes exhaustively should read the note under §3.
 `system_prompts`, `variants`, `capabilities`.
 
 
-## 14. LTX 2.3 prompts
+## 14. LTX 2.3 and 2.5 prompts
 
 Added for Mini Paint NEO's Clipboard tab, which sends to WanGP's **LTX 2.3
 Distilled** models (and its gallery's Send to WanGP popup, which builds the
-same request). The queue, the record, the feed, cancellation and every refusal
-at the door are §3–§9's, unchanged; what differs is below.
+same request), and since the fourth revision to its **LTX 2.5 Distilled** ones
+as well. The queue, the record, the feed, cancellation and every refusal at
+the door are §3–§9's, unchanged; what differs is below.
+
+**One writer, one set of instructions, two models.** At the user's request LTX
+2.5 keeps LTX 2.3's system prompt: a request for either is asked exactly the
+same thing — the same two defaults (§14.3), the same user turn, the same
+sampler. What `model` changes is what the request is called: its `variant`, its
+stage text, the console and its Prompt Studio entry say "LTX 2.5" for a 2.5
+prompt, so nothing written for 2.5 claims to be for 2.3. Lightricks' own LTX
+2.5 enhancer prompts (the `gemma4_*` pair) are not used.
 
 ### 14.1 Asking
 
@@ -633,12 +653,20 @@ job_id = mc_llm_api.submit_ltx(
     seed=None,                          # optional; drawn per request
     origin="my-extension",              # optional label
     remember=True,                      # file it in Prompt Studio
+    model="ltx23",                      # optional: "ltx23" (default) or "ltx25"
 )
 ```
 
 `capabilities()["kinds"]` contains `"ltx"` on an installation that has the
 writer; a caller that must work against an older one checks for it, or for
 `hasattr(mc_llm_api, "submit_ltx")`.
+
+`model` names the LTX model the prompt is for, case-insensitive, and
+`capabilities()["ltx_models"]` lists the ones this installation takes. An
+installation from before LTX 2.5 has no `ltx_models` and no `model` keyword:
+leave the keyword out there — the prompt it writes is the same one, under the
+same instructions, only filed as LTX 2.3's. A name that is not listed is
+refused with `unknown_model` rather than written under another model's name.
 
 ### 14.2 One picture, shown
 
@@ -650,8 +678,9 @@ record's `caption` is empty. A picture needs a model with a vision projector,
 exactly as in §4 (`no_vision` at the door). There is no last-frame or reference
 slot: a caller with a last frame sends it to the video model, not here.
 
-The record reads `kind: "ltx"`, `variant: "ltx23"`, `images: ["first_frame"]` and
-`image_used: "first_frame"` when a picture was sent.
+The record reads `kind: "ltx"`, `variant: "ltx23"` (or `"ltx25"`, the model it
+was asked for), `images: ["first_frame"]` and `image_used: "first_frame"` when a
+picture was sent.
 
 ### 14.3 The instructions
 
@@ -659,11 +688,16 @@ Two defaults, with a first frame and without one:
 
 ```python
 mc_llm_api.system_prompts()["ltx23"]
-# {"label": "LTX 2.3 — from text or a first frame",
+# {"label": "LTX 2.3 and 2.5 — from text or a first frame",
 #  "text": "…", "image": "…", "structure": "…Lightricks' prompting guide…",
 #  "max_tokens": 768}
 mc_llm_api.system_prompt("ltx23", has_image=True)
+mc_llm_api.system_prompts()["ltx25"]     # the same pair, and "same_as": "ltx23"
+mc_llm_api.system_prompt("ltx25", has_image=True) == mc_llm_api.system_prompt("ltx23", has_image=True)
 ```
+
+The pair is LTX 2.3's and LTX 2.5 runs under it too — one set of instructions,
+so a caller that keeps an override (Mini Paint does) keeps one for both.
 
 They are written from Lightricks' LTX-2 prompt enhancer — the Gemma 3 pair
 LTX 2.3 runs (`gemma3_i2v_system_prompt.txt`, `gemma3_t2v_system_prompt.txt`)
@@ -685,20 +719,27 @@ removed.
 
 ### 14.4 Where it is filed
 
-With `remember=True`, a finished LTX 2.3 prompt goes in **LLM Studio → Prompt
+With `remember=True`, a finished LTX prompt goes in **LLM Studio → Prompt
 Studio → Saved generations** — Prompt Studio is LLM Studio's LTX workspace — as
 an entry marked **[No settings]**: the typed prompt as its intent, the written
 prompt as its positive, no negative, and no controls, because it was not written
 from Prompt Studio's controls. Loading it brings the words back, leaves every
-control as it is, and says so. It never appears in MiniMax's Saved prompts.
+control as it is, and says so — naming the model it was written for ("Loaded an
+LTX 2.5 prompt written for minipaint-clipboard…", from the entry's
+`written_for`; an entry saved before LTX 2.5 existed loads as the LTX 2.3 prompt
+it was). It never appears in MiniMax's Saved prompts.
 
 ### 14.5 What the user sees
 
-An LTX 2.3 request runs under the workload lock like any other run and holds no
-panel (§10). The console names it as one:
+An LTX request runs under the workload lock like any other run and holds no
+panel (§10). The console names it by its model:
 
 ```
 Model Chain: LTX 2.3 request 3fa2c1d07b6e4a19 queued at position 1 for minipaint-clipboard
 Model Chain: LLM run started — an LTX 2.3 prompt from a first frame (request 3fa2c1d07b6e4a19 from minipaint-clipboard)
 Model Chain: LTX 2.3 request 3fa2c1d07b6e4a19 done after 12.0s
+Model Chain: LTX 2.5 request 8c01d2e4f5a6b7c8 queued at position 1 for minipaint-clipboard
 ```
+
+Its stage — `status()["stage"]`, the `status` event — names it too: "Looking
+at the first frame and writing the LTX 2.5 prompt…".

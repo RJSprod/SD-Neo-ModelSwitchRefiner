@@ -101,7 +101,8 @@ class FakeClient:
 
     def stream_chat(self, messages, max_tokens, seed, on_text, cancel=None,
                     temperature=0.6, top_p=0.9):
-        self.calls.append({"messages": messages, "seed": seed})
+        self.calls.append({"messages": messages, "seed": seed, "max_tokens": max_tokens,
+                           "temperature": temperature, "top_p": top_p})
         answer = self.answers.pop(0) if self.answers else "An H3 prompt."
         on_text(answer)
         return answer
@@ -408,9 +409,9 @@ class TestSystemPrompts:
     def test_both_variants_publish_both_of_their_default_instructions(self):
         found = api.system_prompts()
 
-        # The two MiniMax variants, and the LTX 2.3 writer's pair beside them
-        # (TestLtx says what that one holds).
-        assert set(found) == {enhancer.FL2VA, enhancer.REF2VA, api.LTX}
+        # The two MiniMax variants, and the LTX writer's pair beside them, under
+        # LTX 2.3's name and LTX 2.5's (TestLtx and TestLtx25 say what they hold).
+        assert set(found) == {enhancer.FL2VA, enhancer.REF2VA, api.LTX, api.LTX25}
         for variant in (enhancer.FL2VA, enhancer.REF2VA):
             assert found[variant]["text"] == enhancer.instructions(variant, False)
             assert found[variant]["image"] == enhancer.instructions(variant, True)
@@ -1330,12 +1331,12 @@ class TestThePanelIsBlocked:
 
 def ltx_writing(text: str = "She lifts the cup.", *, chunks: int = 2, fail: str = "",
                 record: list | None = None):
-    """A stand-in for one LTX 2.3 run, in the real event order: no caption."""
+    """A stand-in for one LTX run, in the real event order: no caption."""
 
-    def double(prompt, image, seed, cancel, system=None, trace=""):
+    def double(prompt, image, seed, cancel, system=None, trace="", model=api.LTX):
         if record is not None:
             record.append({"prompt": prompt, "image": image, "seed": seed,
-                           "system": system, "trace": trace})
+                           "system": system, "trace": trace, "model": model})
         yield sessions.Event(sessions.STATUS, "Preparing the model…")
         for index in range(chunks):
             yield sessions.Event(sessions.CHUNK, f"part{index} ")
@@ -1450,6 +1451,16 @@ class TestLtx:
 
     def test_capabilities_name_both_kinds(self):
         assert api.capabilities()["kinds"] == ["minimax", "ltx"]
+
+    def test_a_request_with_no_model_is_an_ltx_2_3_one(self, monkeypatch):
+        """What every caller written before LTX 2.5 means, and gets."""
+        seen: list = []
+        monkeypatch.setattr(sessions, "ltx", ltx_writing(record=seen))
+        identifier = api.submit_ltx("she waves")
+        jobs.drain_once()
+
+        assert api.status(identifier)["variant"] == api.LTX
+        assert seen[0]["model"] == api.LTX
 
     def test_its_two_defaults_are_published_with_lightricks_structure(self):
         import mc_llm_ltx
@@ -1679,3 +1690,160 @@ class TestTheMinimaxPanelAndLtx:
         assert "Cancelled 1 external request" in status
         assert api.status(gone)["state"] == jobs.CANCELLED
         assert api.status(kept)["state"] == jobs.QUEUED
+
+
+class TestLtx25:
+    """LTX 2.5: the same writer under the same instructions, named for 2.5.
+
+    The user asked for LTX 2.5 Distilled to keep LTX 2.3's system prompt, so
+    a request for it differs from a 2.3 one in what it is called -- its
+    ``variant``, its status line, the console, Prompt Studio's history -- and
+    in nothing it is asked.
+    """
+
+    def test_a_request_for_2_5_is_an_ltx_request_named_for_2_5(self, ltx_written):
+        identifier = api.submit_ltx("she turns and waves", model="ltx25",
+                                    origin="minipaint-clipboard")
+
+        found = api.status(identifier)
+        assert found["kind"] == "ltx"
+        assert found["variant"] == api.LTX25
+        assert found["state"] == jobs.QUEUED
+
+    def test_the_model_is_read_without_regard_to_case_or_spaces(self, ltx_written):
+        assert api.status(api.submit_ltx("she waves", model=" LTX25 "))["variant"] == api.LTX25
+
+    def test_it_reaches_the_run_so_the_run_can_name_it(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(sessions, "ltx", ltx_writing(record=seen))
+        api.submit_ltx("she waves", model="ltx25")
+        jobs.drain_once()
+
+        assert seen[0]["model"] == api.LTX25
+
+    def test_an_unknown_model_is_refused_at_the_door(self, ltx_written):
+        """Never written under another model's name."""
+        with pytest.raises(api.Rejected) as raised:
+            api.submit_ltx("she waves", model="ltx30")
+
+        assert raised.value.code == "unknown_model"
+        assert "ltx25" in str(raised.value)
+        assert jobs.active() is False
+
+    def test_capabilities_list_both_models(self):
+        assert api.capabilities()["ltx_models"] == [api.LTX, api.LTX25]
+
+    def test_its_defaults_are_the_2_3_pair(self):
+        import mc_llm_ltx
+
+        assert api.system_prompt("ltx25", has_image=True) == mc_llm_ltx.IMAGE_SYSTEM_PROMPT
+        assert api.system_prompt("LTX25") == mc_llm_ltx.TEXT_SYSTEM_PROMPT
+        published = api.system_prompts()
+        assert published[api.LTX25]["image"] == published[api.LTX]["image"]
+        assert published[api.LTX25]["text"] == published[api.LTX]["text"]
+        assert published[api.LTX25]["structure"] == published[api.LTX]["structure"]
+        assert published[api.LTX25]["same_as"] == api.LTX
+        assert "same_as" not in published[api.LTX]
+
+    def test_with_a_picture_it_is_asked_exactly_what_2_3_is_asked(self, client, sighted, tmp_path):
+        """All the way down: the same system prompt, the same user turn, the same sampler."""
+        api.submit_ltx("she drinks", first_frame=picture(tmp_path), seed=5)
+        api.submit_ltx("she drinks", first_frame=picture(tmp_path), seed=5, model="ltx25")
+        jobs.drain_once()
+        jobs.drain_once()
+
+        older, newer = client.calls[0], client.calls[1]
+        assert newer["temperature"] == 0.7 and newer["max_tokens"] > 0
+        assert newer["messages"][0] == older["messages"][0]
+        assert newer["messages"][1]["content"][1] == older["messages"][1]["content"][1]
+        assert {key: value for key, value in newer.items() if key != "messages"} == \
+            {key: value for key, value in older.items() if key != "messages"}
+
+    def test_without_one_too(self, client):
+        import mc_llm_ltx
+
+        api.submit_ltx("a dog runs on a beach", model="ltx25")
+        jobs.drain_once()
+
+        assert client.system == mc_llm_ltx.TEXT_SYSTEM_PROMPT.rstrip()
+        assert client.calls[0]["messages"][1]["content"] == "user prompt: a dog runs on a beach"
+
+    def test_its_status_line_says_2_5_and_a_2_3_one_still_says_2_3(self, client, sighted,
+                                                                    tmp_path):
+        """The stage text Mini Paint's queue list shows under an enhancing job."""
+        newer = api.submit_ltx("she drinks", first_frame=picture(tmp_path), model="ltx25")
+        older = api.submit_ltx("a dog runs")
+        newer_feed, older_feed = api.subscribe(newer), api.subscribe(older)
+        jobs.drain_once()
+        jobs.drain_once()
+
+        def stages(feed):
+            return " ".join(event["data"]["text"] for event in feed.poll()
+                            if event["event"] == jobs.EV_STATUS)
+
+        assert "writing the LTX 2.5 prompt" in stages(newer_feed)
+        assert "LTX 2.3" not in stages(newer_feed)
+        assert "Writing the LTX 2.3 prompt" in stages(older_feed)
+
+    def test_the_console_names_2_5(self, client, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            identifier = api.submit_ltx("a dog runs", model="ltx25", origin="minipaint-clipboard")
+            jobs.drain_once()
+
+        lines = [record.getMessage() for record in caplog.records]
+        assert any(f"LTX 2.5 request {identifier} queued" in line for line in lines), lines
+        assert any("an LTX 2.5 prompt" in line and "LLM run started" in line for line in lines), lines
+        assert not any("LTX 2.3" in line for line in lines), lines
+
+    def test_its_prompt_studio_entry_says_it_was_for_2_5(self, ltx_written):
+        import mc_llm_prompt_panel
+
+        api.submit_ltx("she waves", model="ltx25", origin="minipaint-clipboard")
+        jobs.drain_once()
+        entry = mc_llm_state.prompt_sessions()[0]
+
+        assert entry.no_settings is True
+        assert entry.written_for == api.LTX25
+        _intent, _positive, _negative, notice, *_controls = mc_llm_prompt_panel._load_session(
+            entry.identifier)
+        assert "LTX 2.5 prompt" in notice
+        assert "LTX 2.3" not in notice
+
+    def test_an_entry_saved_before_2_5_loads_as_the_2_3_prompt_it_was(self):
+        import mc_llm_prompt_panel
+
+        entry = mc_llm_state.PromptSession(intent="old", positive="p", no_settings=True,
+                                           origin="minipaint-clipboard")
+        mc_llm_state.save_prompt_session(entry)
+        found = mc_llm_state.prompt_sessions()[0]
+
+        assert found.written_for == ""
+        notice = mc_llm_prompt_panel._load_session(found.identifier)[3]
+        assert "LTX 2.3 prompt" in notice
+
+    def test_the_names_and_the_labels(self):
+        import mc_llm_ltx
+
+        assert mc_llm_ltx.model_name("ltx25") == "LTX 2.5"
+        assert mc_llm_ltx.model_name("ltx23") == mc_llm_ltx.model_name("") == "LTX 2.3"
+        assert mc_llm_ltx.label(True, "ltx25") == \
+            "Looking at the first frame and writing the LTX 2.5 prompt"
+        assert mc_llm_ltx.label(False) == "Writing the LTX 2.3 prompt"
+        assert jobs.kind_name(jobs.KIND_LTX, "ltx25") == "LTX 2.5"
+        assert jobs.kind_name(jobs.KIND_LTX, "ltx23") == "LTX 2.3"
+        assert jobs.kind_name(jobs.KIND_MINIMAX, "fl2va") == "MiniMax"
+
+    @pytest.mark.parametrize("raw", ["LTX 2.5 prompt: She lifts the cup.",
+                                     "**LTX-2.5 Prompt:** She lifts the cup."])
+    def test_a_leading_ltx_2_5_label_is_taken_off_too(self, raw):
+        import mc_llm_ltx
+
+        assert mc_llm_ltx.clean(raw) == "She lifts the cup."
+
+    def test_an_ltx_2_5_request_does_not_hold_the_minimax_panel_either(self, ltx_written):
+        api.submit_ltx("she waves", model="ltx25")
+
+        assert jobs.active() is True
+        assert mc_llm_minimax_panel.jobs_active() is False

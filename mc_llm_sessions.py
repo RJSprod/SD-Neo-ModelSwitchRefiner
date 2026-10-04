@@ -806,13 +806,13 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
 
 
 # --------------------------------------------------------------------------- #
-# LTX 2.3, for the external API
+# LTX 2.3 and 2.5, for the external API
 # --------------------------------------------------------------------------- #
 
 
 def _ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
-         system: str | None = None):
-    """One LTX 2.3 prompt, the way Lightricks' own enhancer asks for it.
+         system: str | None = None, model: str = "ltx23"):
+    """One LTX prompt, the way Lightricks' own enhancer asks for it.
 
     One pass, not two: with a first frame the picture is *in* the request, and
     the model writes while looking at it -- Lightricks' ``enhance_i2v`` shape,
@@ -822,10 +822,14 @@ def _ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
 
     The prompt is cleaned onto one line (:func:`mc_llm_ltx.clean`), because
     WanGP reads an LTX prompt one line per prompt.
+
+    ``model`` is the LTX model the prompt is for (``ltx23``, ``ltx25``). The
+    instructions are the same for both; the model only names the run.
     """
     import mc_llm_ltx as ltx_writer
 
-    gpu = _Gpu("an LTX 2.3 prompt", cancel)
+    name = ltx_writer.model_name(model)
+    gpu = _Gpu(f"an {name} prompt", cancel)
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
@@ -838,7 +842,7 @@ def _ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
         for event in _placement_notes():
             yield event
 
-        yield Event(STATUS, f"{ltx_writer.label(image is not None)}…")
+        yield Event(STATUS, f"{ltx_writer.label(image is not None, model)}…")
         written = ""
         for chunk, result in _streamed(
                 lambda on_text: client.stream_chat(
@@ -861,7 +865,7 @@ def _ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
         gpu.release()
         yield Event(DONE, cleaned)
     except Exception as exc:
-        logger.debug("Model Chain: LTX 2.3 run failed", exc_info=True)
+        logger.debug("Model Chain: %s run failed", name, exc_info=True)
         gpu.release()
         yield Event(FAILED, str(exc))
     finally:
@@ -1331,19 +1335,21 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int,
 
 
 def ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
-        system: str | None = None, trace: str = ""):
-    """One LTX 2.3 prompt for the external API. See :func:`_ltx`.
+        system: str | None = None, trace: str = "", model: str = "ltx23"):
+    """One LTX prompt for the external API. See :func:`_ltx`.
 
-    Named on the console the way a MiniMax request is: what kind of run, whether
-    a first frame was shown, whether the caller replaced the instructions, and
-    the external queue's name for the request. Never the prompt, the picture or
-    the override.
+    Named on the console the way a MiniMax request is: what kind of run and for
+    which LTX model, whether a first frame was shown, whether the caller
+    replaced the instructions, and the external queue's name for the request.
+    Never the prompt, the picture or the override.
     """
-    yield from _traced("an LTX 2.3 prompt"
+    import mc_llm_ltx as ltx_writer
+
+    yield from _traced(f"an {ltx_writer.model_name(model)} prompt"
                        + (" from a first frame" if image is not None else "")
                        + (" under caller instructions" if system is not None else "")
                        + (f" ({trace})" if trace else ""),
-                       _ltx(prompt, image, seed, cancel, system))
+                       _ltx(prompt, image, seed, cancel, system, model))
 
 
 def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None,
