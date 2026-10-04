@@ -224,8 +224,8 @@ def jobs_active() -> bool:
     is not up yet: a gate that raised here would take the whole tab down to
     report that nothing was queued.
 
-    MiniMax requests only. The external queue also carries LTX 2.3 requests
-    (Mini Paint's Clipboard, sending to LTX 2.3 Distilled), and those are
+    MiniMax requests only. The external queue also carries LTX requests
+    (Mini Paint's Clipboard, sending to LTX 2.3 or 2.5 Distilled), and those are
     Prompt Studio's kind of work: this panel neither waits behind them nor
     offers to cancel them. A press here during one waits for the workload lock
     like any other panel run and says so.

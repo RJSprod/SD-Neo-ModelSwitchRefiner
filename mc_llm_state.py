@@ -447,7 +447,7 @@ class PromptSession:
     image_name: str = ""
     controls: dict = field(default_factory=dict)
     no_settings: bool = False
-    """An LTX 2.3 prompt another extension asked the external API for.
+    """An LTX prompt another extension asked the external API for.
 
     Written from a typed prompt (and a first frame) by the external writer, not
     from Prompt Studio's controls, so there are none to keep: ``controls`` is
@@ -458,6 +458,12 @@ class PromptSession:
     origin: str = ""
     """Who asked, for a no-settings entry -- the external API's origin label
     (``minipaint-clipboard``). Empty for every run of the panel itself."""
+    written_for: str = ""
+    """Which LTX model a no-settings entry was written for, by the external API's
+    name (``ltx23``, ``ltx25``). Both are written under the same instructions;
+    this is what the entry says it was for when it is loaded. Empty for every run
+    of the panel itself, and on an entry saved before LTX 2.5 existed, which was
+    an LTX 2.3 prompt."""
 
     NO_SETTINGS_MARK = "No settings"
 

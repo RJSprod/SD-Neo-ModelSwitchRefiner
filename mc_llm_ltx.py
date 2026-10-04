@@ -1,9 +1,9 @@
-"""The LTX 2.3 prompt writer: instructions and calling convention, no UI.
+"""The LTX prompt writer, for LTX 2.3 and 2.5: instructions and calling convention, no UI.
 
 Another extension -- Mini Paint NEO's Clipboard tab, sending to WanGP's LTX 2.3
-Distilled models -- asks :mod:`mc_llm_api` for an LTX 2.3 prompt. This module is
-everything about how that prompt is asked for: the two system prompts, the user
-turn, the sampler, the cleaning. The run itself is
+and LTX 2.5 Distilled models -- asks :mod:`mc_llm_api` for an LTX prompt. This
+module is everything about how that prompt is asked for: the two system prompts,
+the user turn, the sampler, the cleaning. The run itself is
 :func:`mc_llm_sessions.ltx`, over the same llama-server and under the same
 workload lock as every other mode.
 
@@ -15,7 +15,8 @@ read at commit ``9ec55f9f22798a3198d9c923856824821bc3317e``, 2026-10-02). LTX
 ``packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/
 gemma3_i2v_system_prompt.txt`` (a first frame and a request) and
 ``gemma3_t2v_system_prompt.txt`` (a request alone). The ``gemma4_*`` pair beside
-them is LTX 2.5's and is not used here. The repository's README adds the
+them is LTX 2.5's and is not used here, for LTX 2.5 either (see below). The
+repository's README adds the
 prompting guide the structure below follows: one flowing paragraph, start with
 the main action, then movements, appearances, environment, camera, light and
 colour, and changes, literal and precise, within about 200 words.
@@ -49,6 +50,18 @@ turn. With a first frame that turn is the picture and then
 *shown* to the model -- a vision request, not a caption pass first -- which is
 how Lightricks' own enhancer sees it and what the user asked for.
 
+LTX 2.5: the same writer
+------------------------
+WanGP's LTX 2.5 Distilled takes what its LTX 2.3 Distilled takes -- a prompt, a
+first frame, a last frame -- and Mini Paint's Clipboard sends to both. Its
+prompts are written under exactly these instructions: the user asked for LTX 2.5
+to keep the LTX 2.3 system prompt, so there is one pair of instructions for
+both, one default, and one override on the caller's side. Lightricks'
+``gemma4_*`` prompts for LTX 2.5 are not used. What the model changes is only
+what a request is called -- on the console, in its status line and in Prompt
+Studio's history -- so a 2.5 prompt never says it was written for 2.3
+(:data:`MODELS`, :func:`model_name`).
+
 One paragraph, always
 ---------------------
 WanGP reads an LTX prompt one line per prompt unless told otherwise, so a reply
@@ -64,14 +77,23 @@ import re
 LTX23 = "ltx23"
 """The writer's name on the external API, beside MiniMax's ``fl2va`` and ``ref2va``."""
 
-LABEL = "LTX 2.3 — from text or a first frame"
-"""What a caller may show for it."""
+LTX25 = "ltx25"
+"""LTX 2.5, written for under the same instructions as LTX 2.3 (see above)."""
+
+MODELS = (LTX23, LTX25)
+"""The LTX models this writer writes for, by the external API's names."""
+
+MODEL_NAMES = {LTX23: "LTX 2.3", LTX25: "LTX 2.5"}
+"""What the console, the status line and Prompt Studio call each one."""
+
+LABEL = "LTX 2.3 and 2.5 — from text or a first frame"
+"""What a caller may show for it: one set of instructions for both models."""
 
 KIND = "ltx"
 """The kind of request on the external queue."""
 
-STATUS_TEXT = "Writing the LTX 2.3 prompt"
-STATUS_IMAGE = "Looking at the first frame and writing the LTX 2.3 prompt"
+STATUS_TEXT = "Writing the {name} prompt"
+STATUS_IMAGE = "Looking at the first frame and writing the {name} prompt"
 
 IMAGE_SYSTEM_PROMPT = """\
 You write prompts for LTX 2.3, an image-to-video model that also generates the soundtrack. You are given an image, which is the exact first frame of the video, and the user's raw input. The input may be a few loose words, a full description, or structured notes (labelled fields, lists, numbered beats, dialogue lines, timings). Write the one prompt that turns this first frame into the video the user asked for.
@@ -156,19 +178,29 @@ USER_TEXT_TEMPLATE = "user prompt: {prompt}"
 
 _THINKING = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 _FENCED = re.compile(r"\A```[^\n]*\n(?P<body>.*?)\n?```\Z", re.DOTALL)
-_LEAD_LABEL = re.compile(r"\A(?:\*\*)?\s*(?:enhanced\s+prompt|ltx(?:[- ]?2(?:\.3)?)?\s+prompt|prompt|output)"
+_LEAD_LABEL = re.compile(r"\A(?:\*\*)?\s*(?:enhanced\s+prompt|ltx(?:[- ]?2(?:\.[0-9])?)?\s+prompt|prompt|output)"
                          r"\s*(?:\*\*)?\s*:\s*(?:\*\*)?\s*", re.IGNORECASE)
 _SPACES = re.compile(r"\s+")
 
 
 def instructions(has_image: bool) -> str:
-    """The system prompt for this request: with a first frame, or with none."""
+    """The system prompt for this request: with a first frame, or with none.
+
+    The same for every model in :data:`MODELS`: LTX 2.5 is written for under
+    LTX 2.3's instructions, by the user's choice.
+    """
     return IMAGE_SYSTEM_PROMPT if has_image else TEXT_SYSTEM_PROMPT
 
 
-def label(has_image: bool) -> str:
-    """What the run says it is doing."""
-    return STATUS_IMAGE if has_image else STATUS_TEXT
+def model_name(model: str = LTX23) -> str:
+    """``"LTX 2.5"`` for ``"ltx25"``; LTX 2.3 for anything else, which is what
+    every LTX request was before there was a second model to name."""
+    return MODEL_NAMES.get(str(model or "").strip().casefold(), MODEL_NAMES[LTX23])
+
+
+def label(has_image: bool, model: str = LTX23) -> str:
+    """What the run says it is doing, naming the model it writes for."""
+    return (STATUS_IMAGE if has_image else STATUS_TEXT).format(name=model_name(model))
 
 
 def user_turn(prompt: str, image_data_url: str | None = None):

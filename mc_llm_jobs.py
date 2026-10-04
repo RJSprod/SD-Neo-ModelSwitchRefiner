@@ -1,8 +1,8 @@
 """The external request queue: one FIFO, one worker, one record per request.
 
 Another extension in this WebUI wants prompts written for it: MiniMax H3
-prompts, and since Mini Paint NEO's Clipboard tab learned to send to LTX 2.3,
-LTX 2.3 prompts (``kind`` ``"minimax"`` or ``"ltx"`` on each record). What
+prompts, and since Mini Paint NEO's Clipboard tab learned to send to LTX 2.3
+and 2.5, LTX prompts (``kind`` ``"minimax"`` or ``"ltx"`` on each record). What
 it must *not* be able to do is take the card out from under a job that is
 already running, and what it must be able to do is find out what happened
 afterwards. Those two sentences are the whole module.
@@ -67,7 +67,7 @@ that request's terminal event.
 
 Nothing here is written to disk. Job records live in this process's RAM and are
 forgotten on the schedule in :func:`_reap`; the finished prompt is saved to
-LLM Studio's history -- MiniMax's, or Prompt Studio's for an LTX 2.3 prompt --
+LLM Studio's history -- MiniMax's, or Prompt Studio's for an LTX prompt --
 only because that is what a panel does with one, and only when the caller asked
 for it.
 """
@@ -167,10 +167,16 @@ llama-server, one workload lock and one card, so two lines would only be two
 ways of taking turns at the same door."""
 
 KIND_NAMES = {KIND_MINIMAX: "MiniMax", KIND_LTX: "LTX 2.3"}
-"""How the console names a request of each kind."""
+"""How the console names a request of each kind. An LTX request is named by
+the model it is written for, which its ``variant`` holds: see :func:`kind_name`."""
 
 
-def kind_name(kind: str) -> str:
+def kind_name(kind: str, variant: str = "") -> str:
+    """"MiniMax", or the LTX model a request is for ("LTX 2.3", "LTX 2.5")."""
+    if kind == KIND_LTX:
+        import mc_llm_ltx
+
+        return mc_llm_ltx.model_name(variant)
     return KIND_NAMES.get(kind, "LLM")
 
 
@@ -386,7 +392,7 @@ def submit(job: Job) -> Job:
                                       "running": bool(_running)})
         _wake.notify_all()
     logger.info("Model Chain: %s request %s queued at position %d%s",
-                kind_name(job.kind), job.identifier, position_of(job.identifier),
+                kind_name(job.kind, job.variant), job.identifier, position_of(job.identifier),
                 f" for {job.origin}" if job.origin else "")
     _ensure_worker()
     return job
@@ -440,7 +446,7 @@ def active(kind: str | None = None) -> bool:
     """Whether anything external is running or waiting. The panel's gate.
 
     ``kind`` narrows it to one kind of request: the MiniMax panel is held by
-    MiniMax requests and not by an LTX 2.3 one, which is Prompt Studio's kind
+    MiniMax requests and not by an LTX one, which is Prompt Studio's kind
     of work and holds nothing but the workload lock every panel run already
     waits on.
     """
@@ -530,7 +536,7 @@ def cancel(identifier: str, reason: str = "") -> dict:
             _announce_positions_locked()
             _wake.notify_all()
             logger.info("Model Chain: %s request %s cancelled while queued",
-                        kind_name(found.kind), key)
+                        kind_name(found.kind, found.variant), key)
             return {"ok": True, "state": CANCELLED, "was": QUEUED}
         found.cancelling = True
         found.cancel_reason = reason or "cancelled"
@@ -538,7 +544,7 @@ def cancel(identifier: str, reason: str = "") -> dict:
     if found._cancel is not None:
         found._cancel.cancel()
     logger.info("Model Chain: %s request %s is being cancelled while running",
-                kind_name(found.kind), key)
+                kind_name(found.kind, found.variant), key)
     return {"ok": True, "state": "cancelling", "was": RUNNING}
 
 
@@ -556,7 +562,7 @@ def cancel_all(reason: str = "", *, origin: str | None = None,
     to; see :mod:`mc_llm_api` on what ``origin`` is and is not.
 
     ``kind`` limits it to one kind of request -- the MiniMax panel's banner
-    cancels MiniMax requests and leaves an LTX 2.3 one alone.
+    cancels MiniMax requests and leaves an LTX one alone.
     """
     with _lock:
         keys = [key for key in list(_pending) + ([_running] if _running else [])
@@ -850,9 +856,10 @@ def _run(found: Job) -> None:
     ``minimax`` and ``ltx`` with generators of their own.
 
     Which generator runs is the request's ``kind``: MiniMax's caption-then-write,
-    or the LTX 2.3 writer, which is shown the first frame itself and emits no
-    caption. Everything around the generator -- the record, the feed, the
-    history -- is the same for both.
+    or the LTX writer, which is shown the first frame itself and emits no
+    caption, and is told which LTX model it writes for (the request's
+    ``variant``) only so that it can say so. Everything around the generator --
+    the record, the feed, the history -- is the same for both.
     """
     import mc_llm_sessions as sessions
 
@@ -870,7 +877,7 @@ def _run(found: Job) -> None:
         # not an exception out of the worker.
         if found.kind == KIND_LTX:
             events = sessions.ltx(found.prompt, found._image, found.seed, cancel_token,
-                                  system=found.system, trace=trace)
+                                  system=found.system, trace=trace, model=found.variant)
         else:
             events = sessions.minimax(found.prompt, found.variant, found._image,
                                       found.seed, cancel_token,
@@ -905,7 +912,7 @@ def _run(found: Job) -> None:
                     _finish_locked(found, FAILED, error=event.text or "The run failed.")
                 return
     except Exception as exc:
-        logger.debug("Model Chain: %s request %s failed", kind_name(found.kind),
+        logger.debug("Model Chain: %s request %s failed", kind_name(found.kind, found.variant),
                      found.identifier, exc_info=True)
         with _wake:
             _finish_locked(found, FAILED, error=str(exc) or exc.__class__.__name__)
@@ -943,7 +950,7 @@ def _finish_locked(found: Job, state: str, error: str = "", reason: str = "") ->
     _emit_locked(found, {DONE: EV_DONE, FAILED: EV_FAILED,
                          CANCELLED: EV_CANCELLED}[state], payload)
     logger.info("Model Chain: %s request %s %s after %.1fs%s",
-                kind_name(found.kind), found.identifier, state, found.elapsed,
+                kind_name(found.kind, found.variant), found.identifier, state, found.elapsed,
                 f" — {found.error}" if state == FAILED else "")
 
 
@@ -955,7 +962,7 @@ def _remember(found: Job) -> None:
     place that sentence stopped being true. A caller that is driving this in
     bulk turns it off, which is why it is a flag rather than an assumption.
 
-    A MiniMax prompt goes in MiniMax's Saved prompts. An LTX 2.3 prompt goes in
+    A MiniMax prompt goes in MiniMax's Saved prompts. An LTX prompt goes in
     Prompt Studio's Saved generations -- Prompt Studio is LLM Studio's LTX
     workspace -- as an entry marked *no settings*: it was written by the
     external writer from a typed prompt and a picture, not from Prompt Studio's
@@ -987,10 +994,10 @@ def _remember_ltx(found: Job) -> None:
         mc_llm_state.save_prompt_session(mc_llm_state.PromptSession(
             title="", intent=found.prompt, positive=found.result, negative="",
             seed=int(found.seed), image_name=found.image_name or found.image_used,
-            controls={}, no_settings=True, origin=found.origin))
+            controls={}, no_settings=True, origin=found.origin, written_for=found.variant))
     except Exception:
-        logger.debug("Model Chain: could not save the LTX 2.3 prompt for request %s",
-                     found.identifier, exc_info=True)
+        logger.debug("Model Chain: could not save the %s prompt for request %s",
+                     kind_name(found.kind, found.variant), found.identifier, exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
