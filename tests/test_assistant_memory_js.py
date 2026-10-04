@@ -179,3 +179,29 @@ def test_the_reading_is_out_of_the_hand_s_way():
     assert "pointer-events: none" in rule
     assert "font-style: italic" in rule
     assert re.search(r"color:\s*var\(--body-text-color-subdued", rule)
+
+
+def test_the_reading_carries_the_lora_mode_to_the_menu_and_the_tooltip():
+    """The ⋯ menu's Warm LoRA / Cold LoRA entries read the server's state off
+    the free-memory reading, so they need no request of their own."""
+    found = run(CLOCK + """
+        const shell = memoryShell(() => Promise.resolve(READING));
+        shell.paintMemory(Object.assign({}, READING, {
+            lora: {mode: "warm", merged: true, blob: false, originals_bytes: 12.1 * 2 ** 30}}), true);
+        const warm = {mode: shell.loraRam.mode, title: shell.nodes.reading.title};
+        shell.paintMemory(Object.assign({}, READING, {
+            lora: {mode: "cold", merged: false, blob: true, originals_bytes: 0}}), true);
+        const cold = {mode: shell.loraRam.mode, title: shell.nodes.reading.title};
+        // A stale repaint, and a reading without the block, leave the mode alone.
+        shell.paintMemory(Object.assign({}, READING, {lora: {mode: "warm"}}), false);
+        shell.paintMemory(READING, true);
+        console.log(JSON.stringify({warm, cold, kept: shell.loraRam.mode}));
+    """)
+
+    assert found["warm"]["mode"] == "warm"
+    assert "LoRA originals 12.1 GB in system RAM (Warm LoRA)" in found["warm"]["title"]
+    assert found["cold"]["mode"] == "cold"
+    assert "LoRA baked in (Cold LoRA)" in found["cold"]["title"]
+    assert "LoRA originals" not in found["cold"]["title"]
+    assert found["kept"] == "cold"
+

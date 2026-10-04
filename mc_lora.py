@@ -368,6 +368,22 @@ def invalidate(sd_model, reason: str = "") -> bool:
     """
     invalidated = False
 
+    try:
+        import mc_lora_ram
+
+        blob = mc_lora_ram.is_blob(sd_model)
+    except Exception:
+        blob = False
+    if blob:
+        # A blob (mc_lora_ram) has its LoRA merged in with no record of the
+        # originals. Asking the host to rebuild would have it merge the next
+        # set on top; the callers that can reach a blob drop it to disk instead,
+        # and this is the one write that must never happen whoever asks.
+        logger.warning("Model Chain: refused to mark a model with a cold LoRA for rebuilding "
+                       "— %s; nothing is merged on top of a blob, it reloads from disk instead",
+                       reason or "no reason given")
+        return False
+
     if sd_model is not None and hasattr(sd_model, HASH_ATTRIBUTE):
         try:
             setattr(sd_model, HASH_ATTRIBUTE, REBUILD)

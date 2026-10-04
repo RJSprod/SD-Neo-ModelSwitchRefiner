@@ -1786,6 +1786,8 @@
             node.textContent = said.text;
             node.title = said.title;
             if (this.nodes.grip) this.nodes.grip.title = said.title;
+            // The LoRA mode rides the same reading, for the ⋯ menu.
+            if (found && found.lora && typeof found.lora === "object") this.loraRam = found.lora;
         }
         node.classList.toggle("forge-assistant-memory-stale", !fresh);
     };
@@ -2424,7 +2426,11 @@
         items.push(this.groupLabel("Panel"), this.floatItem());
         if (NS.look) items.push(this.customizeItem());
         const utilities = this.host.listUtilities();
-        if (utilities.length) items.push(this.groupLabel("Models"));
+        // Models: where the loaded LoRA's originals live, then whatever the
+        // host offers to unload. The group is always there now that the
+        // LoRA switch is in it.
+        items.push(this.groupLabel("Models"));
+        items.push(...this.loraRamItems());
         return items.concat(utilities.map((utility) => {
             const item = element("button", "forge-assistant-menu-item", utility.label);
             item.type = "button";
@@ -2479,6 +2485,67 @@
             : "Choose a conversation first";
         item.addEventListener("click", () => this.showMenu("threads"));
         return item;
+    };
+
+    /** Warm LoRA / Cold LoRA: two radio entries, the current one checked.
+     *
+     * Warm is Forge's way: after a LoRA is merged into the weights, the
+     * un-merged originals stay in system RAM so a LoRA change is a round trip
+     * through RAM. Cold frees them -- at once, when nothing is generating --
+     * and the model keeps its LoRA baked in; a LoRA change then reloads the
+     * checkpoint from disk, and nothing is ever merged on top. Flipping back
+     * to Warm restores nothing: the next merge is the one that stays warm.
+     *
+     * The state is the server's, read with the header's free-memory reading
+     * (`paintMemory`) so the menu shows what is true without a request of its
+     * own; a press answers through `setLoraRam`. */
+    Shell.prototype.loraRamItems = function () {
+        const found = this.loraRam || {};
+        const cold = found.mode === "cold";
+        const gb = (bytes) => (Math.max(0, Number(bytes) || 0) / 1073741824).toFixed(1);
+        const held = found.merged && found.originals_bytes > 0
+            ? gb(found.originals_bytes) + " GB of un-merged weights in system RAM now"
+            : (found.blob ? "the loaded model carries its LoRA baked in"
+                : "no LoRA is merged into the loaded model");
+        const make = (label, modeWord, on, title) => {
+            const item = element("button",
+                                 "forge-assistant-menu-item forge-assistant-lora-" + modeWord,
+                                 label);
+            item.type = "button";
+            // One of two, like a radio: it reports which is on.
+            item.setAttribute("role", "menuitemradio");
+            item.setAttribute("aria-checked", String(on));
+            item.title = title;
+            item.addEventListener("click", () => {
+                this.closeMenu();
+                if (!on) this.setLoraRam(modeWord);
+            });
+            return item;
+        };
+        return [
+            make("Warm LoRA", "warm", !cold,
+                 "Forge's way: the un-merged weights stay in system RAM after a LoRA is "
+                 + "merged, so a LoRA change is a round trip through RAM (" + held + ")"),
+            make("Cold LoRA", "cold", cold,
+                 "Free the un-merged weights from system RAM now and after every merge; a "
+                 + "LoRA change then reloads the checkpoint from disk (" + held + ")"),
+        ];
+    };
+
+    Shell.prototype.setLoraRam = function (modeWord) {
+        const label = modeWord === "cold" ? "Cold LoRA" : "Warm LoRA";
+        this.say(label + "\u2026", "info");
+        return this.store.request("/lora-ram?mode=" + encodeURIComponent(modeWord), {
+            method: "POST",
+        }).then((found) => {
+            if (found && found.lora) this.loraRam = found.lora;
+            this.tell((found && found.message) || (label + " is on."), "info");
+            return this.loraRam;
+        }).catch((error) => {
+            this.tell((error && error.message) || ("The LoRA mode could not be changed."),
+                      "warn");
+            return this.loraRam;
+        });
     };
 
     Shell.prototype.floatItem = function () {
@@ -4418,6 +4485,12 @@
             long.push((card.full_name || card.name) + " " + gb(card.free)
                       + (card.total ? " of " + gb(card.total) : "") + " GB");
         });
+        const lora = found && found.lora;
+        if (lora && lora.merged && lora.originals_bytes > 0) {
+            long.push("LoRA originals " + gb(lora.originals_bytes) + " GB in system RAM (Warm LoRA)");
+        } else if (lora && lora.blob) {
+            long.push("LoRA baked in (Cold LoRA)");
+        }
         return {text: parts.join("\u2002"),
                 title: long.length ? "Free: " + long.join("; ") : ""};
     }

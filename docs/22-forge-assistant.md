@@ -2021,6 +2021,41 @@ answer (`started`, `queued`, or the refusal's own message) is a held status
 line; once the line is empty the button's `data-state` and tooltip say how it
 went for three seconds, `failed` if any press in it was refused.
 
+## 3.28 Warm LoRA, Cold LoRA, in the ⋯ menu
+
+Asked for from use, after a reading of the user's logs: "I want there to be a
+toggle in the flyout menus '...' menu to turn this setting on and off. 'Warm
+Lora' or 'Cold Lora'. Warm means stays on system ram, and cold means its dumped
+from system ram and our extension manages the blob model, and evicts it on
+change... never stack another lora on a blob model! The setting should
+immediately free up the ram, and be capable of being turned on and off without
+a image generation start. ... Once gone, turning warm back on does not load the
+lora back!"
+
+The setting is `mc_lora_ram` (the README's *Warm LoRA, Cold LoRA*), stored as
+the Forge option **LoRA originals in system RAM** so the Settings page and the
+menu are one switch. In the ⋯ menu it is two `menuitemradio` entries under the
+**Models** group, **Warm LoRA** and **Cold LoRA**, the current one checked with
+the same accent tick the switches use; the group is always drawn now, with the
+host's unload entries after them. Each entry's tooltip says what the loaded
+model holds: "12.1 GB of un-merged weights in system RAM now", "the loaded model
+carries its LoRA baked in", or "no LoRA is merged into the loaded model".
+
+The state is the server's and rides the header's free-memory reading (3.26):
+`GET /memory` answers with a `lora` block — `{mode, merged, blob,
+originals_bytes, freed_bytes, pending, model}` — read fresh on each reading
+while the figures stay cached, so the menu needs no request of its own, and the
+tooltip over the figures gains "LoRA originals 12.1 GB in system RAM (Warm
+LoRA)" or "LoRA baked in (Cold LoRA)". A press on the entry that is not on
+closes the menu and `POST`s `/lora-ram?mode=cold` (or `warm`) — a query
+parameter, so the handler is a plain `def` in Starlette's threadpool: choosing
+Cold frees gigabytes under the host's queue lock and the extension's model lock,
+and never on the event loop. The answer's `message` is held in the status line
+(`tell`): "Cold LoRA: 12.1 GB of un-merged weights freed from system RAM. The
+loaded model keeps its LoRA baked in; a LoRA change reloads the checkpoint from
+disk." A press while a generation runs is told that the originals are freed when
+it ends, and they are. A refused press leaves the mode as the server last said.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

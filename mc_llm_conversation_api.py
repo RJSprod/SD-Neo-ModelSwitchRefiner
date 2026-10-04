@@ -73,11 +73,18 @@ UNLOAD_ROUTE = f"{PREFIX}/unload"
 READ_ALOUD_ROUTE = f"{PREFIX}/read-aloud"
 SYSTEM_PROMPT_ROUTE = f"{PREFIX}/system-prompt"
 MEMORY_ROUTE = f"{PREFIX}/memory"
+LORA_RAM_ROUTE = f"{PREFIX}/lora-ram"
+"""Warm LoRA or Cold LoRA (:mod:`mc_lora_ram`): GET reads, POST ``?mode=`` sets.
+
+The mode travels as a query parameter rather than a body so the handler can be
+a plain ``def`` like the memory route's: choosing Cold frees gigabytes under
+two locks, and that belongs in Starlette's threadpool, not on the event loop.
+"""
 
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
           WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE,
-          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE)
+          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE, LORA_RAM_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -393,6 +400,39 @@ def memory() -> dict:
         found = {"ok": True, "ram": ram, "cards": cards}
         _memory_reading = (now, found)
         return found
+
+
+def memory_with_lora() -> dict:
+    """The memory reading, with where the loaded LoRA's originals are.
+
+    Read fresh each time rather than with the cached figures: a flip from the
+    menu changes it between two readings, and a dictionary walk is cheap where
+    nvidia-smi is not. A LoRA module that cannot answer leaves the figures
+    alone -- the header's numbers never wait on it.
+    """
+    found = dict(memory())
+    try:
+        import mc_lora_ram
+
+        found["lora"] = mc_lora_ram.status()
+    except Exception:
+        logger.debug("Model Chain: could not read the LoRA mode for the header", exc_info=True)
+    return found
+
+
+def lora_ram(mode: str = "") -> tuple[dict, int]:
+    """Read, or set and act on, the LoRA mode. ``(payload, status)``."""
+    import mc_lora_ram
+
+    if not mode:
+        return {"ok": True, "lora": mc_lora_ram.status()}, 200
+    if mc_lora_ram.normalise(mode) is None:
+        return {"ok": False, "error": {"code": service.INVALID_INPUT,
+                                       "message": "The LoRA mode is Warm or Cold.",
+                                       "retryable": False}}, 400
+    found = mc_lora_ram.set_mode(mode)
+    message = found.pop("message", "")
+    return {"ok": True, "lora": found, "message": message}, 200
 
 
 def forget_memory_reading() -> None:
@@ -826,9 +866,28 @@ def install(_demo=None, app=None) -> bool:
         except Refused as exc:
             return _refusal(exc)
         try:
-            return _json(memory())
+            return _json(memory_with_lora())
         except Exception:
             return _failed("could not read free memory", "Free memory could not be read.")
+
+    def lora_ram_route(request: Request):
+        # A plain def, like the memory route's: see LORA_RAM_ROUTE.
+        try:
+            checked(request)
+        except Refused as exc:
+            return _refusal(exc)
+        wanted = ""
+        if request.method == "POST":
+            wanted = str(request.query_params.get("mode") or "")
+            if not wanted:
+                return _json({"ok": False, "error": {"code": service.INVALID_INPUT,
+                                                     "message": "Say which mode: warm or cold.",
+                                                     "retryable": False}}, 400)
+        try:
+            payload, status = lora_ram(wanted)
+            return _json(payload, status)
+        except Exception:
+            return _failed("could not change the LoRA mode", "The LoRA mode could not be changed.")
 
     async def served_route(request: Request):
         """One stored picture, by ticket. The flyout's transcript reads these.
@@ -872,6 +931,7 @@ def install(_demo=None, app=None) -> bool:
                 (READ_ALOUD_ROUTE, read_aloud_route, ["POST"]),
                 (SYSTEM_PROMPT_ROUTE, system_prompt_route, ["GET", "POST"]),
                 (MEMORY_ROUTE, memory_route, ["GET"]),
+                (LORA_RAM_ROUTE, lora_ram_route, ["GET", "POST"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

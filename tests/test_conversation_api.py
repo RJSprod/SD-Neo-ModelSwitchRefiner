@@ -616,6 +616,57 @@ class TestFreeMemory:
         assert api.MEMORY_ROUTE in api.ROUTES
         assert not inspect.iscoroutinefunction(app.added[api.MEMORY_ROUTE])
 
+    def test_the_reading_the_route_answers_carries_the_lora_mode(self, host, monkeypatch):
+        """The ⋯ menu's Warm LoRA / Cold LoRA entries ride the header's reading."""
+        import mc_lora_ram
+
+        found = api.memory_with_lora()
+
+        assert found["lora"]["mode"] == "warm"
+        assert set(found["lora"]) >= {"mode", "merged", "blob", "originals_bytes", "pending"}
+        assert "lora" not in api.memory(), "the cached figures stay as they were"
+
+        monkeypatch.setattr(mc_lora_ram, "status", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+        assert "ram" in api.memory_with_lora(), "the figures never wait on the LoRA module"
+
+    def test_the_lora_route_reads_and_sets_the_mode(self, host):
+        import mc_lora_ram
+
+        mc_lora_ram.reset_for_tests()
+        host.shared.opts.model_chain_lora_ram = "Warm"
+
+        payload, status = api.lora_ram("")
+        assert (status, payload["ok"], payload["lora"]["mode"]) == (200, True, "warm")
+
+        payload, status = api.lora_ram("sideways")
+        assert status == 400 and payload["error"]["code"] == "INVALID_INPUT"
+
+        payload, status = api.lora_ram("cold")
+        assert (status, payload["lora"]["mode"]) == (200, "cold")
+        assert payload["message"].startswith("Cold LoRA:")
+        assert host.shared.opts.model_chain_lora_ram == "Cold"
+
+    def test_the_lora_route_is_registered_for_both_methods_and_is_not_a_coroutine(self):
+        """Choosing Cold frees gigabytes under two locks: threadpool work."""
+        import inspect
+
+        class App:
+            routes = []
+            added = {}
+
+            def add_api_route(self, path, handler, methods):
+                self.added[path] = (handler, list(methods))
+
+        if api.Request is None:
+            pytest.skip("FastAPI is not installed")
+        app = App()
+        api.install(app=app)
+
+        assert api.LORA_RAM_ROUTE in api.ROUTES
+        handler, methods = app.added[api.LORA_RAM_ROUTE]
+        assert sorted(methods) == ["GET", "POST"]
+        assert not inspect.iscoroutinefunction(handler)
+
     def test_short_names(self):
         assert api.short_card_name("NVIDIA GeForce RTX 5090", 0) == "5090"
         assert api.short_card_name("NVIDIA RTX A6000", 1) == "A6000"

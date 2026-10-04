@@ -6698,7 +6698,8 @@
     padding-left: 2em;
 }
 
-.forge-assistant-menu-item[role="menuitemcheckbox"]::before {
+.forge-assistant-menu-item[role="menuitemcheckbox"]::before,
+.forge-assistant-menu-item[role="menuitemradio"]::before {
     content: "";
     position: absolute;
     top: 50%;
@@ -6708,7 +6709,8 @@
     line-height: 1;
 }
 
-.forge-assistant-menu-item[role="menuitemcheckbox"][aria-checked="true"]::before {
+.forge-assistant-menu-item[role="menuitemcheckbox"][aria-checked="true"]::before,
+.forge-assistant-menu-item[role="menuitemradio"][aria-checked="true"]::before {
     content: "\2713";
     content: "\2713" / "";
     color: var(--color-accent, #2563eb);

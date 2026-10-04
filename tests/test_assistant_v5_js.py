@@ -232,6 +232,8 @@ class TestTheMenuIsGrouped:
             ["BUTTON", "menuitemcheckbox", "Free Float"],
             ["BUTTON", "menuitem", "Customize…"],
             ["DIV", "presentation", "Models"],
+            ["BUTTON", "menuitemradio", "Warm LoRA"],
+            ["BUTTON", "menuitemradio", "Cold LoRA"],
             ["BUTTON", "menuitem", "Unload All Models"],
             ["BUTTON", "menuitem", "Unload LLM"],
         ]
@@ -253,12 +255,16 @@ class TestTheMenuIsGrouped:
         assert found["newChat"] == [True, "Choose a conversation first"]
         assert found["threads"] == [True, "Choose a conversation first"]
 
-    def test_the_models_group_is_there_only_when_the_host_offers_something(self):
+    def test_the_unload_entries_are_there_only_when_the_host_offers_something(self):
+        """The Models group itself is always drawn since the Warm LoRA / Cold
+        LoRA switch moved into it; what the host offers to unload still only
+        appears when it offers it."""
         found = run(MENU + """
             console.log(JSON.stringify(shell.utilityItems().map((i) => i.textContent)));
         """)
 
-        assert "Models" not in found
+        assert "Models" in found
+        assert not [label for label in found if label.startswith("Unload")]
 
     def test_a_group_heading_is_not_an_entry(self):
         heading = rule(".forge-assistant-menu-group")
@@ -437,3 +443,95 @@ class TestNewChatMovesTheTabToo:
         """)
 
         assert found == {"selected": [["Ada", "t2"]], "pressed": ["t2"]}
+
+
+# --------------------------------------------------------------------------- #
+# Warm LoRA, Cold LoRA: where the loaded LoRA's originals live
+# --------------------------------------------------------------------------- #
+
+
+class TestWarmAndColdLora:
+    """"I want there to be a toggle in the flyout menus '...' menu to turn this
+    setting on and off. 'Warm Lora' or 'Cold Lora'.\""""
+
+    def test_the_two_entries_are_one_radio_pair_with_the_current_mode_checked(self):
+        found = run(MENU + """
+            const checked = () => shell.utilityItems()
+                .filter((i) => i.getAttribute("role") === "menuitemradio")
+                .map((i) => [i.textContent, i.getAttribute("aria-checked")]);
+            const unknown = checked();
+            shell.loraRam = {mode: "cold", merged: false, blob: true, originals_bytes: 0};
+            const cold = checked();
+            shell.loraRam = {mode: "warm", merged: true, blob: false, originals_bytes: 12.1 * 2 ** 30};
+            const warm = checked();
+            const titles = shell.utilityItems()
+                .filter((i) => i.getAttribute("role") === "menuitemradio").map((i) => i.title);
+            console.log(JSON.stringify({unknown, cold, warm, titles}));
+        """, sources=("shell", "system", "look"))
+
+        # Before the server has said anything the entries read as Forge's way.
+        assert found["unknown"] == [["Warm LoRA", "true"], ["Cold LoRA", "false"]]
+        assert found["cold"] == [["Warm LoRA", "false"], ["Cold LoRA", "true"]]
+        assert found["warm"] == [["Warm LoRA", "true"], ["Cold LoRA", "false"]]
+        assert "12.1 GB of un-merged weights in system RAM now" in found["titles"][0]
+        assert "reloads the checkpoint from disk" in found["titles"][1]
+
+    def test_the_models_group_is_there_with_nothing_to_unload(self):
+        found = run(MENU + """
+            console.log(JSON.stringify(shell.utilityItems().map((i) => i.textContent)));
+        """, sources=("shell", "system", "look"))
+
+        assert found[-3:] == ["Models", "Warm LoRA", "Cold LoRA"]
+
+    def test_pressing_the_other_one_posts_the_mode_closes_the_menu_and_tells_the_answer(self):
+        found = run(MENU + """
+            shell.loraRam = {mode: "warm", merged: true, blob: false, originals_bytes: 12.1 * 2 ** 30};
+            shell.store.request = (path, options) => {
+                shell.asked = {path, method: options && options.method};
+                return Promise.resolve({ok: true, lora: {mode: "cold", merged: false, blob: true},
+                                        message: "Cold LoRA: 12.1 GB of un-merged weights freed from system RAM."});
+            };
+            shell.closed = 0;
+            shell.closeMenu = () => { shell.closed += 1; };
+            shell.showMenu("utilities");
+            const item = menu.children.find((c) => c.textContent === "Cold LoRA");
+            item.handlers.click.forEach((fn) => fn());
+            setImmediate(() => console.log(JSON.stringify({
+                asked: shell.asked, closed: shell.closed, mode: shell.loraRam.mode,
+                told: shell.told && shell.told.text,
+                checked: shell.utilityItems().filter((i) => i.getAttribute("role") === "menuitemradio")
+                    .map((i) => i.getAttribute("aria-checked"))})));
+        """, sources=("shell", "system", "look"))
+
+        assert found["asked"] == {"path": "/lora-ram?mode=cold", "method": "POST"}
+        assert found["closed"] == 1
+        assert found["mode"] == "cold"
+        assert found["told"].startswith("Cold LoRA: 12.1 GB")
+        # The next menu reads the server's answer, not the press.
+        assert found["checked"] == ["false", "true"]
+
+    def test_pressing_the_one_already_on_asks_nothing(self):
+        found = run(MENU + """
+            shell.loraRam = {mode: "warm"};
+            shell.asked = [];
+            shell.store.request = (path) => { shell.asked.push(path); return Promise.resolve({}); };
+            shell.closeMenu = () => {};
+            shell.showMenu("utilities");
+            const item = menu.children.find((c) => c.textContent === "Warm LoRA");
+            item.handlers.click.forEach((fn) => fn());
+            console.log(JSON.stringify(shell.asked));
+        """, sources=("shell", "system", "look"))
+
+        assert found == []
+
+    def test_a_refused_change_is_said_and_the_mode_stays(self):
+        found = run(MENU + """
+            shell.loraRam = {mode: "warm"};
+            shell.store.request = () => Promise.reject(new Error("Reload the page"));
+            shell.closeMenu = () => {};
+            shell.setLoraRam("cold").then(() => console.log(JSON.stringify({
+                mode: shell.loraRam.mode, told: shell.told && [shell.told.text, shell.told.kind]})));
+        """, sources=("shell", "system", "look"))
+
+        assert found == {"mode": "warm", "told": ["Reload the page", "warn"]}
+

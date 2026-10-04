@@ -37,6 +37,7 @@ import mc_llm_studio
 import mc_llm_vision
 import mc_logfile
 import mc_lora
+import mc_lora_ram
 import mc_memory
 import mc_pipeline_panel
 import mc_plan
@@ -317,6 +318,22 @@ shared.options_templates.update(
                 "be reapplied. Turn this off to make every restored model rebuild its LoRA "
                 "state from scratch — slower, and worth trying if a LoRA misbehaves after "
                 "a switch"
+            ),
+            mc_lora_ram.OPT_LORA_RAM: shared.OptionInfo(
+                mc_lora_ram.WARM,
+                "LoRA originals in system RAM",
+                gr.Radio,
+                {"choices": list(mc_lora_ram.MODES)},
+            ).info(
+                "Forge merges a LoRA into the weights and keeps the un-merged originals in "
+                "system RAM so a LoRA change is a round trip through RAM rather than a read "
+                "of the checkpoint — about 12 GB for a Krea-sized model, for as long as the "
+                "LoRA is merged. Warm keeps them. Cold frees them at once and after every "
+                "merge; the model then keeps its LoRA baked in, and a change of LoRA — or "
+                "removing it — reloads the checkpoint from disk, so nothing is ever merged "
+                "on top. Also the Warm LoRA / Cold LoRA switch in the Forge Assistant's ⋯ "
+                "menu. Turning Warm back on restores nothing: the next merge is the one "
+                "that stays warm"
             ),
             mc_progress.OPT_PROGRESS: shared.OptionInfo(
                 mc_progress.PROGRESS_DEFAULT,
@@ -2780,6 +2797,17 @@ class ScriptModelChain(scripts.Script):
         except Exception:
             errors.report("Model Chain: failed to reinstate the cached checkpoint", exc_info=True)
 
+        # With the model that will generate now in place: a model carrying a
+        # cold LoRA (mc_lora_ram) that this prompt would change is dropped
+        # here, before the host reloads and parses the prompt's networks, so
+        # the host reads the checkpoint and merges into fresh weights. The
+        # always-on turns script asks the same question; either order holds.
+        try:
+            mc_lora_ram.before_pass(p)
+        except Exception:
+            errors.report("Model Chain: the Cold LoRA check failed; generating anyway",
+                          exc_info=True)
+
         self._armed = False
         self._dropped_networks = []
         self._transition = ""
@@ -3103,6 +3131,14 @@ class ScriptModelChain(scripts.Script):
         are about Stage 1's own pass whether or not a chain follows it.
         """
         if not self._in_stage_2:
+            # First the net under Cold LoRA: a LoRA state the host rebuilt
+            # over a model with one baked in is taken away before any weight
+            # moves (mc_lora_ram). Then the ordinary re-merge eviction.
+            try:
+                mc_lora_ram.before_sampling(p)
+            except Exception:
+                errors.report("Model Chain: the Cold LoRA check before sampling failed",
+                              exc_info=True)
             objects = getattr(getattr(p, "sd_model", None), "forge_objects", None)
             unet = getattr(objects, "unet", None)
             mc_memory.evict_for_rebake(unet)
@@ -3148,6 +3184,17 @@ class ScriptModelChain(scripts.Script):
         reference_max_dim=mc_references.DEFAULT_MAX_DIM,
         **kwargs,
     ):
+        # Cold LoRA: the merge this generation made is baked now, while the model
+        # that made it is the loaded one -- before a Stage 2 switch moves it
+        # into the cache. Warm leaves it alone. Idempotent, like the always-on
+        # turns script's call.
+        if not self._in_stage_2:
+            try:
+                mc_lora_ram.after_generation(p)
+            except Exception:
+                errors.report("Model Chain: baking the LoRA after the generation failed",
+                              exc_info=True)
+
         if not self._armed or self._in_stage_2:
             # No Stage 2 on this generation, so nothing after this point is
             # going to put the image model back on the card. The chained path
@@ -3457,6 +3504,9 @@ class ScriptModelChain(scripts.Script):
 
         refined: list = []
         delivered: list = []
+        # The Stage 2 prompts as the host saw them, for Cold LoRA's bake of
+        # Model B's merge at the end: Stage 1's prompt says nothing about it.
+        stage_2_positives: list = []
         self._in_stage_2 = True
         mc_progress.enter(mc_progress.PHASE_STAGE2)
         try:
@@ -3488,6 +3538,7 @@ class ScriptModelChain(scripts.Script):
                 width, height = mc_arch.scaled_size(
                     image.width, image.height, size_multiplier, arch.alignment
                 )
+                stage_2_positives.append(positive)
 
                 result = self._refine_one(
                     p,
@@ -3529,6 +3580,13 @@ class ScriptModelChain(scripts.Script):
             # object, so anything left on it belongs to no job at all by the time
             # it is next used.
             self._clear_references(p)
+            # And in Cold, Model B's merge is baked while Model B is still the
+            # loaded model, against the Stage 2 prompts that asked for it.
+            if stage_2_positives:
+                try:
+                    mc_lora_ram.after_generation(texts=stage_2_positives)
+                except Exception:
+                    errors.report("Model Chain: baking Stage 2's LoRA failed", exc_info=True)
             mc_memory.observe_activation_peak(
                 stage_2_width, stage_2_height, stage=mc_memory.STAGE_2,
                 batch=getattr(p, "batch_size", 1),
