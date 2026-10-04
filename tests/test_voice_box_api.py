@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import mc_voice_api  # noqa: E402
 import mc_voice_box as box  # noqa: E402
 import mc_voice_box_api as api  # noqa: E402
+import mc_voice_vibevoice  # noqa: E402
 from test_voice_box import (CARD, FakeEngine, FakeRuntime, FakeTurn, FakeTurns, no_mp3,  # noqa: E402
                             spoken, settled)
 
@@ -106,7 +107,8 @@ class TestStatus:
         found = answer.json()
         assert found["ok"] is True and found["engine"]["ready"] is True
         assert found["settings"]["card_uuid"] == CARD
-        assert found["engine_settings"]["steps"] == 10
+        # The engine's own default, which handoff 38 moved from ten to twelve.
+        assert found["engine_settings"]["steps"] == mc_voice_vibevoice.STEPS_DEFAULT == 12
         assert found["cards"][0]["uuid"] == CARD and found["cards"][0]["wangp_card"] is True
         assert found["turns"] == [{"card": "the card", "uuid": CARD}]
         assert found["runtime"] == {"cards": {}, "last_error": ""} and found["jobs"] == []
@@ -235,8 +237,11 @@ class TestRenderingOverTheWire:
         entry, = post(client, api.OUTPUTS_ROUTE, key,
                       {"pipeline_id": prepared["pipeline"]["id"]}).json()["outputs"]
         assert entry["format"] == "mp3" and entry["render"]["seed"] == job["seed"]
-        assert entry["infotext"].startswith("Speaker 1: Hello.\nSteps: 10, CFG scale: 1.3, "
-                                            f"Seed: {job['seed']}")
+        # The WebUI-shaped infotext as handoff 38 left it: the engine's twelve
+        # steps and its solver before the CFG scale, the attention after the seed.
+        assert entry["infotext"].startswith(
+            f"Speaker 1: Hello.\nSteps: {mc_voice_vibevoice.STEPS_DEFAULT}, Solver: DPM++ 2M, "
+            f"CFG scale: 1.3, Seed: {job['seed']}, Attention: SDPA")
 
         played = client.get(api.OUTPUT_AUDIO_ROUTE, params={"id": done["output_id"]}, headers=key)
         assert played.headers["content-type"] == "audio/mpeg" and played.content == b"ID3-an-mp3"
