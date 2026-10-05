@@ -7200,6 +7200,147 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     background: var(--body-background-fill, var(--background-fill-primary, #101010)) !important;
 }
 
+/* The results column fills the window (forge_assistant_layout.js, `Fill`).
+
+   The script measures the room under the column's resting top and writes the
+   gallery's height as one custom property on the column, with a mark; these
+   rules do the rest. Two ids and an attribute, with `!important`: a user.css
+   that sized the gallery against the window -- `#txt2img_gallery_container
+   { height: 85vh !important }` was the one that left a gap in focus mode -- is
+   one id, and loses to these whichever stylesheet the host loads last.
+
+   The container goes back to its content's height; the gallery takes the
+   measured pixels, and its grid and preview fill it. Gradio's own cap on a
+   gallery with no height set (55vh) and Lobe's minimum (470px) are lifted the
+   same way: a measured height is the whole of the answer. */
+#txt2img_results[data-forge-assistant-fill] #txt2img_gallery_container,
+#img2img_results[data-forge-assistant-fill] #img2img_gallery_container {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+}
+
+#txt2img_results[data-forge-assistant-fill] #txt2img_gallery,
+#img2img_results[data-forge-assistant-fill] #img2img_gallery {
+    height: var(--forge-assistant-fill-gallery) !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    flex: 0 0 auto !important;
+}
+
+#txt2img_results[data-forge-assistant-fill] #txt2img_gallery > .grid-wrap,
+#img2img_results[data-forge-assistant-fill] #img2img_gallery > .grid-wrap {
+    height: 100% !important;
+    min-height: 0 !important;
+    max-height: none !important;
+}
+
+#txt2img_results[data-forge-assistant-fill] #txt2img_gallery > .preview,
+#img2img_results[data-forge-assistant-fill] #img2img_gallery > .preview {
+    max-height: none !important;
+}
+
+/* Txt2Img's settings column, docked in the panel (`Dock`, and the panel's
+   third state in forge_assistant.js).
+
+   The column is not moved -- Forge finds its prompt boxes inside <gradio-app>
+   and the panel is outside it -- it is drawn over the panel's empty body.
+   The script writes where (left, top, width, height, in pixels, inline); this
+   says how: fixed, scrolling up and down inside itself, on the panel's own
+   surface, between the focused workspace (1100) and the panel (1200). Inside
+   focus mode the column is in the workspace's stacking context and draws
+   below the panel whatever this says, which is why the panel is see-through
+   over it rather than the column drawn on top. `!important` because Gradio
+   scopes its column's rules with generated classes and writes a min-width
+   inline; nothing here can be left to specificity. */
+.forge-assistant-docked-column {
+    position: fixed !important;
+    z-index: var(--forge-assistant-docked-layer, 1150) !important;
+    margin: 0 !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    max-height: none !important;
+    box-sizing: border-box !important;
+    padding: 0.5em 0.6em 0.6em 0.75em !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain !important;
+    /* Gradio 4.40 says `flex-wrap: wrap` about every column in a row, and a
+       wrapping column given a height does not scroll what it cannot hold: it
+       starts a second column of blocks beside the first, out of sight (Mini
+       Paint NEO met it first, in its Clipboard's request column). */
+    flex-wrap: nowrap !important;
+    background: var(--background-fill-primary) !important;
+    border-radius: 0 0 var(--radius-lg, 10px) var(--radius-lg, 10px) !important;
+}
+
+/* A column of a fixed height whose children may shrink -- Gradio's columns
+   are flex columns, and Lobe makes the settings one so with `!important` --
+   squeezes them to fit instead of scrolling. Docked, they keep their size and
+   the column scrolls. */
+.forge-assistant-docked-column > * {
+    flex-shrink: 0 !important;
+}
+
+/* The row the column left: its track goes to the gallery, and Forge's resize
+   handle goes with the column. Forge writes the row's grid template and the
+   handle's display inline, without priority, on every window resize; these
+   win over that without anything having to undo it, and undocking is the
+   class coming off. */
+.forge-assistant-docked-row {
+    grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.forge-assistant-docked-row > .resize-handle {
+    display: none !important;
+}
+
+/* The panel, docked: as tall as it may be, see-through over the placeholder
+   where the column is drawn, and letting presses through it to the column.
+   The header, the menu and the resize edge keep the panel's surface and take
+   their presses as ever. */
+.forge-assistant-panel.forge-assistant-docked {
+    height: calc(100vh - 2 * 24px);
+    background: transparent;
+}
+
+/* With the root's id, because `#forge-assistant-root > *` gives every child
+   of the root its presses back and an id outranks any number of classes. */
+#forge-assistant-root > .forge-assistant-panel.forge-assistant-docked {
+    pointer-events: none;
+}
+
+.forge-assistant-panel.forge-assistant-docked > *:not(.forge-assistant-dock) {
+    pointer-events: auto;
+}
+
+.forge-assistant-panel.forge-assistant-docked > .forge-assistant-header,
+.forge-assistant-panel.forge-assistant-docked > .forge-assistant-menu {
+    background: var(--background-fill-primary);
+}
+
+.forge-assistant-panel.forge-assistant-docked > .forge-assistant-header {
+    border-radius: var(--radius-lg, 10px) var(--radius-lg, 10px) 0 0;
+}
+
+/* A menu up in the column's place: the panel is the menu's size again, on its
+   own surface, as it is over the conversation. */
+.forge-assistant-panel.forge-assistant-docked.forge-assistant-menu-open {
+    height: auto;
+    background: var(--background-fill-primary);
+}
+
+.forge-assistant-dock {
+    flex: 1 1 auto;
+    min-height: 0;
+    pointer-events: none;
+}
+
+.forge-assistant-settings[aria-pressed="true"] {
+    border-color: var(--color-accent, #2563eb);
+    box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
+}
+
 /* Reduced motion is respected rather than ignored: every transition here is
    decoration and none of it carries information. */
 @media (prefers-reduced-motion: reduce) {

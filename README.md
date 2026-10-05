@@ -3490,7 +3490,27 @@ drag that actually moved will not switch to whatever button you happen to let
 go over; only a press switches. The edge that has more row behind it is faded,
 so a strip that continues looks like it continues, and there is no scrollbar
 to spend the panel's height on. While the tabs are on screen the header's
-**Workspace** button goes — it opens the same list one press further away. The panel is an overlay: it never
+**Workspace** button goes — it opens the same list one press further away.
+
+**On Txt2Img the panel has a third state: the settings column.** A **🎛**
+(*Generation settings*) sits beside **Chat** on Txt2Img only. Pressed, the
+tab's whole left column — the prompts, the Literal boxes and every setting
+under them — leaves the page and is shown in the panel, scrolling up and down
+inside it, and the gallery takes the full width of the row; the panel grows to
+the window's height to hold it. Everything in the column works there as it did
+in the page: it is the same column, not a copy (Forge and every extension find
+the prompt boxes where they always were), drawn over the panel's body and
+moving with the panel when it is dragged or resized. **Chat** from there brings
+the column back to the page and shows the conversation; **🎛** again brings it
+back and returns to whichever view the panel was in, the conversation or the
+tab bar. A menu takes the column's place while it is up, as it does the
+conversation's. Closing the panel puts the column back in the page and opening
+it docks it again; on another workspace the button goes and the panel shows the
+conversation or the tab bar, and coming back to Txt2Img docks the column again.
+The choice is kept with the rest of the panel's layout for the browser tab.
+Img2Img has no such state yet.
+
+The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it
 stops working while it is open. On a phone it becomes a sheet anchored to the
 half the docking says, and *that* is modal, because a sheet the page scrolls
@@ -3693,7 +3713,27 @@ pinned some way down the page to stay clear of its own header — Lobe's split
 previewer does this to the gallery — is pinned to the top instead while focus
 is on, since the header it was clearing is gone, and put back exactly on the
 way out. Without that, the gallery sat under a blank band exactly the height
-of a header that was no longer there. Escape leaves it, unless something
+of a header that was no longer there.
+
+**The results column fills the window**, on Txt2Img and Img2Img, with focus on
+or off: Generate, the gallery and the buttons under it end 8 px above the
+bottom of whatever scrolls them — the window, or focus mode's own edge — and
+the column does not scroll. The room is measured, not guessed as a share of the
+window: from where the column rests (or sticks, under a theme like Lobe that
+pins it below its header) down to that edge, less everything in the column
+that is not the gallery, is the gallery's height, written in pixels. It is
+measured again when the window or the column changes size — focus on or off,
+the settings column docked, a generation's infotext arriving under the buttons
+(which shrinks the gallery rather than pushing the buttons off the screen),
+another tab shown. This takes precedence over a user.css that sizes the gallery
+against the window (`#txt2img_gallery_container { height: 85vh !important }`
+and its like need no change: the extension's rules name two ids and win
+whichever loads last). Where the results sit under the settings rather than
+beside them — a narrow window, a phone — nothing is changed. If the gallery is
+ever the wrong height, `forgeAssistant.fill.explain()` in the browser console
+says what was measured.
+
+Escape leaves focus, unless something
 closer to hand wants Escape first: the assistant's own menu, an edit in
 progress, a dialog, or an IME. A running reply is never interrupted by leaving
 focus.

@@ -197,6 +197,14 @@
         return false;
     }
 
+    // The results column fills the window (forge_assistant_layout.js), and what
+    // the window is changes on the way in and out.
+    function refill() {
+        try {
+            if (NS.fill && typeof NS.fill.refresh === "function") NS.fill.refresh();
+        } catch (error) { /* the fill measures again on its own next resize */ }
+    }
+
     function trapped(root) {
         // Walked to the document, because one ancestor with a transform is
         // enough. Reported by name so the reason a workspace cannot be focused
@@ -390,6 +398,9 @@
         }
 
         this.active = context;
+        // The results column's height is measured against what scrolls it,
+        // and that just changed from the page to this root.
+        refill();
         // One line in the console saying what was actually done, because the
         // reports that led here were "it does not work" three times over and
         // each one meant something different. Cheap, and the first thing to
@@ -443,6 +454,7 @@
                 window.scrollTo(context.pageX, context.pageY);
             } catch (error) { /* a window that will not be scrolled is not a failure */ }
         }
+        refill();
         if (context.focused && typeof context.focused.focus === "function"
             && document.contains(context.focused)) {
             try {
