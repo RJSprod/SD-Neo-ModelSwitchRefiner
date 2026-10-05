@@ -78,6 +78,11 @@
     // Focus, Send -- was most of a collapsed panel, and on a phone twice over.
     const WORKSPACE_GLYPH = "\u{1F4D1}";      // bookmark tabs: the tab bar
     const CHAT_GLYPH = "\u{1F4AC}";           // a speech balloon: the conversation
+    // Control knobs: Txt2Img's settings column, docked in the panel. Not the
+    // gear: the Lobe theme swaps a button holding "⚙️" for an icon of its own
+    // (its svgIcon option), and this one is on none of its lists.
+    const SETTINGS_GLYPH = "\u{1F39B}\uFE0F";
+    const SETTINGS_LABEL = "Generation settings";
     const SEND_GLYPH = "\u27A4";              // an arrowhead
     const STOP_GLYPH = "\u25A0";              // a square
     // How long a request for the browser's full screen is waited on before
@@ -346,6 +351,10 @@
             panelWidth: null,
             panelOpen: false,
             conversationExpanded: true,
+            // The third state: Txt2Img's settings column in the panel. Kept
+            // while another workspace is on screen, where the panel shows what
+            // `conversationExpanded` says, and taken up again on return.
+            settingsDocked: false,
             focusEnabled: false,
             focusWorkspaceId: null,
             showAnyway: false,
@@ -408,7 +417,7 @@
                 this.state.panelWidth = Math.min(MAX_WIDTH,
                                                  Math.max(MIN_WIDTH, found.panelWidth));
             }
-            ["panelOpen", "conversationExpanded"].forEach((name) => {
+            ["panelOpen", "conversationExpanded", "settingsDocked"].forEach((name) => {
                 if (typeof found[name] === "boolean") this.state[name] = found[name];
             });
             // Focus is deliberately not restored here. A reload starts outside
@@ -516,6 +525,7 @@
             panelWidth: this.state.panelWidth,
             panelOpen: this.state.panelOpen,
             conversationExpanded: this.state.conversationExpanded,
+            settingsDocked: this.state.settingsDocked,
             focusEnabled: this.state.focusEnabled,
             focusWorkspaceId: this.state.focusWorkspaceId,
         };
@@ -645,6 +655,14 @@
                                 CHAT_GLYPH, "Chat");
         chat.setAttribute("aria-expanded", String(this.state.conversationExpanded));
         chat.setAttribute("aria-controls", "forge-assistant-conversation");
+        // The third state, on Txt2Img only (`applySettingsButton`): its
+        // settings column, prompts and all, scrolling in the panel and gone
+        // from the page, so the gallery has the whole width. A switch, so a
+        // screen reader says whether it is on.
+        const settings = iconButton("forge-assistant-nav-button forge-assistant-settings",
+                                    SETTINGS_GLYPH, SETTINGS_LABEL);
+        settings.setAttribute("aria-pressed", "false");
+        settings.hidden = true;
         const utilities = iconButton("forge-assistant-nav-button forge-assistant-utilities",
                                      "⋯", "More actions");
         utilities.setAttribute("aria-haspopup", "menu");
@@ -665,13 +683,14 @@
         minimize.title = "Minimize";
         header.appendChild(picker);
         header.appendChild(chat);
+        header.appendChild(settings);
         header.appendChild(utilities);
         header.appendChild(generate);
         header.appendChild(grip);
         header.appendChild(minimize);
         panel.appendChild(header);
-        Object.assign(this.nodes, {header, minimize, picker, chat, utilities, generate,
-                                   grip, reading});
+        Object.assign(this.nodes, {header, minimize, picker, chat, settings, utilities,
+                                   generate, grip, reading});
 
         // The menus' box, in the panel's column between the header and the
         // conversation: a menu takes the conversation's place while it is
@@ -699,6 +718,15 @@
         workspaces.setAttribute("aria-label", "Workspaces");
         panel.appendChild(workspaces);
         this.nodes.workspaces = workspaces;
+
+        // Where the docked settings column is drawn: an empty, see-through
+        // box the column is laid over (`syncDock`). Empty on purpose -- the
+        // column stays in Forge's page, where Forge's scripts find it.
+        const dock = element("div", "forge-assistant-dock");
+        dock.setAttribute("aria-hidden", "true");
+        dock.hidden = true;
+        panel.appendChild(dock);
+        this.nodes.dock = dock;
 
         // The conversation body, the whole of what Chat shows and hides.
         //
@@ -795,31 +823,102 @@
         this.applyChat();
     };
 
-    /** Everything that follows from whether the conversation is showing. */
+    /** Everything that follows from whether the conversation is showing --
+     *  or the settings column, which takes the conversation's place. */
     Shell.prototype.applyChat = function () {
-        const open = this.state.conversationExpanded;
+        const docked = this.dockShown();
+        this.dockedNow = docked;
+        const open = this.state.conversationExpanded && !docked;
         this.nodes.chat.setAttribute("aria-expanded", String(open));
+        this.applySettingsButton();
         // The header's Workspace menu and the row are the same list. Collapsed
         // the row is right there under it, so the menu is a press that buys
         // nothing; it goes, and like the body it leaves the tab order rather
         // than merely stopping being painted. If it is open at the moment it
         // is hidden, it closes -- a menu whose button is gone cannot be
-        // dismissed by pressing that button again.
-        this.nodes.picker.hidden = !open;
-        if (!open && this.nodes.menu.dataset.owner === "workspaces") this.closeMenu();
+        // dismissed by pressing that button again. Docked, there is no row,
+        // so the menu stays.
+        this.nodes.picker.hidden = !open && !docked;
+        if (!open && !docked && this.nodes.menu.dataset.owner === "workspaces") {
+            this.closeMenu();
+        }
         // A menu that is up has the conversation's place (see `applyMenu`):
-        // neither the body nor the row shows under it.
+        // neither the body nor the row nor the docked column shows under it.
         const menuUp = !this.nodes.menu.hidden;
         // `hidden`, not a class: the body has to leave the accessibility tree,
         // not merely stop being painted.
         this.nodes.body.hidden = !open || menuUp;
-        this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open);
-        this.nodes.workspaces.hidden = open || menuUp;
-        if (!open && !menuUp) this.renderWorkspaces();
+        this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open && !docked);
+        this.nodes.panel.classList.toggle("forge-assistant-docked", docked);
+        if (this.nodes.dock) this.nodes.dock.hidden = !docked || menuUp;
+        this.nodes.workspaces.hidden = open || docked || menuUp;
+        if (!open && !docked && !menuUp) this.renderWorkspaces();
         // The panel is sized to its content while collapsed, so the row
         // appearing or going changes how wide it is and therefore where its
         // anchor puts it.
         this.place();
+    };
+
+    /** The workspace on screen, as the shell last heard it or as the host says. */
+    Shell.prototype.currentWorkspace = function () {
+        return this.activeWorkspace
+            || (this.host && typeof this.host.getActiveWorkspace === "function"
+                ? this.host.getActiveWorkspace() : "");
+    };
+
+    /** Is the panel's view the docked settings column? Its state, on the one
+     *  workspace that has the column. Whether the panel is open is not part of
+     *  it: a closed panel keeps its view, and `syncDock` puts the column back
+     *  in the page while it is closed. */
+    Shell.prototype.dockShown = function () {
+        const dock = NS.dock;
+        return !!(this.state.settingsDocked && dock
+                  && dock.available(this.currentWorkspace()));
+    };
+
+    /** The settings button: on Txt2Img only, lit while the column is docked. */
+    Shell.prototype.applySettingsButton = function () {
+        const button = this.nodes && this.nodes.settings;
+        if (!button) return;
+        const dock = NS.dock;
+        const available = !!(dock && dock.available(this.currentWorkspace()));
+        button.hidden = !available;
+        button.setAttribute("aria-pressed", String(available && !!this.state.settingsDocked));
+    };
+
+    /** The workspace changed, or the page under it did: the view follows. */
+    Shell.prototype.applyDock = function () {
+        if (this.dockShown() !== !!this.dockedNow) {
+            this.applyChat();
+            return;
+        }
+        this.applySettingsButton();
+        if (this.dockedNow) this.syncDock();
+    };
+
+    /** The settings column drawn where the panel's placeholder is, or put back
+     *  in the page. Called after every placement and every move of the panel:
+     *  the column is fixed to the window and follows nothing by itself. */
+    Shell.prototype.syncDock = function () {
+        const dock = NS.dock;
+        if (!dock) return;
+        const slot = this.nodes.dock;
+        if (!this.state.panelOpen || !this.dockedNow || !slot) {
+            dock.release();
+            return;
+        }
+        dock.place(slot.hidden ? null : slot.getBoundingClientRect());
+    };
+
+    /** The settings button: docked, or back to the panel's other view. With a
+     *  menu up it is the way back to the column, as Chat is to the
+     *  conversation. */
+    Shell.prototype.toggleDock = function () {
+        const menuUp = !!(this.nodes.menu && !this.nodes.menu.hidden);
+        if (menuUp) this.closeMenu();
+        this.state.settingsDocked = menuUp ? true : !this.dockedNow;
+        this.applyChat();
+        this._save();
     };
 
     /** The workspace row: every tab this installation has, one press each.
@@ -966,6 +1065,11 @@
     };
 
     Shell.prototype.placeNow = function () {
+        this.placePanel();
+        this.syncDock();
+    };
+
+    Shell.prototype.placePanel = function () {
         const root = this.nodes.root;
         if (!root) return;
         const open = this.state.panelOpen;
@@ -1100,6 +1204,8 @@
         const top = event.clientY - drag.offsetY;
         drag.node.style.left = Math.round(left) + "px";
         drag.node.style.top = Math.round(top) + "px";
+        // A docked settings column travels with the panel it is drawn in.
+        if (drag.node === this.nodes.panel) this.syncDock();
         // Free float has nothing to snap to, so there is nothing to preview
         // and nothing to choose: where it is put is where it stays.
         if (this.state.freeFloat) {
@@ -1405,6 +1511,7 @@
         this.on(nodes.launcher, "click", (event) => this.launcherClick(event));
         this.on(nodes.minimize, "click", () => this.close());
         this.on(nodes.chat, "click", () => this.toggleChat());
+        this.on(nodes.settings, "click", () => this.toggleDock());
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
         this.on(nodes.generate, "click", () => this.generateInWanGP());
@@ -1555,6 +1662,7 @@
         this.disposers.push(this.host.subscribeNavigation((active) => {
             this.noteWorkspace(active);
             this.applyGenerate();
+            this.applyDock();
             this.applySuppression();
             this.renderWorkspaces();
             if (this.state.focusEnabled && active && this.focus.isActive()
@@ -1897,6 +2005,15 @@
         // before the menu took its place.
         const menuUp = !!(this.nodes.menu && !this.nodes.menu.hidden);
         if (menuUp) this.closeMenu();
+        // Docked, Chat is the way to the conversation: the column goes back to
+        // the page and the conversation shows.
+        if (this.dockedNow) {
+            this.state.settingsDocked = false;
+            this.state.conversationExpanded = true;
+            this.applyChat();
+            this._save();
+            return;
+        }
         this.state.conversationExpanded = menuUp ? true : !this.state.conversationExpanded;
         this.applyChat();          // which places the panel for its new size
         this._save();
@@ -2252,13 +2369,16 @@
         if (open) {
             if (nodes.body) nodes.body.hidden = true;
             if (nodes.workspaces) nodes.workspaces.hidden = true;
+            if (nodes.dock) nodes.dock.hidden = true;
             this.place();
             return;
         }
-        const expanded = !!this.state.conversationExpanded;
+        const docked = !!this.dockedNow;
+        const expanded = !!this.state.conversationExpanded && !docked;
         if (nodes.body) nodes.body.hidden = !expanded;
-        if (nodes.workspaces) nodes.workspaces.hidden = expanded;
-        if (!expanded) this.renderWorkspaces();
+        if (nodes.workspaces) nodes.workspaces.hidden = expanded || docked;
+        if (nodes.dock) nodes.dock.hidden = !docked;
+        if (!expanded && !docked) this.renderWorkspaces();
         this.place();
     };
 
@@ -4460,6 +4580,8 @@
             } catch (error) { /* already gone */ }
         });
         this.disposers = [];
+        // A docked settings column goes back to the page with the panel.
+        if (NS.dock) NS.dock.release();
         if (this.nodes.root && this.nodes.root.parentElement) {
             this.nodes.root.parentElement.removeChild(this.nodes.root);
         }

@@ -32,6 +32,7 @@ files.
 | `javascript/forge_assistant_store.js` | the page's copy of the conversation, drafts, operations |
 | `javascript/forge_assistant_host.js` | Forge's tabs and header, as an adapter; keyboard arbitration |
 | `javascript/forge_assistant_focus.js` | focus as a reversible transaction, with editor adapters |
+| `javascript/forge_assistant_layout.js` | the results column fills the window; Txt2Img's settings column docked in the panel (§3.29) |
 
 Changed: `prompt_master/chat/history.py` (a revision, a guarded save path, a
 tombstone file, an exclusive identifier), `mc_llm_chat_panel.py` (fifteen direct
@@ -2055,6 +2056,106 @@ and never on the event loop. The answer's `message` is held in the status line
 loaded model keeps its LoRA baked in; a LoRA change reloads the checkpoint from
 disk." A press while a generation runs is told that the originals are freed when
 it ends, and they are. A refused press leaves the mode as the server last said.
+
+## 3.29 The settings column in the panel, and a results column that fills the window
+
+Two asks against Txt2Img, made with screenshots of the user's Forge (Lobe,
+split previewer):
+
+> "lets add this new option. A third state for the flyout menu, that removes the
+> left column from the text to image tab, and makes it scrollable in the flyout
+> menu. Add this button to the flyout menu bar only when text to image tab is
+> open."
+
+> "the right column (generate, gallery, gallery buttons) does not scale all the
+> way to fill the space. There is a gap at the bottom ... The right column
+> should not scroll, it should just fill the space."
+
+Both live in `javascript/forge_assistant_layout.js` (`Dock`, `Fill`), with the
+panel's side in `forge_assistant.js` (`applyChat`, `dockShown`, `syncDock`,
+`toggleDock`) and the rules in `style.css` beside focus mode's.
+
+### The column is drawn in the panel, not moved into it
+
+The obvious build -- take `#txt2img_settings` out of its row and append it to
+the panel -- breaks Forge. The panel is under `<body>`; Forge's scripts find
+the prompt boxes through `gradioApp()`, the `<gradio-app>` element (token
+counters, Ctrl+Enter, extra networks writing into the prompt, paste,
+`get_tab_index`), and so do this extension's own scripts and other
+extensions'. A column outside `<gradio-app>` is a column none of them can find.
+
+So nothing is moved. The column gets `position: fixed` and the pixels of an
+empty placeholder in the panel (`.forge-assistant-dock`), written inline with
+`!important` and re-written after every placement, drag and resize of the panel
+(`syncDock`, from `placeNow` and `moveDrag`). Its row gets a class that hands
+its one remaining track to the results column and hides Forge's resize handle;
+Forge rewrites the row's grid template inline on every window resize, without
+priority, so the class wins without anything having to undo Forge. `release()`
+puts back exactly the inline values it replaced, priority included.
+
+The column is drawn *under* the panel, and the panel is see-through over the
+placeholder and lets presses through it. The other way round cannot work in
+focus mode: the focus root is a stacking context at layer 1100, below the
+panel's 1200, and nothing inside it can be drawn above the panel whatever its
+own z-index says. Under the panel works in both. Two traps met on the way,
+both now held by `tests/test_assistant_layout.py`:
+
+- `#forge-assistant-root > * { pointer-events: auto }` is an id rule; the
+  docked panel's `pointer-events: none` needed the id too, or the panel took
+  every press meant for the column.
+- A Gradio column given a height wraps instead of scrolling (`flex-wrap: wrap`
+  on every column, Mini Paint NEO's trap from its Clipboard): the docked column
+  pins `nowrap`, and its children `flex-shrink: 0`, because Lobe makes the
+  column a flex column with `!important` and the blocks would otherwise be
+  squeezed to fit rather than scrolled.
+
+A transform, filter or containment on an ancestor makes `position: fixed`
+resolve against that ancestor (focus mode checks for the same trap). `place()`
+reads where the box landed and takes the difference back once.
+
+The state is the panel's (`settingsDocked`, saved with the rest of its layout
+for the tab). It shows only on Txt2Img; elsewhere the panel shows the
+conversation or the tab bar as `conversationExpanded` says, and the column is
+in its page. Closing the panel puts the column back; opening it docks it again.
+
+### The fill is measured, not a share of the window
+
+The user's user.css set `#txt2img_gallery_container { height: 85vh !important }`.
+Outside focus that lands near the bottom by luck of the header's height; in
+focus the header is gone, the column starts higher, and 85vh stops short --
+the gap in the screenshot. No single fraction of the window is right in both,
+so `Fill.measure` reads it: from where the column rests (its place in the row
+with the scroller at its start, or where it is held, if sticky and held lower)
+to the bottom of whatever scrolls it, less the column's own content above and
+below the gallery, is the gallery's height. One custom property on the results
+column carries it; the stylesheet applies it on two ids with `!important`, so
+the user's one-id rule loses whichever sheet loads last and the user's file
+needs no change. Measured again on window and visual-viewport resizes, on
+focus entering and leaving, and whenever the results column changes size
+(a ResizeObserver: a tab shown, the dock, an infotext arriving). It writes only
+when the value changed, so its answer to its own write finds nothing to do.
+
+Where the column is held by `position: sticky` is read from the layout, not
+computed from `top`: Chromium measures a sticky offset from inside the
+scroller's padding, which put the first version 8 px past the window's bottom
+in focus mode, and Firefox (the user's browser) need not agree with it. A
+sticky column drawn lower than its place in the row is being held, and where it
+is drawn is where it is held.
+
+`forgeAssistant.fill.explain()` in the console says, per tab, what was measured
+or why the column was left alone ("stacked under the settings" on a phone).
+
+### Verified
+
+In Chromium, against a Forge-shaped Gradio 4.40 app (the real markup, Lobe's
+rules, the user's user.css) while building, and in the suite by
+`tests/test_assistant_layout.py` (a page with only what decides the geometry)
+and `tests/test_assistant_dock_js.py` (the panel's states under node). Every
+rule and branch above was reverted one at a time and a test failed for each,
+except two that change nothing on that page: the focus hook (the column's own
+resize already asks for a measure) and the `!important` on the gallery's height
+(a two-id rule outranks the user.css without it). Neither has run on the
+user's machine or in Firefox.
 
 ## 4. Deliberate deviations
 

@@ -40,6 +40,7 @@ HOST = JAVASCRIPT / "forge_assistant_host.js"
 STORE = JAVASCRIPT / "forge_assistant_store.js"
 SYSTEM = JAVASCRIPT / "forge_assistant_system.js"
 EDITOR = JAVASCRIPT / "mc_message_editor.js"
+LAYOUT = JAVASCRIPT / "forge_assistant_layout.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 
@@ -180,7 +181,7 @@ def run(scenario: str, viewport=None, insets=None, sources=("shell",)) -> dict:
     capped at 128 KiB on Linux and the harness plus the sources is past that.
     """
     order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK, "system": SYSTEM,
-             "editor": EDITOR}
+             "editor": EDITOR, "layout": LAYOUT}
     body = "\n".join(order[name].read_text(encoding="utf-8") for name in sources)
     # The scalars first and the sources last, deliberately. The sources contain
     # the word VIEWPORT (in ``NARROW_VIEWPORT``), so substituting them first
@@ -579,7 +580,7 @@ class TestTheStylesheetCanHideThings:
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
                           "launcherLabel", "input", "ghost", "workspaces",
-                          "picker", "editBar"}, hidden
+                          "picker", "editBar", "dock"}, hidden
 
 
 class TestOpeningAndClosing:
@@ -2716,9 +2717,11 @@ class TestTheHeaderIsOneRow:
         """, sources=("shell",))
 
         # Generate in WanGP is in the row on every tab and shown only on
-        # WanGP's (test_assistant_generate_js).
-        assert found["order"] == ["Workspace", "Chat", "More actions", "Generate in WanGP",
-                                 "forge-assistant-grip", "Minimize the assistant"]
+        # WanGP's (test_assistant_generate_js); Generation settings likewise,
+        # shown only on Txt2Img's (test_assistant_dock_js).
+        assert found["order"] == ["Workspace", "Chat", "Generation settings", "More actions",
+                                 "Generate in WanGP", "forge-assistant-grip",
+                                 "Minimize the assistant"]
         # Glyphs, every one: nothing in the row is a word.
         assert all(len(word) <= 2 for word in found["words"]), found["words"]
         assert found["title"] is True
