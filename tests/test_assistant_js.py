@@ -2499,17 +2499,29 @@ class TestFreeFloat:
 
     def test_turning_it_on_leaves_the_panel_where_it_already_was(self):
         """A mode that moves the thing you were looking at is a mode people
-        turn off again to find it."""
+        turn off again to find it.
+
+        Asserted on where the panel is put, not on the fraction alone: the
+        first version stored the fraction of the whole window and placed it
+        across the travel inside the gap, so turning it on moved this panel
+        23 px left and 7 px up while the fraction looked right."""
         found = run(PANEL + """
             sized(1280, 900);
             const shell = panel();
             shell.setFreeFloat(true);
-            console.log(JSON.stringify({at: shell.state.floatAt}));
+            console.log(JSON.stringify({at: shell.state.floatAt,
+                                        placed: placed(shell.nodes.panel)}));
         """, sources=("shell",))
 
-        # The stub panel sits at left 900 of 1280-360 travel, top 500 of 900-140.
-        assert abs(found["at"]["x"] - 900 / 920) < 0.01
-        assert abs(found["at"]["y"] - 500 / 760) < 0.01
+        # The stub panel sits at left 900, top 500. 900 is 4 px past the
+        # furthest a panel 360 wide goes inside the 24 px gap (896), so it is
+        # held there; 500 is inside the travel, so it stays exactly. Up and
+        # down the travel is the header's (48 px), which is what keeps its
+        # place as the panel changes height.
+        assert found["at"]["x"] == 1
+        assert abs(found["at"]["y"] - (500 - 24) / (900 - 48 - 48)) < 1e-9
+        assert found["placed"]["left"] == "896px"
+        assert found["placed"]["top"] == "500px"
 
     def test_a_floated_panel_is_placed_from_its_fraction(self):
         found = run(PANEL + """
@@ -2535,10 +2547,10 @@ class TestFreeFloat:
         found = run(PANEL + """
             const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
             const seen = [];
-            // All above the 640px breakpoint: below it the panel is a sheet
-            // anchored to a half of the screen, which is the case the next
-            // test covers.
-            [[1920, 1080], [1280, 900], [900, 700], [700, 500]].forEach((size) => {
+            // Phones as well: free float floats below the 640px breakpoint
+            // too, where the panel is otherwise a sheet.
+            [[1920, 1080], [1280, 900], [900, 700], [700, 500], [420, 640],
+             [360, 600], [640, 360]].forEach((size) => {
                 sized(size[0], size[1]);
                 shell.placeNow();
                 const style = shell.nodes.panel.style;
@@ -2552,20 +2564,44 @@ class TestFreeFloat:
             assert left >= 0 and top >= 0, (width, height, left, top)
             assert left < width and top < height, (width, height, left, top)
 
-    def test_a_phone_gets_the_sheet_and_not_a_floating_panel(self):
-        """A sheet is anchored to a half of the screen and covers it, so there
-        is nothing for a floating position to mean. Free float staying on in
-        the preference is right -- it applies again on a wider window."""
+    def test_a_phone_with_it_on_gets_a_floating_panel_where_it_was_put(self):
+        """Reported: "on mobile, the fly-out menu is docking instead of being
+        able to move anywhere in free float". It used to: a phone always got
+        the sheet, so a drag moved the panel and the release put it back."""
         found = run(PANEL + """
             sized(420, 640);
             const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
+            const roles = {};
+            shell.nodes.panel.setAttribute = (n, v) => { roles[n] = v; };
+            shell.nodes.panel.removeAttribute = (n) => { delete roles[n]; };
+            const classes = new Set();
+            shell.nodes.panel.classList = {add: (n) => classes.add(n),
+                                           remove: (n) => classes.delete(n),
+                                           contains: (n) => classes.has(n)};
             shell.placeNow();
-            console.log(JSON.stringify({placed: placed(shell.nodes.panel),
-                                        on: shell.state.freeFloat}));
+            console.log(JSON.stringify({placed: placed(shell.nodes.panel), roles,
+                                        sheet: classes.has("forge-assistant-sheet")}));
+        """, sources=("shell",))
+
+        # Against the far corner, 16 px in (a phone's gap), and never taller
+        # than what shows.
+        assert found["placed"] == {"left": "44px", "top": "484px", "width": "360px",
+                                   "maxHeight": "608px"}
+        assert found["sheet"] is False
+        assert found["roles"] == {"role": "complementary"}, "not modal: it floats"
+
+    def test_a_phone_with_it_off_still_gets_the_sheet(self):
+        """Anchored, a phone keeps the sheet: anchored to a half of the screen
+        and modal, positioned by the stylesheet."""
+        found = run(PANEL + """
+            sized(420, 640);
+            const shell = panel({state: {freeFloat: false, floatAt: {x: 1, y: 1}}});
+            shell.nodes.panel.style.maxHeight = "500px";
+            shell.placeNow();
+            console.log(JSON.stringify({placed: placed(shell.nodes.panel)}));
         """, sources=("shell",))
 
         assert found["placed"] == {}, "the sheet is positioned by the stylesheet"
-        assert found["on"] is True
 
     def test_with_it_off_the_panel_still_snaps(self):
         found = run(PANEL + """
@@ -2679,6 +2715,130 @@ class TestFreeFloat:
         assert found["previewed"] is True
         assert found["anchor"] == "top-left"
         assert found["at"] is None
+
+
+    def test_a_drop_is_placed_back_exactly_where_it_was_let_go(self):
+        """The fraction is measured on the same travel it is laid out on, so a
+        panel let go anywhere inside that travel stays there, on a desktop
+        and on a phone."""
+        found = run(PANEL + """
+            const seen = [];
+            [[1280, 900, 700, 300], [420, 640, 30, 250], [390, 844, 16, 600]]
+                .forEach(([width, height, left, top]) => {
+                    sized(width, height);
+                    const shell = panel({state: {freeFloat: true}});
+                    shell.preview = () => undefined;
+                    shell.drag = {node: shell.nodes.panel, pointerId: 1,
+                                  startX: 0, startY: 0, offsetX: 0, offsetY: 0,
+                                  width: Math.min(360, width - 32), height: 140,
+                                  moved: false, anchor: "bottom-right", committed: false};
+                    shell.moveDrag({pointerId: 1, clientX: left, clientY: top});
+                    shell.endDrag({pointerId: 1}, false);
+                    const where = placed(shell.nodes.panel);
+                    seen.push([left, top, parseInt(where.left, 10), parseInt(where.top, 10)]);
+                });
+            console.log(JSON.stringify({seen}));
+        """, sources=("shell",))
+
+        for left, top, placed_left, placed_top in found["seen"]:
+            assert (placed_left, placed_top) == (left, top), found["seen"]
+
+    def test_an_axis_with_no_room_keeps_the_fraction_it_had(self):
+        """On a phone the panel is as wide as the screen allows, so there is
+        nowhere across to put it; a drag there must not forget where it was
+        across on a wider window."""
+        found = run(PANEL + """
+            sized(390, 844);
+            const shell = panel({state: {freeFloat: true, floatAt: {x: 0.8, y: 0.1}}});
+            shell.preview = () => undefined;
+            shell.drag = {node: shell.nodes.panel, pointerId: 1,
+                          startX: 0, startY: 0, offsetX: 0, offsetY: 0,
+                          width: 358, height: 140, moved: false,
+                          anchor: "bottom-right", committed: false};
+            shell.moveDrag({pointerId: 1, clientX: 16, clientY: 400});
+            shell.endDrag({pointerId: 1}, false);
+            console.log(JSON.stringify({at: shell.state.floatAt}));
+        """, sources=("shell",))
+
+        assert found["at"]["x"] == 0.8
+        assert abs(found["at"]["y"] - (400 - 16) / (844 - 32 - 48)) < 1e-9
+
+    def test_the_header_keeps_its_place_as_the_panel_changes_height(self):
+        """Docking the settings column, opening the conversation, collapsing
+        to the tab bar: the panel changes height under its header, and the
+        header -- the button just pressed in it -- stays where it was put. It
+        moves only as far as the panel needs to stay on screen, and comes back
+        when it no longer needs to."""
+        found = run(PANEL + """
+            sized(390, 844);
+            const shell = panel({state: {freeFloat: true}});
+            shell.preview = () => undefined;
+            shell.drag = {node: shell.nodes.panel, pointerId: 1,
+                          startX: 0, startY: 0, offsetX: 0, offsetY: 0,
+                          width: 358, height: 140, moved: false,
+                          anchor: "bottom-right", committed: false};
+            shell.moveDrag({pointerId: 1, clientX: 16, clientY: 300});
+            shell.endDrag({pointerId: 1}, false);
+            const tops = [];
+            [140, 342, 90, 700, 140].forEach((height) => {
+                shell.nodes.panel.offsetHeight = height;
+                shell.placeNow();
+                tops.push(parseInt(shell.nodes.panel.style.top, 10));
+            });
+            console.log(JSON.stringify({tops}));
+        """, sources=("shell",))
+
+        # 700 does not fit under 300 (844 - 16 is the floor), so it goes up
+        # only as far as it has to: 128. Back at 140, it is at 300 again.
+        assert found["tops"] == [300, 300, 300, 128, 300]
+
+    def test_a_panel_put_against_the_bottom_stays_against_it(self):
+        """A panel let go against the bottom edge is kept against it as it
+        grows or shrinks, rather than its header being kept mid-screen."""
+        found = run(PANEL + """
+            sized(390, 844);
+            const shell = panel({state: {freeFloat: true}});
+            shell.preview = () => undefined;
+            shell.drag = {node: shell.nodes.panel, pointerId: 1,
+                          startX: 0, startY: 0, offsetX: 0, offsetY: 0,
+                          width: 358, height: 140, moved: false,
+                          anchor: "bottom-right", committed: false};
+            // Let go with its bottom past the window's (720 + 140 > 828) and
+            // its header still well inside its own range (720 < 780): it was
+            // put against the bottom.
+            shell.moveDrag({pointerId: 1, clientX: 16, clientY: 720});
+            shell.endDrag({pointerId: 1}, false);
+            const bottoms = [];
+            [140, 342, 90].forEach((height) => {
+                shell.nodes.panel.offsetHeight = height;
+                shell.placeNow();
+                bottoms.push(parseInt(shell.nodes.panel.style.top, 10) + height);
+            });
+            console.log(JSON.stringify({bottoms, y: shell.state.floatAt.y}));
+        """, sources=("shell",))
+
+        assert found["y"] == 1
+        assert found["bottoms"] == [828, 828, 828]
+
+    def test_a_floating_panel_is_never_taller_than_what_shows(self):
+        """A phone's keyboard shrinks the visible viewport and not the window
+        the stylesheet's cap is taken from; the cap is written from what
+        shows, inside the gap and the safe-area insets, on every placement."""
+        found = run(PANEL + """
+            element("forge-assistant-root");   // where the insets are read
+            const shell = panel({state: {freeFloat: true, floatAt: {x: 0, y: 1}}});
+            const seen = [];
+            [[390, 844], [390, 380], [1280, 900], [390, 90]].forEach(([w, h]) => {
+                sized(w, h);
+                shell.placeNow();
+                seen.push(shell.nodes.panel.style.maxHeight);
+            });
+            console.log(JSON.stringify({seen}));
+        """, insets={"--forge-assistant-inset-top": 20, "--forge-assistant-inset-bottom": 34},
+            sources=("shell",))
+
+        # Less the insets and a gap above and below; never under 120 px.
+        assert found["seen"] == ["758px", "294px", "798px", "120px"]
 
 
 class TestTheHeaderIsOneRow:

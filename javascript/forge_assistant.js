@@ -92,6 +92,9 @@
     const MIN_WIDTH = 320;
     const MAX_WIDTH = 640;
     const NOMINAL_WIDTH = 360;
+    // The least the panel's height is ever capped to, however little of the
+    // window shows: the header and a line of whatever is under it.
+    const MIN_VISIBLE_HEIGHT = 120;
     const RESIZE_STEP = 16;
     const BOTTOM_SLACK = 100;
     //: Leaving the end of the transcript on purpose. An upward wheel that has
@@ -203,27 +206,61 @@
     // one edge, 1 against the other. That maps onto any later viewport and can
     // strand the panel no more than an anchor can, which is the property the
     // anchors were protecting and the one thing a remembered pixel would lose.
-    function fractionOf(box, view) {
-        return {x: clamp01((box.left - view.left) / Math.max(1, view.width - box.width)),
-                y: clamp01((box.top - view.top) / Math.max(1, view.height - box.height))};
-    }
-
-    // The same clamping as `anchorPoint`: inside the safe-area insets, inside
-    // the gap, and never larger than the window.
-    function floatPoint(at, box, view, inset) {
+    //
+    // Measured against exactly the travel `floatPoint` lays it out on --
+    // inside the insets and the gap -- so a panel put down anywhere inside
+    // that travel is placed again exactly there. Measured against the whole
+    // window instead, as it first was, a drop moved by up to the gap on
+    // release, and turning free float on moved the panel it promised to
+    // leave alone. On an axis with no travel at all -- a phone, where the
+    // panel is as wide as the screen allows -- any fraction places it the
+    // same, so the one it had is kept for a wider window to use.
+    //
+    // Up and down, what is remembered is where the *header* is (`hold`, its
+    // height), not the whole panel: the panel changes height under it --
+    // the conversation opening, the tab bar, the settings column docked --
+    // and a position kept as a share of the room around the whole panel
+    // moved the header every time, the button just pressed with it. So the
+    // header stays where it was put and the panel grows below it, moved up
+    // only as far as it must to stay on screen. One put against the bottom
+    // edge is remembered as against it (1), and stays against it whatever its
+    // height. Without a `hold` -- the launcher -- the whole box is held.
+    function floatTravel(box, view, inset, hold) {
         const gap = gapFor(view);
         const pad = inset || {top: 0, right: 0, bottom: 0, left: 0};
         const width = Math.min(box.width, view.width - pad.left - pad.right - gap * 2);
         const height = Math.min(box.height, view.height - pad.top - pad.bottom - gap * 2);
-        const minX = view.left + pad.left + gap;
-        const minY = view.top + pad.top + gap;
-        const travelX = Math.max(0, (view.width - pad.right - gap - width)
-            - (pad.left + gap));
-        const travelY = Math.max(0, (view.height - pad.bottom - gap - height)
-            - (pad.top + gap));
-        return {left: Math.round(minX + clamp01(at && at.x) * travelX),
-                top: Math.round(minY + clamp01(at && at.y) * travelY),
-                width: Math.round(width), height: Math.round(height)};
+        const held = hold > 0 ? Math.min(hold, height) : height;
+        return {width, height,
+                minX: view.left + pad.left + gap,
+                minY: view.top + pad.top + gap,
+                travelX: view.width - pad.left - pad.right - gap * 2 - width,
+                travelY: view.height - pad.top - pad.bottom - gap * 2 - held,
+                // The lowest the whole box can sit.
+                lowest: view.top + view.height - pad.bottom - gap - height};
+    }
+
+    function fractionOf(box, view, inset, previous, hold) {
+        const room = floatTravel(box, view, inset, hold);
+        const along = (from, start, travel, kept) => (travel >= 1
+            ? clamp01((from - start) / travel)
+            : (kept === undefined || kept === null ? 0.5 : clamp01(kept)));
+        const x = along(box.left, room.minX, room.travelX, previous && previous.x);
+        const y = box.top >= room.lowest - 0.5 && room.lowest > room.minY
+            ? 1
+            : along(box.top, room.minY, room.travelY, previous && previous.y);
+        return {x, y};
+    }
+
+    // The same clamping as `anchorPoint`: inside the safe-area insets, inside
+    // the gap, and never larger than the window.
+    function floatPoint(at, box, view, inset, hold) {
+        const room = floatTravel(box, view, inset, hold);
+        const top = Math.max(room.minY, Math.min(room.lowest,
+            room.minY + clamp01(at && at.y) * Math.max(0, room.travelY)));
+        return {left: Math.round(room.minX + clamp01(at && at.x) * Math.max(0, room.travelX)),
+                top: Math.round(top),
+                width: Math.round(room.width), height: Math.round(room.height)};
     }
 
     // Nearest by the distance between the dragged element's centre and each
@@ -910,6 +947,44 @@
         dock.place(slot.hidden ? null : slot.getBoundingClientRect());
     };
 
+    /** The docked view is as tall as the conversation is at its fullest.
+     *
+     *  Asked for after the first build, which made the docked panel the
+     *  window's height: "maintain the same height restriction as the fly out
+     *  menu in conversation mode. It should not go to the top and bottom of
+     *  the page ... the entire column's worth of content should be available
+     *  still. Just need to scroll it." So the placeholder the column is drawn
+     *  over is given the conversation body's height with its transcript at
+     *  the most the stylesheet lets it be: the transcript's own max-height,
+     *  read from the stylesheet, plus everything else in the body -- the
+     *  status line, the composer -- measured as it is. The body is hidden
+     *  while docked, so it is shown for the measurement and hidden again in
+     *  the same turn; nothing is painted in between. The column scrolls in
+     *  what that leaves. */
+    Shell.prototype.sizeDock = function () {
+        const slot = this.nodes.dock;
+        if (!slot || !slot.style) return;
+        const body = this.nodes.body;
+        const transcript = this.nodes.transcript;
+        if (!this.dockedNow || slot.hidden || !body || !transcript) {
+            if (slot.style.height) slot.style.height = "";
+            return;
+        }
+        const bodyHidden = body.hidden;
+        slot.hidden = true;
+        body.hidden = false;
+        const chrome = Math.max(0, (body.offsetHeight || 0) - (transcript.offsetHeight || 0));
+        let most = NaN;
+        try {
+            most = parseFloat(window.getComputedStyle(transcript).maxHeight);
+        } catch (error) { /* a host without computed styles */ }
+        if (!(most > 0)) most = transcript.offsetHeight || 0;
+        body.hidden = bodyHidden;
+        slot.hidden = false;
+        const height = Math.round(chrome + most) + "px";
+        if (slot.style.height !== height) slot.style.height = height;
+    };
+
     /** The settings button: docked, or back to the panel's other view. With a
      *  menu up it is the way back to the column, as Chat is to the
      *  conversation. */
@@ -1078,17 +1153,25 @@
         const narrow = view.width < NARROW_VIEWPORT;
         root.setAttribute("data-anchor", this.anchor());
         root.classList.toggle("forge-assistant-narrow", narrow);
-        if (open && narrow) {
+        if (open) this.sizeDock();
+        if (open && narrow && !this.state.freeFloat) {
             // The mobile sheet: full width, anchored to the half the anchor
             // names, and modal -- dialog semantics, contained focus, inert
             // background. A non-modal sheet on a phone is a sheet the page
             // scrolls behind.
+            //
+            // Not with Free Float on. It was, and on a phone that was the
+            // whole of the complaint: "the fly-out menu is docking instead of
+            // being able to move anywhere in free float" -- a drag moved it
+            // and the release put it back in the sheet. Free float is a
+            // floating panel at any width, placed where it was put down.
             this.nodes.panel.classList.add("forge-assistant-sheet");
             this.nodes.panel.setAttribute("role", "dialog");
             this.nodes.panel.setAttribute("aria-modal", "true");
             node.style.left = "";
             node.style.top = "";
             node.style.width = "";
+            node.style.maxHeight = "";
             return;
         }
         this.nodes.panel.classList.remove("forge-assistant-sheet");
@@ -1105,17 +1188,35 @@
                                    Math.min(MAX_WIDTH, view.width - 32));
             node.style.width = width + "px";
         }
+        const pad = insets();
+        if (open) {
+            // Never taller than what can be seen. The stylesheet's cap is the
+            // window's height, and on a phone that is the height with the
+            // address bar away and no keyboard up: a panel that tall, placed
+            // inside the part that shows, ran under the keyboard -- composer
+            // and all -- the moment somebody went to type. Written from the
+            // visible viewport on every placement, which the keyboard
+            // opening, the bar showing and a rotation all ask for.
+            const most = Math.floor(view.height - pad.top - pad.bottom - gapFor(view) * 2);
+            node.style.maxHeight = Math.max(MIN_VISIBLE_HEIGHT, most) + "px";
+        }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
         if (open) this.placedHeight = node.offsetHeight;
-        // Free float does not apply to the phone sheet above: a sheet is
-        // anchored to a half of the screen and covers it, and there is nothing
-        // for a floating position to mean.
         const at = this.state.freeFloat && this.state.floatAt
-            ? floatPoint(this.state.floatAt, box, view, insets())
-            : anchorPoint(this.anchor(), box, view, insets());
+            ? floatPoint(this.state.floatAt, box, view, pad, this.floatHold(node))
+            : anchorPoint(this.anchor(), box, view, pad);
         node.style.left = at.left + "px";
         node.style.top = at.top + "px";
+    };
+
+    /** What of a floated box keeps its place as the box changes height: the
+     *  panel's header. The launcher is held whole (0). See `fractionOf`. */
+    Shell.prototype.floatHold = function (node) {
+        if (!node || node !== this.nodes.panel) return 0;
+        const header = this.nodes.header;
+        const box = header && header.getBoundingClientRect ? header.getBoundingClientRect() : null;
+        return box && box.height > 0 ? box.height : 0;
     };
 
     // -- drag -------------------------------------------------------------- //
@@ -1209,8 +1310,10 @@
         // Free float has nothing to snap to, so there is nothing to preview
         // and nothing to choose: where it is put is where it stays.
         if (this.state.freeFloat) {
+            if (!drag.inset) drag.inset = insets();
+            if (drag.hold === undefined) drag.hold = this.floatHold(drag.node);
             drag.at = fractionOf({left, top, width: drag.width, height: drag.height},
-                                 viewport());
+                                 viewport(), drag.inset, this.state.floatAt, drag.hold);
             return;
         }
         const centre = {x: left + drag.width / 2, y: top + drag.height / 2};
@@ -2880,7 +2983,10 @@
             const node = this.state.panelOpen ? this.nodes.panel : this.nodes.launcher;
             const box = node && node.getBoundingClientRect
                 ? node.getBoundingClientRect() : null;
-            if (box) this.state.floatAt = fractionOf(box, viewport());
+            if (box) {
+                this.state.floatAt = fractionOf(box, viewport(), insets(), null,
+                                                this.floatHold(node));
+            }
         }
         this._saveFloat();
         this._save();

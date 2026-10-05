@@ -99,6 +99,7 @@ def page_html() -> str:
     scripts = "".join(f'<script src="/{path.name}"></script>'
                       for path in sorted(JAVASCRIPT.glob("forge_assistant*.js")))
     return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>{HOST_CSS}</style>
 <link rel="stylesheet" href="/style.css">
 <style id="user-css">{USER_CSS}</style>
@@ -417,3 +418,232 @@ def test_the_docked_column_follows_the_panel_and_the_workspace(browser):
         assert back["button"] is True and back["column"] == back["slot"], back
     finally:
         page.close()
+
+
+# -- the docked view's height ------------------------------------------------- #
+
+def test_the_docked_view_is_as_tall_as_the_conversation_at_its_fullest(browser):
+    """Asked for: "maintain the same height restriction as the fly out menu in
+    conversation mode. It should not go to the top and bottom of the page ...
+    the entire column's worth of content should be available still. Just need
+    to scroll it." """
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        # The conversation at its fullest: the transcript as tall as the
+        # stylesheet lets it be.
+        chat = page.evaluate("""() => {
+            const transcript = document.querySelector(".forge-assistant-transcript");
+            transcript.style.height = getComputedStyle(transcript).maxHeight;
+            const height = document.getElementById("forge-assistant-panel").offsetHeight;
+            transcript.style.height = "";
+            return height;
+        }""")
+        page.click(".forge-assistant-settings")
+        settle(page)
+        docked = page.evaluate("""() => {
+            const panel = document.getElementById("forge-assistant-panel");
+            const column = document.getElementById("txt2img_settings");
+            const slot = document.querySelector(".forge-assistant-dock");
+            const box = (node) => { const r = node.getBoundingClientRect();
+                                    return [Math.round(r.left), Math.round(r.top),
+                                            Math.round(r.width), Math.round(r.height)]; };
+            column.scrollTop = column.scrollHeight;
+            return {panel: panel.offsetHeight, column: box(column), slot: box(slot),
+                    scroll: [column.scrollHeight, column.clientHeight],
+                    reached: Math.round(column.scrollTop + column.clientHeight)
+                        >= column.scrollHeight - 1,
+                    last: column.lastElementChild.getBoundingClientRect().bottom
+                        <= column.getBoundingClientRect().bottom + 1};
+        }""")
+        assert abs(docked["panel"] - chat) <= 1, (docked, chat)
+        assert docked["panel"] < 900 / 2, "not the window's height"
+        assert docked["column"] == docked["slot"], docked
+        assert docked["scroll"][0] > docked["scroll"][1] * 3, "the column scrolls"
+        assert docked["reached"] and docked["last"], "all of it can be scrolled to"
+    finally:
+        page.close()
+
+
+# -- a phone ------------------------------------------------------------------- #
+
+PHONE = {"width": 390, "height": 844}
+
+
+def open_phone(browser, free_float: bool):
+    context = browser.new_context(viewport=PHONE, is_mobile=True, has_touch=True,
+                                  device_scale_factor=2)
+    page = context.new_page()
+    html = page_html()
+    page.route(ORIGIN + "/**", lambda route: _answer(route, html))
+    page.goto(ORIGIN + "/")
+    page.wait_for_function("!!(window.forgeAssistant && window.forgeAssistant.shell)")
+    page.evaluate("(on) => forgeAssistant.shell.setFreeFloat(on)", free_float)
+    page.evaluate("forgeAssistant.shell.open()")
+    settle(page)
+    return context, page
+
+
+def touch_drag(page, start, end, steps: int = 8) -> None:
+    """A finger, through the browser's own touch input rather than a mouse
+    standing in for one, at a hand's pace: a frame between moves and a rest
+    before it lifts. Moves sent all at once are a flick to the browser, and
+    the tap after a flick is the one that stops it, which the browser keeps
+    for itself -- a test's artefact, not a page's behaviour."""
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Input.dispatchTouchEvent",
+             {"type": "touchStart", "touchPoints": [{"x": start[0], "y": start[1]}]})
+    for step in range(1, steps + 1):
+        x = start[0] + (end[0] - start[0]) * step / steps
+        y = start[1] + (end[1] - start[1]) * step / steps
+        page.wait_for_timeout(16)
+        cdp.send("Input.dispatchTouchEvent",
+                 {"type": "touchMove", "touchPoints": [{"x": x, "y": y}]})
+    page.wait_for_timeout(120)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    cdp.detach()
+
+
+PANEL_BOX = """() => {
+    const panel = document.getElementById("forge-assistant-panel");
+    const r = panel.getBoundingClientRect();
+    const grip = document.querySelector(".forge-assistant-grip").getBoundingClientRect();
+    return {left: r.left, top: r.top, right: r.right, bottom: r.bottom, height: r.height,
+            sheet: panel.classList.contains("forge-assistant-sheet"),
+            modal: panel.getAttribute("aria-modal"), role: panel.getAttribute("role"),
+            grip: [grip.left + grip.width / 2, grip.top + grip.height / 2],
+            at: forgeAssistant.shell.state.floatAt,
+            inner: [innerWidth, innerHeight]};
+}"""
+
+
+def test_on_a_phone_free_float_floats_and_stays_where_it_is_put(browser):
+    """Reported: "on mobile, the fly-out menu is docking instead of being able
+    to move anywhere in free float"."""
+    context, page = open_phone(browser, free_float=True)
+    try:
+        before = page.evaluate(PANEL_BOX)
+        assert before["sheet"] is False and before["modal"] is None, before
+        assert before["role"] == "complementary"
+        assert before["left"] >= 16 - 1 and before["right"] <= PHONE["width"] - 16 + 1, before
+
+        # Up the screen by a finger on the header, and let go.
+        grip = before["grip"]
+        touch_drag(page, grip, (grip[0], grip[1] - 300))
+        settle(page)
+        after = page.evaluate(PANEL_BOX)
+        assert after["sheet"] is False, after
+        assert abs(after["top"] - (before["top"] - 300)) <= 1, (before, after)
+        assert after["at"] is not None
+
+        # And down again, part way: where it is let go is where it stays.
+        grip = after["grip"]
+        touch_drag(page, grip, (grip[0], grip[1] + 120))
+        settle(page)
+        again = page.evaluate(PANEL_BOX)
+        assert abs(again["top"] - (after["top"] + 120)) <= 1, (after, again)
+
+        # Reopened, it comes back where it was put.
+        page.evaluate("forgeAssistant.shell.close()")
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        reopened = page.evaluate(PANEL_BOX)
+        assert abs(reopened["top"] - again["top"]) <= 1, (again, reopened)
+    finally:
+        context.close()
+
+
+def keyboard(page, scale: float) -> None:
+    """Less of the page showing than the layout has: what the keyboard coming
+    up does on a phone, where only the visible viewport shrinks and the
+    stylesheet's `100vh` stays the whole screen. Pinch zoom is the same shrink
+    of the visible viewport, and the one a browser can be asked for."""
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Emulation.setPageScaleFactor", {"pageScaleFactor": scale})
+    cdp.detach()
+    settle(page, 4)
+
+
+VISIBLE = """() => {
+    const view = window.visualViewport;
+    const box = (selector) => { const r = document.querySelector(selector).getBoundingClientRect();
+                                return {top: r.top, bottom: r.bottom}; };
+    return {top: view.offsetTop, bottom: view.offsetTop + view.height,
+            panel: box("#forge-assistant-panel"), composer: box(".forge-assistant-composer")};
+}"""
+
+
+def test_on_a_phone_a_floating_panel_fits_what_shows(browser):
+    """The keyboard coming up leaves less of the window showing; a floating
+    panel taller than that ran under the keyboard, composer and all."""
+    context, page = open_phone(browser, free_float=True)
+    try:
+        grip = page.evaluate(PANEL_BOX)["grip"]
+        touch_drag(page, grip, (grip[0], 700))
+        settle(page)
+        keyboard(page, 2.2)
+        found = page.evaluate(VISIBLE)
+        assert found["bottom"] - found["top"] < 400, found
+        assert found["panel"]["top"] >= found["top"] + 16 - 1, found
+        assert found["panel"]["bottom"] <= found["bottom"] - 16 + 1, found
+        assert found["composer"]["bottom"] > found["composer"]["top"], "the composer is drawn"
+        assert found["composer"]["bottom"] <= found["bottom"] - 16 + 1, found
+
+        # Docked, the column's height is what gives way, and the column is
+        # still drawn over the panel's placeholder, inside what shows.
+        page.evaluate("forgeAssistant.shell.toggleDock()")
+        settle(page, 4)
+        docked = page.evaluate(VISIBLE)
+        where = page.evaluate(WHERE)
+        column = page.evaluate("document.getElementById('txt2img_settings')"
+                               ".getBoundingClientRect().bottom")
+        assert docked["panel"]["bottom"] <= docked["bottom"] - 16 + 1, docked
+        assert where["column"] == where["slot"], where
+        assert column <= docked["bottom"] - 16 + 1, (column, docked)
+    finally:
+        context.close()
+
+
+def test_on_a_phone_without_free_float_the_panel_is_still_a_sheet(browser):
+    context, page = open_phone(browser, free_float=False)
+    try:
+        found = page.evaluate(PANEL_BOX)
+        assert found["sheet"] is True and found["modal"] == "true", found
+        assert found["left"] == 0 and found["right"] == PHONE["width"]
+    finally:
+        context.close()
+
+
+def test_on_a_phone_the_settings_column_docks_in_a_floating_panel(browser):
+    context, page = open_phone(browser, free_float=True)
+    try:
+        # Put mid-screen first: docking makes the panel taller, and its header
+        # -- with the button just pressed in it -- stays where it was put.
+        grip = page.evaluate(PANEL_BOX)["grip"]
+        touch_drag(page, grip, (grip[0], 200))
+        settle(page)
+        put = page.evaluate(PANEL_BOX)
+        page.tap(".forge-assistant-settings")
+        settle(page)
+        docked = page.evaluate(PANEL_BOX)
+        assert docked["height"] > put["height"] + 100, (put, docked)
+        assert abs(docked["top"] - put["top"]) <= 1, (put, docked)
+        page.tap(".forge-assistant-chat")
+        settle(page)
+        back = page.evaluate(PANEL_BOX)
+        assert abs(back["top"] - put["top"]) <= 1, (put, back)
+        page.tap(".forge-assistant-settings")
+        settle(page)
+        found = page.evaluate(DOCKED)
+        assert found["pressedButton"] == "true"
+        assert found["column"] == found["slot"], found
+        assert found["scroll"][0] > found["scroll"][1], "the column scrolls"
+        assert found["pressed"] is True
+        grip = page.evaluate(PANEL_BOX)["grip"]
+        touch_drag(page, grip, (grip[0], grip[1] + 150))
+        settle(page)
+        moved = page.evaluate(WHERE)
+        assert moved["column"] == moved["slot"], moved
+    finally:
+        context.close()

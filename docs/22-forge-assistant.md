@@ -678,9 +678,10 @@ corners **at all** is a preference answered once, and the user asked for it to
 be remembered. Keeping it out of the session payload also means it survives
 that payload being rejected by a future schema bump.
 
-It does not apply to the phone sheet, which is anchored to a half of the screen
-and covers it. The preference stays on and applies again on a wider window,
-which is tested rather than assumed.
+It did not apply to the phone sheet, which is anchored to a half of the screen
+and covers it, and the preference waited for a wider window. That was reversed
+at the user's request (§3.30): with Free Float on, a phone gets a floating
+panel too.
 
 The entry is a `menuitemcheckbox` with `aria-checked`, so it reports its state
 instead of only acting, and it is added in `utilityItems()` rather than in the
@@ -2113,6 +2114,17 @@ A transform, filter or containment on an ancestor makes `position: fixed`
 resolve against that ancestor (focus mode checks for the same trap). `place()`
 reads where the box landed and takes the difference back once.
 
+The docked panel was first as tall as the window. Asked for instead: "maintain
+the same height restriction as the fly out menu in conversation mode. It should
+not go to the top and bottom of the page ... the entire columns worth of
+content should be available still. Just need to scroll it." So the placeholder
+is given the conversation body's height with its transcript at its stylesheet
+maximum (`sizeDock`): the transcript's own `max-height`, read from the
+stylesheet, plus everything else in the body as measured. The body is hidden
+while docked, so it is shown for the measurement and hidden again in the same
+turn, and nothing is painted in between. The placeholder may shrink
+(`flex: 0 1 auto`) when the panel is capped to a phone's visible height.
+
 The state is the panel's (`settingsDocked`, saved with the rest of its layout
 for the tab). It shows only on Txt2Img; elsewhere the panel shows the
 conversation or the tab bar as `conversationExpanded` says, and the column is
@@ -2156,6 +2168,48 @@ except two that change nothing on that page: the focus hook (the column's own
 resize already asks for a measure) and the `!important` on the gallery's height
 (a two-id rule outranks the user.css without it). Neither has run on the
 user's machine or in Firefox.
+
+## 3.30 Free Float on a phone
+
+Reported against the build above: "on mobile the fly out menu will be forced to
+a certain location ... make sure that when I'm in mobile the free float mode
+works perfectly", and then: "the fly-out menu is docking instead of being able
+to move anywhere in free float". Below 640 px the open panel was always the
+sheet -- full width, against the top or bottom half -- whatever Free Float
+said, so a finger's drag moved it and the release put it back.
+
+Now the sheet is the anchored mode's alone: with Free Float on, `placePanel`
+floats the panel at any width, non-modal, as on a desktop. Three more things
+were needed for it to behave on a phone, each found by doing it in Chromium
+with real touch input (DevTools' `Input.dispatchTouchEvent`, a phone's
+viewport, `is_mobile`):
+
+- **Where you let go is where it stays.** The fraction was taken of the whole
+  window and laid out across the travel inside the gap, so every drop moved by
+  up to the gap (6 px on a phone) and turning Free Float on moved the panel up
+  to 23 px on a desktop -- the test of that only checked the fraction.
+  `fractionOf` is now the exact inverse of `floatPoint` (`floatTravel`), and an
+  axis with no travel -- a phone, where the panel is as wide as it may be --
+  keeps the fraction it had for a wider window.
+- **The header keeps its place.** A share of the room around the *whole*
+  panel moved the header whenever the panel changed height: docking the
+  settings moved it 75 px up on a phone, the 🎛 just pressed with it. Up and
+  down the travel is the header's now (`floatHold`): the panel grows and
+  shrinks below its header and moves up only as far as it must to stay on
+  screen. A panel let go with its bottom past the window's is remembered as
+  against the bottom (1) and stays against it at any height.
+- **Never taller than what shows.** The stylesheet's cap is `100vh`, which on a
+  phone is the screen with no keyboard and no address bar. The keyboard shrinks
+  only the visible viewport, so the panel ran under it, composer and all.
+  `placePanel` writes the cap from the visible viewport on every placement
+  (the keyboard, the bar and a rotation all re-place). A test asks for pinch
+  zoom to get the same shrink, because a browser will not show a keyboard.
+
+Checked and not changed: Chromium does not report a finger's implicit capture
+moving from the grip to the panel as a lost capture, so the drag's
+`lostpointercapture` listener does not end touch drags. And a tap straight
+after a flick is kept by the browser to stop the flick; the touch tests move a
+frame at a time and rest before lifting, as a hand does.
 
 ## 4. Deliberate deviations
 

@@ -3417,9 +3417,18 @@ the nearest of the six. It is remembered between sessions — not just this one,
 unlike the corner and the width, because whether the thing snaps at all is a
 question you answer once. What is remembered is still not a pixel: it is how
 far across the window the panel was, so a smaller screen next time brings it
-proportionally in rather than leaving it outside. On a phone the panel is a
-sheet anchored to a half of the screen, which is a shape a floating position
-has nothing to say about, so Free Float waits there until the window is wider.
+proportionally in rather than leaving it outside. Where you let go is where it
+stays, to the pixel. Up and down, what keeps its place is the panel's
+**header**: when the panel changes height under it — the conversation opening,
+the tab bar, the settings column docked — the header, and the button you just
+pressed in it, stays put and the panel grows or shrinks below it, moving up
+only as far as it must to stay on screen. A panel put against the bottom edge
+stays against it whatever its height. **On a phone too**: with Free Float on, the
+panel floats where you put it at any width — drag it by its header with a
+finger — instead of being the sheet (with Free Float off a phone still gets the
+sheet, below). It is never taller than the part of the window that shows, so
+when the keyboard comes up the panel shortens and moves to stay above it, the
+composer with it.
 
 **Opened**, it is one row of glyphs — 📑 **Workspace**, 💬 **Chat**, the **⋯**
 menu and **✕** — and the conversation under it. Every glyph carries its word as
@@ -3496,8 +3505,9 @@ to spend the panel's height on. While the tabs are on screen the header's
 (*Generation settings*) sits beside **Chat** on Txt2Img only. Pressed, the
 tab's whole left column — the prompts, the Literal boxes and every setting
 under them — leaves the page and is shown in the panel, scrolling up and down
-inside it, and the gallery takes the full width of the row; the panel grows to
-the window's height to hold it. Everything in the column works there as it did
+inside it, and the gallery takes the full width of the row. The panel is as tall
+as it is with the conversation at its fullest — the same height, not the
+window's — and the column scrolls inside that. Everything in the column works there as it did
 in the page: it is the same column, not a copy (Forge and every extension find
 the prompt boxes where they always were), drawn over the panel's body and
 moving with the panel when it is dragged or resized. **Chat** from there brings
@@ -3514,7 +3524,8 @@ The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it
 stops working while it is open. On a phone it becomes a sheet anchored to the
 half the docking says, and *that* is modal, because a sheet the page scrolls
-behind is a sheet you lose.
+behind is a sheet you lose — unless Free Float is on, and then it floats where
+you put it, as on a desktop, and is not modal.
 
 **It gets out of the way of a dialog.** Mini Paint NEO's *Send to WanGP* popup
 publishes an event when it takes the page; the panel puts itself back to its

@@ -293,3 +293,35 @@ def test_without_the_settings_column_there_is_nothing_to_offer():
     """, sources=("layout",))
 
     assert found == {"available": False, "placed": False}
+
+
+def test_the_docked_view_is_the_conversations_height_at_its_fullest():
+    """Asked for after the first build, which made the docked panel the
+    window's height: "maintain the same height restriction as the fly out menu
+    in conversation mode". The placeholder is the conversation body's height
+    with the transcript at its stylesheet maximum: the body's other parts as
+    measured (the body is shown for the measurement and hidden again), plus
+    the transcript's max-height."""
+    found = run(WORLD + """
+        const {shell} = dockShell("tab_txt2img");
+        const body = shell.nodes.body;
+        const transcript = shell.nodes.transcript;
+        // Laid out only while shown: the measurement has to show the body.
+        Object.defineProperty(body, "offsetHeight", {get() { return this.hidden ? 0 : 310; }});
+        Object.defineProperty(transcript, "offsetHeight",
+                              {get() { return body.hidden ? 0 : 60; }});
+        globalThis.getComputedStyle = (node) => ({
+            maxHeight: node === transcript ? "199px" : "none",
+            getPropertyValue: () => "0px"});
+        shell.toggleDock();
+        shell.sizeDock();
+        const docked = {height: shell.nodes.dock.style.height, body: body.hidden,
+                        slot: shell.nodes.dock.hidden};
+        shell.toggleDock();
+        shell.sizeDock();
+        console.log(JSON.stringify({docked, undocked: shell.nodes.dock.style.height || ""}));
+    """)
+
+    # 310 - 60 of status line and composer, and 199 of transcript.
+    assert found["docked"] == {"height": "449px", "body": True, "slot": False}
+    assert found["undocked"] == ""

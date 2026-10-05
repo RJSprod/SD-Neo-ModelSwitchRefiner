@@ -7295,12 +7295,13 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: none !important;
 }
 
-/* The panel, docked: as tall as it may be, see-through over the placeholder
-   where the column is drawn, and letting presses through it to the column.
-   The header, the menu and the resize edge keep the panel's surface and take
-   their presses as ever. */
+/* The panel, docked: see-through over the placeholder where the column is
+   drawn, and letting presses through it to the column. The header, the menu
+   and the resize edge keep the panel's surface and take their presses as
+   ever. Its height is the placeholder's, which the script gives the
+   conversation's height at its fullest (`sizeDock`): the column scrolls
+   inside that, as the transcript does. */
 .forge-assistant-panel.forge-assistant-docked {
-    height: calc(100vh - 2 * 24px);
     background: transparent;
 }
 
@@ -7323,15 +7324,16 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     border-radius: var(--radius-lg, 10px) var(--radius-lg, 10px) 0 0;
 }
 
-/* A menu up in the column's place: the panel is the menu's size again, on its
-   own surface, as it is over the conversation. */
+/* A menu up in the column's place: on the panel's own surface, as it is over
+   the conversation. */
 .forge-assistant-panel.forge-assistant-docked.forge-assistant-menu-open {
-    height: auto;
     background: var(--background-fill-primary);
 }
 
+/* The measured height, given up first when the panel is capped to what a
+   phone shows. */
 .forge-assistant-dock {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     min-height: 0;
     pointer-events: none;
 }
