@@ -5,18 +5,34 @@
 // host's page and each has to know what the other did to them.
 //
 // THE FILL. Asked for: "the right column (generate, gallery, gallery buttons)
-// does not scale all the way to fill the space. There is a gap at the bottom
-// ... The right column should not scroll, it should just fill the space." The
-// person's own user.css had tried, with `85vh` on the gallery's container: a
-// height taken from the window, not from what is left of it under the column's
-// top. Outside focus that happened to land near the bottom; in focus the header
-// is gone, the column starts higher, and 85vh stops a long way short. No single
-// viewport fraction is right in both, so the gap is measured: the space from
-// where the column rests to the bottom of whatever scrolls it, less everything
-// in the column that is not the gallery, is the gallery's height, written in
-// pixels. "Heights that have to be exact are measured and written as pixels"
-// was learned the hard way next door (Mini Paint NEO's WanGP frame); a
-// percentage inside Gradio's wrappers resolves to auto.
+// does not scale all the way to fill the space. There is a gap at the bottom";
+// and then, once it did, exactly how: "The gallery need to fill its area, only
+// bounded by the screen border, generate / interrupt / cancel, progress bar
+// (when in progress), and gallery buttons. Everything else should be off page.
+// The image should scale up to fill the maximum allowed space. The padding
+// above generate and below gallery buttons should be the same, giving view of
+// gallery in perfect center ... All other content below should still be
+// rendered, but off page and below the view, thus requiring a scroll to see
+// it."
+//
+// So what is kept in view is the column from its first control -- Generate,
+// which Lobe's split previewer moves into the gallery's container, with
+// Interrupt and Skip in the same box, and the progress bar above it while a
+// generation runs -- down to the gallery's buttons. The gap from the top of the
+// view to the first of those is measured, and the same gap is left under the
+// buttons; the gallery is everything in between, in pixels. The generation's
+// infotext, its log and anything else after the buttons is laid out as ever,
+// below the view: the page scrolls to it. The first build fitted the whole
+// column into the window instead, and every infotext took its height out of
+// the gallery -- half a window of picture under a table of settings.
+//
+// The top of the view is the scroller's own top edge -- focus mode's root -- or,
+// when the page itself scrolls, the bottom of whatever holds the top of the
+// window over the column: Lobe's header is sticky. A position kept as a share
+// of the window ("85vh" in the person's user.css) cannot be right both in focus
+// and out of it, which is why this is measured at all; "heights that have to
+// be exact are measured and written as pixels" was learned the hard way next
+// door (Mini Paint NEO's WanGP frame).
 //
 // The pixels travel as one custom property on the results column, and the
 // stylesheet applies them with `!important` on two ids: a user.css rule such as
@@ -53,9 +69,12 @@
     const FILL_TABS = ["txt2img", "img2img"];
     const FILL_MARK = "data-forge-assistant-fill";
     const FILL_VAR = "--forge-assistant-fill-gallery";
-    // Under a column nothing pads -- the page itself scrolls -- this much is left
-    // below it, the same as focus mode's root pads its bottom edge.
-    const FILL_MARGIN = 8;
+    // The room left under the gallery's buttons, so what follows them starts
+    // at the bottom of the view: the gap under the buttons is the gap above
+    // Generate, and nothing shows in it.
+    const FILL_AFTER = "--forge-assistant-fill-after";
+    // The assistant's own root: never what holds the top of the window.
+    const ASSISTANT_ROOT = "forge-assistant-root";
     // Below this the gallery is not a gallery, and a window that short is better
     // served by the page scrolling than by a strip.
     const FILL_FLOOR = 240;
@@ -121,19 +140,107 @@
         this.disposers = [];
     }
 
+    /** Where the view starts, over a column the page itself scrolls: the top
+     *  of the window, or the bottom of what is held over it there -- a sticky or
+     *  fixed header (Lobe's), found by asking the page what is drawn at the top
+     *  of the window above the column. This extension's own panel is never the
+     *  answer, and neither is anything that holds the column itself. */
+    function coveredTop(results, top) {
+        if (typeof document.elementsFromPoint !== "function") return top;
+        const box = results.getBoundingClientRect();
+        const x = Math.max(0, Math.min((window.innerWidth || 0) - 1, box.left + box.width / 2));
+        let covered = top;
+        // A second bar under the first is looked for too; three is plenty.
+        for (let round = 0; round < 3; round += 1) {
+            let found = covered;
+            let hits = [];
+            try {
+                hits = document.elementsFromPoint(x, covered + 1);
+            } catch (error) {
+                hits = [];
+            }
+            hits.forEach((hit) => {
+                if (!hit || (hit.closest && hit.closest("#" + ASSISTANT_ROOT))) return;
+                let walk = hit;
+                while (walk && walk !== document.body && walk !== document.documentElement) {
+                    const style = styleOf(walk);
+                    const position = style ? style.position : "";
+                    if (position === "fixed" || position === "sticky") {
+                        if (!walk.contains(results)) {
+                            found = Math.max(found, walk.getBoundingClientRect().bottom);
+                        }
+                        break;
+                    }
+                    walk = walk.parentElement;
+                }
+            });
+            if (!(found > covered + 0.5)) break;
+            covered = found;
+        }
+        return covered;
+    }
+
+    /** Laid out and in the column's flow: an overlay (a theme's absolute
+     *  progress bar, Forge's live preview) moves nothing and is not counted. */
+    function inFlow(node) {
+        if (!laidOut(node)) return false;
+        const style = styleOf(node);
+        const position = style ? style.position : "";
+        return position !== "absolute" && position !== "fixed";
+    }
+
+    /** The part of the column kept in view, as it is drawn now: from the first
+     *  of Generate's box (with Interrupt and Skip), the progress bar while a
+     *  generation runs, the gallery's container and the gallery, down to the
+     *  bottom of the gallery's buttons. */
+    function keptBox(tab, results, gallery) {
+        const tops = [];
+        const take = (node) => {
+            if (node && node !== results && results.contains(node) && inFlow(node)) {
+                tops.push(node.getBoundingClientRect().top);
+            }
+        };
+        take(results.querySelector("[id$='_generate_box']"));
+        Array.prototype.forEach.call(results.querySelectorAll(".progressDiv"), take);
+        take(byId(tab + "_gallery_container"));
+        const galleryBox = gallery.getBoundingClientRect();
+        tops.push(galleryBox.top);
+        let bottom = galleryBox.bottom;
+        let last = gallery;
+        const buttons = byId("image_buttons_" + tab);
+        if (buttons && results.contains(buttons) && inFlow(buttons)) {
+            bottom = Math.max(bottom, buttons.getBoundingClientRect().bottom);
+            last = buttons;
+        }
+        return {top: Math.min.apply(null, tops), bottom, last};
+    }
+
+    /** The top of the first thing laid out after `node` in the column, or
+     *  null: its following siblings, then its parent's, up to the column. */
+    function nextTop(node, column) {
+        let walk = node;
+        while (walk && walk !== column) {
+            for (let sibling = walk.nextElementSibling; sibling;
+                sibling = sibling.nextElementSibling) {
+                if (inFlow(sibling)) return sibling.getBoundingClientRect().top;
+            }
+            walk = walk.parentElement;
+        }
+        return null;
+    }
+
     /** What the gallery's height should be, in pixels, or null to leave the
      *  column alone -- with the reason, for `explain`. Reads the layout and
      *  writes nothing.
      *
-     *  The column's top is where it rests: its place in the row with the
-     *  scroller at its start, or, when it is sticky, where it sticks if that is
-     *  lower. Its
-     *  bottom is the scroller's inner bottom edge -- its padding's top, the
-     *  same margin focus mode gives the top -- or the window's less
-     *  FILL_MARGIN. Everything between the column's top and the gallery, and
-     *  between the gallery and the last thing in the column, is measured as it
-     *  is, so a generation's infotext arriving under the buttons shrinks the
-     *  gallery rather than pushing the buttons off the screen. */
+     *  The column is measured where it rests: its place in the row with the
+     *  scroller at its start, or, when it is sticky, where it is held if that
+     *  is lower. From there, the gap between the top of the view and the first
+     *  thing kept in view is left again under the last (`keptBox`), and the
+     *  gallery takes everything between them that the rest of the kept part
+     *  does not -- so a progress bar arriving above Generate shortens the
+     *  gallery rather than pushing the buttons off the screen, and the
+     *  infotext arriving after the buttons changes nothing. */
     Fill.prototype.measure = function (tab) {
         const results = byId(tab + "_results");
         const gallery = byId(tab + "_gallery");
@@ -154,18 +261,23 @@
                 return {height: null, reason: "stacked under the settings"};
             }
         }
+        // The view: what scrolls the column, from its top edge to its bottom
+        // edge -- its padding is part of the gap, on both sides alike.
         const scroller = scrollerOf(results);
-        let bottom = 0;
+        let viewTop = 0;
+        let viewBottom = 0;
         let scrolled = 0;
         if (scroller) {
             const box = scroller.getBoundingClientRect();
-            const style = styleOf(scroller);
-            bottom = box.top + (scroller.clientTop || 0) + scroller.clientHeight
-                - px(style && style.paddingBottom);
+            viewTop = box.top + (scroller.clientTop || 0);
+            viewBottom = viewTop + scroller.clientHeight;
             scrolled = scroller.scrollTop || 0;
         } else {
-            const view = NS.viewport ? NS.viewport() : {height: window.innerHeight};
-            bottom = (view.height || window.innerHeight) - FILL_MARGIN;
+            const view = NS.viewport ? NS.viewport()
+                : {top: 0, height: window.innerHeight};
+            const top = view.top || 0;
+            viewBottom = top + (view.height || window.innerHeight);
+            viewTop = coveredTop(results, top);
             scrolled = window.scrollY || window.pageYOffset || 0;
         }
         // Where the column would be in the row, at this scroll and with the
@@ -184,30 +296,38 @@
         if (style && style.position === "sticky" && resultsBox.top > natural + 0.5) {
             top = Math.max(top, resultsBox.top);
         }
+        const kept = keptBox(tab, results, gallery);
         const galleryBox = gallery.getBoundingClientRect();
-        const above = galleryBox.top - resultsBox.top;
-        // The last thing in the column, not the column's own bottom: a column
-        // stretched by its row would otherwise count its stretch as content,
-        // and every pass would take that much more off the gallery.
-        let last = galleryBox.bottom;
-        Array.prototype.forEach.call(results.children || [], (child) => {
-            if (!laidOut(child)) return;
-            const box = child.getBoundingClientRect();
-            const childStyle = styleOf(child);
-            last = Math.max(last, box.bottom + px(childStyle && childStyle.marginBottom));
-        });
-        const below = last - galleryBox.bottom + px(style && style.paddingBottom)
-            + px(style && style.borderBottomWidth);
-        let height = Math.floor(bottom - top - above - below);
+        const above = galleryBox.top - kept.top;
+        const below = kept.bottom - galleryBox.bottom;
+        // The first thing kept in view, where the column rests.
+        const first = kept.top - resultsBox.top + top;
+        const gap = Math.max(0, first - viewTop);
+        const fits = Math.floor(viewBottom - gap - first - above - below);
+        if (!(fits > 0)) return {height: null, reason: "no room"};
+        const drawn = Math.max(FILL_FLOOR, fits);
         // A content-box gallery is drawn its height plus its own padding and
-        // border; the height above is the whole box.
+        // border; the height worked out above is the whole box.
+        let height = drawn;
         const own = styleOf(gallery);
         if (own && own.boxSizing === "content-box") {
             height -= px(own.paddingTop) + px(own.paddingBottom)
                 + px(own.borderTopWidth) + px(own.borderBottomWidth);
         }
-        if (!(height > 0)) return {height: null, reason: "no room"};
-        return {height: Math.max(FILL_FLOOR, height), reason: ""};
+        // What follows the buttons starts at the bottom of the view: the room
+        // between them is made up from where the buttons will end -- the
+        // drawn height, rounded as it is drawn -- counting the room there is
+        // already and leaving out what this wrote last time.
+        let after = 0;
+        const next = nextTop(kept.last, results);
+        if (next !== null) {
+            const written = results.hasAttribute(FILL_MARK)
+                ? px(results.style.getPropertyValue(FILL_AFTER)) : 0;
+            const between = next - kept.bottom - written;
+            const end = first + above + drawn + below;
+            after = Math.max(0, Math.ceil(viewBottom - end - between));
+        }
+        return {height, after, reason: "", gap: Math.round(gap)};
     };
 
     /** Measure one tab and write what it found, or take the fill off. */
@@ -222,14 +342,19 @@
             if (!found.keep && results.hasAttribute(FILL_MARK)) {
                 results.removeAttribute(FILL_MARK);
                 results.style.removeProperty(FILL_VAR);
+                results.style.removeProperty(FILL_AFTER);
             }
             return found;
         }
+        // Written only when they changed: the column is watched, these writes
+        // resize it, and an answer to its own write must find nothing to do.
         const value = found.height + "px";
-        // Written only when it changed: the column is watched, this write
-        // resizes it, and an answer to its own write must find nothing to do.
         if (results.style.getPropertyValue(FILL_VAR) !== value) {
             results.style.setProperty(FILL_VAR, value);
+        }
+        const after = found.after + "px";
+        if (results.style.getPropertyValue(FILL_AFTER) !== after) {
+            results.style.setProperty(FILL_AFTER, after);
         }
         if (!results.hasAttribute(FILL_MARK)) results.setAttribute(FILL_MARK, "");
         return found;
@@ -296,6 +421,7 @@
             if (!results) return;
             results.removeAttribute(FILL_MARK);
             results.style.removeProperty(FILL_VAR);
+            results.style.removeProperty(FILL_AFTER);
         });
         this.started = false;
     };
