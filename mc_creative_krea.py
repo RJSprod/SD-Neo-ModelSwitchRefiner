@@ -1033,7 +1033,8 @@ class Creative:
     # -- one roll ---------------------------------------------------------- #
 
     def roll(self, source: str, stored=None, references=(), guard_checkpoint=False,
-             task_id="", own_bar: bool = True, spatial_layout=None, raw_source=""):
+             task_id="", own_bar: bool = True, spatial_layout=None, raw_source="",
+             check_checkpoint: bool = True):
         """One creative roll: direct locally, then ask the model once.
 
         Yields :class:`mc_llm_sessions.Event` throughout so a caller can put the
@@ -1078,6 +1079,12 @@ class Creative:
 
         ``raw_source`` is what the user typed, kept on the :class:`Roll` so the
         metadata can record it. Nothing in this method reads it.
+
+        ``check_checkpoint`` false skips the Krea 2 checkpoint guard and keeps
+        the rest of ``guard_checkpoint`` (the image reserve, the hand-back). For
+        the later batches of a run whose prompts are written while the images
+        render: the first roll asked for the whole generation, and asking again
+        mid-run reads whatever the host is loading at that instant.
         """
         from prompt_master.core.models import draw_seed
         from prompt_master.krea import director
@@ -1088,7 +1095,7 @@ class Creative:
                                  "Type what you want in the prompt box first.")
             return
 
-        if guard_checkpoint:
+        if guard_checkpoint and check_checkpoint:
             objection = checkpoint_objection()
             if objection:
                 yield sessions.Event(sessions.FAILED, objection)
@@ -1373,6 +1380,29 @@ def image_reserve_bytes() -> int:
         return 0
 
 
+_handing_back = threading.local()
+
+
+class no_hand_back:
+    """Inside this, on this thread, :func:`hand_back_vram` asks for nothing.
+
+    For the passes Creative Mode runs beside an image generation, on a thread of
+    their own, while the language model is on a processor the image job does not
+    use (the Creative script's batch prompts). There is nothing of theirs on the
+    image card to give back, and asking the broker for image VRAM in the middle
+    of a sampling pass is a request nobody needs -- in "Free the LLM for every
+    image" a sweep of the image card, for nothing.
+    """
+
+    def __enter__(self):
+        _handing_back.off = getattr(_handing_back, "off", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        _handing_back.off = max(getattr(_handing_back, "off", 1) - 1, 0)
+        return False
+
+
 def hand_back_vram(reason: str = "the image generation that follows a Krea roll") -> int:
     """Ask for the room the coming image pass needs, if something else holds it.
 
@@ -1385,7 +1415,11 @@ def hand_back_vram(reason: str = "the image generation that follows a Krea roll"
     It is a no-op in the ordinary case: ``request_vram`` returns immediately
     when what is free already covers the requirement, so a card that was sized
     correctly by the reserve never pays for this call.
+
+    Nothing at all inside :class:`no_hand_back`.
     """
+    if getattr(_handing_back, "off", 0):
+        return 0
     needed = image_reserve_bytes()
     if needed <= 0:
         return 0

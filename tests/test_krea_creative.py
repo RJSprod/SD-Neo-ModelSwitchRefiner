@@ -3162,3 +3162,330 @@ class TestEveryBatchRollsAgain:
         seen = run_batches(script, p, style="{prompt}")
 
         assert seen == [["car"], ["car"], ["car"]]
+
+
+# --------------------------------------------------------------------------- #
+# Written ahead: the later batches' prompts while the images render
+# --------------------------------------------------------------------------- #
+
+
+AHEAD = "model-chain-creative-write-ahead"
+
+
+@pytest.fixture
+def beside(monkeypatch):
+    """The writer on a processor the image job does not use (an Intel GPU, say)."""
+    import model_chain_krea_creative as creative_script
+
+    monkeypatch.setattr(creative_script, "_prompts_beside_images", lambda layout: True)
+    return creative_script
+
+
+def host_prompts(p):
+    """What the host does between before_process and the first batch."""
+    total = p.n_iter * p.batch_size
+    p.all_prompts = [p.prompt] * total
+    p.all_seeds = [1000 + i for i in range(total)]
+
+
+def host_batch(script, p, n):
+    """One turn of the host's batch loop, up to the batch's own prompts."""
+    p.iteration = n
+    p.prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
+    p.seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
+    script.before_process_batch(p, batch_number=n, prompts=p.prompts, seeds=p.seeds,
+                                subseeds=p.seeds)
+    return list(p.prompts)
+
+
+def gated(client, after: int):
+    """Hold every request after the first ``after`` until the gate opens.
+
+    ``gate.entered`` is set when a held request has arrived, so a test can act
+    while the request is in flight rather than racing it there.
+    """
+    import threading
+
+    gate = threading.Event()
+    gate.entered = threading.Event()
+    original = client.stream_chat
+
+    def stream_chat(*args, **kwargs):
+        if len(client.calls) >= after:
+            gate.entered.set()
+            gate.wait(10)
+        return original(*args, **kwargs)
+
+    client.stream_chat = stream_chat
+    return gate
+
+
+class TestPromptsWrittenAhead:
+    """Asked for: "when image generation starts for batch one, the LLM should be
+    able to start on its second job in parallel and so on. There is no reason
+    for the LLM to wait. All the prompts should be built asap." -- with the
+    language model on another processor than the images."""
+
+    def test_every_later_prompt_is_written_before_any_batch_asks_for_it(self, script,
+                                                                         client, beside):
+        client.answers = ["First.", "Second.", "Third."]
+        p = BatchProcessing(n_iter=3, batch_size=2)
+        script.before_process(p, True, *panel_values())
+        script._reroll.thread.join(10)
+
+        assert len(client.calls) == 3, "batches 2 and 3 were written while batch 1 rendered"
+
+        host_prompts(p)
+        seen = [host_batch(script, p, n) for n in range(3)]
+
+        assert seen == [["First."] * 2, ["Second."] * 2, ["Third."] * 2]
+        assert len(client.calls) == 3, "no batch asked the model for anything"
+
+    def test_a_batch_whose_prompt_is_not_finished_waits_for_it(self, script, client,
+                                                               beside):
+        import threading
+
+        client.answers = ["First.", "Second."]
+        gate = gated(client, after=1)
+        p = BatchProcessing(n_iter=2, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        host_prompts(p)
+        host_batch(script, p, 0)
+        done = threading.Event()
+        worker = threading.Thread(target=lambda: (host_batch(script, p, 1), done.set()),
+                                  daemon=True)
+        worker.start()
+
+        waited = not done.wait(0.4)
+        gate.set()
+        finished = done.wait(10)
+
+        assert waited, "batch 2 did not start on the first batch's prompt"
+        assert finished and p.all_prompts == ["First.", "Second."]
+        assert len(client.calls) == 2, "it waited for the prompt being written, not a new one"
+
+    def test_the_prompts_written_ahead_leave_the_bar_and_the_image_card_alone(
+            self, script, client, beside, monkeypatch):
+        """The bar is the image job's while it samples, and nothing of the
+        writer's is on the image card to hand back."""
+        import threading
+        import types
+
+        import mc_progress
+
+        bar, asked = [], []
+        real_begin = mc_progress.begin
+        monkeypatch.setattr(mc_progress, "begin", lambda job: (
+            bar.append(threading.current_thread().name), real_begin(job))[1])
+        monkeypatch.setattr(mc_creative_krea, "image_reserve_bytes", lambda: 1 << 30)
+        monkeypatch.setattr(mc_broker, "request_vram", lambda *args, **kwargs: (
+            asked.append(threading.current_thread().name), types.SimpleNamespace(freed=0))[1])
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        script._reroll.thread.join(10)
+
+        assert len(client.calls) == 3
+        assert bar and AHEAD not in bar, bar
+        assert asked and AHEAD not in asked, asked
+
+    def test_skip_does_not_stop_the_writing_and_interrupt_does(self, script, client,
+                                                               beside, monkeypatch):
+        from modules import shared
+
+        gate = gated(client, after=1)
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        monkeypatch.setattr(shared.state, "skipped", True, raising=False)
+        gate.set()
+        script._reroll.thread.join(10)
+        skipped = len(client.calls)
+
+        monkeypatch.setattr(shared.state, "skipped", False, raising=False)
+        gate = gated(client, after=len(client.calls) + 1)
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        assert gate.entered.wait(10), "batch 2's prompt was being written"
+        monkeypatch.setattr(shared.state, "interrupted", True, raising=False)
+        gate.set()
+        script._reroll.thread.join(10)
+
+        assert skipped == 3, "Skip is about the image on screen, not the prompts to come"
+        assert len(client.calls) == skipped + 2, "Interrupt stopped it before batch 3"
+        assert 2 not in script._reroll.written
+        assert shared.state.skipped is False and shared.state.interrupted is True
+
+    def test_a_writer_moved_onto_the_image_card_mid_run_rolls_at_each_batch(
+            self, script, client, monkeypatch):
+        """Asked again before every batch: on the image card, a thread writing
+        ahead would wait for the job that waits for its prompts."""
+        import model_chain_krea_creative as creative_script
+
+        answers = iter([True])
+        monkeypatch.setattr(creative_script, "_prompts_beside_images",
+                            lambda layout: next(answers, False))
+        client.answers = ["First.", "Second.", "Third."]
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        script._reroll.thread.join(10)
+        before = len(client.calls)
+        host_prompts(p)
+        seen = [host_batch(script, p, n) for n in range(3)]
+
+        assert before == 1 and script._reroll.gave_up == 1
+        assert seen == [["First."], ["Second."], ["Third."]]
+
+    def test_a_generation_that_ends_early_stops_the_writing(self, script, client,
+                                                             beside):
+        """Stopped after batch 1, say: prompts for batches that will never run
+        are not worth the model's time."""
+        gate = gated(client, after=1)
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        plan = script._reroll
+        assert gate.entered.wait(10)
+        script.postprocess(p, _Result())
+        gate.set()
+        plan.thread.join(10)
+
+        assert len(client.calls) == 2, "batch 3's prompt was never asked for"
+
+    def test_the_checkpoint_is_not_asked_about_again_mid_run(self, script, client,
+                                                            beside, monkeypatch):
+        """The first roll asked for the whole generation. Asked from the thread,
+        mid-run, it would read whatever the host is loading at that instant."""
+        asked = iter([""])
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: next(asked, "the host is loading another model"))
+        client.answers = ["First.", "Second."]
+        p = BatchProcessing(n_iter=2, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        script._reroll.thread.join(10)
+        host_prompts(p)
+        seen = [host_batch(script, p, n) for n in range(2)]
+
+        assert seen == [["First."], ["Second."]]
+
+    def test_a_prompt_that_could_not_be_written_ahead_keeps_the_first_and_says_so(
+            self, script, client, beside):
+        client.answers = ["First.", ""]
+        p = BatchProcessing(n_iter=2, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        script._reroll.thread.join(10)
+        host_prompts(p)
+        for n in range(2):
+            host_batch(script, p, n)
+        processed = _Result()
+        script.postprocess(p, processed)
+
+        assert p.all_prompts == ["First.", "First."]
+        assert "did not re-roll batch 2" in processed.comments
+
+    def test_on_the_image_card_the_batches_roll_at_their_own_start(self, script, client):
+        """The harness's writer cannot be told apart from the image card, which
+        is the conservative answer: no thread, a roll per batch as it starts."""
+        client.answers = ["First.", "Second."]
+        p = BatchProcessing(n_iter=2, batch_size=1)
+        script.before_process(p, True, *panel_values())
+
+        assert script._reroll.thread is None
+        assert len(client.calls) == 1
+        host_prompts(p)
+        seen = [host_batch(script, p, n) for n in range(2)]
+        assert seen == [["First."], ["Second."]] and len(client.calls) == 2
+
+
+class TestWhereThePromptsAreWritten:
+    """`_prompts_beside_images`: the same question every language-model turn asks
+    before it starts during an image generation."""
+
+    @pytest.fixture
+    def domains(self, monkeypatch):
+        import mc_llm_runtime
+
+        image = mc_broker.cuda_execution(0, uuid="GPU-aaaa1111")
+        found = {"creative": image, "spatial": image}
+        monkeypatch.setattr(mc_broker, "image_execution_domain", lambda: image)
+        monkeypatch.setattr(mc_llm_runtime, "config", lambda role="": role)
+        monkeypatch.setattr(mc_llm_runtime, "execution_domain",
+                            lambda configuration: found[configuration])
+        return found
+
+    @staticmethod
+    def smart():
+        from prompt_master.krea import spatial as spatial_module
+
+        return types.SimpleNamespace(regions=(object(),), compose_mode=spatial_module.SMART)
+
+    def test_a_writer_on_an_intel_gpu_or_the_processor_writes_ahead(self, domains):
+        import model_chain_krea_creative as creative_script
+
+        domains["creative"] = mc_broker.sycl_execution(0, name="Intel Arc")
+        on_arc = creative_script._prompts_beside_images(None)
+        domains["creative"] = mc_broker.CPU_EXECUTION
+        on_cpu = creative_script._prompts_beside_images(None)
+
+        assert on_arc is True and on_cpu is True
+
+    def test_a_writer_on_the_image_card_does_not(self, domains):
+        import model_chain_krea_creative as creative_script
+
+        assert creative_script._prompts_beside_images(None) is False
+
+    def test_a_composer_on_the_image_card_holds_back_a_writer_that_is_not(self, domains):
+        import model_chain_krea_creative as creative_script
+
+        domains["creative"] = mc_broker.sycl_execution(0, name="Intel Arc")
+
+        assert creative_script._prompts_beside_images(self.smart()) is False
+        domains["spatial"] = mc_broker.CPU_EXECUTION
+        assert creative_script._prompts_beside_images(self.smart()) is True
+
+
+class TestQuietPasses:
+    def test_a_quiet_thread_never_touches_the_bar(self, monkeypatch):
+        import mc_llm_progress
+        import mc_progress
+
+        begun = []
+        monkeypatch.setattr(mc_progress, "begin", lambda job: begun.append(job))
+        monkeypatch.setattr(mc_progress, "abandon", lambda: None)
+        reporter = mc_llm_progress.Reporter()
+        with mc_llm_progress.quiet():
+            quiet = reporter.begin("task", 100, claim=False)
+            reporter.enter(mc_progress.PHASE_KREA_WRITE)
+        loud = reporter.begin("task", 100, claim=False)
+        reporter.abandon()
+
+        assert quiet is False and loud is True and len(begun) == 1
+
+    def test_a_quiet_thread_is_stopped_by_interrupt_and_its_own_stop_not_skip(
+            self, monkeypatch):
+        import threading
+
+        import mc_llm_progress
+        from modules import shared
+
+        reporter = mc_llm_progress.Reporter()
+        stop = threading.Event()
+        with mc_llm_progress.quiet(stop):
+            monkeypatch.setattr(shared.state, "skipped", True, raising=False)
+            skipped = reporter.interrupted()
+            monkeypatch.setattr(shared.state, "interrupted", True, raising=False)
+            interrupted = reporter.interrupted()
+            monkeypatch.setattr(shared.state, "interrupted", False, raising=False)
+            stop.set()
+            stopped = reporter.interrupted()
+
+        assert (skipped, interrupted, stopped) == (False, True, True)
+        assert shared.state.skipped is True, "a quiet thread clears nobody's flag"
+
+    def test_no_hand_back_asks_the_broker_for_nothing(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(mc_creative_krea, "image_reserve_bytes", lambda: 1 << 30)
+        monkeypatch.setattr(mc_broker, "request_vram", lambda *args, **kwargs: (
+            asked.append(args), types.SimpleNamespace(freed=0))[1])
+        with mc_creative_krea.no_hand_back():
+            inside = mc_creative_krea.hand_back_vram()
+        mc_creative_krea.hand_back_vram()
+
+        assert inside == 0 and len(asked) == 1

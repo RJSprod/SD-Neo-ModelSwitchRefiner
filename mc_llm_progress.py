@@ -180,6 +180,61 @@ rewinding it -- which is what a long answer should look like.
 """
 
 
+# -- passes that run beside an image generation ---------------------------- #
+#
+# With a batch count above one and the language model on a processor the image
+# job does not use -- an Intel GPU, the CPU, another card -- Creative Mode
+# writes the later batches' prompts on a thread of its own while the images
+# render. Those passes must not touch the bar: the bar is the image job's, the
+# image job is sampling, and a pass that began a progress job of its own would
+# replace the sampler's mid-step. Nor may they read Skip as a stop -- Skip is
+# about the image on screen, not about prompts for batches still to come.
+#
+# So a thread can declare itself quiet. Inside :func:`quiet` every method of the
+# reporter does nothing, and :meth:`Reporter.interrupted` answers whether the
+# *generation* is being stopped (Interrupt, or the host stopping after the
+# current image) or the caller's own ``stop`` was set -- never clearing a flag
+# that is the host's.
+
+_quiet = threading.local()
+
+
+class quiet:
+    """Run this thread's language-model passes without a bar. See above."""
+
+    def __init__(self, stop: threading.Event | None = None):
+        self.stop = stop
+        self._previous = None
+
+    def __enter__(self):
+        self._previous = (getattr(_quiet, "depth", 0), getattr(_quiet, "stop", None))
+        _quiet.depth = self._previous[0] + 1
+        _quiet.stop = self.stop
+        return self
+
+    def __exit__(self, *exc):
+        _quiet.depth, _quiet.stop = self._previous
+        return False
+
+
+def is_quiet() -> bool:
+    """Whether this thread's passes run without a bar (:class:`quiet`)."""
+    return getattr(_quiet, "depth", 0) > 0
+
+
+def _quietly_stopped() -> bool:
+    stop = getattr(_quiet, "stop", None)
+    if stop is not None and stop.is_set():
+        return True
+    try:
+        from modules import shared
+
+        return bool(getattr(shared.state, "interrupted", False)
+                    or getattr(shared.state, "stopping_generation", False))
+    except Exception:
+        return False
+
+
 def writer_rates(kind: str) -> tuple[str, ...]:
     """``(this backbone's key, the general key)`` for one phase.
 
@@ -254,6 +309,8 @@ class Reporter:
         below is identical; only the two lines that talk to
         ``modules.progress`` are skipped.
         """
+        if is_quiet():
+            return False
         task_id = str(task_id or "").strip() or (ADOPTED if not claim else "")
         if not task_id:
             return False
@@ -291,6 +348,8 @@ class Reporter:
 
     def enter(self, phase: str) -> None:
         """Move to a phase, and say so on the bar."""
+        if is_quiet():
+            return
         with self._lock:
             if self._task is None or phase == self._phase:
                 return
@@ -311,6 +370,8 @@ class Reporter:
         the same kind. The denominator stretches when a reply outruns it so the
         bar slows rather than stalling at full.
         """
+        if is_quiet():
+            return
         with self._lock:
             if self._task is None:
                 return
@@ -327,6 +388,8 @@ class Reporter:
         close, because it is a property of the answer rather than of the time
         it took -- and it is what sizes the writing phase of the *next* roll.
         """
+        if is_quiet():
+            return
         with self._lock:
             task, self._task = self._task, None
             claimed, self._claimed = self._claimed, False
@@ -348,6 +411,8 @@ class Reporter:
         describe how long it took to give up, and folding that into the store
         would teach the bar that rolls are quick.
         """
+        if is_quiet():
+            return
         with self._lock:
             task, self._task = self._task, None
             claimed, self._claimed = self._claimed, False
@@ -376,7 +441,13 @@ class Reporter:
         during it means *stop this generation* -- so the flag is left exactly as
         the user set it, and the host's own processing loop reads it a moment
         later and stops.
+
+        A quiet thread (:class:`quiet`) is asked a different question: whether
+        the generation is being stopped, or its own ``stop`` was set. Skip is
+        not a stop for it, and no flag is cleared.
         """
+        if is_quiet():
+            return _quietly_stopped()
         with self._lock:
             if self._task is None:
                 return False
