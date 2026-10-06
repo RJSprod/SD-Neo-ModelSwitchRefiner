@@ -1921,12 +1921,27 @@ Batch size alone never re-rolls: the images of one batch share one prompt. Each
 image records its own batch's roll — creative seed, recipe and the rest — and
 Stage 2 inherits its own batch's prompt. Prompt Neutralize is asked once per
 press, not per batch (its answer is a subtraction of the same source), and an
-armed replay is spent by the first batch. The image model is on the card by the
-time a later batch rolls, so the writer is placed around it as it is for any
-roll that runs beside an image job. If the first roll fails, the later batches
-are not tried again (they would fail the same way, each after a wait); if a
-later re-roll fails, that batch uses the first batch's prompt and the result
-says so. A style you picked stays wrapped around each batch's new prompt.
+armed replay is spent by the first batch. If the first roll fails, the later
+batches are not tried again (they would fail the same way, each after a wait);
+if a later re-roll fails, that batch uses the first batch's prompt and the
+result says so. A style you picked stays wrapped around each batch's new prompt.
+
+**When the writer runs on another processor, the later prompts are written while
+the images render.** With the Creative Writer on an Intel GPU, the CPU or a card
+other than the image model's — and the Spatial Composer too, when a Smart
+layout composes every roll — nothing the language model does competes with the
+sampler. So the moment batch 1's prompt is written and its image starts, the
+writer goes straight on to batch 2's prompt, then batch 3's, back to back, as
+fast as it can; a batch takes its prompt when it reaches it, and waits only if
+that prompt is not finished yet. These later passes are quiet: they leave the
+progress bar to the image, they ignore **Skip** (it is about the image on
+screen), and they stop at **Interrupt**, or when the generation ends early. The
+first roll's Krea 2 checkpoint check stands for the whole run. With the writer
+on the image card itself, each later batch rolls at its own start instead, with
+the image model already loaded and the writer placed around it, as any roll
+beside an image job is — a thread writing ahead there would be waiting for the
+very job that waits for its prompts. Which one applies is decided per batch: a
+writer moved onto the image card mid-run rolls the batches left at their start.
 
 Nothing happens on its own. There is no idle timer, no typing watcher, no repeat
 loop. A creative roll happens because you pressed a button.

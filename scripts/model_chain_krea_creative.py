@@ -71,6 +71,8 @@ Generate. Pressing it again is how you get another one.
 
 from __future__ import annotations
 
+import threading
+
 import gradio as gr
 
 import mc_creative_krea
@@ -78,6 +80,7 @@ import mc_creative_panel
 import mc_creative_profiles
 import mc_hint
 import mc_infotext
+import mc_llm_progress
 import mc_llm_sessions as sessions
 import mc_literal_prompts
 import mc_lora
@@ -1687,12 +1690,108 @@ def _say_what_ran(outcome, written) -> None:
                 literals.describe(getattr(written, "literals", None)))
 
 
+def _write(source, settings, layout, raw_source="", check_checkpoint=True):
+    """One creative roll, as ``(roll, complaint)``: the roll or ``None``, and why not.
+
+    Returns the :class:`mc_creative_krea.Roll` rather than the finished
+    prompt, because what the prompt is made of is settled after this: a
+    layout may still be composed onto the scene it produced. The two steps
+    are separate functions for the same reason they are separate passes --
+    one of them talks to a model and the other one cannot.
+
+    Called inside the :class:`mc_broker.host_job` block ``before_process``
+    opens, which is how ``mc_llm_sessions._Gpu.acquire`` is told that the
+    image job is blocked waiting for this request rather than competing with
+    it. The bar is borrowed rather than claimed, because the host already
+    started one for the generation this is the first part of. Or, for the
+    later batches of a run whose language model is on another processor, on
+    the thread that writes their prompts ahead (:func:`_write_ahead`), quiet
+    and outside the host job -- the image job is not waiting for it.
+
+    The events are drained rather than forwarded. There is no open Gradio
+    event to forward them to -- the press became a native generation, not a
+    handler with an output list -- so the progress bar carries the phase and
+    the log carries the rest.
+
+    ``source`` is handed in rather than read off ``p``, and it is the
+    *transformable* text: the pipeline has already lifted the literal
+    commands out of the prompt box. Reading ``p.prompt`` here would put them
+    back in front of the writer, which is the one thing this feature exists
+    to prevent.
+    """
+    source = str(source or "").strip()
+    if not source:
+        # A prompt that was nothing but literal commands lands here, and it
+        # is not an error: there was no transformable text to write from,
+        # the commands are restored around nothing, and the generation goes
+        # ahead with them. §14.
+        logger.info("Model Chain: Creative Mode has no source prompt to work from")
+        return None, ("there was no transformable text to work from — the "
+                      "prompt was entirely literal commands"
+                      if raw_source.strip() else
+                      "there was no prompt to work from")
+
+    session = mc_creative_krea.creative
+
+    # Held by name and closed explicitly, the way the roll itself holds the
+    # LLM run: every path out of the loop below leaves the generator
+    # suspended, and it is its ``finally`` that gives the progress bar and
+    # the workload lock back. Closing it is what runs that now rather than
+    # whenever the interpreter next collects the frame.
+    events = session.roll(source, settings, guard_checkpoint=True, own_bar=False,
+                          spatial_layout=layout, raw_source=raw_source,
+                          check_checkpoint=check_checkpoint)
+    written = False
+    complaint = ""
+    try:
+        for event in events:
+            if event.kind == sessions.STATUS:
+                logger.debug("Model Chain: Creative Mode — %s", event.text)
+            elif event.kind == sessions.CANCELLED:
+                logger.info("Model Chain: the Creative Mode roll was stopped; "
+                            "the generation continues with the typed prompt")
+                complaint = "the roll was stopped"
+                break
+            elif event.kind == sessions.FAILED:
+                logger.warning("Model Chain: the Creative Mode roll failed (%s); "
+                               "generating from the typed prompt instead",
+                               event.text)
+                complaint = event.text
+                break
+            elif event.kind == sessions.DONE:
+                written = True
+                break
+    except Exception as exc:
+        errors.report("Model Chain: the Creative Mode roll failed", exc_info=True)
+        return None, str(exc) or exc.__class__.__name__
+    finally:
+        events.close()
+
+    if not written:
+        return None, complaint
+
+    last = session.last
+    if last is None or not last.expanded.strip():
+        logger.warning("Model Chain: the Creative Mode roll produced nothing; "
+                       "generating from the typed prompt instead")
+        return None, "the writer returned nothing"
+    return last, ""
+
+
 class _Reroll:
     """What before_process leaves for the batches after the first to roll again.
 
     ``first`` is the prompt batch 1 was given. The host built every entry of
     ``all_prompts`` from it, so it is what each later batch's swap looks for,
     and what a batch whose re-roll failed keeps.
+
+    When the language model runs beside the images (:func:`_prompts_beside_images`)
+    ``thread`` writes every later batch's prompt ahead, one after another, as
+    soon as batch 1's image starts, and ``written`` collects them by batch
+    number as each is finished; ``ready`` is told each time. ``gave_up`` is the
+    first batch the thread left for the batch itself to roll -- the language
+    model was moved onto the image card mid-run -- and ``stop`` ends the thread
+    early (a finished or abandoned generation).
     """
 
     def __init__(self, *, request, settings, layout, first, first_metadata,
@@ -1703,6 +1802,187 @@ class _Reroll:
         self.first = str(first or "")
         self.first_metadata = dict(first_metadata or {})
         self.neutralized = neutralized
+        self.ready = threading.Condition()
+        self.written: dict[int, tuple] = {}
+        self.gave_up: int | None = None
+        self.stop = threading.Event()
+        self.thread: threading.Thread | None = None
+
+
+def _batch_request(plan, batch: int, image_seed=None):
+    """``(request, settings)`` for one later batch: the press's, re-seeded.
+
+    A random creative seed draws afresh on every roll; a fixed one is offset by
+    the batch, as the host offsets image seeds, so a fixed seed still
+    reproduces the whole run.
+    """
+    import dataclasses
+
+    settings = dict(plan.settings)
+    try:
+        seed = int(settings.get("seed", -1))
+    except (TypeError, ValueError):
+        seed = -1
+    if seed >= 0:
+        settings["seed"] = seed + batch
+    request = dataclasses.replace(
+        plan.request, creative_settings=settings,
+        image_seed=plan.request.image_seed if image_seed is None else image_seed)
+    return request, settings
+
+
+def _run_batch(plan, request, settings, check_checkpoint=True):
+    """``(outcome, complaint)`` for one later batch: the pipeline, run once more.
+
+    The Neutralizer is not asked again: its answer is a subtraction of the same
+    source, and the first batch's is handed back.
+    """
+    try:
+        outcome = mc_krea_pipeline.run(
+            request,
+            neutralize=lambda source: plan.neutralized,
+            write=lambda source: _write(source, settings, plan.layout, request.raw_source,
+                                        check_checkpoint=check_checkpoint))
+    except Exception as exc:
+        errors.report("Model Chain: the Creative Mode re-roll failed", exc_info=True)
+        return None, str(exc) or exc.__class__.__name__
+    return outcome, str(getattr(outcome, "creative_note", "") or "")
+
+
+def _generation_stopping() -> bool:
+    """Interrupt, or the host stopping after the current image. Not Skip."""
+    try:
+        from modules import shared
+
+        state = shared.state
+        return bool(getattr(state, "interrupted", False)
+                    or getattr(state, "stopping_generation", False))
+    except Exception:
+        return False
+
+
+def _composes(layout) -> bool:
+    """Whether a Spatial Composer pass follows every roll (a Smart layout with boxes)."""
+    if layout is None or not getattr(layout, "regions", ()):
+        return False
+    try:
+        from prompt_master.krea import spatial as spatial_module
+
+        return getattr(layout, "compose_mode", "") == spatial_module.SMART
+    except Exception:
+        return False
+
+
+def _prompts_beside_images(layout) -> bool:
+    """Whether the later batches' prompts can be written while the images render.
+
+    Asked the way every language-model turn already asks whether it may start
+    during an image generation (``mc_llm_sessions._Gpu``): by the processor
+    each pass executes on against the image job's. The writer -- and the
+    Spatial Composer, when one follows every roll -- on an Intel GPU, the CPU
+    or another card share nothing with the sampler, so their turns would not
+    wait for it, and neither should the prompts. On the image card, or on a
+    card that cannot be told apart from it, a turn waits for the image job to
+    end; a thread writing ahead there would wait for the very job that waits
+    for its prompts, so the batches roll at their own start instead, under the
+    host-job declaration, as the first roll does.
+
+    Never raises; "cannot tell" is "no", which costs speed and nothing else.
+    """
+    try:
+        import mc_broker
+        import mc_llm_roles
+        import mc_llm_runtime
+
+        image = mc_broker.image_execution_domain()
+        roles = [mc_llm_roles.CREATIVE]
+        if _composes(layout):
+            roles.append(mc_llm_roles.SPATIAL)
+        for role in roles:
+            domain = mc_llm_runtime.execution_domain(mc_llm_runtime.config(role))
+            if domain.conflicts_with(image):
+                return False
+        return True
+    except Exception:
+        logger.debug("Model Chain: could not tell where the batch prompts would be written",
+                     exc_info=True)
+        return False
+
+
+def _write_ahead(plan, batches: int) -> None:
+    """Write every later batch's prompt, one after another, as fast as the model can.
+
+    Started by before_process the moment batch 1's prompt is written, and run
+    beside the images: by the time the host reaches a batch its prompt is
+    usually waiting for it, and when it is not, the batch waits for exactly
+    that prompt and no longer.
+
+    Quiet (:class:`mc_llm_progress.quiet`): the bar is the image job's, and a
+    pass that began a progress job of its own would replace the sampler's.
+    Interrupt, or the host stopping after the current image, ends it; Skip does
+    not. It hands nothing back on the image card (:class:`mc_creative_krea.no_hand_back`):
+    nothing of its own is there.
+
+    Each batch's processor is asked again before its passes start, because the
+    user can move a role while a run of eight batches is still going; moved
+    onto the image card, the batches left are rolled at their own start.
+    """
+    try:
+        with mc_llm_progress.quiet(plan.stop), mc_creative_krea.no_hand_back():
+            for batch in range(1, batches):
+                if plan.stop.is_set() or _generation_stopping():
+                    return
+                if not _prompts_beside_images(plan.layout):
+                    logger.info("Model Chain: the Creative Writer is now on the image card; "
+                                "batches %d onwards roll when they start", batch + 1)
+                    with plan.ready:
+                        plan.gave_up = batch
+                        plan.ready.notify_all()
+                    return
+                request, settings = _batch_request(plan, batch)
+                # The first roll asked whether this is a Krea 2 checkpoint for
+                # the whole generation; asked from here it would read whatever
+                # the host is loading at that instant.
+                found = _run_batch(plan, request, settings, check_checkpoint=False)
+                with plan.ready:
+                    plan.written[batch] = found
+                    plan.ready.notify_all()
+                outcome = found[0]
+                if outcome is not None and outcome.cancelled:
+                    return
+                if outcome is not None and outcome.ran_creative:
+                    logger.info("Model Chain: Creative Mode wrote batch %d's prompt ahead "
+                                "of its images", batch + 1)
+    except Exception:
+        errors.report("Model Chain: writing the batch prompts ahead failed", exc_info=True)
+    finally:
+        with plan.ready:
+            plan.ready.notify_all()
+
+
+def _written_ahead(plan, batch: int):
+    """Batch ``batch``'s ``(outcome, complaint)`` from the thread writing ahead.
+
+    Waits for it, for as long as it takes -- the image cannot start without its
+    prompt -- unless the thread will not write it (it gave up, stopped or
+    ended) or the generation is being stopped: ``None`` then, and the batch is
+    rolled where it stands, or not at all.
+    """
+    announced = False
+    with plan.ready:
+        while True:
+            if batch in plan.written:
+                return plan.written[batch]
+            if plan.gave_up is not None and batch >= plan.gave_up:
+                return None
+            if plan.thread is None or not plan.thread.is_alive():
+                return None
+            if _generation_stopping():
+                return None
+            if not announced:
+                logger.info("Model Chain: batch %d waits for its Creative prompt", batch + 1)
+                announced = True
+            plan.ready.wait(0.2)
 
 
 def _batch_count(p) -> int:
@@ -2625,6 +2905,10 @@ class ScriptKreaCreative(scripts.Script):
         self._spatial_note = ""
         self._neutralize_note = ""
         self._composed_without_creative = False
+        if self._reroll is not None:
+            # A run that ended without postprocess (an error mid-batch) left
+            # its thread writing prompts nobody will read.
+            self._reroll.stop.set()
         self._reroll = None
         self._batch_notes = []
 
@@ -2783,6 +3067,17 @@ class ScriptKreaCreative(scripts.Script):
                                    layout=layout, first=written.generation,
                                    first_metadata=dict(written.metadata),
                                    neutralized=neutralized[0] if neutralized else None)
+            if _prompts_beside_images(layout):
+                # The language model shares no processor with the images, so
+                # nothing it does waits for them: every later batch's prompt is
+                # written now, back to back, while batch 1 renders.
+                plan = self._reroll
+                plan.thread = threading.Thread(
+                    target=_write_ahead, args=(plan, _batch_count(p)),
+                    name="model-chain-creative-write-ahead", daemon=True)
+                plan.thread.start()
+                logger.info("Model Chain: Creative Mode is writing the prompts of batches "
+                            "2–%d while the images render", _batch_count(p))
 
     def _publish_plan(self, p, layout, creative: bool = True,
                       neutralize: bool = False) -> None:
@@ -2824,7 +3119,7 @@ class ScriptKreaCreative(scripts.Script):
                          exc_info=True)
 
     def before_process_batch(self, p, *args, **kwargs):
-        """Roll again for every batch after the first, when the batch count is above one.
+        """Give every batch after the first a prompt of its own, when the batch count is above one.
 
         ``before_process`` writes one prompt for the press, and the host builds
         ``all_prompts`` from it -- so every image of every batch used to share
@@ -2834,6 +3129,15 @@ class ScriptKreaCreative(scripts.Script):
         the way the host offsets image seeds), so four batches of two are four
         directions, two images each.
 
+        Where the prompt is written depends on where the language model runs.
+        On another processor than the image job -- an Intel GPU, the CPU,
+        another card -- it is not here at all: a thread started by
+        before_process writes every later batch's prompt back to back while
+        the images render (:func:`_write_ahead`), and this takes the batch's
+        from it, waiting only if it is not finished yet. On the image card the
+        roll happens here, at the batch's start, under the same
+        :func:`mc_broker.host_job` declaration the first roll ran under.
+
         The host calls this before it reads the batch's prompts
         (``parse_extra_network_prompts`` and the conditioning come after), so
         replacing this batch's entries of ``all_prompts`` -- and ``prompts``,
@@ -2841,12 +3145,8 @@ class ScriptKreaCreative(scripts.Script):
         and Stage 2 read the same lists. Styles stay: the first roll's prompt
         is replaced inside each styled entry. An entry that does not contain
         it -- something else rewrote it after before_process -- is left alone
-        rather than guessed at.
-
-        The image model is on the card by now, so the writer is placed around
-        it under the same :func:`mc_broker.host_job` declaration the first roll
-        ran under. A re-roll that fails leaves the batch on the first batch's
-        prompt and says so on the result; nothing here refuses a batch.
+        rather than guessed at. A roll that fails leaves the batch on the first
+        batch's prompt and says so on the result; nothing here refuses a batch.
         """
         plan = self._reroll
         if plan is None or self._rolling:
@@ -2855,17 +3155,8 @@ class ScriptKreaCreative(scripts.Script):
             batch = int(kwargs.get("batch_number", getattr(p, "iteration", 0)) or 0)
         except (TypeError, ValueError):
             return
-        if batch < 1:
+        if batch < 1 or _generation_stopping():
             return
-        try:
-            from modules import shared
-
-            state = getattr(shared, "state", None)
-            if state is not None and (getattr(state, "interrupted", False)
-                                      or getattr(state, "stopping_generation", False)):
-                return
-        except Exception:
-            pass
 
         all_prompts = getattr(p, "all_prompts", None)
         if not isinstance(all_prompts, list) or not all_prompts:
@@ -2875,44 +3166,33 @@ class ScriptKreaCreative(scripts.Script):
         if not indices:
             return
 
-        import dataclasses
+        found = _written_ahead(plan, batch) if plan.thread is not None else None
+        if found is None:
+            if _generation_stopping():
+                return
+            found = self._roll_batch(plan, batch, kwargs.get("seeds") or getattr(p, "seeds", None))
+        outcome, complaint = found
+        self._apply_batch(p, plan, batch, indices, outcome, complaint)
 
+    def _roll_batch(self, plan, batch: int, seeds):
+        """``(outcome, complaint)`` for a batch rolled at its own start, on the image card."""
         import mc_broker
 
-        settings = dict(plan.settings)
         try:
-            seed = int(settings.get("seed", -1))
-        except (TypeError, ValueError):
-            seed = -1
-        if seed >= 0:
-            settings["seed"] = seed + batch
-        seeds = kwargs.get("seeds") or getattr(p, "seeds", None) or ()
-        try:
-            image_seed = int(seeds[0]) if seeds else plan.request.image_seed
-        except (TypeError, ValueError):
-            image_seed = plan.request.image_seed
-        request = dataclasses.replace(plan.request, creative_settings=settings,
-                                      image_seed=image_seed)
-        label = f"batch {batch + 1}"
-
-        self._complaint = ""
+            image_seed = int(seeds[0]) if seeds else None
+        except (TypeError, ValueError, IndexError):
+            image_seed = None
+        request, settings = _batch_request(plan, batch, image_seed)
         self._rolling = True
         try:
             with mc_broker.host_job():
-                outcome = mc_krea_pipeline.run(
-                    request,
-                    neutralize=lambda source: plan.neutralized,
-                    write=lambda source: (self._roll(source, settings, plan.layout,
-                                                     request.raw_source),
-                                          self._complaint))
-        except Exception as exc:
-            errors.report("Model Chain: the Creative Mode re-roll failed", exc_info=True)
-            outcome = None
-            self._complaint = str(exc) or exc.__class__.__name__
+                return _run_batch(plan, request, settings)
         finally:
             self._rolling = False
 
-        complaint, self._complaint = self._complaint, ""
+    def _apply_batch(self, p, plan, batch: int, indices, outcome, complaint) -> None:
+        """Put one batch's prompt where the host will read it, or say why not."""
+        label = f"batch {batch + 1}"
         written = getattr(outcome, "prepared", None)
         if (outcome is None or outcome.cancelled or not outcome.ran_creative
                 or written is None or not written.generation.strip()):
@@ -2935,7 +3215,7 @@ class ScriptKreaCreative(scripts.Script):
         mc_lora.remember_inheritable_for(p, indices, written.inheritable,
                                          self._inheritable_negative)
         _record_per_image(p, plan.first_metadata, written.metadata, indices,
-                          len(all_prompts))
+                          len(p.all_prompts))
         roll = outcome.roll
         logger.info("Model Chain: Creative Mode re-rolled %s — %s characters at "
                     "creativity %s, creative seed %s", label,
@@ -2970,6 +3250,10 @@ class ScriptKreaCreative(scripts.Script):
         self._spatial_note = ""
         self._neutralize_note = ""
         self._composed_without_creative = False
+        if self._reroll is not None:
+            # Every batch that ran took its prompt; one that was stopped early
+            # leaves prompts nobody will read, and the thread can stop writing.
+            self._reroll.stop.set()
         self._reroll = None
         self._batch_notes = []
         if processed is None:
@@ -3149,84 +3433,9 @@ class ScriptKreaCreative(scripts.Script):
     def _roll(self, source, settings, layout, raw_source=""):
         """One creative roll for this generation, or ``None`` to leave it alone.
 
-        Returns the :class:`mc_creative_krea.Roll` rather than the finished
-        prompt, because what the prompt is made of is settled after this: a
-        layout may still be composed onto the scene it produced. The two steps
-        are separate functions for the same reason they are separate passes --
-        one of them talks to a model and the other one cannot.
-
-        Called inside the :class:`mc_broker.host_job` block ``before_process``
-        opens, which is how ``mc_llm_sessions._Gpu.acquire`` is told that the
-        image job is blocked waiting for this request rather than competing with
-        it. The bar is borrowed rather than claimed, because the host already
-        started one for the generation this is the first part of.
-
-        The events are drained rather than forwarded. There is no open Gradio
-        event to forward them to -- the press became a native generation, not a
-        handler with an output list -- so the progress bar carries the phase and
-        the log carries the rest.
-
-        ``source`` is handed in rather than read off ``p``, and it is the
-        *transformable* text: the pipeline has already lifted the literal
-        commands out of the prompt box. Reading ``p.prompt`` here would put them
-        back in front of the writer, which is the one thing this feature exists
-        to prevent.
+        :func:`_write`, with its reason for not rolling kept for postprocess.
         """
-        source = str(source or "").strip()
-        if not source:
-            # A prompt that was nothing but literal commands lands here, and it
-            # is not an error: there was no transformable text to write from,
-            # the commands are restored around nothing, and the generation goes
-            # ahead with them. §14.
-            logger.info("Model Chain: Creative Mode has no source prompt to work from")
-            self._complaint = ("there was no transformable text to work from — the "
-                               "prompt was entirely literal commands"
-                               if raw_source.strip() else
-                               "there was no prompt to work from")
-            return None
-
-        session = mc_creative_krea.creative
-
-        # Held by name and closed explicitly, the way the roll itself holds the
-        # LLM run: every path out of the loop below leaves the generator
-        # suspended, and it is its ``finally`` that gives the progress bar and
-        # the workload lock back. Closing it is what runs that now rather than
-        # whenever the interpreter next collects the frame.
-        events = session.roll(source, settings, guard_checkpoint=True, own_bar=False,
-                              spatial_layout=layout, raw_source=raw_source)
-        written = False
-        try:
-            for event in events:
-                if event.kind == sessions.STATUS:
-                    logger.debug("Model Chain: Creative Mode — %s", event.text)
-                elif event.kind == sessions.CANCELLED:
-                    logger.info("Model Chain: the Creative Mode roll was stopped; "
-                                "the generation continues with the typed prompt")
-                    self._complaint = "the roll was stopped"
-                    break
-                elif event.kind == sessions.FAILED:
-                    logger.warning("Model Chain: the Creative Mode roll failed (%s); "
-                                   "generating from the typed prompt instead",
-                                   event.text)
-                    self._complaint = event.text
-                    break
-                elif event.kind == sessions.DONE:
-                    written = True
-                    break
-        except Exception as exc:
-            errors.report("Model Chain: the Creative Mode roll failed", exc_info=True)
-            self._complaint = str(exc) or exc.__class__.__name__
-            return None
-        finally:
-            events.close()
-
-        if not written:
-            return None
-
-        last = session.last
-        if last is None or not last.expanded.strip():
-            logger.warning("Model Chain: the Creative Mode roll produced nothing; "
-                           "generating from the typed prompt instead")
-            self._complaint = "the writer returned nothing"
-            return None
-        return last
+        roll, complaint = _write(source, settings, layout, raw_source)
+        if complaint:
+            self._complaint = complaint
+        return roll
