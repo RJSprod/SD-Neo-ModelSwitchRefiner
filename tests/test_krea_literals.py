@@ -1015,6 +1015,25 @@ class TestTheChainReadsIt:
         # stripped of the tag by pattern, which is the defence-in-depth half.
         assert positive == "A written scene."
 
+    def test_a_re_rolled_batch_inherits_its_own_prompt(self):
+        """A batch count above one re-rolls every later batch; each image's
+        Stage 2 prompt is resolved from its own batch's pair, and an image with
+        none of its own still inherits the press's."""
+        import model_chain
+
+        p = Processing("A first scene.")
+        p.all_prompts = ["A first scene.", "A first scene.", "A second scene."]
+        p.all_negative_prompts = ["", "", ""]
+        p.negative_prompt = ""
+        mc_lora.remember_inheritable(p, "A first scene.", "")
+        mc_lora.remember_inheritable_for(p, [2], "A second scene.", "")
+        script = model_chain.ScriptModelChain()
+
+        positives, _ = script._stage2_prompts(p, "Inherit", "", "", [])
+
+        assert mc_lora.has_inheritable_each(p)
+        assert positives == ["A first scene.", "A first scene.", "A second scene."]
+
     def test_the_pattern_stripper_is_still_there_underneath(self):
         """A bare tag typed outside a command is still a Stage 1 tag."""
         cleaned, dropped = mc_lora.strip_networks("a street <lora:film:0.8>")

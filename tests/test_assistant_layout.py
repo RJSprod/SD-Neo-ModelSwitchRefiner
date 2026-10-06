@@ -423,13 +423,17 @@ DOCKED = """() => {
     prompt.scrollIntoView({block: "nearest"});
     const p = prompt.getBoundingClientRect();
     const hit = document.elementFromPoint(p.left + p.width / 2, p.top + p.height / 2);
+    // Docked, the text box itself takes no press until a tap engages it (the
+    // guard); the press still has to land on its block in the column, and
+    // not on the panel drawn over it.
+    const block = prompt.closest(".block");
     const row = column.parentElement;
     const results = document.getElementById("txt2img_results");
     return {column: box(column), slot: box(slot),
             scroll: [column.scrollHeight, column.clientHeight],
             squeezed: [...column.querySelectorAll(".block[id^='setting_']")]
                 .filter((node) => Math.round(node.getBoundingClientRect().height) !== 90).length,
-            pressed: hit === prompt,
+            pressed: !!hit && (hit === prompt || block.contains(hit)),
             results: results.getBoundingClientRect().width, row: row.getBoundingClientRect().width,
             pressedButton: document.querySelector(".forge-assistant-settings")
                 .getAttribute("aria-pressed")};
@@ -829,5 +833,160 @@ def test_on_a_phone_the_settings_column_docks_in_a_floating_panel(browser):
         settle(page)
         moved = page.evaluate(WHERE)
         assert moved["column"] == moved["slot"], moved
+    finally:
+        context.close()
+
+
+# The guard: docked, a field takes a drag only once a tap has engaged it.
+
+FIELDS = """() => {
+    const column = document.getElementById("txt2img_settings");
+    const html = `
+      <div class="block gradio-slider" id="t_slider" style="height: auto">
+        <label for="t_number">Steps</label>
+        <input id="t_number" type="number" value="20">
+        <input id="t_range" type="range" min="0" max="100" value="20"
+               style="display: block; width: 90%">
+      </div>
+      <div class="block gradio-textbox" id="t_text" style="height: auto">
+        <label>Literal</label>
+        <textarea id="t_area" rows="3">${"line\\n".repeat(40)}</textarea>
+      </div>
+      <div class="block gradio-dropdown" id="t_drop" style="height: auto">
+        <input id="t_choice" value="Euler">
+      </div>`;
+    column.insertAdjacentHTML("afterbegin", html);
+    column.scrollTop = 0;
+}"""
+
+HIT = """(id) => {
+    const node = document.getElementById(id);
+    const r = node.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return {self: hit === node, inBlock: !!hit && !!node.closest(".block").contains(hit),
+            centre: [r.left + r.width / 2, r.top + r.height / 2]};
+}"""
+
+STATE = """() => {
+    const engaged = [...document.querySelectorAll(".forge-assistant-engaged")].map((n) => n.id);
+    const column = document.getElementById("txt2img_settings");
+    const slider = document.getElementById("t_slider");
+    return {engaged, active: document.activeElement && document.activeElement.id,
+            guarded: column.classList.contains("forge-assistant-guarded"),
+            range: document.getElementById("t_range").value,
+            area: document.getElementById("t_area").scrollTop,
+            column: column.scrollTop,
+            outline: getComputedStyle(slider).outlineStyle + " "
+                + getComputedStyle(slider).outlineWidth};
+}"""
+
+
+def docked_with_fields(page):
+    page.evaluate("forgeAssistant.shell.open()")
+    settle(page)
+    page.click(".forge-assistant-settings")
+    settle(page)
+    page.evaluate(FIELDS)
+    settle(page)
+
+
+def test_a_docked_field_takes_no_press_until_a_tap_engages_it(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        docked_with_fields(page)
+        state = page.evaluate(STATE)
+        assert state["guarded"] is True and state["engaged"] == [], state
+
+        # Nothing engaged: the slider, its number and the text box give their
+        # presses to their blocks; a dropdown keeps its own.
+        for name in ("t_range", "t_number", "t_area"):
+            hit = page.evaluate(HIT, name)
+            assert hit["self"] is False and hit["inBlock"] is True, (name, hit)
+        assert page.evaluate(HIT, "t_choice")["self"] is True
+
+        # A drag across the slider moves nothing.
+        x, y = page.evaluate(HIT, "t_range")["centre"]
+        page.mouse.move(x - 100, y)
+        page.mouse.down()
+        page.mouse.move(x + 150, y, steps=6)
+        page.mouse.up()
+        assert page.evaluate(STATE)["range"] == "20"
+
+        # The wheel over the text box scrolls the column, not the text.
+        x, y = page.evaluate(HIT, "t_area")["centre"]
+        page.mouse.move(x, y)
+        page.mouse.wheel(0, 120)
+        settle(page, 6)
+        page.wait_for_timeout(200)
+        scrolled = page.evaluate(STATE)
+        assert scrolled["area"] == 0 and scrolled["column"] > 0, scrolled
+        page.evaluate("document.getElementById('txt2img_settings').scrollTop = 0")
+        settle(page)
+
+        # A tap engages the slider: outlined, its presses back, and a drag
+        # now slides it. No keyboard: the track was tapped, not the number.
+        x, y = page.evaluate(HIT, "t_range")["centre"]
+        page.mouse.click(x, y)
+        engaged = page.evaluate(STATE)
+        assert engaged["engaged"] == ["t_slider"], engaged
+        assert engaged["outline"] == "solid 2px", engaged
+        assert engaged["active"] != "t_number", engaged
+        assert page.evaluate(HIT, "t_range")["self"] is True
+        page.mouse.move(x - 100, y)
+        page.mouse.down()
+        page.mouse.move(x + 150, y, steps=6)
+        page.mouse.up()
+        assert page.evaluate(STATE)["range"] != "20"
+
+        # A tap on the text box moves the engagement there, and focuses it
+        # with the caret at the end, ready to type.
+        x, y = page.evaluate(HIT, "t_area")["centre"]
+        page.mouse.click(x, y)
+        typed = page.evaluate(STATE)
+        assert typed["engaged"] == ["t_text"] and typed["active"] == "t_area", typed
+        page.keyboard.type("!")
+        assert page.evaluate("document.getElementById('t_area').value.endsWith('!')")
+
+        # A tap outside it lets go, and takes the keyboard with it.
+        page.mouse.click(*page.evaluate(HIT, "setting_3")["centre"])
+        released = page.evaluate(STATE)
+        assert released["engaged"] == [] and released["active"] != "t_area", released
+
+        # Escape lets go too.
+        page.mouse.click(*page.evaluate(HIT, "t_area")["centre"])
+        assert page.evaluate(STATE)["engaged"] == ["t_text"]
+        page.keyboard.press("Escape")
+        assert page.evaluate(STATE)["engaged"] == []
+
+        # Back in the page, the fields are ordinary fields.
+        page.click(".forge-assistant-settings")
+        settle(page)
+        back = page.evaluate(STATE)
+        assert back["guarded"] is False, back
+        assert page.evaluate(HIT, "t_range")["self"] is True
+    finally:
+        page.close()
+
+
+def test_on_a_phone_a_drag_on_a_docked_text_box_scrolls_the_column(browser):
+    context, page = open_phone(browser, free_float=False)
+    try:
+        page.tap(".forge-assistant-settings")
+        settle(page)
+        page.evaluate(FIELDS)
+        settle(page)
+        x, y = page.evaluate(HIT, "t_area")["centre"]
+        touch_drag(page, (x, y), (x, y - 120))
+        settle(page, 4)
+        dragged = page.evaluate(STATE)
+        assert dragged["area"] == 0 and dragged["column"] > 40, dragged
+
+        page.evaluate("document.getElementById('txt2img_settings').scrollTop = 0")
+        settle(page)
+        x, y = page.evaluate(HIT, "t_area")["centre"]
+        page.touchscreen.tap(x, y)
+        settle(page)
+        tapped = page.evaluate(STATE)
+        assert tapped["engaged"] == ["t_text"] and tapped["active"] == "t_area", tapped
     finally:
         context.close()

@@ -32,7 +32,7 @@ files.
 | `javascript/forge_assistant_store.js` | the page's copy of the conversation, drafts, operations |
 | `javascript/forge_assistant_host.js` | Forge's tabs and header, as an adapter; keyboard arbitration |
 | `javascript/forge_assistant_focus.js` | focus as a reversible transaction, with editor adapters |
-| `javascript/forge_assistant_layout.js` | the results column fills the window; Txt2Img's settings column docked in the panel (§3.29) |
+| `javascript/forge_assistant_layout.js` | the results column fills the window; Txt2Img's settings column docked in the panel (§3.29), its fields engaged by a tap (§3.31) |
 
 Changed: `prompt_master/chat/history.py` (a revision, a guarded save path, a
 tombstone file, an exclusive identifier), `mc_llm_chat_panel.py` (fifteen direct
@@ -2257,6 +2257,53 @@ moving from the grip to the panel as a lost capture, so the drag's
 `lostpointercapture` listener does not end touch drags. And a tap straight
 after a flick is kept by the browser to stop the flick; the touch tests move a
 frame at a time and rest before lifting, as a hand does.
+
+## 3.31 A docked field takes a drag only once a tap has engaged it
+
+Asked for once the column was in the panel: "when i try to scroll i might
+scroll a text box, or move a slider. I would like scroll input fields or
+sliding sliders etc, it should require a selection tap. So by default, the
+entire content column is scrollable in the flyout menu, but once i want to say
+type, i have to tap the input field first to select it, then i am in it, and i
+can type. Same with slider ... I would like the component to throw some sort
+of highlight state outline so i know i'm in".
+
+`Guard` in `javascript/forge_assistant_layout.js`, attached by `Dock.place`
+when the column docks and detached by `Dock.release`. While attached the column
+carries `forge-assistant-guarded`, and the stylesheet gives every control that
+takes a drag or a wheel for itself -- a text box, a number box, a slider, the
+compact spatial canvas (`GUARDED`; the stylesheet's list names the same) -- no
+presses at all. That is the whole of the scrolling half: the hit test passes
+over a control with `pointer-events: none`, so a finger or a wheel that starts
+on one is on the block around it, and the column is what scrolls. Nothing
+listens for a drag and nothing calls `preventDefault` on one.
+
+A tap is a `click` -- a browser fires none after a scroll -- caught on the
+document in the capture phase. On a block whose guarded controls are all its
+own (a slider's label, track and number are one block) it *engages* the block:
+`forge-assistant-engaged`, a 2 px outline in `--color-accent` (an outline,
+so nothing in the column moves), and its controls take presses again. The
+engaging tap does nothing else (`preventDefault`: a label's own focus is
+decided here): a text box tapped -- or a block with nothing to slide -- is
+focused, caret at its end, so the keyboard comes up; a slider's track is
+focused without a keyboard; its number, tapped, gets one. In a block that
+holds several fields (an accordion) only the field under the point is meant,
+and a tap on its header engages nothing and opens it as ever. A tap anywhere
+outside the engaged block, Escape, the column going out of sight or undocking
+lets go, and blurs what was focused in it. A control reached by Tab is engaged
+too (`focusin`), outline and all.
+
+Dropdowns (`.gradio-dropdown`), checkboxes, radios and buttons are not guarded:
+a drag across them scrolls already, and they act only on a tap. Gradio's
+dropdown is a text input, which is why the list excludes `.gradio-dropdown *`.
+
+Checked in Chromium by `tests/test_assistant_layout.py`, with a mouse (the hit
+test, a drag across an unengaged slider that moves nothing, the wheel over an
+overflowing text box scrolling the column, engaging, sliding, typing, letting
+go) and with real touch on a phone's viewport (a drag on a text box scrolls the
+column; a tap engages and focuses it). Taking the stylesheet's rule out, the
+guard's attach, or its focus each fails both. Not run on the user's machine or
+in Firefox.
 
 ## 4. Deliberate deviations
 

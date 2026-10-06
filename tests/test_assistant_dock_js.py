@@ -280,6 +280,8 @@ function classes() {
 let trap = {x: 0, y: 0};
 const row = {classList: classes(), parentElement: null};
 const column = {classList: classes(), parentElement: row,
+                // The guard listens on the column for a field reached by Tab.
+                addEventListener() {}, removeEventListener() {},
                 style: styled({width: ["300px", "important"], "min-width": ["320px", ""]}),
                 getBoundingClientRect() {
                     return {left: parseFloat(this.style.values.left) + trap.x,

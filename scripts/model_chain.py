@@ -3017,31 +3017,8 @@ class ScriptModelChain(scripts.Script):
         if prompt_mode == "Inherit":
             styles = []
 
-        # Per-image resolved prompts. create_infotext indexes list values by
-        # image index, so a prompt that varies across the batch is recorded
-        # accurately for each image rather than collapsing to image 0's.
-        total = len(p.all_prompts or [p.prompt])
-        # What a Stage 1 prompt-writing feature left for Stage 2, if one ran.
-        # Two empty strings mean nobody rewrote this generation's prompt, and
-        # ``all_prompts`` answers as it always has.
-        #
-        # One value for the whole batch rather than one per image, because that
-        # is what it is: Creative Mode writes one prompt for the press, and the
-        # per-image variation below it is the host's wildcard and style
-        # expansion of *that* -- expansions of literal payloads Stage 2 is not
-        # supposed to receive in the first place.
-        inherit_positive, inherit_negative = mc_lora.stage1_inheritable(p)
-        resolved_positive, resolved_negative = [], []
-        for i in range(total):
-            stage1_positive = inherit_positive or (
-                p.all_prompts[i] if p.all_prompts else p.prompt)
-            stage1_negative = inherit_negative or (
-                p.all_negative_prompts[i] if p.all_negative_prompts else p.negative_prompt)
-            pos, neg = self._resolve_prompts(
-                stage1_positive, stage1_negative, prompt_mode, prompt, negative, styles
-            )
-            resolved_positive.append(pos)
-            resolved_negative.append(neg)
+        resolved_positive, resolved_negative = self._stage2_prompts(
+            p, prompt_mode, prompt, negative, styles)
 
         p.extra_generation_params.update(
             mc_infotext.build_params(
@@ -3074,6 +3051,37 @@ class ScriptModelChain(scripts.Script):
         self._save_final_images = p.save_samples()
         p.do_not_save_samples = True
         p.do_not_save_grid = True
+
+    def _stage2_prompts(self, p, prompt_mode, prompt, negative, styles):
+        """Every image's resolved Stage 2 prompt pair, as two lists.
+
+        create_infotext indexes list values by image index, so a prompt that
+        varies across the batch is recorded accurately for each image rather
+        than collapsing to image 0's.
+
+        What a Stage 1 prompt-writing feature left for Stage 2, if one ran, is
+        read per image: one pair for the press -- Creative Mode writes one
+        prompt for it, and the per-image variation below that is the host's
+        wildcard and style expansion of *that*, expansions of literal payloads
+        Stage 2 is not supposed to receive in the first place -- and, with a
+        batch count above one, a pair of its own for every image of a batch
+        Creative Mode re-rolled. Two empty strings mean nobody rewrote that
+        image's prompt, and ``all_prompts`` answers as it always has.
+        """
+        total = len(p.all_prompts or [p.prompt])
+        resolved_positive, resolved_negative = [], []
+        for i in range(total):
+            inherit_positive, inherit_negative = mc_lora.stage1_inheritable(p, i)
+            stage1_positive = inherit_positive or (
+                p.all_prompts[i] if p.all_prompts else p.prompt)
+            stage1_negative = inherit_negative or (
+                p.all_negative_prompts[i] if p.all_negative_prompts else p.negative_prompt)
+            pos, neg = self._resolve_prompts(
+                stage1_positive, stage1_negative, prompt_mode, prompt, negative, styles
+            )
+            resolved_positive.append(pos)
+            resolved_negative.append(neg)
+        return resolved_positive, resolved_negative
 
     @staticmethod
     def _capture_references(p, mode, gallery, max_dim):
@@ -3332,6 +3340,21 @@ class ScriptModelChain(scripts.Script):
 
         if prompt_mode == "Inherit":
             styles = []
+
+        # process() recorded every image's Stage 2 prompt before Stage 1 ran,
+        # from the one prompt Creative Mode had written by then. A batch count
+        # above one re-rolls every later batch (the Creative script's
+        # before_process_batch), so those images' records are written again
+        # now, from what each of their batches was actually given.
+        if mc_lora.has_inheritable_each(p):
+            try:
+                resolved_positive, resolved_negative = self._stage2_prompts(
+                    p, prompt_mode, prompt, negative, styles)
+                p.extra_generation_params[mc_infotext.PROMPT] = resolved_positive
+                p.extra_generation_params[mc_infotext.NEGATIVE] = resolved_negative
+            except Exception:
+                logger.debug("Model Chain: could not record the re-rolled batches' "
+                             "Stage 2 prompts", exc_info=True)
 
         # Interrupted during Stage 1: abort before any model switch and hand
         # back what Stage 1 produced, clearly labelled (section 3.5).

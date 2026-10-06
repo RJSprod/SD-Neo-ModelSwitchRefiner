@@ -1908,8 +1908,25 @@ The Creative Director is ordinary Python over a vendored vocabulary of 164
 variant families. It chooses a medium, a lighting treatment, a composition, a
 palette and so on with a seeded PRNG, assembles them into a brief, and hands
 that to the Krea writer. **No model is asked what to vary.** There is no planner
-pass, no candidate generation, no judge and no rewrite — one press is one model
+pass, no candidate generation, no judge and no rewrite — one roll is one model
 request, at every setting.
+
+**A batch count above one rolls again for every batch.** The first batch gets
+the press's roll, and each batch after it gets a fresh one from the same source,
+settings and layout before its images are made — so batch count 2 at batch size
+2 is two directions, two images each. A random creative seed is drawn anew for
+each roll; a fixed one is offset by the batch, as Forge offsets image seeds
+(seed 40 gives 40, 41, 42 …), so a fixed seed still reproduces the whole run.
+Batch size alone never re-rolls: the images of one batch share one prompt. Each
+image records its own batch's roll — creative seed, recipe and the rest — and
+Stage 2 inherits its own batch's prompt. Prompt Neutralize is asked once per
+press, not per batch (its answer is a subtraction of the same source), and an
+armed replay is spent by the first batch. The image model is on the card by the
+time a later batch rolls, so the writer is placed around it as it is for any
+roll that runs beside an image job. If the first roll fails, the later batches
+are not tried again (they would fail the same way, each after a wait); if a
+later re-roll fails, that batch uses the first batch's prompt and the result
+says so. A style you picked stays wrapped around each batch's new prompt.
 
 Nothing happens on its own. There is no idle timer, no typing watcher, no repeat
 loop. A creative roll happens because you pressed a button.
@@ -3524,6 +3541,18 @@ column's place while it is up, as it does the conversation's. The choice is
 kept with the rest of the panel's layout for the browser tab, so a reload with
 the panel closed keeps the column out of the page too. Img2Img has no such
 state yet.
+
+**Docked, a field needs a tap before it takes a drag.** In the panel the whole
+column scrolls, and a drag that starts on a text box, a number box, a slider or
+the compact spatial canvas scrolls the column too, rather than the box's text,
+the slider's value or a region. Tap the field first: it is *engaged* — outlined
+in the accent colour — and from then on it works as it does in the page. A tap
+on a text box puts the keyboard up with the caret at the end; a tap on a
+slider's track lets you slide it (tap its number to type a value instead). A
+tap anywhere else, or Escape, lets the field go and puts the keyboard away.
+Dropdowns, checkboxes and buttons are unchanged: a drag across them already
+scrolls, and they act on a tap. Back in the page, every field is an ordinary
+field again.
 
 The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it

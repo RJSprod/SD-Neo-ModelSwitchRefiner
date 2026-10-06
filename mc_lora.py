@@ -156,13 +156,61 @@ def remember_inheritable(p, positive: str = "", negative: str = "") -> None:
                      exc_info=True)
 
 
-def stage1_inheritable(p) -> tuple[str, str]:
+INHERITABLE_EACH = "mc_stage1_inheritable_each"
+"""Per-image exceptions to :data:`INHERITABLE`, keyed by image index.
+
+Creative Mode writes one prompt for the press and then, with a batch count
+above one, a fresh one for every batch after the first (``before_process_batch``
+in the Creative script). Those later batches' images inherit their own batch's
+prompt, so the pair is recorded per image for them; an image with no entry here
+inherits the press's pair, as every image did before re-rolls existed.
+"""
+
+
+def remember_inheritable_for(p, indices, positive: str = "",
+                             negative: str = "") -> None:
+    """Leave the pair Stage 2 may inherit for the images at ``indices``.
+
+    Never fatal, like :func:`remember_inheritable`: a host object that will not
+    take the attribute leaves those images inheriting the press's pair.
+    """
+    try:
+        found = getattr(p, INHERITABLE_EACH, None)
+        each = dict(found) if isinstance(found, dict) else {}
+        for index in indices:
+            each[int(index)] = (str(positive or ""), str(negative or ""))
+        setattr(p, INHERITABLE_EACH, each)
+    except Exception:
+        logger.debug("Model Chain: could not record a batch's inheritable Stage 1 prompt",
+                     exc_info=True)
+
+
+def has_inheritable_each(p) -> bool:
+    """Whether any image of this generation inherits a pair of its own."""
+    try:
+        return bool(getattr(p, INHERITABLE_EACH, None))
+    except Exception:
+        return False
+
+
+def stage1_inheritable(p, index: int | None = None) -> tuple[str, str]:
     """``(positive, negative)`` Stage 2 may inherit, or two empty strings.
 
     Empty means "nobody rewrote this generation's prompt", which is the ordinary
     case and is not a failure: the caller falls back to ``all_prompts``, which is
     what it read before any of this existed.
+
+    With ``index``, an image whose batch was re-rolled answers with its own
+    pair (:data:`INHERITABLE_EACH`); every other image answers with the press's.
     """
+    if index is not None:
+        try:
+            each = getattr(p, INHERITABLE_EACH, None)
+            if isinstance(each, dict) and int(index) in each:
+                found = each[int(index)]
+                return str(found[0] or ""), str(found[1] or "")
+        except Exception:
+            pass
     try:
         found = getattr(p, INHERITABLE, None)
     except Exception:

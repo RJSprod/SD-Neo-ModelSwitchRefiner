@@ -7350,6 +7350,35 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     pointer-events: none;
 }
 
+/* Docked, a field takes a drag only once a tap has engaged it (`Guard` in
+   forge_assistant_layout.js, whose GUARDED list names the same controls):
+   until then a text box, a number box, a slider or the compact spatial
+   canvas takes no presses, so a drag that starts on one scrolls the column
+   instead of the text, the value or a box. A tap engages the field's block:
+   an outline in the accent, and its controls take presses again. Dropdowns
+   are left out -- a drag across one scrolls already, and it opens on a tap. */
+.forge-assistant-guarded :is(textarea, input[type=text], input:not([type]),
+        input[type=search], input[type=number], input[type=range],
+        [contenteditable=true], .mc-krea-spatial-compact-frame):not(.gradio-dropdown *) {
+    pointer-events: none !important;
+}
+
+.forge-assistant-guarded .forge-assistant-engaged :is(textarea, input[type=text],
+        input:not([type]), input[type=search], input[type=number], input[type=range],
+        [contenteditable=true]),
+.forge-assistant-guarded .forge-assistant-engaged.mc-krea-spatial-compact-frame,
+.forge-assistant-guarded :is(textarea, input, [contenteditable=true]).forge-assistant-engaged {
+    pointer-events: auto !important;
+}
+
+/* The engaged field, so it is plain which one a drag now moves. An outline
+   takes no room, so nothing in the column shifts when a field is engaged. */
+.forge-assistant-guarded .forge-assistant-engaged {
+    outline: 2px solid var(--color-accent, #2563eb) !important;
+    outline-offset: 2px !important;
+    border-radius: var(--radius-sm, 4px);
+}
+
 .forge-assistant-settings[aria-pressed="true"] {
     border-color: var(--color-accent, #2563eb);
     box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
