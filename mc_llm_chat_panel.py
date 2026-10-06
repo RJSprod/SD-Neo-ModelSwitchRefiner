@@ -306,6 +306,11 @@ def build() -> dict:
                 # and in a long thread there is nothing to scan for. See
                 # :func:`_faces`.
                 avatar_images=_faces(who),
+                # Following a streamed reply is javascript/llm_studio.js's
+                # alone: Gradio's own autoscroll counts the last 100 px as the
+                # end and put a reader who had scrolled up less than that back
+                # at the end with every chunk.
+                autoscroll=False,
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))
 

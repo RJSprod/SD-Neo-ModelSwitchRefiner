@@ -479,12 +479,143 @@
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
+    // Asked for next: "input fields should not scroll. They should always
+    // present full content ... I dont want the view to scroll up to the top
+    // when i select it to begin typing, i want what is in view to stay in view,
+    // so i can put the cursor exactly where i need it". So while docked every
+    // text box is as tall as its text (`fit`): the column is the one thing that
+    // scrolls. Its height is written inline with priority, and again whenever
+    // anything rewrites it (Gradio sizes a box to its line limit on every
+    // input) or the column's content changes (an accordion opening shows a box
+    // that had no width to measure); undocking puts back what was there. And
+    // the engaging tap puts the caret where the finger was, focused without
+    // scrolling, so what is on screen stays on screen.
+
     function Guard() {
         this.column = null;
         this.engaged = null;
+        this.saved = new Map();
+        this.observer = null;
+        this.pending = false;
         this.onClick = this.click.bind(this);
         this.onKey = this.key.bind(this);
         this.onFocus = this.focus.bind(this);
+        this.onInput = (event) => this.fit(event.target);
+    }
+
+    /** Make `area` as tall as its text, keeping the column where it is. */
+    Guard.prototype.fit = function (area) {
+        if (!area || area.tagName !== "TEXTAREA" || !this.column || !shows(area)) return;
+        const column = this.column;
+        const keep = column.scrollTop;
+        const style = area.style;
+        if (!this.saved.has(area)) {
+            this.saved.set(area, {value: style.getPropertyValue("height"),
+                                  priority: style.getPropertyPriority("height")});
+        }
+        const before = style.getPropertyValue("height");
+        // Measured at its natural height (its rows), so it shrinks as well as
+        // grows; nothing is painted in between.
+        style.setProperty("height", "auto", "important");
+        const computed = window.getComputedStyle(area);
+        const px = (name) => parseFloat(computed.getPropertyValue(name)) || 0;
+        const wanted = computed.boxSizing === "border-box"
+            ? area.scrollHeight + px("border-top-width") + px("border-bottom-width")
+            : area.scrollHeight - px("padding-top") - px("padding-bottom");
+        const value = Math.ceil(wanted) + "px";
+        style.setProperty("height", value, "important");
+        if (column.scrollTop !== keep) column.scrollTop = keep;
+        if (before !== value) this.forget();
+    };
+
+    Guard.prototype.fitAll = function () {
+        if (!this.column) return;
+        this.column.querySelectorAll("textarea").forEach((area) => this.fit(area));
+        this.forget();
+    };
+
+    /** Our own writes are not news to the observer. */
+    Guard.prototype.forget = function () {
+        if (this.observer && typeof this.observer.takeRecords === "function") {
+            this.observer.takeRecords();
+        }
+    };
+
+    Guard.prototype.schedule = function () {
+        if (this.pending) return;
+        this.pending = true;
+        window.requestAnimationFrame(() => {
+            this.pending = false;
+            this.fitAll();
+        });
+    };
+
+    /** Put back every height `fit` wrote. */
+    Guard.prototype.unfit = function () {
+        this.saved.forEach((entry, area) => {
+            if (entry.value) area.style.setProperty("height", entry.value, entry.priority || "");
+            else area.style.removeProperty("height");
+        });
+        this.saved.clear();
+    };
+
+    // What a mirror of a text box copies so its text wraps line for line as
+    // the box's does.
+    const MIRRORED = ["box-sizing", "padding-top", "padding-right", "padding-bottom",
+        "padding-left", "border-top-width", "border-right-width", "border-bottom-width",
+        "border-left-width", "font-family", "font-size", "font-style", "font-weight",
+        "font-variant", "font-stretch", "line-height", "letter-spacing", "word-spacing",
+        "text-indent", "text-transform", "text-align", "tab-size", "direction",
+        "word-break", "overflow-wrap", "white-space"];
+
+    /** The character offset in `area` under (x, y), or null when it cannot be
+     *  said. Read off a copy of the box's text laid out exactly over it,
+     *  because no browser answers this for a text box itself line for line:
+     *  Chromium's `caretPositionFromPoint` over a textarea always answers the
+     *  first line. The copy is see-through and gone before anything paints. */
+    function caretAt(area, x, y) {
+        let mirror = null;
+        try {
+            const rect = area.getBoundingClientRect();
+            const computed = window.getComputedStyle(area);
+            mirror = document.createElement("div");
+            const style = mirror.style;
+            MIRRORED.forEach((name) => style.setProperty(name, computed.getPropertyValue(name)));
+            if (area.tagName === "TEXTAREA") style.setProperty("white-space", "pre-wrap");
+            else style.setProperty("white-space", "pre");
+            style.setProperty("border-style", "solid");
+            style.setProperty("border-color", "transparent");
+            style.setProperty("position", "fixed");
+            style.setProperty("left", rect.left + "px");
+            style.setProperty("top", rect.top - (area.scrollTop || 0) + "px");
+            style.setProperty("width", rect.width + "px");
+            style.setProperty("margin", "0");
+            style.setProperty("overflow", "hidden");
+            style.setProperty("opacity", "0");
+            style.setProperty("pointer-events", "auto");
+            style.setProperty("z-index", "2147483647");
+            const text = document.createTextNode(String(area.value || ""));
+            mirror.appendChild(text);
+            // A trailing line break only lays out with something after it.
+            mirror.appendChild(document.createTextNode("\u200b"));
+            document.body.appendChild(mirror);
+            let node = null;
+            let offset = null;
+            if (typeof document.caretPositionFromPoint === "function") {
+                const found = document.caretPositionFromPoint(x, y);
+                if (found) { node = found.offsetNode; offset = found.offset; }
+            } else if (typeof document.caretRangeFromPoint === "function") {
+                const found = document.caretRangeFromPoint(x, y);
+                if (found) { node = found.startContainer; offset = found.startOffset; }
+            }
+            if (node === text) return Math.min(offset, text.length);
+            if (node && node.parentNode === mirror) return text.length;
+            return null;
+        } catch (error) {
+            return null;
+        } finally {
+            if (mirror && mirror.parentNode) mirror.parentNode.removeChild(mirror);
+        }
     }
 
     /** The block a guarded control answers for: the compact canvas is its own,
@@ -538,16 +669,29 @@
         document.addEventListener("click", this.onClick, true);
         document.addEventListener("keydown", this.onKey, true);
         column.addEventListener("focusin", this.onFocus);
+        // Bubbling, so it runs after the box's own handlers -- Gradio's
+        // resize among them -- in the same task, before anything is painted.
+        column.addEventListener("input", this.onInput);
+        if (typeof MutationObserver === "function") {
+            this.observer = new MutationObserver(() => this.schedule());
+            this.observer.observe(column, {childList: true, subtree: true, attributes: true,
+                                           attributeFilter: ["style", "class", "hidden"]});
+        }
+        this.fitAll();
     };
 
     Guard.prototype.detach = function () {
         const column = this.column;
         if (!column) return;
         this.release();
+        if (this.observer) this.observer.disconnect();
+        this.observer = null;
+        this.unfit();
         column.classList.remove(GUARD_CLASS);
         document.removeEventListener("click", this.onClick, true);
         document.removeEventListener("keydown", this.onKey, true);
         column.removeEventListener("focusin", this.onFocus);
+        column.removeEventListener("input", this.onInput);
         this.column = null;
     };
 
@@ -566,19 +710,25 @@
         if (!chosen && !hit && !slides) chosen = controls.find((node) => node.matches(TYPED));
         if (!chosen && hit && hit.matches("input[type=range]")) chosen = hit;
         if (!chosen) return;
+        // Wherever the focus or the caret goes, the column stays where it was:
+        // what the reader tapped is what they are looking at.
+        const column = this.column;
+        const keep = column ? column.scrollTop : 0;
+        const offset = chosen === hit && chosen.matches("textarea, input[type=text], " +
+            "input:not([type]), input[type=search]") ? caretAt(chosen, x, y) : null;
         try {
             chosen.focus({preventScroll: true});
         } catch (error) {
             chosen.focus();
         }
-        if (chosen.matches("textarea, input[type=text], input:not([type]), input[type=search]")) {
+        if (offset !== null) {
             try {
-                const end = String(chosen.value || "").length;
-                chosen.setSelectionRange(end, end);
+                chosen.setSelectionRange(offset, offset);
             } catch (error) {
                 // Not every input takes a selection; the focus is what matters.
             }
         }
+        if (column && column.scrollTop !== keep) column.scrollTop = keep;
     };
 
     /** Let the engaged block go, and its keyboard with it. */
@@ -597,6 +747,13 @@
     Guard.prototype.click = function (event) {
         const column = this.column;
         if (!column) return;
+        // Only a press of the reader's. Scripts on this page -- Forge's, this
+        // extension's, Mini Paint NEO's -- press hidden buttons with
+        // `.click()`, and each of those used to read as a tap outside the
+        // engaged field: it let go and took the keyboard away mid-word. An
+        // engaged field is let go by the reader (a tap elsewhere, Escape) and
+        // by nothing else.
+        if (event && event.isTrusted === false) return;
         const target = event.target;
         if (this.engaged && !this.engaged.isConnected) this.engaged = null;
         if (this.engaged && target && this.engaged.contains(target)) return;
@@ -677,8 +834,17 @@
             if (NS.fill) NS.fill.refresh();
         }
         const style = this.active.column.style;
+        // A wider or narrower panel rewraps every box.
+        if (rect && Math.round(rect.width) !== this.active.width) {
+            this.active.width = Math.round(rect.width || 0);
+            this.guard.schedule();
+        }
         if (!rect || !(rect.width > 0) || !(rect.height > 0)) {
-            this.guard.release();
+            // An engaged field stays engaged: only the reader lets it go. The
+            // slot has no height for a moment more often than it looks -- a
+            // phone's keyboard shrinking the visible window caps the panel,
+            // and the slot gives way first -- and letting go here closed the
+            // keyboard under somebody typing.
             style.setProperty("visibility", "hidden", "important");
             return true;
         }

@@ -1959,6 +1959,9 @@ pixels is not a decision. `tests/test_assistant_js.py::TestLeavingTheEnd` has
 the exact case — one notch up, a chunk's render, the render's own scroll event
 — and the wheel, touch and key gestures; seven mutations of the rule fail it.
 
+Superseded by §3.32: the threshold, the window and the slack are gone, at
+the user's request.
+
 ### The character screen
 
 "Really bad right now": three system-prompt surfaces with a paragraph under
@@ -2297,13 +2300,77 @@ Dropdowns (`.gradio-dropdown`), checkboxes, radios and buttons are not guarded:
 a drag across them scrolls already, and they act only on a tap. Gradio's
 dropdown is a text input, which is why the list excludes `.gradio-dropdown *`.
 
+Then, asked for: "input fields should not scroll. They should always present
+full content ... I dont want the view to scroll up to the top when i select it
+to begin typing, i want what is in view to stay in view, so i can put the
+cursor exactly where i need it", and "input field should never close on its
+own in the flyout. Select should never auto deselect ... the input field will
+deselect sometimes while i am still typing!"
+
+- **Full content.** `Guard.fit` makes every docked text box as tall as its
+  text (measured at `height: auto`, written in pixels with priority), with the
+  stylesheet taking away its `max-height`, overflow and resize handle. It runs
+  on attach, after every `input` (bubbling, so after Gradio's own resize in
+  the same task), when anything in the column changes (a MutationObserver,
+  its own writes taken back with `takeRecords`) and when the panel's width
+  changes; undocking puts back the heights it found.
+- **The caret where the finger was.** The engaging tap focuses with
+  `preventScroll`, puts the caret at the character under the tap and puts the
+  column's scroll back if anything moved it. The character is read off a
+  see-through copy of the box's text laid over it (`caretAt`), because
+  Chromium's `caretPositionFromPoint` over a multi-line textarea answers the
+  first line whatever the point.
+- **Only the reader lets go.** The guard released on every `click` outside
+  the engaged block, and scripts on this page press hidden buttons with
+  `.click()` -- each was a tap outside, letting go and blurring mid-word. It
+  reads trusted clicks only now. And `Dock.place` released when the slot had
+  no height for a moment, which a phone's keyboard causes (it shrinks the
+  visible window, the panel is capped, the slot gives way first); it no longer
+  does.
+
 Checked in Chromium by `tests/test_assistant_layout.py`, with a mouse (the hit
-test, a drag across an unengaged slider that moves nothing, the wheel over an
-overflowing text box scrolling the column, engaging, sliding, typing, letting
-go) and with real touch on a phone's viewport (a drag on a text box scrolls the
+test, a drag across an unengaged slider that moves nothing, the wheel over a
+text box scrolling the column, the box showing all its text and growing with
+new lines, engaging with the caret on the tapped line and the column not
+moving, a script's click and an empty placement leaving it engaged, sliding,
+typing, letting go) and with real touch on a phone's viewport (a drag on a text box scrolls the
 column; a tap engages and focuses it). Taking the stylesheet's rule out, the
 guard's attach, or its focus each fails both. Not run on the user's machine or
 in Firefox.
+
+## 3.32 Docked to the end of the transcript, with no slack
+
+Reported again after §3.25: "When streaming response and my scroll is docked
+to bottom, i try to use my mouse scroll to scroll away, but im still stuck!",
+with the rule asked for: "The moment i scroll away from the bottom of the view,
+i should be undocked from the bottom. If the stream continues, it will continue
+down and out of view ... If i scroll to the bottom again, and reach the end of
+scroll, then i become docked again" -- in the panel and in LLM Studio.
+
+What §3.25 left: leaving wanted 40 px of wheel within 400 ms, and the end was
+anything within 100 px of it, so a reader who had moved up less than that was
+"at the end" and every chunk put them back. LLM Studio was worse: its rule was
+the position alone, with the same 100 px, and Gradio's Chatbot autoscroll
+re-pinned within 100 px of its own.
+
+The rule now, the same in both (`scrolledTranscript`, `wheelTranscript`,
+`touchTranscript`, `reachBottom` here; `watch`, `scrolled`, `wheeled` in
+`javascript/llm_studio.js`):
+
+- **Undocked** by any wheel upward (when there is anything above), a finger
+  moved `LEAVE_TOUCH_PX` (4 px, more than a tap's tremble) down the glass,
+  ↑, Page Up or Home, or a scroll upward that leaves the end (the scrollbar).
+  Gestures are read as they start, before the scroll they cause.
+- **Docked** by a scroll downward that reaches the end -- within
+  `FOLLOW_END_PX` (2 px, for a scaled page's fractions) -- or by a wheel or a
+  finger pushing down while already there, where no scroll event can come.
+- A move the code makes itself writes its own position first, so its scroll
+  event is never read as the reader's.
+- LLM Studio's Chatbot is built with `autoscroll=False`.
+
+Held by `tests/test_assistant_js.py::TestLeavingTheEnd` and
+`tests/test_llm_studio_js.py::TestAnchoringTheTranscript`; the old "inside the
+slack still follows" tests were rewritten to the new rule.
 
 ## 4. Deliberate deviations
 

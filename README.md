@@ -3359,13 +3359,15 @@ Tapping the same message again puts the sheet away; tapping a different one
 moves it there. There is no per-message copy button — select the text and copy
 it.
 
-The transcript follows a reply while you are at the end of it and holds your
-place while you are not: scroll up to read something and new messages arrive
-below without moving what you are looking at; scroll back to the bottom and it
-starts following again. Leaving is read from the gesture, not from how far it
-got: one notch of the wheel upward, a finger dragged down the screen, or ↑,
-Page Up or Home lets go of the end at once, so a reply streaming in cannot
-pull you back while you are still on your way up.
+The transcript is **docked to the bottom** while you are at the end of it, and
+follows a reply as it streams. Scroll away from the bottom by any amount — any
+turn of the wheel upward, a finger moved down the screen, ↑, Page Up or Home, or
+the scrollbar — and it is undocked at once: what you are reading stays where it
+is, and the reply carries on below, out of view. Scroll back down to the very
+end (or keep pushing down once you are there) and it is docked again. There is
+no "close enough to the bottom": the end is the end, so a streaming reply cannot
+pull you back while you are anywhere above it. Gradio's own Chatbot autoscroll
+is switched off; this rule is the only thing that moves the transcript.
 
 The threads list, the character (chat with, edit, or create) and your persona
 are behind **☰** in the header, each on its own screen, and every one of them is
@@ -3547,9 +3549,14 @@ column scrolls, and a drag that starts on a text box, a number box, a slider or
 the compact spatial canvas scrolls the column too, rather than the box's text,
 the slider's value or a region. Tap the field first: it is *engaged* — outlined
 in the accent colour — and from then on it works as it does in the page. A tap
-on a text box puts the keyboard up with the caret at the end; a tap on a
-slider's track lets you slide it (tap its number to type a value instead). A
-tap anywhere else, or Escape, lets the field go and puts the keyboard away.
+on a text box puts the keyboard up with the caret where you tapped, and the
+column does not move: what was on screen stays on screen. A tap on a slider's
+track lets you slide it (tap its number to type a value instead). Only you let
+a field go — a tap anywhere else, or Escape — and nothing else does: not the
+panel being re-placed (a phone's keyboard opening), not a script pressing a
+button elsewhere on the page. Docked text boxes are as tall as their text and
+never scroll inside themselves; they grow as you type, and the column is the
+one thing that scrolls.
 Dropdowns, checkboxes and buttons are unchanged: a drag across them already
 scrolls, and they act on a tap. Back in the page, every field is an ordinary
 field again.
@@ -3906,11 +3913,12 @@ end of a thread it stays at the end as replies arrive, including the picture in
 a reply, which lands after the words do and used to take the bottom with it.
 Scroll up and nothing moves you: the reply carries on arriving below and a
 button offers to take you back to it, saying whether there is something new
-down there or just the end of what you were already reading. One notch of the
-wheel upward, a short drag of a finger down the transcript, or ↑, Page Up or
-Home is enough to let go of the end — read from the gesture as it starts, so a
-chunk arriving in the same instant cannot pin you back to the bottom — and
-scrolling down to the end takes hold of it again.
+down there or just the end of what you were already reading. The rule is the
+same as LLM Studio's: docked at the bottom, **undocked the moment you scroll
+away from it by any amount** — any wheel upward, a finger moved down the
+transcript, ↑, Page Up or Home, or the scrollbar, read from the gesture as it
+starts so a chunk arriving in the same instant cannot pin you back — and docked
+again only when you scroll down to the very end (or push down once there).
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip — or attached for you by **Auto Attach**, above. One per message, and

@@ -282,6 +282,7 @@ const row = {classList: classes(), parentElement: null};
 const column = {classList: classes(), parentElement: row,
                 // The guard listens on the column for a field reached by Tab.
                 addEventListener() {}, removeEventListener() {},
+                querySelectorAll: () => [], scrollTop: 0,
                 style: styled({width: ["300px", "important"], "min-width": ["320px", ""]}),
                 getBoundingClientRect() {
                     return {left: parseFloat(this.style.values.left) + trap.x,

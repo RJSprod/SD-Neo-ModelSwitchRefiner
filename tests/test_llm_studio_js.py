@@ -219,6 +219,7 @@ ANCHOR = """
 // MutationObserver so a test can say "and then content arrived".
 const mutations = [];
 const scrollListeners = [];
+const listeners = {};
 
 const bubbles = {
     tagName: "DIV",
@@ -229,7 +230,10 @@ const bubbles = {
     scrollTop: START_SCROLL_TOP,
     querySelectorAll: () => [],
     querySelector: () => null,
-    addEventListener: (kind, fn) => { if (kind === "scroll") scrollListeners.push(fn); },
+    addEventListener: (kind, fn) => {
+        if (kind === "scroll") scrollListeners.push(fn);
+        (listeners[kind] = listeners[kind] || []).push(fn);
+    },
 };
 
 const holder = {
@@ -279,11 +283,18 @@ SOURCE
 
 loaded.forEach((fn) => fn());
 
-// What the reader did, if anything: a scroll to READER_SCROLL_TOP, reported the
-// way a browser reports it.
-if (READER_SCROLL_TOP !== null) {
-    bubbles.scrollTop = READER_SCROLL_TOP;
-    scrollListeners.forEach((fn) => fn());
+// What the reader did, if anything, in order: a number is a scroll to that
+// position, reported the way a browser reports it; {wheel: dy} is a wheel
+// turned, which a browser reports before it scrolls anything.
+const steps = READER_SCROLL_TOP === null ? []
+    : (Array.isArray(READER_SCROLL_TOP) ? READER_SCROLL_TOP : [READER_SCROLL_TOP]);
+for (const step of steps) {
+    if (typeof step === "number") {
+        bubbles.scrollTop = step;
+        scrollListeners.forEach((fn) => fn());
+    } else if (step && typeof step.wheel === "number") {
+        (listeners.wheel || []).forEach((fn) => fn({deltaY: step.wheel, deltaMode: 0}));
+    }
 }
 
 // And then a reply arrives: taller content, and — when COLLAPSE is true — the
@@ -326,10 +337,33 @@ class TestAnchoringTheTranscript:
 
         assert landed["scrollTop"] == 1600
 
-    def test_within_the_slack_still_counts_as_the_end(self):
-        """Gradio's own threshold is 100px and this has to agree with it, or
-        the two fight over every reply that arrives near the bottom."""
-        assert arrival(start=600, reader=550, grown=1600)["scrollTop"] == 1600
+    def test_a_little_away_from_the_end_is_away_from_it(self):
+        """The rule as asked for: "if i scroll away from the bottom even just a
+        little bit, i become undocked". There is no slack any more -- the old
+        100 px agreed with Gradio's own Chatbot, and both put a reader who had
+        scrolled up less than that back at the end with every chunk."""
+        assert arrival(start=600, reader=550, grown=1600)["scrollTop"] == 550
+
+    def test_a_wheel_upward_undocks_before_anything_has_scrolled(self):
+        """A chunk can land between the wheel and the scroll it causes."""
+        assert arrival(start=600, reader=[{"wheel": -3}], grown=1600)["scrollTop"] == 600
+
+    def test_a_wheel_downward_does_not_undock(self):
+        assert arrival(start=600, reader=[{"wheel": 100}], grown=1600)["scrollTop"] == 1600
+
+    def test_reaching_the_end_again_docks_again(self):
+        landed = arrival(start=600, reader=[{"wheel": -100}, 300, 590, 600], grown=1600)
+
+        assert landed["scrollTop"] == 1600
+
+    def test_most_of_the_way_down_is_not_the_end(self):
+        assert arrival(start=600, reader=[300, 590], grown=1600)["scrollTop"] == 590
+
+    def test_a_wheel_downward_at_the_end_docks_without_a_scroll(self):
+        """At the very end nothing can scroll, so no scroll event comes."""
+        landed = arrival(start=600, reader=[{"wheel": -100}, {"wheel": 100}], grown=1600)
+
+        assert landed["scrollTop"] == 1600
 
     def test_a_reader_who_has_scrolled_away_is_left_where_they_are(self):
         landed = arrival(start=600, reader=120, grown=1600)

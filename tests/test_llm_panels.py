@@ -1059,6 +1059,24 @@ class TestWhoSaidWhat:
         assert seen and len(seen[0]) == 2
         assert all(face is not None for face in seen[0])
 
+    def test_gradio_s_own_autoscroll_is_off(self, store, monkeypatch):
+        """Following a streamed reply is llm_studio.js's alone. Gradio's own
+        autoscroll counts the last 100 px as the end, and put a reader who had
+        scrolled up less than that back at the end with every chunk."""
+        import gradio as gr
+
+        seen = []
+
+        class Recorded(gr.Chatbot):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                seen.append(kwargs.get("autoscroll", True))
+
+        monkeypatch.setattr(gr, "Chatbot", Recorded)
+        mc_llm_chat_panel.build()
+
+        assert seen == [False]
+
     def test_yours_is_first_because_that_is_the_order_gradio_takes(self, store):
         """(user, bot). Getting it the wrong way round would put the character's
         face on your messages, which reads as the transcript being confused

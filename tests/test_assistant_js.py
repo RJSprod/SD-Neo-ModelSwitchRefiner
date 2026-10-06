@@ -1138,6 +1138,9 @@ class TestLeavingTheEnd:
     pixels of a wheel notch are inside the slack, and a render in that instant
     read "at the bottom". Leaving is a gesture now, read before the scroll it
     starts, and the position only ever re-follows on a scroll that moved down.
+
+    Then the rule as asked for (docs/22 §3.32): docked at the end, undocked by
+    any move away from it however small, docked again only at the very end.
     """
 
     def test_one_notch_of_the_wheel_upward_leaves_the_end_before_anything_scrolled(self):
@@ -1155,37 +1158,53 @@ class TestLeavingTheEnd:
         assert found["jump"] is False, "the way back is offered at once"
         assert found["top"] == found["end"], "read from the gesture, before the scroll it starts"
 
-    def test_a_wheel_downward_and_a_brush_of_a_trackpad_do_not(self):
+    def test_any_wheel_upward_leaves_and_a_wheel_downward_does_not(self):
+        """The rule as asked for: "if i scroll away from the bottom even just a
+        little bit, i become undocked". A brush of a trackpad is a little bit."""
         found = run(TRANSCRIPT + """
             const transcript = fakeTranscript();
             const shell = shellWith(transcript);
             shell.renderTranscript(conversationOf(20));
-            let now = 1000;
-            Date.now = () => now;
             const down = shell.wheelTranscript({deltaY: 100, deltaMode: 0});
-            const brush = shell.wheelTranscript({deltaY: -12, deltaMode: 0});
-            const stillFollowing = shell.following;
-            now += 1000;                                   // the window has closed
-            const later = shell.wheelTranscript({deltaY: -30, deltaMode: 0});
-            const afterLate = shell.following;
-            now += 100;
-            const adds = shell.wheelTranscript({deltaY: -12, deltaMode: 0});
-            // Down and then up, inside one window: the way down earns no credit
-            // against the notch that follows it.
-            shell.following = true;
-            now += 1000;
-            shell.wheelTranscript({deltaY: 100, deltaMode: 0});
-            now += 50;
-            const upAfterDown = shell.wheelTranscript({deltaY: -48, deltaMode: 0});
-            console.log(JSON.stringify({down, brush, stillFollowing, later, afterLate, adds,
-                                        following: shell.following, upAfterDown}));
+            const afterDown = shell.following;
+            const brush = shell.wheelTranscript({deltaY: -2, deltaMode: 0});
+            console.log(JSON.stringify({down, afterDown, brush, following: shell.following}));
         """)
 
-        assert found["down"] is False and found["brush"] is False
-        assert found["stillFollowing"] is True
-        assert found["later"] is False and found["afterLate"] is True, "a brush an age ago does not count"
-        assert found["adds"] is True and found["following"] is False, "two brushes in one gesture are a notch"
-        assert found["upAfterDown"] is True, "a wheel downward forgets the count rather than owing it"
+        assert found["down"] is False and found["afterDown"] is True
+        assert found["brush"] is True and found["following"] is False
+
+    def test_a_wheel_downward_at_the_end_docks_again_without_a_scroll(self):
+        """At the very end nothing can scroll, so no scroll event comes: the
+        wheel pushing down there is the reader arriving."""
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            shell.wheelTranscript({deltaY: -100, deltaMode: 0});
+            transcript.scrollTop -= 200; shell.scrolledTranscript();
+            const away = shell.wheelTranscript({deltaY: 100, deltaMode: 0});
+            const awayFollowing = shell.following;
+            transcript.scrollTop = bottom(transcript);
+            shell.lastScrollTop = transcript.scrollTop;   // the event already read
+            const there = shell.wheelTranscript({deltaY: 100, deltaMode: 0});
+            console.log(JSON.stringify({away, awayFollowing, there, following: shell.following}));
+        """)
+
+        assert found["away"] is False and found["awayFollowing"] is False
+        assert found["there"] is True and found["following"] is True
+
+    def test_nothing_above_to_go_to_is_not_leaving(self):
+        found = run(TRANSCRIPT + """
+            const transcript = fakeTranscript();
+            const shell = shellWith(transcript);
+            shell.renderTranscript(conversationOf(20));
+            transcript.scrollTop = 0; shell.lastScrollTop = 0;
+            const left = shell.wheelTranscript({deltaY: -100, deltaMode: 0});
+            console.log(JSON.stringify({left, following: shell.following}));
+        """)
+
+        assert found["left"] is False and found["following"] is True
 
     def test_the_first_pixels_of_leaving_do_not_put_the_reader_back(self):
         found = run(TRANSCRIPT + """
@@ -1240,8 +1259,8 @@ class TestLeavingTheEnd:
             const shell = shellWith(transcript);
             shell.renderTranscript(conversationOf(20));
             shell.touchTranscript({touches: [{clientY: 300}]}, true);
-            const small = shell.touchTranscript({touches: [{clientY: 310}]}, false);
-            const drag = shell.touchTranscript({touches: [{clientY: 330}]}, false);
+            const small = shell.touchTranscript({touches: [{clientY: 302}]}, false);
+            const drag = shell.touchTranscript({touches: [{clientY: 306}]}, false);
             const afterTouch = shell.following;
             shell.following = true;
             const key = shell.bubbleKey({key: "ArrowUp"});
@@ -1252,7 +1271,9 @@ class TestLeavingTheEnd:
         assert found["key"] is False, "the key is left to the browser, which scrolls"
         assert found["following"] is False
 
-    def test_scrolling_down_into_the_end_follows_again(self):
+    def test_only_reaching_the_very_end_docks_again(self):
+        """Coming most of the way down is still reading; the end is the end.
+        And from the end, any scroll up -- a scrollbar nudge -- leaves."""
         found = run(TRANSCRIPT + """
             const transcript = fakeTranscript();
             const shell = shellWith(transcript);
@@ -1261,13 +1282,16 @@ class TestLeavingTheEnd:
             const far = shell.following;
             transcript.scrollTop = bottom(transcript) - 60; shell.scrolledTranscript();
             const near = shell.following;
-            transcript.scrollTop -= 30; shell.scrolledTranscript();   // a scrollbar nudge inside the slack
-            console.log(JSON.stringify({far, near, nudged: shell.following}));
+            transcript.scrollTop = bottom(transcript); shell.scrolledTranscript();
+            const end = shell.following;
+            transcript.scrollTop -= 30; shell.scrolledTranscript();   // a scrollbar nudge
+            console.log(JSON.stringify({far, near, end, nudged: shell.following}));
         """)
 
         assert found["far"] is False
-        assert found["near"] is True, "coming down into the slack is coming back"
-        assert found["nudged"] is True, "leaving by the scrollbar takes more than the slack"
+        assert found["near"] is False, "most of the way down is not the end"
+        assert found["end"] is True
+        assert found["nudged"] is False, "a little away from the end is away from it"
 
 
 class TestTheTranscriptScroll:
