@@ -2,9 +2,13 @@
 
 Two asks, both about Txt2Img's two columns:
 
-    "the right column (generate, gallery, gallery buttons) does not scale all
-    the way to fill the space. There is a gap at the bottom ... The right
-    column should not scroll, it should just fill the space."
+    "The gallery need to fill its area, only bounded by the screen border,
+    generate / interrupt / cancel, progress bar (when in progress), and gallery
+    buttons. Everything else should be off page. The image should scale up to
+    fill the maximum allowed space. The padding above generate and below
+    gallery buttons should be the same, giving view of gallery in perfect
+    center ... All other content below should still be rendered, but off page
+    and below the view, thus requiring a scroll to see it."
 
     "a third state for the flyout menu, that removes the left column from the
     text to image tab, and makes it scrollable in the flyout menu."
@@ -17,13 +21,17 @@ inside the gallery's container -- with the person's own user.css loaded last,
 as Forge loads it, and the real assistant scripts and stylesheet. Then it
 measures:
 
-    at rest       the results column ends 8 px above the window's bottom, and
-                  without the fill's mark the user.css height is what is drawn
-                  (so the page is not passing for want of the rule it beats);
-    focused       the same, inside focus mode's root, whose padding is 8 px;
-    an infotext   arriving under the buttons shrinks the gallery, and the
-                  column still ends where it did;
-    resized       the column follows the window;
+    at rest       the gap from the header's bottom to Generate is the gap
+                  from the gallery's buttons to the window's bottom, and what
+                  follows the buttons starts below the window; without the
+                  fill's mark the user.css height is what is drawn (so the page
+                  is not passing for want of the rule it beats);
+    focused       the same, inside focus mode's root;
+    an infotext   arriving after the buttons takes nothing from the gallery,
+                  and stays below the view until the page is scrolled to it;
+    progress      a progress bar above Generate takes its room from the
+                  gallery, and the buttons stay where they were;
+    resized       the gallery follows the window;
     docked        the settings column is drawn exactly over the panel's
                   placeholder, scrolls inside itself with none of its blocks
                   squeezed, takes a press, and the gallery has the row's width;
@@ -50,7 +58,6 @@ ROOT = Path(__file__).resolve().parent.parent
 JAVASCRIPT = ROOT / "javascript"
 STYLE = ROOT / "style.css"
 ORIGIN = "http://forge-layout.test"
-MARGIN = 8
 
 # The person's user.css, as they sent it: a gallery sized against the window.
 USER_CSS = """
@@ -84,7 +91,11 @@ body { margin: 0; background: #0b0f19; color: #eee; font: 14px sans-serif;
 [id$='_gallery_container'] > div:not([id$='_generate_box']) { flex-grow: 1; }
 [id$='img_settings'] { display: flex !important; flex-direction: column !important; }
 #txt2img_settings .block { height: 90px; background: #1f2937; }
-#txt2img_generate { height: 40px; width: 100%; }
+/* A fraction of a pixel, as a theme's sizes in rem give: the gallery's height
+   is a whole number of pixels, and what follows the buttons must still start
+   at the view's bottom, not a fraction above it. */
+#txt2img_generate { height: 40.4px; width: 100%; }
+.progressDiv { position: relative !important; top: 0 !important; height: 20px; }
 #image_buttons_txt2img button { flex: 1 1 100px; height: 32px; }
 .infotext p { margin: 0; line-height: 24px; }
 """
@@ -133,8 +144,8 @@ def page_html() -> str:
           </div>
           <div id="image_buttons_txt2img" class="row image-buttons">{buttons}</div>
           <div class="gr-group">
-            <div id="html_info_txt2img" class="block infotext"></div>
-            <div id="html_log_txt2img" class="block"></div>
+            <div id="html_info_txt2img" class="block infotext"><p>food</p><p>Steps: 8, Sampler: Res Multistep, CFG scale: 1, Seed: 2771589119</p></div>
+            <div id="html_log_txt2img" class="block"><p>Time taken: 8.1 sec.</p></div>
           </div>
         </div>
       </div>
@@ -211,17 +222,33 @@ def open_page(browser, width: int = 1600, height: int = 1000):
 
 
 MEASURE = """() => {
+    const q = (selector) => document.querySelector(selector);
     const box = (node) => { const r = node.getBoundingClientRect();
-                            return {top: r.top, bottom: r.bottom, left: r.left,
-                                    width: r.width, height: r.height}; };
-    const results = document.getElementById("txt2img_results");
-    // The last thing in the column, not the column's own box.
-    const last = Math.max(...[...results.querySelectorAll("*")].map(
-        (node) => node.getBoundingClientRect().bottom));
-    return {inner: innerHeight, results: box(results), last,
-            gallery: box(document.getElementById("txt2img_gallery")),
-            container: box(document.getElementById("txt2img_gallery_container")),
-            buttons: box(document.getElementById("image_buttons_txt2img")),
+                            return {top: r.top, bottom: r.bottom, height: r.height}; };
+    // The view: focus mode's root, inside its border; or the window under the
+    // header held over it.
+    const root = q(".forge-assistant-focus-root");
+    let view;
+    if (root) {
+        const r = root.getBoundingClientRect();
+        const top = r.top + root.clientTop;
+        view = {top, bottom: top + root.clientHeight};
+    } else {
+        const header = q("#lobe-header");
+        view = {top: header ? header.getBoundingClientRect().bottom : 0, bottom: innerHeight};
+    }
+    const results = q("#txt2img_results");
+    // The first thing kept in view: Generate's box, or a progress bar in the
+    // column's flow above it.
+    const kept = [q("#txt2img_generate_box"), ...results.querySelectorAll(".progressDiv")]
+        .filter((node) => node && getComputedStyle(node).position !== "absolute")
+        .map((node) => node.getBoundingClientRect().top);
+    return {view, first: Math.min(...kept), inner: innerHeight,
+            buttons: box(q("#image_buttons_txt2img")),
+            gallery: box(q("#txt2img_gallery")),
+            container: box(q("#txt2img_gallery_container")),
+            // What follows the buttons: the infotext and the log.
+            next: q("#html_info_txt2img").parentElement.getBoundingClientRect().top,
             marked: results.hasAttribute("data-forge-assistant-fill")};
 }"""
 
@@ -230,13 +257,45 @@ def measure(page) -> dict:
     return page.evaluate(MEASURE)
 
 
-def test_the_results_column_ends_at_the_bottom_of_the_window(browser):
+def assert_centred(found) -> None:
+    """The same gap above the first thing kept in view as under the gallery's
+    buttons, and nothing after the buttons inside the view."""
+    above = found["first"] - found["view"]["top"]
+    below = found["view"]["bottom"] - found["buttons"]["bottom"]
+    assert above > 0 and abs(above - below) <= 1, found
+    assert found["next"] >= found["view"]["bottom"], found
+
+
+def test_the_gallery_fills_the_view_between_generate_and_its_buttons(browser):
     page = open_page(browser)
     try:
         found = measure(page)
         assert found["marked"] is True
-        assert abs(found["last"] - (found["inner"] - MARGIN)) <= 1, found
-        assert found["buttons"]["bottom"] <= found["inner"] - MARGIN + 1
+        assert found["view"]["top"] == 64, "measured from under the header"
+        assert_centred(found)
+
+        # The assistant's own panel, put at the top over the column -- right
+        # under the header, where the page is asked what holds the top of the
+        # window -- is not a header: the gallery is measured as before.
+        page.evaluate("""() => {
+            const shell = forgeAssistant.shell;
+            shell.state.anchorOverride = "top-right";
+            shell.state.panelWidth = 640;
+            shell.open();
+        }""")
+        settle(page)
+        covers = page.evaluate("""() => {
+            const results = document.getElementById("txt2img_results").getBoundingClientRect();
+            const panel = document.getElementById("forge-assistant-panel").getBoundingClientRect();
+            const x = results.left + results.width / 2;
+            return panel.left <= x && x <= panel.right && panel.top <= 65 && 65 <= panel.bottom;
+        }""")
+        assert covers is True, "the panel is where the page is asked"
+        settle(page)
+        page.evaluate("forgeAssistant.fill.now()")
+        settle(page)
+        under = measure(page)
+        assert abs(under["gallery"]["height"] - found["gallery"]["height"]) <= 1, under
 
         # The user.css is in force on this page: without the fill's mark its
         # 85vh is what the container is drawn at.
@@ -248,7 +307,7 @@ def test_the_results_column_ends_at_the_bottom_of_the_window(browser):
         page.close()
 
 
-def test_focus_mode_leaves_no_gap_under_the_column(browser):
+def test_focus_mode_centres_the_gallery_in_its_own_view(browser):
     page = open_page(browser)
     try:
         entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', "
@@ -256,40 +315,100 @@ def test_focus_mode_leaves_no_gap_under_the_column(browser):
         assert entered["ok"] is True
         settle(page)
         found = measure(page)
-        # Focus's root pads its edges by 8 px, and the column sits inside them.
-        assert abs(found["last"] - (found["inner"] - MARGIN)) <= 1, found
-        assert found["results"]["top"] <= 80, "the header's reservation is gone"
+        assert found["view"]["top"] == 0
+        assert_centred(found)
+        assert found["first"] <= 80, "the header's reservation is gone"
 
         page.evaluate("forgeAssistant.focus.exit()")
         settle(page)
-        back = measure(page)
-        assert abs(back["last"] - (back["inner"] - MARGIN)) <= 1, back
+        assert_centred(measure(page))
     finally:
         page.close()
 
 
-def test_an_infotext_shrinks_the_gallery_and_not_the_window(browser):
+def test_what_follows_the_buttons_takes_nothing_from_the_gallery(browser):
+    """The first build fitted the whole column into the window, and every
+    infotext took its height out of the gallery. Now the infotext is below the
+    view, and the page scrolls to it."""
     page = open_page(browser)
     try:
         before = measure(page)
-        page.evaluate("document.getElementById('html_info_txt2img').innerHTML = "
-                      "'<p>a prompt</p>'.repeat(4)")
+        page.evaluate("document.getElementById('html_info_txt2img').innerHTML += "
+                      "'<p>Model: kroma-v0.3, Module 1: Qwen2D_VAE</p>'.repeat(12)")
         settle(page, 4)
         after = measure(page)
-        assert abs(after["last"] - (after["inner"] - MARGIN)) <= 1, after
-        assert after["gallery"]["height"] < before["gallery"]["height"] - 80
+        assert abs(after["gallery"]["height"] - before["gallery"]["height"]) <= 1, after
+        assert_centred(after)
+
+        # Rendered, and reached by scrolling.
+        page.evaluate("document.getElementById('html_log_txt2img')"
+                      ".scrollIntoView({block: 'end'})")
+        settle(page)
+        shown = page.evaluate("document.getElementById('html_info_txt2img')"
+                              ".getBoundingClientRect().top < innerHeight")
+        assert shown is True
     finally:
         page.close()
 
 
-def test_the_column_follows_the_window(browser):
+PROGRESS = """(position) => {
+    const container = document.getElementById("txt2img_gallery_container");
+    const bar = document.createElement("div");
+    bar.className = "progressDiv";
+    bar.id = "progress-under-test";
+    // Forge's own rule for the bar, when it is laid over the gallery.
+    if (position) {
+        bar.style.setProperty("position", position, "important");
+        bar.style.setProperty("top", "-14px", "important");
+        bar.style.setProperty("left", "0px");
+        bar.style.setProperty("width", "100%");
+    }
+    const fill = document.createElement("div");
+    fill.className = "progress";
+    bar.appendChild(fill);
+    container.parentNode.insertBefore(bar, container);
+}"""
+
+
+def test_a_progress_bar_takes_its_room_from_the_gallery(browser):
+    """Forge puts its progress bar just before the gallery's container, and
+    Lobe puts it in the column's flow: while a generation runs, Generate and
+    the gallery move down by its height, and the buttons must not."""
+    page = open_page(browser)
+    try:
+        before = measure(page)
+        page.evaluate(PROGRESS, "")
+        settle(page, 4)
+        running = measure(page)
+        assert abs(running["buttons"]["bottom"] - before["buttons"]["bottom"]) <= 1, running
+        assert running["gallery"]["height"] < before["gallery"]["height"] - 19
+        assert_centred(running)
+
+        page.evaluate("document.getElementById('progress-under-test').remove()")
+        settle(page, 4)
+        done = measure(page)
+        assert abs(done["gallery"]["height"] - before["gallery"]["height"]) <= 1, done
+
+        # Forge's own bar, laid over the gallery, moves nothing -- also when
+        # something else has the gallery measured while it is up.
+        page.evaluate(PROGRESS, "absolute")
+        settle(page)
+        page.evaluate("forgeAssistant.fill.now()")
+        settle(page)
+        overlaid = measure(page)
+        assert abs(overlaid["gallery"]["height"] - before["gallery"]["height"]) <= 1, overlaid
+    finally:
+        page.close()
+
+
+def test_the_gallery_follows_the_window(browser):
     page = open_page(browser)
     try:
         page.set_viewport_size({"width": 1400, "height": 820})
         settle(page, 4)
         found = measure(page)
         assert found["inner"] == 820
-        assert abs(found["last"] - (found["inner"] - MARGIN)) <= 1, found
+        assert_centred(found)
     finally:
         page.close()
 
@@ -331,8 +450,7 @@ def test_the_settings_column_docks_in_the_panel_and_scrolls_there(browser):
         assert found["squeezed"] == 0, "no block is squeezed to fit"
         assert found["pressed"] is True, "a press over the panel reaches the column"
         assert abs(found["results"] - found["row"]) <= 1, "the gallery has the row's width"
-        filled = measure(page)
-        assert abs(filled["last"] - (filled["inner"] - MARGIN)) <= 1, filled
+        assert_centred(measure(page))
 
         # Focus as well: the column is inside focus's own layer now, and is
         # still drawn over the panel's placeholder and still takes a press.
@@ -469,8 +587,7 @@ def test_the_docked_column_stays_out_of_the_page_until_chat_or_the_tab_bar(brows
         assert left["focus"] is False and left["open"] is False, left
         assert left["docked"] is True and left["shown"] is False, left
         assert left["full"] is True, left
-        filled = measure(page)
-        assert abs(filled["last"] - (filled["inner"] - MARGIN)) <= 1, filled
+        assert_centred(measure(page))
 
         # Opened, it is in the panel again.
         page.evaluate("forgeAssistant.shell.open()")

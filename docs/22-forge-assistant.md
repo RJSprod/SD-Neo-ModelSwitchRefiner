@@ -2168,12 +2168,48 @@ is drawn is where it is held.
 `forgeAssistant.fill.explain()` in the console says, per tab, what was measured
 or why the column was left alone ("stacked under the settings" on a phone).
 
+### What is kept in view, and what goes below it
+
+The first build fitted the *whole* column into the window: everything in it
+that was not the gallery was taken off the gallery's height. Under Lobe the
+infotext is a tall table (a Positive Prompt block and a row per setting), so
+after every generation the gallery was about half a window, under it. Asked
+for instead: "The gallery need to fill its area, only bounded by the screen
+border, generate / interrupt / cancel, progress bar (when in progress), and
+gallery buttons. Everything else should be off page. The image should scale up
+to fill the maximum allowed space. The padding above generate and below gallery
+buttons should be the same, giving view of gallery in perfect center ... All
+other content below should still be rendered, but off page and below the view,
+thus requiring a scroll to see it."
+
+So `keptBox` takes the part of the column that stays in view: from the first of
+Generate's box (Lobe's split previewer moves it into the gallery's container;
+Interrupt and Skip share it), the progress bar while one is in the column's
+flow (Forge puts `.progressDiv` just before the gallery's container, and Lobe
+makes it `position: relative`; Forge's own absolute bar is an overlay and is
+not counted), the container and the gallery, down to the gallery's buttons.
+The gap from the top of the view to the first of those is left again under the
+buttons, and the gallery is what remains. A second custom property puts room
+under the buttons so that what follows them -- the infotext group -- starts
+exactly at the view's bottom: worked out from the height as it will be drawn,
+rounded down to a whole pixel, because a theme's fractional sizes otherwise
+left the infotext's top edge a fraction of a pixel inside the window.
+
+The top of the view is the scroller's own top edge when something other than
+the page scrolls the column (focus mode's root). When the page scrolls,
+`coveredTop` asks the page what is drawn at the top of the window above the
+column (`elementsFromPoint`), and the bottom of a sticky or fixed element there
+-- Lobe's header -- is the top of the view; this extension's own panel is never
+that element, and neither is anything holding the column. A second bar under
+the first is looked for too.
+
 ### Verified
 
 In Chromium, against a Forge-shaped Gradio 4.40 app (the real markup, Lobe's
 rules, the user's user.css) while building, and in the suite by
-`tests/test_assistant_layout.py` (a page with only what decides the geometry)
-and `tests/test_assistant_dock_js.py` (the panel's states under node). Every
+`tests/test_assistant_layout.py` (a page with only what decides the geometry,
+one fractional height included) and `tests/test_assistant_dock_js.py` (the
+panel's states under node). Every
 rule and branch above was reverted one at a time and a test failed for each,
 except two that change nothing on that page: the focus hook (the column's own
 resize already asks for a measure) and the `!important` on the gallery's height

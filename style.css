@@ -7200,11 +7200,14 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     background: var(--body-background-fill, var(--background-fill-primary, #101010)) !important;
 }
 
-/* The results column fills the window (forge_assistant_layout.js, `Fill`).
+/* The gallery fills the view (forge_assistant_layout.js, `Fill`).
 
-   The script measures the room under the column's resting top and writes the
-   gallery's height as one custom property on the column, with a mark; these
-   rules do the rest. Two ids and an attribute, with `!important`: a user.css
+   The script keeps Generate (and the progress bar while a generation runs),
+   the gallery and its buttons in view with the same gap above Generate as
+   under the buttons, and writes two custom properties on the column, with a
+   mark: the gallery's height, and the room under the buttons that puts what
+   follows them -- the infotext, the log -- below the view. These rules do the
+   rest. Two ids and an attribute, with `!important`: a user.css
    that sized the gallery against the window -- `#txt2img_gallery_container
    { height: 85vh !important }` was the one that left a gap in focus mode -- is
    one id, and loses to these whichever stylesheet the host loads last.
@@ -7238,6 +7241,15 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #txt2img_results[data-forge-assistant-fill] #txt2img_gallery > .preview,
 #img2img_results[data-forge-assistant-fill] #img2img_gallery > .preview {
     max-height: none !important;
+}
+
+/* The room under the gallery's buttons, measured so that what follows them --
+   the generation's infotext, its log -- starts at the bottom of the view and
+   the gap there matches the one above Generate. In a flex column a margin adds
+   to the gap; nothing collapses it. */
+#txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img,
+#img2img_results[data-forge-assistant-fill] #image_buttons_img2img {
+    margin-bottom: var(--forge-assistant-fill-after, 0px) !important;
 }
 
 /* Txt2Img's settings column, docked in the panel (`Dock`, and the panel's

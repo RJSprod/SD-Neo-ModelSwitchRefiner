@@ -3731,23 +3731,27 @@ is on, since the header it was clearing is gone, and put back exactly on the
 way out. Without that, the gallery sat under a blank band exactly the height
 of a header that was no longer there.
 
-**The results column fills the window**, on Txt2Img and Img2Img, with focus on
-or off: Generate, the gallery and the buttons under it end 8 px above the
-bottom of whatever scrolls them — the window, or focus mode's own edge — and
-the column does not scroll. The room is measured, not guessed as a share of the
-window: from where the column rests (or sticks, under a theme like Lobe that
-pins it below its header) down to that edge, less everything in the column
-that is not the gallery, is the gallery's height, written in pixels. It is
-measured again when the window or the column changes size — focus on or off,
-the settings column docked, a generation's infotext arriving under the buttons
-(which shrinks the gallery rather than pushing the buttons off the screen),
-another tab shown. This takes precedence over a user.css that sizes the gallery
-against the window (`#txt2img_gallery_container { height: 85vh !important }`
-and its like need no change: the extension's rules name two ids and win
-whichever loads last). Where the results sit under the settings rather than
-beside them — a narrow window, a phone — nothing is changed. If the gallery is
-ever the wrong height, `forgeAssistant.fill.explain()` in the browser console
-says what was measured.
+**The gallery fills the view**, on Txt2Img and Img2Img, with focus on or off.
+What stays on screen is Generate (with Interrupt and Skip in the same place),
+the progress bar while a generation runs, the gallery and the gallery's
+buttons; the gap between the top of the view and Generate is the gap between
+the buttons and the bottom of the view, so the gallery sits in the middle, and
+it takes all the height in between — the picture scales up to fill it. The top
+of the view is the top of the window, or the bottom of a header the theme holds
+there (Lobe's), or focus mode's own edge. Everything after the buttons — the
+generation's infotext, its log, the time taken — is laid out as ever, but
+below the view: scroll down to it. A generation's infotext arriving takes
+nothing from the gallery, and the progress bar takes its height from the
+gallery, so the buttons never move. The room is measured, not guessed as a
+share of the window, and written in pixels; it is measured again when the
+window or the column changes size — focus on or off, the settings column
+docked, a progress bar coming and going, another tab shown. This takes
+precedence over a user.css that sizes the gallery against the window
+(`#txt2img_gallery_container { height: 85vh !important }` and its like need no
+change: the extension's rules name two ids and win whichever loads last). Where
+the results sit under the settings rather than beside them — a narrow window, a
+phone — nothing is changed. If the gallery is ever the wrong height,
+`forgeAssistant.fill.explain()` in the browser console says what was measured.
 
 Escape leaves focus, unless something
 closer to hand wants Escape first: the assistant's own menu, an edit in
