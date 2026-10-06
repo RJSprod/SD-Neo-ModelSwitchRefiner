@@ -1687,6 +1687,92 @@ def _say_what_ran(outcome, written) -> None:
                 literals.describe(getattr(written, "literals", None)))
 
 
+class _Reroll:
+    """What before_process leaves for the batches after the first to roll again.
+
+    ``first`` is the prompt batch 1 was given. The host built every entry of
+    ``all_prompts`` from it, so it is what each later batch's swap looks for,
+    and what a batch whose re-roll failed keeps.
+    """
+
+    def __init__(self, *, request, settings, layout, first, first_metadata,
+                 neutralized=None):
+        self.request = request
+        self.settings = settings
+        self.layout = layout
+        self.first = str(first or "")
+        self.first_metadata = dict(first_metadata or {})
+        self.neutralized = neutralized
+
+
+def _batch_count(p) -> int:
+    try:
+        return int(getattr(p, "n_iter", 1) or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _swap_prompt(p, indices, old: str, new: str) -> int:
+    """Put ``new`` where ``old`` is in this batch's prompts; how many changed.
+
+    Inside each entry rather than over it, so a style the host wrapped around
+    the written prompt stays wrapped around the new one. The hires prompts
+    follow when they were inherited from the prompt, which is when they hold
+    the same text.
+    """
+    if not old:
+        return 0
+    changed = 0
+    all_prompts = p.all_prompts
+    for index in indices:
+        entry = all_prompts[index]
+        if isinstance(entry, str) and old in entry:
+            all_prompts[index] = entry.replace(old, new, 1)
+            changed += 1
+    if not changed:
+        return 0
+    start = indices[0]
+    batch_prompts = getattr(p, "prompts", None)
+    if isinstance(batch_prompts, list):
+        for offset in range(len(batch_prompts)):
+            if start + offset < len(all_prompts):
+                batch_prompts[offset] = all_prompts[start + offset]
+    hires = getattr(p, "all_hr_prompts", None)
+    if isinstance(hires, list):
+        for index in indices:
+            if index < len(hires) and isinstance(hires[index], str) and old in hires[index]:
+                hires[index] = hires[index].replace(old, new, 1)
+        hires_batch = getattr(p, "hr_prompts", None)
+        if isinstance(hires_batch, list):
+            for offset in range(len(hires_batch)):
+                if start + offset < len(hires):
+                    hires_batch[offset] = hires[start + offset]
+    return changed
+
+
+def _record_per_image(p, first: dict, metadata: dict, indices, total: int) -> None:
+    """Record a re-rolled batch's metadata on its own images.
+
+    The host's ``create_infotext`` takes a list value as one entry per image, so
+    each key becomes a list the first time a batch re-rolls -- batch 1's value
+    everywhere -- and this batch's entries are then its own. A key one roll
+    recorded and another did not is ``None`` on the images it does not
+    describe, which the infotext leaves out.
+    """
+    params = getattr(p, "extra_generation_params", None)
+    if not isinstance(params, dict):
+        return
+    for key in set(first) | set(metadata):
+        values = params.get(key)
+        if not isinstance(values, list) or len(values) != total:
+            values = [first.get(key)] * total
+        else:
+            values = list(values)
+        for index in indices:
+            values[index] = metadata.get(key)
+        params[key] = values
+
+
 def _disarm_replay():
     mc_creative_krea.replay.clear()
     return notice("The armed replay was cleared; the next generation rolls normally.")
@@ -1747,6 +1833,13 @@ class ScriptKreaCreative(scripts.Script):
         # a prompt that was written perfectly well by a writer whose
         # neutralizer was unavailable is not a Creative Mode failure.
         self._neutralize_note = ""
+        # What a batch count above one needs to roll again for every batch
+        # after the first: the press's request, its settings and the prompt
+        # batch 1 was given. ``None`` when nothing will be re-rolled. Set at
+        # the end of before_process, spent by before_process_batch.
+        self._reroll: _Reroll | None = None
+        # One sentence per batch whose re-roll did not happen, for postprocess.
+        self._batch_notes: list[str] = []
 
     def title(self):
         return "Krea Creative Mode"
@@ -2532,6 +2625,8 @@ class ScriptKreaCreative(scripts.Script):
         self._spatial_note = ""
         self._neutralize_note = ""
         self._composed_without_creative = False
+        self._reroll = None
+        self._batch_notes = []
 
         # The negative prompt first, and on its own. No language model in this
         # extension has ever seen it, so there is nothing to protect it from --
@@ -2630,13 +2725,20 @@ class ScriptKreaCreative(scripts.Script):
         # authority -- nothing on that path can reclaim a byte from the image
         # side, and a pass that cannot be placed without doing so fails and
         # the source answers.
+        neutralized = []
+
+        def neutralize_once(source):
+            result = mc_neutralize.neutralize(
+                source, reserve=mc_creative_krea.image_reserve_bytes())
+            neutralized.append(result)
+            return result
+
         self._rolling = True
         try:
             with mc_broker.host_job():
                 outcome = mc_krea_pipeline.run(
                     request,
-                    neutralize=lambda source: mc_neutralize.neutralize(
-                        source, reserve=mc_creative_krea.image_reserve_bytes()),
+                    neutralize=neutralize_once,
                     write=lambda source: (self._roll(source, settings, layout,
                                                      request.raw_source),
                                           self._complaint))
@@ -2671,6 +2773,16 @@ class ScriptKreaCreative(scripts.Script):
             # not a pipeline that ran and is not announced as one.
             return
         _say_what_ran(outcome, written)
+        if outcome.ran_creative and _batch_count(p) > 1:
+            # Every batch after this one rolls again (before_process_batch).
+            # Only when this roll worked: a writer that failed here would fail
+            # again for every batch, each time after a wait, and the batch
+            # would be no more varied for it. The Neutralizer is not asked
+            # twice -- its answer is a subtraction of the same source.
+            self._reroll = _Reroll(request=request, settings=dict(settings),
+                                   layout=layout, first=written.generation,
+                                   first_metadata=dict(written.metadata),
+                                   neutralized=neutralized[0] if neutralized else None)
 
     def _publish_plan(self, p, layout, creative: bool = True,
                       neutralize: bool = False) -> None:
@@ -2711,6 +2823,124 @@ class ScriptKreaCreative(scripts.Script):
             logger.debug("Model Chain: could not build this generation's plan",
                          exc_info=True)
 
+    def before_process_batch(self, p, *args, **kwargs):
+        """Roll again for every batch after the first, when the batch count is above one.
+
+        ``before_process`` writes one prompt for the press, and the host builds
+        ``all_prompts`` from it -- so every image of every batch used to share
+        one roll. With a batch count above one, each batch after the first now
+        gets a roll of its own: the same source, settings and layout, a fresh
+        creative seed (or, for a fixed one, that seed plus the batch's number,
+        the way the host offsets image seeds), so four batches of two are four
+        directions, two images each.
+
+        The host calls this before it reads the batch's prompts
+        (``parse_extra_network_prompts`` and the conditioning come after), so
+        replacing this batch's entries of ``all_prompts`` -- and ``prompts``,
+        the batch's own slice -- is all it takes; the infotext, the saved file
+        and Stage 2 read the same lists. Styles stay: the first roll's prompt
+        is replaced inside each styled entry. An entry that does not contain
+        it -- something else rewrote it after before_process -- is left alone
+        rather than guessed at.
+
+        The image model is on the card by now, so the writer is placed around
+        it under the same :func:`mc_broker.host_job` declaration the first roll
+        ran under. A re-roll that fails leaves the batch on the first batch's
+        prompt and says so on the result; nothing here refuses a batch.
+        """
+        plan = self._reroll
+        if plan is None or self._rolling:
+            return
+        try:
+            batch = int(kwargs.get("batch_number", getattr(p, "iteration", 0)) or 0)
+        except (TypeError, ValueError):
+            return
+        if batch < 1:
+            return
+        try:
+            from modules import shared
+
+            state = getattr(shared, "state", None)
+            if state is not None and (getattr(state, "interrupted", False)
+                                      or getattr(state, "stopping_generation", False)):
+                return
+        except Exception:
+            pass
+
+        all_prompts = getattr(p, "all_prompts", None)
+        if not isinstance(all_prompts, list) or not all_prompts:
+            return
+        size = max(1, int(getattr(p, "batch_size", 1) or 1))
+        indices = range(batch * size, min((batch + 1) * size, len(all_prompts)))
+        if not indices:
+            return
+
+        import dataclasses
+
+        import mc_broker
+
+        settings = dict(plan.settings)
+        try:
+            seed = int(settings.get("seed", -1))
+        except (TypeError, ValueError):
+            seed = -1
+        if seed >= 0:
+            settings["seed"] = seed + batch
+        seeds = kwargs.get("seeds") or getattr(p, "seeds", None) or ()
+        try:
+            image_seed = int(seeds[0]) if seeds else plan.request.image_seed
+        except (TypeError, ValueError):
+            image_seed = plan.request.image_seed
+        request = dataclasses.replace(plan.request, creative_settings=settings,
+                                      image_seed=image_seed)
+        label = f"batch {batch + 1}"
+
+        self._complaint = ""
+        self._rolling = True
+        try:
+            with mc_broker.host_job():
+                outcome = mc_krea_pipeline.run(
+                    request,
+                    neutralize=lambda source: plan.neutralized,
+                    write=lambda source: (self._roll(source, settings, plan.layout,
+                                                     request.raw_source),
+                                          self._complaint))
+        except Exception as exc:
+            errors.report("Model Chain: the Creative Mode re-roll failed", exc_info=True)
+            outcome = None
+            self._complaint = str(exc) or exc.__class__.__name__
+        finally:
+            self._rolling = False
+
+        complaint, self._complaint = self._complaint, ""
+        written = getattr(outcome, "prepared", None)
+        if (outcome is None or outcome.cancelled or not outcome.ran_creative
+                or written is None or not written.generation.strip()):
+            if outcome is not None and outcome.cancelled:
+                return
+            reason = complaint or "the writer returned nothing"
+            logger.warning("Model Chain: Creative Mode did not re-roll %s (%s); it uses "
+                           "the first batch's prompt", label, reason)
+            self._batch_notes.append(
+                f"Creative Mode did not re-roll {label} — {reason}. Its images use "
+                "the first batch's prompt.")
+            return
+
+        replaced = _swap_prompt(p, indices, plan.first, written.generation)
+        if not replaced:
+            logger.warning("Model Chain: Creative Mode re-rolled %s, but its prompts no "
+                           "longer contain the first roll's text; they were left alone",
+                           label)
+            return
+        mc_lora.remember_inheritable_for(p, indices, written.inheritable,
+                                         self._inheritable_negative)
+        _record_per_image(p, plan.first_metadata, written.metadata, indices,
+                          len(all_prompts))
+        roll = outcome.roll
+        logger.info("Model Chain: Creative Mode re-rolled %s — %s characters at "
+                    "creativity %s, creative seed %s", label,
+                    f"{len(written.generation):,}", roll.creativity, roll.creative_seed)
+
     def postprocess(self, p, processed, *args):
         """Say on the result when Creative Mode did not write the prompt.
 
@@ -2735,13 +2965,18 @@ class ScriptKreaCreative(scripts.Script):
         spatial_note = self._spatial_note
         neutralize_note = self._neutralize_note
         composed_raw = self._composed_without_creative
+        batch_notes = list(self._batch_notes)
         self._complaint = ""
         self._spatial_note = ""
         self._neutralize_note = ""
         self._composed_without_creative = False
+        self._reroll = None
+        self._batch_notes = []
         if processed is None:
             return
         try:
+            for note in batch_notes:
+                processed.comments += f"\nModel Chain: {note}"
             if neutralize_note:
                 # First, because it is the first stage: the sentence about the
                 # writer below describes a prompt that this failure decided

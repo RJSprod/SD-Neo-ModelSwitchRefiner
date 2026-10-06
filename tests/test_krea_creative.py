@@ -39,6 +39,7 @@ import mc_infotext
 import mc_llm_krea_panel as panel
 import mc_llm_paths
 import mc_llm_sessions as sessions
+import mc_lora
 from prompt_master.krea import director, variation
 from prompt_master.krea import library as library_module
 
@@ -3052,3 +3053,112 @@ class TestTheReserveComesFromTheWholePlan:
         shared.opts.sd_model_checkpoint = "krea2.safetensors"
 
         assert mc_creative_krea.image_reserve_bytes() == 8 * 1024 ** 3
+
+
+# --------------------------------------------------------------------------- #
+# A batch count above one rolls again for every batch after the first
+# --------------------------------------------------------------------------- #
+
+
+class BatchProcessing(Processing):
+    """A processing object with the batch geometry the host gives one."""
+
+    def __init__(self, prompt="car", n_iter=2, batch_size=2):
+        super().__init__(prompt)
+        self.n_iter = n_iter
+        self.batch_size = batch_size
+        self.negative_prompt = ""
+
+
+def run_batches(script, p, style="{prompt}, film grain", **panel):
+    """``before_process``, then the host's loop: ``all_prompts`` built (with a
+    style around the written prompt), and ``before_process_batch`` for each
+    batch with that batch's slice, the way ``process_images_inner`` calls it."""
+    script.before_process(p, True, *panel_values(**panel))
+    total = p.n_iter * p.batch_size
+    p.all_prompts = [style.replace("{prompt}", p.prompt)] * total
+    p.all_seeds = [1000 + i for i in range(total)]
+    seen = []
+    for n in range(p.n_iter):
+        p.iteration = n
+        p.prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
+        p.seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
+        script.before_process_batch(p, batch_number=n, prompts=p.prompts,
+                                    seeds=p.seeds, subseeds=p.seeds)
+        seen.append(list(p.prompts))
+    return seen
+
+
+class TestEveryBatchRollsAgain:
+    def test_each_batch_after_the_first_gets_its_own_roll(self, script, client):
+        client.answers = ["First direction.", "Second direction.", "Third direction."]
+        p = BatchProcessing(n_iter=3, batch_size=2)
+        seen = run_batches(script, p)
+
+        assert seen == [["First direction., film grain"] * 2,
+                        ["Second direction., film grain"] * 2,
+                        ["Third direction., film grain"] * 2]
+        assert p.all_prompts == [prompt for batch in seen for prompt in batch]
+        assert len(client.calls) == 3
+
+    def test_one_batch_rolls_once(self, script, client):
+        p = BatchProcessing(n_iter=1, batch_size=4)
+        run_batches(script, p)
+
+        assert len(client.calls) == 1
+
+    def test_each_image_records_its_own_batchs_roll(self, script, client):
+        p = BatchProcessing(n_iter=2, batch_size=2)
+        run_batches(script, p)
+        seeds = p.extra_generation_params[mc_infotext.CREATIVE_SEED]
+
+        assert isinstance(seeds, list) and len(seeds) == 4
+        assert seeds[0] == seeds[1] and seeds[2] == seeds[3]
+        assert seeds[0] != seeds[2]
+
+    def test_a_fixed_creative_seed_is_offset_by_the_batch(self, script, client):
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        run_batches(script, p, seed=40)
+
+        assert p.extra_generation_params[mc_infotext.CREATIVE_SEED] == [40, 41, 42]
+
+    def test_stage_2_inherits_each_batchs_own_prompt(self, script, client):
+        client.answers = ["First.", "Second."]
+        p = BatchProcessing(n_iter=2, batch_size=1)
+        run_batches(script, p)
+
+        assert mc_lora.stage1_inheritable(p, 0)[0] == "First."
+        assert mc_lora.stage1_inheritable(p, 1)[0] == "Second."
+
+    def test_a_re_roll_that_fails_keeps_the_first_prompt_and_says_so(
+            self, script, client, monkeypatch):
+        client.answers = ["First."]
+        p = BatchProcessing(n_iter=2, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        p.all_prompts = [p.prompt] * 2
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+            yield  # pragma: no cover - generator shape only
+
+        monkeypatch.setattr(sessions, "krea", explode)
+        p.prompts = p.all_prompts[1:2]
+        script.before_process_batch(p, batch_number=1, prompts=p.prompts, seeds=[7])
+        processed = _Result()
+        script.postprocess(p, processed)
+
+        assert p.all_prompts == ["First.", "First."]
+        assert "did not re-roll batch 2" in processed.comments
+        assert "llama-server is not running" in processed.comments
+
+    def test_a_failed_first_roll_is_not_tried_again_per_batch(self, script, client,
+                                                              monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+            yield  # pragma: no cover - generator shape only
+
+        monkeypatch.setattr(sessions, "krea", explode)
+        p = BatchProcessing(n_iter=3, batch_size=1)
+        seen = run_batches(script, p, style="{prompt}")
+
+        assert seen == [["car"], ["car"], ["car"]]

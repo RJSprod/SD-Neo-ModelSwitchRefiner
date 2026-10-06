@@ -1,5 +1,6 @@
 // Forge Assistant -- the generation tabs' layout: the results column fills the
-// window, and Txt2Img's settings column can be docked into the panel.
+// window, and Txt2Img's settings column can be docked into the panel, where a
+// field takes a drag only after a tap has engaged it.
 //
 // Two things, one file, because both are about the same two columns of the
 // host's page and each has to know what the other did to them.
@@ -426,6 +427,203 @@
         this.started = false;
     };
 
+    // -- the guard ----------------------------------------------------------- //
+    //
+    // Asked for once the column was in the panel: "when i try to scroll i might
+    // scroll a text box, or move a slider. I would like scroll input fields or
+    // sliding sliders etc, it should require a selection tap. So by default, the
+    // entire content column is scrollable in the flyout menu, but once i want to
+    // say type, i have to tap the input field first to select it, then i am in
+    // it, and i can type. Same with slider ... I would like the component to
+    // throw some sort of highlight state outline so i know i'm in".
+    //
+    // So while the column is docked, every control that takes a drag or a wheel
+    // for itself -- a text box (it scrolls its own text), a number box, a
+    // slider, the compact spatial canvas -- is given no presses at all by the
+    // stylesheet (`pointer-events: none`). A drag that starts on one is then a
+    // drag on the block around it, and the column scrolls. A tap (a `click`,
+    // which a browser does not fire after a scroll) on the block *engages* it:
+    // the block gets `forge-assistant-engaged`, an outline, and its controls get
+    // their presses back; a text box is focused, with the caret at its end, so
+    // the keyboard comes up. A tap anywhere outside it, or Escape, lets it go.
+    // Dropdowns, checkboxes, radios and buttons are left alone: a drag across
+    // them scrolls already, and they act only on a tap.
+    //
+    // The selector is the stylesheet's too (`.forge-assistant-guarded` in
+    // style.css); the two lists must name the same controls.
+
+    const GUARD_CLASS = "forge-assistant-guarded";
+    const ENGAGED_CLASS = "forge-assistant-engaged";
+    const GUARDED = [
+        "textarea",
+        "input[type=text]",
+        "input:not([type])",
+        "input[type=search]",
+        "input[type=number]",
+        "input[type=range]",
+        "[contenteditable=true]",
+        ".mc-krea-spatial-compact-frame",
+    ].map((selector) => selector + ":not(.gradio-dropdown *)").join(", ");
+    // Controls a tap on which should bring a keyboard up.
+    const TYPED = "textarea, input[type=text], input:not([type]), input[type=search], " +
+        "input[type=number], [contenteditable=true]";
+    const COMPACT = ".mc-krea-spatial-compact-frame";
+
+    function shows(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function within(rect, x, y) {
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    function Guard() {
+        this.column = null;
+        this.engaged = null;
+        this.onClick = this.click.bind(this);
+        this.onKey = this.key.bind(this);
+        this.onFocus = this.focus.bind(this);
+    }
+
+    /** The block a guarded control answers for: the compact canvas is its own,
+     *  every other control its Gradio block (a slider's label, track and
+     *  number box are one block, and a tap on any of them engages all three). */
+    Guard.prototype.unitOf = function (control) {
+        if (!control || !control.closest) return null;
+        const compact = control.closest(COMPACT);
+        if (compact) return compact;
+        const block = control.closest(".block");
+        return block && this.column && this.column.contains(block) ? block : control;
+    };
+
+    /** The guarded controls of `unit`, as drawn. */
+    Guard.prototype.controls = function (unit) {
+        const found = unit.matches && unit.matches(GUARDED) ? [unit] : [];
+        unit.querySelectorAll(GUARDED).forEach((node) => found.push(node));
+        return found.filter(shows);
+    };
+
+    /** The unit a tap at (x, y) on `target` engages, or null. Guarded controls
+     *  take no presses, so the target is whatever is around them: the block a
+     *  control answers for, or something inside it (a label), or a block that
+     *  holds several -- an accordion -- where only the one under the point is
+     *  meant. */
+    Guard.prototype.unitAt = function (target, x, y) {
+        if (!target || !target.closest || !this.column.contains(target)) return null;
+        const compact = target.closest(COMPACT);
+        if (compact) return compact;
+        const block = target.closest(".block");
+        const scope = block && this.column.contains(block) ? block : this.column;
+        const controls = this.controls(scope);
+        const hit = controls.find((node) => within(node.getBoundingClientRect(), x, y));
+        if (hit) return this.unitOf(hit);
+        // A tap beside the controls -- a label, a slider's ends -- engages the
+        // block when every control in it is that block's own.
+        if (block && controls.length && controls.every((node) => this.unitOf(node) === block)) {
+            return block;
+        }
+        return null;
+    };
+
+    Guard.prototype.attach = function (column) {
+        if (this.column === column) return;
+        this.detach();
+        if (!column) return;
+        this.column = column;
+        column.classList.add(GUARD_CLASS);
+        // Capture, on the document: a tap outside the column lets go as well,
+        // and this has to decide before the control's own handlers run.
+        document.addEventListener("click", this.onClick, true);
+        document.addEventListener("keydown", this.onKey, true);
+        column.addEventListener("focusin", this.onFocus);
+    };
+
+    Guard.prototype.detach = function () {
+        const column = this.column;
+        if (!column) return;
+        this.release();
+        column.classList.remove(GUARD_CLASS);
+        document.removeEventListener("click", this.onClick, true);
+        document.removeEventListener("keydown", this.onKey, true);
+        column.removeEventListener("focusin", this.onFocus);
+        this.column = null;
+    };
+
+    /** Engage `unit`: its outline, its presses, and -- for a text box tapped,
+     *  or a block with nothing to slide -- the keyboard. */
+    Guard.prototype.engage = function (unit, x, y) {
+        if (this.engaged === unit) return;
+        this.release();
+        this.engaged = unit;
+        unit.classList.add(ENGAGED_CLASS);
+        if (x === undefined) return;
+        const controls = this.controls(unit);
+        const hit = controls.find((node) => within(node.getBoundingClientRect(), x, y));
+        const slides = controls.some((node) => node.matches("input[type=range]"));
+        let chosen = hit && hit.matches(TYPED) ? hit : null;
+        if (!chosen && !hit && !slides) chosen = controls.find((node) => node.matches(TYPED));
+        if (!chosen && hit && hit.matches("input[type=range]")) chosen = hit;
+        if (!chosen) return;
+        try {
+            chosen.focus({preventScroll: true});
+        } catch (error) {
+            chosen.focus();
+        }
+        if (chosen.matches("textarea, input[type=text], input:not([type]), input[type=search]")) {
+            try {
+                const end = String(chosen.value || "").length;
+                chosen.setSelectionRange(end, end);
+            } catch (error) {
+                // Not every input takes a selection; the focus is what matters.
+            }
+        }
+    };
+
+    /** Let the engaged block go, and its keyboard with it. */
+    Guard.prototype.release = function () {
+        const unit = this.engaged;
+        if (!unit) return false;
+        this.engaged = null;
+        unit.classList.remove(ENGAGED_CLASS);
+        const active = document.activeElement;
+        if (active && active !== document.body && unit.contains(active) && active.blur) {
+            active.blur();
+        }
+        return true;
+    };
+
+    Guard.prototype.click = function (event) {
+        const column = this.column;
+        if (!column) return;
+        const target = event.target;
+        if (this.engaged && !this.engaged.isConnected) this.engaged = null;
+        if (this.engaged && target && this.engaged.contains(target)) return;
+        const unit = this.unitAt(target, event.clientX, event.clientY);
+        if (!unit) {
+            this.release();
+            return;
+        }
+        // The tap is the engaging one: a label's own focus, or anything else
+        // the press would have done, is this function's to decide.
+        event.preventDefault();
+        this.engage(unit, event.clientX, event.clientY);
+    };
+
+    Guard.prototype.key = function (event) {
+        if (event.key === "Escape" && this.release()) event.stopPropagation();
+    };
+
+    /** A control reached from the keyboard (Tab) is engaged, outline and all:
+     *  it is as much "in it" as a tapped one. */
+    Guard.prototype.focus = function (event) {
+        const target = event.target;
+        if (!target || !target.matches || !target.matches(GUARDED)) return;
+        const unit = this.unitOf(target);
+        if (unit && unit !== this.engaged) this.engage(unit);
+    };
+
     // -- the dock ------------------------------------------------------------ //
 
     const DOCK_WORKSPACE = "tab_txt2img";
@@ -441,6 +639,7 @@
 
     function Dock() {
         this.active = null;
+        this.guard = new Guard();
     }
 
     /** The column and the row it sits in: the row's child that holds
@@ -474,10 +673,12 @@
             this.active = Object.assign({saved}, found);
             found.column.classList.add(DOCK_COLUMN);
             if (found.row) found.row.classList.add(DOCK_ROW);
+            this.guard.attach(found.column);
             if (NS.fill) NS.fill.refresh();
         }
         const style = this.active.column.style;
         if (!rect || !(rect.width > 0) || !(rect.height > 0)) {
+            this.guard.release();
             style.setProperty("visibility", "hidden", "important");
             return true;
         }
@@ -505,6 +706,7 @@
         const active = this.active;
         if (!active) return false;
         this.active = null;
+        this.guard.detach();
         const style = active.column.style;
         active.saved.forEach((entry) => {
             if (entry.value) style.setProperty(entry.name, entry.value, entry.priority || "");
@@ -522,6 +724,8 @@
 
     NS.Fill = Fill;
     NS.Dock = Dock;
+    NS.Guard = Guard;
+    NS.GUARDED = GUARDED;
     NS.fill = new Fill();
     NS.dock = new Dock();
     NS.DOCK_WORKSPACE = DOCK_WORKSPACE;
