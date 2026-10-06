@@ -74,14 +74,23 @@
         {composer: "mc-llm-krea-prompt", submit: "mc-llm-krea-generate", stop: "mc-llm-krea-stop"},
     ];
 
-    // How close to the bottom still counts as "following along". A reader who
-    // has scrolled up by more than this is reading, and moving the viewport
-    // under them is the rudest thing a chat window can do.
+    // Docked to the end of the transcript, and leaving it -- the same rule as
+    // the Forge Assistant's conversation (`scrolledTranscript` there), as
+    // asked for: "The moment i scroll away from the bottom of the view, i
+    // should be undocked from the bottom ... If i scroll to the bottom again,
+    // and reach the end of scroll, then i become docked again".
     //
-    // 100 and not a number of our own: it is what Gradio's own Chatbot uses,
-    // and two components disagreeing about whether you are at the bottom is
-    // worse than either answer.
-    const FOLLOW_SLACK_PX = 100;
+    // There is no slack. This used to count the last 100 px as "the end", to
+    // agree with Gradio's own Chatbot -- and both of them put a reader who had
+    // scrolled up less than that back at the end with every streamed chunk.
+    // Gradio's autoscroll is off now (`autoscroll=False` in
+    // mc_llm_chat_panel.py) and this is the only thing that follows.
+    // FOLLOW_END_PX is for the fractional pixels of a scaled page.
+    const FOLLOW_END_PX = 2;
+    // A finger moved this far is a scroll, not the tremble of a tap.
+    const LEAVE_TOUCH_PX = 4;
+    // A wheel reported in lines (Firefox does) or pages, as pixels.
+    const WHEEL_LINE_PX = 16;
 
     function root() {
         const app = typeof gradioApp === "function" ? gradioApp() : document;
@@ -155,31 +164,73 @@
         return target.scrollHeight - target.scrollTop - target.clientHeight;
     }
 
-    // Where the reader put the transcript, remembered *before* anything
-    // arrives.
+    // Whether the reader is docked, decided by what they do rather than read
+    // after the fact.
     //
-    // This is the whole of why the first version of this did not work. It
-    // asked "are we near the bottom?" from inside the MutationObserver, which
-    // by definition runs after the new content is in the DOM -- so a reply
-    // that added more than the slack made the answer "no" for a reader who had
-    // been pinned to the bottom a millisecond earlier. Whether to follow is a
-    // question about where you *were*, and there is no reading of the DOM
-    // after the fact that answers it.
-    //
-    // So it is answered from scroll events instead, which only fire when the
-    // position actually changes, and the observer does what the recorded
-    // answer says.
+    // The first version of this asked "are we near the bottom?" from inside
+    // the MutationObserver, which by definition runs after the new content is
+    // in the DOM -- so a reply that added more than the slack made the answer
+    // "no" for a reader who had been at the bottom a millisecond earlier.
+    // Whether to follow is a question about where you *were*. So it is
+    // answered from the reader's own input -- a wheel or a finger the moment
+    // it starts, before the scroll it causes (a chunk can land in between),
+    // and the scroll events after it -- and the observer does what that says.
+    // Moves the observer makes itself are written into `last`, so they are
+    // never read as the reader's.
     function watch(target) {
         if (target.mcLlmAnchor) return target.mcLlmAnchor;
         // A scroller seen for the first time is a thread that has just been
         // opened, and a thread opens at its newest message.
-        const state = {pinned: true, offset: target.scrollTop};
+        const state = {pinned: true, offset: target.scrollTop, last: target.scrollTop,
+                       touchY: null};
         target.mcLlmAnchor = state;
         target.addEventListener("scroll", function () {
-            state.offset = target.scrollTop;
-            state.pinned = bottomGap(target) <= FOLLOW_SLACK_PX;
+            scrolled(state, target);
         }, {passive: true});
+        target.addEventListener("wheel", function (event) {
+            let dy = Number(event && event.deltaY) || 0;
+            if (event && event.deltaMode === 1) dy *= WHEEL_LINE_PX;
+            else if (event && event.deltaMode === 2) dy *= target.clientHeight || 400;
+            wheeled(state, target, dy);
+        }, {passive: true});
+        target.addEventListener("touchstart", function (event) {
+            const touch = event && event.touches && event.touches[0];
+            state.touchY = touch ? touch.clientY : null;
+        }, {passive: true});
+        target.addEventListener("touchmove", function (event) {
+            const touch = event && event.touches && event.touches[0];
+            if (!touch || typeof state.touchY !== "number") return;
+            const moved = touch.clientY - state.touchY;
+            // A finger down the glass scrolls the transcript up under it.
+            if (moved >= LEAVE_TOUCH_PX) wheeled(state, target, -moved);
+            else if (moved <= -LEAVE_TOUCH_PX) wheeled(state, target, -moved);
+        }, {passive: true});
+        target.addEventListener("keydown", function (event) {
+            const key = event && event.key;
+            if (key === "ArrowUp" || key === "PageUp" || key === "Home") {
+                wheeled(state, target, -1);
+            }
+        });
         return state;
+    }
+
+    // A scroll the reader made: upward and away from the end undocks; downward
+    // and reaching it docks.
+    function scrolled(state, position) {
+        const moved = position.scrollTop - state.last;
+        state.last = position.scrollTop;
+        state.offset = position.scrollTop;
+        const gap = bottomGap(position);
+        if (moved < 0 && gap > FOLLOW_END_PX) state.pinned = false;
+        else if (moved > 0 && gap <= FOLLOW_END_PX) state.pinned = true;
+    }
+
+    // A gesture, read as it starts: any upward one undocks when there is
+    // anything above to go to; a downward one at the very end (where no scroll
+    // event can come) docks.
+    function wheeled(state, position, dy) {
+        if (dy < 0 && position.scrollTop > 0) state.pinned = false;
+        else if (dy > 0 && bottomGap(position) <= FOLLOW_END_PX) state.pinned = true;
     }
 
     // What the scroll position should be once new content has landed, or null
@@ -220,6 +271,9 @@
             if (wanted !== null && wanted !== target.scrollTop) {
                 target.scrollTop = wanted;
             }
+            // Ours, not the reader's: the scroll event this fires changes
+            // nothing.
+            state.last = target.scrollTop;
         });
         observer.observe(holder, {childList: true, subtree: true, characterData: true});
 

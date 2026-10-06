@@ -848,23 +848,29 @@ FIELDS = """() => {
         <input id="t_range" type="range" min="0" max="100" value="20"
                style="display: block; width: 90%">
       </div>
+      <div class="block gradio-dropdown" id="t_drop" style="height: auto">
+        <input id="t_choice" value="Euler">
+      </div>
       <div class="block gradio-textbox" id="t_text" style="height: auto">
         <label>Literal</label>
         <textarea id="t_area" rows="3">${"line\\n".repeat(40)}</textarea>
-      </div>
-      <div class="block gradio-dropdown" id="t_drop" style="height: auto">
-        <input id="t_choice" value="Euler">
       </div>`;
     column.insertAdjacentHTML("afterbegin", html);
     column.scrollTop = 0;
 }"""
 
 HIT = """(id) => {
+    // The middle of what shows of it: a docked text box is as tall as its
+    // text, and may run past the column's bottom.
     const node = document.getElementById(id);
     const r = node.getBoundingClientRect();
-    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    const column = document.getElementById("txt2img_settings").getBoundingClientRect();
+    const top = Math.max(r.top, column.top, 0);
+    const bottom = Math.min(r.bottom, column.bottom, innerHeight);
+    const x = r.left + r.width / 2, y = (top + bottom) / 2;
+    const hit = document.elementFromPoint(x, y);
     return {self: hit === node, inBlock: !!hit && !!node.closest(".block").contains(hit),
-            centre: [r.left + r.width / 2, r.top + r.height / 2]};
+            centre: [x, y]};
 }"""
 
 STATE = """() => {
@@ -878,6 +884,26 @@ STATE = """() => {
             column: column.scrollTop,
             outline: getComputedStyle(slider).outlineStyle + " "
                 + getComputedStyle(slider).outlineWidth};
+}"""
+
+
+FULL = """() => {
+    const area = document.getElementById("t_area");
+    return {scrollHeight: area.scrollHeight, clientHeight: area.clientHeight};
+}"""
+
+# Which line the caret is on, and which line is under (x, y).
+CARET = """([x, y]) => {
+    const area = document.getElementById("t_area");
+    const r = area.getBoundingClientRect();
+    const cs = getComputedStyle(area);
+    const lines = area.value.split("\\n").length;
+    const inner = area.scrollHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const lineHeight = inner / lines;
+    const under = Math.floor((y - r.top - parseFloat(cs.borderTopWidth)
+                              - parseFloat(cs.paddingTop)) / lineHeight);
+    const line = area.value.slice(0, area.selectionStart).split("\\n").length - 1;
+    return {line, under, selection: area.selectionStart};
 }"""
 
 
@@ -912,6 +938,11 @@ def test_a_docked_field_takes_no_press_until_a_tap_engages_it(browser):
         page.mouse.up()
         assert page.evaluate(STATE)["range"] == "20"
 
+        # The text box shows all of its text: nothing in it to scroll.
+        full = page.evaluate(FULL)
+        assert full["scrollHeight"] <= full["clientHeight"] + 1, full
+        assert full["clientHeight"] > 400, full
+
         # The wheel over the text box scrolls the column, not the text.
         x, y = page.evaluate(HIT, "t_area")["centre"]
         page.mouse.move(x, y)
@@ -938,14 +969,43 @@ def test_a_docked_field_takes_no_press_until_a_tap_engages_it(browser):
         page.mouse.up()
         assert page.evaluate(STATE)["range"] != "20"
 
-        # A tap on the text box moves the engagement there, and focuses it
-        # with the caret at the end, ready to type.
+        # A tap on the text box moves the engagement there and focuses it with
+        # the caret on the line that was tapped -- and the column stays where
+        # it was, so what was on screen is still on screen.
+        page.evaluate("document.getElementById('txt2img_settings').scrollTop = 120")
+        settle(page)
         x, y = page.evaluate(HIT, "t_area")["centre"]
         page.mouse.click(x, y)
         typed = page.evaluate(STATE)
         assert typed["engaged"] == ["t_text"] and typed["active"] == "t_area", typed
+        assert typed["column"] == 120, "engaging a text box does not scroll the column"
+        caret = page.evaluate(CARET, [x, y])
+        assert caret["line"] > 0 and abs(caret["line"] - caret["under"]) <= 1, caret
         page.keyboard.type("!")
-        assert page.evaluate("document.getElementById('t_area').value.endsWith('!')")
+        settle(page)
+        after = page.evaluate(STATE)
+        assert after["column"] == 120, "typing does not scroll the column either"
+
+        # More lines grow the box rather than scrolling inside it.
+        page.keyboard.type("\n\n\n\n\n")
+        settle(page)
+        grown = page.evaluate(FULL)
+        assert grown["clientHeight"] > full["clientHeight"], (full, grown)
+        assert grown["scrollHeight"] <= grown["clientHeight"] + 1, grown
+
+        # Nothing but the reader lets it go: a script pressing a button
+        # elsewhere on the page, and the panel being placed again with its
+        # slot empty for a moment, leave it engaged and focused.
+        page.evaluate("""() => {
+            const button = document.createElement("button");
+            document.body.appendChild(button);
+            button.click();
+            forgeAssistant.dock.place({left: 0, top: 0, width: 0, height: 0});
+        }""")
+        page.evaluate("forgeAssistant.shell.syncDock()")
+        settle(page)
+        kept = page.evaluate(STATE)
+        assert kept["engaged"] == ["t_text"] and kept["active"] == "t_area", kept
 
         # A tap outside it lets go, and takes the keyboard with it.
         page.mouse.click(*page.evaluate(HIT, "setting_3")["centre"])
@@ -958,12 +1018,14 @@ def test_a_docked_field_takes_no_press_until_a_tap_engages_it(browser):
         page.keyboard.press("Escape")
         assert page.evaluate(STATE)["engaged"] == []
 
-        # Back in the page, the fields are ordinary fields.
+        # Back in the page, the fields are ordinary fields, with the heights
+        # they had.
         page.click(".forge-assistant-settings")
         settle(page)
         back = page.evaluate(STATE)
         assert back["guarded"] is False, back
         assert page.evaluate(HIT, "t_range")["self"] is True
+        assert page.evaluate("document.getElementById('t_area').style.height") == ""
     finally:
         page.close()
 

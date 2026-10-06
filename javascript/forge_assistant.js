@@ -96,17 +96,19 @@
     // window shows: the header and a line of whatever is under it.
     const MIN_VISIBLE_HEIGHT = 120;
     const RESIZE_STEP = 16;
-    const BOTTOM_SLACK = 100;
-    //: Leaving the end of the transcript on purpose. An upward wheel that has
-    //: travelled this far within LEAVE_WINDOW_MS -- one notch of a mouse wheel
-    //: in either browser, more than a brush of a trackpad -- or a finger
-    //: dragged this far down the glass, unfollows at once, before the scroll
-    //: it starts has moved anything. The position rule cannot see intent, and
-    //: while a reply was streaming a chunk arriving between two of its events
-    //: put the reader back at the end every time they tried to leave it.
-    const LEAVE_WHEEL_PX = 40;
-    const LEAVE_TOUCH_PX = 24;
-    const LEAVE_WINDOW_MS = 400;
+    //: Docked to the end of the transcript, and leaving it. The rule, as asked
+    //: for: "The moment i scroll away from the bottom of the view, i should be
+    //: undocked from the bottom ... If i scroll to the bottom again, and reach
+    //: the end of scroll, then i become docked again". Any upward wheel, a
+    //: finger moved this far down the glass, or a scroll upward that leaves the
+    //: end undocks; a scroll downward that reaches the end -- within
+    //: FOLLOW_END_PX of it, for the fractional pixels of a scaled page -- or a
+    //: wheel or finger pushing down while already there, docks again. There is
+    //: no slack: an earlier build counted the last 100 px as "the end" and
+    //: wanted a whole wheel notch before it let go, and a reader inside that
+    //: slack while a reply streamed was put back at the end by every chunk.
+    const FOLLOW_END_PX = 2;
+    const LEAVE_TOUCH_PX = 4;
     //: A wheel reported in lines (Firefox does) or pages, as pixels.
     const WHEEL_LINE_PX = 16;
 
@@ -3771,27 +3773,30 @@
 
     // -- Following the end, and leaving it ------------------------------------- //
     //
-    // Locked to the latest while the reader is at the end of it, left exactly
-    // where they are the moment they are not, and following again when they
-    // come back down. The scroll position alone could not tell leaving from
-    // being at the end while a reply was streaming: the first pixels of a
-    // wheel notch are still inside the slack, a chunk arriving in that instant
-    // saw "at the bottom" and put the reader back there, and the next notch
-    // met the same thing. So leaving is read from the gesture -- a wheel
+    // Docked: following the latest while the reader is at the end. Undocked the
+    // moment they move away from it, by however little, and left exactly where
+    // they are while a reply streams on below. Docked again only when they come
+    // back down to the very end. Leaving is read from the gesture -- a wheel
     // upward, a finger down the glass, a key that reads back -- the moment it
-    // starts, and the position rule only ever *re-follows* on a scroll that
-    // moved down and reached the end; an upward scroll inside the slack, and
-    // a move this code made itself, change nothing.
+    // starts, before the scroll it causes, because a chunk can arrive between
+    // the gesture and its first scroll event and would otherwise put the reader
+    // back. A scroll upward that leaves the end (a scrollbar dragged) undocks
+    // too. A move this code made itself is never read as the reader's:
+    // `lastScrollTop` is written with every such move.
+
+    function distanceToEnd(transcript) {
+        return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+    }
 
     Shell.prototype.scrolledTranscript = function () {
         const transcript = this.nodes.transcript;
         if (!transcript) return;
-        const distance = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+        const distance = distanceToEnd(transcript);
         const last = typeof this.lastScrollTop === "number" ? this.lastScrollTop : transcript.scrollTop;
-        const movedDown = transcript.scrollTop > last;
+        const moved = transcript.scrollTop - last;
         this.lastScrollTop = transcript.scrollTop;
-        if (distance > BOTTOM_SLACK) this.following = false;
-        else if (movedDown) this.following = true;
+        if (moved < 0 && distance > FOLLOW_END_PX) this.following = false;
+        else if (moved > 0 && distance <= FOLLOW_END_PX) this.following = true;
         this.showJumpNow();
     };
 
@@ -3804,9 +3809,18 @@
 
     // Stop following the latest, now, because the reader asked to.
     Shell.prototype.leaveBottom = function () {
-        this.wheelUp = 0;
         if (!this.following) return false;
         this.following = false;
+        this.showJumpNow();
+        return true;
+    };
+
+    // Follow the latest again, because the reader is at the end and pushing
+    // further: no scroll event comes from a transcript that cannot move.
+    Shell.prototype.reachBottom = function () {
+        const transcript = this.nodes.transcript;
+        if (this.following || !transcript || distanceToEnd(transcript) > FOLLOW_END_PX) return false;
+        this.following = true;
         this.showJumpNow();
         return true;
     };
@@ -3818,24 +3832,21 @@
         return dy;
     }
 
-    // A wheel upward, counted over a short window so a notch leaves and a
-    // brush of a trackpad does not. A wheel downward forgets the count.
+    // Any wheel upward leaves, when there is anything above to go to; a wheel
+    // downward at the end docks.
     Shell.prototype.wheelTranscript = function (event) {
-        const delta = wheelPixels(event, this.nodes.transcript);
-        if (delta >= 0 || !this.following) {
-            this.wheelUp = 0;
-            return false;
+        const transcript = this.nodes.transcript;
+        const delta = wheelPixels(event, transcript);
+        if (delta < 0) {
+            if (transcript && transcript.scrollTop <= 0) return false;
+            return this.leaveBottom();
         }
-        const now = Date.now();
-        if (!this.wheelAt || now - this.wheelAt > LEAVE_WINDOW_MS) this.wheelUp = 0;
-        this.wheelAt = now;
-        this.wheelUp = (this.wheelUp || 0) - delta;
-        if (this.wheelUp < LEAVE_WHEEL_PX) return false;
-        return this.leaveBottom();
+        if (delta > 0) return this.reachBottom();
+        return false;
     };
 
-    // A finger that has moved down the glass by a deliberate amount is the
-    // transcript scrolling up under it.
+    // A finger moved down the glass is the transcript scrolling up under it;
+    // moved up at the end, it is the reader pushing past the latest.
     Shell.prototype.touchTranscript = function (event, starting) {
         const touch = event && event.touches && event.touches[0];
         if (!touch) return false;
@@ -3843,9 +3854,15 @@
             this.touchY = touch.clientY;
             return false;
         }
-        if (!this.following || typeof this.touchY !== "number") return false;
-        if (touch.clientY - this.touchY < LEAVE_TOUCH_PX) return false;
-        return this.leaveBottom();
+        if (typeof this.touchY !== "number") return false;
+        const moved = touch.clientY - this.touchY;
+        if (moved >= LEAVE_TOUCH_PX) {
+            const transcript = this.nodes.transcript;
+            if (transcript && transcript.scrollTop <= 0) return false;
+            return this.leaveBottom();
+        }
+        if (moved <= -LEAVE_TOUCH_PX) return this.reachBottom();
+        return false;
     };
 
     // Put the latest message on screen, now and again once the browser has

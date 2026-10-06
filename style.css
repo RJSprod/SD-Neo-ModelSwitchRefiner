@@ -7371,6 +7371,16 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     pointer-events: auto !important;
 }
 
+/* Docked, a text box shows all of its text and never scrolls inside itself:
+   the column is the one thing that scrolls. The height is the script's
+   (`Guard.fit`, as tall as the text); these take away what would cap it or
+   scroll it -- Gradio's line limit is a max-height and an overflow. */
+.forge-assistant-guarded textarea {
+    max-height: none !important;
+    overflow-y: hidden !important;
+    resize: none !important;
+}
+
 /* The engaged field, so it is plain which one a drag now moves. An outline
    takes no room, so nothing in the column shifts when a field is engaged. */
 .forge-assistant-guarded .forge-assistant-engaged {
