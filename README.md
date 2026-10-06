@@ -3513,12 +3513,17 @@ the prompt boxes where they always were), drawn over the panel's body and
 moving with the panel when it is dragged or resized. **Chat** from there brings
 the column back to the page and shows the conversation; **🎛** again brings it
 back and returns to whichever view the panel was in, the conversation or the
-tab bar. A menu takes the column's place while it is up, as it does the
-conversation's. Closing the panel puts the column back in the page and opening
-it docks it again; on another workspace the button goes and the panel shows the
-conversation or the tab bar, and coming back to Txt2Img docks the column again.
-The choice is kept with the rest of the panel's layout for the browser tab.
-Img2Img has no such state yet.
+tab bar. Those two are the only ways it comes back: while it is docked the
+column stays out of the page, and the gallery keeps the whole row, whatever
+else happens. Close the panel and the column is simply out of sight — the
+gallery stays full width, in focus mode and out of it, and leaving focus mode
+changes nothing — and opening the panel shows it there again. On another
+workspace the button goes and the panel shows the conversation or the tab bar;
+coming back to Txt2Img shows the column in the panel again. A menu takes the
+column's place while it is up, as it does the conversation's. The choice is
+kept with the rest of the panel's layout for the browser tab, so a reload with
+the panel closed keeps the column out of the page too. Img2Img has no such
+state yet.
 
 The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it

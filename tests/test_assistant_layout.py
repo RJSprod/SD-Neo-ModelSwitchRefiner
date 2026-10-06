@@ -375,6 +375,7 @@ WHERE = """() => {
     const box = (node) => { const r = node.getBoundingClientRect();
                             return [Math.round(r.left), Math.round(r.top)]; };
     return {docked: column.classList.contains("forge-assistant-docked-column"),
+            shown: getComputedStyle(column).visibility === "visible",
             button: !document.querySelector(".forge-assistant-settings").hidden,
             column: box(column), slot: box(slot)};
 }"""
@@ -403,19 +404,85 @@ def test_the_docked_column_follows_the_panel_and_the_workspace(browser):
         assert moving["column"] == moving["slot"], moving
         assert moving["column"][0] < start["column"][0] - 400
 
-        # Another workspace: the column goes back to its page and the button
-        # goes; back on Txt2Img, it is docked again.
+        # Another workspace: the button goes and the column is held out of
+        # sight -- not given back to its page; back on Txt2Img, it shows in
+        # the panel again.
         page.evaluate(SWITCH, "tab_img2img")
-        page.wait_for_function("!document.getElementById('txt2img_settings')"
-                               ".classList.contains('forge-assistant-docked-column')")
+        page.wait_for_function("document.querySelector('.forge-assistant-settings').hidden")
+        settle(page)
         away = page.evaluate(WHERE)
-        assert away["docked"] is False and away["button"] is False, away
+        assert away["docked"] is True and away["shown"] is False, away
         page.evaluate(SWITCH, "tab_txt2img")
-        page.wait_for_function("document.getElementById('txt2img_settings')"
-                               ".classList.contains('forge-assistant-docked-column')")
+        page.wait_for_function("!document.querySelector('.forge-assistant-settings').hidden")
         settle(page)
         back = page.evaluate(WHERE)
-        assert back["button"] is True and back["column"] == back["slot"], back
+        assert back["shown"] is True and back["column"] == back["slot"], back
+    finally:
+        page.close()
+
+
+def press_three_times(page, selector) -> None:
+    box = page.evaluate("(s) => { const r = document.querySelector(s).getBoundingClientRect();"
+                        " return [r.left + r.width / 2, r.top + r.height / 2]; }", selector)
+    for _ in range(3):
+        page.mouse.click(*box)
+        page.wait_for_timeout(60)
+    settle(page, 4)
+
+
+ROW = """() => {
+    const column = document.getElementById("txt2img_settings");
+    const results = document.getElementById("txt2img_results");
+    return {docked: column.classList.contains("forge-assistant-docked-column"),
+            shown: getComputedStyle(column).visibility === "visible",
+            full: Math.abs(results.getBoundingClientRect().width
+                           - results.parentElement.getBoundingClientRect().width) <= 1,
+            beside: column.getBoundingClientRect().right
+                <= results.getBoundingClientRect().left + 1,
+            focus: forgeAssistant.focus.isActive(),
+            open: forgeAssistant.shell.state.panelOpen};
+}"""
+
+
+def test_the_docked_column_stays_out_of_the_page_until_chat_or_the_tab_bar(browser):
+    """Reported: the gallery "returns to the left column when i exit focus
+    mode. if i exit focus mode with the column enabled inside the flyout menu,
+    it should remain hidden when focus mode exit. the only way to get it back
+    is open the fly out and switch to conversation or tab mode"."""
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.click(".forge-assistant-settings")
+        settle(page)
+        # Focus, from the header; the panel put away for the whole gallery;
+        # focus ended from the launcher.
+        press_three_times(page, ".forge-assistant-grip")
+        assert page.evaluate(ROW)["focus"] is True
+        page.click(".forge-assistant-header [aria-label='Minimize the assistant']")
+        settle(page)
+        closed = page.evaluate(ROW)
+        assert closed["docked"] is True and closed["shown"] is False, closed
+        assert closed["full"] is True, "the gallery keeps the row"
+        press_three_times(page, ".forge-assistant-launcher")
+        left = page.evaluate(ROW)
+        assert left["focus"] is False and left["open"] is False, left
+        assert left["docked"] is True and left["shown"] is False, left
+        assert left["full"] is True, left
+        filled = measure(page)
+        assert abs(filled["last"] - (filled["inner"] - MARGIN)) <= 1, filled
+
+        # Opened, it is in the panel again.
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        opened = page.evaluate(WHERE)
+        assert opened["shown"] is True and opened["column"] == opened["slot"], opened
+
+        # Chat is a way back: the column is in its page beside the gallery.
+        page.click(".forge-assistant-chat")
+        settle(page)
+        back = page.evaluate(ROW)
+        assert back["docked"] is False and back["beside"] is True and back["full"] is False, back
     finally:
         page.close()
 
