@@ -390,7 +390,8 @@
             conversationExpanded: true,
             // The third state: Txt2Img's settings column in the panel. Kept
             // while another workspace is on screen, where the panel shows what
-            // `conversationExpanded` says, and taken up again on return.
+            // `conversationExpanded` says, and taken up again on return; the
+            // column stays out of the page all the while (`syncDock`).
             settingsDocked: false,
             focusEnabled: false,
             focusWorkspaceId: null,
@@ -933,18 +934,34 @@
         if (this.dockedNow) this.syncDock();
     };
 
-    /** The settings column drawn where the panel's placeholder is, or put back
-     *  in the page. Called after every placement and every move of the panel:
-     *  the column is fixed to the window and follows nothing by itself. */
+    /** The settings column drawn where the panel's placeholder is, kept out
+     *  of sight, or put back in the page. Called after every placement and
+     *  every move of the panel: the column is fixed to the window and follows
+     *  nothing by itself.
+     *
+     *  Docked, the column stays out of the page until the panel is switched
+     *  to the conversation or the tab bar -- not when the panel is closed,
+     *  not when another workspace is showing, not when focus mode ends.
+     *  Asked for: "if i exit focus mode with the column enabled inside the
+     *  flyout menu, it should remain hidden when focus mode exit. the only
+     *  way to get it back is open the fly out and switch to conversation or
+     *  tab mode". The first build put it back whenever the panel closed, so a
+     *  panel closed in focus mode, for the whole gallery, brought the column
+     *  back and focus mode ended with it in the page. It is shown in the
+     *  panel while the panel is open on Txt2Img with no menu up, and hidden
+     *  -- still out of the page, the gallery keeping the row -- otherwise. */
     Shell.prototype.syncDock = function () {
         const dock = NS.dock;
         if (!dock) return;
         const slot = this.nodes.dock;
-        if (!this.state.panelOpen || !this.dockedNow || !slot) {
+        if (!this.state.settingsDocked || !slot) {
             dock.release();
             return;
         }
-        dock.place(slot.hidden ? null : slot.getBoundingClientRect());
+        // The placeholder shows only in the docked view with no menu up
+        // (`applyChat`, `applyMenu`), so it is the whole of the question.
+        const showing = this.state.panelOpen && !slot.hidden;
+        dock.place(showing ? slot.getBoundingClientRect() : null);
     };
 
     /** The docked view is as tall as the conversation is at its fullest.

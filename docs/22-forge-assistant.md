@@ -2127,8 +2127,19 @@ turn, and nothing is painted in between. The placeholder may shrink
 
 The state is the panel's (`settingsDocked`, saved with the rest of its layout
 for the tab). It shows only on Txt2Img; elsewhere the panel shows the
-conversation or the tab bar as `conversationExpanded` says, and the column is
-in its page. Closing the panel puts the column back; opening it docks it again.
+conversation or the tab bar as `conversationExpanded` says.
+
+While it is on, the column stays out of the page: `syncDock` places it over the
+placeholder when the panel is open in the docked view, and otherwise keeps it
+docked and hidden (`visibility: hidden`, still out of the row, so the gallery
+keeps the whole width). Only switching the panel to the conversation (Chat) or
+the tab bar (🎛 again) gives it back. The first build gave it back whenever the
+panel closed, and was reported against: "it returns to the left column when i
+exit focus mode. if i exit focus mode with the column enabled inside the flyout
+menu, it should remain hidden when focus mode exit. the only way to get it back
+is open the fly out and switch to conversation or tab mode". Focus mode never
+touched the column; the panel closed in focus mode, for the whole gallery, had
+already put it back, and leaving focus showed it.
 
 ### The fill is measured, not a share of the window
 

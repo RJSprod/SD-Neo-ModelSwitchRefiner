@@ -126,44 +126,94 @@ def test_chat_while_docked_puts_the_column_back_and_shows_the_conversation():
     assert found["released"] == 1
 
 
-def test_another_workspace_gives_the_column_back_and_returning_docks_it_again():
+def test_another_workspace_keeps_the_column_out_of_sight_and_returning_shows_it():
     found = run(WORLD + """
         const {shell, dock} = dockShell("tab_txt2img");
         shell.toggleDock();
         shell.activeWorkspace = "tab_img2img";
         shell.applyDock();
         const away = Object.assign(view(shell), {released: dock.released,
+                                                 last: dock.placed[dock.placed.length - 1],
                                                  kept: shell.state.settingsDocked});
-        const before = dock.placed.length;
         shell.activeWorkspace = "tab_txt2img";
         shell.applyDock();
         console.log(JSON.stringify({away, back: view(shell),
-                                    placedAgain: dock.placed.length > before}));
+                                    last: dock.placed[dock.placed.length - 1]}));
     """)
 
     # Away: the conversation, as the panel was before, and no button.
     assert found["away"]["docked"] is False and found["away"]["body"] is True
     assert found["away"]["button"] is False
-    assert found["away"]["released"] == 1
+    # The column is not given back to the page: it is held out of sight.
+    assert found["away"]["released"] == 0
+    assert found["away"]["last"] is None
     # The choice is the panel's, kept for Txt2Img.
     assert found["away"]["kept"] is True
     assert found["back"]["docked"] is True and found["back"]["slot"] is True
-    assert found["placedAgain"] is True
+    assert found["last"] == {"left": 10, "top": 50, "width": 340, "height": 700}
 
 
-def test_closing_the_panel_puts_the_column_back_and_opening_it_docks_again():
+def test_closing_the_panel_keeps_the_column_out_of_the_page():
+    """Asked for: "if i exit focus mode with the column enabled inside the
+    flyout menu, it should remain hidden when focus mode exit. the only way to
+    get it back is open the fly out and switch to conversation or tab mode".
+    The first build gave the column back whenever the panel closed -- which is
+    how a panel closed in focus mode, for the whole gallery, ended focus mode
+    with the column in the page."""
     found = run(WORLD + """
         const {shell, dock} = dockShell("tab_txt2img");
         shell.toggleDock();
         shell.state.panelOpen = false;
         shell.syncDock();
-        const closed = dock.released;
+        const closed = {released: dock.released, last: dock.placed[dock.placed.length - 1]};
         shell.state.panelOpen = true;
         shell.syncDock();
-        console.log(JSON.stringify({closed, docked: dock.docked}));
+        console.log(JSON.stringify({closed, last: dock.placed[dock.placed.length - 1]}));
     """)
 
-    assert found == {"closed": 1, "docked": True}
+    assert found["closed"] == {"released": 0, "last": None}, "held, out of sight"
+    assert found["last"] == {"left": 10, "top": 50, "width": 340, "height": 700}
+
+
+def test_only_the_conversation_or_the_tab_bar_gives_the_column_back():
+    found = run(WORLD + """
+        const {shell, dock} = dockShell("tab_txt2img", {conversationExpanded: false});
+        shell.toggleDock();
+        // Closed and opened, another workspace and back: still held.
+        shell.state.panelOpen = false;
+        shell.syncDock();
+        shell.state.panelOpen = true;
+        shell.activeWorkspace = "tab_img2img";
+        shell.applyDock();
+        shell.activeWorkspace = "tab_txt2img";
+        shell.applyDock();
+        const held = dock.released;
+        // The tab bar, from the settings button: given back.
+        shell.toggleDock();
+        const tabs = {released: dock.released, row: view(shell).row};
+        // Docked again, then the conversation, from Chat: given back.
+        shell.toggleDock();
+        shell.toggleChat();
+        console.log(JSON.stringify({held, tabs, chat: {released: dock.released,
+                                                       body: view(shell).body}}));
+    """)
+
+    assert found["held"] == 0
+    assert found["tabs"] == {"released": 1, "row": True}
+    assert found["chat"] == {"released": 2, "body": True}
+
+
+def test_a_page_opened_with_the_column_docked_and_the_panel_closed_holds_it():
+    """The docked state is kept with the panel's layout for the tab, so a
+    reload with the panel closed keeps the column out of the page too."""
+    found = run(WORLD + """
+        const {shell, dock} = dockShell("tab_txt2img", {panelOpen: false,
+                                                        settingsDocked: true});
+        console.log(JSON.stringify({placed: dock.placed, released: dock.released}));
+    """)
+
+    assert found["placed"] and all(rect is None for rect in found["placed"])
+    assert found["released"] == 0
 
 
 def test_a_menu_takes_the_columns_place_and_gives_it_back():
