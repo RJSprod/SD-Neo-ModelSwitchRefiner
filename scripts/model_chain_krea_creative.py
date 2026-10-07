@@ -71,6 +71,7 @@ Generate. Pressing it again is how you get another one.
 
 from __future__ import annotations
 
+import re
 import threading
 
 import gradio as gr
@@ -1968,21 +1969,55 @@ def _written_ahead(plan, batch: int):
     ended) or the generation is being stopped: ``None`` then, and the batch is
     rolled where it stands, or not at all.
     """
-    announced = False
-    with plan.ready:
-        while True:
-            if batch in plan.written:
-                return plan.written[batch]
-            if plan.gave_up is not None and batch >= plan.gave_up:
-                return None
-            if plan.thread is None or not plan.thread.is_alive():
-                return None
-            if _generation_stopping():
-                return None
-            if not announced:
-                logger.info("Model Chain: batch %d waits for its Creative prompt", batch + 1)
-                announced = True
-            plan.ready.wait(0.2)
+    announced = None
+    try:
+        with plan.ready:
+            while True:
+                if batch in plan.written:
+                    return plan.written[batch]
+                if plan.gave_up is not None and batch >= plan.gave_up:
+                    return None
+                if plan.thread is None or not plan.thread.is_alive():
+                    return None
+                if _generation_stopping():
+                    return None
+                if announced is None:
+                    logger.info("Model Chain: batch %d waits for its Creative prompt",
+                                batch + 1)
+                    announced = _say_on_bar(f"Waiting for batch {batch + 1}'s Creative "
+                                            "prompt…")
+                plan.ready.wait(0.2)
+    finally:
+        if announced is not None:
+            _unsay_on_bar(*announced)
+
+
+def _say_on_bar(text: str):
+    """Put ``text`` on the host's bar; ``(text, what it replaced)`` to take it off again.
+
+    A batch waiting for its prompt is otherwise a bar that has stopped for no
+    reason anybody can see -- the prompt is being written on another processor,
+    quietly, and the image is what is waiting for it.
+    """
+    try:
+        from modules import shared
+
+        before = getattr(shared.state, "textinfo", None)
+        shared.state.textinfo = text
+        return text, before
+    except Exception:
+        return text, None
+
+
+def _unsay_on_bar(text: str, before) -> None:
+    """Take ``text`` off the bar, unless something has written over it since."""
+    try:
+        from modules import shared
+
+        if getattr(shared.state, "textinfo", None) == text:
+            shared.state.textinfo = before
+    except Exception:
+        pass
 
 
 def _batch_count(p) -> int:
@@ -1992,22 +2027,88 @@ def _batch_count(p) -> int:
         return 1
 
 
-def _swap_prompt(p, indices, old: str, new: str) -> int:
-    """Put ``new`` where ``old`` is in this batch's prompts; how many changed.
+_TOKENS = re.compile(r"\w+|\s+|[^\w\s]")
+"""Words, runs of space and single marks: what a prompt's changes are counted in.
 
-    Inside each entry rather than over it, so a style the host wrapped around
-    the written prompt stays wrapped around the new one. The hires prompts
-    follow when they were inherited from the prompt, which is when they hold
-    the same text.
+``__wildcard__`` is one word (an underscore is a word character), so a wildcard
+the host expanded is one token replaced by its pick; ``{a|b}`` is marks and
+words, each its own token.
+"""
+
+
+def _merged(base: str, host: str, writer: str) -> str | None:
+    """The writer's changes to ``base`` made on top of the host's, or ``None``.
+
+    A three-way merge, word by word. ``base`` is the prompt batch 1 was given;
+    ``host`` is what the host made of it for one image -- a style wrapped around
+    it, a wildcard in a Literal box replaced by that image's pick; ``writer`` is
+    this batch's prompt, which differs from ``base`` only where the writer (and
+    the Spatial Composer) wrote something else. Every change either side made is
+    kept; where both changed the same words there is no right answer, and the
+    image stays on the first batch's prompt rather than a guess.
+    """
+    import difflib
+
+    words = _TOKENS.findall(base)
+    if "".join(words) != base:
+        return None
+
+    def edits(other: str, side: int):
+        theirs = _TOKENS.findall(other)
+        matcher = difflib.SequenceMatcher(None, words, theirs, autojunk=False)
+        return [(i1, i2, theirs[j1:j2], side)
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != "equal"]
+
+    out: list[str] = []
+    position = 0
+    previous = None
+    for i1, i2, replacement, side in sorted(edits(host, 0) + edits(writer, 1),
+                                             key=lambda edit: (edit[0], edit[1], edit[3])):
+        if i1 < position:
+            return None
+        if (previous is not None and i1 == i2 == position and previous[0] == previous[1]
+                == i1 and previous[3] != side):
+            # Both sides wrote something new at the same place: neither order is
+            # the one somebody meant.
+            return None
+        out.extend(words[position:i1])
+        out.extend(replacement)
+        position = i2
+        previous = (i1, i2, replacement, side)
+    out.extend(words[position:])
+    return "".join(out)
+
+
+def _rebased(base: str, entry, new: str) -> str | None:
+    """``new`` as the host made ``entry`` of ``base``, or ``None`` when it cannot be said."""
+    if not isinstance(entry, str):
+        return None
+    if base in entry:
+        return entry.replace(base, new, 1)
+    return _merged(base, entry, new)
+
+
+def _swap_prompt(p, indices, old: str, new: str) -> int:
+    """Give this batch's images ``new`` where they were given ``old``; how many changed.
+
+    Not over each entry but inside it, so whatever the host did to ``old`` for
+    one image is done to ``new`` too: a style it wrapped around the written
+    prompt stays wrapped around the new one, and a wildcard it expanded -- in a
+    Literal box, say, which is restored around the writer's words and reaches
+    the host as typed -- keeps that image's own pick. Batch 1's text no longer
+    appears in an entry once a wildcard in it has been expanded, so the entry is
+    rebased (:func:`_merged`): the writer's changes, made on top of the host's.
+    An entry where both changed the same words is left on the first prompt.
+    The hires prompts follow the same way.
     """
     if not old:
         return 0
     changed = 0
     all_prompts = p.all_prompts
     for index in indices:
-        entry = all_prompts[index]
-        if isinstance(entry, str) and old in entry:
-            all_prompts[index] = entry.replace(old, new, 1)
+        swapped = _rebased(old, all_prompts[index], new)
+        if swapped is not None:
+            all_prompts[index] = swapped
             changed += 1
     if not changed:
         return 0
@@ -2020,8 +2121,10 @@ def _swap_prompt(p, indices, old: str, new: str) -> int:
     hires = getattr(p, "all_hr_prompts", None)
     if isinstance(hires, list):
         for index in indices:
-            if index < len(hires) and isinstance(hires[index], str) and old in hires[index]:
-                hires[index] = hires[index].replace(old, new, 1)
+            if index < len(hires):
+                swapped = _rebased(old, hires[index], new)
+                if swapped is not None:
+                    hires[index] = swapped
         hires_batch = getattr(p, "hr_prompts", None)
         if isinstance(hires_batch, list):
             for offset in range(len(hires_batch)):
@@ -3208,10 +3311,17 @@ class ScriptKreaCreative(scripts.Script):
 
         replaced = _swap_prompt(p, indices, plan.first, written.generation)
         if not replaced:
-            logger.warning("Model Chain: Creative Mode re-rolled %s, but its prompts no "
-                           "longer contain the first roll's text; they were left alone",
-                           label)
+            logger.warning("Model Chain: Creative Mode re-rolled %s, but something else "
+                           "rewrote the same words of its prompts; they were left on the "
+                           "first batch's prompt", label)
+            self._batch_notes.append(
+                f"Creative Mode re-rolled {label}, but something else rewrote the same "
+                "words of its prompts. Its images use the first batch's prompt.")
             return
+        if replaced < len(indices):
+            logger.warning("Model Chain: Creative Mode re-rolled %s; %d of its %d images "
+                           "kept the first batch's prompt, where something else rewrote "
+                           "the same words", label, len(indices) - replaced, len(indices))
         mc_lora.remember_inheritable_for(p, indices, written.inheritable,
                                          self._inheritable_negative)
         _record_per_image(p, plan.first_metadata, written.metadata, indices,
