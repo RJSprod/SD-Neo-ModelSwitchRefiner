@@ -7203,10 +7203,12 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 /* The gallery fills the view (forge_assistant_layout.js, `Fill`).
 
    The script keeps Generate (and the progress bar while a generation runs),
-   the gallery and its buttons in view with the same gap above Generate as
-   under the buttons, and writes two custom properties on the column, with a
-   mark: the gallery's height, and the room under the buttons that puts what
-   follows them -- the infotext, the log -- below the view. These rules do the
+   the gallery and its buttons in view, one space apart and one space from the
+   view's top and bottom edges -- the space being the gap the theme draws
+   between the gallery and its buttons, kept with inline margins -- and writes
+   custom properties on the column, with a mark: the gallery's height, the
+   room under the buttons that puts what follows them -- the infotext, the log
+   -- below the view, and the grid view's height and row. These rules do the
    rest. Two ids and an attribute, with `!important`: a user.css
    that sized the gallery against the window -- `#txt2img_gallery_container
    { height: 85vh !important }` was the one that left a gap in focus mode -- is
@@ -7231,11 +7233,38 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     flex: 0 0 auto !important;
 }
 
-#txt2img_results[data-forge-assistant-fill] #txt2img_gallery > .grid-wrap,
-#img2img_results[data-forge-assistant-fill] #img2img_gallery > .grid-wrap {
+/* The grid view (no picture open) reaches the gallery's bottom edge: its
+   scroller is given the measured pixels, wherever in the gallery it sits, so
+   no theme's cap on it leaves the gallery's own background showing under it. */
+#txt2img_results[data-forge-assistant-fill] #txt2img_gallery .grid-wrap,
+#img2img_results[data-forge-assistant-fill] #img2img_gallery .grid-wrap {
+    height: var(--forge-assistant-fill-grid, 100%) !important;
+    min-height: 0 !important;
+    max-height: none !important;
+}
+
+/* And holds whole rows: every row is the measured height that puts a whole
+   number of them in the scroller, each thumbnail fills its row, and scrolling
+   stops a row at a time, so no row is cut by the gallery's edge. */
+#txt2img_results[data-forge-assistant-fill][data-forge-assistant-rows] #txt2img_gallery .grid-wrap,
+#img2img_results[data-forge-assistant-fill][data-forge-assistant-rows] #img2img_gallery .grid-wrap {
+    scroll-snap-type: y mandatory !important;
+    scroll-padding-top: var(--forge-assistant-fill-grid-pad, 0px) !important;
+}
+
+#txt2img_results[data-forge-assistant-fill][data-forge-assistant-rows] #txt2img_gallery .grid-container,
+#img2img_results[data-forge-assistant-fill][data-forge-assistant-rows] #img2img_gallery .grid-container {
+    grid-template-rows: none !important;
+    grid-auto-rows: var(--forge-assistant-fill-row) !important;
+}
+
+#txt2img_results[data-forge-assistant-fill][data-forge-assistant-rows] #txt2img_gallery .grid-container > .thumbnail-item,
+#img2img_results[data-forge-assistant-fill][data-forge-assistant-rows] #img2img_gallery .grid-container > .thumbnail-item {
     height: 100% !important;
     min-height: 0 !important;
     max-height: none !important;
+    aspect-ratio: auto !important;
+    scroll-snap-align: start !important;
 }
 
 #txt2img_results[data-forge-assistant-fill] #txt2img_gallery > .preview,
@@ -7244,8 +7273,8 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 }
 
 /* The room under the gallery's buttons, measured so that what follows them --
-   the generation's infotext, its log -- starts at the bottom of the view and
-   the gap there matches the one above Generate. In a flex column a margin adds
+   the generation's infotext, its log -- starts at the bottom of the view, one
+   space under the buttons. In a flex column a margin adds
    to the gap; nothing collapses it. */
 #txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img,
 #img2img_results[data-forge-assistant-fill] #image_buttons_img2img {

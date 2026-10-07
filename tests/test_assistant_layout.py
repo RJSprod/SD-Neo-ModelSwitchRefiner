@@ -21,9 +21,11 @@ inside the gallery's container -- with the person's own user.css loaded last,
 as Forge loads it, and the real assistant scripts and stylesheet. Then it
 measures:
 
-    at rest       the gap from the header's bottom to Generate is the gap
-                  from the gallery's buttons to the window's bottom, and what
-                  follows the buttons starts below the window; without the
+    at rest       one space -- the gap between the gallery and its buttons --
+                  above Generate (under the tab buttons laid out above the
+                  column, or under the header), between Generate and the
+                  gallery, and from the buttons to the window's bottom, and
+                  what follows the buttons starts below the window; without the
                   fill's mark the user.css height is what is drawn (so the page
                   is not passing for want of the rule it beats);
     focused       the same, inside focus mode's root;
@@ -32,6 +34,10 @@ measures:
     progress      a progress bar above Generate takes its room from the
                   gallery, and the buttons stay where they were;
     resized       the gallery follows the window;
+    lifted        a column drawn lower than one space under what is above it
+                  is brought up to it, and never over the tab buttons;
+    grid          the grid view reaches the gallery's bottom edge, its rows are
+                  whole and fill it exactly, and it scrolls a row at a time;
     docked        the settings column is drawn exactly over the panel's
                   placeholder, scrolls inside itself with none of its blocks
                   squeezed, takes a press, and the gallery has the row's width;
@@ -80,7 +86,13 @@ body { margin: 0; background: #0b0f19; color: #eee; font: 14px sans-serif;
           min-width: min(320px, 100%); flex-grow: 1; }
 .gr-group, .styler { display: flex; flex-direction: column; }
 .block { position: relative; }
-.grid-wrap { overflow-y: auto; }
+.grid-wrap { position: relative; padding: 8px; overflow-y: scroll; }
+.grid-container { display: grid; position: relative; gap: 16px;
+                  grid-template-columns: repeat(var(--grid-cols), minmax(0, 1fr));
+                  grid-auto-rows: minmax(100px, 1fr); }
+.thumbnail-item { position: relative; width: 100%; height: 100%; padding: 0;
+                  aspect-ratio: 1; border: 1px solid #374151; overflow: clip; }
+.thumbnail-lg > img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .fixed-height { min-height: 320px; max-height: 55vh; }
 .resize-handle { grid-column: 2 / 3; min-width: 16px; max-width: 16px; }
 .tab-nav { display: flex; height: 40px; }
@@ -138,7 +150,7 @@ def page_html() -> str:
             <div id="txt2img_generate_box" class="row"><button id="txt2img_generate">Generate</button></div>
             <div class="styler">
               <div id="txt2img_gallery" class="block gradio-gallery">
-                <div class="grid-wrap fixed-height"><div class="grid-container"></div></div>
+                <div class="grid-wrap fixed-height"><div class="grid-container" style="--grid-cols: 4"></div></div>
               </div>
             </div>
           </div>
@@ -243,7 +255,21 @@ MEASURE = """() => {
     const kept = [q("#txt2img_generate_box"), ...results.querySelectorAll(".progressDiv")]
         .filter((node) => node && getComputedStyle(node).position !== "absolute")
         .map((node) => node.getBoundingClientRect().top);
-    return {view, first: Math.min(...kept), inner: innerHeight,
+    // What the first thing kept in view may come up to: the view's top, or
+    // the tab buttons laid out above the column.
+    let ceiling = view.top;
+    const nav = q(".tab-nav");
+    if (!root && nav && nav.getBoundingClientRect().height > 0) {
+        ceiling = Math.max(ceiling, nav.getBoundingClientRect().bottom);
+    }
+    // The kept things, in the order they are drawn.
+    const leaves = [q("#txt2img_generate_box"), ...results.querySelectorAll(".progressDiv"),
+                    q("#txt2img_gallery"), q("#image_buttons_txt2img")]
+        .filter((node) => node && getComputedStyle(node).position !== "absolute")
+        .map((node) => { const r = node.getBoundingClientRect();
+                         return {id: node.id, top: r.top, bottom: r.bottom}; })
+        .sort((a, b) => a.top - b.top);
+    return {view, ceiling, leaves, first: Math.min(...kept), inner: innerHeight,
             buttons: box(q("#image_buttons_txt2img")),
             gallery: box(q("#txt2img_gallery")),
             container: box(q("#txt2img_gallery_container")),
@@ -257,12 +283,17 @@ def measure(page) -> dict:
     return page.evaluate(MEASURE)
 
 
-def assert_centred(found) -> None:
-    """The same gap above the first thing kept in view as under the gallery's
-    buttons, and nothing after the buttons inside the view."""
-    above = found["first"] - found["view"]["top"]
-    below = found["view"]["bottom"] - found["buttons"]["bottom"]
-    assert above > 0 and abs(above - below) <= 1, found
+def assert_spaced(found) -> None:
+    """One space -- the gap between the gallery and its buttons -- above the
+    first thing kept in view, between each kept thing and the next, and under
+    the buttons; nothing after the buttons inside the view."""
+    space = found["buttons"]["top"] - found["gallery"]["bottom"]
+    assert space > 0, found
+    assert abs(found["first"] - found["ceiling"] - space) <= 1, found
+    leaves = found["leaves"]
+    for before, after in zip(leaves, leaves[1:]):
+        assert abs(after["top"] - before["bottom"] - space) <= 1, (before, after, found)
+    assert abs(found["view"]["bottom"] - found["buttons"]["bottom"] - space) <= 1, found
     assert found["next"] >= found["view"]["bottom"], found
 
 
@@ -272,7 +303,7 @@ def test_the_gallery_fills_the_view_between_generate_and_its_buttons(browser):
         found = measure(page)
         assert found["marked"] is True
         assert found["view"]["top"] == 64, "measured from under the header"
-        assert_centred(found)
+        assert_spaced(found)
 
         # The assistant's own panel, put at the top over the column -- right
         # under the header, where the page is asked what holds the top of the
@@ -298,16 +329,18 @@ def test_the_gallery_fills_the_view_between_generate_and_its_buttons(browser):
         assert abs(under["gallery"]["height"] - found["gallery"]["height"]) <= 1, under
 
         # The user.css is in force on this page: without the fill's mark its
-        # 85vh is what the container is drawn at.
-        page.evaluate("document.getElementById('txt2img_results')"
-                      ".removeAttribute('data-forge-assistant-fill')")
-        bare = measure(page)
+        # 85vh is what the container is drawn at. Read in the same turn as the
+        # mark comes off: the column's resize has the fill put it back at the
+        # next frame.
+        bare = page.evaluate("() => { document.getElementById('txt2img_results')"
+                             ".removeAttribute('data-forge-assistant-fill');"
+                             " return (" + MEASURE + ")(); }")
         assert abs(bare["container"]["height"] - 0.85 * bare["inner"]) <= 1, bare
     finally:
         page.close()
 
 
-def test_focus_mode_centres_the_gallery_in_its_own_view(browser):
+def test_focus_mode_spaces_the_gallery_in_its_own_view(browser):
     page = open_page(browser)
     try:
         entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', "
@@ -316,12 +349,12 @@ def test_focus_mode_centres_the_gallery_in_its_own_view(browser):
         settle(page)
         found = measure(page)
         assert found["view"]["top"] == 0
-        assert_centred(found)
+        assert_spaced(found)
         assert found["first"] <= 80, "the header's reservation is gone"
 
         page.evaluate("forgeAssistant.focus.exit()")
         settle(page)
-        assert_centred(measure(page))
+        assert_spaced(measure(page))
     finally:
         page.close()
 
@@ -338,7 +371,7 @@ def test_what_follows_the_buttons_takes_nothing_from_the_gallery(browser):
         settle(page, 4)
         after = measure(page)
         assert abs(after["gallery"]["height"] - before["gallery"]["height"]) <= 1, after
-        assert_centred(after)
+        assert_spaced(after)
 
         # Rendered, and reached by scrolling.
         page.evaluate("document.getElementById('html_log_txt2img')"
@@ -382,7 +415,7 @@ def test_a_progress_bar_takes_its_room_from_the_gallery(browser):
         running = measure(page)
         assert abs(running["buttons"]["bottom"] - before["buttons"]["bottom"]) <= 1, running
         assert running["gallery"]["height"] < before["gallery"]["height"] - 19
-        assert_centred(running)
+        assert_spaced(running)
 
         page.evaluate("document.getElementById('progress-under-test').remove()")
         settle(page, 4)
@@ -408,7 +441,131 @@ def test_the_gallery_follows_the_window(browser):
         settle(page, 4)
         found = measure(page)
         assert found["inner"] == 820
-        assert_centred(found)
+        assert_spaced(found)
+    finally:
+        page.close()
+
+
+def test_a_column_drawn_low_is_brought_up_to_one_space_under_what_is_above(browser):
+    """Asked for: "The amount of space between the bottom of the gallery to the
+    top of the gallery buttons should be the minimum padding we use for
+    spacing. Make the space above the generation button, between generate
+    button and gallery, between gallery and gallery buttons, and gallery
+    buttons of the view." A theme's padding over the column is taken back up
+    to one space -- under the tab buttons while they are laid out above it,
+    under the header when they are not -- and never over them."""
+    page = open_page(browser)
+    try:
+        page.evaluate("document.getElementById('txt2img_results_panel')"
+                      ".style.setProperty('padding-top', '72px', 'important')")
+        settle(page, 4)
+        found = measure(page)
+        assert found["ceiling"] == 104, "under the tab buttons"
+        assert_spaced(found)
+
+        # Moved, not resized: nothing the fill watches says so, a resize would.
+        page.evaluate("document.querySelector('.tab-nav').style.display = 'none'")
+        page.evaluate("forgeAssistant.fill.now()")
+        settle(page, 4)
+        found = measure(page)
+        assert found["ceiling"] == 64, "under the header"
+        assert_spaced(found)
+        assert found["first"] < 64 + 72, "brought up over the theme's padding"
+    finally:
+        page.close()
+
+
+# A thumbnail of a portrait picture, the shape of a 640 x 960 render.
+PICTURE = ("data:image/svg+xml," + urllib.parse.quote(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="960">'
+    '<rect width="640" height="960" fill="#c33"/></svg>'))
+
+GRID = """(picture) => {
+    // Wrapped once more, the way a theme or another Gradio build may: a share
+    // of a height-less parent is no height, the measured pixels are.
+    const wrap = document.querySelector("#txt2img_gallery .grid-wrap");
+    const outer = document.createElement("div");
+    wrap.parentNode.insertBefore(outer, wrap);
+    outer.appendChild(wrap);
+    const container = wrap.querySelector(".grid-container");
+    for (let n = 0; n < 30; n += 1) {
+        const item = document.createElement("button");
+        item.className = "thumbnail-item thumbnail-lg";
+        const img = document.createElement("img");
+        img.src = picture;
+        item.appendChild(img);
+        container.appendChild(item);
+    }
+    return Promise.all([...container.querySelectorAll("img")].map((img) =>
+        img.complete ? null : new Promise((done) => { img.onload = done; })));
+}"""
+
+GRID_BOX = """() => {
+    const gallery = document.getElementById("txt2img_gallery");
+    const wrap = gallery.querySelector(".grid-wrap");
+    const style = getComputedStyle(wrap);
+    const items = [...wrap.querySelectorAll(".thumbnail-item")];
+    const heights = items.map((item) => item.getBoundingClientRect().height);
+    const tops = [...new Set(items.map((item) => Math.round(item.getBoundingClientRect().top)))];
+    const g = gallery.getBoundingClientRect();
+    const w = wrap.getBoundingClientRect();
+    return {gallery: [g.top, g.bottom], wrap: [w.top, w.bottom], centre: (w.left + w.right) / 2,
+            client: wrap.clientHeight, scroll: wrap.scrollTop,
+            pad: [parseFloat(style.paddingTop), parseFloat(style.paddingBottom)],
+            gap: parseFloat(getComputedStyle(wrap.firstElementChild).rowGap),
+            width: items[0].getBoundingClientRect().width,
+            heights: [Math.min(...heights), Math.max(...heights)],
+            rows: tops.length,
+            shown: items.filter((item) => { const r = item.getBoundingClientRect();
+                                            return r.bottom > w.top && r.top < w.bottom; })
+                .map((item) => { const r = item.getBoundingClientRect();
+                                 return [r.top - w.top, r.bottom - w.top]; })};
+}"""
+
+
+def test_the_grid_view_fills_the_gallery_with_whole_rows(browser):
+    """Asked for, of the gallery with no picture open: "There is empty space in
+    the gallery, enough to see the semi checkered background. Can you fix the
+    sizing so that view which scrolls images fills the gallery window with no
+    cut off?" The grid's scroller reaches the gallery's bottom whatever caps it
+    (a theme's rule here), its rows are as near the pictures' shape as a whole
+    number of rows allows, and they fill it exactly, a row at a time."""
+    page = open_page(browser)
+    try:
+        page.add_style_tag(content=".grid-wrap { max-height: 300px !important; }")
+        page.evaluate(GRID, PICTURE)
+        settle(page, 4)
+        found = page.evaluate(GRID_BOX)
+        assert abs(found["wrap"][1] - found["gallery"][1]) <= 1, found
+        low, high = found["heights"]
+        assert high - low <= 0.5, found
+        row = high
+        rows = round((found["client"] - sum(found["pad"]) + found["gap"]) / (row + found["gap"]))
+        assert rows >= 1
+        assert abs(sum(found["pad"]) + rows * row + (rows - 1) * found["gap"]
+                   - found["client"]) <= 1, found
+        # Nearer the picture's own shape than one row more or one fewer.
+        natural = found["width"] * 1.5
+        room = found["client"] - sum(found["pad"])
+        for other in (rows - 1, rows + 1):
+            if other >= 1:
+                worse = (room - (other - 1) * found["gap"]) / other
+                assert abs(row - natural) <= abs(worse - natural), found
+        # Every thumbnail in view is whole.
+        for top, bottom in found["shown"]:
+            assert top >= -0.5 and bottom <= found["client"] + 0.5, found
+
+        # Scrolled, it stops a row at a time, and the rows in view are whole.
+        page.mouse.move(found["centre"], (found["wrap"][0] + found["wrap"][1]) / 2)
+        page.mouse.wheel(0, row * 0.7)
+        page.wait_for_timeout(800)
+        settle(page)
+        scrolled = page.evaluate(GRID_BOX)
+        step = row + found["gap"]
+        assert scrolled["scroll"] > 0, scrolled
+        assert abs(scrolled["scroll"] / step - round(scrolled["scroll"] / step)) * step <= 1, scrolled
+        for top, bottom in scrolled["shown"]:
+            assert top >= -0.5 and bottom <= scrolled["client"] + 0.5, scrolled
     finally:
         page.close()
 
@@ -454,7 +611,7 @@ def test_the_settings_column_docks_in_the_panel_and_scrolls_there(browser):
         assert found["squeezed"] == 0, "no block is squeezed to fit"
         assert found["pressed"] is True, "a press over the panel reaches the column"
         assert abs(found["results"] - found["row"]) <= 1, "the gallery has the row's width"
-        assert_centred(measure(page))
+        assert_spaced(measure(page))
 
         # Focus as well: the column is inside focus's own layer now, and is
         # still drawn over the panel's placeholder and still takes a press.
@@ -591,7 +748,7 @@ def test_the_docked_column_stays_out_of_the_page_until_chat_or_the_tab_bar(brows
         assert left["focus"] is False and left["open"] is False, left
         assert left["docked"] is True and left["shown"] is False, left
         assert left["full"] is True, left
-        assert_centred(measure(page))
+        assert_spaced(measure(page))
 
         # Opened, it is in the panel again.
         page.evaluate("forgeAssistant.shell.open()")

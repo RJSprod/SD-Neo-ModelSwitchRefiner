@@ -32,7 +32,7 @@ files.
 | `javascript/forge_assistant_store.js` | the page's copy of the conversation, drafts, operations |
 | `javascript/forge_assistant_host.js` | Forge's tabs and header, as an adapter; keyboard arbitration |
 | `javascript/forge_assistant_focus.js` | focus as a reversible transaction, with editor adapters |
-| `javascript/forge_assistant_layout.js` | the results column fills the window; Txt2Img's settings column docked in the panel (§3.29), its fields engaged by a tap (§3.31) |
+| `javascript/forge_assistant_layout.js` | the results column fills the window, evenly spaced, with a grid of whole rows (§3.33); Txt2Img's settings column docked in the panel (§3.29), its fields engaged by a tap (§3.31) |
 
 Changed: `prompt_master/chat/history.py` (a revision, a guarded save path, a
 tombstone file, an exclusive identifier), `mc_llm_chat_panel.py` (fifteen direct
@@ -2371,6 +2371,65 @@ The rule now, the same in both (`scrolledTranscript`, `wheelTranscript`,
 Held by `tests/test_assistant_js.py::TestLeavingTheEnd` and
 `tests/test_llm_studio_js.py::TestAnchoringTheTranscript`; the old "inside the
 slack still follows" tests were rewritten to the new rule.
+
+## 3.33 One space around the gallery, and a grid of whole rows
+
+Reported against §3.29 with three full-screen screenshots (focus with the
+panel, the page under Lobe, the grid view): "There is empty space above
+generate and below the gallery buttons. I want that padding removed", then,
+asked whether flush to the edges was meant: "It should not be flush ... The
+amount of space between the bottom of the gallery to the top of the gallery
+buttons should be the minimum padding we use for spacing. Make the space above
+the generation button, between generate button and gallery, between gallery
+and gallery buttons, and gallery buttons of the view." And of the grid view:
+"There is empty space in the gallery, enough to see the semi checkered
+background. Can you fix the sizing so that view which scrolls images fills the
+gallery window with no cut off?"
+
+§3.29 measured the gap from the top of the view to Generate and left it again
+under the buttons. That gap was the theme's: Lobe's sticky offset under its
+header, the results panel's padding, focus mode's own padding. Now one space is
+used everywhere, and it is the theme's own gap between the gallery and its
+buttons, measured each time:
+
+- **Above the first thing kept in view.** Its top is brought to one space under
+  the top of the view, or under whatever is laid out above the column and across
+  it (`aboveBottom`: the tab buttons over a column the page scrolls; sticky and
+  fixed things are `coveredTop`'s), up or down. It is done with an inline
+  `margin-top` on that thing (Generate's box, a progress bar in the flow, or the
+  gallery's container when Generate is inside it), so the column itself, and
+  where a sticky column is held, do not change.
+- **Between each kept thing and the next** (Generate, the progress bar, the
+  gallery), the same way. The gallery-to-buttons gap is the space by definition.
+- **Under the buttons**, to the bottom of the view; the gallery takes the rest.
+
+The margins are written inline with `!important` and the value each node had is
+kept (`Fill.spaced`): every measure reads the column with them taken off and put
+back in the same turn (`bare`), so it always reads the theme's own spacing and
+never its own; the fill coming off puts them back. Moving is not resizing, so a
+column that only moves (the tab buttons hidden, nothing else changed) is
+measured again at the next resize, as before.
+
+**The grid view.** The grid's scroller (`.grid-wrap`, found anywhere in the
+gallery) is given the measured pixels down to the gallery's bottom edge, not a
+share of a parent that may have no height, so no theme's cap leaves the
+gallery's background showing under it. Its rows are given one height
+(`--forge-assistant-fill-row`, with `data-forge-assistant-rows`): the whole
+number of rows nearest the pictures' own shape at the grid's column width (the
+first thumbnail's picture, read when it loads), stretched or shrunk to fill the
+scroller exactly. Each thumbnail fills its row, and the scroller snaps a row at
+a time (`scroll-snap-type: y mandatory`, `scroll-padding-top` at the scroller's
+padding), so no row is cut by the gallery's edge at rest. A picture whose shape
+differs from the row's is fitted inside it as the gallery's `object-fit` says.
+
+Checked in Chromium by `tests/test_assistant_layout.py`: at rest, in focus, with
+a progress bar, with an infotext, resized, with the theme's padding over the
+column (brought up under the tab buttons, then under the header), and the grid
+of thirty portrait pictures inside an extra wrapper under a theme's
+`max-height` cap. Each of these was reverted one at a time and a test failed:
+the lift, the pair spacing, the ceiling, the bare read, the grid's pixels, the
+row height, the snap and the refresh on a picture's load. Not run on the user's
+machine or in Firefox.
 
 ## 4. Deliberate deviations
 
