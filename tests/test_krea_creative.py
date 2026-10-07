@@ -3151,6 +3151,20 @@ class TestEveryBatchRollsAgain:
         assert "did not re-roll batch 2" in processed.comments
         assert "llama-server is not running" in processed.comments
 
+    def test_a_wildcard_the_host_expanded_keeps_each_images_pick(self, script, client):
+        """Reported in use: with a wildcard in a Literal box, no batch re-rolled.
+        The box is restored around the writer's words as typed, the host's
+        wildcard extension then picks a value per image, and batch 1's text was
+        in no image's prompt any more for the swap to find."""
+        client.answers = ["A first scene.", "A second scene."]
+        p = BatchProcessing("[[__light__]] car", n_iter=2, batch_size=2)
+        script.before_process(p, True, *panel_values())
+        expand_wildcard(p, "__light__", ["dawn", "dusk", "noon", "night"])
+        seen = [host_batch(script, p, n) for n in range(2)]
+
+        assert seen == [["dawn A first scene.", "dusk A first scene."],
+                        ["noon A second scene.", "night A second scene."]]
+
     def test_a_failed_first_roll_is_not_tried_again_per_batch(self, script, client,
                                                               monkeypatch):
         def explode(*args, **kwargs):
@@ -3186,6 +3200,14 @@ def host_prompts(p):
     total = p.n_iter * p.batch_size
     p.all_prompts = [p.prompt] * total
     p.all_seeds = [1000 + i for i in range(total)]
+
+
+def expand_wildcard(p, token, picks):
+    """The host and a wildcard extension: every image's prompt from the press's,
+    with ``token`` replaced by that image's own pick, as Dynamic Prompts and the
+    wildcards extension do in ``process``."""
+    p.all_prompts = [p.prompt.replace(token, pick) for pick in picks]
+    p.all_seeds = [1000 + i for i in range(len(picks))]
 
 
 def host_batch(script, p, n):
@@ -3242,9 +3264,12 @@ class TestPromptsWrittenAhead:
         assert len(client.calls) == 3, "no batch asked the model for anything"
 
     def test_a_batch_whose_prompt_is_not_finished_waits_for_it(self, script, client,
-                                                               beside):
+                                                               beside, monkeypatch):
         import threading
 
+        from modules import shared
+
+        monkeypatch.setattr(shared.state, "textinfo", None, raising=False)
         client.answers = ["First.", "Second."]
         gate = gated(client, after=1)
         p = BatchProcessing(n_iter=2, batch_size=1)
@@ -3257,11 +3282,15 @@ class TestPromptsWrittenAhead:
         worker.start()
 
         waited = not done.wait(0.4)
+        on_the_bar = shared.state.textinfo
         gate.set()
         finished = done.wait(10)
 
         assert waited, "batch 2 did not start on the first batch's prompt"
+        assert on_the_bar == "Waiting for batch 2's Creative prompt…", \
+            "the bar says what the image is waiting for"
         assert finished and p.all_prompts == ["First.", "Second."]
+        assert shared.state.textinfo is None, "and takes it off again"
         assert len(client.calls) == 2, "it waited for the prompt being written, not a new one"
 
     def test_the_prompts_written_ahead_leave_the_bar_and_the_image_card_alone(
@@ -3348,6 +3377,18 @@ class TestPromptsWrittenAhead:
         plan.thread.join(10)
 
         assert len(client.calls) == 2, "batch 3's prompt was never asked for"
+
+    def test_a_wildcard_keeps_each_images_pick_when_written_ahead(self, script, client,
+                                                                  beside):
+        client.answers = ["A first scene.", "A second scene.", "A third scene."]
+        p = BatchProcessing("[[__light__]] car", n_iter=3, batch_size=1)
+        script.before_process(p, True, *panel_values())
+        script._reroll.thread.join(10)
+        expand_wildcard(p, "__light__", ["dawn", "dusk", "noon"])
+        seen = [host_batch(script, p, n) for n in range(3)]
+
+        assert seen == [["dawn A first scene."], ["dusk A second scene."],
+                        ["noon A third scene."]]
 
     def test_the_checkpoint_is_not_asked_about_again_mid_run(self, script, client,
                                                             beside, monkeypatch):
@@ -3489,3 +3530,33 @@ class TestQuietPasses:
         mc_creative_krea.hand_back_vram()
 
         assert inside == 0 and len(asked) == 1
+
+
+class TestRebasingABatchsPrompt:
+    """`_merged`: the writer's changes to batch 1's prompt, made on top of what the
+    host made of it for one image."""
+
+    def merged(self, base, host, writer):
+        import model_chain_krea_creative as creative_script
+
+        return creative_script._merged(base, host, writer)
+
+    def test_a_style_and_a_wildcard_pick_survive_the_writers_change(self):
+        found = self.merged("__light__ A red car in the rain.",
+                            "film still, dawn A red car in the rain., grainy",
+                            "__light__ A blue truck under a bridge.")
+
+        assert found == "film still, dawn A blue truck under a bridge., grainy"
+
+    def test_a_dynamic_prompts_variant_survives_it_too(self):
+        found = self.merged("{warm|cold} light. A red car.", "cold light. A red car.",
+                            "{warm|cold} light. A blue truck.")
+
+        assert found == "cold light. A blue truck."
+
+    def test_words_both_changed_have_no_right_answer(self):
+        assert self.merged("__x__ A red car.", "__x__ A crimson car.",
+                           "__x__ A blue car.") is None
+
+    def test_both_writing_something_new_in_one_place_has_none_either(self):
+        assert self.merged("A car.", "A car. Dusk.", "A car. Rain.") is None

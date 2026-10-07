@@ -1924,7 +1924,12 @@ press, not per batch (its answer is a subtraction of the same source), and an
 armed replay is spent by the first batch. If the first roll fails, the later
 batches are not tried again (they would fail the same way, each after a wait);
 if a later re-roll fails, that batch uses the first batch's prompt and the
-result says so. A style you picked stays wrapped around each batch's new prompt.
+result says so. A style you picked stays wrapped around each batch's new prompt, and a
+wildcard — in the prompt or a Literal box, expanded per image by a wildcard
+extension — keeps each image's own pick: a later batch's roll changes only the
+writer's words in each image's prompt, whatever else the host made of it. An
+image where something else rewrote those same words keeps the first batch's
+prompt, and the result says so.
 
 **When the writer runs on another processor, the later prompts are written while
 the images render.** With the Creative Writer on an Intel GPU, the CPU or a card
@@ -1933,10 +1938,15 @@ layout composes every roll — nothing the language model does competes with the
 sampler. So the moment batch 1's prompt is written and its image starts, the
 writer goes straight on to batch 2's prompt, then batch 3's, back to back, as
 fast as it can; a batch takes its prompt when it reaches it, and waits only if
-that prompt is not finished yet. These later passes are quiet: they leave the
-progress bar to the image, they ignore **Skip** (it is about the image on
-screen), and they stop at **Interrupt**, or when the generation ends early. The
-first roll's Krea 2 checkpoint check stands for the whole run. With the writer
+that prompt is not finished yet — the bar then says *Waiting for batch N's
+Creative prompt…*. The writer still writes one prompt at a time, so when a prompt
+takes longer than an image (about 25 s against 6 s for a Krea paragraph on an
+integrated Arc), every batch after the first waits the difference: the images
+are waiting for the writer, not the writer for the images. These later passes
+are quiet: they leave the progress bar to the image, they ignore **Skip** (it is
+about the image on screen), and they stop at **Interrupt**, or when the
+generation ends early. The first roll's Krea 2 checkpoint check stands for the
+whole run. With the writer
 on the image card itself, each later batch rolls at its own start instead, with
 the image model already loaded and the writer placed around it, as any roll
 beside an image job is — a thread writing ahead there would be waiting for the
