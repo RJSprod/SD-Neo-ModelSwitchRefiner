@@ -3800,13 +3800,14 @@ of a header that was no longer there.
 What stays on screen is Generate (with Interrupt and Skip in the same place),
 the progress bar while a generation runs, the gallery and the gallery's
 buttons. They are spaced evenly: the gap the theme draws between the gallery
-and its buttons is also the gap above Generate, between Generate (and the
-progress bar) and the gallery, and from the buttons to the bottom of the view,
-and the gallery takes all the height in between — the picture scales up to
-fill it. The top of the view is the top of the window, or the bottom of a header
-the theme holds there (Lobe's), or focus mode's own edge; Generate comes up to
-one space under it, or under the tab buttons when they are laid out above the
-column. In the grid view (no picture open) the thumbnails fill the gallery to
+and its buttons is also the gap above the panel that holds Generate, between
+Generate (and the progress bar) and the gallery, and from the buttons to the
+bottom of the view, and the gallery takes all the height in between — the
+picture scales up to fill it. The top of the view is the top of the window, or
+the bottom of a header the theme holds there (Lobe's), or focus mode's own edge;
+the panel comes up to one space under it, or under the tab buttons when they are
+laid out above the column, and Generate stays inside the panel with the panel's
+own padding — the whole right side keeps within the panel's boundary. In the grid view (no picture open) the thumbnails fill the gallery to
 its bottom edge in whole rows — as many rows as come nearest the pictures' own
 shape — and scrolling moves a row at a time, so no row is cut off. Everything after the buttons — the
 generation's infotext, its log, the time taken — is laid out as ever, but

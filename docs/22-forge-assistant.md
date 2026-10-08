@@ -2439,13 +2439,21 @@ header, the results panel's padding, focus mode's own padding. Now one space is
 used everywhere, and it is the theme's own gap between the gallery and its
 buttons, measured each time:
 
-- **Above the first thing kept in view.** Its top is brought to one space under
-  the top of the view, or under whatever is laid out above the column and across
-  it (`aboveBottom`: the tab buttons over a column the page scrolls; sticky and
-  fixed things are `coveredTop`'s), up or down. It is done with an inline
-  `margin-top` on that thing (Generate's box, a progress bar in the flow, or the
-  gallery's container when Generate is inside it), so the column itself, and
-  where a sticky column is held, do not change.
+- **Above the frame around the first thing kept in view.** The frame is the
+  outermost box inside the column that the first kept thing is the first thing
+  in (`frameOf`): the theme's panel around the whole right side -- Lobe's gray
+  box, Forge's own `variant="panel"` -- whose padding is above Generate. Its
+  top is brought to one space under the top of the view, or under whatever is
+  laid out above the column and across it (`aboveBottom`: the tab buttons over
+  a column the page scrolls; sticky and fixed things are `coveredTop`'s), up or
+  down, with an inline `margin-top` on the frame, so the column itself, and
+  where a sticky column is held, do not change; Generate sits inside the frame
+  at its padding. The first build moved the first kept thing itself (the
+  gallery's container, with Generate inside it) and was reported against at
+  once: "The generate button is being rendered outside of that dark gray box
+  ... I would prefer the generate button still render inside the gray box so
+  that all things in the right appear within its boundary" -- a negative
+  margin on a child pulls it up out of its parent's padding and past its edge.
 - **Between each kept thing and the next** (Generate, the progress bar, the
   gallery), the same way. The gallery-to-buttons gap is the space by definition.
 - **Under the buttons**, to the bottom of the view; the gallery takes the rest.
@@ -2471,9 +2479,10 @@ differs from the row's is fitted inside it as the gallery's `object-fit` says.
 
 Checked in Chromium by `tests/test_assistant_layout.py`: at rest, in focus, with
 a progress bar, with an infotext, resized, with the theme's padding over the
-column (brought up under the tab buttons, then under the header), and the grid
-of thirty portrait pictures inside an extra wrapper under a theme's
-`max-height` cap. Each of these was reverted one at a time and a test failed:
+column (brought up under the tab buttons, then under the header), the panel one
+space under the ceiling with Generate at its padding edge, and the grid of
+thirty portrait pictures inside an extra wrapper under a theme's `max-height`
+cap. Each of these was reverted one at a time and a test failed:
 the lift, the pair spacing, the ceiling, the bare read, the grid's pixels, the
 row height, the snap and the refresh on a picture's load. Not run on the user's
 machine or in Firefox.
