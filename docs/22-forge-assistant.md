@@ -2144,6 +2144,53 @@ is open the fly out and switch to conversation or tab mode". Focus mode never
 touched the column; the panel closed in focus mode, for the whole gallery, had
 already put it back, and leaving focus showed it.
 
+### Forge's mobile script, and a docked row one track wide
+
+Reported after #260, with the Lobe theme's split previewer on: "Enter focus
+mode, enable generation in flyout (now full screen gallery), exit focus mode
+with enabled generation in flyout, disable generation in flyout, enter focus
+mode, see generation is now in the left column" -- Generate's box back in the
+toprow's actions column, where Gradio first drew it, instead of the gallery's
+container where Lobe keeps it. No script on the page was known to move it
+there, and a real Gradio 4.40 page with Lobe's own bundle, Forge's `script.js`
+and resize handle, this extension and real presses (the browser granting full
+screen) did not reproduce it in Chromium through every sequence of focus, dock
+and panel toggles up to four steps. So a temporary watcher went onto the
+user's page (`model_chain_watch_generate.js`, since removed): every DOM call
+that moved the box, with the caller's stack, into `model_chain.log`.
+
+The log named **Forge Neo's own `extensions-builtin/mobile/javascript/mobile.js`**.
+On every window `resize` it asks whether the page is a phone -- a results
+column that is laid out with `offsetLeft === 0`, which is where a stacked
+layout puts it -- and when the answer changes it moves `#txt2img_generate_box`:
+into `#txt2img_results` for a phone, back into `#txt2img_actions_column` for a
+desktop, caring nothing for where a theme had put it in between. The docked
+row is one track wide (`.forge-assistant-docked-row { grid-template-columns:
+minmax(0, 1fr) }`), so the results column sat on the row's left edge: a phone,
+to that script. And the browser's full screen, which comes and goes with
+focus, resizes the window. Exiting focus with the column docked: resize,
+"phone", the box into the results column. Undocking, then entering focus:
+resize, "desktop", the box into the actions column -- in the left column,
+inside the toprow that Lobe had moved into the settings.
+
+So the docked results column keeps a pixel off the edge. `Dock.place` reads
+the results column's `offsetLeft` *before* the row changes (`besideOf`): a
+column drawn beside the settings gets `forge-assistant-docked-beside`, a
+`margin-left: 1px !important`, and never reads as the edge while docked; one
+drawn under them -- a phone, at the edge already -- gets nothing, so the dock
+turns no phone into a desktop for that script (which would have moved Generate
+out of the results column into the toprow in the panel). `release` takes the
+class off. The pixel comes off the gallery's width, which nothing can see.
+
+`tests/test_assistant_layout.py` carries that script as it is in Forge Neo and
+Lobe's shape of the toprow inside the settings, and holds both halves: docked
+beside the settings, two resizes around an undock leave the box in the
+gallery's container (without the margin the first resize moves it); stacked
+under them, the dock leaves `offsetLeft` at 0 and the box where the script put
+it. Checked only there and against the user's log; the box the script had
+already moved on the user's page comes back to the gallery's container on a
+reload, when Lobe places it again.
+
 ### The fill is measured, not a share of the window
 
 The user's user.css set `#txt2img_gallery_container { height: 85vh !important }`.

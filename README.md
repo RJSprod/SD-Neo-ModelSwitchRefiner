@@ -3561,7 +3561,11 @@ tab bar. Those two are the only ways it comes back: while it is docked the
 column stays out of the page, and the gallery keeps the whole row, whatever
 else happens. Close the panel and the column is simply out of sight — the
 gallery stays full width, in focus mode and out of it, and leaving focus mode
-changes nothing — and opening the panel shows it there again. On another
+changes nothing — and opening the panel shows it there again. Generate stays
+where your theme put it through all of this: Forge's own mobile script takes a
+results column on the row's left edge for a phone and moves the Generate box on
+every window resize (the browser's full screen is one), so while the column is
+docked beside the settings the gallery keeps a pixel off that edge. On another
 workspace the button goes and the panel shows the conversation or the tab bar;
 coming back to Txt2Img shows the column in the panel again. A menu takes the
 column's place while it is up, as it does the conversation's. The choice is

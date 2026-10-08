@@ -1039,7 +1039,7 @@
      *  there. Read before the row changes, because it is the row before the
      *  dock that says which. See `DOCK_BESIDE`. */
     function besideOf(row) {
-        if (!row) return null;
+        if (!row || !row.children) return null;
         const results = Array.prototype.find.call(row.children,
             (child) => child.id && /_results$/.test(child.id));
         if (!results || !laidOut(results)) return null;
