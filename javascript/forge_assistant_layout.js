@@ -295,23 +295,33 @@
         return {top, bottom, last, anchor, leaves, buttons};
     }
 
-    /** The outermost box inside the column that `node` is the first thing in:
-     *  up from `node` while it is the first in-flow child of its parent and
-     *  the parent is not the column itself. A theme's panel around the whole
-     *  right side -- Lobe's gray box, Forge's own `variant="panel"` -- is one,
-     *  with its padding above Generate. The space goes above the frame and
-     *  the frame is what moves, so what is in it stays in it: moving the
-     *  first kept thing alone pulled Generate up out of the box. */
-    function frameOf(node, results) {
+    /** The outermost box inside `stop` that `node` is the first thing in: up
+     *  from `node` while it is the first in-flow child of its parent and the
+     *  parent is not `stop` itself. A theme's panel around the whole right
+     *  side -- Lobe's gray box, Forge's own `variant="panel"` -- is one, with
+     *  its padding above Generate; so is the box Gradio wraps a group's
+     *  components in, which clips. The space goes above the frame and the
+     *  frame is what moves, so what is in it stays in it: moving the first
+     *  kept thing alone pulled Generate up out of the panel, and moving the
+     *  gallery inside its clipping wrapper pulled its top edge out through
+     *  the clip -- a frame with no top, and the picture's top cut. */
+    function frameOf(node, stop) {
         let frame = node;
-        while (frame.parentElement && frame.parentElement !== results
-            && results.contains(frame.parentElement)) {
+        while (frame.parentElement && frame.parentElement !== stop
+            && stop.contains(frame.parentElement)) {
             const parent = frame.parentElement;
             const first = Array.prototype.find.call(parent.children, inFlow);
             if (first !== frame) break;
             frame = parent;
         }
         return frame;
+    }
+
+    /** The nearest ancestor of `node` that holds `other` too. */
+    function commonAncestor(node, other) {
+        let walk = node.parentElement;
+        while (walk && !walk.contains(other)) walk = walk.parentElement;
+        return walk || document.documentElement;
     }
 
     /** The bottom of the lowest thing laid out above `node` and across it, up
@@ -489,22 +499,27 @@
         const first = kept.top + rest;
         const lift = ceiling + space - (first - inset);
         const margins = [];
+        const nudged = new Set();
         const nudge = (node, by) => {
             if (Math.abs(by) < 0.25) return;
             const own = styleOf(node);
+            nudged.add(node);
             margins.push([node, Math.round((px(own && own.marginTop) + by) * 100) / 100]);
         };
         nudge(frame, lift);
         // Each kept thing one space under the one before it (the buttons are
-        // already: that gap is the space), and how far that moves the gallery.
+        // already: that gap is the space), moved by its own frame -- the
+        // outermost box, short of what it shares with the thing before it,
+        // that it is the first thing in -- and how far that moves the gallery.
         let moved = 0;
         for (let index = 1; index < kept.leaves.length; index += 1) {
             const node = kept.leaves[index];
             if (node === kept.buttons) continue;
-            const gap = node.getBoundingClientRect().top
-                - kept.leaves[index - 1].getBoundingClientRect().bottom;
+            const before = kept.leaves[index - 1];
+            const gap = node.getBoundingClientRect().top - before.getBoundingClientRect().bottom;
             const by = space - gap;
-            nudge(node, by);
+            const own = frameOf(node, commonAncestor(node, before));
+            nudge(nudged.has(own) ? node : own, by);
             if (Math.abs(by) >= 0.25 && node.getBoundingClientRect().top <= galleryBox.top + 0.5) {
                 moved += by;
             }

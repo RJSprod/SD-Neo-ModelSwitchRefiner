@@ -2455,7 +2455,18 @@ buttons, measured each time:
   that all things in the right appear within its boundary" -- a negative
   margin on a child pulls it up out of its parent's padding and past its edge.
 - **Between each kept thing and the next** (Generate, the progress bar, the
-  gallery), the same way. The gallery-to-buttons gap is the space by definition.
+  gallery), the same way -- each moved by its own frame, the outermost box it
+  is the first thing in short of what it shares with the thing before it
+  (`frameOf` with `commonAncestor`). Gradio wraps a group's components in a
+  box that clips (`overflow: hidden` on the group and on its `.styler`), and
+  Lobe's layout leaves a wider gap between Generate and the gallery than the
+  space, so the first build's margin on the gallery itself pulled its top edge
+  up out through that clip: reported as "the light gray stroke that appears
+  around the image gallery ... appears on the left, bottom, and right... But
+  not the top. In fact, depending how I size the column, a little bit of the
+  top edge of the image gets cut off." The wrapper moves instead, and the
+  gallery stays whole inside it. The gallery-to-buttons gap is the space by
+  definition.
 - **Under the buttons**, to the bottom of the view; the gallery takes the rest.
 
 The margins are written inline with `!important` and the value each node had is

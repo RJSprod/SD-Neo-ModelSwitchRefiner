@@ -86,7 +86,9 @@ body { margin: 0; background: #0b0f19; color: #eee; font: 14px sans-serif;
 .unequal-height { align-items: flex-start; }
 .column { display: flex; flex-direction: column; flex-wrap: wrap; gap: 16px;
           min-width: min(320px, 100%); flex-grow: 1; }
-.gr-group, .styler { display: flex; flex-direction: column; }
+.gr-group, .styler { display: flex; flex-direction: column; overflow: hidden; }
+#txt2img_gallery_container { gap: 24px; }
+#txt2img_gallery { border: 2px solid #777; box-sizing: border-box; }
 .block { position: relative; }
 .grid-wrap { position: relative; padding: 8px; overflow-y: scroll; }
 .grid-container { display: grid; position: relative; gap: 16px;
@@ -323,7 +325,12 @@ MEASURE = """() => {
     const frame = {top: panel.getBoundingClientRect().top,
                    inner: panel.getBoundingClientRect().top + parseFloat(panelStyle.borderTopWidth)
                           + parseFloat(panelStyle.paddingTop)};
-    return {view, ceiling, leaves, frame, first: Math.min(...kept), inner: innerHeight,
+    // The gallery and the clipping box Gradio wraps it in: a gallery drawn
+    // above its wrapper's top has no top edge, and its picture's top is cut.
+    const galleryNode = q("#txt2img_gallery");
+    const wrapper = {top: galleryNode.parentElement.getBoundingClientRect().top,
+                     generateBottom: q("#txt2img_generate_box").getBoundingClientRect().bottom};
+    return {view, ceiling, leaves, frame, wrapper, first: Math.min(...kept), inner: innerHeight,
             buttons: box(q("#image_buttons_txt2img")),
             gallery: box(q("#txt2img_gallery")),
             container: box(q("#txt2img_gallery_container")),
@@ -350,6 +357,15 @@ def assert_spaced(found) -> None:
     # "I would prefer the generate button still render inside the gray box so
     # that all things in the right appear within its boundary."
     assert abs(found["first"] - found["frame"]["inner"]) <= 1, found
+    # The gallery's frame is whole: its top edge is inside the box Gradio
+    # wraps it in, which clips. Asked for after the next build: "the light
+    # gray stroke that appears around the image gallery ... appears on the
+    # left, bottom, and right... But not the top. In fact, depending how I
+    # size the column, a little bit of the top edge of the image gets cut
+    # off." The gap between Generate and the gallery is the space all the
+    # same, so the wrapper is what moved.
+    assert found["gallery"]["top"] >= found["wrapper"]["top"] - 0.5, found
+    assert abs(found["gallery"]["top"] - found["wrapper"]["generateBottom"] - space) <= 1, found
     leaves = found["leaves"]
     for before, after in zip(leaves, leaves[1:]):
         assert abs(after["top"] - before["bottom"] - space) <= 1, (before, after, found)
@@ -645,7 +661,9 @@ GRID_BOX = """() => {
     const tops = [...new Set(items.map((item) => Math.round(item.getBoundingClientRect().top)))];
     const g = gallery.getBoundingClientRect();
     const w = wrap.getBoundingClientRect();
-    return {gallery: [g.top, g.bottom], wrap: [w.top, w.bottom], centre: (w.left + w.right) / 2,
+    // The scroller fills the gallery to the inside of its frame.
+    const frame = parseFloat(getComputedStyle(gallery).borderBottomWidth) || 0;
+    return {gallery: [g.top, g.bottom - frame], wrap: [w.top, w.bottom], centre: (w.left + w.right) / 2,
             client: wrap.clientHeight, scroll: wrap.scrollTop,
             pad: [parseFloat(style.paddingTop), parseFloat(style.paddingBottom)],
             gap: parseFloat(getComputedStyle(wrap.firstElementChild).rowGap),
