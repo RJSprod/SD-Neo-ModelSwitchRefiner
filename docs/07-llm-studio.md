@@ -4291,3 +4291,48 @@ ignores a stranger's claim, which its own test holds.
   at once, delayed ones wait for `fire()`. Node 22's `globalThis.navigator` has
   only a getter; the clipboard stand-in is defined with `Object.defineProperty`.
 - `mc_llm_overlays` owns six surfaces now, not seven.
+
+### 39.6 The user's first run: a tap did nothing (8 October 2026)
+
+> *"I just tried to tap action a message in the LLM Studio … and nothing
+> happened. It didnt bring up the button row or the old pop up UI."*
+
+Gradio 4.40 draws a message as `div.message-row > div.flex-wrap > div.message
+> button[data-testid="bot"]` (its `ChatBot.svelte`): the **words are inside a
+button**, the host's select target, which also turns Enter into a click. The
+row's first build took that button for the bubble — `[data-testid="bot"]` is the
+first selector — and `bubbleAt` refused every tap that landed inside a button,
+so on the real page no tap could ever open a row. Every node test passed,
+because the harness drew a bubble as a `div[data-testid]`: a stand-in that
+proved nothing about the host.
+
+The fix: a matched button stands for its `.message` wrapper (`bubbleOf`), the
+row is appended there — beside the button, never inside it, because a button
+inside a button presses both — and a press inside the host's own message button
+is a press on the message (`messageButtonOf`), while a link in the words, or a
+button of the row, stays its own. The wrapper gets no `tabindex` when the host's
+button is there to focus, and the keydown handler leaves a bubble that *is* a
+button to the click the browser makes of its Enter. Escape, which the README had
+promised, was not wired at all; it is now, from anywhere on the page.
+
+Two tests came out of it. The node harness draws bubbles in three shapes —
+`flat`, `gradio` (the real markup, with Gradio's `handle_select` stood in for)
+and `button` (a theme that kept the button and dropped the wrapper) — and
+`TestGradiosOwnBubble` holds the row beside the button, the tap inside it, the
+link, the row press not selecting, Enter once, and the ordinal counted in
+wrappers; four mutations of the fix each fail a test. And **a live test on real
+Gradio 4.40.0 in Chromium**: `tests/live/llm_studio_row_live.py` builds the
+panel's page (the Chatbot with its id and class, the hidden box and buttons,
+the real script and stylesheet, Forge's `onUiLoaded`/`onAfterUiUpdate` stood in
+for), taps, presses Regenerate and reads `regenerate:assistant:1` back from a
+server handler, and checks the marker survives Gradio's markdown sanitizer with
+its attributes and `hidden`, the rows hidden at rest, the pager, the prompt's
+row, dismiss, Escape, Enter once and Copy. `tests/test_llm_studio_live.py` runs
+it in the interpreter `MC_GRADIO_PYTHON` names and skips without one; with the
+first build put back it fails the way the user's page did. Stock 4.40.0 needs
+Mini Paint NEO's pins (`fastapi==0.112.2`, `pydantic==2.8.2`,
+`huggingface_hub==0.24.6`, `gradio-client==1.2.0`) to launch at all, and its
+`Chatbot` has no `autoscroll` keyword, which the panel passes: the user's Forge
+Neo builds the panel, so its Gradio is a 4.40-lineage build of its own (Forge
+Neo pins `fastapi==0.127.1`, `pydantic==2.10.6`); the live script passes
+`autoscroll` only where the signature takes it.

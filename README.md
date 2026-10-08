@@ -3379,7 +3379,10 @@ the page's audio focus, so Voice Chat and the Voice Box go quiet, and either of
 them speaking pauses it.
 
 The row is drawn in the browser, because a Gradio 4.40 chat bubble has nowhere
-to put a component. A button names which message it is on when it is pressed,
+to put a component. Gradio draws each message as a button holding the words;
+the row sits beside that button, inside the bubble, and a tap anywhere on the
+words — that button included — opens it, while a link in the words stays a
+link. A button names which message it is on when it is pressed,
 not when the row was drawn, so deleting a message above never re-aims a button
 below; the version pager and the message's key travel in a hidden marker at the
 start of every bubble, written by the server. A theme that replaces Gradio's
@@ -6843,7 +6846,7 @@ dispatched at the real listener list has to reach the native submission, no
 timer may be armed by a press or by an hour of nobody touching anything, and the
 hidden roll button the old gate pressed has to go unpressed. Those are the
 properties that make a generation survive a hidden tab and a closed one. It
-skips where node is absent, as `tests/test_llm_studio_js.py` does.
+skips where node is absent, as `tests/test_llm_studio_js.py` does. `tests/test_llm_studio_live.py` goes one step further for the conversation's action row: it runs the real script on a real Gradio 4.40.0 page in Chromium (`tests/live/llm_studio_row_live.py`) when `MC_GRADIO_PYTHON` names a venv that has Gradio 4.40.0 and Playwright, and skips otherwise — because a node stand-in for Gradio's bubbles passed a build on which no tap worked.
 
 `tests/test_krea_progress.py` covers the other half of the same change: that the
 roll reports itself on the bar the generation already has without ever starting

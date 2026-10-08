@@ -383,9 +383,40 @@
     function bubblesIn(holder, selectors) {
         for (let index = 0; index < selectors.length; index += 1) {
             const found = holder.querySelectorAll(selectors[index]);
-            if (found && found.length) return found;
+            if (found && found.length) {
+                const bubbles = [];
+                for (let at = 0; at < found.length; at += 1) {
+                    const bubble = bubbleOf(found[at]);
+                    if (bubbles.indexOf(bubble) < 0) bubbles.push(bubble);
+                }
+                return bubbles;
+            }
         }
         return [];
+    }
+
+    // Gradio 4.40 draws a message as `div.message > button[data-testid]`: the
+    // button is its select target and holds the words, the div is the bubble
+    // the theme paints. The row belongs beside the button, inside the bubble,
+    // not inside the button -- a button inside a button is a tap that presses
+    // both -- so a matched button stands for its wrapper. Anything else (a
+    // theme's own shape, the stand-ins the tests use) is the bubble itself.
+    function bubbleOf(node) {
+        if (node && node.tagName === "BUTTON" && node.parentNode
+            && node.parentNode.classList && node.parentNode.classList.contains("message")) {
+            return node.parentNode;
+        }
+        return node;
+    }
+
+    // The host's own select button inside a bubble, when the bubble has one:
+    // a tap on it is a tap on the message, and Enter or Space on it already
+    // becomes a click, which is why the bubble gets no tabindex of its own.
+    function messageButtonOf(bubble) {
+        if (!bubble) return null;
+        if (bubble.tagName === "BUTTON") return bubble;
+        if (typeof bubble.querySelector !== "function") return null;
+        return bubble.querySelector("button[data-testid]");
     }
 
     function replyBubbles(holder) {
@@ -592,7 +623,12 @@
         if (bar && bar.parentNode && bar.parentNode.removeChild) bar.parentNode.removeChild(bar);
         bubble.dataset.mcLlmActions = stamp;
         bubble.setAttribute("data-mc-role", meta.role);
-        if (!bubble.getAttribute("tabindex")) bubble.setAttribute("tabindex", "0");
+        // Focusable from the keyboard -- unless the host's own message button
+        // is there to be focused, in which case a second tab stop on the same
+        // message would be one too many.
+        if (!bubble.getAttribute("tabindex") && !messageButtonOf(bubble)) {
+            bubble.setAttribute("tabindex", "0");
+        }
         bar = rowFor(holder, bubble, role);
         bubble.appendChild(bar);
         applyVibe(bubble, bar, key);
@@ -618,20 +654,26 @@
 
     function bubbleAt(holder, target) {
         if (!target || typeof target.closest !== "function") return null;
-        // A press on a control inside the bubble is that control's; a
-        // selection inside it is reading.
-        if (target.closest("button, a, input, textarea, select, ." + ROW_CLASS)) return null;
+        // A selection inside the bubble is reading, not a tap.
         const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
         if (selection && !selection.isCollapsed) return null;
         const selectors = REPLY_SELECTORS.concat(PROMPT_SELECTORS);
-        for (let index = 0; index < selectors.length; index += 1) {
-            const found = target.closest(selectors[index]);
+        let bubble = null;
+        for (let index = 0; index < selectors.length && !bubble; index += 1) {
+            const found = bubbleOf(target.closest(selectors[index]));
             if (found && holder.contains && holder.contains(found) && found.dataset
                 && found.dataset.mcLlmActions) {
-                return found;
+                bubble = found;
             }
         }
-        return null;
+        if (!bubble) return null;
+        // A press on a control inside the bubble is that control's -- a link
+        // in the words, a button of the row -- except the host's own message
+        // button, which *is* the message: Gradio 4.40 wraps every message's
+        // words in one, so a tap anywhere on the words lands inside it.
+        const control = target.closest("button, a, input, textarea, select, ." + ROW_CLASS);
+        if (control && control !== bubble && control !== messageButtonOf(bubble)) return null;
+        return bubble;
     }
 
     function roleOf(bubble) {
@@ -675,11 +717,14 @@
             const bubble = bubbleAt(holder, event.target);
             if (bubble) toggle(holder, bubble);
         });
-        // Enter or Space on a focused message does what a tap does.
+        // Enter or Space on a focused message does what a tap does. A message
+        // that is a button already turns those keys into a click, which the
+        // handler above takes; toggling here as well would open and close it.
         holder.addEventListener("keydown", function (event) {
             if (!event || (event.key !== "Enter" && event.key !== " ")) return;
             const bubble = event.target;
             if (!bubble || !bubble.dataset || !bubble.dataset.mcLlmActions) return;
+            if (bubble.tagName === "BUTTON") return;
             event.preventDefault();
             toggle(holder, bubble);
         });
@@ -695,6 +740,12 @@
                 if (open && target && typeof open.contains === "function" && open.contains(target)) {
                     return;
                 }
+                reveal(holder, "");
+            }, true);
+            // Escape puts the open row away from anywhere on the page, the
+            // way it closes everything else of this tab's.
+            window.addEventListener("keydown", function (event) {
+                if (!revealed || !event || event.key !== "Escape") return;
                 reveal(holder, "");
             }, true);
         }
