@@ -2039,6 +2039,18 @@ load into `<LLM data root>/logs/model_chain.log`, beside the managed LLM's own
 log, so if completion is missing the reason is a line in a file rather than
 something to go looking for in the browser's developer tools.
 
+**Temporary: a watcher on the Generate box.** Reported under the Lobe theme's
+split previewer: after a sequence of focus mode and the flyout's docked
+settings column, Txt2Img's Generate box ends up back in the left column. No
+script on the page is known to move it there, so until the mover is caught
+`javascript/model_chain_watch_generate.js` watches the box and writes every
+DOM call that moves it (with the caller's stack), every change of its ancestry,
+and the moments around them — focus, the dock, the panel, full screen, resizes,
+tab changes, Gradio requests — as `Model Chain watch:` lines in
+`model_chain.log` (`mc_generate_watch`, `POST /model-chain/generate-box/watch`).
+Elements are named by id and class only; no text travels. It comes out once the
+log has caught the mover.
+
 **Always on screen, always in effect.** The row is there whether or not
 Creative or Spatial is on, and what is in it goes into every generation either
 way — what is in effect is what you can see. It used to appear only while one

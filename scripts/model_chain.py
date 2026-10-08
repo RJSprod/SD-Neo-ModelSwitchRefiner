@@ -26,6 +26,7 @@ import mc_broker
 import mc_hint
 import mc_infotext
 import mc_literal_report
+import mc_generate_watch  # TEMPORARY: the Generate box watcher
 import mc_llm_conversation_api
 import mc_llm_conversation_startup
 import mc_llm_paths
@@ -4301,6 +4302,8 @@ try:
     script_callbacks.on_app_started(mc_arm.on_app_started)
     script_callbacks.on_app_started(mc_logfile.attach)
     script_callbacks.on_app_started(mc_literal_report.install)
+    # TEMPORARY: the Generate box watcher's route (mc_generate_watch).
+    script_callbacks.on_app_started(mc_generate_watch.install)
     # The Voice Chat browser routes. Registered here rather than at import for
     # the reason every other route in this file is: there is no FastAPI app to
     # add anything to until the host has one.
