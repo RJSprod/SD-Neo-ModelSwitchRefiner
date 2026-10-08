@@ -27,7 +27,7 @@ The speech marker, and why it is a closure
 ------------------------------------------
 :func:`speech_marker` takes a function that hands over the text of a reply that
 *completed*, and returns a Gradio handler. The chat panel wires that handler with
-``.success(...)`` on each of the six reply-producing runs, and passes its own
+``.success(...)`` on each of the five reply-producing runs, and passes its own
 "what did the last run finish with" reader in. Two things fall out of that shape:
 
     the dependency points one way -- the panel does not import a voice module to
@@ -1339,6 +1339,15 @@ def pocket_html() -> str:
         f'<button type="button" class="mc-voice-install" data-mc-voice-pocket-install'
         f'{" disabled" if not found.platform_supported else ""}>'
         f'{_pocket_button(found)}</button>'
+        # Its own button rather than a mode of Install, because it is asked for
+        # on an installation that is complete: a new PocketTTS release is picked
+        # up by pressing it, and a runtime somebody suspects is broken is put
+        # right by pressing it. Pressable whenever anything is on disk.
+        f'<button type="button" class="mc-voice-install mc-voice-reinstall" '
+        f'data-mc-voice-pocket-reinstall'
+        f'{"" if found.present and found.platform_supported else " disabled"} '
+        f'title="Remove the installed PocketTTS runtime, model and official voices and '
+        f'install this build\'s again. Saved voices are kept.">Reinstall</button>'
         f'</div>'
         f'<p class="mc-voice-note">A streaming model that speaks with reviewed official '
         f'voices and can make a voice of its own from a short recording you take here. It '
@@ -1426,7 +1435,15 @@ def _pocket_button(found) -> str:
     checks whether it is already installed and says so rather than downloading
     again, so "Install what is missing" is a description of what happens rather
     than a promise this layer is making.
+
+    A fourth state since the 3.3.0 pin: an installation from an earlier release
+    is complete and useless, and the press that fixes it is a reinstall, which
+    the adapter does on an Install press too -- so the button says what will
+    happen. The Reinstall button beside it is for an installation that is not
+    stale.
     """
+    if found.stale:
+        return "Reinstall PocketTTS"
     if found.complete:
         return "Installed"
     if found.ready:

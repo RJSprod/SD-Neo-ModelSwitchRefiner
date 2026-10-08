@@ -1308,6 +1308,14 @@ class Job:
     batch: int = 1
     names: list = field(default_factory=list)
     """Each take's output name, in take order."""
+    origin: dict = field(default_factory=dict)
+    """Who asked, when it was not the Voice Box's own Render: :data:`ORIGIN_KEYS`.
+
+    LLM Studio's Send to VibeVoice sends a message's text with the thread, the
+    message and a digest of its words as one ``key``, and finds the render
+    again after a reload by asking :func:`outputs` for that key. Kept on the
+    output's record for that reason, and shown nowhere else.
+    """
     output_ids: list = field(default_factory=list)
     phase: str = QUEUED
     reason: str = ""
@@ -1340,6 +1348,7 @@ class Job:
         return {"id": self.id, "name": self.name, "pipeline_id": self.pipeline_id,
                 "phase": self.phase, "reason": self.reason, "warning": self.warning,
                 "progress": dict(self.progress), "output_id": self.output_id,
+                "origin": dict(self.origin),
                 "output_ids": list(self.output_ids), "batch": self.batch,
                 "created": self.created, "started": self.started, "ended": self.ended,
                 "elapsed": self.elapsed(), "seed": self.seed, "seed_drawn": self.seed_drawn,
@@ -1468,8 +1477,33 @@ def _end(job: Job, phase: str, warning: str = "") -> None:
     job.ended = _now()
 
 
+ORIGIN_KEYS = ("kind", "key", "label")
+ORIGIN_CHARS = 200
+"""What a render's ``origin`` may carry: three short strings and nothing else.
+
+Another tab on the page names itself (``kind``), the thing it rendered
+(``key``, which it chooses and reads back) and a label for a person. A record
+is kept on the job and the output, so it is held to a shape the file format
+and the page can take whatever a caller sends: a key is cut to
+:data:`ORIGIN_CHARS`, a value that is not a string is dropped, and anything
+that is not a mapping is no origin at all.
+"""
+
+
+def _clean_origin(value) -> dict:
+    """The origin a caller sent, held to :data:`ORIGIN_KEYS`. Never raises."""
+    if not isinstance(value, dict):
+        return {}
+    found = {}
+    for key in ORIGIN_KEYS:
+        text = value.get(key)
+        if isinstance(text, str) and text.strip():
+            found[key] = text.strip()[:ORIGIN_CHARS]
+    return found
+
+
 def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str = "",
-           inline: dict | None = None) -> dict:
+           inline: dict | None = None, origin: dict | None = None) -> dict:
     """Queue a render of ``prompt`` with a configuration, for a pipeline. Returns the job.
 
     The configuration is the saved one ``configuration_id`` names, or ``inline``
@@ -1481,6 +1515,10 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
 
     A configuration with no seed gets one drawn here, so the job says from the
     start which seed it renders with and its output records it.
+
+    ``origin`` is for a render asked for from another tab (:data:`ORIGIN_KEYS`):
+    kept on the job and written into the output's record, so the tab that asked
+    can find its render again, and otherwise changing nothing about the render.
     """
     if _turns is None:
         raise VoiceBoxError("Voice Box is not connected to the cards on this WebUI.")
@@ -1545,7 +1583,8 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
                  for take in range(batch)]
     job = Job(id=_new_id(), name=names[0], pipeline_id=owner["id"],
               prompt=str(prompt), configuration=chosen, card=card, configuration_id=source,
-              seed=int(seed), seed_drawn=drawn, batch=batch, names=names)
+              seed=int(seed), seed_drawn=drawn, batch=batch, names=names,
+              origin=_clean_origin(origin))
     # The answer is the job as it was queued. Read after the card's thread has
     # it, it could already say the job had started, depending on who ran first.
     queued = job.to_dict()
@@ -1704,6 +1743,7 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
             "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
                          for number, voice in sorted(voices.items())],
             "prompt": job.prompt,
+            "origin": dict(job.origin),
             "sections": len(sections),
             "take": take + 1,
             "takes": takes,

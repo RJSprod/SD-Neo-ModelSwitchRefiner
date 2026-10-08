@@ -892,7 +892,8 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
                         None, None, None, None))
 
         shown = chat._transcript(chats.load("Ada", conversation.identifier))[0][0]
-        assert shown.startswith("<img src=\"file=")
+        # After the row's marker, which every bubble now starts with.
+        assert shown.split("\n\n", 1)[1].startswith("<img src=\"file=")
         assert shown.endswith("what is this")
 
     def test_a_model_with_no_eyes_refuses_before_anything_is_written(self, store, host,
@@ -925,7 +926,8 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
                                     messages=[Message(role="user", versions=["hello love"])])
         rows, _ = chat._view(conversation)
 
-        assert rows == [["hello love", None]]
+        assert [[cell.split("\n\n")[-1] if cell else cell for cell in row] for row in rows] == \
+            [["hello love", None]]
 
 
 # --------------------------------------------------------------------------- #

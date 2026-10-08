@@ -492,6 +492,22 @@ class Status:
     model_message: str = ""
     cloning_message: str = ""
     closure: dict = field(default_factory=dict)
+    stale: bool = False
+    """Whether what is on disk is an earlier PocketTTS than this build pins.
+
+    A runtime closure that has moved on since it was installed, a model marker
+    at an earlier declaration, or cloning weights recorded for an earlier model.
+    Not one of the five readinesses: it is the one state whose remedy is a
+    reinstall rather than an install, and it is reported in those words so that
+    a 3.0.2 installation under the 3.3.0 pin reads as "press Reinstall" and not
+    as "not installed" -- which it plainly is not -- or as "installed", which
+    would leave the engine refusing to start with nothing on screen saying why.
+    """
+    stale_message: str = ""
+    present: bool = False
+    """Whether any part of PocketTTS is on disk at all, which is what makes
+    Reinstall a button that does something rather than an Install by another
+    name."""
 
     @property
     def ready(self) -> bool:
@@ -521,6 +537,8 @@ class Status:
 
     @property
     def message(self) -> str:
+        if self.stale:
+            return self.stale_message
         if self.ready:
             return "Installed." if self.cloning_ready else \
                 "Installed — official voices. Cloning needs upstream access."
@@ -587,9 +605,13 @@ def _status() -> Status:
         # The closure id is derived from the platform id and every wheel's hash,
         # so this is true exactly when the pinned closure has changed -- which
         # is the moment a saved voice's fingerprint stops meaning what it meant.
-        # Reported rather than silently re-used (I-PKT-18).
-        found.runtime_message = ("Installed, but this build pins a different PocketTTS "
-                                 "runtime. Install it again to update.")
+        # Reported rather than silently re-used (I-PKT-18), and reported as the
+        # thing it is: a reinstall, with both versions named.
+        found.stale = True
+        found.runtime_message = (
+            f"Installed — PocketTTS {installed.get('pocket_version') or 'an earlier release'}; "
+            f"this build pins PocketTTS {pinned_version() or 'a newer release'}. Press "
+            f"Reinstall to update.")
     else:
         found.runtime_ready = True
         found.runtime_message = (
@@ -599,11 +621,19 @@ def _status() -> Status:
 
     root = paths.pocket_model_root(entry.identifier)
     model = _read_json(root / paths.INSTALLED_FILENAME)
+    found.present = bool(installed or model)
     missing = [name for name in entry.required_paths if not (root / name).exists()]
     if not entry.required_paths:
         found.model_message = ("Not installed — this build has not recorded the PocketTTS "
                                "model artifacts yet. A maintainer runs "
                                "tools/pin_pocket_models.py.")
+    elif model and _model_outdated(model, entry):
+        # Before the missing-files check on purpose: a 3.0.2 model directory is
+        # missing this build's tokenizer.json, and "Not installed" is not what
+        # it is. It is installed, at a declaration this build no longer makes.
+        found.stale = True
+        found.model_message = (f"Installed — {entry.label}, at an earlier revision than "
+                               f"this build declares. Press Reinstall to update.")
     elif not model or missing:
         found.model_message = (f"Not installed — {entry.label}, about "
                                f"{models._bytes_label(entry.download_bytes)}.")
@@ -622,6 +652,10 @@ def _status() -> Status:
         found.cloning_message = ("Voice cloning needs PocketTTS's gated weights, which this "
                                  "build has not recorded yet. A maintainer runs "
                                  "tools/pin_pocket_models.py.")
+    elif cloning and _cloning_outdated(cloning, entry):
+        found.stale = True
+        found.cloning_message = ("Installed for an earlier PocketTTS model than this build "
+                                 "declares. Press Reinstall to update.")
     elif cloning and not gone:
         found.cloning_ready = bool(found.runtime_ready and found.speech_model_ready)
         found.cloning_message = "Installed — you can clone a voice from a recording."
@@ -631,7 +665,73 @@ def _status() -> Status:
             f"accept the conditions at huggingface.co/{entry.cloning_repo} with your own "
             f"account, then save an access token under Settings → Voice Chat → Access "
             f"token and press Install. Official PocketTTS voices work without this.")
+    if found.stale:
+        # One sentence over the four lines, because the four say which part
+        # moved and this says what to do about all of them: a reinstall is one
+        # press, and what it keeps is the part somebody would hesitate over.
+        was = str((installed or {}).get("pocket_version") or "")
+        found.stale_message = (
+            f"PocketTTS needs a reinstall: this build pins PocketTTS "
+            f"{pinned_version() or 'a newer release'}"
+            + (f" and what is installed is {was}" if was else
+               " and what is installed is from an earlier release")
+            + ". Press Reinstall — your saved voices are kept, and are rebuilt for the "
+              "new model.")
     return found
+
+
+def pinned_version() -> str:
+    """The PocketTTS release this build's manifest pins, for a sentence that names it."""
+    try:
+        return str((manifest().get("runtime") or {}).get("version") or "")
+    except PocketError:
+        return ""
+
+
+def _declared(entry: Bundle) -> dict:
+    """What this build declares the installed model to be, as the record an install writes.
+
+    Read back by :func:`_model_outdated` against the manifest of whichever
+    build is running later. The revisions are upstream's commits for the
+    weights, the official voice states and the cloning weights, and the file
+    names are the required paths -- so a model whose declaration moved in any
+    of those reads as needing a reinstall, whether the move was a new upload
+    under the same name (3.0.2's english_2026-04 weights to 3.3.0's
+    english_2026-09, same filename) or a new file altogether (tokenizer.model to
+    tokenizer.json).
+    """
+    return {"revision": entry.revision,
+            "voice_revision": entry.voice_revision,
+            "cloning_revision": entry.cloning_revision,
+            "files": sorted(str(item.local_name) for item in entry.artifacts)}
+
+
+def _model_outdated(model: dict, entry: Bundle) -> bool:
+    """Whether an installed model record names an earlier declaration than this build's.
+
+    A record written by this build carries ``declared`` and is compared key by
+    key. A record from before that -- 3.0.2's installer wrote the public
+    revision alone -- is compared on that revision. A record with neither, or
+    one at ``main``, is a folder install from before revisions were recorded or
+    a test's stand-in, and is not read as outdated: a reinstall this code cannot
+    justify is a download nobody asked for.
+    """
+    if not model:
+        return False
+    declared = model.get("declared")
+    if isinstance(declared, dict):
+        wanted = _declared(entry)
+        return any(declared.get(key) != wanted[key] for key in wanted if key in declared)
+    revision = str(model.get("revision") or "")
+    return bool(revision) and revision != "main" and revision != entry.revision
+
+
+def _cloning_outdated(record: dict, entry: Bundle) -> bool:
+    """Whether the gated weights on disk were recorded for an earlier cloning revision."""
+    if not record:
+        return False
+    revision = str(record.get("revision") or "")
+    return bool(revision) and revision != "main" and revision != entry.cloning_revision
 
 
 CLONING_MARKER = "installed-cloning.json"
@@ -1058,6 +1158,51 @@ def install(on_status=None, on_progress=None, cloning: bool = True) -> Status:
     Installing Pocket modifies neither Kokoro nor Sopro, and there is no shared
     staging tree, marker file or runtime.
     """
+    if status().stale:
+        # What is on disk is an earlier release than this build pins, so
+        # "install what is missing" would fetch this build's runtime beside a
+        # model directory and voice states prepared for the old one. The press
+        # that means "make this work" is a reinstall, and the panel's button
+        # says so before it is pressed.
+        return reinstall(on_status=on_status, on_progress=on_progress)
+    return _install(on_status=on_status, on_progress=on_progress, cloning=cloning)
+
+
+def reinstall(on_status=None, on_progress=None) -> Status:
+    """Remove the installed PocketTTS and install this build's again. Saved voices are kept.
+
+    The Reinstall button, and what Install does on an installation this build
+    reads as stale. The runtime is stopped first -- a worker holding the old
+    closure's files open is a removal that leaves pieces -- then the runtime,
+    the model directory (the gated weights with it), the official voice states,
+    the staging area and the previews go, and :func:`_install` fetches
+    everything the manifest declares. Custom voices are not touched: each keeps
+    the recording it was made from and its prepared states live under the
+    model's fingerprint, so the voice library offers **Rebuild** for the new
+    model rather than losing anything (I-PKT-15). Nothing here asks which
+    engine is selected, unlike :func:`uninstall`: PocketTTS being the selected
+    engine is exactly when somebody presses this.
+    """
+    try:
+        import mc_voice_pocket_runtime as runtime
+
+        runtime.stop("PocketTTS is being reinstalled")
+    except Exception:
+        logger.debug("Model Chain: could not stop PocketTTS before reinstalling it",
+                     exc_info=True)
+    for root in (paths.pocket_runtime_root(), paths.pocket_models_root(),
+                 paths.pocket_official_root(), paths.pocket_staging_root(),
+                 paths.pocket_preview_root()):
+        if paths.pocket_inside(root):
+            shutil.rmtree(root, ignore_errors=True)
+    _manifest_cache_clear()
+    logger.info("Model Chain: PocketTTS's runtime, model and official voices were removed "
+                "for a reinstall; saved voices were kept")
+    return _install(on_status=on_status, on_progress=on_progress, cloning=True)
+
+
+def _install(on_status=None, on_progress=None, cloning: bool = True) -> Status:
+    """The four-part transaction :func:`install` describes, on a tree that is not stale."""
     say = models._narrator(KIND, on_status)
     tick = models._ticker(KIND, on_progress)
     with models._claim(KIND, say, bundle().identifier):
@@ -1176,7 +1321,7 @@ def install_model(on_status=None, on_progress=None, folder=None) -> None:
     target = paths.pocket_model_root(entry.identifier)
     marker = _read_json(target / paths.INSTALLED_FILENAME)
     missing = [name for name in entry.required_paths if not (target / name).exists()]
-    if marker and not missing:
+    if marker and not missing and not _model_outdated(marker, entry):
         say(f"{entry.label} is already installed.")
         tick(1.0)
         return
@@ -1203,6 +1348,10 @@ def install_model(on_status=None, on_progress=None, folder=None) -> None:
             "id": entry.identifier,
             "repo": entry.public_repo,
             "revision": entry.revision,
+            # The whole declaration, so a later build whose manifest moved any
+            # part of it reads this directory as needing a reinstall rather
+            # than as installed (see _model_outdated).
+            "declared": _declared(entry),
             "license": entry.license,
             "attribution": entry.attribution,
             "digests": {name: digest for name, digest in sorted(digests.items())},
@@ -1296,7 +1445,7 @@ def install_cloning(on_status=None, on_progress=None, folder=None) -> None:
         raise PocketError("Install the PocketTTS model before its voice-cloning weights.")
     marker = _read_json(target / CLONING_MARKER)
     gone = [name for name in entry.cloning_required_paths if not (target / name).exists()]
-    if marker and not gone:
+    if marker and not gone and not _cloning_outdated(marker, entry):
         say("The PocketTTS voice-cloning weights are already installed.")
         tick(1.0)
         return

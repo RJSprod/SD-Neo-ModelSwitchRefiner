@@ -326,13 +326,16 @@
 
     // One event on `document`, "mc:audio-focus", `{owner, kind}` (docs/23-voice-box.md
     // section 8). This side says "voice-chat" before it speaks or opens a
-    // microphone, and gives the speaker and every microphone up when Voice Box
-    // says it is about to use either (`yieldAudioFocus`, at the end). Every
-    // hook is guarded, so a page with only one of the two behaves exactly as it
-    // did before the event existed.
+    // microphone, and gives the speaker and every microphone up when one of
+    // the owners it knows says they are about to use either (`yieldAudioFocus`,
+    // at the end): the Voice Box, and since the action row LLM Studio's own
+    // Play of a VibeVoice render. A stranger's claim is ignored -- a reply being
+    // read out is not stopped by an event nobody here recognises. Every hook is
+    // guarded, so a page with only one of them behaves exactly as it did
+    // before the event existed.
     const FOCUS_EVENT = "mc:audio-focus";
     const FOCUS_OWNER = "voice-chat";
-    const FOCUS_RIVAL = "voice-box";
+    const FOCUS_RIVALS = ["voice-box", "llm-studio"];
 
     function announceAudioFocus(kind) {
         if (typeof CustomEvent !== "function" || typeof document === "undefined" || !document
@@ -4195,6 +4198,29 @@
             });
         }
 
+        // Reinstall: the same route with one flag, which removes what is on
+        // disk (saved voices excepted) and fetches everything again. Its own
+        // button because it is pressed on an installation that is complete --
+        // a new PocketTTS release, or a runtime somebody suspects -- and
+        // Install on a stale installation does the same thing by itself.
+        const reinstall = row.querySelector("[data-mc-voice-pocket-reinstall]");
+        if (reinstall) {
+            reinstall.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                reinstall.disabled = true;
+                if (install) install.disabled = true;
+                post(ROUTES.pocketInstall, {reinstall: true}, holder).then(function (payload) {
+                    if (payload && payload.error) {
+                        reinstall.disabled = false;
+                        if (install) install.disabled = false;
+                        setText(row, '[data-mc-voice-status="pocket"]', payload.error);
+                        return;
+                    }
+                    pollPocket(holder, row, 1200);
+                });
+            });
+        }
+
         // The manual half, four parts of it. `startInstall` speaks Kokoro's
         // install route and this one takes a part name, so these buttons are
         // handled here and skipped by the generic handler above -- attaching
@@ -4302,12 +4328,23 @@
         const install = row.querySelector("[data-mc-voice-pocket-install]");
         if (install) {
             install.disabled = !!progress.running || !payload.platform_supported;
-            // Three states, matching the server's. "Installed" from `installed`
+            // Four states, matching the server's. "Installed" from `installed`
             // alone meant a machine whose gated half had been refused read
-            // finished, with the Clone panel below it saying the opposite.
-            install.textContent = payload.complete
-                ? "Installed"
-                : (payload.installed ? "Install what is missing" : "Install PocketTTS");
+            // finished, with the Clone panel below it saying the opposite; and
+            // an installation from an earlier release than this build pins is
+            // complete and useless, so its button says what pressing it does.
+            install.textContent = payload.stale
+                ? "Reinstall PocketTTS"
+                : (payload.complete
+                    ? "Installed"
+                    : (payload.installed ? "Install what is missing" : "Install PocketTTS"));
+        }
+        const reinstall = row.querySelector("[data-mc-voice-pocket-reinstall]");
+        if (reinstall) {
+            // Pressable whenever anything is on disk to remove; an empty tree
+            // has Install for that.
+            reinstall.disabled = !!progress.running || !payload.platform_supported
+                || !payload.present;
         }
         // The rest of this surface is server-rendered from the same readiness --
         // the Clone panel's whole body is chosen by it, not just its status line
@@ -4317,7 +4354,7 @@
         // poll that sees no news costs nothing.
         const settled = !progress.running;
         const now = [payload.installed, payload.complete, payload.cloning_ready,
-                     payload.official_voices_ready].join("/");
+                     payload.official_voices_ready, !!payload.stale].join("/");
         if (settled && pocketReadiness !== null && pocketReadiness !== now) {
             pocketReadiness = now;
             attempt("redraw the Voice Chat settings", swapSurface);
@@ -7208,11 +7245,11 @@
     // microphone this file can have open: the flyout's dictation (kept and
     // transcribed, as a press of its own button would), the composer's slide
     // (ended as a release would) and the clone recorder (its take lands in the
-    // trimmer, as Stop recording would). Only Voice Box's word does this; this
-    // file's own announcements pass through untouched.
+    // trimmer, as Stop recording would). Only a rival's word does this; this
+    // file's own announcements and a stranger's pass through untouched.
     function yieldAudioFocus(event) {
         const detail = event && event.detail;
-        if (!detail || detail.owner !== FOCUS_RIVAL) return;
+        if (!detail || !detail.owner || FOCUS_RIVALS.indexOf(detail.owner) < 0) return;
         attempt("give up the speaker", function () {
             if (speech || playing || speaking) stopSpeaking(true, "audio-focus");
         });

@@ -202,13 +202,16 @@ class TestSuccessOnlySpeech:
 
         markers = [(kind, fn) for kind, fn in recorded
                    if getattr(fn, "__name__", "") == "marker"]
-        assert len(markers) == 6, (
-            f"expected the speech marker on all six reply paths, found {len(markers)}")
+        # Send, the composer's submit, Regenerate, Continue and Send again from
+        # here. Six until the action row: the sheet's Regenerate and the reply's
+        # own ↻ were two paths to one action, and the row is one.
+        assert len(markers) == 5, (
+            f"expected the speech marker on all five reply paths, found {len(markers)}")
         assert all(kind == "success" for kind, _fn in markers), (
             "the speech marker is attached with .then(), which runs after a run that "
             "failed — a failed generation would be read aloud")
 
-    def test_the_six_paths_share_one_marker_object(self):
+    def test_the_five_paths_share_one_marker_object(self):
         """Section 49: the registration must be structurally shared, so fixing
         one path cannot leave another silently unspoken."""
         import conftest
@@ -227,7 +230,7 @@ class TestSuccessOnlySpeech:
             conftest._Dependency._chain = original
 
         markers = {id(fn) for fn in recorded if getattr(fn, "__name__", "") == "marker"}
-        assert len(markers) == 1, "the six paths were wired with six different handlers"
+        assert len(markers) == 1, "the five paths were wired with five different handlers"
 
 
 class TestWhatTheRunLeftBehind:
@@ -799,6 +802,44 @@ class TestThePocketSurface:
         for name, value in changed.items():
             setattr(found, name, value)
         return found
+
+    def test_a_reinstall_button_is_offered_whenever_anything_is_on_disk(self, monkeypatch):
+        """The user's ask, word for word: "i need a reinstall button in the
+        settings voice chat menu for pocket TTS". Beside Install, pressable on an
+        installation that is complete, and greyed on an empty tree."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "status", lambda: self._ready(present=True))
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        assert "data-mc-voice-pocket-reinstall" in markup
+        button = markup.split("data-mc-voice-pocket-reinstall")[1].split("</button>")[0]
+        assert "disabled" not in button
+        assert button.endswith(">Reinstall")
+        assert "Saved voices are kept" in button
+
+        monkeypatch.setattr(pocket, "status",
+                            lambda: self._ready(present=False, runtime_ready=False,
+                                                speech_model_ready=False))
+        empty = mc_voice_ui.settings_html()
+        button = empty.split("data-mc-voice-pocket-reinstall")[1].split("</button>")[0]
+        assert "disabled" in button
+
+    def test_a_stale_installation_leads_with_the_reinstall_sentence(self, monkeypatch):
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "status", lambda: self._ready(
+            present=True, stale=True, runtime_ready=False,
+            stale_message="PocketTTS needs a reinstall: this build pins PocketTTS 3.3.0 "
+                          "and what is installed is 3.0.2. Press Reinstall."))
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        line = markup.split('data-mc-voice-status="pocket">')[1].split("</div>")[0]
+        assert line.startswith("PocketTTS needs a reinstall")
+        install = markup.split("data-mc-voice-pocket-install")[1].split("</button>")[0]
+        assert "Reinstall PocketTTS" in install
 
     def test_the_panel_reports_five_readinesses_and_not_one_boolean(self):
         """Section 24. A machine whose speech works and whose Clone button does

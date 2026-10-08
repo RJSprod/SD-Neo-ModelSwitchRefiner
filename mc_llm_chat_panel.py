@@ -39,8 +39,6 @@ cannot create a control in response to a click. The states are:
     to the other workspaces.
 ``THREADS_SCREEN`` / ``CHARACTER_SCREEN`` / ``PERSONA_SCREEN``
     One destination each, opened from the nav sheet.
-``MESSAGE_ACTION_SHEET``
-    A bottom sheet applying to the message that was tapped.
 ``MESSAGE_EDIT_MODE``
     The composer, temporarily replaced by an editor for the selected message.
 ``ATTACHMENT_PREVIEW``
@@ -50,18 +48,35 @@ Only one of the four screens is ever open: :func:`_screens` is the single
 function that says so, and every handler that opens one returns its whole
 answer rather than toggling a component of its own.
 
-Per-message actions, and why they are a sheet
----------------------------------------------
+Per-message actions, and why they are a row in the bubble
+---------------------------------------------------------
 Gradio 4.40's ``Chatbot`` renders the value it is given and nothing else, so
-there is nowhere to hang a ``⋯`` on a bubble. The component's own ``select``
-event is what nominates a message -- tap a bubble and it says which -- and the
-actions are drawn once, in a sheet that overlays the bottom of the transcript,
-applying to whichever message is nominated. Everything the standalone menu
-offers is there: edit, regenerate, continue, send again from here, branch from
-here, delete, delete from here, and the version pager a regenerate leaves
-behind. A sheet rather than a row in the flow, because a row inserted between
-the transcript and the composer moves both of them every time you tap a
-message.
+there is nowhere to hang a component on a bubble. The actions used to be a
+sheet over the bottom of the transcript, opened by the component's ``select``
+event, with a line saying which message it applied to. They are a row of icon
+buttons *inside* the bubble now, shown by a tap on the message and put away by
+the next, drawn by ``javascript/llm_studio.js`` the way the Forge Assistant
+draws its own -- "I like how in conversation mode flyout, I can access the
+action right in the message" -- for both the character's replies and your own
+prompts. Everything the sheet offered is there: edit, regenerate, continue,
+send again from here, branch from here, delete, delete from here and the
+version pager a regenerate leaves behind; and three the sheet did not have,
+Copy, Send to VibeVoice and Play, which are the browser's and the Voice Box's
+and never reach this file.
+
+What reaches this file is a **nomination**. A button in a row writes which
+message it is on -- ``assistant:2``, the third reply counted down the
+transcript, or ``user:0`` -- into one hidden box and presses one hidden button
+per action. Each handler turns that into a message index through the
+``positions`` map the transcript was drawn with (:func:`_nominated`) and calls
+the same function the sheet's button called. The browser nominates; Python
+decides, loads, streams and saves. There is no round trip on the tap itself,
+which is why the row opens at once.
+
+The row needs two things only Python knows: how many versions a reply has and
+which is showing, and a key the Voice Box can file a render under. Both ride
+inside the bubble as a hidden marker the browser reads (:func:`_meta`), so
+every write of the transcript -- a refresh, a streamed token -- carries them.
 
 **Edit** means two different things and is two different things. A reply is text
 on the transcript, so editing it rewrites that text where it sits. One of your
@@ -72,17 +87,10 @@ from keeps every one of them. The same rule regenerating follows, for the same
 reason: nothing a reader typed or was told is thrown away to make room for a
 second attempt.
 
-Regenerate is the one action that also has an icon on the bubble itself, because
-it is the one asked for often enough that three taps is two too many. The icon
-is drawn in the browser -- there is nowhere in a Gradio 4.40 bubble to put a
-component -- and all it does is nominate a reply: the handler behind it is the
-sheet's, so the two can never mean different things. It is polish in the strict
-sense, and the tab is complete without it.
-
-``Chatbot`` pairs turns, so the row and column the click reports is not the
-index of a message. The map between them is built with the transcript, in one
-pass, and carried in a ``gr.State`` -- deriving it a second time somewhere else
-is how the two would come to disagree.
+``Chatbot`` pairs turns, so a row of the component is not a message index, and
+a reply's ordinal down the transcript is not one either. The map between them
+is built with the transcript, in one pass, and carried in a ``gr.State`` --
+deriving it a second time somewhere else is how the two would come to disagree.
 
 Multimodal attachment follows the same rule the standalone application used:
 an image is offered only when the running model has a projector, and a request
@@ -170,18 +178,16 @@ a ``Cancellation`` object, and it holds the id of the operation the server is
 running. Stop is a request about that id now, not the closing of a generator.
 """
 
-SELECTION_ORDER = ("sheet", "heading", "back", "pager", "forward", "drop",
-                   "regenerate", "continue", "resend", "edit", "edit_box", "edit_image",
-                   "composer")
+SELECTION_ORDER = ("edit", "edit_box", "edit_image", "composer")
 """The order :func:`_selection_updates` answers in.
 
-The action sheet is redrawn from that one function by every handler that
-changes the transcript, so the list of controls it writes into has to be
-written down once. ``tests/test_llm_panels.py`` asserts the two are the same
-length: a handler one value short would put a label into a visibility and
-nothing would raise.
+The editor is redrawn from that one function by every handler that changes
+the transcript, so the list of controls it writes into has to be written down
+once. ``tests/test_llm_panels.py`` asserts the two are the same length: a
+handler one value short would put a label into a visibility and nothing would
+raise.
 
-The last four are not in the sheet. An edit borrows the composer's space rather
+Four, since the action sheet went: an edit borrows the composer's space rather
 than opening a panel of its own, so "which message is selected" decides the
 state of the edit row, of the picture in it, and of the composer -- and because
 they are in this list, every refresh returns the panel to CHAT_HOME without a
@@ -224,11 +230,10 @@ def build() -> dict:
     # whatever is at index 4 by the time it arrives.
     revision_state = gr.State(_token(opened))
     thread_state = gr.State(initial_thread)
-    # Which message the action sheet applies to, and how to get from the
-    # component's (row, column) to that index. Both are State rather than
-    # recomputed, because a transcript that has been edited since the click is
-    # a different transcript and the click has to be read against the one it
-    # was made on.
+    # Which message the editor is open on, and how to get from a nomination
+    # to a message index. Both are State rather than recomputed, because a
+    # transcript that has been edited since the tap is a different transcript
+    # and the nomination has to be read against the one it was made on.
     selected = gr.State(NO_SELECTION)
     positions = gr.State(initial_map)
     # Which overlay is open, by name. Held here rather than read back off the
@@ -314,25 +319,24 @@ def build() -> dict:
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))
 
-            # THE PER-REPLY REGENERATE ICON, as far as Python is concerned.
+            # THE ACTION ROW IN EVERY BUBBLE, as far as Python is concerned.
             #
             # A Gradio 4.40 Chatbot draws its own bubbles and there is nowhere
-            # to put a component on one, so the icon itself is drawn in the
-            # browser by javascript/llm_studio.js. What it does when tapped is
-            # entirely here: it writes which reply was tapped into this box and
-            # presses this button, and the handler below is the same one the
-            # action sheet's Regenerate uses. The browser nominates; Python
-            # decides, loads, streams and saves.
+            # to put a component on one, so the row itself is drawn in the
+            # browser by javascript/llm_studio.js. What a button does when
+            # tapped is entirely here: it writes which message it is on into
+            # this box -- "assistant:2", "user:0" -- and presses the hidden
+            # button for its action, and the handler behind that button is the
+            # one the old action sheet's button called. The browser nominates;
+            # Python decides, loads, streams and saves.
             #
-            # Both are invisible and neither is anything to do without the
-            # other. The icons are polish: with the script absent, or a theme
-            # whose bubbles it cannot recognise, they are simply not drawn and
-            # Regenerate is where it has always been -- on the sheet a tap on
-            # the bubble opens.
-            regenerate_at = gr.Textbox(value="", visible=False, container=False,
-                                       elem_id=ui.ident("chat", "regenerate-at"))
-            regenerate_now = gr.Button("Regenerate this reply", visible=False,
-                                       elem_id=ui.ident("chat", "regenerate-now"))
+            # All invisible, and none of them anything to do without the
+            # script. One box rather than one per action, because a press is
+            # one nomination and one action, and the box's value rides in the
+            # same request as the press.
+            action_at = gr.Textbox(value="", visible=False, container=False,
+                                   elem_id=ui.ident("chat", "action-at"))
+            nominated = _nominated_buttons()
 
             # THE FORGE ASSISTANT'S PLUMBING, as far as Gradio is concerned.
             #
@@ -667,22 +671,13 @@ def build() -> dict:
         # Neither ever holds a transcript or a reply.
         voice_plumbing = mc_voice_ui.plumbing()
 
-        # -- MESSAGE_ACTION_SHEET ------------------------------------------- #
-
-        actions = _action_sheet()
-
     # -- wiring ----------------------------------------------------------- #
     #
     # Everything that changes what the transcript is goes through one output
     # list, so a handler cannot leave the transcript, the position map, the
-    # header and the action sheet describing four different conversations.
+    # header and the editor describing four different conversations.
 
-    selection = {"sheet": actions["sheet"], "heading": actions["heading"],
-                 "back": actions["back"], "pager": actions["pager"],
-                 "forward": actions["forward"], "drop": actions["drop"],
-                 "regenerate": actions["regenerate"], "continue": actions["continue"],
-                 "resend": actions["resend"],
-                 "edit": edit_row, "edit_box": edit_box, "edit_image": edit_image,
+    selection = {"edit": edit_row, "edit_box": edit_box, "edit_image": edit_image,
                  "composer": composer}
     view = ([transcript, positions, selected, status, header]
             + [selection[key] for key in SELECTION_ORDER] + [revision_state])
@@ -705,12 +700,8 @@ def build() -> dict:
     mc_llm_overlays.register("character", character_screen)
     mc_llm_overlays.register("persona", persona_screen)
     mc_llm_overlays.register("voice", voice["screen"])
-    mc_llm_overlays.register("actions", actions["sheet"])
     mc_llm_overlays.register_state(OVERLAY_OWNER, surface)
     screens = _screen_outputs(surface)
-    # The transcript's own handler is the only one that *opens* the action
-    # sheet, so it is the only one that carries the rest of the surfaces.
-    selecting = _selection_outputs(view)
 
     # -- getting about ---------------------------------------------------- #
 
@@ -718,8 +709,7 @@ def build() -> dict:
     # own surfaces out of the way; the shell adds the second handler that opens
     # it. Two handlers on one button, which is what makes one control mean the
     # same thing in Conversation as it does in every other mode.
-    menu.click(fn=_leave, inputs=[character, thread_state],
-               outputs=screens + view, queue=False)
+    menu.click(fn=_close_screens, outputs=screens, queue=False)
     for control in (threads_back, character_back, persona_back, voice["back"]):
         control.click(fn=_close_screens, outputs=screens, queue=False)
 
@@ -847,30 +837,28 @@ def build() -> dict:
                        queue=False)
 
     # -- the per-message actions ------------------------------------------ #
+    #
+    # Every one of these is pressed by the row in a bubble, with the message
+    # it is on nominated in ``action_at``. The nomination rides in the same
+    # request as the press, so there is nothing to race: the handler reads it
+    # against the map the transcript was drawn with and refuses one that no
+    # longer names a message rather than acting on the message now at that
+    # place.
+    where = [character, thread_state, positions, action_at]
 
-    transcript.select(fn=_select_message,
-                      inputs=[character, thread_state, positions, selected],
-                      outputs=selecting, queue=False)
-    actions["close"].click(fn=_close_selection, inputs=[character, thread_state],
-                           outputs=view, queue=False)
-
-    actions["back"].click(fn=_page_version(-1),
-                          inputs=[character, thread_state, selected, revision_state],
-                          outputs=view, queue=False)
-    actions["forward"].click(fn=_page_version(1),
-                             inputs=[character, thread_state, selected, revision_state],
-                             outputs=view, queue=False)
-    actions["drop"].click(fn=_drop_version,
-                          inputs=[character, thread_state, selected, revision_state],
-                          outputs=view, queue=False)
+    nominated["back"].click(fn=_page_at(-1), inputs=where + [revision_state],
+                            outputs=view, queue=False)
+    nominated["forward"].click(fn=_page_at(1), inputs=where + [revision_state],
+                               outputs=view, queue=False)
+    nominated["drop"].click(fn=_drop_at, inputs=where + [revision_state],
+                            outputs=view, queue=False)
 
     # One shape for both roles now. Edit used to be able to move the panel onto
     # another thread -- editing one of your own messages branched -- and
     # answered with the thread list and the open thread in front of the view to
-    # say so. It edits in place, so there is nothing in front of the view.
-    actions["edit"].click(fn=_open_editor,
-                          inputs=[character, thread_state, selected],
-                          outputs=view, queue=False)
+    # say so. It edits in place, so there is nothing in front of the view. The
+    # editor's Save still reads ``selected``, which the open answer set.
+    nominated["edit"].click(fn=_edit_at, inputs=where, outputs=view, queue=False)
     save_edit.click(fn=_commit_edit,
                     inputs=[character, thread_state, selected, edit_box, edit_image,
                             revision_state],
@@ -879,16 +867,12 @@ def build() -> dict:
                                   gr.update(visible=True)),
                       outputs=[edit_row, edit_image, composer], queue=False)
 
-    actions["branch"].click(fn=_branch_here,
-                            inputs=[character, thread_state, selected, search,
-                                    revision_state],
-                            outputs=[threads, thread_state] + view, queue=False)
-    actions["delete"].click(fn=_delete_message,
-                            inputs=[character, thread_state, selected, revision_state],
-                            outputs=view, queue=False)
-    actions["delete_from"].click(fn=_delete_from,
-                                 inputs=[character, thread_state, selected, revision_state],
-                                 outputs=view, queue=False)
+    nominated["branch"].click(fn=_branch_at, inputs=where + [search, revision_state],
+                              outputs=[threads, thread_state] + view, queue=False)
+    nominated["delete"].click(fn=_delete_at, inputs=where + [revision_state],
+                              outputs=view, queue=False)
+    nominated["delete_from"].click(fn=_delete_from_at, inputs=where + [revision_state],
+                                   outputs=view, queue=False)
 
     # -- the attachment ---------------------------------------------------- #
     #
@@ -916,54 +900,37 @@ def build() -> dict:
     # a composer that is one line tall, which is what this one starts as.
     submitted = message.submit(fn=_send, inputs=sent, outputs=stream,
                                show_progress="minimal")
-    # The only streaming handler whose outputs carry the thread list and the
-    # open thread: regenerating in the middle of a thread branches, and a panel
+    # The streaming handlers whose outputs carry the thread list and the open
+    # thread: regenerating in the middle of a thread branches, and a panel
     # left pointing at the thread it came from would apply the next action to
-    # the wrong conversation.
-    regenerating = actions["regenerate"].click(
-        fn=_regenerate,
-        inputs=[character, thread_state, selected] + sampling + [search, revision_state],
+    # the wrong conversation. Continue and Send again from here can land in a
+    # branch too -- Continue on an earlier reply, and Send again from here
+    # always (specification S8).
+    asking = where + sampling + [search, revision_state]
+    regenerating = nominated["regenerate"].click(
+        fn=_regenerate_reply, inputs=asking,
         outputs=[threads, thread_state] + stream, show_progress="minimal")
-    # The same handler, nominated from the bubble instead of from the sheet.
-    # One tap rather than three, which is the whole of what the icon is for.
-    again = regenerate_now.click(
-        fn=_regenerate_reply,
-        inputs=([character, thread_state, positions, regenerate_at] + sampling
-                + [search, revision_state]),
+    continuing = nominated["continue"].click(
+        fn=_continue_at, inputs=asking,
         outputs=[threads, thread_state] + stream, show_progress="minimal")
-    # Continue and Send again from here carry the thread list too now. Both can
-    # land in a branch -- Continue on an earlier reply, and Send again from
-    # here always (specification S8) -- and a panel left pointing at the thread
-    # the reply came from would apply the next action to the wrong one.
-    continuing = actions["continue"].click(
-        fn=_continue,
-        inputs=[character, thread_state, selected] + sampling + [search, revision_state],
-        outputs=[threads, thread_state] + stream, show_progress="minimal")
-    resending = actions["resend"].click(
-        fn=_resend,
-        inputs=[character, thread_state, selected] + sampling + [search, revision_state],
+    resending = nominated["resend"].click(
+        fn=_resend_at, inputs=asking,
         outputs=[threads, thread_state] + stream, show_progress="minimal")
 
-    # The three that start from the action sheet put it away as they go: the
-    # reply is arriving in the transcript behind it, and Stop is in the
-    # composer, which the sheet is covering.
-    for control in (actions["regenerate"], actions["continue"], actions["resend"]):
-        control.click(fn=lambda: gr.update(visible=False), outputs=[actions["sheet"]],
-                      queue=False)
-
-    # Built once and attached to every run below, so a seventh way of producing
+    # Built once and attached to every run below, so a sixth way of producing
     # a reply cannot be added without either joining this loop or being visibly
-    # absent from it. Section 49's requirement is exactly that the registration
+    # absent from it. (Five since the action row: the sheet's Regenerate and the
+    # reply's own ↻ were two paths to one action.) Section 49's requirement is exactly that the registration
     # be structurally shared.
     speech_marker = mc_voice_ui.speech_marker(completed_reply, _character_named)
 
-    for run in (replying, submitted, regenerating, again, continuing, resending):
+    for run in (replying, submitted, regenerating, continuing, resending):
         # The thread list is refreshed because an untitled thread has just been
-        # named, and the selection is dropped because the message it pointed at
-        # may not be the message that is there now.
+        # named, and the view is read back off disk because the message the
+        # editor pointed at may not be the message that is there now.
         run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
                  inputs=[character, search], outputs=[threads])
-        run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
+        run.then(fn=_settle, inputs=[character, thread_state], outputs=view)
         # ``success`` and deliberately not ``then``. Gradio runs a ``then``
         # continuation whether or not the event before it raised, which would
         # make "the run reached its terminal callback" the trigger for speaking
@@ -999,45 +966,32 @@ _MODEL_LABEL = "● Model"
 """What the header's state control says before the shell has told it anything."""
 
 
-def _action_sheet() -> dict:
-    """The per-message actions, as a sheet over the bottom of the transcript.
+NOMINATED_ACTIONS = (
+    ("regenerate", "Regenerate this reply"),
+    ("edit", "Edit this message"),
+    ("continue", "Continue this reply"),
+    ("resend", "Send again from here"),
+    ("branch", "Branch from here"),
+    ("delete", "Delete this message"),
+    ("delete_from", "Delete from here"),
+    ("back", "Show the previous version"),
+    ("forward", "Show the next version"),
+    ("drop", "Delete this version"),
+)
+"""The hidden buttons the row in a bubble presses, by name, with the label each is built with.
 
-    Built once and re-labelled, because Gradio cannot create a control in
-    response to a click: which of these apply to the message in hand is said by
-    hiding the ones that do not, and by :func:`_selection_updates`.
-    """
-    with gr.Column(visible=False, elem_id=ui.ident("chat", "actions"),
-                   elem_classes=ui.classes("sheet", "sheet-bottom",
-                                           "message-actions")) as sheet:
-        with gr.Row(elem_classes=ui.classes("sheet-head")):
-            heading = gr.HTML(elem_id=ui.ident("chat", "selection"))
-            close = gr.Button("✕", size="sm", scale=0, min_width=44,
-                              elem_classes=ui.classes("icon-button"))
-        with gr.Row(elem_classes=ui.classes("message-actions-row")):
-            back = gr.Button("◀", size="sm", min_width=44, visible=False)
-            pager = gr.HTML(visible=False, elem_classes=ui.classes("pager"))
-            forward = gr.Button("▶", size="sm", min_width=44, visible=False)
-            drop = gr.Button("Delete this version", size="sm", visible=False)
-        with gr.Row(elem_classes=ui.classes("message-actions-row")):
-            edit = gr.Button("Edit", size="sm")
-            regenerate = gr.Button("Regenerate", size="sm", visible=False,
-                                   elem_id=ui.ident("chat", "regenerate"))
-            carry_on = gr.Button("Continue", size="sm", visible=False)
-            resend = gr.Button("Send again from here", size="sm", visible=False)
-            branch = gr.Button("Branch from here", size="sm")
-        # Last, and behind a rule of its own: nothing above this line loses
-        # anything, and everything below it does.
-        with gr.Group(elem_classes=ui.classes("destructive")):
-            with gr.Row(elem_classes=ui.classes("message-actions-row")):
-                delete = gr.Button("Delete message", size="sm", variant="stop")
-                delete_from = gr.Button("Delete from here", size="sm", variant="stop")
+One per action the old sheet had, and the regenerate icon's one before it,
+now all of a kind. The id each gets -- ``mc-llm-chat-<name>-now``, with the
+underscore of ``delete_from`` a dash -- is what ``javascript/llm_studio.js``
+presses; ``tests/test_llm_panels.py`` compares the two files on it.
+"""
 
-    return {
-        "sheet": sheet, "heading": heading, "close": close,
-        "back": back, "pager": pager, "forward": forward, "drop": drop,
-        "edit": edit, "regenerate": regenerate, "continue": carry_on, "resend": resend,
-        "branch": branch, "delete": delete, "delete_from": delete_from,
-    }
+
+def _nominated_buttons() -> dict:
+    """The hidden buttons of :data:`NOMINATED_ACTIONS`, built where the transcript is."""
+    return {name: gr.Button(label, visible=False,
+                            elem_id=ui.ident("chat", f"{name.replace('_', '-')}-now"))
+            for name, label in NOMINATED_ACTIONS}
 
 
 def _picked(component):
@@ -1316,7 +1270,7 @@ def _view(conversation) -> tuple[list[list[str | None]], list[list[int]]]:
     if conversation is None:
         return rows, positions
     for index, message in enumerate(conversation.messages):
-        body = _body(message)
+        body = _body(message, _meta(conversation, message))
         if message.role == USER:
             rows.append([body, None])
             positions.append([len(rows) - 1, 0, index])
@@ -1329,8 +1283,47 @@ def _view(conversation) -> tuple[list[list[str | None]], list[list[int]]]:
     return rows, positions
 
 
-def _body(message) -> str:
-    """One message as the transcript draws it: the picture, then the words.
+META_CLASS = "mc-llm-meta"
+"""The class of the hidden marker in every bubble, which the page script reads.
+
+Four attributes: ``data-mc-role``, ``data-mc-versions`` and ``data-mc-active``
+for the row's version pager, and ``data-mc-key`` for the Voice Box. A span
+rather than anything cleverer because a span with ``data-`` attributes is what
+Gradio's sanitiser lets through a Chatbot message; it holds no text, so it
+reads as nothing, and ``style.css`` keeps the paragraph it sits in out of the
+layout. In the markdown it is a line of its own at the top, because a line
+appended after a code fence would keep the fence open and a span joined to a
+heading would unmake it.
+"""
+
+
+def _meta(conversation, message) -> str:
+    """The marker for one message, as the markdown the transcript draws.
+
+    The key is the thread and a digest of the role and the words, and not the
+    message's index: a message deleted above moves every index below it, and
+    the render the Voice Box filed under a key has to stay that message's. Two
+    messages with the same words in one thread share a key, and so share a
+    render, which is the right answer for the same words. A different version
+    of a reply is different words, so it is a key of its own -- the render the
+    Play button offers is of the version showing.
+    """
+    import hashlib
+
+    from prompt_master.chat.history import ASSISTANT
+
+    thread = str(getattr(conversation, "identifier", "") or "")
+    digest = hashlib.sha1(f"{message.role}\n{message.text}".encode("utf-8")).hexdigest()[:12]
+    versions = max(1, len(getattr(message, "versions", None) or [""]))
+    return (f'<span class="{META_CLASS}" '
+            f'data-mc-role="{"assistant" if message.role == ASSISTANT else "user"}" '
+            f'data-mc-versions="{versions}" '
+            f'data-mc-active="{max(0, min(int(getattr(message, "active", 0) or 0), versions - 1))}" '
+            f'data-mc-key="{ui.escape(thread)}:{digest}" hidden></span>')
+
+
+def _body(message, meta: str = "") -> str:
+    """One message as the transcript draws it: the marker, the picture, then the words.
 
     The picture itself rather than its name. A conversation about a photograph
     that shows the reader a line of italic text saying a photograph was
@@ -1341,17 +1334,17 @@ def _body(message) -> str:
     message that was sent with a picture is not the same message without one.
     """
     body = message.text
-    if not getattr(message, "attached", False):
-        return body
-    shown = (mc_llm_attachments.markup(message.image_path, message.image_name)
-             if message.image_path
-             # A chat whose pictures could not be moved onto disk still shows
-             # them; there is simply nothing to point the browser at, so the
-             # bytes go inline as they always did. Rare, and better than a
-             # transcript that has lost a picture the file still holds.
-             else f'<img src="{message.image}" alt="{ui.escape(message.image_name or "attached image")}"'
-                  f' class="mc-llm-attached">')
-    return f"{shown}\n\n{body}" if body else shown
+    if getattr(message, "attached", False):
+        shown = (mc_llm_attachments.markup(message.image_path, message.image_name)
+                 if message.image_path
+                 # A chat whose pictures could not be moved onto disk still shows
+                 # them; there is simply nothing to point the browser at, so the
+                 # bytes go inline as they always did. Rare, and better than a
+                 # transcript that has lost a picture the file still holds.
+                 else f'<img src="{message.image}" alt="{ui.escape(message.image_name or "attached image")}"'
+                      f' class="mc-llm-attached">')
+        body = f"{shown}\n\n{body}" if body else shown
+    return f"{meta}\n\n{body}" if meta and body else (meta or body)
 
 
 def _transcript(conversation) -> list[list[str | None]]:
@@ -1394,44 +1387,79 @@ def _message_at(positions, row, column) -> int:
 def _reply_at(positions, ordinal) -> int:
     """The message the ``ordinal``-th reply in the transcript is.
 
-    What the regenerate icon on a bubble sends back. The browser cannot know a
+    What a button in a reply's row sends back. The browser cannot know a
     message index -- ``_view`` pairs turns, so the row a bubble is on is not
     one -- and it should not be taught to: all it can honestly report is *which
     reply this is*, counted down the transcript, and the map that answers what
     that means is already in the panel's hands.
 
     Counted against ``positions`` rather than against the conversation, for the
-    same reason the click map exists at all: the transcript the icons were
-    drawn on is the one ``positions`` describes, and a reply is only ever the
-    ``n``-th thing on screen.
+    same reason the map exists at all: the transcript the row was drawn on is
+    the one ``positions`` describes, and a reply is only ever the ``n``-th
+    thing on screen.
     """
+    return _ordinal_at(positions, ordinal, 1)
+
+
+def _prompt_at(positions, ordinal) -> int:
+    """The message the ``ordinal``-th prompt of yours in the transcript is."""
+    return _ordinal_at(positions, ordinal, 0)
+
+
+def _ordinal_at(positions, ordinal, column: int) -> int:
     try:
         wanted = int(str(ordinal).strip())
     except (TypeError, ValueError):
         return NO_SELECTION
     if wanted < 0:
         return NO_SELECTION
-    replies = []
+    found = []
     for entry in positions or ():
         try:
             _, at_column, index = entry
         except (TypeError, ValueError):
             continue
-        if int(at_column) == 1:
-            replies.append(int(index))
-    return replies[wanted] if wanted < len(replies) else NO_SELECTION
+        if int(at_column) == column:
+            found.append(int(index))
+    return found[wanted] if wanted < len(found) else NO_SELECTION
 
 
-def _regenerate_reply(who, identifier, positions, ordinal, temperature, top_p,
-                      reply_tokens, seed, filter_text="", revision=None):
-    """Regenerate the reply whose icon was tapped.
+def _nominated(positions, text) -> int:
+    """The message a row's button named, as an index into the thread it was drawn on.
 
-    A translation and nothing else: the ordinal becomes a message index and
-    :func:`_regenerate` does the rest, so the icon and the sheet's Regenerate
-    cannot come to mean two different things -- including the branching, which
-    is the part it would be worst to have two of.
+    ``assistant:2`` is the third reply counted down the transcript, ``user:0``
+    your first prompt; a bare number is a reply's ordinal, which is what the
+    regenerate icon sent before the row existed. Anything else names nothing,
+    and nothing is :data:`NO_SELECTION`, which every handler refuses rather
+    than reading as "the message now at that place": a transcript the browser
+    is a moment behind on must never cost somebody a message.
     """
-    index = _reply_at(positions, ordinal)
+    value = str(text or "").strip()
+    role, _, ordinal = value.partition(":")
+    if not _:
+        return _reply_at(positions, value)
+    role = role.strip().lower()
+    if role == "assistant":
+        return _reply_at(positions, ordinal)
+    if role == "user":
+        return _prompt_at(positions, ordinal)
+    return NO_SELECTION
+
+
+STALE_NOMINATION = "That message is no longer in the thread. Reopen it and try again."
+"""What a row says when its message has moved out from under it."""
+
+
+def _regenerate_reply(who, identifier, positions, at, temperature, top_p,
+                      reply_tokens, seed, filter_text="", revision=None):
+    """Regenerate the reply whose row was pressed.
+
+    A translation and nothing else: the nomination becomes a message index and
+    :func:`_regenerate` does the rest, so the row and the service cannot come
+    to mean two different things -- including the branching, which is the
+    part it would be worst to have two of.
+    """
+    index = _nominated(positions, at)
     if index == NO_SELECTION:
         yield _here(identifier, _idle(_load(who, identifier), "", None,
                                       "That reply is no longer in the thread. Reopen it "
@@ -1441,54 +1469,97 @@ def _regenerate_reply(who, identifier, positions, ordinal, temperature, top_p,
                            seed, filter_text, revision)
 
 
+def _continue_at(who, identifier, positions, at, temperature, top_p, reply_tokens, seed,
+                 filter_text="", revision=None):
+    """Continue the reply whose row was pressed; :func:`_continue` does the rest."""
+    index = _nominated(positions, at)
+    if index == NO_SELECTION:
+        yield _here(identifier, _idle(_load(who, identifier), "", None, STALE_NOMINATION,
+                                      "warn"))
+        return
+    yield from _continue(who, identifier, index, temperature, top_p, reply_tokens, seed,
+                         filter_text, revision)
+
+
+def _resend_at(who, identifier, positions, at, temperature, top_p, reply_tokens, seed,
+               filter_text="", revision=None):
+    """Answer again the prompt whose row was pressed; :func:`_resend` does the rest."""
+    index = _nominated(positions, at)
+    if index == NO_SELECTION:
+        yield _here(identifier, _idle(_load(who, identifier), "", None, STALE_NOMINATION,
+                                      "warn"))
+        return
+    yield from _resend(who, identifier, index, temperature, top_p, reply_tokens, seed,
+                       filter_text, revision)
+
+
+def _stale(who, identifier) -> list:
+    """The view, unchanged, saying the row's message is gone."""
+    return _refresh(_load(who, identifier), STALE_NOMINATION, "warn")
+
+
+def _edit_at(who, identifier, positions, at):
+    index = _nominated(positions, at)
+    return _stale(who, identifier) if index == NO_SELECTION \
+        else _open_editor(who, identifier, index)
+
+
+def _branch_at(who, identifier, positions, at, filter_text, revision=None):
+    index = _nominated(positions, at)
+    if index == NO_SELECTION:
+        return [gr.update(), identifier or ""] + _stale(who, identifier)
+    return _branch_here(who, identifier, index, filter_text, revision)
+
+
+def _delete_at(who, identifier, positions, at, revision=None):
+    index = _nominated(positions, at)
+    return _stale(who, identifier) if index == NO_SELECTION \
+        else _delete_message(who, identifier, index, revision)
+
+
+def _delete_from_at(who, identifier, positions, at, revision=None):
+    index = _nominated(positions, at)
+    return _stale(who, identifier) if index == NO_SELECTION \
+        else _delete_from(who, identifier, index, revision)
+
+
+def _page_at(step: int):
+    """Show the previous or next version of the reply whose row was pressed."""
+    page = _page_version(step)
+
+    def at_row(who, identifier, positions, at, revision=None):
+        index = _nominated(positions, at)
+        return _stale(who, identifier) if index == NO_SELECTION \
+            else page(who, identifier, index, revision)
+
+    return at_row
+
+
+def _drop_at(who, identifier, positions, at, revision=None):
+    index = _nominated(positions, at)
+    return _stale(who, identifier) if index == NO_SELECTION \
+        else _drop_version(who, identifier, index, revision)
+
+
 def _selection_updates(conversation, index: int, editing: bool = False) -> list:
-    """What the action sheet shows for message ``index``.
+    """What the editor shows for message ``index``.
 
     Returned in the order :data:`SELECTION_ORDER` lists, which is the one thing
     about this function that has to be kept in step with the layout.
 
     ``editing`` is the one state that is not a property of the message: the
     in-place editor is open on it. Everywhere else this is left alone, and the
-    last four answers put the editor away, empty its picture chip and give the
-    composer back.
+    four answers put the editor away, empty its picture chip and give the
+    composer back. Which actions apply to a message is the row's business now,
+    drawn in the browser from the marker :func:`_meta` puts in the bubble.
     """
-    from prompt_master.chat.history import ASSISTANT
-
-    hidden = gr.update(visible=False)
     home = [gr.update(visible=False), gr.update(), gr.update(value=None, visible=False),
             gr.update(visible=True)]
     if (conversation is None or index < 0 or index >= len(conversation.messages)):
-        return [gr.update(visible=False), gr.update(value=""), hidden, hidden, hidden, hidden,
-                hidden, hidden, hidden] + home
+        return home
 
     message = conversation.messages[index]
-    reply = message.role == ASSISTANT
-    last = index == len(conversation.messages) - 1
-    versions = len(message.versions)
-    speaker = "the character" if reply else "you"
-    opening = " ".join(message.text.split())[:80] or "(empty)"
-
     return [
-        # Put away while the editor is open: the sheet covers the bottom of the
-        # transcript and the editor is under it, so leaving both up is two
-        # panels arguing over the same corner of the screen.
-        gr.update(visible=not editing),
-        gr.update(value=ui.notice(f"Message {index + 1} of {len(conversation.messages)}, "
-                                  f"from {speaker}: {opening}"
-                                  + ("…" if len(message.text) > 80 else ""))),
-        gr.update(visible=versions > 1, interactive=message.active > 0),
-        gr.update(visible=versions > 1,
-                  value=f'<div class="{ui.PREFIX}-pager">'
-                        f'{message.active + 1}/{versions}</div>'),
-        gr.update(visible=versions > 1, interactive=message.active < versions - 1),
-        gr.update(visible=versions > 1),
-        # Regenerate writes this reply again and keeps the one it had as a
-        # version; continuing only makes sense for the reply still at the end,
-        # because anything after it would be answering a question that has
-        # already been answered again.
-        gr.update(visible=reply),
-        gr.update(visible=reply and last and bool(message.text.strip())),
-        gr.update(visible=not reply),
         # The edit row is put away and the composer comes back: a refresh is a
         # return to CHAT_HOME, whatever the panel was doing before it -- unless
         # this refresh is the one that opened the editor.
@@ -1524,8 +1595,8 @@ def _refresh(conversation, note: str, kind: str = "info",
     """Every output the ``view`` list names, for one state of one thread.
 
     One function for all of them because they are one fact: the rows, the map a
-    click is read against, the header, the message the action sheet applies to
-    and what that sheet shows all come from the same conversation, and a
+    nomination is read against, the header, the message the editor is open on
+    and what the editor shows all come from the same conversation, and a
     handler that returned four of the five would leave the fifth describing a
     thread that is no longer on screen.
 
@@ -1582,36 +1653,8 @@ def _screen_outputs(surface) -> list:
             + mc_llm_overlays.foreign(SCREENS, OVERLAY_OWNER)[0])
 
 
-def _opening_actions(conversation, note: str, kind: str = "info", index: int = NO_SELECTION,
-                     editing: bool = False) -> list:
-    """:func:`_refresh`, plus every other overlay closed.
-
-    The action sheet is the seventh surface and the one that used to know about
-    none of the others: tapping a bubble opened it over whatever was already
-    open. It is opened by ``view`` -- which every transcript handler writes --
-    so the closing of the rest is appended here rather than folded into
-    ``_refresh``, and only the one handler that *opens* it carries the tail.
-    """
-    return _refresh(conversation, note, kind, index, editing) \
-        + mc_llm_overlays.foreign(("actions",), OVERLAY_OWNER)[1]
-
-
-def _selection_outputs(view) -> list:
-    return view + mc_llm_overlays.foreign(("actions",), OVERLAY_OWNER)[0]
-
-
 def _close_screens() -> list:
     return _screens("")
-
-
-def _leave(who, identifier) -> list:
-    """Put this panel's own surfaces away, for a control that opens the shell's.
-
-    The message selection goes with them: the action sheet applies to a message
-    the reader is about to stop looking at, and a sheet left open underneath
-    another sheet is the second half of every "why is this still here?".
-    """
-    return _close_screens() + _close_selection(who, identifier)
 
 
 def _open_threads(who, filter_text) -> list:
@@ -1979,30 +2022,6 @@ def _revision_or_read(revision, who, identifier):
 # --------------------------------------------------------------------------- #
 
 
-def _select_message(who, identifier, positions, current, event: gr.SelectData = None):
-    """A tap on a bubble nominates the message the action sheet applies to.
-
-    Tapping the message that is already nominated puts the sheet away again.
-    The same gesture opens and closes it because there is only one gesture: a
-    Chatbot bubble has no second affordance to dismiss from.
-    """
-    conversation = _load(who, identifier)
-    index = NO_SELECTION
-    where = getattr(event, "index", None)
-    if isinstance(where, (list, tuple)) and len(where) >= 2:
-        index = _message_at(positions, where[0], where[1])
-    elif isinstance(where, int):
-        # Some hosts report a flat index. Read it as the row, and take the
-        # reply half of it, which is what a flat index counts.
-        index = _message_at(positions, where, 1)
-    if index == NO_SELECTION:
-        return _opening_actions(conversation,
-                                "That part of the transcript is not a message.", "warn")
-    if _selection(current) == index:
-        return _opening_actions(conversation, "Ready.")
-    return _opening_actions(conversation, "Ready.", index=index)
-
-
 def _selection(value) -> int:
     """``value`` as a message index. A State that has never been set is None."""
     try:
@@ -2011,7 +2030,8 @@ def _selection(value) -> int:
         return NO_SELECTION
 
 
-def _close_selection(who, identifier):
+def _settle(who, identifier):
+    """The view read back off disk, with nothing selected: what every run ends on."""
     return _reopen(who, identifier, "Ready.")
 
 
@@ -2031,9 +2051,9 @@ def _page_version(step: int):
         if not outcome.get("ok"):
             note, kind = _refused(outcome)
             return _reopen(who, identifier, note, kind, index=index)
-        # The sheet stays open on the message being paged: reading three
-        # variants is three taps on one control, not three round trips through
-        # the transcript.
+        # The message stays the one being paged: the row in its bubble reads
+        # the version from the marker the refresh draws, so reading three
+        # variants is three taps on one control.
         return _reopen(who, identifier,
                        f"Showing version {wanted + 1} of {len(message.versions)}.",
                        index=index)

@@ -28,6 +28,22 @@ import mc_llm_prompt_panel
 import mc_llm_studio
 
 
+def words(rows):
+    """Transcript rows with the marker every bubble starts with taken off.
+
+    The marker (``mc_llm_chat_panel._meta``) is the row's business; these
+    tests are about which words land in which bubble.
+    """
+    import re
+
+    def bare(text):
+        if text is None:
+            return None
+        return re.sub(r'^<span class="mc-llm-meta"[^>]*></span>\n\n', "", text)
+
+    return [[bare(cell) for cell in row] for row in rows]
+
+
 def _all_shut(tail) -> bool:
     """Whether every value in an overlay answer's tail says "closed".
 
@@ -190,7 +206,7 @@ class TestConversation:
         conversation.append(USER, "hello")
         conversation.append(ASSISTANT, "hi")
 
-        assert mc_llm_chat_panel._transcript(conversation) == [["hello", "hi"]]
+        assert words(mc_llm_chat_panel._transcript(conversation)) == [["hello", "hi"]]
 
     def test_two_replies_in_a_row_become_two_rows(self):
         from prompt_master.chat.history import ASSISTANT, Conversation
@@ -199,8 +215,8 @@ class TestConversation:
         conversation.append(ASSISTANT, "first")
         conversation.append(ASSISTANT, "second")
 
-        assert mc_llm_chat_panel._transcript(conversation) == [[None, "first"],
-                                                              [None, "second"]]
+        assert words(mc_llm_chat_panel._transcript(conversation)) == [[None, "first"],
+                                                                     [None, "second"]]
 
     def test_an_attachment_is_shown_in_the_transcript(self):
         """The picture itself, not a line of italic text saying there was one.
@@ -439,7 +455,7 @@ class TestPerMessageActions:
 
         rows, positions = mc_llm_chat_panel._view(conversation)
 
-        assert rows == [["hello", "hi"], [None, "and again"]]
+        assert words(rows) == [["hello", "hi"], [None, "and again"]]
         assert mc_llm_chat_panel._message_at(positions, 0, 0) == 0
         assert mc_llm_chat_panel._message_at(positions, 0, 1) == 1
         assert mc_llm_chat_panel._message_at(positions, 1, 1) == 2
@@ -452,68 +468,86 @@ class TestPerMessageActions:
         assert mc_llm_chat_panel._message_at([[0, 0, 0]], 4, 1) == \
             mc_llm_chat_panel.NO_SELECTION
 
-    def test_tapping_the_same_message_again_puts_the_bar_away(self, store):
-        """One gesture opens and closes it: a Chatbot bubble has no second
-        affordance to dismiss from."""
-        class Click:
-            index = [0, 0]
+    def test_a_rows_nomination_names_the_message_it_is_on(self, store):
+        """What a button in a bubble sends: the role and the ordinal down the
+        transcript, read against the map the transcript was drawn with --
+        never a message index, which the browser cannot know."""
+        from prompt_master.chat.history import ASSISTANT
 
         conversation = self._thread(store)
+        conversation.append(ASSISTANT, "and again")
         _, positions = mc_llm_chat_panel._view(conversation)
 
-        opened = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
-                                                   mc_llm_chat_panel.NO_SELECTION, Click())
-        closed = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
-                                                   opened[2], Click())
+        assert mc_llm_chat_panel._nominated(positions, "user:0") == 0
+        assert mc_llm_chat_panel._nominated(positions, "assistant:0") == 1
+        assert mc_llm_chat_panel._nominated(positions, "user:1") == 2
+        assert mc_llm_chat_panel._nominated(positions, " Assistant : 2 ") == 4
+        # The regenerate icon's old shape, a bare ordinal, still names a reply.
+        assert mc_llm_chat_panel._nominated(positions, "1") == 3
 
-        assert opened[2] == 0 and opened[5].get("visible") is True
-        assert closed[2] == mc_llm_chat_panel.NO_SELECTION
-        assert closed[5].get("visible") is False
-
-    def test_tapping_a_different_message_moves_the_bar_to_it(self, store):
-        class Click:
-            index = [0, 1]
-
+    def test_a_nomination_that_names_nothing_is_no_selection(self, store):
         conversation = self._thread(store)
         _, positions = mc_llm_chat_panel._view(conversation)
+        nothing = mc_llm_chat_panel.NO_SELECTION
 
-        moved = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
-                                                  0, Click())
+        for bad in ("user:9", "assistant:-1", "character:0", "", None, "assistant:", "x:y:z"):
+            assert mc_llm_chat_panel._nominated(positions, bad) == nothing, bad
+        assert mc_llm_chat_panel._nominated([], "assistant:0") == nothing
+        assert mc_llm_chat_panel._nominated(None, "user:0") == nothing
 
-        assert moved[2] == 1 and moved[5].get("visible") is True
-
-    def test_the_sheet_and_the_updates_that_redraw_it_are_the_same_length(self):
+    def test_the_editor_and_the_updates_that_redraw_it_are_the_same_length(self):
         assert len(mc_llm_chat_panel.SELECTION_ORDER) == \
             len(mc_llm_chat_panel._selection_updates(None, -1))
 
-    def test_which_actions_apply_depends_on_the_message(self, store):
+    def test_every_bubble_carries_a_marker_the_row_is_drawn_from(self, store):
+        """Role, versions and the version showing, and a key for the Voice Box:
+        inside the message itself, so a streamed token and a refresh alike
+        carry them, and first, so a fence or a heading after it is untouched."""
         conversation = self._thread(store)
-        names = mc_llm_chat_panel.SELECTION_ORDER
+        conversation.messages[1].add_version("a second attempt")
+        conversation.messages[1].show(0)
 
-        for index, expected in ((0, "resend"), (1, "regenerate")):
-            shown = dict(zip(names, mc_llm_chat_panel._selection_updates(conversation, index)))
-            assert shown["sheet"].get("visible") is True
-            assert shown[expected].get("visible") is True
+        rows, _ = mc_llm_chat_panel._view(conversation)
 
-        # Continue is offered only on the reply still at the end: anything
-        # before it would be carrying on with a turn already answered.
-        last = len(conversation.messages) - 1
-        assert mc_llm_chat_panel._selection_updates(
-            conversation, last)[7].get("visible") is True
-        assert mc_llm_chat_panel._selection_updates(
-            conversation, 1)[7].get("visible") is False
+        asked, reply = rows[0]
+        assert asked.startswith(f'<span class="{mc_llm_chat_panel.META_CLASS}" ')
+        assert 'data-mc-role="user"' in asked and 'data-mc-versions="1"' in asked
+        assert asked.endswith("hidden></span>\n\nask 0")
+        assert 'data-mc-role="assistant"' in reply
+        assert 'data-mc-versions="2"' in reply and 'data-mc-active="0"' in reply
+        assert reply.endswith("\n\nreply 0")
+        assert f'data-mc-key="{conversation.identifier}:' in reply
 
-    def test_the_version_pager_appears_once_there_is_more_than_one(self, store):
+    def test_the_key_follows_the_words_and_not_the_place(self, store):
+        """A message deleted above moves every index below it; the render the
+        Voice Box filed under a key has to stay that message's. The same words
+        in the same thread are one key; another version of a reply is another
+        key, because it is other words."""
         conversation = self._thread(store)
-        message = conversation.messages[1]
-        message.add_version("a second attempt")
+        rows, _ = mc_llm_chat_panel._view(conversation)
+        before = rows[0][1].split('data-mc-key="')[1].split('"')[0]
 
-        shown = mc_llm_chat_panel._selection_updates(conversation, 1)
+        conversation.delete(0)
+        rows, _ = mc_llm_chat_panel._view(conversation)
+        after = rows[0][1].split('data-mc-key="')[1].split('"')[0]
+        assert after == before
 
-        assert shown[2].get("visible") is True          # back
-        assert "2/2" in shown[3].get("value")           # the pager itself
-        assert shown[4].get("interactive") is False     # nothing after the last
-        assert shown[5].get("visible") is True          # delete this version
+        conversation.messages[0].add_version("other words")
+        rows, _ = mc_llm_chat_panel._view(conversation)
+        assert rows[0][1].split('data-mc-key="')[1].split('"')[0] != before
+
+    def test_a_picture_goes_after_the_marker_and_before_the_words(self, store):
+        """The marker is a line of its own at the top; the picture's markup and
+        the words follow as they did."""
+        conversation = self._thread(store)
+        message = conversation.messages[0]
+        message.image = "data:image/png;base64,AAAA"
+        message.image_name = "a.png"
+
+        rows, _ = mc_llm_chat_panel._view(conversation)
+
+        marker, picture, words = rows[0][0].split("\n\n")
+        assert marker.startswith("<span") and picture.startswith("<img") and words == "ask 0"
 
     def test_paging_back_shows_the_earlier_attempt(self, store):
         conversation = self._thread(store)
@@ -567,8 +601,9 @@ class TestPerMessageActions:
         # missing from one handler in nine.
         width = len(mc_llm_chat_panel._refresh(None, ""))
 
+        _, positions = mc_llm_chat_panel._view(conversation)
         for result in (
-            mc_llm_chat_panel._close_selection("Ada", identifier),
+            mc_llm_chat_panel._settle("Ada", identifier),
             mc_llm_chat_panel._page_version(1)("Ada", identifier, 1),
             mc_llm_chat_panel._drop_version("Ada", identifier, 1),
             mc_llm_chat_panel._commit_edit("Ada", identifier, 0, "changed", None),
@@ -576,31 +611,49 @@ class TestPerMessageActions:
             mc_llm_chat_panel._delete_from("Ada", identifier, 2),
             mc_llm_chat_panel._open_thread("Ada", identifier)[2:],
             mc_llm_chat_panel._open_editor("Ada", identifier, 1),
+            # The row's own handlers, nominated and stale alike.
+            mc_llm_chat_panel._edit_at("Ada", identifier, positions, "assistant:0"),
+            mc_llm_chat_panel._edit_at("Ada", identifier, positions, "assistant:9"),
+            mc_llm_chat_panel._page_at(-1)("Ada", identifier, positions, "assistant:0"),
+            mc_llm_chat_panel._drop_at("Ada", identifier, positions, "user:9"),
+            mc_llm_chat_panel._delete_at("Ada", identifier, positions, "nothing"),
+            mc_llm_chat_panel._delete_from_at("Ada", identifier, positions, "user:0"),
+            mc_llm_chat_panel._branch_at("Ada", identifier, positions, "assistant:9", "")[2:],
         ):
             assert len(result) == width
 
-    def test_tapping_a_bubble_also_writes_the_other_overlays(self, store):
-        """The one handler in this list that *opens* a surface rather than
-        redrawing one, and therefore the one that is wider.
-
-        Tapping a bubble opens the message action sheet, and the action sheet
-        is the seventh pop surface in LLM Studio. It used to know about none of
-        the other six: it opened over the character editor, over the thread
-        list, over the workspace chooser. So this handler writes every other
-        surface shut as well, and its answer carries one value for each.
-        """
-        import mc_llm_overlays
-
+    def test_a_rows_handlers_act_on_the_message_they_name(self, store):
+        """Nominated rather than selected: the same functions the sheet's
+        buttons called, reached through the map the transcript was drawn with,
+        so the row and the service cannot come to mean two different things."""
         conversation = self._thread(store)
-        width = len(mc_llm_chat_panel._refresh(None, ""))
-        closing = mc_llm_overlays.foreign(("actions",),
-                                          mc_llm_chat_panel.OVERLAY_OWNER)[1]
+        identifier = conversation.identifier
+        _, positions = mc_llm_chat_panel._view(conversation)
 
-        answered = mc_llm_chat_panel._select_message(
-            "Ada", conversation.identifier, [[0, 0, 0]], mc_llm_chat_panel.NO_SELECTION)
+        mc_llm_chat_panel._delete_from_at("Ada", identifier, positions, "user:1")
+        assert [m.text for m in mc_llm_chat_panel._load("Ada", identifier).messages] == \
+            ["ask 0", "reply 0"]
 
-        assert len(answered) == width + len(closing)
-        assert _all_shut(answered[width:])
+        opened = mc_llm_chat_panel._edit_at("Ada", identifier, positions, "assistant:0")
+        shown = dict(zip(mc_llm_chat_panel.SELECTION_ORDER, opened[5:]))
+        assert shown["edit"].get("visible") is True and shown["edit_box"].get("value") == "reply 0"
+        assert opened[2] == 1, "the editor's Save reads the selected index"
+
+    def test_a_stale_nomination_is_refused_rather_than_read_as_the_message_now_there(
+            self, store):
+        """A transcript the browser is a moment behind on must never cost
+        somebody a message: a row that names a reply the thread no longer has
+        says so and deletes nothing."""
+        conversation = self._thread(store)
+        identifier = conversation.identifier
+        _, positions = mc_llm_chat_panel._view(conversation)
+
+        answered = mc_llm_chat_panel._delete_at("Ada", identifier, positions, "assistant:7")
+
+        assert mc_llm_chat_panel.STALE_NOMINATION in answered[3]
+        assert len(mc_llm_chat_panel._load("Ada", identifier).messages) == 4
+        branched = mc_llm_chat_panel._branch_at("Ada", identifier, positions, "user:5", "")
+        assert branched[1] == identifier and mc_llm_chat_panel.STALE_NOMINATION in branched[5]
 
     def test_regenerate_falls_back_to_the_last_reply(self, store):
         """"Again" is about the end of the thread unless somebody has said
@@ -940,12 +993,15 @@ class TestTheRegenerateIconOnAReply:
             monkeypatch.setattr(gr, name, recording(getattr(gr, name)))
         mc_llm_chat_panel.build()
 
-        assert ui.ident("chat", "regenerate-at") in seen
-        assert ui.ident("chat", "regenerate-now") in seen
+        assert ui.ident("chat", "action-at") in seen
+        for name, _label in mc_llm_chat_panel.NOMINATED_ACTIONS:
+            assert ui.ident("chat", f"{name.replace('_', '-')}-now") in seen, name
 
     def test_the_script_presses_the_ids_the_panel_declares(self):
         """The two halves are in two languages and nothing links them but these
-        strings, so they are compared rather than trusted."""
+        strings, so they are compared rather than trusted. The script builds
+        the button ids from the action's name, so what is compared is the
+        prefix and suffix it joins and the name list it joins them to."""
         from pathlib import Path
 
         import mc_llm_ui as ui
@@ -953,8 +1009,14 @@ class TestTheRegenerateIconOnAReply:
         script = (Path(mc_llm_chat_panel.__file__).resolve().parent
                   / "javascript" / "llm_studio.js").read_text(encoding="utf-8")
 
-        for name in ("regenerate-at", "regenerate-now", "transcript"):
+        for name in ("action-at", "transcript"):
             assert f'"{ui.ident("chat", name)}"' in script
+        for name, _label in mc_llm_chat_panel.NOMINATED_ACTIONS:
+            assert f'"{name}"' in script, name
+        # Python dashes the name into the id (``delete_from`` → ``delete-from``,
+        # :func:`_nominated_buttons`); the script joins the same way.
+        assert 'replace(/_/g, "-")' in script
+        assert '"mc-llm-chat-"' in script and '"-now"' in script
 
 
 
@@ -1306,15 +1368,15 @@ class TestEditingAMessageInPlace:
         assert [row.identifier for row in ChatStore(store / "chats").listing("Ada")] == \
             [conversation.identifier]
 
-    def test_saving_goes_home_rather_than_reopening_the_sheet(self, store):
-        """The sheet covers the bottom of the transcript, and reopening it over
-        the message just saved is the panel looking stuck on a finished thing."""
+    def test_saving_goes_home(self, store):
+        """The composer comes back and the editor goes: a refresh is a return
+        to CHAT_HOME, and a panel that stayed in the editor over the message
+        just saved would look stuck on a finished thing."""
         chats, conversation = self._thread(store)
 
         shown = self.shown(mc_llm_chat_panel._commit_edit(
             "Ada", conversation.identifier, 1, "changed", None))
 
-        assert shown["sheet"].get("visible") is False
         assert shown["edit"].get("visible") is False
         assert shown["composer"].get("visible") is True
         assert chats.load("Ada", conversation.identifier).messages[1].text == "changed"
@@ -1603,24 +1665,16 @@ class TestTheSurfaces:
         """It opens the shell's workspace sheet, which this panel does not own.
         What it does here is get out of the way, so the sheet does not open over
         a thread list."""
-        conversation = self._thread(store)
-
-        answered = mc_llm_chat_panel._leave("Ada", conversation.identifier)
+        answered = mc_llm_chat_panel._close_screens()
 
         assert answered[0] == ""
         assert all(shown is False for shown in self._visible(answered))
 
-    def test_the_menu_button_puts_the_message_actions_away(self, store):
-        """The action sheet applies to a message the reader is about to stop
-        looking at, and a sheet left open under another sheet is the second half
-        of every "why is this still here?"."""
-        conversation = self._thread(store)
-        screens = self._screens_width()
-
-        answered = mc_llm_chat_panel._leave("Ada", conversation.identifier)
-
-        assert answered[screens + 2] == mc_llm_chat_panel.NO_SELECTION
-        assert answered[screens + 5].get("visible") is False
+    def test_the_menu_button_touches_nothing_but_the_surfaces(self):
+        """It used to redraw the whole view as well, to put the message action
+        sheet away. The actions are a row inside the bubble now and cover
+        nothing, so there is nothing of the view for this press to write."""
+        assert len(mc_llm_chat_panel._close_screens()) == self._screens_width()
 
     def test_tapping_a_thread_opens_it_and_comes_home(self, store):
         conversation = self._thread(store)
@@ -1721,7 +1775,6 @@ class TestTheComposer:
         assert shown["edit"].get("visible") is True
         assert shown["edit_box"].get("value") == "reply"
         assert shown["composer"].get("visible") is False
-        assert shown["sheet"].get("visible") is False
 
     def test_saving_an_edit_comes_back_to_the_composer(self, store):
         conversation = self._thread(store)

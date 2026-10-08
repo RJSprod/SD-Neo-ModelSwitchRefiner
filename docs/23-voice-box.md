@@ -488,7 +488,27 @@ join the queue of their card.
 **Audio focus.** A single event on `document`, `mc:audio-focus`,
 `{owner, kind}`: Voice Box playback stops Voice Chat's speech and closes any open
 microphone (the composer's, the flyout's dictation and the clone recorder's),
-and Voice Chat speaking or listening pauses Voice Box playback.
+and Voice Chat speaking or listening pauses Voice Box playback. Since 8 October
+2026 LLM Studio's *Play VibeVoice* claims it too (`llm-studio`): Voice Box and
+LLM Studio yield to any owner that is not themselves, Voice Chat to the two it
+knows (`FOCUS_RIVALS`), so a stranger's event cannot cut a reply off.
+
+**Other tabs, since 8 October 2026.** The page exposes a bridge for a script of
+another tab, `window.mcVoiceBox`: `canRender(text)` — the sentence Render would
+be refused with, or empty; `renderText(text, {name, origin})` — a render with the
+page's own samples, speakers and configuration and the text as the script,
+queued (a Promise of the job); `jobById(id)` — the job as the page's own poll
+last saw it, so a caller watching a job opens no request of its own;
+`outputsFor(prefix)` — the outputs whose `render.origin.key` starts with
+`prefix` (a Promise); `outputAudioUrl(id)` — a blob URL of the output's audio,
+fetched with the token. The render's **origin** is `mc_voice_box.render(…,
+origin=)`: `{kind, key, label}`, three strings of at most `ORIGIN_CHARS`
+(`_clean_origin`; anything else dropped), kept on the job (`Job.origin`,
+`to_dict`) and written into the output's record (`render.origin`), changing
+nothing about the render itself. It is how the asking tab finds its render after
+a reload. LLM Studio's *Send to VibeVoice* is the first caller (docs/07 §39):
+`kind: "llm"`, the message's key, the label *LLM Studio*; the lane is named
+*LLM Studio · <the first words>*. Nothing in the Voice Box depends on who calls.
 
 **The page** is one `gr.HTML` root painted once in an `on_ui_tabs` tab, a script
 bundle that owns its DOM, and JSON routes on the page token, with Mini Paint's
@@ -781,6 +801,10 @@ render is the measurement every estimate here waits for.
   keep the lock after all.
 * Two handoffs disagree about this machine's RAM (48 GB and 96 GB). Every RAM
   decision logs its figures, so the first turn settles it.
+* LLM Studio's *Send to VibeVoice* (docs/07 §39) has not run on the user's
+  machine either: the first things to watch are the row's note when the Voice Box
+  refuses (no sample for Speaker 1), the lane *LLM Studio · …* landing in the
+  Outputs stage, and Play coming alive on the message within a second of it.
 * Nothing in phases 1a, 1b or 2 has run on the user's machine. The first
   things to watch: the worker's handshake reporting the card asked for; the
   7B's real peak on the 3090 against the estimate (the calibration takes it from

@@ -58,23 +58,24 @@ serves one inference at a time, from one lane thread, and there is no
 configuration in which that becomes two (I-PKT-8). A turn, an audition and a
 clone audition all queue behind the same lane.
 
-Interruption is a drain, and it says so
-----------------------------------------
-Released PocketTTS 3.0.2 exposes no safe cooperative cancellation for an
-abandoned stream. Upstream's own change to add one is open rather than merged,
-and it states that draining the stream to completion was the correct Python-API
-behaviour before it -- because abandoning the generator leaves the generation
-thread running for the remainder of the input, and the model being not
-thread-safe makes starting the next generation while the old one is alive
-incorrect.
+Interruption is a drain, and it says so -- or upstream's own Event, and it says that
+------------------------------------------------------------------------------------
+Released PocketTTS 3.0.2 exposed no safe cooperative cancellation for an
+abandoned stream: abandoning the generator leaves the generation thread running
+for the remainder of the input, and the model being not thread-safe makes
+starting the next generation while the old one is alive incorrect. Upstream
+merged its cancellation in 3.2.0 -- ``generate_audio_stream(..., stop=Event)``,
+checked before every chunk and every generated frame -- and this repository
+adopted it with the 3.3.0 pin.
 
 So ``tts_interrupt`` here does four things and does not pretend to do a fifth:
 
     the turn is marked interrupted, so no more text is accepted for it;
     every queued not-yet-started unit for it is dropped;
-    the call already inside the model is **kept being consumed** to its
-        ordinary completion, and everything it yields is thrown away here
-        rather than written to the pipe;
+    the call already inside the model is **kept being consumed** to its end,
+        and everything it yields is thrown away here rather than written to
+        the pipe -- on a build that takes ``stop``, that end comes within one
+        generation step, because the turn's Event was set first;
     when the call returns, ``tts_interrupted`` with ``state="complete"`` tells
         the parent the lane is free.
 
@@ -82,12 +83,16 @@ The third is the one that is easy to get wrong. Pocket's internal latent and
 result queues are ordinary unbounded ``queue.Queue`` instances, so a consumer
 that stopped pulling would not stop the producer -- it would only leave a
 generation thread running with nothing draining it (I-PKT-12, section 5.3).
+That is as true of a stopped stream as of a whole one: the Event ends the
+generation, and the drain is still what empties what it had queued.
 
-Nothing here is a local copy of upstream's unmerged cancellation. When it is
-merged and this project deliberately adopts a reviewed release,
-:data:`INTERRUPT_MODE` becomes ``cooperative``, the interrupt sets upstream's
-Event instead of running to the end, and the parent's state machine and the
-browser's Stop do not change (I-PKT-14, section 21.7).
+Which of the two a build offers is read off its signature at load, never off
+its version string: :attr:`Engine.interrupt_mode` is ``cooperative`` when
+``generate_audio_stream`` takes ``stop`` and ``drain_unit`` otherwise, every
+frame and the handshake carry it, and the parent's state machine and the
+browser's Stop are the same in both -- on a cooperative build the report simply
+arrives much sooner (I-PKT-14, section 21.7). Nothing here is a local copy of
+upstream's cancellation; a 3.0.2 runtime left installed still drains.
 
 Speed is DSP here, and says so
 ------------------------------
@@ -180,14 +185,19 @@ SAMPLE_RATE = 24000
 rather than assumed -- a model revision that changed it would otherwise be a
 worker emitting frames the browser resamples into a chipmunk."""
 
-INTERRUPT_MODE = "drain_unit"
-"""What this worker can promise when a turn is interrupted.
+DRAIN_UNIT = "drain_unit"
+COOPERATIVE = "cooperative"
+INTERRUPT_MODE = DRAIN_UNIT
+"""What this worker can promise when a turn is interrupted, and the least of it.
 
-Reported in the handshake and read by the parent, which refuses a mode its own
-state machine does not implement. ``drain_unit`` is released 3.0.2's honest
-answer; ``cooperative`` is what this becomes when a merged upstream
-cancellation is adopted, and the only other thing that changes then is what
-:meth:`Worker.interrupt` does with the flag it already sets.
+Reported in the handshake and in every frame about an interrupted turn, and
+read by the parent, which refuses a mode its own state machine does not
+implement. ``drain_unit`` is released 3.0.2's honest answer and the answer for
+any build whose ``generate_audio_stream`` takes no ``stop``; ``cooperative`` is
+what :attr:`Engine.interrupt_mode` becomes once the loaded build takes one
+(3.2.0 and later), decided by :meth:`Engine.decide_interrupt_mode` from the
+signature rather than from a version. This constant is the mode before a model
+is loaded and the mode of a build that offers nothing better.
 """
 
 _LENGTH = struct.Struct(">I")
@@ -456,7 +466,7 @@ def thread_policy() -> str:
     """What this build can honestly say about PocketTTS's CPU execution.
 
     A sentence, and there is deliberately no number in it to set. PocketTTS
-    3.0.2 calls ``torch.set_num_threads(1)`` itself and gets its parallelism
+    (3.0.2 and 3.3.0 alike) calls ``torch.set_num_threads(1)`` itself and gets its parallelism
     from its own generation and decoder threads, so an ``OMP_NUM_THREADS``
     chosen here and reported as a Pocket thread count would be reporting
     something untrue (section 16.4, section 35). Sopro's worker has an
@@ -1384,9 +1394,11 @@ it: the boundary this process actually has to defend is the pipe, and that is
 checked here.
 
 Set by the parent when it builds this process's environment, and set again
-below immediately before the import -- braces and belt, because a closure that
-does not ship ``beartype`` would otherwise fail to import at all rather than
-run one function slower.
+below immediately before the import -- braces and belt, because a 3.0.2 closure
+that did not ship ``beartype`` would otherwise fail to import at all rather than
+run one function slower. 3.1.0 dropped beartype altogether, so on the 3.3.0
+closure this repository pins the variable is read by nothing and costs nothing;
+it stays for a 3.0.2 runtime that is still installed.
 """
 
 
@@ -1519,6 +1531,7 @@ class Engine:
         self.model = None
         self.defaults = {}
         self.upstream_build_id = str(found.get("upstream_build_id") or "")
+        self.interrupt_mode = INTERRUPT_MODE
         self._export_state = None
         self._numpy = None
         self._states = collections.OrderedDict()
@@ -1592,6 +1605,7 @@ class Engine:
                               f"cannot speak with it.")
         self.upstream_build_id = str(getattr(self.model, "build_id", "")
                                      or self.upstream_build_id or "")
+        self.decide_interrupt_mode()
         self.defaults = self._read_defaults(recipe)
         rate = int(getattr(self.model, "sample_rate", 0) or 0)
         if rate:
@@ -1672,6 +1686,25 @@ class Engine:
     def device(self) -> str:
         found = getattr(self.model, "device", None)
         return str(found) if found is not None else "cpu"
+
+    def decide_interrupt_mode(self) -> str:
+        """What Stop can promise on the model that is loaded, read off its signature.
+
+        ``cooperative`` when ``generate_audio_stream`` takes a ``stop`` parameter
+        -- upstream's own ``threading.Event``, merged in 3.2.0 -- and
+        ``drain_unit`` otherwise. The signature and not the version string,
+        because the day a build ships the parameter under a version this file
+        did not expect is the day a version rule would leave a cancellable
+        build draining; and a signature that cannot be read, or one that takes
+        anything (``**kwargs``), decides nothing and stays with the drain, the
+        promise that is kept whatever the build does with an argument it was
+        not asked about.
+        """
+        call = getattr(self.model, "generate_audio_stream", None)
+        takes = _parameters(call) if call is not None else None
+        self.interrupt_mode = COOPERATIVE if takes is not None and "stop" in takes \
+            else DRAIN_UNIT
+        return self.interrupt_mode
 
     @contextlib.contextmanager
     def speaking_at(self, delivery: Delivery):
@@ -1870,7 +1903,7 @@ class Engine:
     # -- speaking ---------------------------------------------------------- #
 
     def stream(self, text: str, voice_id: str, delivery: Delivery, on_audio,
-               listening) -> dict:
+               listening, stop=None) -> dict:
         """Synthesise one committed unit, and hand its PCM over as it arrives.
 
         ``listening`` is called before every block and decides whether the block
@@ -1893,6 +1926,14 @@ class Engine:
         runs until the first ``next``, and the sampler reads the temperature per
         chunk, so a scope that closed after the call was made would have restored
         the old value before a single block was produced.
+
+        ``stop`` is the turn's Event, handed to the model only on a build whose
+        signature takes it (:meth:`decide_interrupt_mode`). Set, it ends the
+        generation within a step and the stream soon after; the loop below then
+        drains what little was queued, exactly as it drains a whole unit on a
+        build that cannot be stopped. A build that takes no ``stop`` is never
+        offered one: a ``TypeError`` from inside somebody's reply is not a
+        refusal anybody can read.
         """
         state = self.state_for(voice_id)
         began = time.monotonic()
@@ -1903,9 +1944,11 @@ class Engine:
         trim = Trim(self.sample_rate, floor=self._quiet_floor.get(voice_id, 0),
                     gap_ms=KEEP_GAP_MS + (delivery or NEUTRAL).pause_ms)
         seam = Seam(self.sample_rate)
+        arguments = {"copy_state": True}
+        if stop is not None and self.interrupt_mode == COOPERATIVE:
+            arguments["stop"] = stop
         with self.speaking_at(delivery):
-            stream = self.model.generate_audio_stream(state, str(text or ""),
-                                                      copy_state=True)
+            stream = self.model.generate_audio_stream(state, str(text or ""), **arguments)
             try:
                 for chunk in stream:
                     if first == 0.0:
@@ -2013,8 +2056,10 @@ class Turn:
     ``interrupted`` is set by :meth:`Worker.interrupt` and read in three places:
     the lane skips queued units for the turn, the streaming loop stops offering
     blocks onward, and :meth:`next_segment` stops waiting for text that is never
-    coming. What it does *not* do is stop the generator -- see the module
-    docstring.
+    coming. ``halt`` is set beside it and is the one thing that *can* stop the
+    generator: the lane hands it to :meth:`Engine.stream`, which hands it to a
+    build that takes ``stop`` and keeps it to itself on one that does not --
+    see the module docstring.
     """
 
     def __init__(self, identifier: str, voice_id: str, delivery: Delivery = None):
@@ -2024,6 +2069,9 @@ class Turn:
         self.segments: "queue.Queue" = queue.Queue()
         self.done = False
         self.interrupted = False
+        self.halt = threading.Event()
+        """Upstream's ``stop``, for the unit inside the model when this turn is
+        stopped. Set once and never cleared: a turn is stopped once."""
         self.gate = threading.Lock()
         """Held for the two lines that decide whether a unit is inside the model.
 
@@ -2059,6 +2107,7 @@ class Turn:
 
     def stop(self) -> None:
         self.interrupted = True
+        self.halt.set()
         self.done = True
         # Wake anything waiting for text, and throw away what is queued: only
         # the unit already inside the model may drain (section 21.3).
@@ -2197,25 +2246,28 @@ class Worker:
         for turn in found:
             turn.stop()
 
+    def mode(self) -> str:
+        """The interrupt mode of the model that is loaded, or the least promise before one is."""
+        engine = self.engine
+        return str(getattr(engine, "interrupt_mode", "") or INTERRUPT_MODE) if engine \
+            else INTERRUPT_MODE
+
     def interrupt(self, identifier: str) -> None:
         """Stop offering this turn's audio, and drop what it has not started.
 
-        Returns at once. The unit already inside the model is not stopped --
-        this build cannot stop one safely and does not claim to -- so what
-        happens next is that the lane keeps consuming it, throws the blocks
-        away, and reports ``state="complete"`` when the call returns
-        (I-PKT-11, I-PKT-12).
-
-        When a merged upstream cancellation is adopted, this is where its Event
-        is set, and the only thing that changes for anybody else is that the
-        report arrives much sooner (section 21.7).
+        Returns at once. ``turn.stop()`` sets the turn's Event, and what that
+        does to the unit already inside the model depends on the build: one
+        that takes ``stop`` ends its generation within a step, one that does not
+        runs to its ordinary end. Either way the lane keeps consuming the call,
+        throws the blocks away, and reports ``state="complete"`` when it returns
+        (I-PKT-11, I-PKT-12) -- on the first kind of build, soon.
         """
         turn = self.turn(identifier)
         if turn is None:
             # A turn that has already ended. The parent's Stop is idempotent and
             # the honest answer is that the lane is free.
             self.send({"op": "tts_interrupted", "turn": str(identifier or ""),
-                       "state": "complete", "interrupt_mode": INTERRUPT_MODE})
+                       "state": "complete", "interrupt_mode": self.mode()})
             return
         turn.stop()
         with turn.gate:
@@ -2231,11 +2283,11 @@ class Worker:
             # control that waited for a drain that never happened would be a
             # control that stayed disabled for no reason.
             self.send({"op": "tts_interrupted", "turn": turn.id, "state": "complete",
-                       "interrupt_mode": INTERRUPT_MODE})
+                       "interrupt_mode": self.mode()})
             self.close_turn(turn.id)
             return
         self.send({"op": "tts_interrupted", "turn": turn.id, "state": "draining",
-                   "interrupt_mode": INTERRUPT_MODE})
+                   "interrupt_mode": self.mode()})
 
     # -- the one lane ------------------------------------------------------ #
 
@@ -2291,7 +2343,7 @@ class Worker:
         is free and the parent is told so.
         """
         self.send({"op": "tts_ready", "turn": turn.id, "sample_rate": self.engine.sample_rate,
-                   "streaming": "chunk", "interrupt_mode": INTERRUPT_MODE})
+                   "streaming": "chunk", "interrupt_mode": self.mode()})
         interrupted_chars = 0
         interrupted_ms = 0
         while True:
@@ -2317,7 +2369,7 @@ class Worker:
                 if now - heartbeat[0] >= DRAIN_HEARTBEAT:
                     heartbeat[0] = now
                     self.send({"op": "tts_interrupted", "turn": turn.id,
-                               "state": "draining", "interrupt_mode": INTERRUPT_MODE})
+                               "state": "draining", "interrupt_mode": self.mode()})
                 return False
 
             def offer(block, turn=turn):
@@ -2326,7 +2378,7 @@ class Worker:
 
             try:
                 found = self.engine.stream(text, turn.voice_id, turn.delivery, offer,
-                                           listening)
+                                           listening, stop=turn.halt)
             finally:
                 with turn.gate:
                     turn.speaking = False
@@ -2344,7 +2396,7 @@ class Worker:
             # Never a timer on the parent's side, so this is the thing the
             # waiting state clears on (I-PKT-13).
             self.send({"op": "tts_interrupted", "turn": turn.id, "state": "complete",
-                       "interrupt_mode": INTERRUPT_MODE,
+                       "interrupt_mode": self.mode(),
                        "chars": interrupted_chars, "audio_ms": interrupted_ms,
                        "dropped_units": turn.dropped})
             _note(f"interrupted turn drained: unit of {interrupted_chars} chars, "
@@ -2447,7 +2499,7 @@ def serve(stdin, stdout, engine_factory=None) -> int:
                         "quantization": engine.precision,
                         "sampler_steps": engine.sampler_steps,
                         "streaming": True,
-                        "interrupt_mode": INTERRUPT_MODE,
+                        "interrupt_mode": engine.interrupt_mode,
                         "thread_policy": thread_policy(),
                         "voice_state_schema": engine.state_schema,
                         "voices": len(engine.voices),
@@ -2455,7 +2507,7 @@ def serve(stdin, stdout, engine_factory=None) -> int:
                     })
                     _note(f"ready — cpu, {engine.precision}, {engine.sampler_steps} step(s), "
                           f"{len(engine.voices)} voices, containment {parent_death}, "
-                          f"interrupt {INTERRUPT_MODE}")
+                          f"interrupt {engine.interrupt_mode}")
                 except SystemExit:
                     raise
                 except Exception as exc:

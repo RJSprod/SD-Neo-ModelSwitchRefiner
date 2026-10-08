@@ -226,6 +226,20 @@ class TestRenderingOverTheWire:
         assert audio.headers["content-disposition"].startswith('attachment; filename="render.wav"')
         assert "Hello.wav" in audio.headers["content-disposition"]
 
+    def test_a_render_sent_from_another_tab_carries_its_origin_both_ways(self, client, key,
+                                                                         prepared):
+        """What LLM Studio sends, and what it reads back: the origin on the
+        job the route answers with, and on the output listed afterwards."""
+        origin = {"kind": "llm", "key": "thread-1:3:abcd1234", "label": "Message 4"}
+        job = post(client, api.RENDER_ROUTE, key, {
+            "pipeline_id": prepared["pipeline"]["id"], "prompt": "Speaker 1: Hello.",
+            "configuration_id": prepared["configuration"]["id"], "name": "Message 4",
+            "origin": dict(origin, junk="dropped")}).json()["job"]
+        assert job["origin"] == origin
+        done = settled(job["id"])
+        entry, = post(client, api.OUTPUTS_ROUTE, key, {"pipeline_id": ""}).json()["outputs"]
+        assert entry["id"] == done["output_id"] and entry["render"]["origin"] == origin
+
     def test_an_mp3_render_is_served_and_downloaded_as_one(self, client, key, prepared,
                                                            monkeypatch):
         monkeypatch.setattr(box, "_encode_mp3", lambda pcm16, rate, tags: b"ID3-an-mp3")

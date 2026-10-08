@@ -609,114 +609,245 @@ class TestKeepingAnOpenedSectionInView:
 
 
 # --------------------------------------------------------------------------- #
-# The regenerate icon on a reply
+# The row of actions in every bubble
 # --------------------------------------------------------------------------- #
 #
 # The one feature in this file that reaches into the host's own DOM, because a
 # Gradio 4.40 Chatbot draws its own bubbles and there is nowhere in one to put a
-# component. What it must do is narrow and worth running rather than reading:
-# draw one icon per reply and no more than one, say *which* reply was tapped at
-# the moment of the tap, and put the icons away entirely rather than guess when
-# the bubbles are a shape it does not recognise.
+# component. What it must do is worth running rather than reading: draw one row
+# per message and no more than one, show it on a tap and put it away on the
+# next, say *which* message a button is on at the moment of the press, and put
+# the rows away entirely rather than guess when the bubbles are a shape it does
+# not recognise. Copy, Send to VibeVoice and Play never reach Python, so they
+# are driven here against a clipboard and a Voice Box that record what they
+# were asked.
 #
-# The ordinal is the part with a real bug behind it. Captured when the icon is
+# The ordinal is the part with a real bug behind it. Captured when the row is
 # drawn, it names the wrong message the moment anything above it is deleted --
-# and for this particular button, naming the wrong message means rewriting a
-# reply the reader did not point at. So it is read from the live transcript when
-# the icon is pressed, and that is asserted by moving the bubbles underneath it.
+# and for a delete button, naming the wrong message means deleting a message
+# the reader did not point at. So it is read from the live transcript when the
+# button is pressed, and that is asserted by moving the bubbles underneath it.
 
-TRANSCRIPT = """
-function bubble(name) {
-    return {
-        name,
-        tagName: "DIV",
-        dataset: {},
-        children: [],
-        appendChild(child) { bubble.last = child; this.children.push(child); return child; },
-        querySelector: () => null,
-        querySelectorAll: () => [],
-        addEventListener() {},
-    };
+ROW = """
+// A small DOM with the parts the row reads and writes: classes, attributes,
+// datasets, a tree, selectors of the shapes the script uses, cloneNode for the
+// copy, closest for the tap, and events that bubble.
+function matches(node, selector) {
+    return selector.split(",").some((part) => {
+        const piece = part.trim();
+        if (!piece) return false;
+        let rest = piece;
+        if (rest.startsWith(":scope")) rest = rest.slice(6).trim();
+        const tag = (rest.match(/^[a-z]+/i) || [""])[0];
+        if (tag && node.tagName.toLowerCase() !== tag.toLowerCase()) return false;
+        rest = rest.slice(tag.length);
+        const classes = rest.match(/\\.[\\w-]+/g) || [];
+        if (!classes.every((c) => node.classList.contains(c.slice(1)))) return false;
+        const attrs = rest.match(/\\[[^\\]]+\\]/g) || [];
+        return attrs.every((a) => {
+            const [, name, value] = a.match(/^\\[([\\w-]+)(?:="([^"]*)")?\\]$/) || [];
+            if (!name) return false;
+            const held = node.getAttribute(name);
+            return value === undefined ? held !== null : held === value;
+        });
+    });
 }
 
-const bubbles = __BUBBLES__.map(bubble);
-const shown = {list: bubbles};
+class El {
+    constructor(tag) {
+        this.tagName = tag.toUpperCase();
+        this.attributes = {};
+        this.dataset = {};
+        this.children = [];
+        this.parentNode = null;
+        this.handlers = {};
+        this.style = {};
+        this.hidden = false;
+        this.disabled = false;
+        this.paused = true;
+        this._text = "";
+        this.classList = {
+            contains: (c) => this.classes().includes(c),
+            add: (c) => { if (!this.classes().includes(c)) this.className = this.classes().concat(c).join(" "); },
+            remove: (c) => { this.className = this.classes().filter((x) => x !== c).join(" "); },
+            toggle: (c, on) => { if (on) this.classList.add(c); else this.classList.remove(c); },
+        };
+        this.className = "";
+    }
+    classes() { return this.className.split(/\\s+/).filter(Boolean); }
+    get textContent() {
+        return this.children.length ? this.children.map((c) => c.textContent).join("") : this._text;
+    }
+    set textContent(value) { this._text = String(value); this.children = []; }
+    get innerText() { return this.textContent; }
+    set innerHTML(value) { this._text = ""; this.children = []; this.html = value; }
+    get innerHTML() { return this.html || this.textContent; }
+    getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    removeAttribute(name) { delete this.attributes[name]; }
+    hasAttribute(name) { return name in this.attributes; }
+    appendChild(child) {
+        if (child.parentNode) child.parentNode.removeChild(child);
+        child.parentNode = this;
+        this.children.push(child);
+        return child;
+    }
+    removeChild(child) {
+        this.children = this.children.filter((c) => c !== child);
+        child.parentNode = null;
+        return child;
+    }
+    contains(node) {
+        for (let at = node; at; at = at.parentNode) if (at === this) return true;
+        return false;
+    }
+    closest(selector) {
+        for (let at = this; at; at = at.parentNode) if (at.tagName && matches(at, selector)) return at;
+        return null;
+    }
+    all() { return this.children.flatMap((c) => [c].concat(c.all())); }
+    querySelectorAll(selector) { return this.all().filter((n) => matches(n, selector)); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    cloneNode(deep) {
+        const copy = new El(this.tagName);
+        copy.className = this.className;
+        copy.attributes = Object.assign({}, this.attributes);
+        copy.dataset = Object.assign({}, this.dataset);
+        copy._text = this._text;
+        if (deep) this.children.forEach((c) => copy.appendChild(c.cloneNode(true)));
+        return copy;
+    }
+    addEventListener(kind, fn) { (this.handlers[kind] = this.handlers[kind] || []).push(fn); }
+    dispatchEvent(event) {
+        event.target = event.target || this;
+        for (let at = this; at; at = at.parentNode) {
+            (at.handlers[event.type] || []).forEach((fn) => fn.call(at, event));
+            if (!event.bubbles) break;
+        }
+        return true;
+    }
+    click() {
+        this.clicks = (this.clicks || 0) + 1;
+        this.dispatchEvent({type: "click", bubbles: true, preventDefault() {}, stopPropagation() {}});
+    }
+    focus() {}
+    select() {}
+    play() { this.paused = false; this.played = (this.played || 0) + 1; this.dispatchEvent({type: "play"}); return Promise.resolve(); }
+    pause() { this.paused = true; this.dispatchEvent({type: "pause"}); }
+    getBoundingClientRect() { return {top: 0, bottom: 0, height: 0, left: 0, right: 0}; }
+}
 
-const transcript = {
-    id: "mc-llm-chat-transcript",
-    tagName: "DIV",
-    dataset: {},
-    scrollHeight: 0,
-    clientHeight: 0,
-    scrollTop: 0,
-    querySelector: () => null,
-    querySelectorAll(selector) {
-        return selector === __SELECTOR__ ? shown.list : [];
-    },
-    addEventListener() {},
-};
+const byId = {};
+function element(tag, id) {
+    const node = new El(tag);
+    if (id) { node.setAttribute("id", id); byId[id] = node; }
+    return node;
+}
 
-const field = {tagName: "TEXTAREA", value: "", events: [],
-               dispatchEvent(event) { field.events.push(event.type); return true; },
-               addEventListener() {}};
-const box = {
-    id: "mc-llm-chat-regenerate-at",
-    tagName: "DIV",
-    dataset: {},
-    querySelector: (selector) => (selector.indexOf("textarea") >= 0 ? field : null),
-    querySelectorAll: () => [],
-    addEventListener() {},
-};
+// The transcript: replies and prompts in the shapes Gradio 4.40 draws, each
+// with the marker Python puts first in every message.
+const holder = element("div", "mc-llm-chat-transcript");
+holder.scrollHeight = 0; holder.clientHeight = 0; holder.scrollTop = 0;
+const bubbles = [];
+function bubble(role, text, meta) {
+    const node = new El("div");
+    node.setAttribute("data-testid", role === "user" ? "user" : "bot");
+    node.className = "message " + (role === "user" ? "user" : "bot");
+    const marker = new El("span");
+    marker.className = "mc-llm-meta";
+    marker.setAttribute("data-mc-role", role);
+    marker.setAttribute("data-mc-versions", String((meta && meta.versions) || 1));
+    marker.setAttribute("data-mc-active", String((meta && meta.active) || 0));
+    marker.setAttribute("data-mc-key", (meta && meta.key) || ("thread-1:" + text.replace(/\\W/g, "")));
+    marker.setAttribute("hidden", "");
+    const words = new El("p");
+    words.textContent = text;
+    node.appendChild(marker);
+    node.appendChild(words);
+    holder.appendChild(node);
+    bubbles.push(node);
+    return node;
+}
+__BUBBLES__
+
+// The hidden box and buttons Python builds.
+const box = element("div", "mc-llm-chat-action-at");
+const field = new El("textarea");
+field.value = "";
+field.events = [];
+field.dispatchEvent = (event) => { field.events.push(event.type); return true; };
+box.appendChild(field);
 const presses = [];
-const trigger = {
-    id: "mc-llm-chat-regenerate-now",
-    tagName: "BUTTON",
-    dataset: {},
-    disabled: false,
-    click() { presses.push(field.value); },
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    addEventListener() {},
+["regenerate", "edit", "continue", "resend", "branch", "delete", "delete-from", "back",
+ "forward", "drop"].forEach((name) => {
+    const button = element("button", "mc-llm-chat-" + name + "-now");
+    button.click = () => presses.push([name, field.value]);
+});
+
+const clipboard = [];
+Object.defineProperty(globalThis, "navigator", {
+    value: {clipboard: {writeText(text) { clipboard.push(text); return Promise.resolve(); }}},
+    configurable: true,
+});
+
+// The Voice Box's bridge, as the scenario sets it.
+const voiceBox = {
+    asked: [], urls: [], jobs: {}, outputs: [],
+    canRender(text) { return voiceBox.refusal || ""; },
+    renderText(text, options) {
+        voiceBox.asked.push({text, options});
+        if (voiceBox.refuseSend) return Promise.reject(new Error(voiceBox.refuseSend));
+        const id = "j" + voiceBox.asked.length;
+        voiceBox.jobs[id] = {id, phase: "queued", live: true, output_id: ""};
+        return Promise.resolve(voiceBox.jobs[id]);
+    },
+    jobById(id) { return voiceBox.jobs[id] || null; },
+    outputsFor(prefix) {
+        voiceBox.prefixes = (voiceBox.prefixes || []).concat(prefix);
+        return Promise.resolve(voiceBox.outputs.filter((o) => o.render.origin.key.startsWith(prefix)));
+    },
+    outputAudioUrl(id) { voiceBox.urls.push(id); return Promise.resolve("blob:test-" + id); },
 };
+globalThis.mcVoiceBox = __VOICE_BOX__ ? voiceBox : undefined;
 
-const elements = {
-    "mc-llm-chat-transcript": transcript,
-    "mc-llm-chat-regenerate-at": box,
-    "mc-llm-chat-regenerate-now": trigger,
-};
-
-const created = [];
-
-globalThis.Event = function (kind) { this.type = kind; };
-const html = {scrollTop: 0, getAttribute: () => null,
-              setAttribute() {}, removeAttribute() {}};
+const focusEvents = [];
+const documentListeners = {};
+globalThis.Event = function (kind, init) { this.type = kind; this.bubbles = !!(init && init.bubbles); };
+globalThis.CustomEvent = function (kind, init) { this.type = kind; this.detail = init && init.detail; };
+const html = {scrollTop: 0, getAttribute: () => null, setAttribute() {}, removeAttribute() {}};
 globalThis.document = {
     documentElement: html,
-    querySelector: (selector) => elements[selector.replace("#", "")] || null,
-    createElement() {
-        const node = {
-            tagName: "BUTTON",
-            className: "",
-            textContent: "",
-            type: "",
-            title: "",
-            attributes: {},
-            handlers: {},
-            setAttribute(name, value) { node.attributes[name] = value; },
-            addEventListener(kind, fn) { node.handlers[kind] = fn; },
-        };
-        created.push(node);
-        return node;
+    body: new El("body"),
+    querySelector: (selector) => byId[selector.replace("#", "")] || null,
+    createElement: (tag) => new El(tag),
+    addEventListener(kind, fn) { (documentListeners[kind] = documentListeners[kind] || []).push(fn); },
+    dispatchEvent(event) {
+        if (event.type === "mc:audio-focus") focusEvents.push(event.detail);
+        (documentListeners[event.type] || []).forEach((fn) => fn(event));
+        return true;
     },
-    addEventListener() {},
+    execCommand: () => false,
     readyState: "complete",
 };
 globalThis.window = globalThis;
+const windowListeners = {};
+globalThis.addEventListener = (kind, fn) => { (windowListeners[kind] = windowListeners[kind] || []).push(fn); };
+globalThis.getSelection = () => ({isCollapsed: true});
 globalThis.innerHeight = 900;
 globalThis.scrollY = 0;
-globalThis.addEventListener = () => {};
-globalThis.setTimeout = (fn) => { fn(); return 0; };
-globalThis.setInterval = () => 0;
+// A timer with no delay runs at once (the nomination's next tick); one with
+// a delay waits for the scenario to fire it, so a note can be read before it
+// goes away.
+const timeouts = [];
+globalThis.setTimeout = (fn, ms) => {
+    if (!ms) { fn(); return 0; }
+    timeouts.push({fn, ms});
+    return timeouts.length;
+};
+globalThis.clearTimeout = (id) => { if (timeouts[id - 1]) timeouts[id - 1].cleared = true; };
+const intervals = [];
+globalThis.setInterval = (fn, ms) => { intervals.push({fn, ms}); return intervals.length; };
+globalThis.clearInterval = (id) => { if (intervals[id - 1]) intervals[id - 1].cleared = true; };
 globalThis.MutationObserver = function () { this.observe = () => {}; };
 globalThis.gradioApp = () => globalThis.document;
 
@@ -726,116 +857,431 @@ globalThis.onAfterUiUpdate = () => {};
 
 SOURCE
 
-__BREAK__
+// What the page holds before the script first runs.
+__SETUP__
+
 loaded.forEach((fn) => fn());
 
-const stopped = [];
-function tap(which) {
-    const node = bubbles[which].children[0];
-    if (!node || !node.handlers.click) return false;
-    node.handlers.click({
-        preventDefault() { stopped.push("default"); },
-        stopPropagation() { stopped.push("propagation"); },
-    });
-    return true;
+// The scenario's hands.
+function rowOf(node) { return node.children.filter((c) => c.classList.contains("mc-llm-message-actions"))[0] || null; }
+function buttons(node) { return rowOf(node) ? rowOf(node).querySelectorAll("button") : []; }
+function actionsOf(node) { return buttons(node).map((b) => b.getAttribute("data-action")); }
+function buttonOf(node, action) { return buttons(node).filter((b) => b.getAttribute("data-action") === action)[0]; }
+function tap(node) {
+    const words = node.querySelector("p") || node;
+    words.dispatchEvent({type: "click", bubbles: true, target: words, preventDefault() {}, stopPropagation() {}});
+}
+function pressDown(node) {
+    (windowListeners.pointerdown || []).forEach((fn) => fn({target: node}));
+}
+function pressAction(node, action) {
+    const button = buttonOf(node, action);
+    button.dispatchEvent({type: "click", bubbles: false, target: button, preventDefault() {}, stopPropagation() {}});
+}
+function noteOf(node) { const n = rowOf(node).querySelector(".mc-llm-message-actions-note"); return n && !n.hidden ? n.textContent : ""; }
+async function settle() { await new Promise((r) => process.nextTick(r)); await new Promise((r) => process.nextTick(r)); }
+function look() { intervals.filter((i) => !i.cleared).forEach((i) => i.fn()); }
+function fire() { timeouts.splice(0).filter((t) => !t.cleared).forEach((t) => t.fn()); }
+function rewire() { loaded.forEach((fn) => fn()); }
+function state(node) {
+    return {open: rowOf(node) ? !rowOf(node).hidden : null, revealed: node.classList.contains("mc-llm-revealed"),
+            expanded: node.getAttribute("aria-expanded"), vibe: node.getAttribute("data-mc-vibe"),
+            play: buttonOf(node, "play") ? {disabled: buttonOf(node, "play").disabled, glyph: buttonOf(node, "play").textContent} : null,
+            send: buttonOf(node, "vibe") ? {disabled: buttonOf(node, "vibe").disabled, title: buttonOf(node, "vibe").title} : null};
 }
 
+const out = {};
+await (async function () {
 __REHEARSAL__
+})();
 
-console.log(JSON.stringify({
-    drawn: bubbles.map((one) => one.children.length),
-    label: created.length ? created[0].textContent : "",
-    title: created.length ? created[0].attributes["aria-label"] : "",
-    classes: created.map((one) => one.className),
+console.log(JSON.stringify(Object.assign({
+    rows: bubbles.map((b) => node_actions(b)),
     presses,
     events: field.events,
-    stopped,
-}));
+    clipboard,
+    asked: voiceBox.asked,
+    urls: voiceBox.urls,
+    prefixes: voiceBox.prefixes || [],
+    focus: focusEvents,
+}, out)));
+function node_actions(b) { return actionsOf(b); }
 """
 
 
-def transcript(bubbles: int = 3, rehearsal: str = "", selector: str = '[data-testid="bot"]',
-               break_first: bool = False):
-    """Run the script against a transcript of ``bubbles`` replies."""
-    broken = ("html.getAttribute = () => { throw new Error('no'); };"
-              if break_first else "")
-    harness = (TRANSCRIPT.replace("SOURCE", SCRIPT.read_text())
-               .replace("__BREAK__", broken)
+def row(bubbles=(("assistant", "reply 0"),), rehearsal: str = "", voice_box: bool = True,
+        setup: str = ""):
+    """Run the script against a transcript of ``bubbles``: ``(role, text[, meta])``.
+    ``setup`` runs before the script first wires the page; ``rehearsal`` after."""
+    made = []
+    for one in bubbles:
+        role, text = one[0], one[1]
+        meta = json.dumps(one[2] if len(one) > 2 else {})
+        made.append(f"bubble({json.dumps(role)}, {json.dumps(text)}, {meta});")
+    harness = (ROW.replace("SOURCE", SCRIPT.read_text())
+               .replace("__BUBBLES__", "\n".join(made))
                .replace("__REHEARSAL__", rehearsal)
-               .replace("__BUBBLES__", json.dumps([f"reply {index}" for index in range(bubbles)]))
-               .replace("__SELECTOR__", json.dumps(selector)))
+               .replace("__SETUP__", setup)
+               .replace("__VOICE_BOX__", "true" if voice_box else "false"))
     result = subprocess.run(["node", "--input-type=module", "-e", harness],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-class TestTheRegenerateIcon:
-    def test_every_reply_gets_one(self):
-        assert transcript(bubbles=3)["drawn"] == [1, 1, 1]
+REPLY_ROW = ["edit", "regenerate", "continue", "branch", "copy", "vibe", "play", "delete",
+             "delete_from"]
+PROMPT_ROW = ["edit", "resend", "branch", "copy", "vibe", "play", "delete", "delete_from"]
 
-    def test_it_is_the_reload_glyph_and_it_says_what_it_does(self):
-        """A bare icon with no accessible name is a button a screen reader
-        reads out as "button"."""
-        drawn = transcript(bubbles=1)
 
-        assert drawn["label"] == "↻"
-        assert drawn["title"] == "Regenerate this reply"
-        assert drawn["classes"] == ["mc-llm-again"]
+class TestTheActionRow:
+    def test_every_message_gets_one_row_in_the_order_that_reads(self):
+        """Edit and the ways of asking again, then Branch; Copy and the two
+        VibeVoice buttons; the two that lose something last. A prompt of yours
+        has Send again where a reply has Regenerate and Continue."""
+        found = row([("assistant", "reply 0"), ("user", "ask 1"), ("assistant", "reply 1")])
+
+        assert found["rows"] == [REPLY_ROW, PROMPT_ROW, REPLY_ROW]
 
     def test_wiring_twice_does_not_draw_it_twice(self):
         """This runs after every update the host makes, and a transcript that
-        grew a second icon on every streamed chunk would be unreadable within a
+        grew a second row on every streamed chunk would be unreadable within a
         sentence."""
-        assert transcript(bubbles=2, rehearsal="loaded.forEach((fn) => fn());"
-                                               "loaded.forEach((fn) => fn());")["drawn"] == \
-            [1, 1]
+        found = row([("assistant", "reply 0"), ("user", "ask 1")], "rewire(); rewire();"
+                    "out.rows_each = bubbles.map((b) => b.children.filter((c) => c.classList.contains('mc-llm-message-actions')).length);")
 
-    def test_tapping_one_names_which_reply_it_is(self):
-        drawn = transcript(bubbles=3, rehearsal="tap(2);")
+        assert found["rows_each"] == [1, 1]
 
-        assert drawn["presses"] == ["2"]
-        # Written *and* announced: Gradio learns a value from the event, and a
-        # box written to without one is a box the server still reads as empty.
-        assert drawn["events"] == ["input"]
+    def test_the_row_is_hidden_until_the_message_is_tapped_and_the_next_tap_puts_it_away(self):
+        found = row([("assistant", "reply 0"), ("user", "ask 1")], """
+            out.before = state(bubbles[0]);
+            tap(bubbles[0]);
+            out.opened = state(bubbles[0]);
+            tap(bubbles[0]);
+            out.closed = state(bubbles[0]);
+        """)
 
-    def test_the_tap_never_reaches_the_bubble_under_it(self):
-        """The bubble is wired to the Chatbot's own select event, and a click
-        that reached it would open the action sheet over the reply that is
-        about to start arriving."""
-        assert transcript(bubbles=2, rehearsal="tap(0);")["stopped"] == \
-            ["default", "propagation"]
+        assert found["before"]["open"] is False and found["before"]["expanded"] == "false"
+        assert found["opened"]["open"] is True and found["opened"]["revealed"] is True
+        assert found["opened"]["expanded"] == "true"
+        assert found["closed"]["open"] is False and found["closed"]["revealed"] is False
 
-    def test_which_reply_it_is_is_read_when_it_is_tapped(self):
-        """The bug this is here for: an ordinal captured when the icon was
+    def test_tapping_another_message_moves_the_row_and_a_press_elsewhere_puts_it_away(self):
+        found = row([("assistant", "reply 0"), ("user", "ask 1")], """
+            tap(bubbles[0]);
+            tap(bubbles[1]);
+            out.moved = [state(bubbles[0]).open, state(bubbles[1]).open];
+            pressDown(bubbles[1].querySelector("p"));
+            out.inside = state(bubbles[1]).open;
+            pressDown(holder);
+            out.outside = state(bubbles[1]).open;
+        """)
+
+        assert found["moved"] == [False, True]
+        assert found["inside"] is True, "a press on the open message itself is the tap's to handle"
+        assert found["outside"] is False
+
+    def test_the_row_survives_a_redraw_while_it_is_open(self):
+        """A reply arriving token by token redraws the transcript once a
+        frame; a row that closed whenever a word arrived could not be used,
+        and a row *rebuilt* on every word would lose what it was saying."""
+        found = row([("assistant", "reply 0")], """
+            tap(bubbles[0]);
+            pressAction(bubbles[0], "vibe");
+            const bar = rowOf(bubbles[0]);
+            rewire();
+            out.after = state(bubbles[0]);
+            out.note = noteOf(bubbles[0]);
+            out.same = rowOf(bubbles[0]) === bar;
+        """)
+
+        assert found["after"]["open"] is True
+        assert found["note"] == "Sent to VibeVoice…" and found["same"] is True
+
+    def test_a_row_is_drawn_again_when_the_marker_under_it_changes(self):
+        """A version paged, a reply still arriving: the row reads the marker
+        when it is built, so a changed marker is a rebuilt row -- once."""
+        found = row([("assistant", "reply 0")], """
+            const marker = bubbles[0].querySelector(".mc-llm-meta");
+            marker.setAttribute("data-mc-versions", "3");
+            marker.setAttribute("data-mc-active", "1");
+            rewire();
+            out.pager = rowOf(bubbles[0]).querySelector(".mc-llm-message-actions-pager").textContent;
+            out.rows = bubbles[0].children.filter((c) => c.classList.contains("mc-llm-message-actions")).length;
+        """)
+
+        assert found["pager"] == "2/3" and found["rows"] == 1
+
+    def test_the_keyboard_opens_it_too(self):
+        found = row([("assistant", "reply 0")], """
+            out.tabindex = bubbles[0].getAttribute("tabindex");
+            bubbles[0].dispatchEvent({type: "keydown", key: "Enter", bubbles: true, target: bubbles[0], preventDefault() {}});
+            out.opened = state(bubbles[0]).open;
+            bubbles[0].dispatchEvent({type: "keydown", key: " ", bubbles: true, target: bubbles[0], preventDefault() {}});
+            out.closed = state(bubbles[0]).open;
+        """)
+
+        assert found["tabindex"] == "0"
+        assert found["opened"] is True and found["closed"] is False
+
+    def test_a_press_names_the_message_and_presses_the_actions_button(self):
+        """Written *and* announced: Gradio learns a value from the event, and a
+        box written to without one is a box the server still reads as empty."""
+        found = row([("assistant", "reply 0"), ("user", "ask 1"), ("assistant", "reply 1")], """
+            pressAction(bubbles[2], "regenerate");
+            pressAction(bubbles[1], "resend");
+            pressAction(bubbles[2], "delete_from");
+            pressAction(bubbles[0], "edit");
+        """)
+
+        assert found["presses"] == [["regenerate", "assistant:1"], ["resend", "user:0"],
+                                    ["delete-from", "assistant:1"], ["edit", "assistant:0"]]
+        assert found["events"] == ["input"] * 4
+
+    def test_a_pressed_row_goes_away(self):
+        """Pressed is chosen: the transcript that comes back is drawn afresh."""
+        found = row([("assistant", "reply 0")], """
+            tap(bubbles[0]);
+            pressAction(bubbles[0], "branch");
+            out.after = state(bubbles[0]).open;
+        """)
+
+        assert found["after"] is False
+
+    def test_which_message_it_is_is_read_when_it_is_pressed(self):
+        """The bug this is here for: an ordinal captured when the row was
         drawn names the wrong message as soon as anything above it goes, and
-        for this button that means rewriting a reply nobody pointed at."""
-        drawn = transcript(
-            bubbles=3,
-            # The first reply is deleted out of the thread, the way deleting a
-            # message renumbers every bubble below it, and *then* the icon on
-            # what is now the second reply is tapped.
-            rehearsal="const kept = [bubbles[1], bubbles[2]];"
-                      "shown.list = kept;"
-                      "tap(2);")
+        for a delete button that means deleting a message nobody pointed at."""
+        found = row([("assistant", "reply 0"), ("assistant", "reply 1"), ("assistant", "reply 2")], """
+            holder.removeChild(bubbles[0]);
+            pressAction(bubbles[2], "delete");
+        """)
 
-        assert drawn["presses"] == ["1"]
+        assert found["presses"] == [["delete", "assistant:1"]]
 
-    def test_another_feature_throwing_does_not_stop_it_being_drawn(self):
-        """Each concern in this file is wired on its own. A single try around
-        all of them meant the first one throwing took the six after it down with
-        it, and the failure was silent -- the icons simply were not there."""
-        assert transcript(bubbles=2, break_first=True)["drawn"] == [1, 1]
+    def test_the_version_pager_appears_once_there_is_more_than_one(self):
+        found = row([("assistant", "reply 0", {"versions": 3, "active": 2}),
+                     ("assistant", "reply 1")], """
+            const cluster = rowOf(bubbles[0]).querySelector(".mc-llm-message-actions-versions");
+            out.pager = cluster.querySelector(".mc-llm-message-actions-pager").textContent;
+            out.cluster = cluster.querySelectorAll("button").map((b) => [b.getAttribute("data-action"), b.disabled]);
+            out.plain = !!rowOf(bubbles[1]).querySelector(".mc-llm-message-actions-versions");
+            pressAction(bubbles[0], "back");
+            pressAction(bubbles[0], "drop");
+        """)
 
-    def test_bubbles_it_cannot_recognise_cost_an_icon_and_nothing_else(self):
-        """A theme that replaces Gradio's DOM wholesale. Regenerate is still on
-        the sheet a tap on the bubble opens, which is where it was before this
-        existed -- so the right behaviour is to draw nothing and carry on, not
-        to guess at an element."""
-        drawn = transcript(bubbles=3, selector=".something-a-theme-invented")
+        assert found["pager"] == "3/3"
+        assert found["cluster"] == [["back", False], ["forward", True], ["drop", False]]
+        assert found["plain"] is False
+        assert found["presses"] == [["back", "assistant:0"], ["drop", "assistant:0"]]
 
-        assert drawn["drawn"] == [0, 0, 0]
-        assert drawn["presses"] == []
+    def test_every_button_has_a_name_a_screen_reader_can_say(self):
+        found = row([("assistant", "reply 0", {"versions": 2})], """
+            out.names = buttons(bubbles[0]).map((b) => [b.getAttribute("aria-label"), b.title]);
+        """)
+
+        for label, title in found["names"]:
+            assert label and label == title
+
+    def test_bubbles_it_cannot_recognise_cost_the_row_and_nothing_else(self):
+        """A theme that replaces Gradio's DOM wholesale. The right behaviour is
+        to draw nothing and carry on, not to guess at an element."""
+        found = row([("assistant", "reply 0")], """
+            bubbles[0].removeAttribute("data-testid");
+            bubbles[0].className = "something-a-theme-invented";
+            bubbles[0].children = bubbles[0].children.filter((c) => !c.classList.contains("mc-llm-message-actions"));
+            delete bubbles[0].dataset.mcLlmActions;
+            rewire();
+            out.drawn = bubbles[0].children.filter((c) => c.classList.contains("mc-llm-message-actions")).length;
+        """)
+
+        assert found["drawn"] == 0
+
+
+class TestCopyAndVibeVoice:
+    def test_copy_puts_the_words_on_the_clipboard_without_the_row_or_the_marker(self):
+        found = row([("assistant", "Hello there, friend.")], """
+            pressAction(bubbles[0], "copy");
+            await settle();
+            out.glyph = buttonOf(bubbles[0], "copy").textContent;
+            fire();
+            out.later = buttonOf(bubbles[0], "copy").textContent;
+        """)
+
+        assert found["clipboard"] == ["Hello there, friend."]
+        assert found["glyph"] == "✓", "the button says it did it"
+        assert found["later"] == "⧉", "and goes back to being Copy"
+
+    def test_send_renders_the_words_with_the_pages_voice_box_under_the_messages_key(self):
+        found = row([("assistant", "Hello there.", {"key": "thread-1:abc123"})], """
+            pressAction(bubbles[0], "vibe");
+            out.sent = state(bubbles[0]);
+            await settle();
+            out.pending = state(bubbles[0]);
+        """)
+
+        assert len(found["asked"]) == 1
+        assert found["asked"][0]["text"] == "Hello there."
+        assert found["asked"][0]["options"]["origin"] == {"kind": "llm", "key": "thread-1:abc123",
+                                                           "label": "LLM Studio"}
+        assert found["asked"][0]["options"]["name"].startswith("LLM Studio")
+        assert found["sent"]["vibe"] == "rendering"
+        assert found["pending"]["play"]["disabled"] is True
+
+    def test_play_comes_alive_when_the_render_is_done_and_the_message_blinks_until_played(self):
+        found = row([("assistant", "Hello there.", {"key": "thread-1:abc123"})], """
+            pressAction(bubbles[0], "vibe");
+            await settle();
+            look();
+            out.live = state(bubbles[0]);
+            voiceBox.jobs.j1 = {id: "j1", phase: "done", live: false, output_id: "o9"};
+            look();
+            out.done = state(bubbles[0]);
+            pressAction(bubbles[0], "play");
+            await settle();
+            out.playing = state(bubbles[0]);
+            out.src = bubbles[0].querySelector("audio") ? "inside" : "shared";
+        """)
+
+        assert found["live"]["play"]["disabled"] is True and found["live"]["vibe"] == "rendering"
+        assert found["done"]["play"]["disabled"] is False and found["done"]["vibe"] == "ready"
+        assert found["urls"] == ["o9"]
+        assert found["playing"]["vibe"] == "played"
+        assert found["playing"]["play"]["glyph"] == "‖"
+        assert found["focus"] == [{"owner": "llm-studio", "kind": "playback"}]
+
+    def test_a_second_send_is_one_to_one_with_the_last_press(self):
+        """The first render's completion is not this message's audio any more:
+        Play waits for the second and offers only it."""
+        found = row([("assistant", "Hello there.", {"key": "thread-1:abc123"})], """
+            pressAction(bubbles[0], "vibe");
+            await settle();
+            pressAction(bubbles[0], "vibe");
+            await settle();
+            voiceBox.jobs.j1 = {id: "j1", phase: "done", live: false, output_id: "o1"};
+            look();
+            out.first = state(bubbles[0]);
+            voiceBox.jobs.j2 = {id: "j2", phase: "done", live: false, output_id: "o2"};
+            look();
+            out.second = state(bubbles[0]);
+            pressAction(bubbles[0], "play");
+            await settle();
+        """)
+
+        assert len(found["asked"]) == 2
+        assert found["first"]["play"]["disabled"] is True and found["first"]["vibe"] == "rendering"
+        assert found["second"]["play"]["disabled"] is False
+        assert found["urls"] == ["o2"]
+
+    def test_a_render_that_fails_says_so_and_play_stays_dark(self):
+        found = row([("assistant", "Hello there.")], """
+            pressAction(bubbles[0], "vibe");
+            await settle();
+            voiceBox.jobs.j1 = {id: "j1", phase: "failed", live: false, output_id: "", warning: "The card could not be made ready."};
+            look();
+            out.failed = state(bubbles[0]);
+            out.note = noteOf(bubbles[0]);
+        """)
+
+        assert found["failed"]["play"]["disabled"] is True and found["failed"]["vibe"] is None
+        assert found["note"] == "The card could not be made ready."
+
+    def test_what_the_voice_box_refuses_is_said_in_the_row(self):
+        found = row([("assistant", "Hello there.")], """
+            voiceBox.refusal = "Speaker 1 has no sample.";
+            pressAction(bubbles[0], "vibe");
+            out.note = noteOf(bubbles[0]);
+            out.state = state(bubbles[0]);
+        """)
+
+        assert found["asked"] == []
+        assert found["note"] == "Speaker 1 has no sample."
+        assert found["state"]["vibe"] is None
+
+    def test_without_a_voice_box_on_the_page_the_send_button_says_so_and_is_dark(self):
+        found = row([("assistant", "Hello there.")], """
+            out.state = state(bubbles[0]);
+            pressAction(bubbles[0], "play");
+            out.note = noteOf(bubbles[0]);
+        """, voice_box=False)
+
+        assert found["state"]["send"]["disabled"] is True
+        assert "Voice Box is not on this page" in found["state"]["send"]["title"]
+        assert found["note"] == "Send this message to VibeVoice first."
+
+    def test_a_reload_finds_the_renders_already_made_for_the_thread(self):
+        """Read once per thread from the Voice Box's outputs by their origin
+        keys, newest first; found again, a render is steady rather than
+        blinking, because it is not news."""
+        found = row([("assistant", "reply 0", {"key": "thread-1:aaa"}),
+                     ("user", "ask 1", {"key": "thread-1:bbb"})], """
+            await settle();
+            out.first = state(bubbles[0]);
+            out.second = state(bubbles[1]);
+            pressAction(bubbles[0], "play");
+            await settle();
+            rewire();
+            rewire();
+        """, setup="""
+            voiceBox.outputs = [
+                {id: "o5", render: {origin: {kind: "llm", key: "thread-1:aaa"}}},
+                {id: "o4", render: {origin: {kind: "llm", key: "thread-1:aaa"}}},
+                {id: "o3", render: {origin: {kind: "llm", key: "thread-2:aaa"}}},
+            ];
+        """)
+
+        assert found["prefixes"] == ["thread-1:"], "asked once, not on every redraw"
+        assert found["first"]["vibe"] == "played" and found["first"]["play"]["disabled"] is False
+        assert found["second"]["vibe"] is None and found["second"]["play"]["disabled"] is True
+        assert found["urls"] == ["o5"]
+
+    def test_somebody_else_claiming_the_speaker_pauses_the_render(self):
+        found = row([("assistant", "Hello there.", {"key": "k"})], """
+            pressAction(bubbles[0], "vibe");
+            await settle();
+            voiceBox.jobs.j1 = {id: "j1", phase: "done", live: false, output_id: "o1"};
+            look();
+            pressAction(bubbles[0], "play");
+            await settle();
+            out.playing = state(bubbles[0]).play.glyph;
+            document.dispatchEvent(new CustomEvent("mc:audio-focus", {detail: {owner: "voice-chat", kind: "speech"}}));
+            out.after = state(bubbles[0]).play.glyph;
+            document.dispatchEvent(new CustomEvent("mc:audio-focus", {detail: {owner: "llm-studio", kind: "playback"}}));
+        """)
+
+        assert found["playing"] == "‖" and found["after"] == "▶︎"
+
+    def test_nothing_in_the_row_is_what_lobes_icon_swap_replaces(self):
+        """Lobe's SVG icon option (its ``replaceIcon``) swaps the whole content
+        of any button, span or link whose text *contains* one of its strings
+        (CLAUDE.md: the Voice Box lost three actions to it). The row's glyphs
+        are compared with that list, not with a guess at what an emoji is: the
+        waveform is a picture inside a button with no text, and ↪ is not ↩."""
+        found = row([("assistant", "reply 0", {"versions": 2})], """
+            const bar = rowOf(bubbles[0]);
+            out.texts = buttons(bubbles[0]).map((b) => b.textContent)
+                .concat(bar.querySelectorAll("span, a").map((s) => s.textContent));
+        """)
+
+        assert len(found["texts"]) >= len(REPLY_ROW) + 3
+        for text in found["texts"]:
+            for swapped in LOBE_SWAPS:
+                assert swapped not in text, (text, swapped)
+
+
+# What LobeTheme's `replaceIcon` looks for, by `textContent.includes`, in
+# every button (16 px icons), span and link (36 px) of the page -- read from
+# lobehub/sd-webui-lobe-theme, src/scripts/replaceIcon.ts, 2026-10-08.
+LOBE_SWAPS = (
+    # buttons
+    "🖌️", "🗃️", "🖼️", "🎨️", "📂", "🔄", "🔁", "♻️", "↙️", "⤴", "↕️", "🗑️", "📋", "💾", "🎲️",
+    "🪄", "⚙️", "➡️", "⇅", "⇄", "🎴", "🌀", "💥", "📷", "📝", "📐", "⬇️", "↩", "📒", "📎",
+    "📦", "💞", "✨",
+    # spans
+    "⤡", "⊞", "🖫", "×",
+    # links
+    "❮", "❯",
+)
 
 
 # --------------------------------------------------------------------------- #

@@ -2113,6 +2113,14 @@ def pocket_payload() -> dict:
         "message": found.message,
         "label": found.label,
         "pinned": pocket.pinned(),
+        # The reinstall state, apart from the five readinesses: an earlier
+        # PocketTTS on disk than this build pins is not "not installed", and the
+        # button that fixes it is Reinstall. ``present`` is what makes that
+        # button pressable at all.
+        "stale": found.stale,
+        "stale_message": found.stale_message,
+        "present": found.present,
+        "pinned_version": pocket.pinned_version(),
         "model_id": found.model_id,
         "fingerprint": found.fingerprint,
         "download_bytes": found.download_bytes,
@@ -2141,12 +2149,13 @@ def pocket_payload() -> dict:
     }
 
 
-def pocket_install(part: str = "", folder: str = "") -> dict:
-    """Install PocketTTS. One button for all of it, or one part from a folder.
+def pocket_install(part: str = "", folder: str = "", reinstall: bool = False) -> dict:
+    """Install PocketTTS. One button for all of it, one part from a folder, or all of it again.
 
     Offloaded by the route in front, because this downloads a PyTorch closure
     and builds an isolated interpreter, and neither is something to do on an
-    event loop.
+    event loop. ``reinstall`` is the Reinstall button: what is on disk is
+    removed first, saved voices excepted, and everything is fetched again.
     """
     import mc_voice_pocket as pocket
 
@@ -2154,7 +2163,9 @@ def pocket_install(part: str = "", folder: str = "") -> dict:
     if refused:
         raise Refused(409, refused)
     try:
-        if folder:
+        if reinstall:
+            pocket.reinstall()
+        elif folder:
             pocket.install_from(str(part or "runtime"), str(folder))
         else:
             pocket.install()
@@ -3283,6 +3294,7 @@ def install(_demo=None, app=None) -> bool:
 
             folder = str(payload.get("folder") or "").strip()
             part = str(payload.get("part") or "").strip() or "runtime"
+            reinstall = bool(payload.get("reinstall"))
             already = models.progress().get(pocket.KIND) or {}
             if already.get("running"):
                 return JSONResponse({"ok": True, "already": True})
@@ -3298,7 +3310,7 @@ def install(_demo=None, app=None) -> bool:
 
         def run():
             try:
-                pocket_install(part, folder)
+                pocket_install(part, folder, reinstall)
             except Exception:
                 # Already logged with its reason and already recorded where the
                 # Settings row will draw it -- see mc_voice_models._claim.

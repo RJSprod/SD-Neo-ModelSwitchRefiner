@@ -1,23 +1,23 @@
 {
   "schema": 1,
-  "version": 4,
+  "version": 5,
   "pinned": true,
-  "notes": "The runtime closure is pinned byte for byte: every wheel is named, sized and hashed from pypi.org, its completeness was measured against a real pocket-tts install, and tools/pin_pocket_models.py refuses a closure whose pins contradict one another. The model, official voice and cloning artifacts are DECLARED BUT NOT HASHED. Their repositories, paths and revisions are upstream's own, read out of pocket_tts/config/english.yaml and pocket_tts/utils/utils.py inside the 3.0.2 wheel -- three different commits, one for the weights and tokenizer, one for the cloning-capable weights, one for the voice embeddings. What is missing is the sizes and digests, because the machine that wrote this could not reach huggingface.co. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher that changed its mind. Run `python tools/pin_pocket_models.py --model` on a machine that can reach the hub to record the sizes and digests and turn the first claim into the second -- with HF_TOKEN set and the Kyutai conditions accepted if the gated half is wanted; a closed gate leaves the public half resolved. The official voice bank has one entry on purpose. Upstream advertises twenty-six names and most are English, but which have an English embedding in the repository is a question only the repository can answer, and a name that is not served costs the user every voice rather than one. The --model run prints the whole embeddings directory for a maintainer to review and add. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
+  "notes": "The runtime closure below is resolved: every wheel is named, sized and hashed from pypi.org, so the managed install fetches exactly what this repository claims and refuses anything else. Model and voice artifacts carry the publisher's digest where the hub reports one and are attested over HTTPS at install time where it does not, and either way the digest of what actually arrived is recorded. Regenerate this file with tools/pin_pocket_models.py; it is the only thing that should write it. This is GATE P-1 satisfied: no unreviewed wheel is fetched dynamically.",
   "runtime": {
     "package": "pocket-tts",
     "import_name": "pocket_tts",
-    "version": "3.0.2",
-    "upstream_commit": "f5fa841aa8702d7f15ea9e344bec5290bf42a446",
-    "upstream_released": "2026-08-25",
+    "version": "3.3.0",
+    "upstream_commit": "3dbee45d343d7dddd0d105468d17f8dcba14db3e",
+    "upstream_released": "2026-09-24",
     "torch_version": "2.6.0",
     "provider": "cpu",
     "python_requires": ">=3.10,<3.15",
     "license": "Apache-2.0 (PocketTTS, Kyutai); BSD-3-Clause (PyTorch); BSD-3-Clause (NumPy); Apache-2.0 (safetensors)",
-    "attribution": "PocketTTS by Kyutai. Package pocket-tts 3.0.2 from PyPI; PyPI provenance ties that release to upstream commit f5fa841aa8702d7f15ea9e344bec5290bf42a446.",
+    "attribution": "PocketTTS by Kyutai. Package pocket-tts 3.3.0 from PyPI; its release tag v3.3.0 is upstream commit 3dbee45d343d7dddd0d105468d17f8dcba14db3e.",
     "closure": [
       [
         "pocket-tts",
-        "3.0.2",
+        "3.3.0",
         "pure"
       ],
       [
@@ -39,6 +39,11 @@
         "sentencepiece",
         "0.2.2",
         "binary"
+      ],
+      [
+        "tokenizers",
+        "0.23.2",
+        "abi3"
       ],
       [
         "filelock",
@@ -78,11 +83,6 @@
       [
         "fsspec",
         "2024.10.0",
-        "pure"
-      ],
-      [
-        "beartype",
-        "0.22.9",
         "pure"
       ],
       [
@@ -166,7 +166,7 @@
         "pure"
       ]
     ],
-    "closure_notes": "The smallest inference-complete closure, measured rather than reasoned about: every package here is one `import pocket_tts` fails without, checked by blocking each candidate at the import hook against a real 3.0.2 install, plus the runtime dependencies those packages themselves declare. The versions are checked against each other as well as against the import: tools/pin_pocket_models.py reads what every publisher declares about every other package here and refuses a closure whose pins contradict one another. That check was added after a closure shipped in which every wheel downloaded, every hash matched, every file unpacked, and `import pocket_tts` then died on `cannot import name 'Sentinel' from 'typing_extensions'` -- typing-extensions was pinned at 4.12.2 from when this closure was thirteen packages, and pydantic and typing-inspection had arrived needing 4.14.1 and 4.15.0. Every pin was real; the set was not installable. colorama and setuptools are here for the same reason and were found by the same check: tqdm declares colorama on Windows, which is the only platform this closure has, and torch declares setuptools on Python 3.12 and later, which is half the minors it advertises. Upstream's project metadata also lists a server and a CLI -- fastapi, uvicorn, typer, python-multipart, einops -- and none of them is on the import path Voice Chat uses; section 23.1 says the closure is the smallest tested inference-complete one, so they are absent and the tool's OMITTED table records why. huggingface-hub and requests are here because pocket_tts.utils.utils imports them at module level, not because anything resolves a location at run time: the worker is handed a config whose every path is local, HF_HUB_OFFLINE is set in its environment, and it refuses a config that names a network location at all (I-PKT-20). huggingface-hub is pinned in the 0.x line deliberately: 1.x replaces requests with httpx and would add httpx, httpcore, anyio, h11 and sniffio to an offline worker for an HTTP client it must never use. beartype cannot be dropped -- pocket_tts/data/audio.py imports beartype.typing unconditionally -- but POCKET_TTS_NO_BEARTYPE=1 in the worker's environment keeps its claw from wrapping every function in the package, which upstream's own comment says costs per call. hf-xet is absent for the same reason torchao is: an accelerator for downloads this worker never performs. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run. Torch is 2.6.0 rather than the 3.0.2 metadata's >=2.5.0 floor because 2.5.x has no cp313 Windows wheel and this manifest advertises Python 3.13; a floor is not a runtime identity, and a platform advertised without a wheel to satisfy it is a platform that fails at install time instead of at review time. scipy is pinned at 1.15.3 rather than a newer release because 1.16 dropped Python 3.10, which this manifest still advertises.",
+    "closure_notes": "The smallest inference-complete closure, measured rather than reasoned about: every package here is one `import pocket_tts` fails without, checked by blocking each candidate at the import hook against a real 3.0.2 install and read again against the 3.3.0 wheel's imports, plus the runtime dependencies those packages themselves declare. The versions are checked against each other as well as against the import: tools/pin_pocket_models.py reads what every publisher declares about every other package here and refuses a closure whose pins contradict one another. That check was added after a closure shipped in which every wheel downloaded, every hash matched, every file unpacked, and `import pocket_tts` then died on `cannot import name 'Sentinel' from 'typing_extensions'` -- typing-extensions was pinned at 4.12.2 from when this closure was thirteen packages, and pydantic and typing-inspection had arrived needing 4.14.1 and 4.15.0. Every pin was real; the set was not installable. colorama and setuptools are here for the same reason and were found by the same check: tqdm declares colorama on Windows, which is the only platform this closure has, and torch declares setuptools on Python 3.12 and later, which is half the minors it advertises. Upstream's project metadata also lists a server and a CLI -- fastapi, uvicorn, typer, python-multipart, einops -- and none of them is on the import path Voice Chat uses; section 23.1 says the closure is the smallest tested inference-complete one, so they are absent and the tool's OMITTED table records why. huggingface-hub and requests are here because pocket_tts.utils.utils imports them at module level, not because anything resolves a location at run time: the worker is handed a config whose every path is local, HF_HUB_OFFLINE is set in its environment, and it refuses a config that names a network location at all (I-PKT-20). huggingface-hub is pinned in the 0.x line deliberately: 1.x replaces requests with httpx and would add httpx, httpcore, anyio, h11 and sniffio to an offline worker for an HTTP client it must never use. tokenizers arrived with 3.1.0 and is required: pocket_tts/modules/text_conditioner.py imports it at module level beside sentencepiece, and the released English configuration points at a tokenizer.json rather than a sentencepiece .model (the same vocabulary, converted). It ships one cp310-abi3 wheel that serves every minor here, and it needs only huggingface-hub, which is already pinned. beartype left with 3.1.0: upstream replaced it with a static checker, nothing in the 3.3.0 wheel imports it, and the worker's POCKET_TTS_NO_BEARTYPE=1 is now a harmless leftover a 3.0.2 runtime still honours. hf-xet is absent for the same reason torchao is: an accelerator for downloads this worker never performs. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run. Torch is 2.6.0 rather than the 3.3.0 metadata's >=2.5.0 floor because 2.5.x has no cp313 Windows wheel and this manifest advertises Python 3.13; a floor is not a runtime identity, and a platform advertised without a wheel to satisfy it is a platform that fails at install time instead of at review time. scipy is pinned at 1.15.3 rather than a newer release because 1.16 dropped Python 3.10, which this manifest still advertises.",
     "platforms": [
       {
         "id": "windows-x86_64-cp310",
@@ -178,11 +178,11 @@
         "python": "3.10",
         "artifacts": [
           {
-            "filename": "pocket_tts-3.0.2-py3-none-any.whl",
-            "local_name": "pocket_tts-3.0.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/94/13/c3e2fffd23e37ef68270013e7993620720ebd8c14e79cdb155bde8314116/pocket_tts-3.0.2-py3-none-any.whl",
-            "bytes": 74607,
-            "sha256": "f14174195a16dc775f17b11fa1dd67b160567ef5a54872d5570164ea19550f37"
+            "filename": "pocket_tts-3.3.0-py3-none-any.whl",
+            "local_name": "pocket_tts-3.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/1e/c0/9bf4453c170bfe15cbe71d9ec7bbd7052bea0275e5c0645f59be373b83ab/pocket_tts-3.3.0-py3-none-any.whl",
+            "bytes": 86452,
+            "sha256": "77b2eb5554cb710e92888f84e28816f2361dba075e0ace47108458794db99111"
           },
           {
             "filename": "torch-2.6.0-cp310-cp310-win_amd64.whl",
@@ -211,6 +211,13 @@
             "url": "https://files.pythonhosted.org/packages/26/83/c3547715c29b7e4c84a180a240267f7685dde6f9b981396f16b95405ec9d/sentencepiece-0.2.2-cp310-cp310-win_amd64.whl",
             "bytes": 1245044,
             "sha256": "1120e0791540615e650b2e9bea835bf38a7362455d8ab62dee7968219c2d79a0"
+          },
+          {
+            "filename": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "local_name": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/db/f7/0a69ac6b82dbccf3f71add938a161c497952749294b8dd6dfe03a819dc40/tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "bytes": 2863236,
+            "sha256": "2e96f5699d5249c9c64aa8412e044f727aae3a4098cf830f9901ec1afc361cde"
           },
           {
             "filename": "filelock-3.16.1-py3-none-any.whl",
@@ -267,13 +274,6 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
-          },
-          {
-            "filename": "beartype-0.22.9-py3-none-any.whl",
-            "local_name": "beartype-0.22.9-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
-            "bytes": 1333658,
-            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
           },
           {
             "filename": "pydantic-2.13.5-py3-none-any.whl",
@@ -399,11 +399,11 @@
         "python": "3.11",
         "artifacts": [
           {
-            "filename": "pocket_tts-3.0.2-py3-none-any.whl",
-            "local_name": "pocket_tts-3.0.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/94/13/c3e2fffd23e37ef68270013e7993620720ebd8c14e79cdb155bde8314116/pocket_tts-3.0.2-py3-none-any.whl",
-            "bytes": 74607,
-            "sha256": "f14174195a16dc775f17b11fa1dd67b160567ef5a54872d5570164ea19550f37"
+            "filename": "pocket_tts-3.3.0-py3-none-any.whl",
+            "local_name": "pocket_tts-3.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/1e/c0/9bf4453c170bfe15cbe71d9ec7bbd7052bea0275e5c0645f59be373b83ab/pocket_tts-3.3.0-py3-none-any.whl",
+            "bytes": 86452,
+            "sha256": "77b2eb5554cb710e92888f84e28816f2361dba075e0ace47108458794db99111"
           },
           {
             "filename": "torch-2.6.0-cp311-cp311-win_amd64.whl",
@@ -432,6 +432,13 @@
             "url": "https://files.pythonhosted.org/packages/ab/62/9e2569867e3dcff7ad6d89642a9615b9801b5cd698abe7df3b490361f66e/sentencepiece-0.2.2-cp311-cp311-win_amd64.whl",
             "bytes": 1246268,
             "sha256": "70d4ca6f4d06df7f0ccab6fe4f49c8a712c8c8b6847b4f0af9a0e1dbb0e0337e"
+          },
+          {
+            "filename": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "local_name": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/db/f7/0a69ac6b82dbccf3f71add938a161c497952749294b8dd6dfe03a819dc40/tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "bytes": 2863236,
+            "sha256": "2e96f5699d5249c9c64aa8412e044f727aae3a4098cf830f9901ec1afc361cde"
           },
           {
             "filename": "filelock-3.16.1-py3-none-any.whl",
@@ -488,13 +495,6 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
-          },
-          {
-            "filename": "beartype-0.22.9-py3-none-any.whl",
-            "local_name": "beartype-0.22.9-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
-            "bytes": 1333658,
-            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
           },
           {
             "filename": "pydantic-2.13.5-py3-none-any.whl",
@@ -620,11 +620,11 @@
         "python": "3.12",
         "artifacts": [
           {
-            "filename": "pocket_tts-3.0.2-py3-none-any.whl",
-            "local_name": "pocket_tts-3.0.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/94/13/c3e2fffd23e37ef68270013e7993620720ebd8c14e79cdb155bde8314116/pocket_tts-3.0.2-py3-none-any.whl",
-            "bytes": 74607,
-            "sha256": "f14174195a16dc775f17b11fa1dd67b160567ef5a54872d5570164ea19550f37"
+            "filename": "pocket_tts-3.3.0-py3-none-any.whl",
+            "local_name": "pocket_tts-3.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/1e/c0/9bf4453c170bfe15cbe71d9ec7bbd7052bea0275e5c0645f59be373b83ab/pocket_tts-3.3.0-py3-none-any.whl",
+            "bytes": 86452,
+            "sha256": "77b2eb5554cb710e92888f84e28816f2361dba075e0ace47108458794db99111"
           },
           {
             "filename": "torch-2.6.0-cp312-cp312-win_amd64.whl",
@@ -653,6 +653,13 @@
             "url": "https://files.pythonhosted.org/packages/8d/11/753fca2e6b109be3ab7867abf357dfe48677fe726ae5a5363d0b54ca9450/sentencepiece-0.2.2-cp312-cp312-win_amd64.whl",
             "bytes": 1248030,
             "sha256": "7c6e7bf684dc12145bfa685d3060beaea55139134ba848289bee514ed42e7383"
+          },
+          {
+            "filename": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "local_name": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/db/f7/0a69ac6b82dbccf3f71add938a161c497952749294b8dd6dfe03a819dc40/tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "bytes": 2863236,
+            "sha256": "2e96f5699d5249c9c64aa8412e044f727aae3a4098cf830f9901ec1afc361cde"
           },
           {
             "filename": "filelock-3.16.1-py3-none-any.whl",
@@ -709,13 +716,6 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
-          },
-          {
-            "filename": "beartype-0.22.9-py3-none-any.whl",
-            "local_name": "beartype-0.22.9-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
-            "bytes": 1333658,
-            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
           },
           {
             "filename": "pydantic-2.13.5-py3-none-any.whl",
@@ -841,11 +841,11 @@
         "python": "3.13",
         "artifacts": [
           {
-            "filename": "pocket_tts-3.0.2-py3-none-any.whl",
-            "local_name": "pocket_tts-3.0.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/94/13/c3e2fffd23e37ef68270013e7993620720ebd8c14e79cdb155bde8314116/pocket_tts-3.0.2-py3-none-any.whl",
-            "bytes": 74607,
-            "sha256": "f14174195a16dc775f17b11fa1dd67b160567ef5a54872d5570164ea19550f37"
+            "filename": "pocket_tts-3.3.0-py3-none-any.whl",
+            "local_name": "pocket_tts-3.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/1e/c0/9bf4453c170bfe15cbe71d9ec7bbd7052bea0275e5c0645f59be373b83ab/pocket_tts-3.3.0-py3-none-any.whl",
+            "bytes": 86452,
+            "sha256": "77b2eb5554cb710e92888f84e28816f2361dba075e0ace47108458794db99111"
           },
           {
             "filename": "torch-2.6.0-cp313-cp313-win_amd64.whl",
@@ -874,6 +874,13 @@
             "url": "https://files.pythonhosted.org/packages/09/fa/d2d6369257fd2f0de616b1c7110b73fab409ef61b14f1b9e0010ed325914/sentencepiece-0.2.2-cp313-cp313-win_amd64.whl",
             "bytes": 1247987,
             "sha256": "74f0ee601047c0c12a783088b51be4e6214a62ecd9e02278c477433cd16e0ed9"
+          },
+          {
+            "filename": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "local_name": "tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/db/f7/0a69ac6b82dbccf3f71add938a161c497952749294b8dd6dfe03a819dc40/tokenizers-0.23.2-cp310-abi3-win_amd64.whl",
+            "bytes": 2863236,
+            "sha256": "2e96f5699d5249c9c64aa8412e044f727aae3a4098cf830f9901ec1afc361cde"
           },
           {
             "filename": "filelock-3.16.1-py3-none-any.whl",
@@ -930,13 +937,6 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
-          },
-          {
-            "filename": "beartype-0.22.9-py3-none-any.whl",
-            "local_name": "beartype-0.22.9-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
-            "bytes": 1333658,
-            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
           },
           {
             "filename": "pydantic-2.13.5-py3-none-any.whl",
@@ -1066,40 +1066,40 @@
       "language": "en",
       "public_repo": "kyutai/pocket-tts-without-voice-cloning",
       "cloning_repo": "kyutai/pocket-tts",
-      "revision": "d29db7978e464fb90cb3359ee0c69a273b9142cc",
+      "revision": "e7205b6ee50e654a5ea19f0e9df2b0813b05e921",
       "sample_rate": 24000,
       "recommended_temperature": 0.3,
       "license": "CC-BY-4.0 (PocketTTS model weights, Kyutai)",
       "attribution": "PocketTTS English by Kyutai. Public model assets from huggingface.co/kyutai/pocket-tts-without-voice-cloning; the voice-cloning weights are a separate gated repository whose conditions have to be accepted upstream.",
       "summary": "A streaming CPU model. Speaks with precomputed official voice states, and clones a voice from a short local recording once the gated weights are installed.",
-      "notes": "Downloaded once and then read from disk. The two revisions are upstream's own, read out of pocket_tts/config/english.yaml inside the 3.0.2 wheel: the package pins the public weights and tokenizer at one commit and the cloning-capable weights at another, and following main instead would install bytes the shipped configuration was not written for. Voice Chat's installer copies that same configuration out of the runtime and rewrites its three locations to the local files it verified, so nothing is resolved again after installation and no hf:// or https:// location ever reaches the worker.",
+      "notes": "Downloaded once and then read from disk. The revisions are upstream's own, read out of pocket_tts/config/english.yaml and pocket_tts/utils/utils.py inside the 3.3.0 wheel: the package pins the public weights (the english_2026-09 robustness fine-tune, the same file english.yaml and english_2026-09.yaml name) at one commit, the tokenizer.json at a later one, the cloning-capable weights at a commit of the gated repository and the voice embeddings at a fourth, and following main instead would install bytes the shipped configuration was not written for. A 3.0.2 installation holds the english_2026-04 weights, a sentencepiece tokenizer.model and embeddings prepared for those weights, none of which this release can use: the installer reads such an installation as needing a reinstall and says so. Voice Chat's installer copies the shipped configuration out of the runtime and rewrites its three locations to the local files it verified, so nothing is resolved again after installation and no hf:// or https:// location ever reaches the worker.",
       "about_bytes": 0,
       "ram_bytes": 2147483648,
       "files": [
         {
           "filename": "languages/english/model.safetensors",
           "local_name": "model.safetensors",
-          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/d29db7978e464fb90cb3359ee0c69a273b9142cc/languages/english/model.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e7205b6ee50e654a5ea19f0e9df2b0813b05e921/languages/english/model.safetensors",
           "bytes": 0,
           "sha256": ""
         },
         {
-          "filename": "languages/english/tokenizer.model",
-          "local_name": "tokenizer.model",
-          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/d29db7978e464fb90cb3359ee0c69a273b9142cc/languages/english/tokenizer.model",
+          "filename": "languages/english/tokenizer.json",
+          "local_name": "tokenizer.json",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/00eac05ed3d16bdc3f6b5d598874019c34a89214/languages/english/tokenizer.json",
           "bytes": 0,
           "sha256": ""
         }
       ],
       "required_paths": [
         "model.safetensors",
-        "tokenizer.model"
+        "tokenizer.json"
       ],
       "cloning_files": [
         {
           "filename": "languages/english/model.safetensors",
           "local_name": "model-voice-cloning.safetensors",
-          "url": "https://huggingface.co/kyutai/pocket-tts/resolve/39592ff23c9ef80098bb74895d104c26275fe2c9/languages/english/model.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts/resolve/983151f13aaeab1b13c1e5e3c2c383d49a9edf3f/languages/english/model.safetensors",
           "bytes": 0,
           "sha256": ""
         }
@@ -1110,7 +1110,7 @@
       "config": {
         "weights_path": "model-voice-cloning.safetensors",
         "weights_path_without_voice_cloning": "model.safetensors",
-        "tokenizer_path": "tokenizer.model"
+        "tokenizer_path": "tokenizer.json"
       },
       "voices": [
         {
@@ -1120,18 +1120,19 @@
           "accent": "",
           "license": "CC-BY-4.0 (PocketTTS voice states, Kyutai)",
           "attribution": "PocketTTS official voice Alba by Kyutai (CC-BY-4.0). Precomputed voice state from huggingface.co/kyutai/pocket-tts-without-voice-cloning, installed locally and never fetched at speech time.",
-          "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/blob/e81d79e8194ad4c7ce879c87a4258ef20cbf2487/languages/english/embeddings/alba.safetensors",
+          "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/blob/4e1e0a3e611c51c0b4ed8174fc10f32a54644303/languages/english/embeddings/alba.safetensors",
           "artifact": {
             "filename": "languages/english/embeddings/alba.safetensors",
             "local_name": "alba.safetensors",
-            "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e81d79e8194ad4c7ce879c87a4258ef20cbf2487/languages/english/embeddings/alba.safetensors",
+            "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/4e1e0a3e611c51c0b4ed8174fc10f32a54644303/languages/english/embeddings/alba.safetensors",
             "bytes": 0,
             "sha256": ""
           }
         }
       ],
-      "cloning_revision": "39592ff23c9ef80098bb74895d104c26275fe2c9",
-      "voice_revision": "e81d79e8194ad4c7ce879c87a4258ef20cbf2487"
+      "cloning_revision": "983151f13aaeab1b13c1e5e3c2c383d49a9edf3f",
+      "voice_revision": "4e1e0a3e611c51c0b4ed8174fc10f32a54644303",
+      "tokenizer_revision": "00eac05ed3d16bdc3f6b5d598874019c34a89214"
     }
   }
 }

@@ -1,21 +1,22 @@
-"""One overlay at a time, decided in one place, for all seven of them.
+"""One overlay at a time, decided in one place, for all six of them.
 
-LLM Studio has seven surfaces that pop over the workspace, and until now it had
-*three* mechanisms for deciding which was open: the shell's two sheets knew
-about each other, the chat panel's four screens knew about each other, and the
-message action sheet knew about nothing. So opening the character editor left
-the workspace chooser underneath it, and tapping a bubble opened an action
-sheet over whichever of those happened to be showing. Three half-drawn panels
-stacked on one phone screen, and each mechanism individually correct.
+LLM Studio has six surfaces that pop over the workspace, and until this module
+it had *three* mechanisms for deciding which was open: the shell's two sheets
+knew about each other, the chat panel's four screens knew about each other,
+and the message action sheet -- a seventh then, a row inside the bubble now --
+knew about nothing. So opening the character editor left the workspace chooser
+underneath it, and tapping a bubble opened an action sheet over whichever of
+those happened to be showing. Three half-drawn panels stacked on one phone
+screen, and each mechanism individually correct.
 
 This module is the fourth mechanism that replaces all three. :func:`showing`
 answers "what is visible" for every surface at once, so exclusivity is a
-property of one function rather than a rule seven handlers have to remember.
+property of one function rather than a rule six handlers have to remember.
 
 How it reaches Gradio
 ---------------------
 A Gradio handler can only write the outputs it declares, so a decision about
-all seven is only worth making if every opener *can* write all seven. Both
+all six is only worth making if every opener *can* write all six. Both
 halves are built in one ``gr.Blocks`` but by two modules, and the shell's
 sheets exist before the chat panel is built — so the components are registered
 here as they are created, and each module asks for the ones it did not build
@@ -51,11 +52,12 @@ SHELL = ("mode", "model")
 CHAT = ("threads", "character", "persona", "voice")
 """Conversation's screens. The same tuple ``mc_llm_chat_panel.SCREENS`` names."""
 
-ACTIONS = "actions"
-"""The per-message action sheet. The seventh, and the one that knew nothing."""
+OVERLAYS = SHELL + CHAT
+"""Every pop surface in LLM Studio, in the order this module answers in.
 
-OVERLAYS = SHELL + CHAT + (ACTIONS,)
-"""Every pop surface in LLM Studio, in the order this module answers in."""
+Six. The per-message action sheet was the seventh until it became a row inside
+the bubble it applies to, which covers nothing and so has nothing to close.
+"""
 
 _components: dict = {}
 _states: dict = {}
@@ -112,7 +114,7 @@ def present(names) -> tuple:
 
 
 def showing(name: str = "") -> dict:
-    """Which of the seven is open. Exactly one, or none.
+    """Which of the six is open. Exactly one, or none.
 
     The single decision. ``name`` is the surface being opened; everything else
     is closed, including the surfaces the caller has never heard of, which is

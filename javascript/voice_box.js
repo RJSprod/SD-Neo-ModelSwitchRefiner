@@ -3932,6 +3932,14 @@
     // -- the Configuration header: Render, Install and the one status line ----- //
 
     function renderBlocker() {
+        return renderBlockerFor(state.prompt, "Write a script first.");
+    }
+
+    // Why `text` cannot be rendered with the page's current pipeline and
+    // configuration, or "" when it can. The Render button's reason, and the
+    // reason another tab gets for a script of its own (`mcVoiceBox.canRender`).
+    function renderBlockerFor(text, emptyMessage) {
+        if (!state.booted) return "Voice Box has not loaded.";
         if (!state.status) return "Loading…";
         const engine = state.status.engine || {};
         if (engine.ready === false) {
@@ -3942,9 +3950,9 @@
             return engine.message || "VibeVoice is not installed.";
         }
         if (!state.pipelineId) return "No pipeline.";
-        const parsed = parseScript(state.prompt);
+        const parsed = parseScript(text);
         if (parsed.error) return parsed.error;
-        if (!parsed.words) return "Write a script first.";
+        if (!parsed.words) return emptyMessage || "Nothing to speak.";
         const working = ensureWorking();
         const settings = state.status.settings || {};
         if (!working.card_uuid && !settings.card_uuid) return "Choose the card VibeVoice renders on.";
@@ -3966,6 +3974,33 @@
         return state.dirty.prompt ? savePrompt() : Promise.resolve();
     }
 
+    // The render request for `prompt` as the page would send its own: the
+    // pipeline on screen, the saved configuration by id when the screen shows it
+    // unchanged, otherwise what the screen shows inline, validated by the
+    // server the same way. `name` and `origin` are another tab's to give.
+    function renderBody(prompt, name, origin) {
+        const working = ensureWorking();
+        const unsaved = state.dirty.configuration || !configurationById(state.configurationId);
+        const body = {pipeline_id: state.pipelineId, prompt: String(prompt || ""),
+                      configuration_id: state.configurationId, name: String(name || "")};
+        if (unsaved) body.configuration = Object.assign({}, working);
+        if (origin && typeof origin === "object") body.origin = origin;
+        return body;
+    }
+
+    // A job the server has just taken: shown on the status line at once --
+    // queued, or on its card -- and polled at the live rate until it ends.
+    function adoptJob(reply) {
+        const job = recordOf(reply, "job");
+        if (job.id) {
+            state.ownJobs[job.id] = true;
+            if (!jobById(job.id)) state.jobs = [job].concat(state.jobs);
+        }
+        renderStatus();
+        schedulePoll();
+        return job;
+    }
+
     function renderNow() {
         // A press is the answer to the last failure: the line stops saying it.
         state.lastFailure = null;
@@ -3974,29 +4009,62 @@
             say(why, "warn");
             return Promise.resolve(null);
         }
-        const pipelineId = state.pipelineId;
-        const working = ensureWorking();
-        // The saved configuration when the screen shows it unchanged, otherwise
-        // what the screen shows, inline, validated by the server the same way.
-        const unsaved = state.dirty.configuration || !configurationById(state.configurationId);
         return flushSaves().then(function () {
-            const body = {pipeline_id: pipelineId, prompt: state.prompt,
-                          configuration_id: state.configurationId, name: ""};
-            if (unsaved) body.configuration = Object.assign({}, working);
-            return request("render", ROUTES.render, {body: body});
+            return request("render", ROUTES.render, {body: renderBody(state.prompt, "", null)});
         }).then(function (reply) {
             // The status line shows the new job at once -- queued, or on its
             // card -- which is the answer to the press. A message in its place
             // would hide the job's Cancel for as long as it held the line.
-            const job = recordOf(reply, "job");
-            if (job.id) {
-                state.ownJobs[job.id] = true;
-                if (!jobById(job.id)) state.jobs = [job].concat(state.jobs);
-            }
-            renderStatus();
-            schedulePoll();
+            adoptJob(reply);
             return refreshStatus();
         });
+    }
+
+    // -- another tab's render ----------------------------------------------- //
+    //
+    // LLM Studio's Send to VibeVoice: a message's words rendered with whatever
+    // this page is set up with -- its pipeline, its configuration and the
+    // samples in it -- and nothing of the page's own prompt touched. The job is
+    // this page's as much as a Render press's: it shows on the status line,
+    // its output lands in the pipeline's list, and the poll follows it.
+    //
+    // Queued behind a render in flight rather than folded into it: two
+    // messages sent in a row are two renders, and the second must never be
+    // handed the first's job (the in-flight rule's `queue`).
+    function renderText(text, options) {
+        const settings = options || {};
+        const why = renderBlockerFor(text, "Nothing to speak.");
+        if (why) return Promise.reject(new Error(why));
+        return request("render", ROUTES.render,
+                       {body: renderBody(text, settings.name, settings.origin), queue: true})
+            .then(function (reply) {
+                const job = adoptJob(reply);
+                refreshStatus().catch(report);
+                return job;
+            });
+    }
+
+    // Every output whose origin key starts with `prefix`, newest first: how
+    // another tab finds its renders again after a reload. Its own request
+    // kind, so it is never folded into the page's own outputs read, which
+    // asks for one pipeline.
+    function outputsFor(prefix) {
+        const wanted = String(prefix || "");
+        return request("outputs:origin", ROUTES.outputs, {body: {pipeline_id: ""}})
+            .then(function (found) {
+                return listOf(found, "outputs").filter(function (output) {
+                    const origin = output && output.render && output.render.origin;
+                    const key = origin && typeof origin.key === "string" ? origin.key : "";
+                    return !!key && key.indexOf(wanted) === 0;
+                });
+            });
+    }
+
+    // An output's sound as a blob URL, fetched with the page token the way the
+    // lanes fetch theirs, and cached with them.
+    function outputAudioUrl(id) {
+        const key = "output:" + String(id || "");
+        return audioUrl(key, ROUTES.outputAudio + "?id=" + encodeURIComponent(String(id || "")));
     }
 
     // The install's progress is the status line's first state.
@@ -4527,6 +4595,16 @@
     window.mcVoiceBox = {
         state: function () { return state; },
         boot: boot,
+        // For another tab on this page. LLM Studio's Send to VibeVoice reads
+        // these five and nothing else: why a text cannot be rendered right
+        // now, a render of it with the page's current setup, a job by id (the
+        // page's poll keeps `state.jobs` current while one is live), the
+        // outputs that carry an origin key, and an output's sound.
+        canRender: function (text) { return renderBlockerFor(text, "Nothing to speak."); },
+        renderText: renderText,
+        jobById: jobById,
+        outputsFor: outputsFor,
+        outputAudioUrl: outputAudioUrl,
         focusEvent: function () {
             return {name: FOCUS_EVENT, owner: OWNER, last: state.focus.last,
                     sent: state.focus.sent.slice()};

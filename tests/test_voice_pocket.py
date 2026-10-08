@@ -1123,6 +1123,213 @@ class TestTheInstallButtonSaysWhatIsLeftToDo:
         assert tried == ["cloning"], "the gated half was not attempted"
 
 
+class TestAnEarlierInstallIsReadAsNeedingAReinstall:
+    """The 3.3.0 pin, met by a 3.0.2 installation.
+
+    Its runtime is another closure, its model directory holds the english_2026-04
+    weights under the same filename as the new ones and a tokenizer.model where
+    this build wants a tokenizer.json, and its official voice states were
+    prepared for those old weights. None of that is "not installed" and none of
+    it is "installed"; it is one state with one remedy, and the panel says
+    which button that is.
+    """
+
+    class Pinned:
+        """A platform whose closure this build pins, for a runtime record to disagree with."""
+
+        identifier = "test-runner"
+        artifacts = (object(),)
+        closure_id = "closure-of-this-build"
+
+    def _runtime(self, closure: str, version: str = "3.0.2") -> None:
+        paths.pocket_runtime_manifest().write_text(
+            json.dumps({"schema": 1, "closure": closure, "platform": "test-runner",
+                        "pocket_version": version, "torch_version": "2.6.0"}),
+            encoding="utf-8")
+
+    def test_a_runtime_from_another_closure_names_both_versions_and_reinstall(
+            self, host, installed, worker, monkeypatch):
+        installed["runtime"]["version"] = "3.3.0"
+        monkeypatch.setattr(pocket, "platform", lambda: self.Pinned())
+        self._runtime("closure-of-3.0.2")
+
+        found = pocket.status()
+
+        assert found.stale is True
+        assert found.runtime_ready is False and found.ready is False
+        assert "3.0.2" in found.runtime_message and "3.3.0" in found.runtime_message
+        assert "Reinstall" in found.runtime_message
+        assert found.message == found.stale_message
+        assert "3.3.0" in found.message and "3.0.2" in found.message
+        assert "saved voices are kept" in found.message
+        assert found.present is True
+
+    def test_the_runtime_this_build_pins_is_not_stale(self, host, installed, worker,
+                                                     monkeypatch):
+        monkeypatch.setattr(pocket, "platform", lambda: self.Pinned())
+        self._runtime("closure-of-this-build", "3.3.0")
+        found = pocket.status()
+        assert found.stale is False and found.runtime_ready is True
+
+    def test_a_model_at_an_earlier_revision_is_stale_rather_than_not_installed(
+            self, host, installed, worker):
+        """3.0.2's installer wrote the public revision alone, and that is enough
+        to tell: the 3.3.0 manifest names another commit for the same file."""
+        root = paths.pocket_model_root("english")
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"schema": 1, "id": "english",
+                        "revision": "d29db7978e464fb90cb3359ee0c69a273b9142cc",
+                        "digests": {"model.safetensors": "a" * 64}}), encoding="utf-8")
+
+        found = pocket.status()
+
+        assert found.stale is True
+        assert found.speech_model_ready is False
+        assert "earlier revision" in found.model_message and "Reinstall" in found.model_message
+        assert "Not installed" not in found.model_message
+
+    def test_a_record_with_the_whole_declaration_is_compared_part_by_part(
+            self, host, installed, worker):
+        """What this build's installer writes. The voice states and the cloning
+        weights are declared with the model, so a manifest that moved either
+        reads the directory as needing a reinstall even with the weights' own
+        commit unchanged."""
+        entry = pocket.bundle()
+        root = paths.pocket_model_root("english")
+        record = {"schema": 1, "id": "english", "revision": entry.revision,
+                  "declared": pocket._declared(entry), "digests": {}}
+        (root / paths.INSTALLED_FILENAME).write_text(json.dumps(record), encoding="utf-8")
+        assert pocket.status().stale is False
+
+        record["declared"]["voice_revision"] = "somewhere-else"
+        (root / paths.INSTALLED_FILENAME).write_text(json.dumps(record), encoding="utf-8")
+        assert pocket.status().stale is True
+
+    def test_a_record_without_a_revision_is_trusted(self, host, installed, worker):
+        """A folder install from before revisions were recorded, or a test's
+        stand-in: a reinstall this code cannot justify is a download nobody
+        asked for."""
+        found = pocket.status()
+        assert found.stale is False and found.ready is True
+
+    def test_cloning_weights_recorded_for_an_earlier_model_are_stale(self, host, cloning,
+                                                                     worker):
+        root = paths.pocket_model_root("english")
+        (root / pocket.CLONING_MARKER).write_text(
+            json.dumps({"schema": 1, "revision": "39592ff23c9ef80098bb74895d104c26275fe2c9"}),
+            encoding="utf-8")
+
+        found = pocket.status()
+
+        assert found.stale is True
+        assert found.cloning_ready is False
+        assert "earlier PocketTTS model" in found.cloning_message
+
+    def test_the_button_reads_reinstall_when_the_install_is_stale(self, host, installed,
+                                                                 worker):
+        import mc_voice_ui as voice_ui
+
+        root = paths.pocket_model_root("english")
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"schema": 1, "id": "english", "revision": "older", "digests": {}}),
+            encoding="utf-8")
+        assert voice_ui._pocket_button(pocket.status()) == "Reinstall PocketTTS"
+
+    def test_install_on_a_stale_tree_reinstalls(self, host, installed, worker, monkeypatch):
+        """"Install what is missing" would fetch this build's runtime beside a
+        model directory prepared for the old one. The press that means "make
+        this work" is a reinstall, whichever button it came from."""
+        root = paths.pocket_model_root("english")
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"schema": 1, "id": "english", "revision": "older", "digests": {}}),
+            encoding="utf-8")
+        asked = []
+        monkeypatch.setattr(pocket, "reinstall",
+                            lambda on_status=None, on_progress=None:
+                            asked.append("reinstall") or pocket.status())
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            asked.append("install") or pocket.status())
+        pocket.install()
+        assert asked == ["reinstall"]
+
+    def test_install_on_a_current_tree_does_not(self, host, installed, worker, monkeypatch):
+        asked = []
+        monkeypatch.setattr(pocket, "reinstall",
+                            lambda on_status=None, on_progress=None:
+                            asked.append("reinstall") or pocket.status())
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            asked.append("install") or pocket.status())
+        pocket.install()
+        assert asked == ["install"]
+
+    def test_reinstall_removes_the_runtime_the_model_and_the_voices_and_keeps_saved_voices(
+            self, host, cloning, worker, monkeypatch):
+        kept = paths.pocket_clones_root() / "abc" / "reference.wav"
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_bytes(b"RIFFkept")
+        stopped = []
+        monkeypatch.setattr(worker, "stop", lambda reason="": stopped.append(reason))
+        installed_with = []
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            installed_with.append(cloning) or pocket.status())
+
+        pocket.reinstall()
+
+        assert stopped and "reinstalled" in stopped[0]
+        assert not paths.pocket_runtime_root().exists()
+        assert not paths.pocket_model_root("english").exists()
+        assert not paths.pocket_official_root("english").exists()
+        assert kept.is_file(), "a saved voice's recording was removed"
+        assert installed_with == [True], "the gated half was not asked for again"
+
+    def test_reinstall_does_not_ask_which_engine_is_selected(self, host, cloning, worker,
+                                                            monkeypatch):
+        """Unlike uninstall: PocketTTS being the selected engine is exactly when
+        somebody presses Reinstall."""
+        engines.select("pocket")
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            pocket.status())
+        pocket.reinstall()
+        assert not paths.pocket_runtime_root().exists()
+
+    def test_install_model_replaces_a_directory_at_an_earlier_revision(
+            self, host, installed, worker, monkeypatch):
+        """The early return that says "already installed" has to know about
+        revisions, or a reinstall of the runtime would leave the old weights
+        under the new closure."""
+        root = paths.pocket_model_root("english")
+        marker = root / paths.INSTALLED_FILENAME
+        marker.write_text(json.dumps({"schema": 1, "id": "english", "revision": "older",
+                                      "digests": {}}), encoding="utf-8")
+
+        def fetch_all(artifacts, staging, say, tick, share, expectations):
+            digests = {}
+            for item in artifacts:
+                (staging / item.local_name).write_bytes(b"\x08\x00\x00\x00\x00\x00\x00\x00{}")
+                digests[item.local_name] = "b" * 64
+            return digests
+
+        monkeypatch.setattr(models, "_expectations", lambda artifacts, say: {})
+        monkeypatch.setattr(models, "_make_room", lambda artifacts, staging, expectations: None)
+        monkeypatch.setattr(models, "_fetch_all", fetch_all)
+        monkeypatch.setattr(pocket, "_sanity_check", lambda staging, required, label: None)
+        monkeypatch.setattr(pocket, "_read_recipe", lambda entry: {"weights_path": "x"})
+        monkeypatch.setattr(pocket, "_write_local_config", lambda entry: None)
+        said = []
+
+        pocket.install_model(on_status=said.append)
+
+        assert not any("already installed" in line for line in said)
+        written = json.loads(marker.read_text(encoding="utf-8"))
+        assert written["revision"] == pocket.bundle().revision
+        assert written["declared"] == pocket._declared(pocket.bundle())
+        assert pocket.status().stale is False
+
+
 class TestTheWorkerEnvironmentSaysWhatItMeans:
     def test_no_credential_and_no_location_can_reach_it(self, host, monkeypatch):
         """I-PKT-21. A token is the installer's and the parent process's, and
@@ -1276,22 +1483,26 @@ class TestEveryEngineAnswersBothReadinesses:
 
 
 NEEDED = (
-    "pocket-tts", "torch", "numpy", "safetensors", "sentencepiece", "scipy", "PyYAML",
-    "beartype", "pydantic", "pydantic-core", "annotated-types", "typing-inspection",
+    "pocket-tts", "torch", "numpy", "safetensors", "sentencepiece", "tokenizers", "scipy",
+    "PyYAML", "pydantic", "pydantic-core", "annotated-types", "typing-inspection",
     "typing-extensions", "huggingface-hub", "requests", "urllib3", "certifi", "idna",
     "tqdm", "filelock", "sympy", "mpmath", "networkx",
 )
 """Every distribution ``import pocket_tts`` fails without, measured not reasoned.
 
 Taken by blocking each candidate at the import hook against a real ``pocket-tts
-3.0.2`` install and seeing which ones make the import raise. It is written down
-here so that the measurement survives: a closure that quietly lost one of these
-would install, pass every test that does not start a runtime, and then fail on
-the first reply somebody wanted spoken.
+3.0.2`` install and seeing which ones make the import raise, then read again
+against the 3.3.0 wheel's module-level imports when the pin moved: ``tokenizers``
+arrived with 3.1.0 (``pocket_tts/modules/text_conditioner.py`` imports it beside
+sentencepiece, and the released English configuration points at a
+``tokenizer.json``), and ``beartype`` left with it. It is written down here so
+that the measurement survives: a closure that quietly lost one of these would
+install, pass every test that does not start a runtime, and then fail on the
+first reply somebody wanted spoken.
 """
 
 ABSENT = ("fastapi", "uvicorn", "typer", "python-multipart", "einops", "torchao",
-          "hf-xet", "httpx", "httpcore")
+          "hf-xet", "httpx", "httpcore", "beartype")
 """What must *not* be in it, and each for its own reason.
 
 The first five are upstream's server and CLI and are not on the import path
@@ -1300,7 +1511,9 @@ inference-complete one. ``torchao`` is an optional accelerator for a
 quantization GATE P-5 has not measured yet. ``hf-xet`` accelerates downloads this
 worker never performs. ``httpx`` and ``httpcore`` arrive only with
 huggingface-hub 1.x, which replaced requests with an HTTP client an offline
-worker must never use -- which is why the pin stays in the 0.x line.
+worker must never use -- which is why the pin stays in the 0.x line. ``beartype``
+is the 3.0.2 closure's type-checking claw, which nothing in 3.3.0 imports: a
+closure still carrying it would be a closure nobody re-read when the pin moved.
 """
 
 
