@@ -1647,6 +1647,49 @@ class TestThePocketRoutes:
         assert found.status_code == 409
         assert found.json()["error"] == "PocketTTS says no, for a reason."
 
+    def test_a_reinstall_press_reinstalls_rather_than_fetching_what_is_missing(
+            self, client, key, host, voice_root, monkeypatch):
+        """The Reinstall button is the install route with one flag, and the
+        flag reaches the adapter's reinstall -- which removes what is on disk
+        first -- rather than the install that would fetch beside it."""
+        import threading
+        import time
+
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        engines.select("pocket")
+        asked = []
+        done = threading.Event()
+
+        def reinstall():
+            asked.append("reinstall")
+            done.set()
+            return pocket.status()
+
+        monkeypatch.setattr(pocket, "refusal", lambda manual=False: "")
+        monkeypatch.setattr(pocket, "reinstall", reinstall)
+        monkeypatch.setattr(pocket, "install",
+                            lambda: asked.append("install") or pocket.status())
+        found = client.post(api.POCKET_INSTALL_ROUTE, json={"reinstall": True}, headers=key)
+        assert found.status_code == 200 and found.json()["already"] is False
+        assert done.wait(5.0), "the install thread never ran"
+        time.sleep(0.05)
+        assert asked == ["reinstall"]
+
+    def test_the_status_route_says_when_a_reinstall_is_needed(self, client, key, host,
+                                                              voice_root):
+        """Beside the five readinesses: an earlier PocketTTS on disk is not
+        "not installed", and the browser labels its button from this."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        payload = client.post(api.POCKET_ROUTE, json={}, headers=key).json()
+        for name in ("stale", "stale_message", "present", "pinned_version"):
+            assert name in payload, name
+        assert payload["stale"] is False
+        assert payload["pinned_version"] == "3.3.0"
+
     def test_no_status_route_starts_an_install_or_a_worker(self, client, key, host,
                                                            voice_root, monkeypatch):
         """Section 17, at the route a browser polls."""

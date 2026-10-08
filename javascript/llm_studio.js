@@ -11,7 +11,9 @@
 //   * the transcript follows a streaming reply while the reader is at the end
 //     of it, and holds their place when they are not;
 //   * Escape stops a run;
-//   * every reply in the transcript gets a regenerate icon;
+//   * every message in the transcript gets a row of actions, shown by a tap
+//     on it: the version pager, Edit, Regenerate or Send again, Continue,
+//     Branch, Copy, Send to VibeVoice, Play, Delete and Delete from here;
 //   * the conversation workspace is measured against the window, so the layout
 //     can fit the space it actually has rather than a space guessed in a
 //     stylesheet;
@@ -41,13 +43,24 @@
 // a pure-CSS estimate of the same number, so the tab is laid out correctly
 // without this file and exactly with it.
 //
-// The regenerate icon is the one that had to be here rather than in Python, and
+// The action row is the one that had to be here rather than in Python, and
 // for a plain reason: a Gradio 4.40 Chatbot draws its own bubbles and there is
-// nowhere in one to put a component. So the icon is drawn here and does exactly
-// one thing when tapped -- it says *which reply* it is on, into a hidden box,
-// and presses a hidden button. Everything after that is Python's: loading the
-// thread, branching it, streaming the reply, saving it. The browser nominates
-// and decides nothing, which is the line this file stays on.
+// nowhere in one to put a component. So the row is drawn here, inside the
+// bubble, the way the Forge Assistant draws its own under a message -- "I
+// like how in conversation mode flyout, I can access the action right in the
+// message" -- and a button in it does exactly one thing when tapped: it says
+// *which message* it is on, into a hidden box, and presses a hidden button
+// for its action. Everything after that is Python's: loading the thread,
+// branching it, streaming the reply, saving it. The browser nominates and
+// decides nothing, which is the line this file stays on.
+//
+// Three buttons in the row never reach Python at all, because what they do is
+// the browser's or the Voice Box's: Copy puts the message's words on the
+// clipboard; Send to VibeVoice hands them to the Voice Box tab on this same
+// page (`window.mcVoiceBox`), which renders them with whatever it is set up
+// with; Play plays the render that came back. Which render belongs to which
+// message is a key Python writes into the bubble, and the Voice Box files the
+// render under it, so a reload finds it again.
 //
 // Everything is found by this extension's own element ids. Section 5 again:
 // no selector below depends on a class Gradio generated, so a theme that
@@ -56,13 +69,14 @@
 // feature it drives is skipped and the rest carry on; the tab is fully usable
 // with this file absent, which is the test of whether it is really polish.
 //
-// The reply bubbles are the single exception, and they are why the paragraph
-// above is worth keeping honest rather than quietly widening. A bubble is the
-// host's element and carries no id of ours, so the shapes Gradio 4 and the
-// themes that reskin it are known to use are tried in turn -- and when none of
-// them matches, no icon is drawn and nothing else changes. Regenerate is still
-// on the sheet a tap on the bubble opens, which is where it was before this
-// existed. A theme this cannot read costs an icon, never an action.
+// The bubbles are the single exception, and they are why the paragraph above
+// is worth keeping honest rather than quietly widening. A bubble is the host's
+// element and carries no id of ours, so the shapes Gradio 4 and the themes
+// that reskin it are known to use are tried in turn -- and when none of them
+// matches, no row is drawn and nothing else changes. There is no sheet behind
+// the row any more, so a theme this cannot read costs the per-message actions
+// on that theme; the shapes below are the ones Gradio 4.40 and the Lobe theme
+// on the user's own page draw.
 
 (function () {
     "use strict";
@@ -283,98 +297,746 @@
         if (target) watch(target);
     }
 
-    // -- a regenerate icon on every reply ----------------------------------- //
+    // -- a row of actions in every bubble ----------------------------------- //
 
-    // The shapes a reply bubble is known to come in, most specific first. Tried
-    // in turn; the first that matches anything wins, and if none does the icons
+    // The shapes a bubble is known to come in, most specific first. Tried in
+    // turn; the first that matches anything wins, and if none does the rows
     // are not drawn. See the note at the top of this file: this is the one
-    // place that reads the host's DOM, and the cost of failing to read it is an
-    // icon, never an action.
+    // place that reads the host's DOM.
     const REPLY_SELECTORS = [
         '[data-testid="bot"]',
         ".message-row.bot-row",
         ".bot-row",
         ".message.bot",
     ];
+    const PROMPT_SELECTORS = [
+        '[data-testid="user"]',
+        ".message-row.user-row",
+        ".user-row",
+        ".message.user",
+    ];
 
-    const AGAIN_LABEL = "Regenerate this reply";
+    // What the browser presses and writes. The box is one, the buttons one
+    // per action, named by Python (mc_llm_chat_panel.NOMINATED_ACTIONS) and
+    // compared across the two files by a test.
+    const ACTION_AT = "mc-llm-chat-action-at";
+    const ACTION_PREFIX = "mc-llm-chat-";
+    const ACTION_SUFFIX = "-now";
 
-    function replyBubbles(holder) {
-        for (let index = 0; index < REPLY_SELECTORS.length; index += 1) {
-            const found = holder.querySelectorAll(REPLY_SELECTORS[index]);
+    // What Python puts in every bubble for this row to read: the role, the
+    // versions and the one showing, and the key the Voice Box files a render
+    // under. A bubble without it is drawn from what can be seen -- its role,
+    // from which list it was found in.
+    const META_CLASS = "mc-llm-meta";
+
+    const ROW_CLASS = "mc-llm-message-actions";
+    const BUTTON_CLASS = "mc-llm-message-action";
+    const REVEALED_CLASS = "mc-llm-revealed";
+
+    // A waveform, because that is what the Voice Box makes and "that's vibey".
+    // Drawn rather than typed: there is no glyph for it, and a picture inside a
+    // button is one Lobe's icon swap never touches, since it has no text.
+    const WAVEFORM = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" '
+        + 'focusable="false"><g fill="currentColor"><rect x="2" y="9" width="2.5" height="6" '
+        + 'rx="1"/><rect x="6.5" y="5" width="2.5" height="14" rx="1"/><rect x="11" y="2" '
+        + 'width="2.5" height="20" rx="1"/><rect x="15.5" y="6" width="2.5" height="12" '
+        + 'rx="1"/><rect x="20" y="10" width="2.5" height="4" rx="1"/></g></svg>';
+
+    // The row, in the order it is drawn: the version pager where there are
+    // versions to page; the actions that change the thread; the three that
+    // take the words elsewhere; and last, behind a gap of their own, the two
+    // that lose something. `role` limits a button to one kind of bubble;
+    // `local` marks the ones this file answers itself. Every glyph is a
+    // symbol and not an emoji, and none is the cross Lobe's icon swap
+    // replaces (CLAUDE.md, "The host's theme rewrites the page"); U+FE0E
+    // keeps the play triangle text rather than a coloured emoji.
+    const ACTIONS = [
+        {action: "edit", glyph: "✎", label: "Edit"},
+        // "\u21bb", spelt as the Forge Assistant spells it: one glyph for one
+        // action in both views of the conversation, and a test compares them.
+        {action: "regenerate", glyph: "\u21bb", label: "Regenerate", role: "assistant"},
+        {action: "resend", glyph: "↪", label: "Send again from here", role: "user"},
+        {action: "continue", glyph: "⇢", label: "Continue", role: "assistant"},
+        {action: "branch", glyph: "⎇", label: "Branch from here"},
+        {action: "copy", glyph: "⧉", label: "Copy message", local: true},
+        {action: "vibe", svg: WAVEFORM, label: "Send to VibeVoice", local: true},
+        {action: "play", glyph: "▶︎", label: "Play VibeVoice", local: true},
+        {action: "delete", glyph: "✕", label: "Delete message", destructive: true},
+        {action: "delete_from", glyph: "⤓", label: "Delete from here", destructive: true},
+    ];
+    const PAGER = [
+        {action: "back", glyph: "‹", label: "Show the previous version"},
+        {action: "forward", glyph: "›", label: "Show the next version"},
+        {action: "drop", glyph: "⊗", label: "Delete this version"},
+    ];
+
+    // How long a note in the row stays, and a copied tick on its button.
+    const NOTE_MS = 4000;
+    const COPIED_MS = 1200;
+    // The Voice Box's poll runs at a second while a job of its is live, so
+    // asking it more often than that reads the same answer twice.
+    const WATCH_MS = 1000;
+    // A job the Voice Box no longer lists (it keeps the last fifty) is given
+    // this many looks before the message is told its render is lost.
+    const WATCH_PATIENCE = 20;
+
+    function bubblesIn(holder, selectors) {
+        for (let index = 0; index < selectors.length; index += 1) {
+            const found = holder.querySelectorAll(selectors[index]);
             if (found && found.length) return found;
         }
         return [];
     }
 
-    // Which reply this is, counted down the transcript, asked at the moment of
-    // the tap rather than remembered from when the icon was drawn. A thread
-    // that has had a message deleted out of the middle of it has renumbered
-    // every bubble below, and an ordinal captured in a closure would name the
-    // wrong one -- which for this particular button means rewriting a reply the
-    // reader did not point at.
-    function ordinalOf(holder, bubble) {
-        const current = replyBubbles(holder);
+    function replyBubbles(holder) {
+        return bubblesIn(holder, REPLY_SELECTORS);
+    }
+
+    function promptBubbles(holder) {
+        return bubblesIn(holder, PROMPT_SELECTORS);
+    }
+
+    // Which message this is, counted down the transcript among its role,
+    // asked at the moment of the tap rather than remembered from when the row
+    // was drawn. A thread that has had a message deleted out of the middle of
+    // it has renumbered every bubble below, and an ordinal captured in a
+    // closure would name the wrong one -- which for a delete means deleting a
+    // message the reader did not point at.
+    function ordinalOf(holder, bubble, role) {
+        const current = role === "user" ? promptBubbles(holder) : replyBubbles(holder);
         for (let index = 0; index < current.length; index += 1) {
             if (current[index] === bubble) return index;
         }
         return -1;
     }
 
-    // Hand the ordinal to Python and let go. Nothing is decided here: which
-    // message that is, whether it can be regenerated, and whether doing so
-    // branches the thread are all answered on the other side of this button.
-    function askAgain(ordinal) {
-        const holder = byId("mc-llm-chat-regenerate-at");
-        if (!holder) return false;
-        const field = holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
-            ? holder : holder.querySelector("textarea, input");
+    // What Python wrote into the bubble, or what can be seen of it.
+    function metaOf(bubble, role) {
+        const found = bubble.querySelector ? bubble.querySelector("." + META_CLASS) : null;
+        const read = function (name, fallback) {
+            const value = found && found.getAttribute ? found.getAttribute(name) : null;
+            return value === null || value === undefined || value === "" ? fallback : value;
+        };
+        const versions = Math.max(1, parseInt(read("data-mc-versions", "1"), 10) || 1);
+        const active = Math.max(0, Math.min(parseInt(read("data-mc-active", "0"), 10) || 0,
+                                            versions - 1));
+        return {role: read("data-mc-role", role), versions: versions, active: active,
+                key: read("data-mc-key", "")};
+    }
+
+    // Hand a nomination to Python and let go. Nothing is decided here: which
+    // message that is, whether the action applies to it, and whether doing it
+    // branches the thread are all answered on the other side of the button.
+    function nominate(holder, bubble, role, action) {
+        const ordinal = ordinalOf(holder, bubble, role);
+        if (ordinal < 0) return false;
+        const box = byId(ACTION_AT);
+        if (!box) return false;
+        const field = box.tagName === "TEXTAREA" || box.tagName === "INPUT"
+            ? box : box.querySelector("textarea, input");
         if (!field) return false;
-        field.value = String(ordinal);
+        field.value = role + ":" + ordinal;
         // Gradio learns a value from the event, not from the property: a box
         // written to without this is a box the server still reads as empty.
         field.dispatchEvent(new Event("input", {bubbles: true}));
         // Next tick, so the value is in the host's store before the press that
         // sends it.
         window.setTimeout(function () {
-            press("mc-llm-chat-regenerate-now");
+            press(ACTION_PREFIX + action.replace(/_/g, "-") + ACTION_SUFFIX);
         }, 0);
         return true;
     }
 
-    function againButton(holder, bubble) {
+    function actionButton(spec) {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "mc-llm-again";
-        button.textContent = "\u21bb";
-        button.title = AGAIN_LABEL;
-        button.setAttribute("aria-label", AGAIN_LABEL);
-        button.addEventListener("click", function (event) {
-            // Stopped here, and deliberately: the bubble under this icon is
-            // wired to the Chatbot's own select event, and a click that reached
-            // it would open the action sheet over the reply that is about to
-            // start arriving.
-            event.preventDefault();
-            event.stopPropagation();
-            const ordinal = ordinalOf(holder, bubble);
-            if (ordinal >= 0) askAgain(ordinal);
-        });
+        button.className = BUTTON_CLASS + (spec.destructive ? " mc-llm-message-action-destructive" : "");
+        if (spec.svg) button.innerHTML = spec.svg;
+        else button.textContent = spec.glyph;
+        button.title = spec.label;
+        button.setAttribute("aria-label", spec.label);
+        button.setAttribute("data-action", spec.action);
         return button;
     }
 
-    function wireReplies() {
+    // The words of a message, for the clipboard and the Voice Box: the
+    // bubble's text without the row, the marker and anything else this file
+    // put in it. A copy is taken so nothing on screen moves.
+    function messageText(bubble) {
+        const copy = typeof bubble.cloneNode === "function" ? bubble.cloneNode(true) : null;
+        if (copy && copy.querySelectorAll) {
+            const strays = copy.querySelectorAll("." + ROW_CLASS + ", ." + META_CLASS);
+            for (let index = 0; index < strays.length; index += 1) {
+                const stray = strays[index];
+                if (stray.parentNode && stray.parentNode.removeChild) {
+                    stray.parentNode.removeChild(stray);
+                }
+            }
+            const text = typeof copy.innerText === "string" ? copy.innerText : copy.textContent;
+            return String(text || "").trim();
+        }
+        return String(bubble.dataset && bubble.dataset.mcLlmText || bubble.textContent || "").trim();
+    }
+
+    // -- the row itself ------------------------------------------------------ //
+
+    // Which message's row is open, by key; re-applied after every redraw, so a
+    // reply arriving token by token does not close the row somebody opened.
+    let revealed = "";
+
+    function keyOf(bubble, role, holder) {
+        const meta = metaOf(bubble, role);
+        if (meta.key) return meta.key;
+        return role + ":" + ordinalOf(holder, bubble, role);
+    }
+
+    function rowFor(holder, bubble, role) {
+        const meta = metaOf(bubble, role);
+        const key = keyOf(bubble, role, holder);
+        const bar = document.createElement("div");
+        bar.className = ROW_CLASS;
+        bar.hidden = true;
+        bar.setAttribute("data-key", key);
+        if (meta.role === "assistant" && meta.versions > 1) {
+            const cluster = document.createElement("span");
+            cluster.className = "mc-llm-message-actions-versions";
+            const back = actionButton(PAGER[0]);
+            back.disabled = meta.active <= 0;
+            const pager = document.createElement("span");
+            pager.className = "mc-llm-message-actions-pager";
+            pager.textContent = (meta.active + 1) + "/" + meta.versions;
+            const forward = actionButton(PAGER[1]);
+            forward.disabled = meta.active >= meta.versions - 1;
+            const drop = actionButton(PAGER[2]);
+            [back, forward, drop].forEach(function (button) {
+                button.addEventListener("click", function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    nominate(holder, bubble, meta.role, button.getAttribute("data-action"));
+                });
+            });
+            cluster.appendChild(back);
+            cluster.appendChild(pager);
+            cluster.appendChild(forward);
+            cluster.appendChild(drop);
+            bar.appendChild(cluster);
+        }
+        ACTIONS.forEach(function (spec) {
+            if (spec.role && spec.role !== meta.role) return;
+            const button = actionButton(spec);
+            button.addEventListener("click", function (event) {
+                // Stopped here, and deliberately: the bubble under this row
+                // is what a tap toggles the row with, and a click that reached
+                // it would put the row away under the finger.
+                event.preventDefault();
+                event.stopPropagation();
+                if (spec.local) {
+                    local(spec.action, holder, bubble, bar, key, button);
+                    return;
+                }
+                // Pressed is chosen: the row goes away, and the transcript
+                // that comes back is drawn afresh.
+                reveal(holder, "");
+                nominate(holder, bubble, meta.role, spec.action);
+            });
+            bar.appendChild(button);
+        });
+        const note = document.createElement("span");
+        note.className = "mc-llm-message-actions-note";
+        note.hidden = true;
+        bar.appendChild(note);
+        return bar;
+    }
+
+    function rowOf(bubble) {
+        if (!bubble.querySelector) return null;
+        const rows = bubble.querySelectorAll("." + ROW_CLASS);
+        for (let index = 0; index < rows.length; index += 1) {
+            if (rows[index].parentNode === bubble) return rows[index];
+        }
+        return null;
+    }
+
+    function noteIn(bar, text) {
+        const note = bar.querySelector ? bar.querySelector(".mc-llm-message-actions-note") : null;
+        if (!note) return;
+        note.textContent = text || "";
+        note.hidden = !text;
+        if (note.mcLlmTimer) window.clearTimeout(note.mcLlmTimer);
+        if (text) {
+            note.mcLlmTimer = window.setTimeout(function () {
+                note.textContent = "";
+                note.hidden = true;
+            }, NOTE_MS);
+        }
+    }
+
+    // One bubble: its row drawn once, and drawn again when the marker changed
+    // under it -- a version paged, a reply still arriving -- because the row
+    // reads the marker when it is built. Idempotent, because this runs after
+    // every update the host makes.
+    function wireBubble(holder, bubble, role) {
+        // A node without an element's methods -- a stand-in, or something a
+        // theme put where a bubble goes -- gets no row and costs nothing else.
+        if (!bubble.dataset || typeof bubble.setAttribute !== "function"
+            || typeof bubble.appendChild !== "function"
+            || typeof bubble.querySelectorAll !== "function") return;
+        const key = keyOf(bubble, role, holder);
+        const meta = metaOf(bubble, role);
+        const stamp = key + "|" + meta.versions + "|" + meta.active;
+        let bar = rowOf(bubble);
+        if (bar && bubble.dataset.mcLlmActions === stamp) {
+            applyVibe(bubble, bar, key);
+            return;
+        }
+        if (bar && bar.parentNode && bar.parentNode.removeChild) bar.parentNode.removeChild(bar);
+        bubble.dataset.mcLlmActions = stamp;
+        bubble.setAttribute("data-mc-role", meta.role);
+        if (!bubble.getAttribute("tabindex")) bubble.setAttribute("tabindex", "0");
+        bar = rowFor(holder, bubble, role);
+        bubble.appendChild(bar);
+        applyVibe(bubble, bar, key);
+    }
+
+    function wireBubbles() {
         const holder = byId("mc-llm-chat-transcript");
         if (!holder) return;
-        const bubbles = replyBubbles(holder);
-        for (let index = 0; index < bubbles.length; index += 1) {
-            const bubble = bubbles[index];
-            // Idempotent, because this runs after every update the host makes:
-            // a bubble Gradio re-rendered is a new element without the flag and
-            // gets its icon back, and one it left alone is skipped.
-            if (!bubble.dataset || bubble.dataset.mcLlmAgain === "1") continue;
-            bubble.dataset.mcLlmAgain = "1";
-            bubble.appendChild(againButton(holder, bubble));
+        const replies = replyBubbles(holder);
+        for (let index = 0; index < replies.length; index += 1) {
+            wireBubble(holder, replies[index], "assistant");
         }
+        const prompts = promptBubbles(holder);
+        for (let index = 0; index < prompts.length; index += 1) {
+            wireBubble(holder, prompts[index], "user");
+        }
+        wireTaps(holder);
+        reveal(holder, revealed);
+        if (replies.length || prompts.length) recoverVibe(holder);
+    }
+
+    // -- tap to reveal ------------------------------------------------------- //
+
+    function bubbleAt(holder, target) {
+        if (!target || typeof target.closest !== "function") return null;
+        // A press on a control inside the bubble is that control's; a
+        // selection inside it is reading.
+        if (target.closest("button, a, input, textarea, select, ." + ROW_CLASS)) return null;
+        const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+        if (selection && !selection.isCollapsed) return null;
+        const selectors = REPLY_SELECTORS.concat(PROMPT_SELECTORS);
+        for (let index = 0; index < selectors.length; index += 1) {
+            const found = target.closest(selectors[index]);
+            if (found && holder.contains && holder.contains(found) && found.dataset
+                && found.dataset.mcLlmActions) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    function roleOf(bubble) {
+        return bubble.getAttribute && bubble.getAttribute("data-mc-role") === "user"
+            ? "user" : "assistant";
+    }
+
+    // Show one message's row and nobody else's. Kept as a key rather than a
+    // node and applied again after every redraw: a reply arriving token by
+    // token redraws the transcript once a frame, and a row that closed
+    // whenever a word arrived could not be used while a reply was arriving.
+    function reveal(holder, key) {
+        revealed = key || "";
+        const all = Array.prototype.slice.call(replyBubbles(holder))
+            .concat(Array.prototype.slice.call(promptBubbles(holder)));
+        let found = null;
+        all.forEach(function (bubble) {
+            const bar = rowOf(bubble);
+            if (!bar) return;
+            const open = !!revealed && bar.getAttribute("data-key") === revealed;
+            if (open) found = bubble;
+            if (bar.hidden === open) bar.hidden = !open;
+            if (bubble.classList) bubble.classList.toggle(REVEALED_CLASS, open);
+            if (bubble.getAttribute("aria-expanded") !== String(open)) {
+                bubble.setAttribute("aria-expanded", String(open));
+            }
+        });
+        if (!found) revealed = "";
+    }
+
+    function toggle(holder, bubble) {
+        const key = keyOf(bubble, roleOf(bubble), holder);
+        reveal(holder, revealed === key ? "" : key);
+    }
+
+    function wireTaps(holder) {
+        if (holder.dataset.mcLlmTaps === "1") return;
+        holder.dataset.mcLlmTaps = "1";
+        // Delegated, because bubbles are rebuilt whenever the thread moves.
+        holder.addEventListener("click", function (event) {
+            const bubble = bubbleAt(holder, event.target);
+            if (bubble) toggle(holder, bubble);
+        });
+        // Enter or Space on a focused message does what a tap does.
+        holder.addEventListener("keydown", function (event) {
+            if (!event || (event.key !== "Enter" && event.key !== " ")) return;
+            const bubble = event.target;
+            if (!bubble || !bubble.dataset || !bubble.dataset.mcLlmActions) return;
+            event.preventDefault();
+            toggle(holder, bubble);
+        });
+        // A press anywhere but on the open message puts its row away, in the
+        // capture phase so it runs before the press lands: a tap on another
+        // message closes this one here and opens that one above.
+        if (!window.mcLlmDismissWired) {
+            window.mcLlmDismissWired = true;
+            window.addEventListener("pointerdown", function (event) {
+                if (!revealed) return;
+                const open = openBubble(holder);
+                const target = event && event.target;
+                if (open && target && typeof open.contains === "function" && open.contains(target)) {
+                    return;
+                }
+                reveal(holder, "");
+            }, true);
+        }
+    }
+
+    function openBubble(holder) {
+        const all = Array.prototype.slice.call(replyBubbles(holder))
+            .concat(Array.prototype.slice.call(promptBubbles(holder)));
+        for (let index = 0; index < all.length; index += 1) {
+            const bar = rowOf(all[index]);
+            if (bar && bar.getAttribute("data-key") === revealed) return all[index];
+        }
+        return null;
+    }
+
+    // -- Copy, Send to VibeVoice, Play --------------------------------------- //
+
+    function local(action, holder, bubble, bar, key, button) {
+        if (action === "copy") copyMessage(bubble, bar, button);
+        else if (action === "vibe") sendToVibe(holder, bubble, bar, key);
+        else if (action === "play") playVibe(holder, bubble, bar, key, button);
+    }
+
+    function copyMessage(bubble, bar, button) {
+        const text = messageText(bubble);
+        const done = function () {
+            const was = button.textContent;
+            button.textContent = "✓";
+            window.setTimeout(function () { button.textContent = was; }, COPIED_MS);
+        };
+        const clipboard = typeof navigator !== "undefined" && navigator.clipboard;
+        if (clipboard && typeof clipboard.writeText === "function") {
+            clipboard.writeText(text).then(done, function () {
+                if (copyByCommand(text)) done();
+                else noteIn(bar, "The browser would not copy. Select the text and copy it.");
+            });
+            return;
+        }
+        if (copyByCommand(text)) done();
+        else noteIn(bar, "The browser would not copy. Select the text and copy it.");
+    }
+
+    // The old way, for a page that is not a secure context: a box off screen,
+    // selected and copied with the command the browser still honours.
+    function copyByCommand(text) {
+        try {
+            const box = document.createElement("textarea");
+            box.value = text;
+            box.setAttribute("readonly", "");
+            box.style.position = "fixed";
+            box.style.left = "-9999px";
+            document.body.appendChild(box);
+            box.select();
+            const copied = typeof document.execCommand === "function" && document.execCommand("copy");
+            document.body.removeChild(box);
+            return !!copied;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    // The Voice Box tab on this page, when it is there and has grown the bridge.
+    function voiceBox() {
+        const box = window.mcVoiceBox;
+        if (!box || typeof box.renderText !== "function" || typeof box.canRender !== "function") {
+            return null;
+        }
+        return box;
+    }
+
+    // What each message has asked of the Voice Box, by key: the job in
+    // flight, the output that came back, and whether it has been played. One
+    // record per message, replaced by the next press -- "it should be 1 to 1.
+    // Only play the audio from the last vibe voice button press" -- so a
+    // render that comes back for a press that has been superseded is left to
+    // the Voice Box's own list and never offered here.
+    const records = {};
+    let watcher = 0;
+    let recovered = "";
+    let audio = null;
+
+    function recordOf(key) {
+        return records[key] || null;
+    }
+
+    function applyVibe(bubble, bar, key) {
+        const record = recordOf(key);
+        const state = !record ? "" : (record.pending ? "rendering"
+            : (record.output ? (record.played ? "played" : "ready") : ""));
+        if ((bubble.getAttribute("data-mc-vibe") || "") !== state) {
+            if (state) bubble.setAttribute("data-mc-vibe", state);
+            else bubble.removeAttribute("data-mc-vibe");
+        }
+        const buttons = bar.querySelectorAll ? bar.querySelectorAll("button") : [];
+        for (let index = 0; index < buttons.length; index += 1) {
+            const button = buttons[index];
+            const action = button.getAttribute("data-action");
+            if (action === "play") {
+                const playable = !!(record && record.output && !record.pending);
+                if (button.disabled !== !playable) button.disabled = !playable;
+                const playing = !!(audio && audio.mcLlmKey === key && !audio.paused);
+                const glyph = playing ? "‖" : "▶︎";
+                if (button.textContent !== glyph) button.textContent = glyph;
+                button.title = playing ? "Pause VibeVoice" : "Play VibeVoice";
+                button.setAttribute("aria-label", button.title);
+            } else if (action === "vibe") {
+                const box = voiceBox();
+                const why = box ? "" : "Voice Box is not on this page.";
+                if (button.disabled !== !!why) button.disabled = !!why;
+                const label = why ? "Send to VibeVoice — " + why
+                    : (record && record.pending ? "Rendering with VibeVoice…"
+                       : "Send to VibeVoice");
+                if (button.title !== label) {
+                    button.title = label;
+                    button.setAttribute("aria-label", label);
+                }
+            }
+        }
+    }
+
+    function sendToVibe(holder, bubble, bar, key) {
+        const box = voiceBox();
+        if (!box) {
+            noteIn(bar, "Voice Box is not on this page.");
+            return;
+        }
+        const text = messageText(bubble);
+        const why = box.canRender(text);
+        if (why) {
+            noteIn(bar, why);
+            return;
+        }
+        const record = {job: "", output: "", pending: true, played: false, looks: 0};
+        records[key] = record;
+        applyVibe(bubble, bar, key);
+        noteIn(bar, "Sent to VibeVoice…");
+        const opening = text.replace(/\s+/g, " ").slice(0, 40);
+        let asked;
+        try {
+            asked = box.renderText(text, {
+                name: "LLM Studio · " + opening,
+                origin: {kind: "llm", key: key, label: "LLM Studio"},
+            });
+        } catch (error) {
+            asked = Promise.reject(error);
+        }
+        Promise.resolve(asked).then(function (job) {
+            // Superseded by a later press while the request was out: that
+            // press's record is the one that counts.
+            if (records[key] !== record) return;
+            record.job = job && job.id ? String(job.id) : "";
+            if (!record.job) {
+                record.pending = false;
+                noteIn(bar, "The Voice Box took the message but named no job.");
+            }
+            applyVibe(bubble, bar, key);
+            watchRenders(holder);
+        }, function (error) {
+            if (records[key] !== record) return;
+            record.pending = false;
+            applyVibe(bubble, bar, key);
+            noteIn(bar, (error && error.message) || "The Voice Box refused the message.");
+        });
+    }
+
+    // The jobs in flight, looked at once a second while there is one. The
+    // Voice Box's own poll keeps its job list current; this reads it.
+    function watchRenders(holder) {
+        if (watcher) return;
+        watcher = window.setInterval(function () { lookAtRenders(holder); }, WATCH_MS);
+        lookAtRenders(holder);
+    }
+
+    function lookAtRenders(holder) {
+        const box = voiceBox();
+        let pending = 0;
+        Object.keys(records).forEach(function (key) {
+            const record = records[key];
+            if (!record.pending || !record.job) return;
+            const job = box && typeof box.jobById === "function" ? box.jobById(record.job) : null;
+            if (!job) {
+                record.looks += 1;
+                if (record.looks > WATCH_PATIENCE) {
+                    record.pending = false;
+                    settleRender(holder, key, "The Voice Box no longer lists that render.");
+                } else {
+                    pending += 1;
+                }
+                return;
+            }
+            record.looks = 0;
+            if (job.live) {
+                pending += 1;
+                return;
+            }
+            record.pending = false;
+            if (job.phase === "done" && job.output_id) {
+                record.output = String(job.output_id);
+                record.played = false;
+                settleRender(holder, key, "");
+            } else {
+                settleRender(holder, key, job.warning || ("The render was " + (job.phase || "not finished") + "."));
+            }
+        });
+        if (!pending && watcher) {
+            window.clearInterval(watcher);
+            watcher = 0;
+        }
+    }
+
+    // A record has changed: the bubble it belongs to, if it is still on the
+    // page, shows it.
+    function settleRender(holder, key, note) {
+        const bubble = bubbleFor(holder, key);
+        if (!bubble) return;
+        const bar = rowOf(bubble);
+        if (!bar) return;
+        applyVibe(bubble, bar, key);
+        if (note) noteIn(bar, note);
+    }
+
+    function bubbleFor(holder, key) {
+        const all = Array.prototype.slice.call(replyBubbles(holder))
+            .concat(Array.prototype.slice.call(promptBubbles(holder)));
+        for (let index = 0; index < all.length; index += 1) {
+            const bar = rowOf(all[index]);
+            if (bar && bar.getAttribute("data-key") === key) return all[index];
+        }
+        return null;
+    }
+
+    // The renders already made for this thread, read once per thread from the
+    // Voice Box's outputs by their origin keys: a reload, or a thread opened
+    // again, finds Play where it was. Newest first, so the latest render of a
+    // message is the one offered; a record this page made is never replaced.
+    function recoverVibe(holder) {
+        const box = voiceBox();
+        if (!box || typeof box.outputsFor !== "function") return;
+        const first = replyBubbles(holder)[0] || promptBubbles(holder)[0];
+        if (!first) return;
+        const key = keyOf(first, roleOf(first), holder);
+        const thread = key.indexOf(":") > 0 ? key.slice(0, key.lastIndexOf(":") + 1) : "";
+        if (!thread || thread === recovered) return;
+        recovered = thread;
+        let asked;
+        try {
+            asked = box.outputsFor(thread);
+        } catch (error) {
+            asked = Promise.reject(error);
+        }
+        Promise.resolve(asked).then(function (outputs) {
+            (outputs || []).forEach(function (output) {
+                const origin = output && output.render && output.render.origin;
+                const found = origin && typeof origin.key === "string" ? origin.key : "";
+                if (!found || records[found]) return;
+                records[found] = {job: "", output: String(output.id || ""), pending: false,
+                                  played: true, looks: 0};
+            });
+            Object.keys(records).forEach(function (known) { settleRender(holder, known, ""); });
+        }, function () {
+            // The next thread asks again; this one is simply not recovered.
+            recovered = "";
+        });
+    }
+
+    // One player for the whole transcript, made when first needed. Playing
+    // claims the page's audio focus, so Voice Chat and the Voice Box go
+    // quiet, and anybody else claiming it pauses this.
+    const FOCUS_EVENT = "mc:audio-focus";
+    const FOCUS_OWNER = "llm-studio";
+
+    function player(holder) {
+        if (audio) return audio;
+        audio = document.createElement("audio");
+        audio.preload = "auto";
+        audio.mcLlmKey = "";
+        const refresh = function () {
+            if (audio.mcLlmKey) settleRender(holder, audio.mcLlmKey, "");
+        };
+        ["play", "pause", "ended"].forEach(function (name) {
+            audio.addEventListener(name, refresh);
+        });
+        if (typeof document.addEventListener === "function") {
+            document.addEventListener(FOCUS_EVENT, function (event) {
+                const detail = event && event.detail;
+                if (!detail || detail.owner === FOCUS_OWNER) return;
+                if (!audio.paused && typeof audio.pause === "function") audio.pause();
+            });
+        }
+        return audio;
+    }
+
+    function claimFocus() {
+        if (typeof CustomEvent !== "function" || typeof document.dispatchEvent !== "function") {
+            return;
+        }
+        try {
+            document.dispatchEvent(new CustomEvent(FOCUS_EVENT,
+                                                   {detail: {owner: FOCUS_OWNER, kind: "playback"}}));
+        } catch (error) { /* a page without the event is a page as before */ }
+    }
+
+    function playVibe(holder, bubble, bar, key, button) {
+        const record = recordOf(key);
+        if (!record || !record.output || record.pending) {
+            noteIn(bar, record && record.pending ? "VibeVoice is still rendering this message."
+                   : "Send this message to VibeVoice first.");
+            return;
+        }
+        const box = voiceBox();
+        if (!box || typeof box.outputAudioUrl !== "function") {
+            noteIn(bar, "Voice Box is not on this page.");
+            return;
+        }
+        const sound = player(holder);
+        if (sound.mcLlmKey === key && !sound.paused) {
+            sound.pause();
+            return;
+        }
+        record.played = true;
+        applyVibe(bubble, bar, key);
+        let asked;
+        try {
+            asked = box.outputAudioUrl(record.output);
+        } catch (error) {
+            asked = Promise.reject(error);
+        }
+        Promise.resolve(asked).then(function (url) {
+            if (records[key] !== record) return;
+            claimFocus();
+            if (sound.mcLlmKey !== key || sound.src !== url) {
+                sound.src = url;
+                sound.mcLlmKey = key;
+            }
+            const started = sound.play();
+            return Promise.resolve(started).catch(function (error) {
+                noteIn(bar, "Playback was refused by the browser" + (error && error.message
+                    ? ": " + error.message : "."));
+            });
+        }, function (error) {
+            noteIn(bar, (error && error.message) || "The render could not be fetched.");
+        });
     }
 
     // -- a section that opens stays where it can be read -------------------- //
@@ -796,7 +1458,7 @@
         attempt("wire the attachment pickers", function () { PICKERS.forEach(wirePicker); });
         attempt("wire the composers", function () { PANELS.forEach(wireComposer); });
         attempt("follow the transcript", wireTranscript);
-        attempt("draw the reply icons", wireReplies);
+        attempt("draw the action rows", wireBubbles);
         attempt("keep the sheets in view", wireSheets);
         attempt("edit in a dialog", wireEditor);
         attempt("count the seconds", function () { watchActivity(); tick(); });

@@ -571,6 +571,36 @@ class TestRendering:
         assert box.prompts()["history"][0]["text"].startswith("Speaker 1: Hi.")
         assert job["progress"]["sections"] == 2
 
+    def test_a_render_from_another_tab_keeps_its_origin_on_the_job_and_the_output(self, ready):
+        """LLM Studio's Send to VibeVoice names what it rendered, and reads the
+        name back off the outputs after a reload. Three strings, held to that
+        shape: a key cut to its ceiling, a value that is not a string dropped,
+        a key this service does not know left behind."""
+        found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
+                           ready["configuration"]["id"], "From a message",
+                           origin={"kind": "llm", "key": "thread-1:3:abcd1234",
+                                   "label": "Message 4", "junk": "no", "nested": {"a": 1}})
+        assert found["origin"] == {"kind": "llm", "key": "thread-1:3:abcd1234",
+                                   "label": "Message 4"}
+
+        job = settled(found["id"])
+        entry = box.output(job["output_id"])
+        assert entry["render"]["origin"] == found["origin"]
+        assert [one["render"]["origin"] for one in box.outputs(ready["pipeline"]["id"])] == \
+            [found["origin"]]
+
+    def test_an_origin_that_is_not_three_strings_is_no_origin(self, ready):
+        pipeline, configuration = ready["pipeline"]["id"], ready["configuration"]["id"]
+        assert box.render(pipeline, "Speaker 1: Hi.", configuration, origin="llm")["origin"] == {}
+        assert box.render(pipeline, "Speaker 1: Hi.", configuration,
+                          origin={"kind": 5, "key": ["x"]})["origin"] == {}
+        long = box.render(pipeline, "Speaker 1: Hi.", configuration,
+                          origin={"key": "k" * 500})["origin"]
+        assert long == {"key": "k" * box.ORIGIN_CHARS}
+        assert box.render(pipeline, "Speaker 1: Hi.", configuration)["origin"] == {}
+        for job in box.jobs():
+            settled(job["id"])
+
     def test_what_is_wrong_is_said_before_any_card_is_asked_for(self, ready):
         pipeline, configuration = ready["pipeline"]["id"], ready["configuration"]["id"]
         with pytest.raises(box.VoiceBoxError, match="Speaker 3 has no sample"):

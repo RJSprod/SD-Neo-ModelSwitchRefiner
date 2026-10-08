@@ -30,6 +30,10 @@ Kokoro and Sopro cancel. Their synthesis is a generator the worker stops
 pulling from, so abandoning it abandons the work and the engine is free at
 once.
 
+*(Written against 3.0.2. The build pins 3.3.0 since 8 October 2026, which has
+the cooperative cancellation this section waits for; see "PocketTTS 3.3.0,
+adopted" at the end. The reasoning stands for any older installation.)*
+
 Released PocketTTS 3.0.2 is not like that. `generate_audio_stream()` runs its
 own generation and decoder threads; abandoning the generator leaves the
 generation thread running for the remainder of the input; and the model is
@@ -114,6 +118,10 @@ interrupt sets an Event instead of running to the end, and nothing else changes:
 not the `tts_interrupt` command, not the parent's state machine, not the
 browser's Stop, not the busy indicator. It simply clears much sooner.
 
+*Done, 8 October 2026 — exactly as written here, with one refinement: the worker
+reads the mode off the loaded model's signature rather than the version
+(below).*
+
 ---
 
 ## The facade is a registry now
@@ -151,8 +159,8 @@ shared caller may branch on which, and after this change none does.
 | --- | --- | --- |
 | Kokoro | `cancel` | synthesis is abandoned; the lane is free at once |
 | Sopro V2 | `cancel` | the same |
-| PocketTTS 3.0.2 | `drain_unit` | silence now; the in-flight unit finishes silently; ready shortly |
-| PocketTTS, later | `cooperative` | the same user-visible behaviour, much sooner |
+| PocketTTS 3.0.2 (an installation not yet reinstalled) | `drain_unit` | silence now; the in-flight unit finishes silently; ready shortly |
+| PocketTTS 3.3.0 (this build's pin) | `cooperative` | the same user-visible behaviour, much sooner: the stop event ends the unit within a step |
 
 The browser reads that value out of the status payload. It does **not** infer
 "Pocket means drain" from a version string, an engine id or anything else it
@@ -825,8 +833,9 @@ choices, they do not silently mutate them.
 
 ## What is deliberately not built
 
-* No local copy of upstream's unmerged cancellation. `interrupt_mode` stays
-  `drain_unit` until a merged upstream change is reviewed and adopted.
+* No local copy of upstream's cancellation. It was adopted when Kyutai merged
+  and released it (3.2.0; this build pins 3.3.0), and `interrupt_mode` is
+  `drain_unit` only on an installation that has not been reinstalled since.
 * No GPU. The worker's environment empties every graphics variable before Torch
   is imported and the handshake refuses a non-CPU provider. That is a support
   decision for the first integration, not a claim about what upstream can do.
@@ -844,3 +853,84 @@ choices, they do not silently mutate them.
 * No sharing of one PyTorch process between Sopro and Pocket, and no sharing of
   one worker between any two engines. Different closures and different native
   libraries are a reason for separate processes, not a code smell to unify.
+
+---
+
+## PocketTTS 3.3.0, adopted (8 October 2026)
+
+The user asked whether the *audio.cpp* project's recent word that "PocketTTS has
+gotten faster" was true, and whether any of it could be had here. Two answers.
+
+**audio.cpp's gain is its own.** audio.cpp is a C++/ggml reimplementation of
+several speech models, PocketTTS among them; its release 0.9.1 added a depthwise
+upsampling to its PocketTTS decoder on the CPU (its PR 806: the decoder from
+30.5 to 10.1 ms a frame at four threads, real-time factor 0.461 to 0.207). That
+is a change to its decoder, and this engine does not run its decoder: Voice Chat
+runs Kyutai's own PyPI package, `pocket-tts`, under PyTorch on the CPU, in a
+pinned closure. Nothing of audio.cpp's speed-up reaches it, and swapping the
+engine for audio.cpp's would be a new engine — a new closure, a new worker, a
+new voice format — which is not what was asked and not weighed here.
+
+**Upstream itself got faster, and that one is ours to take.** Between 3.0.2 and
+3.3.0 (tag `3dbee45`, released 24 September 2026) Kyutai changed the decoder to
+decode every latent queued for it in one call rather than one per call, moved the
+activations to the tanh approximation of GELU, dropped `beartype` and
+`sentencepiece` for a `tokenizers`-based `tokenizer.json`, published new default
+English weights (`english_2026-09`) with new voice embeddings and cloning weights,
+and — in 3.2.0 — merged the cooperative cancellation this document waited for:
+`generate_audio_stream(..., stop: threading.Event)`. No figure for the speed-up
+is claimed here: the gates of the previous section are where a number would come
+from, and the user's machine has not run it.
+
+### What changed in this extension
+
+- **The closure.** `voice/managed-pocket-models.json` pins `pocket-tts` 3.3.0,
+  `tokenizers` 0.23.2 (abi3) joins the wheel set and `beartype` leaves it;
+  `tools/pin_pocket_models.py` resolved the 120 wheels against PyPI as before and
+  the manifest is at version 5. The model entry declares the weights at commit
+  `e7205b6`, `tokenizer.json` at its own commit (`tokenizer_revision`; the tool
+  caches listings per revision), the embeddings at `4e1e0a3` and the cloning
+  weights at `983151f`, with `model.safetensors` and `tokenizer.json` required
+  and `config.tokenizer_path` pointing at the latter.
+- **The worker reads what Stop can promise.** `Engine.decide_interrupt_mode()`
+  inspects the loaded model's `generate_audio_stream` signature: `cooperative`
+  when it takes `stop`, `drain_unit` otherwise, and the drain when the signature
+  cannot be read or takes anything (`**kwargs`). The signature and not the
+  version, for the reason the table gives: the day a build ships the parameter
+  under a version this file did not expect is the day a version rule leaves a
+  cancellable build draining. Cooperative, `stream()` passes `Turn.halt` — one
+  `threading.Event` per turn, set by `Turn.stop()` — and the generation returns
+  at the step it is set; the parent's state machine, the `tts_interrupt`
+  command, the browser's Stop and *Voice finishing…* are untouched. The
+  handshake and every frame carry the mode the engine decided.
+- **A stale installation is reported as a reinstall.** `Status` gains `stale`,
+  `stale_message` and `present`. The runtime's closure id against the manifest's
+  (as before, but named as a reinstall with both versions), the model's
+  recorded declaration against the entry's (`_model_outdated`, before the
+  missing-files check — a 3.0.2 model directory is missing this build's
+  `tokenizer.json`, and *Not installed* is not what it is) and the cloning
+  marker's (`_cloning_outdated`) each mark it, and one sentence over the four
+  lines says what to do. Nothing speaks until the reinstall, as an installation
+  from another closure never did.
+- **Reinstall.** `mc_voice_pocket.reinstall()` stops the worker, removes the
+  runtime, the model directory (the gated weights with it), the official voice
+  states, the staging area and the previews, and runs the install transaction
+  with cloning. Custom voices are not touched: the recording and the per-model
+  prepared states stay, and the voice library's **Rebuild** makes the new
+  model's. `install()` does the same on a stale tree. The card gets a
+  **Reinstall** button beside Install (`POST …/pocket/install` with
+  `reinstall: true`), enabled when something is present and the platform is
+  supported; Install's own label reads *Reinstall PocketTTS* on a stale tree.
+- **Tests.** The worker tests gain a model whose stream takes `stop` and hold
+  that a set event ends the generation early, that the mode is read off the
+  signature (a model taking `**kwargs` stays on the drain) and that the frames
+  carry it; the adapter tests hold the stale readings and the reinstall's
+  removals and keepings; the page tests the Reinstall button's wiring. All
+  mutation-checked.
+
+### Not done, and said so
+
+Nothing has run on the user's machine: the first reinstall there, the first
+cooperative Stop and the real-time factor of 3.3.0 against 3.0.2 are the
+measurements this section waits for. The gates of "The gates, and the tables
+nobody has filled in" are unchanged and still unfilled.

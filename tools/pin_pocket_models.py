@@ -218,14 +218,24 @@ class Declared:
     local_name: str
     about: str
     config_key: str = ""
+    revision_key: str = ""
+    """The manifest key naming the commit this file is served at, when it is not
+    the model's own ``revision``.
+
+    Upstream's 3.3.0 configuration names the tokenizer at a later commit of the
+    public repository than the weights -- the tokenizer.json was added after the
+    weights were uploaded -- so one revision for the whole bundle would ask for a
+    file at a commit that does not hold it. Empty means the model's revision.
+    """
 
 
 MODEL_FILES = (
     Declared("languages/english/model.safetensors", "model.safetensors",
              "the transformer, the depth decoder and the acoustic decoder",
              "weights_path_without_voice_cloning"),
-    Declared("languages/english/tokenizer.model", "tokenizer.model",
-             "the sentencepiece text tokenizer", "tokenizer_path"),
+    Declared("languages/english/tokenizer.json", "tokenizer.json",
+             "the text tokenizer: a tokenizers JSON holding the sentencepiece vocabulary",
+             "tokenizer_path", revision_key="tokenizer_revision"),
 )
 """What ``kyutai/pocket-tts-without-voice-cloning`` has to serve.
 
@@ -238,9 +248,12 @@ and prints what the repository actually holds, so a rename upstream is a loud
 failure with the correction already on screen.
 
 The paths and the revisions are upstream's own, read out of
-``pocket_tts/config/english.yaml`` inside the 3.0.2 wheel: that file is what the
+``pocket_tts/config/english.yaml`` inside the 3.3.0 wheel: that file is what the
 package resolves when nobody replaces its locations, so it is the statement of
-which bytes this model *is*. There is no ``config.json`` here because there is
+which bytes this model *is*. Since 3.1.0 the English configuration names a
+``tokenizer.json`` (``tokenizer: tokenizers``) rather than the sentencepiece
+``.model`` 3.0.2 shipped -- the same vocabulary, converted -- and names it at a
+commit of its own, which is what ``revision_key`` carries. There is no ``config.json`` here because there is
 nothing for one to do -- the architecture is that same shipped YAML, and the
 installer copies it out of the runtime rather than fetching a second description
 of the model from the hub (see ``mc_voice_pocket._read_recipe``).
@@ -966,19 +979,34 @@ def model(entry: dict, state: State, committed: dict, say) -> dict:
     repo = str(entry.get("public_repo") or "")
     if not repo:
         raise PinError(f"{MODEL_ID} names no public_repo")
-    commit, served = repository(repo, str(entry.get("revision") or "main"), "", say)
+    listings: dict = {}
+
+    def listing(revision: str) -> tuple:
+        """One read of the repository per revision asked for, however many files share it."""
+        if revision not in listings:
+            listings[revision] = repository(repo, revision, "", say)
+        return listings[revision]
+
+    commit, served = listing(str(entry.get("revision") or "main"))
 
     files = []
     config = dict(entry.get("config") or {})
     for declared in MODEL_FILES:
-        _must_serve(repo, commit, served, declared.path)
-        artifact = _hub_artifact(repo, commit, declared.path, declared.local_name, "")
+        # A file with a commit of its own is read at that commit; the others
+        # at the model's. Upstream's arrangement rather than this tool's: its
+        # configuration names the tokenizer at a later commit than the weights.
+        wanted = str(entry.get(declared.revision_key) or "") if declared.revision_key else ""
+        at_commit, at_served = listing(wanted) if wanted else (commit, served)
+        _must_serve(repo, at_commit, at_served, declared.path)
+        artifact = _hub_artifact(repo, at_commit, declared.path, declared.local_name, "")
         artifact["about"] = declared.about
         _agree(state, committed, artifact, MODEL_ID)
         say(f"  {declared.path}: {_describe(artifact)}")
         files.append(artifact)
         if declared.config_key:
             config[declared.config_key] = declared.local_name
+        if declared.revision_key:
+            found[declared.revision_key] = at_commit
 
     # The voice states are pinned at a revision of their own, and that is
     # upstream's arrangement rather than an oversight here: its own config names

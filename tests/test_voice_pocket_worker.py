@@ -482,8 +482,13 @@ class FakeEngine:
     I-PKT-12 rather than a test of a flag.
     """
 
-    def __init__(self, config=None, chunks=6, gate=None):
+    def __init__(self, config=None, chunks=6, gate=None, stoppable=False):
         found = dict(config or {})
+        # What the real Engine reads off the loaded build's signature: a build
+        # that takes upstream's ``stop`` is cooperative, and this fake's stream
+        # then ends when the Event it was handed is set.
+        self.stoppable = bool(stoppable)
+        self.interrupt_mode = "cooperative" if stoppable else "drain_unit"
         self.model_root = ""
         self.config_path = ""
         self.official_root = ""
@@ -521,10 +526,16 @@ class FakeEngine:
     def state_for(self, voice_id):
         return {"voice": voice_id}
 
-    def stream(self, text, voice_id, delivery, on_audio, listening):
+    def stream(self, text, voice_id, delivery, on_audio, listening, stop=None):
         self.started.append(text)
+        self.halts = getattr(self, "halts", [])
+        self.halts.append(stop)
         produced = 0
         for index in range(self.chunks):
+            if self.stoppable and stop is not None and stop.is_set():
+                # Upstream's generator on 3.3.0: the Event is checked before
+                # every frame, and a set one ends the generation there.
+                break
             if self.gate is not None:
                 self.gate(index)
             produced += 1
@@ -584,6 +595,109 @@ class TestTheHandshakeSaysWhatSectionEighteenAsksFor:
         text = pocket_worker.json.dumps(header)
         for forbidden in ("/home", "\\\\Users", "python.exe", "pid", "token"):
             assert forbidden not in text
+
+
+class TestTheHandshakeCarriesTheLoadedBuildsMode:
+    """The mode is the engine's, decided when the model loaded, not this file's constant.
+
+    A worker that said ``drain_unit`` over a build that takes ``stop`` would
+    leave the parent reporting *Voice finishing…* for a wait that is already
+    over; one that said ``cooperative`` over a 3.0.2 build would promise a
+    cancellation it cannot make. So every frame asks the engine.
+    """
+
+    def test_a_cooperative_build_is_announced_as_one(self):
+        found = run_worker(FakeEngine(stoppable=True), lambda stdin, out: None)
+        header, _payload = found.of("ready")[0]
+        assert header["interrupt_mode"] == "cooperative"
+
+    def test_an_unstoppable_build_is_still_a_drain(self):
+        found = run_worker(FakeEngine(), lambda stdin, out: None)
+        header, _payload = found.of("ready")[0]
+        assert header["interrupt_mode"] == "drain_unit"
+
+    def test_the_lane_hands_every_unit_the_turns_event(self):
+        """Whatever the build does with it: the drain-unit engine is handed the
+        Event too and ignores it, which is what makes the two builds one code
+        path in the lane."""
+        engine = FakeEngine(chunks=1)
+
+        def feed(stdin, out):
+            stdin.feed({"op": "tts_begin", "turn": "T0", "voice_id": "v"})
+            stdin.feed({"op": "tts_text", "turn": "T0"}, b"One.")
+            stdin.feed({"op": "tts_end", "turn": "T0"})
+            out.wait_for("tts_done")
+
+        run_worker(engine, feed)
+        assert len(engine.halts) == 1
+        assert isinstance(engine.halts[0], type(threading.Event()))
+
+
+class TestACooperativeBuildFreesTheLaneWithinAStep:
+    """3.3.0's half of GATE P-3: the Event ends the unit, the drain empties what is left."""
+
+    def test_the_interrupted_unit_ends_early_and_every_frame_says_cooperative(self):
+        """Eight chunks were coming. The interrupt lands while the second is in
+        flight, the Event is set before the gate opens, and the generator stops
+        at the third -- so the lane is free after two chunks rather than eight,
+        and the parent is told in the mode's own name."""
+        seen = threading.Event()
+        release = threading.Event()
+
+        def gate(index):
+            if index == 1:
+                seen.set()
+                release.wait(3.0)
+
+        engine = FakeEngine(chunks=8, gate=gate, stoppable=True)
+
+        def feed(stdin, out):
+            stdin.feed({"op": "tts_begin", "turn": "T5", "voice_id": "v"})
+            stdin.feed({"op": "tts_text", "turn": "T5"}, b"Hello there.")
+            stdin.feed({"op": "tts_end", "turn": "T5"})
+            assert seen.wait(3.0)
+            stdin.feed({"op": "tts_interrupt", "turn": "T5"})
+            out.wait_for("tts_interrupted")
+            release.set()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and not engine.consumed:
+                time.sleep(0.01)
+
+        found = run_worker(engine, feed)
+        assert engine.consumed == [2], "the Event did not end the unit early"
+        assert engine.halts[0].is_set(), "the turn's Event was never set"
+        frames = [header for header, _p in found.of("tts_interrupted")]
+        assert frames and all(header["interrupt_mode"] == "cooperative" for header in frames)
+        assert frames[-1]["state"] == "complete"
+
+    def test_what_was_consumed_after_the_stop_is_still_never_offered(self):
+        """The Event ends the generation; the drain is still what empties it,
+        and a block produced on the way out goes nowhere (I-PKT-12)."""
+        seen = threading.Event()
+        release = threading.Event()
+
+        def gate(index):
+            if index == 1:
+                seen.set()
+                release.wait(3.0)
+
+        engine = FakeEngine(chunks=8, gate=gate, stoppable=True)
+
+        def feed(stdin, out):
+            stdin.feed({"op": "tts_begin", "turn": "T6", "voice_id": "v"})
+            stdin.feed({"op": "tts_text", "turn": "T6"}, b"Hello.")
+            stdin.feed({"op": "tts_end", "turn": "T6"})
+            assert seen.wait(3.0)
+            stdin.feed({"op": "tts_interrupt", "turn": "T6"})
+            out.wait_for("tts_interrupted")
+            release.set()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and not engine.consumed:
+                time.sleep(0.01)
+
+        found = run_worker(engine, feed)
+        assert engine.offered == [0]
+        assert len(found.of("tts_audio")) == 1
 
 
 class TestInterruptionIsADrainAndNotACancellation:
@@ -836,12 +950,38 @@ class FakeModel:
         return {"prepared": True}
 
 
+class StoppableModel(FakeModel):
+    """PocketTTS 3.3.0's generation surface: ``generate_audio_stream`` takes ``stop``.
+
+    The one difference from :class:`FakeModel` that matters here, and exactly
+    the one upstream merged in 3.2.0: a ``threading.Event`` checked before
+    every frame. The rest of the signature is 3.0.2's, which is also 3.3.0's.
+    """
+
+    def generate_audio_stream(self, model_state, text_to_generate, max_tokens=1000,
+                              frames_after_eos=None, copy_state=True, stop=None):
+        self.calls.append({"text": text_to_generate, "copy_state": copy_state, "stop": stop})
+        self.state_copies.append(dict(model_state) if copy_state else model_state)
+
+        def produce():
+            for _index in range(self.chunks):
+                if stop is not None and stop.is_set():
+                    break
+                self.seen.append({"temp": self.temp,
+                                  "sampler_decode_steps": self.sampler_decode_steps})
+                yield numpy.full(240, self.level, dtype=numpy.float32)
+            self.exhausted = True
+
+        return produce()
+
+
 def pocket_engine(model, **config):
     engine = pocket_worker.Engine({"sample_rate": RATE, **config})
     engine.model = model
     engine._numpy = numpy
     engine.voices = {"v": {"kind": "official", "state": "irrelevant"}}
     engine._states["v"] = {"base": 1}
+    engine.decide_interrupt_mode()
     return engine
 
 
@@ -933,6 +1073,60 @@ class TestTheEngineKeepsConsumingWhileMuted:
                           explode, lambda: True)
         assert model.temp == 0.3
         assert model.exhausted, "the generator was abandoned rather than drained"
+
+
+class TestStopIsUpstreamsOwnEventOnABuildThatTakesIt:
+    """What the 3.3.0 pin bought, at the only place it can be observed."""
+
+    def test_the_mode_is_read_off_the_signature_and_not_off_a_version(self):
+        assert pocket_engine(FakeModel()).interrupt_mode == "drain_unit"
+        assert pocket_engine(StoppableModel()).interrupt_mode == "cooperative"
+
+    def test_a_signature_that_takes_anything_decides_nothing(self):
+        """``**kwargs`` would swallow a ``stop`` nothing reads, and a drain is the
+        promise kept whatever the build does with it."""
+        class Anything(FakeModel):
+            def generate_audio_stream(self, model_state, text_to_generate, **values):
+                return FakeModel.generate_audio_stream(self, model_state, text_to_generate)
+
+        assert pocket_engine(Anything()).interrupt_mode == "drain_unit"
+
+    def test_a_stoppable_build_is_handed_the_turns_event(self):
+        model = StoppableModel(chunks=3)
+        engine = pocket_engine(model)
+        halt = threading.Event()
+        engine.stream("Hello.", "v", pocket_worker.NEUTRAL, lambda _b: None, lambda: True,
+                      stop=halt)
+        assert model.calls[-1]["stop"] is halt
+
+    def test_an_unstoppable_build_is_never_offered_one(self):
+        """:class:`FakeModel` has 3.0.2's exact signature, so a ``stop`` handed
+        to it would be a ``TypeError`` inside somebody's reply."""
+        model = FakeModel(chunks=2)
+        engine = pocket_engine(model)
+        engine.stream("Hello.", "v", pocket_worker.NEUTRAL, lambda _b: None, lambda: True,
+                      stop=threading.Event())
+        assert model.exhausted and "stop" not in model.calls[-1]
+
+    def test_a_set_event_ends_the_generation_early_and_the_stream_is_still_drained(self):
+        """Loud chunks, so the trim lets every block through and ``listening`` is
+        asked about each: a silent unit never reaches the listener at all."""
+        model = StoppableModel(chunks=8, level=0.5)
+        engine = pocket_engine(model)
+        halt = threading.Event()
+        offered = []
+
+        def listening():
+            if len(offered) >= 2:
+                halt.set()
+                return False
+            return True
+
+        found = engine.stream("Hello.", "v", pocket_worker.NEUTRAL, offered.append, listening,
+                              stop=halt)
+        assert model.exhausted, "the generator was abandoned rather than drained"
+        assert found["blocks"] < 8, "the Event did not end the generation"
+        assert len(offered) == 2
 
 
 class TestTwoUnitsInARowSoundLikeOneReply:

@@ -1,4 +1,4 @@
-"""One overlay at a time, across all seven surfaces and in both directions.
+"""One overlay at a time, across all six surfaces and in both directions.
 
 LLM Studio had three independent ideas of "only one at a time": the shell's two
 sheets knew about each other, Conversation's four screens knew about each other,
@@ -7,9 +7,10 @@ own, which is exactly why the failure was so easy to reach -- opening the
 character editor left the workspace chooser underneath it, and tapping a bubble
 opened an action sheet over whichever of those happened to be showing.
 
-Specification O01 asks for all 21 ordered pairs. That is what
+The sheet is a row inside the bubble now, which covers nothing, so the surfaces
+are six. Specification O01 asks for every ordered pair. That is what
 :meth:`TestExclusivity.test_every_ordered_pair_of_surfaces` does, from the one
-function that decides, rather than from seven handlers that each have to
+function that decides, rather than from six handlers that each have to
 remember.
 """
 
@@ -62,13 +63,16 @@ class TestTheDecision:
     def test_closing_closes_everything(self):
         assert not any(mc_llm_overlays.showing("").values())
 
-    def test_the_seven_are_the_seven(self):
+    def test_the_six_are_the_six(self):
         """A pop surface added without joining this tuple is a pop surface that
-        opens over the others, which is the whole defect this replaced."""
+        opens over the others, which is the whole defect this replaced. The
+        message actions are not among them: a row inside a bubble covers
+        nothing, and a seventh entry for it would be a surface nothing opens."""
         assert mc_llm_overlays.OVERLAYS == (
-            "mode", "model", "threads", "character", "persona", "voice", "actions")
-        assert set(mc_llm_studio.SHEETS) | set(mc_llm_chat_panel.SCREENS) | {"actions"} \
+            "mode", "model", "threads", "character", "persona", "voice")
+        assert set(mc_llm_studio.SHEETS) | set(mc_llm_chat_panel.SCREENS) \
             == set(mc_llm_overlays.OVERLAYS)
+        assert "actions" not in mc_llm_overlays.OVERLAYS
 
 
 class TestExclusivity:
@@ -76,19 +80,20 @@ class TestExclusivity:
         """All 21, both ways round. O01."""
         pairs = list(itertools.permutations(mc_llm_overlays.OVERLAYS, 2))
 
-        assert len(pairs) == 42, "seven surfaces make 42 ordered pairs"
+        assert len(pairs) == 30, "six surfaces make 30 ordered pairs"
         for opened, other in pairs:
             showing = mc_llm_overlays.showing(opened)
 
             assert showing[opened] is True
             assert showing[other] is False, f"{opened} left {other} open"
 
-    def test_the_action_sheet_closes_the_others_and_is_closed_by_them(self):
-        """The seventh surface, and the one that knew about none of the rest."""
-        assert mc_llm_overlays.showing("actions")["threads"] is False
-        assert mc_llm_overlays.showing("threads")["actions"] is False
-        assert mc_llm_overlays.showing("model")["actions"] is False
-        assert mc_llm_overlays.showing("actions")["model"] is False
+    def test_the_old_action_sheet_is_a_name_the_registry_no_longer_takes(self):
+        """A row inside a bubble is not a surface, and a build that still
+        registered one would be asking every handler for an output that is
+        not there."""
+        mc_llm_overlays.register("actions", Component("sheet"))
+        assert mc_llm_overlays.registered("actions") is None
+        assert "actions" not in mc_llm_overlays.showing("threads")
 
 
 class TestReachingGradio:
@@ -97,7 +102,7 @@ class TestReachingGradio:
 
         others = mc_llm_overlays.closes(mc_llm_studio.SHEETS)
 
-        assert set(others) == set(mc_llm_chat_panel.SCREENS) | {"actions"}
+        assert set(others) == set(mc_llm_chat_panel.SCREENS)
 
     def test_a_build_that_registered_nothing_asks_for_nothing(self):
         """A panel built on its own -- in a test, or on a host where one mode

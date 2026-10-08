@@ -282,10 +282,12 @@ settingsParts.cleanupRow.querySelector = function (selector) {
 settingsParts.pocketRow = element("pocket-row");
 settingsParts.pocketRow["data-mc-voice-kind"] = "pocket";
 settingsParts.pocketInstall = element("pocket-install", "BUTTON");
+settingsParts.pocketReinstall = element("pocket-reinstall", "BUTTON");
 settingsParts.pocketStatus = element("pocket-status");
 settingsParts.pocketCloning = element("pocket-cloning");
 settingsParts.pocketRow.querySelector = function (selector) {
     if (selector.indexOf("pocket-install") !== -1) return settingsParts.pocketInstall;
+    if (selector.indexOf("pocket-reinstall") !== -1) return settingsParts.pocketReinstall;
     if (selector.indexOf('mc-voice-status="pocket"') !== -1) {
         return settingsParts.pocketStatus;
     }
@@ -1209,6 +1211,7 @@ function report(extra) {
             ttsLocalLabel: settingsParts.ttsLocal.textContent,
             pocketButton: settingsParts.pocketInstall.textContent,
             pocketDisabled: settingsParts.pocketInstall.disabled,
+            pocketReinstallDisabled: settingsParts.pocketReinstall.disabled,
             pocketLine: settingsParts.pocketStatus.textContent,
             pocketCloning: settingsParts.pocketCloning.textContent,
             runtimeLine: settingsParts.runtimeLine.textContent,
@@ -5842,6 +5845,47 @@ class TestThePocketInstallButtonSaysWhatIsLeftToDo:
              ANSWERS=self.pocket(installed=False, complete=False,
                                  speech_model_ready=False))
         assert found["settings"]["pocketButton"] == "Install PocketTTS"
+
+    def test_an_installation_from_an_earlier_release_reads_reinstall(self):
+        """The 3.3.0 pin met by a 3.0.2 installation: complete, present, and
+        useless until it is fetched again. The one button says what pressing
+        it does, and the status line is the server's sentence about it."""
+        found = run("""
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self.pocket(installed=False, complete=False, stale=True, present=True,
+                                 message="PocketTTS needs a reinstall: this build pins "
+                                         "PocketTTS 3.3.0 and what is installed is 3.0.2. "
+                                         "Press Reinstall."))
+        assert found["settings"]["pocketButton"] == "Reinstall PocketTTS"
+        assert found["settings"]["pocketDisabled"] is False
+        assert found["settings"]["pocketReinstallDisabled"] is False
+        assert found["settings"]["pocketLine"].startswith("PocketTTS needs a reinstall")
+
+    def test_reinstall_posts_the_one_flag_and_is_only_pressable_with_something_on_disk(self):
+        found = run("""
+            await tick();
+            await tick();
+            settingsParts.pocketReinstall.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self.pocket(installed=True, complete=True, cloning_ready=True,
+                                 present=True))
+        posted = [one for one in found["requests"] if "voice/pocket/install" in one["url"]]
+        assert [json.loads(one["bodyText"]) for one in posted] == [{"reinstall": True}]
+
+        empty = run("""
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self.pocket(installed=False, complete=False, speech_model_ready=False,
+                                 present=False))
+        assert empty["settings"]["pocketReinstallDisabled"] is True, \
+            "with nothing on disk there is nothing to reinstall, and Install is the button"
 
     def test_a_part_that_arrives_redraws_the_panel_rather_than_a_sentence(self):
         """The other half of the reported bug. The Clone panel's whole body is

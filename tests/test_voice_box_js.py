@@ -1972,6 +1972,109 @@ class TestTheRenderGate:
         assert found["status"] == "VibeVoice was unloaded from RTX 3090."
 
 
+class TestTheBridgeForOtherTabs:
+    """`window.mcVoiceBox` for LLM Studio's Send to VibeVoice: a render of a
+    message's words with whatever this page is set up with, found again by its
+    origin, and played from the same token-checked route the lanes use."""
+
+    def test_a_text_is_rendered_with_the_pages_pipeline_and_configuration(self):
+        found = run("""
+            await flush();
+            const job = await globalThis.mcVoiceBox.renderText("Hello from a message.",
+                {name: "Message 4", origin: {kind: "llm", key: "t1:3:abcd"}});
+            report({job, render: requestsTo("/render").map(plain), own: mcVoiceBox.state().ownJobs});
+        """)
+
+        assert [r["body"] for r in found["render"]] == [
+            {"pipeline_id": "p1", "prompt": "Hello from a message.", "configuration_id": "c1",
+             "name": "Message 4", "origin": {"kind": "llm", "key": "t1:3:abcd"}}]
+        assert found["render"][0]["headers"]["x-model-chain-voice"] == "PAGE-TOKEN"
+        assert found["job"]["id"] == "j1"
+        assert found["own"] == {"j1": True}, "the job is this page's to follow"
+        assert 1000 in found["timers"], "a live job of this page's is polled at the live rate"
+        assert found["status"] == "1 queued"
+
+    def test_unsaved_configuration_changes_go_inline_as_they_do_for_render(self):
+        found = run("""
+            await flush();
+            press("2", find(".mc-voice-box-sample"));
+            await globalThis.mcVoiceBox.renderText("Hi.", {});
+            report({render: requestsTo("/render").map(plain)});
+        """)
+
+        body = found["render"][0]["body"]
+        assert body["configuration"]["speakers"] == {"1": "s1", "2": "s1"}
+        assert "origin" not in body and body["name"] == ""
+
+    def test_two_sends_in_a_row_are_two_renders(self):
+        """The in-flight rule folds a repeated press into the request in
+        flight; a second message is not a repeat of the first, and must never
+        be handed its job."""
+        found = run("""
+            await flush();
+            const first = globalThis.mcVoiceBox.renderText("One.", {origin: {key: "a"}});
+            const second = globalThis.mcVoiceBox.renderText("Two.", {origin: {key: "b"}});
+            await Promise.all([first, second]);
+            report({render: requestsTo("/render").map(plain)});
+        """)
+
+        assert [r["body"]["prompt"] for r in found["render"]] == ["One.", "Two."]
+
+    def test_it_says_why_a_text_cannot_be_rendered(self):
+        found = run("""
+            await flush();
+            const bridge = globalThis.mcVoiceBox;
+            let refused = "";
+            try { await bridge.renderText("Speaker 2: hi", {}); } catch (error) { refused = error.message; }
+            report({ready: bridge.canRender("Hello."), empty: bridge.canRender("   "),
+                    speaker: bridge.canRender("Speaker 2: hi"), refused,
+                    render: requestsTo("/render").length});
+        """)
+
+        assert found["ready"] == ""
+        assert found["empty"] == "Nothing to speak."
+        assert found["speaker"] == "Speaker 2 has no sample."
+        assert found["refused"] == "Speaker 2 has no sample." and found["render"] == 0
+
+    def test_an_engine_that_is_not_installed_is_the_reason(self):
+        found = run("""
+            await flush();
+            report({why: globalThis.mcVoiceBox.canRender("Hello.")});
+        """, answers={"/status": {"json": status_with(
+            engine={"ready": False, "supported": True, "message": "VibeVoice is not installed.",
+                    "model_id": "vibevoice-7b", "download_bytes": 19_000_000_000})}})
+
+        assert found["why"] == "VibeVoice is not installed."
+
+    def test_outputs_are_found_again_by_their_origin_key(self):
+        mine = dict(OUTPUT, id="o7", render=dict(OUTPUT["render"],
+                                                 origin={"kind": "llm", "key": "t1:3:abcd"}))
+        other = dict(OUTPUT, id="o8", render=dict(OUTPUT["render"],
+                                                  origin={"kind": "llm", "key": "t2:1:ffff"}))
+        found = run("""
+            await flush();
+            const mine = await globalThis.mcVoiceBox.outputsFor("t1:");
+            report({ids: mine.map((o) => o.id),
+                    asked: requestsTo("/outputs").map(plain).map((r) => r.body)});
+        """, answers={"/outputs": {"json": {"ok": True, "outputs": [OUTPUT, mine, other]}}})
+
+        assert found["ids"] == ["o7"]
+        assert {"pipeline_id": ""} in found["asked"], "every pipeline's outputs are asked for"
+
+    def test_an_outputs_sound_comes_with_the_token_as_a_blob_url(self):
+        found = run("""
+            await flush();
+            const url = await globalThis.mcVoiceBox.outputAudioUrl("o1");
+            const again = await globalThis.mcVoiceBox.outputAudioUrl("o1");
+            report({url, again, audio: requests.filter((r) => r.url.indexOf("/outputs/audio?id=o1") !== -1).map(plain)});
+        """)
+
+        assert found["url"].startswith("blob:") and found["again"] == found["url"]
+        assert len(found["audio"]) == 1, "fetched once, cached with the lanes' sounds"
+        assert found["audio"][0]["headers"]["x-model-chain-voice"] == "PAGE-TOKEN"
+        assert found["audio"][0]["method"] == "GET"
+
+
 class TestPipelines:
     def test_new_creates_and_opens_a_pipeline(self):
         found = run("""
@@ -4783,13 +4886,19 @@ class TestVoiceChatsHalf:
             const stoppedByStranger = stopped.length;
             focusFrom("voice-box", "playback");
             await flush();
-            report({announced, playedBefore, stoppedByStranger});
+            const stoppedByVoiceBox = stopped.length;
+            speech.listen();
+            await flush();
+            focusFrom("llm-studio", "playback");
+            await flush();
+            report({announced, playedBefore, stoppedByStranger, stoppedByVoiceBox});
         """)
 
         assert found["announced"] == [{"owner": "voice-chat", "kind": "speech"}]
         assert found["playedBefore"] == 1
-        assert found["stoppedByStranger"] == 0
-        assert found["stopped"] == 1
+        assert found["stoppedByStranger"] == 0, "a claim nobody here recognises is ignored"
+        assert found["stoppedByVoiceBox"] == 1
+        assert found["stopped"] == 2, "LLM Studio's Play VibeVoice is the other owner it knows"
         assert found["warnings"] == []
 
     def test_a_microphone_announces_capture_and_voice_box_closes_it(self):

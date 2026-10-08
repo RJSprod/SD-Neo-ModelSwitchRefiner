@@ -256,7 +256,8 @@ def render_payload(values: dict) -> dict:
     configuration = values.get("configuration")
     found = box.render(values.get("pipeline_id"), str(values.get("prompt") or ""),
                        str(values.get("configuration_id") or ""), str(values.get("name") or ""),
-                       inline=configuration if isinstance(configuration, dict) else None)
+                       inline=configuration if isinstance(configuration, dict) else None,
+                       origin=values.get("origin"))
     return {"ok": True, "job": found}
 
 

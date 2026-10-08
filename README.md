@@ -3331,24 +3331,60 @@ a rotation, a phone's keyboard coming up — so the buttons stay in reach.
 
 ### Conversation, per message
 
-Tap a message in the transcript and the actions for that message open in a
-sheet over the bottom of it — nothing is inserted between the transcript and the
-composer, so neither of them moves:
+Tap a message in the transcript and its actions open **inside the bubble**, as
+one row of icon buttons under the words — nothing opens over the transcript and
+nothing is inserted between it and the composer, so neither of them moves. Tap
+the message again, tap another message, press Escape or press anywhere else on
+the page and the row goes away; Enter or Space opens it from the keyboard. The
+row reads left to right in the order the actions get used — Edit and the ways of
+asking again, then Branch; then Copy and the two VibeVoice buttons; then the two
+that lose something:
 
-| Action | What it does |
-| --- | --- |
-| **Edit** | Rewrite it in place, at any position in the thread, yours or the character's alike — the version showing is the one changed. The picture it carries is kept, and the replies under it are left exactly as they are. |
-| **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
-| **Continue** | Carry a reply on from exactly where it stopped. On the last reply in a thread that happens in place. On an earlier one it **branches** first, because continuing a reply that has messages under it would leave them answering a paragraph that no longer says what they were answering. |
-| **Send again from here** | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. Your *last* message has nothing after it to keep, so that one is answered in place, in the same thread. |
-| **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
-| **Delete message** / **Delete from here** | One message, or that one and everything after it. |
+| Button | Action | What it does |
+| --- | --- | --- |
+| ✎ | **Edit** | Rewrite it in place, at any position in the thread, yours or the character's alike — the version showing is the one changed. The picture it carries is kept, and the replies under it are left exactly as they are. |
+| ↻ | **Regenerate** (a reply) | Ask for the reply again. At the end of a thread it keeps the one it had and `‹ 2/3 ›` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
+| ⇢ | **Continue** (a reply) | Carry a reply on from exactly where it stopped. On the last reply in a thread that happens in place. On an earlier one it **branches** first, because continuing a reply that has messages under it would leave them answering a paragraph that no longer says what they were answering. |
+| ↪ | **Send again from here** (one of yours) | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. Your *last* message has nothing after it to keep, so that one is answered in place, in the same thread. |
+| ⎇ | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
+| ⧉ | **Copy** | The message's words, as written, onto the clipboard — just the words, not the row. The button reads ✓ for a moment. |
+| a waveform | **Send to VibeVoice** | Render the message with the Voice Box's setup, as it stands on that tab. Below. |
+| ▶︎ | **Play VibeVoice** | Play (and pause) the render made for this message. Dark until there is one. |
+| ✕ | **Delete message** | One message. |
+| ⤓ | **Delete from here** | That message and everything after it. |
 
-Every reply also carries a small **↻** of its own, at the bottom of the bubble:
-one tap regenerates that reply, without opening the sheet first. It is the same
-action with the same rules — including the branching — and it is drawn in the
-browser, so a theme that replaces Gradio's chat DOM entirely may not show it.
-Regenerate is on the sheet either way.
+On a reply with more than one attempt the row also carries the version pager —
+`‹ 2/3 ›` and ⊗ **Delete this version** — in the same row, where the sheet used
+to show it. Every button has a name a screen reader can say, and the row is
+drawn once per message and kept while a reply streams into it, so it does not
+close or blink when a word arrives.
+
+**Send to VibeVoice** renders the message with the Voice Box tab's own setup —
+the samples, the speakers and the configuration as they are on that page: the
+message's words are the script, nothing else is changed, and the render joins
+the card's queue exactly as a press of Render there would. VibeVoice has to be
+installed, and what the Voice Box would refuse at its own Render — no sample
+for Speaker 1, no card chosen, nothing to speak — is said in the row instead of
+sending. While the render runs the bubble's edge pulses and Play is dark; when
+it lands the edge **blinks** until the audio has been played once, and **Play
+VibeVoice** plays it — and pauses it — in the tab. It never plays by itself.
+Sending the same message again darkens Play until the new render is done, and
+only the render of the **last** press is ever offered — one to one: a render
+still coming back for an earlier press is left to the Voice Box's own list and
+never played here. The renders are the Voice Box's: its Outputs stage lists
+them as *LLM Studio · <the first words>*, lanes like any other, and each is
+filed under the message it came from, so a page loaded later finds Play where
+it was — steady rather than blinking, because it is not news. Playing claims
+the page's audio focus, so Voice Chat and the Voice Box go quiet, and either of
+them speaking pauses it.
+
+The row is drawn in the browser, because a Gradio 4.40 chat bubble has nowhere
+to put a component. A button names which message it is on when it is pressed,
+not when the row was drawn, so deleting a message above never re-aims a button
+below; the version pager and the message's key travel in a hidden marker at the
+start of every bubble, written by the server. A theme that replaces Gradio's
+chat DOM entirely may not show the row, and there is no second way to these
+actions — the sheet that used to open over the bottom of the transcript is gone.
 
 Regenerating in the middle of a thread makes a branch rather than deleting what
 came after it. Both threads are then in **Threads**: the new one is where the
@@ -3379,10 +3415,6 @@ typing: a box with anything in it is left alone, and **Edit** will still take
 the message back once the box is free. A message with a picture attached stays
 where it is (the picture cannot come back into the composer with it); **Send
 again from here** answers that one in place.
-
-Tapping the same message again puts the sheet away; tapping a different one
-moves it there. There is no per-message copy button — select the text and copy
-it.
 
 The transcript is **docked to the bottom** while you are at the end of it, and
 follows a reply as it streams. Scroll away from the bottom by any amount — any
@@ -5276,6 +5308,32 @@ then it is one Install button like everything else. Without that, official
 voices still work and the clone panel tells you what is missing rather than
 offering a button that cannot work.
 
+This build pins **PocketTTS 3.3.0** (`voice/managed-pocket-models.json`),
+Kyutai's release of 24 September 2026, and it is faster than the 3.0.2 earlier
+builds pinned for reasons that are upstream's: its decoder now decodes every
+latent queued for it in one call rather than one at a time, and its activations
+use the cheaper tanh GELU, so a sentence costs fewer and larger steps on the
+same cores. (The *audio.cpp* project's recent PocketTTS speed-ups — a depthwise
+upsampling in its decoder — belong to its own C++ decoder and do not reach this
+engine, which runs Kyutai's PyTorch package.) The release also brings the
+cooperative Stop described below, a `tokenizers`-based tokenizer in place of the
+`sentencepiece` one (the model folder gains a `tokenizer.json`), and new default
+English weights. **An installation made by an earlier build needs a reinstall**,
+and the card says so: each of its lines names what is at an earlier revision —
+*Installed — PocketTTS 3.0.2; this build pins PocketTTS 3.3.0. Press Reinstall
+to update.* — and one sentence above them says what to do about all of them:
+*PocketTTS needs a reinstall: this build pins PocketTTS 3.3.0 and what is
+installed is 3.0.2. Press Reinstall — your saved voices are kept, and are
+rebuilt for the new model.* Until then PocketTTS does not speak, as an
+installation from a different closure never did. **Reinstall** is a button
+beside Install on the Pocket card (and Install does the same on an installation
+that is stale): it stops the worker, removes the runtime, the model, the
+official voices and the staging area, and installs everything the manifest
+declares — the gated cloning weights too, when a token is saved. Custom voices
+are never touched: each keeps the recording it was made from, and its prepared
+states live under the model's fingerprint, so **Rebuild** in the voice library
+makes the new model's version from the recording you already gave it.
+
 **Where the token comes from.** Paste it once under *Settings → Voice Chat →
 Access token* and Voice Chat keeps it for every gated download, for every
 engine; or set `HF_TOKEN` in the environment you start the WebUI from and leave
@@ -5311,25 +5369,24 @@ PocketTTS sets its own CPU thread policy internally, and a slider that set
 something untrue.
 
 **And then there is Stop.** On Kokoro and on Sopro, Stop cancels: playback stops
-and the synthesis is abandoned. Released PocketTTS cannot do that safely — its
-generation runs on threads of its own, abandoning it leaves them running, and
-its model is documented as not thread-safe, so beginning the next sentence while
-the last one is still alive would be wrong. Upstream is working on it and has
-not merged it, and this extension does not ship a private copy of somebody
-else's unfinished patch.
-
-So on PocketTTS, Stop means **stop what I am hearing now**. The browser goes
-silent immediately, exactly as on the other two. What is different is that the
-one sentence already inside the model finishes on its own, silently, with
-everything it produces thrown away — and while that lasts the Play control says
-*Voice finishing…* and will not start anything new. It clears when the engine
-actually reports it is free, never on a timer. Everything the reply had not
-started yet is dropped, so what you wait for is one sentence rather than the
-rest of the answer.
-
-Kokoro and Sopro never show that state. When Pocket gains cooperative
-cancellation upstream and this extension adopts a reviewed release, the wait
-simply gets much shorter and nothing else about it changes.
+and the synthesis is abandoned. PocketTTS 3.0.2 could not do that safely — its
+generation ran on threads of its own, abandoning it left them running, and its
+model is documented as not thread-safe — so on it Stop meant *stop what I am
+hearing now*: the browser went silent at once, the one sentence already inside
+the model finished on its own, silently, with everything it produced thrown
+away, and the Play control said *Voice finishing…* until the engine reported it
+was free. Kyutai merged cooperative cancellation in 3.2.0 —
+`generate_audio_stream()` takes a `stop` event and returns at the step it is
+set — and this build pins 3.3.0, so **Stop now stops the model too**: the worker
+sets the event, the sentence ends within a step, and the engine is free well
+inside a second rather than at the end of the sentence. The worker decides which
+Stop it has by reading the loaded model's own signature, not its version string,
+and says so in its handshake and every reply (`interrupt_mode`: `cooperative`,
+or `drain_unit` on an older runtime that has not been reinstalled), so the page
+shows *Voice finishing…* for exactly as long as the engine is busy either way,
+clears it when the engine reports it is free and never on a timer, and nothing
+else about Stop changes. Everything the reply had not started yet is dropped in
+both cases.
 
 Custom Pocket voices keep the recording they were made from, and their prepared
 data is stored per model — so changing the model or the precision does not
@@ -6053,6 +6110,19 @@ is *Trailer 4* to *Trailer 7* — and one named while a batch is still rendering
 numbered after all of its takes. A batch lands as one lane a take, the first
 take chosen, and a cancelled batch keeps none of them.
 
+A render can be asked for from another tab. **Send to VibeVoice** on a message
+in LLM Studio's conversation sends that message's words as the script, with the
+Voice Box page's own samples, speakers and configuration as they stand, and the
+job joins the card's queue like a press of Render; what the Voice Box would
+refuse at its own Render is refused there, in the message's row. Such a render
+carries an **origin** — who asked (`llm`), a key for the message and a label,
+three short strings and nothing else — on the job and in the output's record
+(`render.origin`), and is named *LLM Studio · <the first words>* in the
+Outputs list, where it is a lane like any other. The origin is how the asking
+tab finds its render again after a reload. The page's script offers the bridge
+(`window.mcVoiceBox`: `canRender`, `renderText`, `jobById`, `outputsFor`,
+`outputAudioUrl`); nothing in the Voice Box depends on who calls it.
+
 ### Where it lives
 
 Under the voice data root, in `voice_box/`: `samples/<id>/` (the sound and its
@@ -6069,6 +6139,11 @@ carried by one event on the page (`mc:audio-focus`): when Voice Box plays or
 records, Voice Chat stops speaking and closes any microphone it had open — the
 composer's, the flyout's dictation and the clone recorder's — and when Voice Chat
 speaks or listens, Voice Box pauses. Neither side needs the other to exist.
+LLM Studio's **Play VibeVoice** is a third party to the same rule: playing a
+render there pauses Voice Box and stops Voice Chat, and either of them pauses
+it. Voice Box and LLM Studio yield to any owner that is not themselves; Voice
+Chat yields to the two it knows, so an event nobody recognises cannot cut a
+reply off.
 
 ### The worker
 
@@ -6154,7 +6229,8 @@ otherwise reach for the hub — and keeps the mirror's own copy beside it.
 Under `/model-chain/voice-box`, on the same page token and origin check as Voice
 Chat's routes and with the same absence of a sign-in gate: status, install,
 settings and the folder dialog; samples (a raw WAV upload with its title in a
-header), prompts, configurations, pipelines; render, jobs and cancel; outputs,
+header), prompts, configurations, pipelines; render (with an optional `origin`,
+kept with the job and the output), jobs and cancel; outputs,
 their audio, save and download; and one runtime action. Audio is fetched with
 the token and played from memory. A request that is refused says why with the
 status that fits — 400 for a bad value, 404 for something no longer there, 409
@@ -6220,7 +6296,7 @@ mc_llm_conversation_api.py      the browser routes the floating panel speaks
 mc_llm_conversation_startup.py  what all of that does once, at start-up
 mc_llm_attachment_staging.py    an uploaded picture, validated and held, with a
                       readiness that is a state rather than a timer
-mc_llm_overlays.py    one owner for all seven of LLM Studio's pop surfaces
+mc_llm_overlays.py    one owner for all six of LLM Studio's pop surfaces
 mc_assistant_settings.py        the floating panel's settings, validated twice
 
 mc_voice_paths.py     where Voice Chat keeps its runtime, models, bank and clones
@@ -6249,7 +6325,8 @@ sopro_worker/worker.py     the Sopro sidecar, and one of two that import Torch
 voice/managed-sopro-models.json  the pinned Sopro closure (data only)
 tools/pin_sopro_models.py  resolves that closure from PyPI (maintainers only)
 
-mc_voice_pocket.py    PocketTTS: install, five readiness states, clone transaction
+mc_voice_pocket.py    PocketTTS: install and reinstall, five readiness states and a
+                      stale one, clone transaction
 mc_voice_pocket_runtime.py  the Pocket worker process, and the drain that is its Stop
 mc_voice_pocket_profile.py  Pocket's delivery, and the one control that is Pocket's
 pocket_worker/worker.py    the Pocket sidecar, in a Torch that is not Sopro's
@@ -6690,7 +6767,7 @@ refuses a foreign origin and a missing page token, and holds the line that there
 is no sign-in gate: a WebUI with `--gradio-auth` configured still serves a page
 that carries the token, and no route can answer 401. `test_voice_ui.py` walks the built
 Conversation panel and asserts the speech marker is attached with `.success()`
-rather than `.then()`, on all six reply paths, as one shared handler.
+rather than `.then()`, on all five reply paths, as one shared handler.
 `test_voice_engines.py`, `test_voice_engine_surfaces.py` and
 `test_voice_lab.py` defend the engine boundary from three sides. The first
 asserts the rules — one engine selected, no cross-engine fallback, per-engine

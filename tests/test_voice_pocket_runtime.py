@@ -150,6 +150,15 @@ class TestTheHandshakeRefusesWhatThisBuildCannotAccept:
             runtime.ensure_started()
         assert "different model" in str(raised.value)
 
+    @pytest.mark.pocket(interrupt_mode="cooperative")
+    def test_a_cooperative_worker_is_accepted_and_its_mode_is_what_the_surface_reads(
+            self, host, fake_pocket_worker):
+        """3.3.0's worker. The parent's state machine is the same for both modes;
+        what changes is the name it reports, which the browser draws from."""
+        runtime.ensure_started()
+        assert runtime.engine()["interrupt_mode"] == "cooperative"
+        assert runtime.declared_interrupt_mode() == "cooperative"
+
     @pytest.mark.pocket(interrupt_mode="magic")
     def test_an_interrupt_mode_this_parent_cannot_implement_is_refused(
             self, host, fake_pocket_worker):

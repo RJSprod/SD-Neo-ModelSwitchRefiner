@@ -1619,7 +1619,7 @@ behind it and comes back unchanged — same scroll position, same unsent message
 | Threads | search, the list, New, Rename, and Delete behind its own heading |
 | Character | Talking to, Edit/New, the editor, card import, advanced sampling, Delete |
 | You | your name, about you, Save |
-| Message actions | the version pager and every per-message operation |
+| Message actions | the version pager and every per-message operation — **superseded, §39**: a row of buttons inside the bubble |
 | Model and runtime | the chooser, Rescan, Load, Unload, the state, Open Setup |
 | Workspace | the four modes |
 
@@ -3223,6 +3223,9 @@ messages scrolling *through* it.
 
 ### 31.3 Regenerate, twice
 
+*Superseded by §39: the icon became one button of a row every message carries,
+nominated the same way; the ordinal rule below is now the row's.*
+
 Two of the five were the same feature, and the second is the one that mattered.
 
 > *"Add a regenerate icon directly next to the chat response in thread view."*
@@ -4165,3 +4168,126 @@ blocks. Warm prompt caches multiply all of it. At 8,192 tokens on this backbone:
 Neither is changed here. `--swa-full` was chosen in §26.2 for prompt reuse and
 the cache count is a setting somebody picked; what was missing was the
 arithmetic to choose between them, and §38.3 is that.
+
+## 39. The sheet goes: a row of buttons in the bubble (8 October 2026)
+
+> *"All of the options should appear in a row below when i tap, as buttons with
+> icons that represent the actions … the same for prompts i submitted. No more
+> flyout box in LLM Studio to see message options, make it appear in the cell as
+> a row of buttons that toggles when i tap the message in the cell."*
+
+### 39.1 What a tap does now
+
+A tap on a message reveals one row of icon buttons under its words, inside the
+bubble; the next tap on it, a tap on another message, Escape, or a press
+anywhere else puts it away, and Enter or Space from the keyboard opens it (the
+bubble has `tabindex="0"` and `aria-expanded`). The sheet of §19.2 is gone from
+`mc_llm_chat_panel.py` — `SELECTION_ORDER` is edit, edit box, edit image and
+composer — and so is §31.3's lone ↻: Regenerate is one button of the row.
+
+The order is the order the actions get used, read left to right: Edit; the ways
+of asking again (↻ Regenerate and ⇢ Continue on a reply, ↪ Send again on a
+prompt); ⎇ Branch; ⧉ Copy; the two VibeVoice buttons (a drawn waveform for Send,
+▶︎ for Play — *"an icon of waveform, because thats vibey"*); then the two that
+lose something, ✕ Delete and ⤓ Delete from here. A reply with versions carries
+the pager in the same row, ‹ 2/3 › and ⊗ *Delete this version*. Every button has
+an `aria-label` equal to its `title`.
+
+Every glyph was compared with what LobeTheme's `replaceIcon` swaps (every
+button, span or link whose text *contains* one of its strings; the list is in
+`tests/test_llm_studio_js.py` as `LOBE_SWAPS`, read from its source), not with a
+guess at what counts as an emoji. ↪ is not ↩, which Lobe swaps; the waveform is
+an SVG inside a button with no text; no span of the row holds a cross.
+
+### 39.2 How a press reaches the server
+
+A Gradio 4.40 chat bubble still has nowhere to put a component, so the row is
+drawn by `javascript/llm_studio.js` and the server is reached the way §31.3's
+icon reached it, generalised: one hidden `Textbox` (`mc-llm-chat-action-at`)
+and ten hidden `Button`s built by `_nominated_buttons()` from
+`NOMINATED_ACTIONS` (`mc-llm-chat-<name>-now`, the name dashed). A press writes
+`role:ordinal` — the message's role and its place among the bubbles of that role,
+counted down the live transcript *at the moment of the press* — fires `input`
+so Gradio learns the value, and presses the button a tick later. `_nominated`
+turns that into a message index through the same `positions` map the sheet's
+tap went through, `_prompt_at` for prompts; a nomination that no longer matches
+the thread is refused with `STALE_NOMINATION` rather than applied to whatever
+moved into the place. Every handler ends in `_settle`, which puts the panel in
+its home state — the sheet's `_close_selection` had nothing left to close.
+
+The pager and the message's key cannot be counted off the DOM, so the server
+writes them into the message: `_meta()` puts a hidden
+`<span class="mc-llm-meta" data-mc-role data-mc-versions data-mc-active
+data-mc-key hidden>` first in every bubble's markdown, and the row reads it. The
+key is `<thread>:<sha1(role + newline + text)[:12]>`, the same for the same words
+at the same place, so a reload finds the same key. A row is drawn once per
+message and rebuilt only when the marker under it changed (a version paged):
+`wireBubbles` runs after every host update, and a row rebuilt on every streamed
+word would lose what it was saying — the note, Copy's ✓ — which is what the
+redraw test holds.
+
+### 39.3 Copy
+
+Copy puts the message's words on the clipboard — `messageText`, the bubble with
+the row and the marker left out — through `navigator.clipboard` where it exists
+and `execCommand("copy")` on a page that only has that, and reads ✓ for a
+moment. *"Copy should just copy."*
+
+### 39.4 Send to VibeVoice, Play VibeVoice
+
+> *"When i send to vibevoice, it should try to use the set up already in the
+> page … This button simply feeds in the prompt (for now). … It does not auto
+> play, but i would like to have something like a blinking stroke on taht
+> message to indicate it has audio ready to play. If i send to vibevoice again,
+> the play button should disable as it waits for the requested audio to
+> complete. It should be 1 to 1."*
+
+The Voice Box's page offers a bridge, `window.mcVoiceBox` (`canRender`,
+`renderText`, `jobById`, `outputsFor`, `outputAudioUrl`; docs/23 §8), and LLM
+Studio uses only that: nothing of the Voice Box is imported here, and a page
+without it has a dark Send that says why. Send asks `canRender(text)` first, so
+what the Voice Box would refuse at its own Render is said in the row instead,
+and then `renderText(text, {name, origin})`: the Voice Box's own samples,
+speakers and configuration, the message as the script, queued like a press of
+Render. The render carries an **origin** — `{kind: "llm", key, label}` — which
+`mc_voice_box.render()` keeps on the job and writes into the output's record
+(`render.origin`); the Voice Box lists it as *LLM Studio · <the first words>*.
+
+One **record per message**, keyed by the marker's key: the job in flight, the
+output that came back, and whether it was played. A second press replaces the
+record, so the earlier render — whatever it returns — is never this message's:
+Play is dark while the new one renders and offers only the last press's output.
+That is the one-to-one rule, and a mutation that keeps the first record while
+one is pending fails its test. The bubble carries `data-mc-vibe`: `rendering`
+(the edge pulses; Play dark), `ready` (the edge **blinks** until played), then
+`played` (steady). Jobs in flight are looked at once a second through
+`jobById`, which reads the list the Voice Box's own poll keeps current — LLM
+Studio opens no request of its own for it — and a job that disappears from that
+list for twenty looks is given up with a note. Nothing plays by itself.
+
+A page loaded later finds the renders again: once per thread, `outputsFor` is
+asked for the thread's key prefix and every output with an origin key becomes a
+record marked played — steady rather than blinking, because it is not news — the
+newest first, so the latest render of a message is the one offered. Playing
+goes through one `<audio>` for the transcript, claims `mc:audio-focus` as
+`llm-studio`, and pauses when anybody else claims it; Voice Chat names it among
+the owners it yields to (`FOCUS_RIVALS`, beside the Voice Box) and still
+ignores a stranger's claim, which its own test holds.
+
+### 39.5 Found on the way
+
+- The render watcher was first named `watch`, and `javascript/llm_studio.js`
+  already had a `watch(target)` — the transcript's scroll watcher. Two function
+  declarations in one scope: the later wins, the transcript's follow broke, and
+  the old anchoring tests caught it (`state.pinned` of `undefined`). Renamed
+  `watchRenders`, `lookAtRenders`, `settleRender`.
+- The row's class was first `mc-llm-actions`, which three panels already use
+  through `ui.classes("actions")` on rows Gradio hides; the theme contract test
+  (`test_no_rule_sets_display_on_anything_gradio_hides`) refused the stylesheet's
+  `display: flex` on it. The row is `mc-llm-message-actions`, its buttons
+  `mc-llm-message-action`.
+- The harness ran every timer at once, so the row's four-second note cleared
+  itself as it was written; zero-delay timers (the nomination's next tick) run
+  at once, delayed ones wait for `fire()`. Node 22's `globalThis.navigator` has
+  only a getter; the clipboard stand-in is defined with `Object.defineProperty`.
+- `mc_llm_overlays` owns six surfaces now, not seven.

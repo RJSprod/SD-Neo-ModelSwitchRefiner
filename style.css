@@ -1098,46 +1098,153 @@
     display: none !important;
 }
 
-/* The regenerate icon on a reply, drawn into the bubble by
-   javascript/llm_studio.js. Styled here rather than there so that a theme can
-   override it the ordinary way, and so the script stays a script.
+/* The row of actions in every bubble, drawn there by javascript/llm_studio.js
+   and shown by a tap on the message. Styled here rather than there so that a
+   theme can override it the ordinary way, and so the script stays a script.
 
-   Quiet until the reply is pointed at: at rest it is faint, and it comes up on
-   hover or focus. A transcript's job is to be read, and an icon that shouts on
-   every paragraph is the reason there is no copy button under every message
-   either. It keeps its full contrast on :focus-visible, because a keyboard is
-   how somebody who cannot hover reaches it at all. */
-#mc-llm-studio .mc-llm-transcript .mc-llm-again {
-    background: transparent;
-    border: 0;
-    border-radius: 4px;
-    color: inherit;
+   The marker Python puts first in every message is a span with no text; the
+   paragraph the markdown wraps it in would still take a line, so that
+   paragraph is taken out of the flow where :has() is understood, and the span
+   itself everywhere. */
+#mc-llm-studio .mc-llm-transcript .mc-llm-meta {
+    display: none;
+}
+
+#mc-llm-studio .mc-llm-transcript p:has(> .mc-llm-meta:only-child) {
+    display: none;
+}
+
+/* A message with actions is tapped to show them, and says so: a pointer over
+   it, a ring when the keyboard is on it, and the accent on its border while
+   its row is open -- so which message a button belongs to is never a guess.
+   The row itself is shown and hidden with `hidden`, which the rule at the top
+   of this tab makes stick against a theme's display. */
+#mc-llm-studio .mc-llm-transcript [data-mc-role] {
     cursor: pointer;
-    display: block;
-    font-size: 0.95em;
-    line-height: 1;
-    margin-left: auto;
-    margin-top: 0.35em;
-    opacity: 0.35;
-    padding: 0.15em 0.35em;
-    transition: opacity 0.12s ease-in-out;
+}
+
+#mc-llm-studio .mc-llm-transcript [data-mc-role]:focus-visible {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: 2px;
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-revealed {
+    box-shadow: 0 0 0 2px var(--color-accent, #2563eb);
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-actions {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25em;
+    margin-top: 0.45em;
     /* Never part of the text somebody selects and copies out of a reply. */
     user-select: none;
-    width: max-content;
 }
 
-#mc-llm-studio .mc-llm-transcript .mc-llm-again:hover,
-#mc-llm-studio .mc-llm-transcript .mc-llm-again:focus-visible {
-    background: var(--background-fill-secondary, transparent);
-    opacity: 1;
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-actions[hidden] {
+    display: none !important;
 }
 
-/* A pointer is not the only way in. On a touch screen there is no hover at
-   all, so the icon is simply legible: a control that only appears under a
-   mouse is a control a phone does not have. */
-@media (hover: none) {
-    #mc-llm-studio .mc-llm-transcript .mc-llm-again {
-        opacity: 0.7;
+/* Reachable without hover, always: a control that only appears on hover is a
+   control a touch screen does not have. Sized as a target rather than as
+   text, because these carry a glyph and not a word: 44px square is the
+   smallest thing a thumb hits reliably, and the glyph is a little larger than
+   the body text and centred, with `line-height: 1` keeping it on the middle of
+   the square whatever the theme's leading is. */
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-action {
+    align-items: center;
+    background: var(--button-secondary-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 1.05em;
+    justify-content: center;
+    line-height: 1;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.15em 0.4em;
+    text-align: center;
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-action svg {
+    display: block;
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-action:disabled {
+    cursor: default;
+    opacity: 0.4;
+}
+
+/* The two that lose something sit behind a gap of their own, and in the
+   theme's colour for a destructive press. */
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-action-destructive {
+    color: var(--error-text-color, var(--color-accent, inherit));
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-action[data-action="delete"] {
+    margin-left: 0.6em;
+}
+
+/* "2/3" is the only thing that says an earlier attempt is still there, so it
+   is read as a number rather than as prose. The cluster keeps its buttons
+   together and ends with a gap. */
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-actions-versions {
+    align-items: center;
+    display: inline-flex;
+    gap: 0.25em;
+    margin-right: 0.6em;
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-actions-pager {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    padding: 0 0.3em;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-message-actions-note {
+    flex-basis: 100%;
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+/* VibeVoice's state on the message: a stroke that blinks while a render is
+   ready and not yet played, steady once it has been, and a faint pulse on the
+   Send button while the render is being made. Motion is kept out of the way
+   of anybody who asked for less of it. */
+@keyframes mc-llm-vibe-ready {
+    0%, 100% { box-shadow: 0 0 0 2px var(--color-accent, #2563eb); }
+    50% { box-shadow: 0 0 0 2px transparent; }
+}
+
+@keyframes mc-llm-vibe-rendering {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+#mc-llm-studio .mc-llm-transcript [data-mc-vibe="ready"] {
+    animation: mc-llm-vibe-ready 1.2s ease-in-out infinite;
+}
+
+#mc-llm-studio .mc-llm-transcript [data-mc-vibe="played"] {
+    box-shadow: 0 0 0 2px var(--color-accent, #2563eb);
+}
+
+#mc-llm-studio .mc-llm-transcript [data-mc-vibe="rendering"] .mc-llm-message-action[data-action="vibe"] {
+    animation: mc-llm-vibe-rendering 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #mc-llm-studio .mc-llm-transcript [data-mc-vibe="ready"],
+    #mc-llm-studio .mc-llm-transcript [data-mc-vibe="rendering"] .mc-llm-message-action[data-action="vibe"] {
+        animation: none;
+    }
+
+    #mc-llm-studio .mc-llm-transcript [data-mc-vibe="ready"] {
+        box-shadow: 0 0 0 2px var(--color-accent, #2563eb);
     }
 }
 
@@ -1292,29 +1399,6 @@
     max-height: 70%;
     top: auto;
     z-index: 25;
-}
-
-#mc-llm-studio .mc-llm-message-actions-row {
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.35em;
-}
-
-#mc-llm-studio .mc-llm-message-actions-row > * {
-    flex: 0 0 auto;
-}
-
-#mc-llm-studio .mc-llm-message-actions button {
-    min-height: 2.6em;
-}
-
-/* "2/3" is the only thing that says an earlier attempt is still there, so it
-   is read as a number rather than as prose. */
-#mc-llm-studio .mc-llm-pager {
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    padding: 0 0.3em;
-    white-space: nowrap;
 }
 
 /* The thread list scrolls inside the screen it is on, so the search box and

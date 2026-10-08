@@ -8,15 +8,16 @@ playback has already stopped and the engine has not finished yet.
 Why Pocket's Stop is not Sopro's Stop
 -------------------------------------
 Kokoro's and Sopro's synthesis are generators the worker stops pulling from, so
-abandoning one abandons the work. Released PocketTTS 3.0.2 is not like that:
+abandoning one abandons the work. PocketTTS is not like that:
 
     ``generate_audio_stream()`` runs its own generation and decoder threads,
     and abandoning the generator leaves the generation thread running for the
-    remainder of the input. Upstream's own change to add cooperative
-    cancellation is open rather than merged, and it says in as many words that
-    draining the stream to completion was the correct Python-API behaviour
-    before it. The model is documented as not thread-safe, so starting the next
-    generation while the old one is alive is incorrect (section 5.10).
+    remainder of the input. Released 3.0.2 offered no way to stop one; 3.2.0
+    merged upstream's own ``stop`` Event, which this repository adopted with
+    the 3.3.0 pin, and the worker sets it -- but the generator is still drained
+    rather than abandoned, because the model is documented as not thread-safe
+    and starting the next generation while the old one is alive is incorrect
+    (section 5.10).
 
 So this runtime does not claim to cancel. It claims what it can do:
 
@@ -42,11 +43,13 @@ unit 3 queued and unit 4 not yet committed loses 3 and 4 outright: draining a
 whole queued assistant answer would turn a bounded compatibility policy into a
 long lockout (section 21.3, section 49.4).
 
-Nothing here is a local copy of upstream's unmerged cancellation. When Kyutai
-merges it and this project deliberately adopts a reviewed release,
-:data:`INTERRUPT_MODE` becomes ``cooperative``, the worker sets an Event instead
-of running to the end, and neither the command below nor the browser's Stop
-changes at all (I-PKT-14, section 21.7).
+Which of the two the worker can promise is its handshake's ``interrupt_mode``,
+read off the loaded build's signature rather than its version: ``drain_unit``
+for a 3.0.2 runtime still installed, ``cooperative`` for 3.2.0 and later, where
+the Event ends the generation within a step and the report that frees the lane
+arrives that much sooner. Nothing on this side changes between the two -- not
+the command below, not the state machine, not the browser's Stop -- which is
+I-PKT-14 and section 21.7 kept: the wait simply got shorter.
 
 What this module does not do
 ----------------------------
@@ -103,11 +106,12 @@ one there rather than starting one it cannot promise to end (section 34).
 INTERRUPT_MODE = "drain_unit"
 """What Stop means on this engine, as the capability the shared turn reads.
 
-``drain_unit`` for released PocketTTS 3.0.2, and it is a statement about
-upstream rather than a preference: see the module docstring. The *effective*
-mode comes from the worker's handshake once one is resident, so that adopting a
-merged upstream cancellation is a change to the worker and this constant, and
-not a change to Voice Chat.
+``drain_unit`` is the answer before a worker has said, and a 3.0.2 build's
+answer for as long as one is installed; it is a statement about upstream rather
+than a preference: see the module docstring. The *effective* mode comes from the
+worker's handshake once one is resident -- ``cooperative`` on the 3.3.0 pin --
+so adopting upstream's cancellation was a change to the worker and not a change
+to Voice Chat.
 """
 
 SUPPORTED_INTERRUPT_MODES = ("drain_unit", "cooperative")
