@@ -103,6 +103,9 @@ body { margin: 0; background: #0b0f19; color: #eee; font: 14px sans-serif;
 #lobe-header { position: sticky; top: 0; height: 64px; z-index: 999; background: #000; }
 #txt2img_results, #img2img_results { position: sticky; top: 80px !important; }
 .panel { margin: 0 !important; padding: 16px !important; }
+/* Forge's divider drag: nothing on the page takes a press, or a hit-test. */
+body.resizing * { pointer-events: none !important; }
+body.resizing .resize-handle { pointer-events: initial !important; }
 [id$='_gallery_container'] { min-height: 470px; }
 [id$='_gallery_container'] > div:not([id$='_generate_box']) { flex-grow: 1; }
 [id$='img_settings'] { display: flex !important; flex-direction: column !important; }
@@ -577,6 +580,67 @@ def test_a_column_under_the_settings_keeps_what_the_mobile_script_decided(browse
         assert docked["offsetLeft"] == 0, docked
         resize(page, 1600, 1000)
         assert page.evaluate(GENERATE_BOX)["parent"] == "txt2img_results"
+    finally:
+        page.close()
+
+
+def test_a_divider_drag_does_not_put_the_column_under_the_header(browser):
+    """Reported: "When i move the column divider to adjust column widths,
+    sometimes the generation button appears to fall under the tab bar."
+    Forge's drag gives every element pointer-events: none, so the page's
+    hit-test finds no header at the top of the window, and with the tab
+    buttons inside the theme's header (Lobe's) nothing else holds the
+    column down: a measure during the drag put the panel at the window's
+    top, where it stayed. Under the drag the fill keeps what it wrote, and
+    measures again when the drag ends."""
+    page = open_page(browser)
+    try:
+        page.evaluate("document.querySelector('.tab-nav').style.display = 'none'")
+        page.evaluate("forgeAssistant.fill.now()")
+        settle(page, 4)
+        before = measure(page)
+        assert before["ceiling"] == 64, "the header alone holds the column down"
+        assert_spaced(before)
+
+        # The drag: Forge's class on the body, then the divider moved -- the
+        # column resized, which is what asks the fill to measure.
+        page.evaluate("""() => {
+            document.body.classList.add("resizing");
+            const row = document.getElementById("txt2img_results").parentElement;
+            row.style.gridTemplateColumns = "420px 16px 1fr";
+        }""")
+        settle(page, 6)
+        during = measure(page)
+        assert abs(during["frame"]["top"] - before["frame"]["top"]) <= 1, during
+        assert_spaced(during)
+
+        page.evaluate("document.body.classList.remove('resizing')")
+        settle(page, 6)
+        after = measure(page)
+        assert_spaced(after)
+        assert after["ceiling"] == 64
+    finally:
+        page.close()
+
+
+def test_an_overlay_over_the_window_is_not_a_header(browser):
+    """A lightbox or a dialog fixed over the whole window is found at the top
+    of it too, and is not a ceiling: the column under it keeps its height."""
+    page = open_page(browser)
+    try:
+        before = measure(page)
+        page.evaluate("""() => {
+            const overlay = document.createElement("div");
+            overlay.id = "lightbox-under-test";
+            overlay.style.cssText = "position: fixed; inset: 0; z-index: 1001; background: rgba(0,0,0,.6)";
+            document.body.appendChild(overlay);
+        }""")
+        page.evaluate("forgeAssistant.fill.now()")
+        settle(page, 4)
+        found = measure(page)
+        assert found["marked"] is True, found
+        assert abs(found["gallery"]["height"] - before["gallery"]["height"]) <= 1, found
+        assert abs(found["frame"]["top"] - before["frame"]["top"]) <= 1, found
     finally:
         page.close()
 

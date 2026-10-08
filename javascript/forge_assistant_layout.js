@@ -144,12 +144,22 @@
         return walk || null;
     }
 
+    /** Forge's divider drag: `body.resizing`, under which its stylesheet
+     *  gives every element `pointer-events: none`, so the page answers
+     *  `elementsFromPoint` with nothing -- no header, no ceiling. */
+    function dragging() {
+        return !!(document.body && document.body.classList
+                  && document.body.classList.contains("resizing"));
+    }
+
     function Fill() {
         this.frame = 0;
         this.observer = null;
         this.watched = new Set();
         this.started = false;
         this.disposers = [];
+        // A measure asked for during Forge's divider drag, taken when it ends.
+        this.deferred = false;
         // Per tab, the margins written to space the kept things evenly: each
         // node with the inline margin-top it had before, put back when the
         // column is measured (so it is read as the theme draws it) and when the
@@ -227,8 +237,13 @@
                     const style = styleOf(walk);
                     const position = style ? style.position : "";
                     if (position === "fixed" || position === "sticky") {
-                        if (!walk.contains(results)) {
-                            found = Math.max(found, walk.getBoundingClientRect().bottom);
+                        const box = walk.getBoundingClientRect();
+                        // A header is a bar. Something fixed over most of the
+                        // window -- a lightbox, a dialog -- is not a header,
+                        // and a column under it is not shorter for it.
+                        if (!walk.contains(results)
+                            && box.height <= (window.innerHeight || 0) / 2) {
+                            found = Math.max(found, box.bottom);
                         }
                         break;
                     }
@@ -621,6 +636,14 @@
     };
 
     Fill.prototype.now = function () {
+        // Under the drag nothing can be seen at the top of the window, and a
+        // measure then put the column under the header, where it stayed once
+        // the drag ended without another resize. What was written stays until
+        // the drag ends; the body's class coming off is the measure's cue.
+        if (dragging()) {
+            this.deferred = true;
+            return;
+        }
         FILL_TABS.forEach((tab) => {
             try {
                 this.apply(tab);
@@ -648,6 +671,17 @@
         const again = () => this.refresh();
         window.addEventListener("resize", again);
         this.disposers.push(() => window.removeEventListener("resize", again));
+        // The end of Forge's divider drag: its class leaving the body.
+        if (typeof MutationObserver === "function" && document.body) {
+            const ended = new MutationObserver(() => {
+                if (this.deferred && !dragging()) {
+                    this.deferred = false;
+                    this.refresh();
+                }
+            });
+            ended.observe(document.body, {attributes: true, attributeFilter: ["class"]});
+            this.disposers.push(() => ended.disconnect());
+        }
         // A picture loading in the grid view: the first one's shape decides
         // how many rows fit, and a load does not resize the column.
         const loaded = (event) => {

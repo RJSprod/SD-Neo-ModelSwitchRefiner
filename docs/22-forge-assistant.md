@@ -2250,8 +2250,20 @@ the page scrolls the column (focus mode's root). When the page scrolls,
 `coveredTop` asks the page what is drawn at the top of the window above the
 column (`elementsFromPoint`), and the bottom of a sticky or fixed element there
 -- Lobe's header -- is the top of the view; this extension's own panel is never
-that element, and neither is anything holding the column. A second bar under
-the first is looked for too.
+that element, neither is anything holding the column, and neither is anything
+fixed over more than half the window (a lightbox, a dialog: a header is a bar).
+A second bar under the first is looked for too.
+
+That question has one answer the page cannot give: during Forge's divider drag
+(`body.resizing`), when its stylesheet gives every element `pointer-events:
+none` and a hit-test finds nothing. Reported as "When i move the column divider
+to adjust column widths, sometimes the generation button appears to fall under
+the tab bar": a measure during the drag took the window's top for the ceiling
+-- Lobe keeps the tab buttons inside its header, so the DOM walk above the
+column (`aboveBottom`) found nothing either -- and the panel sat under the
+header until something else resized the column. Under the drag the fill now
+keeps what it wrote (`dragging`, `deferred`), and the body's class coming off
+is the cue to measure again.
 
 ### Verified
 
