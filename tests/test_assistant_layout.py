@@ -114,6 +114,40 @@ body { margin: 0; background: #0b0f19; color: #eee; font: 14px sans-serif;
 
 SETTINGS_BLOCKS = 24
 
+# Forge Neo's own extensions-builtin/mobile/javascript/mobile.js, as it is:
+# on every window resize it takes a results column at offsetLeft 0 for a
+# phone's stacked layout and moves Generate's box into that column, and back
+# into the toprow's actions column once the column is off the edge again. The
+# docked row put the column on the edge, and the browser's full screen
+# resized the window on the way out of focus and on the way back in.
+MOBILE_JS = """
+(function () {
+    let isSetupForMobile = false;
+    function isMobile() {
+        for (const tab of ["txt2img", "img2img"]) {
+            const imageTab = gradioApp().getElementById(tab + "_results");
+            if (imageTab && imageTab.offsetParent && imageTab.offsetLeft === 0) return true;
+        }
+        return false;
+    }
+    function reportWindowSize() {
+        if (gradioApp().querySelector(".toprow-compact-tools")) return;
+        const currentlyMobile = isMobile();
+        if (currentlyMobile === isSetupForMobile) return;
+        isSetupForMobile = currentlyMobile;
+        for (const tab of ["txt2img", "img2img"]) {
+            const button = gradioApp().getElementById(tab + "_generate_box");
+            const target = gradioApp().getElementById(currentlyMobile ? tab + "_results" : tab + "_actions_column");
+            if (!button || !target) continue;
+            target.insertBefore(button, target.firstElementChild);
+            gradioApp().getElementById(tab + "_results").classList.toggle("mobile", currentlyMobile);
+        }
+    }
+    window.addEventListener("resize", reportWindowSize);
+    onUiLoaded(reportWindowSize);
+})();
+"""
+
 
 def page_html() -> str:
     blocks = "".join(f'<div class="block" id="setting_{n}">Setting {n}</div>'
@@ -140,7 +174,12 @@ def page_html() -> str:
     <div class="row resize-handle-row unequal-height"
          style="display: grid; gap: 0; grid-template-columns: 1fr 16px 1fr">
       <div id="txt2img_settings" class="column" style="min-width: min(320px, 100%)">
-        <div class="block" id="txt2img_prompt"><textarea aria-label="Prompt"></textarea></div>
+        <div id="txt2img_toprow" class="row">
+          <div class="block" id="txt2img_prompt"><textarea aria-label="Prompt"></textarea></div>
+          <div id="txt2img_actions_column" class="column">
+            <div id="txt2img_tools" class="row"><button>paste</button></div>
+          </div>
+        </div>
         {blocks}
       </div>
       <div class="resize-handle"></div>
@@ -167,10 +206,16 @@ def page_html() -> str:
 </div>
 </div></gradio-app>
 <script>
-function gradioApp() {{ return document.querySelector("gradio-app"); }}
+function gradioApp() {{
+    // As Forge's script.js has it: the element, given getElementById.
+    const elem = document.querySelector("gradio-app");
+    elem.getElementById = function (id) {{ return document.getElementById(id); }};
+    return elem;
+}}
 const uiLoaded = [];
 function onUiLoaded(fn) {{ uiLoaded.push(fn); }}
 </script>
+<script>{MOBILE_JS}</script>
 {scripts}
 <script>uiLoaded.forEach((fn) => fn());</script>
 </body></html>"""
@@ -430,6 +475,77 @@ def test_a_progress_bar_takes_its_room_from_the_gallery(browser):
         settle(page)
         overlaid = measure(page)
         assert abs(overlaid["gallery"]["height"] - before["gallery"]["height"]) <= 1, overlaid
+    finally:
+        page.close()
+
+
+GENERATE_BOX = """() => {
+    const box = document.getElementById("txt2img_generate_box");
+    const results = document.getElementById("txt2img_results");
+    return {parent: box.parentElement.id, offsetLeft: results.offsetLeft,
+            beside: results.classList.contains("forge-assistant-docked-beside"),
+            docked: forgeAssistant.dock.isDocked()};
+}"""
+
+
+def resize(page, width: int, height: int) -> None:
+    """The window resized -- Forge's mobile script listens for it."""
+    page.set_viewport_size({"width": width, "height": height})
+    settle(page, 4)
+
+
+def test_docked_the_results_column_never_reads_as_a_phone_to_forges_mobile_script(browser):
+    """Reported: with Lobe's split previewer, focus on, the column docked,
+    focus off, the column undocked and focus on again left Generate in the
+    left column. The mover was Forge's own mobile script: the docked row put
+    the results column on its left edge, which that script takes for a phone,
+    and the browser's full screen resized the window on each toggle of focus.
+    Docked beside the settings, the column keeps a pixel off the edge."""
+    page = open_page(browser)
+    try:
+        assert page.evaluate(GENERATE_BOX)["parent"] == "txt2img_gallery_container"
+        page.evaluate("forgeAssistant.shell.open(); forgeAssistant.shell.toggleDock()")
+        settle(page)
+        docked = page.evaluate(GENERATE_BOX)
+        assert docked["docked"] is True and docked["beside"] is True, docked
+        assert docked["offsetLeft"] > 0, docked
+
+        # Focus off (the full screen gone): a resize, with the column docked.
+        resize(page, 1600, 940)
+        assert page.evaluate(GENERATE_BOX)["parent"] == "txt2img_gallery_container"
+
+        # Undocked, then focus on again: another resize.
+        page.evaluate("forgeAssistant.shell.toggleDock()")
+        settle(page)
+        resize(page, 1600, 1000)
+        found = page.evaluate(GENERATE_BOX)
+        assert found["parent"] == "txt2img_gallery_container", found
+        assert found["beside"] is False and found["docked"] is False, found
+    finally:
+        page.close()
+
+
+def test_a_column_under_the_settings_keeps_what_the_mobile_script_decided(browser):
+    """A phone's stacked layout is on the edge before the dock, and stays so:
+    the dock must not turn a phone into a desktop for that script, or Generate
+    would leave the results column for the toprow in the panel."""
+    page = open_page(browser)
+    try:
+        # Stacked, as Forge's resize handle lays a narrow window out, and a
+        # resize for the mobile script to notice: Generate above the gallery.
+        page.evaluate("""() => { const row = document.getElementById("txt2img_results").parentElement;
+            row.style.display = "flex"; row.style.flexDirection = "column"; }""")
+        resize(page, 1600, 940)
+        stacked = page.evaluate(GENERATE_BOX)
+        assert stacked["offsetLeft"] == 0 and stacked["parent"] == "txt2img_results", stacked
+
+        page.evaluate("forgeAssistant.shell.open(); forgeAssistant.shell.toggleDock()")
+        settle(page)
+        docked = page.evaluate(GENERATE_BOX)
+        assert docked["docked"] is True and docked["beside"] is False, docked
+        assert docked["offsetLeft"] == 0, docked
+        resize(page, 1600, 1000)
+        assert page.evaluate(GENERATE_BOX)["parent"] == "txt2img_results"
     finally:
         page.close()
 

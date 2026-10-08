@@ -2039,18 +2039,6 @@ load into `<LLM data root>/logs/model_chain.log`, beside the managed LLM's own
 log, so if completion is missing the reason is a line in a file rather than
 something to go looking for in the browser's developer tools.
 
-**Temporary: a watcher on the Generate box.** Reported under the Lobe theme's
-split previewer: after a sequence of focus mode and the flyout's docked
-settings column, Txt2Img's Generate box ends up back in the left column. No
-script on the page is known to move it there, so until the mover is caught
-`javascript/model_chain_watch_generate.js` watches the box and writes every
-DOM call that moves it (with the caller's stack), every change of its ancestry,
-and the moments around them — focus, the dock, the panel, full screen, resizes,
-tab changes, Gradio requests — as `Model Chain watch:` lines in
-`model_chain.log` (`mc_generate_watch`, `POST /model-chain/generate-box/watch`).
-Elements are named by id and class only; no text travels. It comes out once the
-log has caught the mover.
-
 **Always on screen, always in effect.** The row is there whether or not
 Creative or Spatial is on, and what is in it goes into every generation either
 way — what is in effect is what you can see. It used to appear only while one
@@ -3573,7 +3561,11 @@ tab bar. Those two are the only ways it comes back: while it is docked the
 column stays out of the page, and the gallery keeps the whole row, whatever
 else happens. Close the panel and the column is simply out of sight — the
 gallery stays full width, in focus mode and out of it, and leaving focus mode
-changes nothing — and opening the panel shows it there again. On another
+changes nothing — and opening the panel shows it there again. Generate stays
+where your theme put it through all of this: Forge's own mobile script takes a
+results column on the row's left edge for a phone and moves the Generate box on
+every window resize (the browser's full screen is one), so while the column is
+docked beside the settings the gallery keeps a pixel off that edge. On another
 workspace the button goes and the panel shows the conversation or the tab bar;
 coming back to Txt2Img shows the column in the panel again. A menu takes the
 column's place while it is up, as it does the conversation's. The choice is

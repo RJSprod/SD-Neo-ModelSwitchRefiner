@@ -7336,6 +7336,18 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: none !important;
 }
 
+/* The results column, docked beside the settings: a pixel off the row's left
+   edge. Forge's own mobile script reads a results column at `offsetLeft === 0`
+   as a phone's stacked layout and moves Generate's box on the next window
+   resize -- into the column, then back into the toprow's actions column --
+   and the docked row, one track wide, put the column on that edge. The
+   script puts the class on only when the column was beside the settings
+   before the dock; a phone's column was on the edge already and is left so
+   (forge_assistant_layout.js, `besideOf`). */
+.forge-assistant-docked-beside {
+    margin-left: 1px !important;
+}
+
 /* The panel, docked: see-through over the placeholder where the column is
    drawn, and letting presses through it to the column. The header, the menu
    and the resize edge keep the panel's surface and take their presses as

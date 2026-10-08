@@ -998,6 +998,19 @@
     const DOCK_SETTINGS = "txt2img_settings";
     const DOCK_COLUMN = "forge-assistant-docked-column";
     const DOCK_ROW = "forge-assistant-docked-row";
+    // On the results column while it is docked beside the settings rather
+    // than under them: a pixel of margin, so it never sits on the row's left
+    // edge. Forge's own mobile script (extensions-builtin/mobile, on every
+    // window resize) reads a results column at `offsetLeft === 0` as a
+    // phone's stacked layout and moves Generate's box into that column, and
+    // back into the toprow's actions column once the edge is clear -- which,
+    // with Lobe's split previewer keeping the box in the gallery's container,
+    // left Generate in the left column after focus had gone on and off around
+    // the dock (the browser's full screen resizes the window both ways). The
+    // dock gives the row's whole width to the results, so without this the
+    // column was the edge. A column that was at the edge already -- a phone --
+    // gets no margin and stays what the script took it for.
+    const DOCK_BESIDE = "forge-assistant-docked-beside";
     // The inline properties the dock writes, each put back as it was found.
     const DOCK_PROPS = ["left", "top", "width", "height", "visibility"];
 
@@ -1021,6 +1034,18 @@
         return column ? {row, column} : null;
     };
 
+    /** The results column of `row` while it is drawn beside the settings --
+     *  off the row's left edge -- or null: under them (a phone), or not
+     *  there. Read before the row changes, because it is the row before the
+     *  dock that says which. See `DOCK_BESIDE`. */
+    function besideOf(row) {
+        if (!row || !row.children) return null;
+        const results = Array.prototype.find.call(row.children,
+            (child) => child.id && /_results$/.test(child.id));
+        if (!results || !laidOut(results)) return null;
+        return results.offsetLeft > 0 ? results : null;
+    }
+
     /** Can the dock be offered on this workspace? */
     Dock.prototype.available = function (workspaceId) {
         return workspaceId === DOCK_WORKSPACE && !!this.find();
@@ -1038,9 +1063,11 @@
                 value: found.column.style.getPropertyValue(name),
                 priority: found.column.style.getPropertyPriority(name),
             }));
-            this.active = Object.assign({saved}, found);
+            const beside = besideOf(found.row);
+            this.active = Object.assign({saved, beside}, found);
             found.column.classList.add(DOCK_COLUMN);
             if (found.row) found.row.classList.add(DOCK_ROW);
+            if (beside) beside.classList.add(DOCK_BESIDE);
             this.guard.attach(found.column);
             if (NS.fill) NS.fill.refresh();
         }
@@ -1091,6 +1118,7 @@
         });
         active.column.classList.remove(DOCK_COLUMN);
         if (active.row) active.row.classList.remove(DOCK_ROW);
+        if (active.beside) active.beside.classList.remove(DOCK_BESIDE);
         if (NS.fill) NS.fill.refresh();
         return true;
     };
