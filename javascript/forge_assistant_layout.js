@@ -74,6 +74,17 @@
     // at the bottom of the view: the gap under the buttons is the gap above
     // Generate, and nothing shows in it.
     const FILL_AFTER = "--forge-assistant-fill-after";
+    // The grid view (the gallery with no picture open): its scroller's height,
+    // the height of one row of thumbnails, and the scroller's top padding, so a
+    // row snaps to where the first one starts.
+    const FILL_GRID = "--forge-assistant-fill-grid";
+    const FILL_ROW = "--forge-assistant-fill-row";
+    const FILL_GRID_PAD = "--forge-assistant-fill-grid-pad";
+    const ROWS_MARK = "data-forge-assistant-rows";
+    const FILL_PROPS = [FILL_VAR, FILL_AFTER, FILL_GRID, FILL_ROW, FILL_GRID_PAD];
+    // The space between the kept things when the gallery's buttons are not
+    // there to measure it from.
+    const SPACE_FALLBACK = 8;
     // The assistant's own root: never what holds the top of the window.
     const ASSISTANT_ROOT = "forge-assistant-root";
     // Below this the gallery is not a gallery, and a window that short is better
@@ -139,6 +150,55 @@
         this.watched = new Set();
         this.started = false;
         this.disposers = [];
+        // Per tab, the margins written to space the kept things evenly: each
+        // node with the inline margin-top it had before, put back when the
+        // column is measured (so it is read as the theme draws it) and when the
+        // fill comes off.
+        this.spaced = {};
+    }
+
+    function putMargin(node, saved) {
+        if (saved.value) node.style.setProperty("margin-top", saved.value, saved.priority);
+        else node.style.removeProperty("margin-top");
+    }
+
+    function ownMargin(node) {
+        return {value: node.style.getPropertyValue("margin-top"),
+                priority: node.style.getPropertyPriority("margin-top")};
+    }
+
+    /** The grid view (no picture open): its scroller fitted to the bottom of
+     *  the gallery as it will be drawn, and the height of a row of thumbnails
+     *  that puts a whole number of rows in it -- as many as come nearest the
+     *  pictures' own shape at the grid's column width, so a picture is cut by
+     *  neither the gallery's edge nor its row. Null when there is no grid;
+     *  no row until a thumbnail's picture has loaded. */
+    function gridOf(gallery, galleryBox, drawn) {
+        const wrap = gallery.querySelector(".grid-wrap");
+        if (!wrap || !laidOut(wrap)) return null;
+        const own = styleOf(gallery);
+        const box = wrap.getBoundingClientRect();
+        const outer = Math.floor(drawn - (box.top - galleryBox.top)
+            - px(own && own.paddingBottom) - px(own && own.borderBottomWidth));
+        if (!(outer > 0)) return null;
+        const style = styleOf(wrap);
+        const frame = px(style && style.paddingTop) + px(style && style.paddingBottom)
+            + px(style && style.borderTopWidth) + px(style && style.borderBottomWidth);
+        const height = style && style.boxSizing === "content-box" ? outer - frame : outer;
+        const found = {height, row: null, rows: 0, pad: px(style && style.paddingTop)};
+        const container = wrap.querySelector(".grid-container");
+        const thumb = container && container.querySelector(".thumbnail-item");
+        const picture = thumb && thumb.querySelector("img");
+        if (!thumb || !laidOut(thumb) || !picture || !(picture.naturalWidth > 0)) return found;
+        const room = outer - frame;
+        const gap = px(styleOf(container) && styleOf(container).rowGap);
+        const natural = thumb.getBoundingClientRect().width
+            * picture.naturalHeight / picture.naturalWidth;
+        if (!(room > 0) || !(natural > 0)) return found;
+        const rows = Math.max(1, Math.round((room + gap) / (natural + gap)));
+        found.rows = rows;
+        found.row = Math.floor((room - (rows - 1) * gap) / rows * 100) / 100;
+        return found;
     }
 
     /** Where the view starts, over a column the page itself scrolls: the top
@@ -193,27 +253,71 @@
     /** The part of the column kept in view, as it is drawn now: from the first
      *  of Generate's box (with Interrupt and Skip), the progress bar while a
      *  generation runs, the gallery's container and the gallery, down to the
-     *  bottom of the gallery's buttons. */
+     *  bottom of the gallery's buttons. `anchor` is the one whose top is that
+     *  first top (the outermost, on a tie), and `leaves` are the things spaced
+     *  evenly -- Generate, the progress bar, the gallery, the buttons -- in the
+     *  order they are drawn. */
     function keptBox(tab, results, gallery) {
-        const tops = [];
+        const candidates = [];
         const take = (node) => {
             if (node && node !== results && results.contains(node) && inFlow(node)) {
-                tops.push(node.getBoundingClientRect().top);
+                candidates.push(node);
+                return node;
             }
+            return null;
         };
-        take(results.querySelector("[id$='_generate_box']"));
-        Array.prototype.forEach.call(results.querySelectorAll(".progressDiv"), take);
+        const leaves = [];
+        const generate = take(results.querySelector("[id$='_generate_box']"));
+        if (generate) leaves.push(generate);
+        Array.prototype.forEach.call(results.querySelectorAll(".progressDiv"), (bar) => {
+            if (take(bar)) leaves.push(bar);
+        });
         take(byId(tab + "_gallery_container"));
+        candidates.push(gallery);
+        leaves.push(gallery);
         const galleryBox = gallery.getBoundingClientRect();
-        tops.push(galleryBox.top);
         let bottom = galleryBox.bottom;
         let last = gallery;
-        const buttons = byId("image_buttons_" + tab);
+        let buttons = byId("image_buttons_" + tab);
         if (buttons && results.contains(buttons) && inFlow(buttons)) {
             bottom = Math.max(bottom, buttons.getBoundingClientRect().bottom);
             last = buttons;
+            leaves.push(buttons);
+        } else {
+            buttons = null;
         }
-        return {top: Math.min.apply(null, tops), bottom, last};
+        const tops = candidates.map((node) => node.getBoundingClientRect().top);
+        const top = Math.min.apply(null, tops);
+        const level = candidates.filter((node, index) => tops[index] <= top + 0.5);
+        const anchor = level.find((node) => level.every((other) => node.contains(other)))
+            || level[0];
+        leaves.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+        return {top, bottom, last, anchor, leaves, buttons};
+    }
+
+    /** The bottom of the lowest thing laid out above `node` and across it, up
+     *  to `stop` (the scroller, or the page), or null: what the first thing kept
+     *  in view may come up to and no further -- the tab buttons over a column
+     *  the page scrolls. Sticky and fixed things are `coveredTop`'s. */
+    function aboveBottom(node, stop) {
+        const box = node.getBoundingClientRect();
+        let found = null;
+        let walk = node;
+        while (walk && walk.parentElement && walk !== stop
+            && walk !== document.body && walk !== document.documentElement) {
+            for (let sibling = walk.previousElementSibling; sibling;
+                sibling = sibling.previousElementSibling) {
+                if (!inFlow(sibling)) continue;
+                const style = styleOf(sibling);
+                if (style && style.position === "sticky") continue;
+                const other = sibling.getBoundingClientRect();
+                if (other.bottom > box.top + 0.5) continue;
+                if (other.right <= box.left || other.left >= box.right) continue;
+                found = found === null ? other.bottom : Math.max(found, other.bottom);
+            }
+            walk = walk.parentElement;
+        }
+        return found;
     }
 
     /** The top of the first thing laid out after `node` in the column, or
@@ -231,18 +335,62 @@
     }
 
     /** What the gallery's height should be, in pixels, or null to leave the
-     *  column alone -- with the reason, for `explain`. Reads the layout and
-     *  writes nothing.
+     *  column alone -- with the reason, for `explain` -- and the margins and
+     *  grid that go with it. Reads the layout as the theme draws it (this
+     *  extension's spacing margins off) and writes nothing.
      *
      *  The column is measured where it rests: its place in the row with the
      *  scroller at its start, or, when it is sticky, where it is held if that
-     *  is lower. From there, the gap between the top of the view and the first
-     *  thing kept in view is left again under the last (`keptBox`), and the
-     *  gallery takes everything between them that the rest of the kept part
-     *  does not -- so a progress bar arriving above Generate shortens the
-     *  gallery rather than pushing the buttons off the screen, and the
-     *  infotext arriving after the buttons changes nothing. */
+     *  is lower. One space -- the gap the theme draws between the gallery and
+     *  its buttons -- is put above the first thing kept in view (under the top
+     *  of the view, or under what is laid out above the column), between each
+     *  kept thing and the next, and under the buttons (`keptBox`); the gallery
+     *  takes everything between them that the rest of the kept part does not
+     *  -- so a progress bar arriving above Generate shortens the gallery
+     *  rather than pushing the buttons off the screen, and the infotext
+     *  arriving after the buttons changes nothing. */
     Fill.prototype.measure = function (tab) {
+        return this.bare(tab, () => this.read(tab));
+    };
+
+    /** Run `read` with the spacing margins this wrote taken off, and put them
+     *  back after: nothing is laid out in between, and nothing changes. */
+    Fill.prototype.bare = function (tab, read) {
+        const spaced = this.spaced[tab];
+        if (!spaced || !spaced.size) return read();
+        const ours = [];
+        spaced.forEach((saved, node) => {
+            ours.push([node, ownMargin(node)]);
+            putMargin(node, saved);
+        });
+        try {
+            return read();
+        } finally {
+            ours.forEach(([node, value]) => putMargin(node, value));
+        }
+    };
+
+    /** Write the spacing margins `margins` ([node, px] pairs) for a tab, and
+     *  put back every other one written before. */
+    Fill.prototype.space = function (tab, margins) {
+        const spaced = this.spaced[tab] || (this.spaced[tab] = new Map());
+        const keep = new Set(margins.map(([node]) => node));
+        spaced.forEach((saved, node) => {
+            if (keep.has(node)) return;
+            putMargin(node, saved);
+            spaced.delete(node);
+        });
+        margins.forEach(([node, value]) => {
+            if (!spaced.has(node)) spaced.set(node, ownMargin(node));
+            const text = value + "px";
+            if (node.style.getPropertyValue("margin-top") !== text
+                || node.style.getPropertyPriority("margin-top") !== "important") {
+                node.style.setProperty("margin-top", text, "important");
+            }
+        });
+    };
+
+    Fill.prototype.read = function (tab) {
         const results = byId(tab + "_results");
         const gallery = byId(tab + "_gallery");
         if (!results || !gallery) return {height: null, reason: "no results column"};
@@ -299,12 +447,46 @@
         }
         const kept = keptBox(tab, results, gallery);
         const galleryBox = gallery.getBoundingClientRect();
-        const above = galleryBox.top - kept.top;
+        // One space between everything kept in view, and between it and the
+        // view's edges: the gap the theme draws between the gallery and its
+        // buttons.
+        const space = kept.buttons
+            ? Math.max(0, kept.buttons.getBoundingClientRect().top - galleryBox.bottom)
+            : SPACE_FALLBACK;
+        // From where things are drawn now to where the column rests.
+        const rest = top - resultsBox.top;
+        // How high the first thing kept in view may go: the top of the view, or
+        // the bottom of what is laid out above the column, where it rests.
+        let ceiling = viewTop;
+        const over = aboveBottom(kept.anchor, scroller);
+        if (over !== null) ceiling = Math.max(ceiling, over + rest);
+        const first = kept.top + rest;
+        const lift = ceiling + space - first;
+        const margins = [];
+        const nudge = (node, by) => {
+            if (Math.abs(by) < 0.25) return;
+            const own = styleOf(node);
+            margins.push([node, Math.round((px(own && own.marginTop) + by) * 100) / 100]);
+        };
+        nudge(kept.anchor, lift);
+        // Each kept thing one space under the one before it (the buttons are
+        // already: that gap is the space), and how far that moves the gallery.
+        let moved = 0;
+        for (let index = 1; index < kept.leaves.length; index += 1) {
+            const node = kept.leaves[index];
+            if (node === kept.buttons) continue;
+            const gap = node.getBoundingClientRect().top
+                - kept.leaves[index - 1].getBoundingClientRect().bottom;
+            const by = space - gap;
+            nudge(node, by);
+            if (Math.abs(by) >= 0.25 && node.getBoundingClientRect().top <= galleryBox.top + 0.5) {
+                moved += by;
+            }
+        }
+        const start = ceiling + space;
+        const above = galleryBox.top - kept.top + moved;
         const below = kept.bottom - galleryBox.bottom;
-        // The first thing kept in view, where the column rests.
-        const first = kept.top - resultsBox.top + top;
-        const gap = Math.max(0, first - viewTop);
-        const fits = Math.floor(viewBottom - gap - first - above - below);
+        const fits = Math.floor(viewBottom - space - start - above - below);
         if (!(fits > 0)) return {height: null, reason: "no room"};
         const drawn = Math.max(FILL_FLOOR, fits);
         // A content-box gallery is drawn its height plus its own padding and
@@ -325,10 +507,11 @@
             const written = results.hasAttribute(FILL_MARK)
                 ? px(results.style.getPropertyValue(FILL_AFTER)) : 0;
             const between = next - kept.bottom - written;
-            const end = first + above + drawn + below;
+            const end = start + above + drawn + below;
             after = Math.max(0, Math.ceil(viewBottom - end - between));
         }
-        return {height, after, reason: "", gap: Math.round(gap)};
+        const grid = gridOf(gallery, galleryBox, drawn);
+        return {height, after, margins, grid, reason: "", gap: Math.round(space)};
     };
 
     /** Measure one tab and write what it found, or take the fill off. */
@@ -340,11 +523,7 @@
         if (found.height === null) {
             // A tab that is not on screen keeps what it had: it is measured
             // again the moment it is shown, because showing it resizes it.
-            if (!found.keep && results.hasAttribute(FILL_MARK)) {
-                results.removeAttribute(FILL_MARK);
-                results.style.removeProperty(FILL_VAR);
-                results.style.removeProperty(FILL_AFTER);
-            }
+            if (!found.keep) this.clear(tab, results);
             return found;
         }
         // Written only when they changed: the column is watched, these writes
@@ -357,9 +536,33 @@
         if (results.style.getPropertyValue(FILL_AFTER) !== after) {
             results.style.setProperty(FILL_AFTER, after);
         }
+        const grid = found.grid;
+        write(results, FILL_GRID, grid ? grid.height + "px" : null);
+        const row = grid && grid.row ? grid.row : null;
+        write(results, FILL_ROW, row ? row + "px" : null);
+        write(results, FILL_GRID_PAD, row ? grid.pad + "px" : null);
+        if (row && !results.hasAttribute(ROWS_MARK)) results.setAttribute(ROWS_MARK, "");
+        if (!row && results.hasAttribute(ROWS_MARK)) results.removeAttribute(ROWS_MARK);
+        this.space(tab, found.margins);
         if (!results.hasAttribute(FILL_MARK)) results.setAttribute(FILL_MARK, "");
         return found;
     };
+
+    /** Take the fill off a tab's column: its marks, its properties, its margins. */
+    Fill.prototype.clear = function (tab, results) {
+        this.space(tab, []);
+        results.removeAttribute(FILL_MARK);
+        results.removeAttribute(ROWS_MARK);
+        FILL_PROPS.forEach((name) => results.style.removeProperty(name));
+    };
+
+    function write(node, name, value) {
+        if (value === null) {
+            if (node.style.getPropertyValue(name)) node.style.removeProperty(name);
+        } else if (node.style.getPropertyValue(name) !== value) {
+            node.style.setProperty(name, value);
+        }
+    }
 
     Fill.prototype.watch = function (node) {
         if (!node || this.watched.has(node) || !this.observer) return;
@@ -404,6 +607,17 @@
         const again = () => this.refresh();
         window.addEventListener("resize", again);
         this.disposers.push(() => window.removeEventListener("resize", again));
+        // A picture loading in the grid view: the first one's shape decides
+        // how many rows fit, and a load does not resize the column.
+        const loaded = (event) => {
+            const target = event.target;
+            if (target && target.tagName === "IMG" && target.closest
+                && target.closest(".grid-container")) {
+                this.refresh();
+            }
+        };
+        document.addEventListener("load", loaded, true);
+        this.disposers.push(() => document.removeEventListener("load", loaded, true));
         if (window.visualViewport) {
             window.visualViewport.addEventListener("resize", again);
             this.disposers.push(() => window.visualViewport.removeEventListener("resize", again));
@@ -419,10 +633,7 @@
         this.disposers.splice(0).forEach((dispose) => dispose());
         FILL_TABS.forEach((tab) => {
             const results = byId(tab + "_results");
-            if (!results) return;
-            results.removeAttribute(FILL_MARK);
-            results.style.removeProperty(FILL_VAR);
-            results.style.removeProperty(FILL_AFTER);
+            if (results) this.clear(tab, results);
         });
         this.started = false;
     };
