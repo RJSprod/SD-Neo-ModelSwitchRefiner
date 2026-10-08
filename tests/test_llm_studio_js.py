@@ -720,7 +720,9 @@ class El {
     addEventListener(kind, fn) { (this.handlers[kind] = this.handlers[kind] || []).push(fn); }
     dispatchEvent(event) {
         event.target = event.target || this;
-        for (let at = this; at; at = at.parentNode) {
+        if (!event.stopPropagation) event.stopPropagation = () => { event.stopped = true; };
+        if (!event.preventDefault) event.preventDefault = () => { event.defaulted = true; };
+        for (let at = this; at && !event.stopped; at = at.parentNode) {
             (at.handlers[event.type] || []).forEach((fn) => fn.call(at, event));
             if (!event.bubbles) break;
         }
@@ -744,15 +746,21 @@ function element(tag, id) {
     return node;
 }
 
-// The transcript: replies and prompts in the shapes Gradio 4.40 draws, each
-// with the marker Python puts first in every message.
+// The transcript, each message with the marker Python puts first in it. Two
+// shapes: "flat" is one div with the testid, the simplest thing a theme could
+// draw; "gradio" is what Gradio 4.40's Chatbot really draws (its
+// ChatBot.svelte): `div.message-row.bot-row > div.flex-wrap.bot >
+// div.message.bot > button[data-testid="bot"]`, the words inside the button,
+// which selects the message on click and on Enter. `bubbles[i]` is the bubble
+// the script should treat as the message: the div in both shapes.
+const SHAPE = __SHAPE__;
 const holder = element("div", "mc-llm-chat-transcript");
 holder.scrollHeight = 0; holder.clientHeight = 0; holder.scrollTop = 0;
 const bubbles = [];
+const hostButtons = [];
+const selects = [];
 function bubble(role, text, meta) {
-    const node = new El("div");
-    node.setAttribute("data-testid", role === "user" ? "user" : "bot");
-    node.className = "message " + (role === "user" ? "user" : "bot");
+    const kind = role === "user" ? "user" : "bot";
     const marker = new El("span");
     marker.className = "mc-llm-meta";
     marker.setAttribute("data-mc-role", role);
@@ -762,10 +770,36 @@ function bubble(role, text, meta) {
     marker.setAttribute("hidden", "");
     const words = new El("p");
     words.textContent = text;
+    if (SHAPE === "gradio") {
+        const row = new El("div");
+        row.className = "message-row bubble " + kind + "-row";
+        const flex = new El("div");
+        flex.className = "flex-wrap " + kind;
+        const node = new El("div");
+        node.className = "message " + kind;
+        const button = new El("button");
+        button.setAttribute("data-testid", kind);
+        button.addEventListener("click", () => selects.push(kind));   // Gradio's handle_select
+        button.appendChild(marker);
+        button.appendChild(words);
+        node.appendChild(button);
+        flex.appendChild(node);
+        row.appendChild(flex);
+        holder.appendChild(row);
+        bubbles.push(node);
+        hostButtons.push(button);
+        return node;
+    }
+    // "button": a theme that kept Gradio's button and dropped its wrapper, so
+    // the bubble is the button itself and the row has to live inside it.
+    const node = new El(SHAPE === "button" ? "button" : "div");
+    node.setAttribute("data-testid", kind);
+    node.className = "message " + kind;
     node.appendChild(marker);
     node.appendChild(words);
     holder.appendChild(node);
     bubbles.push(node);
+    if (SHAPE === "button") hostButtons.push(node);
     return node;
 }
 __BUBBLES__
@@ -876,7 +910,10 @@ function pressDown(node) {
 }
 function pressAction(node, action) {
     const button = buttonOf(node, action);
-    button.dispatchEvent({type: "click", bubbles: false, target: button, preventDefault() {}, stopPropagation() {}});
+    button.dispatchEvent({type: "click", bubbles: true, target: button});
+}
+function clickOn(target) {
+    target.dispatchEvent({type: "click", bubbles: true, target});
 }
 function noteOf(node) { const n = rowOf(node).querySelector(".mc-llm-message-actions-note"); return n && !n.hidden ? n.textContent : ""; }
 async function settle() { await new Promise((r) => process.nextTick(r)); await new Promise((r) => process.nextTick(r)); }
@@ -904,15 +941,18 @@ console.log(JSON.stringify(Object.assign({
     urls: voiceBox.urls,
     prefixes: voiceBox.prefixes || [],
     focus: focusEvents,
+    selects,
 }, out)));
 function node_actions(b) { return actionsOf(b); }
 """
 
 
 def row(bubbles=(("assistant", "reply 0"),), rehearsal: str = "", voice_box: bool = True,
-        setup: str = ""):
+        setup: str = "", shape: str = "flat"):
     """Run the script against a transcript of ``bubbles``: ``(role, text[, meta])``.
-    ``setup`` runs before the script first wires the page; ``rehearsal`` after."""
+    ``setup`` runs before the script first wires the page; ``rehearsal`` after.
+    ``shape`` is "flat" (a div with the testid), "gradio" (Gradio 4.40's own
+    markup, the words inside a button) or "button" (the testid on a bare button)."""
     made = []
     for one in bubbles:
         role, text = one[0], one[1]
@@ -922,6 +962,7 @@ def row(bubbles=(("assistant", "reply 0"),), rehearsal: str = "", voice_box: boo
                .replace("__BUBBLES__", "\n".join(made))
                .replace("__REHEARSAL__", rehearsal)
                .replace("__SETUP__", setup)
+               .replace("__SHAPE__", json.dumps(shape))
                .replace("__VOICE_BOX__", "true" if voice_box else "false"))
     result = subprocess.run(["node", "--input-type=module", "-e", harness],
                             capture_output=True, text=True, timeout=30)
@@ -1012,6 +1053,15 @@ class TestTheActionRow:
 
         assert found["pager"] == "2/3" and found["rows"] == 1
 
+    def test_escape_puts_it_away_from_anywhere(self):
+        found = row([("assistant", "reply 0")], """
+            tap(bubbles[0]);
+            (windowListeners.keydown || []).forEach((fn) => fn({key: "Escape", target: holder}));
+            out.after = state(bubbles[0]).open;
+        """)
+
+        assert found["after"] is False
+
     def test_the_keyboard_opens_it_too(self):
         found = row([("assistant", "reply 0")], """
             out.tabindex = bubbles[0].getAttribute("tabindex");
@@ -1096,6 +1146,115 @@ class TestTheActionRow:
         """)
 
         assert found["drawn"] == 0
+
+
+class TestGradiosOwnBubble:
+    """Gradio 4.40 draws a message as `div.message > button[data-testid]`, the
+    words inside the button (its ChatBot.svelte). The first build read the
+    button as the bubble and refused every tap "inside a button", so on the
+    real page a tap did nothing at all, while the flat stand-in passed. These
+    run the script against that shape."""
+
+    def test_the_row_sits_beside_the_hosts_button_inside_the_bubble(self):
+        found = row([("assistant", "reply 0"), ("user", "ask 1")], """
+            out.in_button = hostButtons.map((b) => b.querySelectorAll(".mc-llm-message-actions").length);
+            out.in_bubble = bubbles.map((b) => b.children.filter((c) => c.classList.contains("mc-llm-message-actions")).length);
+            out.tabindex = bubbles.map((b) => b.getAttribute("tabindex"));
+            out.role = bubbles.map((b) => b.getAttribute("data-mc-role"));
+        """, shape="gradio")
+
+        assert found["rows"] == [REPLY_ROW, PROMPT_ROW]
+        assert found["in_button"] == [0, 0], "a button inside a button presses both"
+        assert found["in_bubble"] == [1, 1]
+        assert found["tabindex"] == [None, None], "the host's button is the tab stop"
+        assert found["role"] == ["assistant", "user"]
+
+    def test_a_tap_on_the_words_inside_the_hosts_button_opens_the_row(self):
+        found = row([("assistant", "reply 0"), ("user", "ask 1")], """
+            tap(bubbles[0]);
+            out.opened = state(bubbles[0]).open;
+            clickOn(hostButtons[0]);
+            out.closed = state(bubbles[0]).open;
+            clickOn(hostButtons[1]);
+            out.other = [state(bubbles[0]).open, state(bubbles[1]).open];
+        """, shape="gradio")
+
+        assert found["opened"] is True
+        assert found["closed"] is False, "the button itself is the message too"
+        assert found["other"] == [False, True]
+        assert found["selects"] == ["bot", "bot", "user"], "Gradio's own select still fires; nothing is bound to it"
+
+    def test_a_link_in_the_words_is_the_links(self):
+        found = row([("assistant", "reply 0")], """
+            const link = new El("a");
+            link.setAttribute("href", "https://example.test/");
+            bubbles[0].querySelector("p").appendChild(link);
+            clickOn(link);
+            out.open = state(bubbles[0]).open;
+        """, shape="gradio")
+
+        assert found["open"] is False
+
+    def test_pressing_a_row_button_does_not_press_the_host_or_toggle(self):
+        found = row([("assistant", "Hello there.")], """
+            tap(bubbles[0]);
+            const before = selects.length;
+            pressAction(bubbles[0], "copy");
+            await settle();
+            out.selected_more = selects.length - before;
+            out.open = state(bubbles[0]).open;
+        """, shape="gradio")
+
+        assert found["clipboard"] == ["Hello there."]
+        assert found["selected_more"] == 0
+        assert found["open"] is True, "a local action leaves the row where it is"
+
+    def test_enter_on_the_hosts_button_is_left_to_the_click_it_becomes(self):
+        found = row([("assistant", "reply 0")], """
+            hostButtons[0].dispatchEvent({type: "keydown", key: "Enter", bubbles: true, target: hostButtons[0]});
+            out.after_key = state(bubbles[0]).open;
+            clickOn(hostButtons[0]);   // what the browser fires for that Enter
+            out.after_click = state(bubbles[0]).open;
+        """, shape="gradio")
+
+        assert found["after_key"] is False, "toggling on the key and again on its click would open and close"
+        assert found["after_click"] is True
+
+    def test_a_bubble_that_is_itself_a_button_still_opens_once_per_press(self):
+        """A theme that kept the button and dropped its wrapper: the row lives
+        inside the button, a tap on it opens, Enter is left to the click the
+        browser makes of it, and the button needs no tabindex of ours."""
+        found = row([("assistant", "reply 0")], """
+            out.inside = bubbles[0].children.filter((c) => c.classList.contains("mc-llm-message-actions")).length;
+            out.tabindex = bubbles[0].getAttribute("tabindex");
+            tap(bubbles[0]);
+            out.opened = state(bubbles[0]).open;
+            bubbles[0].dispatchEvent({type: "keydown", key: "Enter", bubbles: true, target: bubbles[0]});
+            out.after_key = state(bubbles[0]).open;
+            clickOn(bubbles[0]);
+            out.after_click = state(bubbles[0]).open;
+        """, shape="button")
+
+        assert found["inside"] == 1 and found["tabindex"] is None
+        assert found["opened"] is True
+        assert found["after_key"] is True, "the key alone changes nothing; its click does"
+        assert found["after_click"] is False
+
+    def test_which_message_it_is_counts_bubbles_and_moves_with_them(self):
+        found = row([("assistant", "reply 0"), ("assistant", "reply 1"), ("assistant", "reply 2")], """
+            holder.removeChild(bubbles[0].parentNode.parentNode);   // the whole message-row
+            pressAction(bubbles[2], "delete");
+        """, shape="gradio")
+
+        assert found["presses"] == [["delete", "assistant:1"]]
+
+    def test_a_pressed_action_names_the_message_from_inside_its_row(self):
+        found = row([("assistant", "reply 0"), ("user", "ask 1"), ("assistant", "reply 1")], """
+            pressAction(bubbles[2], "regenerate");
+            pressAction(bubbles[1], "resend");
+        """, shape="gradio")
+
+        assert found["presses"] == [["regenerate", "assistant:1"], ["resend", "user:0"]]
 
 
 class TestCopyAndVibeVoice:
