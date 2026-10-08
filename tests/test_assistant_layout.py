@@ -22,10 +22,12 @@ as Forge loads it, and the real assistant scripts and stylesheet. Then it
 measures:
 
     at rest       one space -- the gap between the gallery and its buttons --
-                  above Generate (under the tab buttons laid out above the
-                  column, or under the header), between Generate and the
-                  gallery, and from the buttons to the window's bottom, and
-                  what follows the buttons starts below the window; without the
+                  above the panel that holds Generate (under the tab buttons
+                  laid out above the column, or under the header), Generate
+                  inside the panel with its own padding, one space between
+                  Generate and the gallery, and from the buttons to the
+                  window's bottom, and what follows the buttons starts below
+                  the window; without the
                   fill's mark the user.css height is what is drawn (so the page
                   is not passing for want of the rule it beats);
     focused       the same, inside focus mode's root;
@@ -314,7 +316,14 @@ MEASURE = """() => {
         .map((node) => { const r = node.getBoundingClientRect();
                          return {id: node.id, top: r.top, bottom: r.bottom}; })
         .sort((a, b) => a.top - b.top);
-    return {view, ceiling, leaves, first: Math.min(...kept), inner: innerHeight,
+    // The frame around the first kept thing: the results panel, with its
+    // padding, which Generate must stay inside.
+    const panel = q("#txt2img_results_panel");
+    const panelStyle = getComputedStyle(panel);
+    const frame = {top: panel.getBoundingClientRect().top,
+                   inner: panel.getBoundingClientRect().top + parseFloat(panelStyle.borderTopWidth)
+                          + parseFloat(panelStyle.paddingTop)};
+    return {view, ceiling, leaves, frame, first: Math.min(...kept), inner: innerHeight,
             buttons: box(q("#image_buttons_txt2img")),
             gallery: box(q("#txt2img_gallery")),
             container: box(q("#txt2img_gallery_container")),
@@ -330,11 +339,17 @@ def measure(page) -> dict:
 
 def assert_spaced(found) -> None:
     """One space -- the gap between the gallery and its buttons -- above the
-    first thing kept in view, between each kept thing and the next, and under
-    the buttons; nothing after the buttons inside the view."""
+    panel that holds the first thing kept in view, that thing inside the
+    panel's padding, one space between each kept thing and the next, and
+    under the buttons; nothing after the buttons inside the view."""
     space = found["buttons"]["top"] - found["gallery"]["bottom"]
     assert space > 0, found
-    assert abs(found["first"] - found["ceiling"] - space) <= 1, found
+    assert abs(found["frame"]["top"] - found["ceiling"] - space) <= 1, found
+    # Inside the panel: at its padding edge, never above it. Asked for after
+    # the first build lifted Generate out through the top of the gray box:
+    # "I would prefer the generate button still render inside the gray box so
+    # that all things in the right appear within its boundary."
+    assert abs(found["first"] - found["frame"]["inner"]) <= 1, found
     leaves = found["leaves"]
     for before, after in zip(leaves, leaves[1:]):
         assert abs(after["top"] - before["bottom"] - space) <= 1, (before, after, found)
@@ -572,8 +587,13 @@ def test_a_column_drawn_low_is_brought_up_to_one_space_under_what_is_above(brows
     under the header when they are not -- and never over them."""
     page = open_page(browser)
     try:
-        page.evaluate("document.getElementById('txt2img_results_panel')"
+        # Padding over the column -- outside the panel: what is inside the
+        # panel is the panel's own and stays, see assert_spaced.
+        # Padding on the column changes no content box, so nothing the fill
+        # watches says so; a theme's padding is there from the first measure.
+        page.evaluate("document.getElementById('txt2img_results')"
                       ".style.setProperty('padding-top', '72px', 'important')")
+        page.evaluate("forgeAssistant.fill.now()")
         settle(page, 4)
         found = measure(page)
         assert found["ceiling"] == 104, "under the tab buttons"

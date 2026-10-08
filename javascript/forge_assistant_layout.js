@@ -295,6 +295,25 @@
         return {top, bottom, last, anchor, leaves, buttons};
     }
 
+    /** The outermost box inside the column that `node` is the first thing in:
+     *  up from `node` while it is the first in-flow child of its parent and
+     *  the parent is not the column itself. A theme's panel around the whole
+     *  right side -- Lobe's gray box, Forge's own `variant="panel"` -- is one,
+     *  with its padding above Generate. The space goes above the frame and
+     *  the frame is what moves, so what is in it stays in it: moving the
+     *  first kept thing alone pulled Generate up out of the box. */
+    function frameOf(node, results) {
+        let frame = node;
+        while (frame.parentElement && frame.parentElement !== results
+            && results.contains(frame.parentElement)) {
+            const parent = frame.parentElement;
+            const first = Array.prototype.find.call(parent.children, inFlow);
+            if (first !== frame) break;
+            frame = parent;
+        }
+        return frame;
+    }
+
     /** The bottom of the lowest thing laid out above `node` and across it, up
      *  to `stop` (the scroller, or the page), or null: what the first thing kept
      *  in view may come up to and no further -- the tab buttons over a column
@@ -342,10 +361,12 @@
      *  The column is measured where it rests: its place in the row with the
      *  scroller at its start, or, when it is sticky, where it is held if that
      *  is lower. One space -- the gap the theme draws between the gallery and
-     *  its buttons -- is put above the first thing kept in view (under the top
-     *  of the view, or under what is laid out above the column), between each
-     *  kept thing and the next, and under the buttons (`keptBox`); the gallery
-     *  takes everything between them that the rest of the kept part does not
+     *  its buttons -- is put above the frame around the first thing kept in
+     *  view (a theme's panel, whose own padding then frames Generate inside
+     *  it; `frameOf`) under the top of the view, or under what is laid out
+     *  above the column; between each kept thing and the next; and under the
+     *  buttons (`keptBox`). The gallery takes everything between them that
+     *  the rest of the kept part does not
      *  -- so a progress bar arriving above Generate shortens the gallery
      *  rather than pushing the buttons off the screen, and the infotext
      *  arriving after the buttons changes nothing. */
@@ -460,15 +481,20 @@
         let ceiling = viewTop;
         const over = aboveBottom(kept.anchor, scroller);
         if (over !== null) ceiling = Math.max(ceiling, over + rest);
+        // The frame around the first kept thing, and how far inside it that
+        // thing sits (the frame's padding): the frame goes one space under
+        // the ceiling, and the first kept thing that much further down.
+        const frame = frameOf(kept.anchor, results);
+        const inset = Math.max(0, kept.top - frame.getBoundingClientRect().top);
         const first = kept.top + rest;
-        const lift = ceiling + space - first;
+        const lift = ceiling + space - (first - inset);
         const margins = [];
         const nudge = (node, by) => {
             if (Math.abs(by) < 0.25) return;
             const own = styleOf(node);
             margins.push([node, Math.round((px(own && own.marginTop) + by) * 100) / 100]);
         };
-        nudge(kept.anchor, lift);
+        nudge(frame, lift);
         // Each kept thing one space under the one before it (the buttons are
         // already: that gap is the space), and how far that moves the gallery.
         let moved = 0;
@@ -483,7 +509,7 @@
                 moved += by;
             }
         }
-        const start = ceiling + space;
+        const start = ceiling + space + inset;
         const above = galleryBox.top - kept.top + moved;
         const below = kept.bottom - galleryBox.bottom;
         const fits = Math.floor(viewBottom - space - start - above - below);
