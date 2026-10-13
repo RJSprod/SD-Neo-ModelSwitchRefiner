@@ -537,6 +537,10 @@ Under **Settings → Model Chain**:
 - **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
   colour** and the toggles below them — see
   [Progress-bar appearance](#progress-bar-appearance).
+- **Quieter night mode: dim the primary buttons in the dark theme** (default
+  on) — Generate and every other primary button drawn as a dim surface tinted
+  with the theme's accent instead of a solid block of it. See
+  [A quieter night mode](#a-quieter-night-mode).
 - **Show the Forge Assistant** (default on), **Forge Assistant label**,
   **launcher** and **position** — the floating panel, what it is called, whether
   it draws its name, an icon or both, and which of the six resting places it
@@ -727,6 +731,41 @@ otherwise put a second moving pattern on the same small element, so the sheen
 detects that and stands down by itself, leaving the colour and glow to carry the
 look. That check measures the actual conflict rather than looking for a theme by
 name, so it works for any theme that decorates the bar the same way.
+
+### A quieter night mode
+
+**On by default.** In the dark theme, Gradio paints a primary button as a solid
+block of the theme's accent, and a theme is entitled to a light accent: the Lobe
+theme's night mode has a white one out of the box, so **Generate** — 44 pixels
+tall and the width of its column — was the brightest thing on a black page, with
+**Send**, **Apply settings**, Mini Paint's **Add to Queue** and every other
+primary button the same white.
+
+**Quieter night mode** in Settings → Model Chain draws those buttons as a dim
+surface instead: the accent let through at a low opacity over whatever is
+behind the button, a somewhat stronger line of the same accent around it, and
+the page's ordinary text on it. Hovering and pressing strengthen the tint rather
+than filling the button in. The accent is still the theme's own, so a theme with
+a blue accent gets a blue-tinted Generate and one with a white accent a grey
+one; nothing here states a colour of its own. The same surface replaces the
+yellow the Lobe theme puts on a dropdown's keyboard-highlighted row, and the
+white on the primary buttons of Lobe's own dialogs.
+
+What it does not do: it touches only the dark theme (Lobe's day mode has a
+black accent, and a black Generate is no bright spot), only how those buttons
+are painted and never their size — Lobe fixes Generate at 44 pixels and the
+Forge Assistant measures that box, and both still hold — and nothing else that
+the accent colours: slider thumbs, ticked checkboxes, the selected tab's
+underline and Interrupt's red are as the theme draws them. It applies to every
+tab, under any WebUI theme, because the buttons are Gradio's; and turning it
+off puts the solid buttons straight back, no reload needed, because the rule is
+a stylesheet keyed on one attribute the page reads live. A browser without
+`color-mix()` gets the theme's secondary button surface in place of the tint,
+which is the same idea with less finesse.
+
+Checked for real, not on a stub: `tests/test_night_mode.py` renders a
+Lobe-shaped night page in Chromium and measures what Generate is painted with
+the setting on and off.
 
 ## How it behaves
 

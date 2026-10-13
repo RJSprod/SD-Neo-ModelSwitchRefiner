@@ -183,6 +183,24 @@ line) are not things anybody reads twice. Off puts it straight back -- no
 reload, because the rule is CSS keyed on an attribute this reads live.
 """
 
+OPT_QUIET_NIGHT = "model_chain_quiet_night"
+"""Draw the dark theme's primary buttons as a dim surface rather than a solid
+block of the accent. Read by javascript/model_chain_night.js.
+
+Gradio paints a primary button -- Generate above all -- in the theme's accent,
+and a theme is entitled to a light accent: LobeTheme's night mode has a white
+one out of the box, so Generate was the brightest thing on a black page, with
+every other primary button the same white. The ask was fewer bright spots at
+night, Generate first.
+
+Only the dark theme is touched, only how those buttons are painted (never
+their size), and the colours still come from the theme's own variables, so a
+blue accent gives a blue-tinted button and a white one a grey one. Default on,
+because that was the ask. Off puts the solid buttons straight back -- no
+reload, for the same reason as the footer above: the rule is CSS keyed on an
+attribute the script reads live.
+"""
+
 OPT_STYLE_ENABLE = "model_chain_style_enable"
 OPT_STYLE_THEME = "model_chain_style_theme"
 OPT_STYLE_COLOR = "model_chain_style_color"
@@ -365,6 +383,19 @@ shared.options_templates.update(
                 "and this is the one strip under it that no layout here can reach. Applies "
                 "to every tab, because the footer is one element on the page; turning it "
                 "off puts it straight back"
+            ),
+            OPT_QUIET_NIGHT: shared.OptionInfo(
+                True,
+                "Quieter night mode: dim the primary buttons in the dark theme",
+            ).info(
+                "in the dark theme, Generate and every other primary button is a solid "
+                "block of the theme's accent — white, under the Lobe theme — and the "
+                "brightest thing on the page. This draws them as a dim surface tinted "
+                "with that accent, with the accent as a line around them and the page's "
+                "ordinary text on them; hovering strengthens the tint. Only the dark "
+                "theme, only the colours (nothing changes size), and the colours are "
+                "still the theme's own. Applies to every tab, under any WebUI theme; "
+                "turning it off puts the solid buttons straight back"
             ),
             # -- appearance, deliberately independent of everything above --- #
             # These change how the host's bar looks and never what it reports,

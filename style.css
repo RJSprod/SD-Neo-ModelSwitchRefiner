@@ -521,6 +521,123 @@
 }
 
 /* ==========================================================================
+   Model Chain -- a quieter night mode
+   ==========================================================================
+
+   Inert until javascript/model_chain_night.js puts `data-mc-night="quiet"`
+   on the root, which it does while the Settings toggle is on (and it is on by
+   default). Nothing here touches the light theme: every rule also asks for
+   `.dark`, which Forge's dark theme is on the body, and LobeTheme puts there
+   too.
+
+   What it is for. Gradio paints a primary button as a solid block of the
+   theme's accent, and a theme is entitled to a light accent: LobeTheme's
+   night mode has a white one out of the box, so Generate -- 44 pixels tall
+   and the width of its column -- was the brightest thing on a black page,
+   with Send, Apply settings, Add to Queue and every other primary button the
+   same white. The ask was fewer bright spots at night, Generate first.
+
+   What it does. The block becomes a dim surface: the accent at a low opacity
+   over whatever is behind it, a somewhat stronger line of the same accent
+   around it, and the page's ordinary text colour on it. Hovering and pressing
+   strengthen the tint rather than filling the button in. The accent is still
+   the theme's own -- `--color-accent`, which Gradio defines and Lobe
+   redefines -- so a theme with a blue accent gets a blue-tinted Generate and
+   one with a white accent a grey one; nothing here states a colour.
+
+   Three rules, all three learned elsewhere in this file:
+
+   1. Colours only ever come from the host's variables. A literal would be
+      right for one theme and wrong for the next.
+   2. A solid declaration comes before the mixed one, and the mix is under
+      @supports: a browser without color-mix() gets the theme's secondary
+      button surface, which is the same idea with less finesse.
+   3. No geometry. Height, padding and radius stay whatever the theme set --
+      Lobe fixes Generate at 44 px -- so nothing moves when the toggle does.
+
+   Specificity, since these compete with two stylesheets. Gradio's own
+   `.primary` rule carries a generated class and comes to (0,2,0) or so;
+   Lobe's rules on the generate button set only its height, and its rule on
+   the primary buttons of its own dialogs is (0,2,0) with `!important` on
+   hover. Every selector here is (0,3,1) or more, this stylesheet is linked
+   after both, and `!important` is said only where Lobe says it first -- on
+   its own dialogs' buttons and on the dropdown row below -- so a user
+   stylesheet can still override the Generate rule the ordinary way. */
+
+:root[data-mc-night="quiet"] .dark button.gradio-button.primary {
+    background: var(--button-secondary-background-fill);
+    border-color: var(--button-secondary-border-color);
+    color: var(--body-text-color);
+}
+
+:root[data-mc-night="quiet"] .dark button.gradio-button.primary:hover:not([disabled]),
+:root[data-mc-night="quiet"] .dark button.gradio-button.primary:focus-visible {
+    background: var(--button-secondary-background-fill-hover);
+    border-color: var(--button-secondary-border-color-hover);
+    color: var(--body-text-color);
+}
+
+/* LobeTheme's own dialogs -- its settings, its share sheet -- draw their
+   primary buttons with antd, and Lobe fills those with the same accent. The
+   same surface, with `!important` because Lobe's hover rule says it. */
+:root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous) {
+    background: var(--button-secondary-background-fill);
+    border-color: var(--button-secondary-border-color);
+    color: var(--body-text-color);
+}
+
+:root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):hover,
+:root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):active {
+    background: var(--button-secondary-background-fill-hover) !important;
+    border-color: var(--button-secondary-border-color-hover) !important;
+    color: var(--body-text-color) !important;
+}
+
+/* A dropdown's keyboard-highlighted row. Lobe paints the row the arrow keys
+   or a typed filter land on in its yellow, with black text -- at night the
+   one block of colour on the page. The same dim surface, and the text colour
+   stays the text colour; `!important` and the longer selector because Lobe's
+   rule says `!important`. */
+:root[data-mc-night="quiet"] .dark ul.options li.active:not(.selected) {
+    background: var(--button-secondary-background-fill-hover) !important;
+    color: var(--body-text-color) !important;
+}
+
+/* The finesse: the accent itself, let through at a low opacity, so the button
+   keeps a trace of the colour that marks it as the primary action. Over the
+   solid rules above, for the browsers that can mix. */
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary,
+    :root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous) {
+        background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 38%, transparent);
+    }
+
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary:hover:not([disabled]),
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary:focus-visible {
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 56%, transparent);
+    }
+
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary:active:not([disabled]) {
+        background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+    }
+
+    :root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):hover {
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent) !important;
+        border-color: color-mix(in srgb, var(--color-accent) 56%, transparent) !important;
+    }
+
+    :root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):active {
+        background: color-mix(in srgb, var(--color-accent) 30%, transparent) !important;
+    }
+
+    :root[data-mc-night="quiet"] .dark ul.options li.active:not(.selected) {
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent) !important;
+    }
+}
+
+/* ==========================================================================
    LLM Studio
    ==========================================================================
 
