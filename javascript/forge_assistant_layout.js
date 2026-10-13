@@ -19,7 +19,8 @@
 // So what is kept in view is the column from its first control -- Generate,
 // which Lobe's split previewer moves into the gallery's container, with
 // Interrupt and Skip in the same box, and the progress bar above it while a
-// generation runs -- down to the gallery's buttons. The gap from the top of the
+// generation runs, with the room its ooze rises into (`reachOf`) -- down to
+// the gallery's buttons. The gap from the top of the
 // view to the first of those is measured, and the same gap is left under the
 // buttons; the gallery is everything in between, in pixels. The generation's
 // infotext, its log and anything else after the buttons is laid out as ever,
@@ -284,6 +285,28 @@
         return position !== "absolute" && position !== "fixed";
     }
 
+    /** How far above its own top a kept thing paints: what a progress bar
+     *  draws over itself. The progress bar's ooze (model_chain_progress.js)
+     *  rises out of the bar in a box 34 px above it, and a header over that
+     *  box hid every bubble -- asked for: "I cannot see the full animation
+     *  for my progress bar. I have it set to ooze so the animation should
+     *  be above." Measured from the bar's absolutely positioned children, so
+     *  a decoration of any height counts and a bar without one reaches
+     *  nothing. A bubble is clipped to its box, so the box is the reach. */
+    function reachOf(node) {
+        if (!node || !node.classList || !node.classList.contains("progressDiv")) return 0;
+        const top = node.getBoundingClientRect().top;
+        let reach = 0;
+        Array.prototype.forEach.call(node.children, (child) => {
+            const style = styleOf(child);
+            if (!style || style.position !== "absolute" || style.display === "none") return;
+            const box = child.getBoundingClientRect();
+            if (!(box.width > 0 && box.height > 0)) return;
+            reach = Math.max(reach, top - box.top);
+        });
+        return Math.round(reach * 100) / 100;
+    }
+
     /** The part of the column kept in view, as it is drawn now: from the first
      *  of Generate's box (with Interrupt and Skip), the progress bar while a
      *  generation runs, the gallery's container and the gallery, down to the
@@ -413,7 +436,12 @@
      *  the rest of the kept part does not
      *  -- so a progress bar arriving above Generate shortens the gallery
      *  rather than pushing the buttons off the screen, and the infotext
-     *  arriving after the buttons changes nothing. */
+     *  arriving after the buttons changes nothing. A progress bar that paints
+     *  above itself (`reachOf`) has that much room clear above it as well:
+     *  under the ceiling when it is the first thing kept, and under the thing
+     *  before it otherwise. The room overlaps the space and the frame's
+     *  padding above the bar, which are empty, so it costs only what it
+     *  needs beyond them. */
     Fill.prototype.measure = function (tab) {
         return this.bare(tab, () => this.read(tab));
     };
@@ -531,7 +559,11 @@
         const frame = frameOf(kept.anchor, results);
         const inset = Math.max(0, kept.top - frame.getBoundingClientRect().top);
         const first = kept.top + rest;
-        const lift = ceiling + space - (first - inset);
+        // And the first kept thing low enough under the ceiling for what it
+        // paints above itself: the frame goes no higher than one space under
+        // the ceiling, and the first thing no higher than its reach under it.
+        const reach = kept.leaves.length ? reachOf(kept.leaves[0]) : 0;
+        const lift = Math.max(ceiling + space - (first - inset), ceiling + reach - first);
         const margins = [];
         const nudged = new Set();
         const nudge = (node, by) => {
@@ -551,14 +583,14 @@
             if (node === kept.buttons) continue;
             const before = kept.leaves[index - 1];
             const gap = node.getBoundingClientRect().top - before.getBoundingClientRect().bottom;
-            const by = space - gap;
+            const by = Math.max(space, reachOf(node)) - gap;
             const own = frameOf(node, commonAncestor(node, before));
             nudge(nudged.has(own) ? node : own, by);
             if (Math.abs(by) >= 0.25 && node.getBoundingClientRect().top <= galleryBox.top + 0.5) {
                 moved += by;
             }
         }
-        const start = ceiling + space + inset;
+        const start = first + lift;
         const above = galleryBox.top - kept.top + moved;
         const below = kept.bottom - galleryBox.bottom;
         const fits = Math.floor(viewBottom - space - start - above - below);

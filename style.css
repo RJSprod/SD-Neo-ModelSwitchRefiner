@@ -1404,6 +1404,65 @@
     top: calc(var(--mc-theme-header) + 16px);
 }
 
+/* -- a generation in the results column ---------------------------------------- */
+
+/* Asked for: "when there is a progress bar, there should be no button row for
+   interrupt and skip. Instead, just the progress bar the properly sized
+   gallery and gallery buttons to fill below the area needed to render the
+   progress bar and 'ooze' above it. I want it to be compact still, less space
+   than what is currently dedicated to the row of button and progress bar."
+
+   Forge draws its bar absolutely, 14 px above the results panel, over whatever
+   is there -- under this theme the header, which hid the bar's top and every
+   bubble of the ooze rising out of it. While a generation runs the bar is the
+   panel's first thing, in flow, and the Forge Assistant's fill keeps the room
+   its ooze rises into clear of the header and gives the gallery the rest
+   (`reachOf` in forge_assistant_layout.js). The room overlaps the space and
+   the panel's padding above the bar, which the row used to sit under. The
+   ooze needs 34 px of it, nearly all the row gave back, so the bar itself is
+   14 px rather than Forge's 20, its line of text at 11 px: the bar and its
+   ooze then take about a fifth less than the row and the bar did. */
+:root[data-mc-theme="on"] [id$="_results_panel"] > .progressDiv:not(.mc-progress-flash) {
+    position: relative;
+    top: 0;
+    left: 0;
+    flex: 0 0 auto;
+    height: 14px;
+    cursor: pointer;
+}
+
+:root[data-mc-theme="on"] [id$="_results_panel"] > .progressDiv:not(.mc-progress-flash) > .progress {
+    height: 14px;
+    font-size: 11px;
+    line-height: 14px;
+}
+
+/* No Interrupt and Skip row while a bar shows: the box is not drawn, the
+   buttons keep the display Forge writes on them, so its Escape, Alt+Enter
+   and Ctrl+Enter still press them and the Forge Assistant still reads a run
+   from them. A bar Forge hides (Settings, "Show progressbar" off) shows
+   nothing, so the row stays. A press on the bar, or in the ooze above it,
+   brings the row back for the rest of the run, and another puts it away
+   (`pressBar` in model_chain_theme.js): on a touchscreen there is no Escape
+   to press, and a bar 14 px tall is short of what a finger needs. */
+:root[data-mc-theme="on"] [id$="_results_panel"]:has(> .progressDiv:not(.mc-progress-flash):not([style*="display: none"]):not(.mc-theme-show-controls)) [id$="_generate_box"] {
+    display: none;
+}
+
+/* The completion flash (an option of the progress bar's appearance) shows
+   at the panel's top without taking room: it arrives as Generate's row comes
+   back, and a flash in flow would move the gallery twice in a second. */
+:root[data-mc-theme="on"] [id$="_results_panel"] > .progressDiv.mc-progress-flash,
+:root[data-mc-theme="on"] [id$="_results_panel"] > .progressDiv.mc-progress-flash > .progress {
+    height: 14px;
+}
+
+:root[data-mc-theme="on"] [id$="_results_panel"] > .progressDiv.mc-progress-flash {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
 /* -- the settings column ------------------------------------------------------ */
 
 /* Each group down the column is a box: a surface a step above the page, a

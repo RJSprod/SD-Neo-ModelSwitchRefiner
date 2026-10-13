@@ -514,6 +514,91 @@ def test_a_progress_bar_takes_its_room_from_the_gallery(browser):
         page.close()
 
 
+# A bar that paints above itself, as the progress bar's ooze does: a box of its
+# own, absolutely placed, 34 px over the bar (model_chain_progress.js,
+# `.mc-ooze-overlay`). `after` puts the bar after Generate, inside the gallery's
+# container, rather than first in the panel.
+DECORATED = """(after) => {
+    const container = document.getElementById("txt2img_gallery_container");
+    const bar = document.createElement("div");
+    bar.className = "progressDiv";
+    bar.id = "progress-under-test";
+    const fill = document.createElement("div");
+    fill.className = "progress";
+    bar.appendChild(fill);
+    const overlay = document.createElement("div");
+    overlay.id = "decoration-under-test";
+    overlay.style.cssText = "position: absolute; top: -34px; bottom: 0; left: 0; right: 0; pointer-events: none";
+    bar.appendChild(overlay);
+    if (after) {
+        const generate = document.getElementById("txt2img_generate_box");
+        generate.parentNode.insertBefore(bar, generate.nextSibling);
+    } else {
+        container.parentNode.insertBefore(bar, container);
+    }
+}"""
+
+DECORATION = """() => {
+    const r = (id) => document.getElementById(id).getBoundingClientRect();
+    return {bar: {top: r("progress-under-test").top, bottom: r("progress-under-test").bottom},
+            decoration: {top: r("decoration-under-test").top},
+            generate: {bottom: r("txt2img_generate_box").bottom},
+            gallery: {top: r("txt2img_gallery").top}};
+}"""
+
+
+def test_a_bar_that_paints_above_itself_has_that_room_clear_under_the_ceiling(browser):
+    """Asked for: "I cannot see the full animation for my progress bar. I have
+    it set to ooze so the animation should be above." The ooze rises in a box
+    34 px over the bar, and a header over that box hid it. The room overlaps
+    the space and the panel's padding above the bar, which are empty: the
+    first thing kept is its reach under the ceiling, and no lower than the
+    frame's one space and padding put it anyway."""
+    page = open_page(browser)
+    try:
+        before = measure(page)
+        page.evaluate(DECORATED, False)
+        settle(page, 4)
+        found = measure(page)
+        drawn = page.evaluate(DECORATION)
+        space = found["buttons"]["top"] - found["gallery"]["bottom"]
+        inset = found["frame"]["inner"] - found["frame"]["top"]
+        assert 34 > space + inset, "the room this test is about is more than the space and padding"
+
+        assert abs(drawn["decoration"]["top"] - found["ceiling"]) <= 1, (drawn, found)
+        assert abs(drawn["bar"]["top"] - (found["ceiling"] + 34)) <= 1, (drawn, found)
+        # The frame stays at least one space under the ceiling; the rest as
+        # ever: one space between each kept thing and the next (Generate, on
+        # this page, then the gallery), the buttons where they were.
+        assert found["frame"]["top"] >= found["ceiling"] + space - 1, found
+        leaves = found["leaves"]
+        assert leaves[0]["id"] == "progress-under-test", leaves
+        for above, below in zip(leaves, leaves[1:]):
+            assert abs(below["top"] - above["bottom"] - space) <= 1, (above, below, found)
+        assert abs(found["buttons"]["bottom"] - before["buttons"]["bottom"]) <= 1, (before, found)
+        assert abs(found["view"]["bottom"] - found["buttons"]["bottom"] - space) <= 1, found
+    finally:
+        page.close()
+
+
+def test_a_bar_after_another_kept_thing_has_its_reach_clear_of_that_thing(browser):
+    """The same room under the thing before it, when the bar is not first."""
+    page = open_page(browser)
+    try:
+        page.evaluate(DECORATED, True)
+        settle(page, 4)
+        found = measure(page)
+        drawn = page.evaluate(DECORATION)
+        space = found["buttons"]["top"] - found["gallery"]["bottom"]
+
+        assert abs(drawn["bar"]["top"] - drawn["generate"]["bottom"] - max(space, 34)) <= 1, (drawn, found)
+        assert drawn["decoration"]["top"] >= drawn["generate"]["bottom"] - 1, drawn
+        assert abs(drawn["gallery"]["top"] - drawn["bar"]["bottom"] - space) <= 1, (drawn, found)
+        assert abs(found["view"]["bottom"] - found["buttons"]["bottom"] - space) <= 1, found
+    finally:
+        page.close()
+
+
 GENERATE_BOX = """() => {
     const box = document.getElementById("txt2img_generate_box");
     const results = document.getElementById("txt2img_results");

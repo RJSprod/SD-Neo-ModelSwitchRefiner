@@ -32,7 +32,7 @@ files.
 | `javascript/forge_assistant_store.js` | the page's copy of the conversation, drafts, operations |
 | `javascript/forge_assistant_host.js` | Forge's tabs and header, as an adapter; keyboard arbitration |
 | `javascript/forge_assistant_focus.js` | focus as a reversible transaction, with editor adapters |
-| `javascript/forge_assistant_layout.js` | the results column fills the window, evenly spaced, with a grid of whole rows (§3.33); Txt2Img's settings column docked in the panel (§3.29), its fields engaged by a tap (§3.31) |
+| `javascript/forge_assistant_layout.js` | the results column fills the window, evenly spaced, with a grid of whole rows (§3.33) and room for what a progress bar paints above itself (§3.35); Txt2Img's settings column docked in the panel (§3.29), its fields engaged by a tap (§3.31) |
 
 Changed: `prompt_master/chat/history.py` (a revision, a guarded save path, a
 tombstone file, an exclusive identifier), `mc_llm_chat_panel.py` (fifteen direct
@@ -2714,6 +2714,58 @@ trace, no environment, the module logging nothing, the summary lost, the
 route unregistered, a bad kind accepted. Run on the user's machine twice:
 still moving the page the first time, and the second time with the log,
 which is where the hold comes from. The hold itself has not run there.
+
+## 3.35 Room for what a progress bar paints above itself
+
+Asked for, with a screenshot of a run under the Model Chain theme: "I cannot
+see the full animation for my progress bar. I have it set to ooze so the
+animation should be above. How about this, when there is a progress bar,
+there should be no button row for interrupt and skip. Instead, just the
+progress bar the properly sized gallery and gallery buttons to fill below the
+area needed to render the progress bar and 'ooze' above it. I want it to be
+compact still, less space than what is currently dedicated to the row of
+button and progress bar."
+
+Reproduced in Chromium with the theme's page, the person's user.css, Forge
+Neo's own rules for the bar and the progress-bar appearance set to Ooze:
+Forge draws the bar absolutely, 14 px above the results panel, so it is not
+a kept thing here (`inFlow`), and the panel one space under the theme's
+header put the bar's top 6 px under the header and 40 px of the 54 px box its
+bubbles rise in (`.mc-ooze-overlay`, 34 px above the bar) behind it. While it
+ran the gallery started 76 px under the header, as at rest.
+
+Two halves. The theme (docs/24 §0) takes the bar into the panel's flow while
+it runs, 14 px tall, and does not draw the Generate box beside it -- the
+layout is the theme's. The fill learns one thing, and it is not about the
+theme: **a kept thing can paint above itself** (`reachOf`): a progress bar's
+absolutely placed children that reach above its top -- the ooze's box --
+measure how much room it needs clear. The first kept thing is lifted so that
+room is under the ceiling (`lift` is the larger of what puts the frame one
+space under the ceiling and what puts the first thing its reach under it;
+`start` is where the first thing then is), and a kept thing after another
+has that room under the one before it rather than one space. The room
+overlaps the space and the frame's padding above the bar, which are empty,
+so it costs only what it needs beyond them: on the theme's page the gallery
+starts 56 px under the header while a run shows, against 76 at rest. A bar
+with nothing above it reaches nothing, and is spaced as before.
+
+Verified in Chromium: `tests/test_assistant_layout.py` (a bar carrying a 34 px
+decoration, first: the decoration's top at the ceiling, the frame still one
+space under it, one space between every kept thing after; and after
+Generate: its reach under Generate, not one space) and
+`tests/test_theme_layout.py` (the user's page during a run: the ooze whole
+under the header and not covered, at rest and scrolled and under focus; the
+row not drawn while Interrupt keeps Forge's display; one space between the
+bar and the gallery, the buttons unmoved, the header-to-gallery distance at
+most four fifths of the resting one; a press on the bar or the ooze toggling
+the row, a control over the ooze and a press beside the bar not; the run's
+end restoring the resting layout and the next run starting without the row;
+a bar Forge hides keeping the row; a plain bar at Generate's resting place).
+Fourteen mutations each fail a test: the reach at the ceiling, between
+leaves, in `start`, or never measured; the bar left absolute; the row drawn;
+a hidden bar hiding it; the press ignored by it; the bar or its fill at 20 px;
+the press never wired, on the bar alone, counted on a control, or beside
+the bar. Not run on the user's machine or in Firefox.
 
 ## 4. Deliberate deviations
 
