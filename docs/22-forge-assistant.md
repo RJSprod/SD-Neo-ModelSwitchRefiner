@@ -2597,7 +2597,30 @@ console with the account as JSON, kept as `forgeAssistant.shell.lastDrag`;
 and a drag that moved and found something else moved -- the page scrolled,
 the viewport moved, the tabs moved, the height changed, a selection grew,
 the browser ended it -- says so on the status line (`tell`, a warning), where
-a phone can read it with the panel open. The next report is that line.
+a phone can read it with the panel open.
+
+Asked for that console line, the user answered: "i meant our log file ...
+`model_chain.log` ... write it here, with other logging content". So the
+account goes to the server -- `POST /model-chain/conversation/v2/journal`,
+behind the conversation API's key like every other route -- and
+`mc_assistant_journal` writes it as one line of `model_chain.log` through the
+`model_chain` logger (`mc_logfile` writes that logger to the file, and the
+console gets it too): the summary first, `Forge Assistant drag (mouse on the
+launcher, 180 px, ended by pointerup, the page scrolled by 0, 240)`, then the
+account as JSON, so a drag sits between the lines of whatever else was going
+on. For that the account gained the events as they came (`trace`: the first
+sixty and the last, each with its time, what it was, where it was and what the
+browser said of it -- cancelable, cancelled -- the rest counted as
+`dropped`), where the handle was put (`put`, `from`, `box`), and the page's
+environment: the browser, the pointer the device has (`maxTouchPoints`,
+`pointer: coarse`, `hover`), the pixel ratio, the window, the visual viewport
+and its scale, the screen, the document's size against the window's, the
+scrolling element, what the root and the body say about overflow, transforms,
+position and zoom, the theme, focus mode, full screen, free float, the panel
+open or a sheet. Nothing of it is read into anything on the server, on
+purpose: the point is what the browser said. The console line and the status
+line stay; a server that refuses the post or is not there is a console line
+and never in the way of the drag. The next report is that log file.
 
 ### Verified
 
@@ -2618,12 +2641,22 @@ and three taps on the header still toggle focus. The account: a quiet drag's
 line says the press was cancelled and captured, the handle's rules, nothing
 moved; a page scrolled under a drag (by the test, mid-drag) is in the line
 and on the status line; a finger's line counts the moves the handle heard
-and blocked. Each of the seven was reverted one at a time and a test failed:
-the cancel, the finger's exemption, the `user-select`, the `touch-action`,
-the touchmove wiring, the live-drag guard, the `dragstart`; and four of the
+and blocked. The post (`tests/test_assistant_js.py`): its path, method and
+body, the trace's first and last entries, the cap at sixty with the rest
+counted, a server that is not there costing the drag nothing; the Chromium
+mouse test reads what the page posted. The journal
+(`tests/test_assistant_journal.py`): one line that reads before its JSON,
+the kind one word, what is not an account refused with its reason, the line
+landing in `model_chain.log` between two others through `mc_logfile`'s own
+handler, the route registered with the others and answering the file's
+name. Each of the seven was reverted one at a time and a test failed: the
+cancel, the finger's exemption, the `user-select`, the `touch-action`, the
+touchmove wiring, the live-drag guard, the `dragstart`; four of the
 account's: never written, nothing said, the scroll not read, the touch
-moves not counted. Run on the user's machine once, and still moving the
-page there: the account is what the next run brings back.
+moves not counted; and seven of the journal's: the page never posting, no
+trace, no environment, the module logging nothing, the summary lost, the
+route unregistered, a bad kind accepted. Run on the user's machine once,
+and still moving the page there: the log is what the next run brings back.
 
 ## 4. Deliberate deviations
 

@@ -54,6 +54,7 @@ skips without either.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import urllib.parse
 from pathlib import Path
@@ -1480,11 +1481,21 @@ def moved_by(before, during):
             round(during["panel"][1] - before["panel"][1])]
 
 
+JOURNAL = ORIGIN + "/model-chain/conversation/v2/journal"
+
+
 def test_a_mouse_drag_by_the_header_moves_the_panel_and_selects_nothing(browser):
     page = open_page(browser)
     accounts = []
     page.on("console", lambda message: accounts.append(message.text)
             if message.text.startswith("Forge Assistant drag: ") else None)
+    # The server's journal: what the page posts for the extension's log.
+    journalled = []
+
+    def take(route):
+        journalled.append(json.loads(route.request.post_data))
+        route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+    page.route(JOURNAL, take)
     try:
         page.evaluate("forgeAssistant.shell.setFreeFloat(true)")
         page.evaluate("forgeAssistant.shell.open()")
@@ -1550,6 +1561,23 @@ def test_a_mouse_drag_by_the_header_moves_the_panel_and_selects_nothing(browser)
         assert len(accounts) == 3 and '"pageScrolled":[0,240]' in accounts[-1], accounts
         status = page.evaluate("document.querySelector('.forge-assistant-status').textContent")
         assert "That drag moved more than the handle: the page scrolled by 0, 240" in status, status
+        assert status.endswith("The account is in model_chain.log."), status
+
+        # And every account went to the server, for the log: the kind, the
+        # events as they came, the page it happened on.
+        page.wait_for_function("() => true")
+        assert len(journalled) == 3, journalled
+        posted = journalled[-1]
+        assert posted["kind"] == "drag" and posted["pointer"] == "mouse", posted
+        assert posted["pageScrolled"] == [0, 240] and posted["put"] is not None, posted
+        assert posted["trace"][0]["e"] == "pointerdown" and posted["trace"][0]["p"] is True, posted
+        assert posted["trace"][-1]["e"] == "pointerup", posted
+        assert all(entry["e"] == "pointermove" for entry in posted["trace"][1:-1]), posted
+        environment = posted["environment"]
+        assert "Chrome" in environment["userAgent"] or "HeadlessChrome" in environment["userAgent"]
+        assert environment["window"] == [1600, 1000] and environment["freeFloat"] is True
+        assert environment["panelOpen"] is True and environment["scroller"] == "html"
+        assert environment["document"][1] > environment["document"][3], "a page taller than the window"
     finally:
         page.close()
 

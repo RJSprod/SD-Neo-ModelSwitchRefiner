@@ -53,6 +53,9 @@
     const NARROW_GAP = 16;
     const NARROW_VIEWPORT = 640;
     const DRAG_THRESHOLD = 6;
+    // How many events a drag's account keeps, in the order they came. The
+    // first ones and the last are what say whose the gesture was.
+    const TRACE_MAX = 60;
 
     // How often `recover` may run. A handler that fails on every pointermove
     // must not turn into a forced layout on every pointermove as well.
@@ -1328,6 +1331,8 @@
             drag.watch.travel = Math.max(drag.watch.travel,
                                          Math.hypot(event.clientX - drag.startX,
                                                     event.clientY - drag.startY));
+            traceEvent(drag.watch, {e: "pointermove", x: event.clientX, y: event.clientY,
+                                    b: event.buttons});
         }
         // The button came up somewhere this page never heard about -- outside
         // the window, in another application, across a remote-desktop session
@@ -1348,6 +1353,7 @@
         const top = event.clientY - drag.offsetY;
         drag.node.style.left = Math.round(left) + "px";
         drag.node.style.top = Math.round(top) + "px";
+        if (drag.watch) drag.watch.put = [Math.round(left), Math.round(top)];
         // A docked settings column travels with the panel it is drawn in.
         if (drag.node === this.nodes.panel) this.syncDock();
         // Free float has nothing to snap to, so there is nothing to preview
@@ -1430,15 +1436,81 @@
     // menu still moves the whole page" -- on a page just loaded, nothing else
     // touched -- and not reproduced here in Chromium by a mouse, a finger, a
     // selection or a host rule on the handles. So every drag keeps an account
-    // of what else moved while it was live and writes it to the console when
-    // it ends (`forgeAssistant.shell.lastDrag` keeps the last one); a drag that
-    // found something else moved says so on the status line too, where a
-    // phone can read it with the panel open. The account: the pointer and what
-    // it pressed, the handle's computed touch-action and user-select, whether
-    // the press was cancelled and captured, the page's scroll, the visual
-    // viewport, the document's height, the tabs' place in the document and the
-    // selection before and after, the moves seen, the touch moves blocked, and
-    // how the drag ended.
+    // of what else moved while it was live and, when it ends, writes it to the
+    // console, keeps it as `forgeAssistant.shell.lastDrag`, and sends it to
+    // the server, which writes it into the extension's own log
+    // (`mc_assistant_journal`: one line of model_chain.log per drag, between
+    // whatever else was being logged, which is the file the user shares); a
+    // drag that found something else moved says so on the status line too,
+    // where a phone can read it with the panel open. The account: the pointer
+    // and what it pressed, the handle's computed touch-action and user-select,
+    // whether the press was cancelled and captured, the page's scroll, the
+    // visual viewport, the document's height, the tabs' place in the document
+    // and the selection before and after, where the handle was put, the moves
+    // seen, the touch moves blocked, how the drag ended, the events as they
+    // came (`trace`, the first TRACE_MAX and the last), and the page's
+    // environment: the browser, the pointer the device has, the window, the
+    // viewport, the document's size against the window's, the scroller, what
+    // the root and the body say about overflow and transforms, the theme,
+    // focus mode, full screen, and the panel's state.
+
+    /** One event into a drag's trace: when, what, and what the browser said
+     * about it. The first TRACE_MAX - 1 are kept and the last always is;
+     * what is dropped between is counted. */
+    function traceEvent(watch, entry) {
+        entry.t = Date.now() - watch.started;
+        if (entry.last || watch.trace.length < TRACE_MAX - 1) {
+            watch.trace.push(entry);
+        } else {
+            watch.dropped += 1;
+        }
+    }
+
+    /** The page the drag happened on, for its account. */
+    function environment(shell) {
+        const nav = window.navigator || {};
+        const doc = document.documentElement;
+        const body = document.body;
+        const visual = window.visualViewport;
+        const style = (node) => {
+            try {
+                return node ? window.getComputedStyle(node) : null;
+            } catch (error) {
+                return null;
+            }
+        };
+        const media = (query) => {
+            try {
+                return !!(window.matchMedia && window.matchMedia(query).matches);
+            } catch (error) {
+                return null;
+            }
+        };
+        const root = style(doc);
+        const page = style(body);
+        const panel = shell.nodes && shell.nodes.panel;
+        return {
+            userAgent: String(nav.userAgent || ""),
+            touchPoints: Number(nav.maxTouchPoints) || 0,
+            coarse: media("(pointer: coarse)"),
+            hover: media("(hover: hover)"),
+            pixelRatio: Number(window.devicePixelRatio) || 1,
+            window: [window.innerWidth, window.innerHeight],
+            visual: visual ? [Math.round(visual.width || 0), Math.round(visual.height || 0),
+                              Math.round((Number(visual.scale) || 1) * 100) / 100] : null,
+            screen: window.screen ? [window.screen.width, window.screen.height] : null,
+            document: doc ? [doc.scrollWidth, doc.scrollHeight, doc.clientWidth, doc.clientHeight] : null,
+            scroller: document.scrollingElement ? describe(document.scrollingElement) : null,
+            root: root ? [root.overflowX, root.overflowY, root.transform] : null,
+            body: page ? [page.overflowX, page.overflowY, page.transform, page.position, page.zoom] : null,
+            theme: doc && typeof doc.getAttribute === "function" ? doc.getAttribute("data-mc-theme") : null,
+            focused: !!(body && body.classList && body.classList.contains("forge-assistant-focused")),
+            fullscreen: !!document.fullscreenElement,
+            freeFloat: !!(shell.state && shell.state.freeFloat),
+            panelOpen: !!(shell.state && shell.state.panelOpen),
+            sheet: !!(panel && panel.classList && panel.classList.contains("forge-assistant-sheet")),
+        };
+    }
 
     /** A node, for the account: `button#forge-assistant-launcher.forge-assistant-launcher`. */
     function describe(node) {
@@ -1480,7 +1552,8 @@
         try {
             style = window.getComputedStyle(handle);
         } catch (error) { /* a stub for a node */ }
-        return {
+        const box = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+        const watch = {
             handle: node === this.nodes.panel ? "panel" : "launcher",
             pointer: event.pointerType || "unknown",
             pressed: describe(event.target && event.target.nodeType === 1 ? event.target : node),
@@ -1489,17 +1562,29 @@
             pressCancelled: !!event.defaultPrevented,
             captured: false,
             before: pageState(),
+            from: [Math.round(event.clientX || 0), Math.round(event.clientY || 0)],
+            box: box ? [Math.round(box.left), Math.round(box.top), Math.round(box.width),
+                        Math.round(box.height)] : null,
+            put: null,
             moves: 0,
             travel: 0,
             touchMoves: 0,
             touchCancelable: 0,
             touchBlocked: 0,
+            trace: [],
+            dropped: 0,
             started: Date.now(),
         };
+        traceEvent(watch, {e: "pointerdown", x: watch.from[0], y: watch.from[1],
+                           c: event.cancelable !== false, p: !!event.defaultPrevented});
+        return watch;
     };
 
     Shell.prototype.accountForDrag = function (drag, event, cancelled) {
         const watch = drag.watch;
+        traceEvent(watch, {e: event && event.type ? event.type : "reset", last: true,
+                           x: event && event.clientX !== undefined ? Math.round(event.clientX) : null,
+                           y: event && event.clientY !== undefined ? Math.round(event.clientY) : null});
         const after = pageState();
         const delta = (was, now) => (was && now ? was.map((value, i) => now[i] - value) : null);
         const some = (values) => !!values && values.some((value) => value !== 0);
@@ -1526,6 +1611,9 @@
             touchCancelable: watch.touchCancelable,
             touchBlocked: watch.touchBlocked,
             fullscreen: !!document.fullscreenElement,
+            from: watch.from,
+            box: watch.box,
+            put: watch.put,
             astray: [],
         };
         if (some(report.pageScrolled)) report.astray.push("the page scrolled by " + report.pageScrolled.join(", "));
@@ -1536,14 +1624,50 @@
         if (cancelled && event && event.type && event.type !== "pointerup") {
             report.astray.push("the browser ended it (" + event.type + ")");
         }
+        try {
+            report.environment = environment(this);
+        } catch (error) {
+            report.environment = null;
+        }
+        report.trace = watch.trace;
+        report.dropped = watch.dropped;
         this.lastDrag = report;
         try {
             console.info("Forge Assistant drag: " + JSON.stringify(report));
         } catch (error) { /* no console to write to */ }
+        this.journal(Object.assign({kind: "drag"}, report));
         if (report.astray.length && drag.moved) {
             this.tell("That drag moved more than the handle: " + report.astray.join("; ")
-                      + ". The console has the account.", "warn");
+                      + ". The account is in model_chain.log.", "warn");
         }
+    };
+
+    /** An account, to the server, for the extension's log. Never in the
+     * way: a server that refuses it or is not there is a line on the
+     * console, no more. */
+    Shell.prototype.journal = function (entry) {
+        const store = this.store;
+        if (!store || typeof store.request !== "function") return null;
+        let sent = null;
+        try {
+            sent = store.request("/journal", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(entry),
+                deadline: 8000,
+            });
+        } catch (error) {
+            return null;
+        }
+        if (sent && typeof sent.catch === "function") {
+            sent.catch((error) => {
+                try {
+                    console.debug("Forge Assistant: the journal was not written: "
+                                  + ((error && error.message) || error));
+                } catch (ignored) { /* no console */ }
+            });
+        }
+        return sent;
     };
 
     /** The page does not pan under a finger that is dragging a handle.
@@ -1568,9 +1692,15 @@
             watch.touchMoves += 1;
             if (event.cancelable !== false) watch.touchCancelable += 1;
         }
-        if (event.cancelable === false) return;
+        if (event.cancelable === false) {
+            if (watch) traceEvent(watch, {e: "touchmove", c: false, p: false});
+            return;
+        }
         if (typeof event.preventDefault === "function") event.preventDefault();
-        if (watch) watch.touchBlocked += 1;
+        if (watch) {
+            watch.touchBlocked += 1;
+            traceEvent(watch, {e: "touchmove", c: true, p: true});
+        }
     };
 
     // -- wiring ------------------------------------------------------------- //
