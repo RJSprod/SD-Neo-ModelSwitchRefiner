@@ -76,6 +76,7 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
        --color-accent: #fff; --primary-500: #fff; --font-mono: monospace; --size-4: 16px; --shadow-drop-lg: none; }
 .app { padding: var(--size-4); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; }
+.unequal-height { align-items: flex-start; }
 .column { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
 .tabs { position: relative; }
 .tab-nav { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--border-color-primary); }
@@ -221,7 +222,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
     <div id="txt2img_extra_tabs" class="tabs extra-networks">
       {extra_tabs_nav("txt2img", controls_built=controls_built)}
       <div id="txt2img_generation" class="tabitem" role="tabpanel" style="display: block">
-        <div class="row">
+        <div class="row unequal-height">
           <div id="txt2img_settings" class="column">{blocks}</div>
           <div id="txt2img_results" class="column">
             <div id="txt2img_results_panel" class="column panel">
@@ -995,6 +996,50 @@ class TestWithTheForgeAssistant:
         assert found["generate"]["top"] <= found["header"]["bottom"] + space + 24, found
         assert abs(found["inner"] - found["buttons"]["bottom"] - space) <= 1, found
         assert found["gallery"]["height"] > 0.5 * found["inner"], found
+        page.close()
+
+    def test_scrolling_keeps_the_column_in_view_under_the_bar_and_focus_mode_takes_the_whole_window(self, browser):
+        """Normal mode: the settings scroll, the results column is held a
+        margin under the bar, never under it. Focus mode: the bar is hidden,
+        the workspace is the window, the column is held at its padding, where
+        the fill measured it, scrolled or not; leaving focus puts it back."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        at_rest = page.evaluate(FILLED)
+        page.evaluate("window.scrollTo(0, 600)")
+        settle(page, 4)
+        scrolled = page.evaluate(FILLED)
+        assert page.evaluate("window.scrollY") == 600
+        assert scrolled["generate"]["top"] >= scrolled["header"]["bottom"] + 4, scrolled
+        assert scrolled["generate"]["top"] < at_rest["generate"]["top"], "held under the bar, not scrolled away"
+        assert scrolled["buttons"]["bottom"] <= scrolled["inner"], scrolled
+        page.evaluate("window.scrollTo(0, 0)")
+        settle(page, 4)
+
+        entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', forgeAssistant.shell.host)")
+        assert entered["ok"] is True
+        settle(page, 8)
+        focused = page.evaluate(FILLED)
+        root = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-focus-root');"
+                             " const b = r.getBoundingClientRect(); return {top: b.top, bottom: b.bottom,"
+                             " navDisplay: getComputedStyle(document.querySelector('#tabs > .tab-nav')).display}; })()")
+        assert root["navDisplay"] == "none", "the bar is not drawn under focus"
+        assert focused["marked"] is True and focused["reason"] == "", focused
+        space = focused["buttons"]["top"] - focused["gallery"]["bottom"]
+        assert abs(focused["generate"]["top"] - (root["top"] + space + 16)) <= 1, (focused, root)
+        assert abs(root["bottom"] - focused["buttons"]["bottom"] - space) <= 1, (focused, root)
+        assert focused["gallery"]["height"] > at_rest["gallery"]["height"], "the header's room is the gallery's"
+
+        page.evaluate("document.querySelector('.forge-assistant-focus-root').scrollTop = 600")
+        settle(page, 4)
+        held = page.evaluate(FILLED)
+        assert abs(held["generate"]["top"] - focused["generate"]["top"]) <= 1, (held, focused)
+        assert abs(held["buttons"]["bottom"] - focused["buttons"]["bottom"]) <= 1, (held, focused)
+
+        page.evaluate("forgeAssistant.focus.exit()")
+        settle(page, 8)
+        back = page.evaluate(FILLED)
+        assert abs(back["generate"]["top"] - at_rest["generate"]["top"]) <= 1, (back, at_rest)
         page.close()
 
     def test_interrupt_and_skip_are_no_bright_spots(self, browser):
