@@ -3915,7 +3915,11 @@ shape — and scrolling moves a row at a time, so no row is cut off. Everything 
 generation's infotext, its log, the time taken — is laid out as ever, but
 below the view: scroll down to it. A generation's infotext arriving takes
 nothing from the gallery, and the progress bar takes its height from the
-gallery, so the buttons never move. The room is measured, not guessed as a
+gallery, so the buttons never move. A progress bar that draws above itself —
+the **Ooze** appearance's bubbles rise 34 px over the bar — gets that room
+clear under the top of the view, so no header hides it; the room overlaps the
+empty space and padding above the bar, and costs only what it needs beyond
+them. The room is measured, not guessed as a
 share of the window, and written in pixels; it is measured again when the
 window or the column changes size — focus on or off, the settings column
 docked, a progress bar coming and going, another tab shown. This takes
@@ -6352,6 +6356,19 @@ one second.
   and under the assistant's focus mode, where the bar is hidden and the
   workspace is the whole window, it is held at the workspace's padding
   instead, so the fitted gallery stays whole there too.
+- **A generation without the Interrupt and Skip row.** While Forge's progress
+  bar runs, the row is not drawn: the bar is the results panel's first thing,
+  14 px tall with its line of text at 11 px, and the Forge Assistant's fitted
+  column keeps the room its Ooze bubbles rise into clear of the header (Forge
+  draws the bar 14 px above the panel, where this header covered its top and
+  every bubble). The bar and its ooze take about a fifth less than the bar
+  and the row did, and the gallery has the rest. Interrupt and Skip are still
+  there: Forge's own **Escape** interrupts, **Alt+Enter** skips and
+  **Ctrl+Enter** interrupts and starts again, and a **press on the bar** (or
+  in the ooze above it) brings the row back for the rest of the run, another
+  press puts it away. The next run starts without it. With Forge's "Show
+  progressbar" off there is no bar to show, so the row stays. The completion
+  flash, where it is on, shows at the panel's top without taking room.
 - **The page's text size everywhere.** Gradio sets its body text size on its
   container alone, so the Forge Assistant's panel and launcher, which live on
   the page's body, and this theme's own drawers were drawn at the browser's

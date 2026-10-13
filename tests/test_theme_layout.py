@@ -126,6 +126,16 @@ ASSISTANT_HOST_CSS = """
 #image_buttons_txt2img button { flex: 1 1 100px; height: 32px; }
 """
 
+# Forge Neo's own rules for its progress bar (style.css: absolute, 14 px above
+# the results panel, 20 px tall) and Gradio 4.40's column, which is positioned
+# and so is the box the bar is drawn against.
+FORGE_PROGRESS_CSS = """
+.column { position: relative; }
+.progressDiv { position: absolute; height: 20px; background: #b4c0cc; border-radius: 3px !important; top: -14px; left: 0px; width: 100%; }
+.dark .progressDiv { background: #424c5b; }
+.progressDiv .progress { width: 0%; height: 20px; background: #0060df; color: white; font-weight: bold; line-height: 20px; text-align: right; border-radius: 3px; overflow: visible; white-space: nowrap; padding: 0 0.5em; }
+"""
+
 # The person's user.css, as the assistant's tests carry it: the gallery and its
 # container sized against the window. And the container alone, which is what
 # a theme that lets the gallery stop short of it turns into half a window of
@@ -224,10 +234,13 @@ def extra_pages(tabname: str, *, controls_built: bool) -> str:
 
 
 def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
-              controls_built: bool = True, assistant: str = "", popup: bool = False) -> str:
+              controls_built: bool = True, assistant: str = "", popup: bool = False,
+              progress: bool = False) -> str:
     """`assistant` is a user.css to put on a page that also runs the Forge
     Assistant's scripts, in Forge's order (its folder's scripts load before
-    this one's), with Gradio's gallery markup for its fill to measure."""
+    this one's), with Gradio's gallery markup for its fill to measure.
+    `progress` adds Forge's own progress bar rules and this extension's
+    progress-bar appearance script, for a page that runs a generation."""
     buttons = "".join(
         f'<button role="tab" id="{tab}-button" aria-controls="{tab}" '
         f'aria-selected="{"true" if i == 0 else "false"}" class="{"selected" if i == 0 else ""}">{label}</button>'
@@ -240,7 +253,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
                  '<div role="tab">Txt 2 Img</div></div></header></div>' if lobe else "")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{HOST_CSS}{ASSISTANT_HOST_CSS if assistant else ""}</style>
+<style>{HOST_CSS}{ASSISTANT_HOST_CSS if assistant else ""}{FORGE_PROGRESS_CSS if progress else ""}</style>
 <link rel="stylesheet" href="/style.css">
 <style id="user-css">{assistant}</style>
 </head><body class="dark">
@@ -336,6 +349,7 @@ function cardClicked(tabname, text) {{
 }}
 </script>
 {"".join(f'<script src="/javascript/{path.name}"></script>' for path in sorted((ROOT / "javascript").glob("forge_assistant*.js"))) if assistant else ""}
+{'<script src="/javascript/model_chain_progress.js"></script>' if progress else ""}
 <script src="/javascript/model_chain_theme.js"></script>
 </body></html>"""
 
@@ -387,13 +401,13 @@ ON = {"model_chain_theme": True}
 
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
-              controls_built=True, assistant="", popup=False):
+              controls_built=True, assistant="", popup=False, progress=False):
     """A page of its own context, or one in a context given -- two pages of
     one context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height})
     page = owner.new_page()
     html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
-                     assistant=assistant, popup=popup)
+                     assistant=assistant, popup=popup, progress=progress)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcTheme" + (" && !!(window.forgeAssistant && window.forgeAssistant.fill)"
@@ -1273,6 +1287,224 @@ class TestForgesPopup:
         assert found["name"] <= 16.5, found
         assert found["cellPad"] <= 2.5 and found["cellBorder"] == 0, found
         assert found["gap"] <= 8, found
+        page.close()
+
+
+# -- a generation in the results column ----------------------------------------- #
+
+OOZE = {"model_chain_style_enable": True, "model_chain_style_theme": "Ooze"}
+
+# What Forge's submit() does (javascript/ui.js, progressbar.js): Interrupt and
+# Skip shown over Generate by their inline display, and the bar built and put
+# before the gallery's container, in the results panel.
+RUN = """(shown) => {
+    for (const id of ["txt2img_interrupt", "txt2img_skip"]) document.getElementById(id).style.display = "block";
+    const container = document.getElementById("txt2img_gallery_container");
+    const bar = document.createElement("div");
+    bar.className = "progressDiv";
+    bar.style.display = shown ? "block" : "none";
+    const inner = document.createElement("div");
+    inner.className = "progress";
+    inner.style.width = "62%";
+    inner.textContent = "Sampling step 5/8 62% ETA: 00:03";
+    bar.appendChild(inner);
+    container.parentNode.insertBefore(bar, container);
+}"""
+
+# And what its end does: the bar removed, Interrupt and Skip hidden again.
+END = """() => {
+    document.querySelectorAll("#txt2img_results_panel > .progressDiv").forEach((bar) => bar.remove());
+    for (const id of ["txt2img_interrupt", "txt2img_skip"]) document.getElementById(id).style.display = "none";
+}"""
+
+RUNNING = """() => {
+    const q = (s) => document.querySelector(s);
+    const box = (node) => { if (!node) return null; const r = node.getBoundingClientRect();
+                            return {top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height}; };
+    const bar = q("#txt2img_results_panel > .progressDiv");
+    const overlay = bar ? bar.querySelector(".mc-ooze-overlay") : null;
+    const interrupt = q("#txt2img_interrupt");
+    const header = q("#tabs > .tab-nav");
+    // What is drawn at the top of the ooze, two pixels in: the header, if it
+    // covers the bubbles there.
+    let covered = null;
+    if (overlay) {
+        const r = overlay.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 2);
+        covered = !!(hit && header.contains(hit));
+    }
+    return {header: box(header), bar: box(bar), overlay: box(overlay), covered,
+            barPosition: bar ? getComputedStyle(bar).position : null,
+            fillHeight: bar ? bar.querySelector(".progress").getBoundingClientRect().height : null,
+            generate: box(q("#txt2img_generate_box")),
+            generateDisplay: getComputedStyle(q("#txt2img_generate_box")).display,
+            interruptDisplay: getComputedStyle(interrupt).display, interruptInline: interrupt.style.display,
+            interruptWidth: interrupt.getBoundingClientRect().width,
+            gallery: box(q("#txt2img_gallery")), buttons: box(q("#image_buttons_txt2img")),
+            reason: forgeAssistant.fill.explain()[0].reason};
+}"""
+
+
+def running_page(browser, opts=None, **kwargs):
+    """The user's page: the theme, the Forge Assistant fitting the column to the
+    window (their user.css), Forge's own bar and the progress bar's ooze."""
+    return open_page(browser, dict(OOZE, **(opts or {})), assistant=USER_CSS_WHOLE, progress=True,
+                     width=kwargs.pop("width", 886), height=kwargs.pop("height", 898), **kwargs)
+
+
+def start(page, shown=True):
+    page.evaluate(RUN, shown)
+    settle(page, 8)
+    return page.evaluate(RUNNING)
+
+
+def press(page, x, y):
+    page.mouse.click(x, y)
+    settle(page, 8)
+    return page.evaluate(RUNNING)
+
+
+class TestAGenerationInTheResultsColumn:
+    """Asked for, with a screenshot of a run: "I cannot see the full animation
+    for my progress bar. I have it set to ooze so the animation should be
+    above. How about this, when there is a progress bar, there should be no
+    button row for interrupt and skip. Instead, just the progress bar the
+    properly sized gallery and gallery buttons to fill below the area needed
+    to render the progress bar and 'ooze' above it. I want it to be compact
+    still, less space than what is currently dedicated to the row of button
+    and progress bar." Forge draws the bar absolutely, 14 px above the
+    results panel -- under the theme's header, which hid its top and every
+    bubble rising out of it. Nothing here measures by hand: the fill's own
+    observers have to follow the bar arriving and the row going."""
+
+    def test_the_bar_and_its_ooze_are_clear_of_the_header_and_the_row_is_not_drawn(self, browser):
+        page = running_page(browser)
+        rest = page.evaluate(RUNNING)
+        assert rest["generateDisplay"] != "none" and rest["bar"] is None, rest
+        found = start(page)
+
+        # The row is not drawn; the buttons keep the display Forge wrote, so its
+        # Escape and Alt+Enter still press them and the assistant still reads
+        # a run from them.
+        assert found["generateDisplay"] == "none", found
+        assert found["interruptInline"] == "block" and found["interruptDisplay"] == "block", found
+        # The bar in the column's flow, 14 px, its ooze whole under the header.
+        assert found["barPosition"] == "relative", found
+        assert abs(found["bar"]["height"] - 14) <= 0.5 and abs(found["fillHeight"] - 14) <= 0.5, found
+        assert found["overlay"] is not None and found["overlay"]["top"] < found["bar"]["top"] - 30, found
+        assert found["overlay"]["top"] >= found["header"]["bottom"] - 0.5, found
+        assert found["covered"] is False, found
+        # One space between the bar and the gallery, the gallery's buttons where
+        # they were, and the gallery the taller for it.
+        space = found["buttons"]["top"] - found["gallery"]["bottom"]
+        assert abs(found["gallery"]["top"] - found["bar"]["bottom"] - space) <= 1, found
+        assert abs(found["buttons"]["bottom"] - rest["buttons"]["bottom"]) <= 1, (rest, found)
+        assert found["gallery"]["height"] > rest["gallery"]["height"] + 10, (rest, found)
+        # Compact: the bar and its ooze take a fifth less than the row did.
+        before = rest["gallery"]["top"] - rest["header"]["bottom"]
+        now = found["gallery"]["top"] - found["header"]["bottom"]
+        assert now <= 0.8 * before, (before, now)
+
+        # Scrolled, the column held under the bar: still clear of it.
+        page.evaluate("window.scrollTo(0, 500)")
+        settle(page, 6)
+        scrolled = page.evaluate(RUNNING)
+        assert page.evaluate("window.scrollY") == 500
+        assert scrolled["overlay"]["top"] >= scrolled["header"]["bottom"] - 0.5, scrolled
+        assert scrolled["covered"] is False, scrolled
+        page.close()
+
+    def test_a_press_on_the_bar_or_its_ooze_brings_the_row_back_and_another_puts_it_away(self, browser):
+        """On a touchscreen there is no Escape to press: a press on the bar
+        brings Interrupt and Skip back for the rest of the run, and the room
+        the ooze rises into counts, because 14 px is short of a finger."""
+        page = running_page(browser)
+        running = start(page)
+        bar = running["bar"]
+        middle = (bar["left"] + bar["right"]) / 2
+
+        shown = press(page, middle, (bar["top"] + bar["bottom"]) / 2)
+        assert shown["generateDisplay"] != "none" and shown["interruptWidth"] > 0, shown
+        assert shown["gallery"]["height"] < running["gallery"]["height"] - 30, (running, shown)
+        assert abs(shown["buttons"]["bottom"] - running["buttons"]["bottom"]) <= 1, (running, shown)
+        assert shown["generate"]["top"] >= shown["bar"]["bottom"], shown
+
+        hidden = press(page, middle, bar["top"] - 20)
+        assert hidden["generateDisplay"] == "none", hidden
+        assert abs(hidden["gallery"]["height"] - running["gallery"]["height"]) <= 1, (running, hidden)
+
+        # A control is a control, even one drawn over the ooze -- a stacked
+        # page's last setting can be, under the room above the bar -- and
+        # beside the bar is not the bar.
+        page.evaluate("""(at) => {
+            const button = document.createElement("button");
+            button.id = "over-the-ooze";
+            button.textContent = "a control";
+            button.style.cssText = `position: fixed; left: ${at[0] - 40}px; top: ${at[1] - 10}px; width: 80px; height: 20px; z-index: 5`;
+            document.querySelector("gradio-app").appendChild(button);
+        }""", [middle, bar["top"] - 20])
+        settle(page)
+        assert press(page, middle, bar["top"] - 20)["generateDisplay"] == "none"
+        assert press(page, bar["left"] - 20, (bar["top"] + bar["bottom"]) / 2)["generateDisplay"] == "none"
+        page.close()
+
+    def test_the_end_of_a_run_brings_generate_back_and_the_next_run_starts_without_the_row(self, browser):
+        page = running_page(browser)
+        rest = page.evaluate(RUNNING)
+        running = start(page)
+        bar = running["bar"]
+        press(page, (bar["left"] + bar["right"]) / 2, (bar["top"] + bar["bottom"]) / 2)
+
+        page.evaluate(END)
+        settle(page, 8)
+        done = page.evaluate(RUNNING)
+        assert done["generateDisplay"] != "none" and done["bar"] is None, done
+        assert abs(done["gallery"]["height"] - rest["gallery"]["height"]) <= 1, (rest, done)
+        assert abs(done["generate"]["top"] - rest["generate"]["top"]) <= 1, (rest, done)
+
+        # The press was the last run's: the mark went with its bar.
+        again = start(page)
+        assert again["generateDisplay"] == "none", again
+        page.close()
+
+    def test_a_bar_forge_hides_leaves_the_row(self, browser):
+        """Settings, "Show progressbar" off: Forge builds the bar hidden, and a
+        run with nothing to show keeps its Interrupt and Skip."""
+        page = running_page(browser)
+        rest = page.evaluate(RUNNING)
+        found = start(page, shown=False)
+
+        assert found["generateDisplay"] != "none", found
+        assert abs(found["gallery"]["height"] - rest["gallery"]["height"]) <= 1, (rest, found)
+        page.close()
+
+    def test_a_bar_with_nothing_above_it_sits_one_space_under_the_header(self, browser):
+        """No ooze, no room: the panel one space under the header and the bar
+        at its padding, as Generate sits at rest."""
+        page = running_page(browser, {"model_chain_style_theme": "Flat"})
+        rest = page.evaluate(RUNNING)
+        found = start(page)
+
+        assert found["overlay"] is None and found["generateDisplay"] == "none", found
+        assert abs(found["bar"]["top"] - rest["generate"]["top"]) <= 1, (rest, found)
+        page.close()
+
+    def test_under_focus_the_ooze_is_inside_the_workspace(self, browser):
+        page = running_page(browser)
+        start(page)
+        entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', forgeAssistant.shell.host)")
+        assert entered["ok"] is True
+        settle(page, 8)
+        found = page.evaluate(RUNNING)
+        root = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-focus-root')"
+                             ".getBoundingClientRect(); return {top: r.top, bottom: r.bottom}; })()")
+
+        assert found["reason"] == "", found
+        assert found["overlay"]["top"] >= root["top"] - 0.5, (found, root)
+        assert found["generateDisplay"] == "none", found
+        space = found["buttons"]["top"] - found["gallery"]["bottom"]
+        assert abs(root["bottom"] - found["buttons"]["bottom"] - space) <= 1, (found, root)
+        page.evaluate("forgeAssistant.focus.exit()")
         page.close()
 
 

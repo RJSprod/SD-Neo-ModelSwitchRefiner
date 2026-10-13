@@ -75,7 +75,10 @@ The pieces, and where they are:
   selected one is always shown), a theme toggle and a settings button; the
   **split view** (the classic top row to the head of the settings column, the
   Generate box to the head of the gallery's container, in both tabs, with the
-  compact layout's box handled too); the **quick-settings drawer** (fixed
+  compact layout's box handled too); **a generation without the Interrupt
+  and Skip row** (`pressBar`: a press on the running bar or in what it paints
+  above itself, never on a control, marks the bar to bring the row back,
+  and the mark goes with the bar); the **quick-settings drawer** (fixed
   under the header, opened from the header or by the setting, closed by
   Escape, remembered per browser); the **extra-network drawer** on the right
   (Forge's `.extra-page` tabs and the controls strip Forge's script gathers
@@ -99,7 +102,9 @@ The pieces, and where they are:
   the header, the menu, the two drawers (the extra-network one with its
   strip, its page at the card size set, its pane as tall as its cards), the
   info panel's blocks, chips and copy buttons, the split view's rows, the
-  sticky results column, the boxes down the settings column, the
+  sticky results column, a running progress bar in the results panel's flow
+  at 14 px with the Generate box not drawn beside it (`:has()`, keyed on a
+  bar Forge has not hidden and the press's mark), the boxes down the settings column, the
   token-counter pill, the 36 px tool buttons, the gallery's checkerboard
   ground, the phone sizes. Colours only from the host's variables;
   `!important` only where Forge, Gradio's inline style on a tab panel or a

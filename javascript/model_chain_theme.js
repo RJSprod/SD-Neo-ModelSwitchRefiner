@@ -1136,9 +1136,56 @@
         scheduleFit();
     }
 
+    // -- a generation in the results column ---------------------------------------- //
+    //
+    // While Forge's progress bar runs, its Interrupt and Skip row is not drawn
+    // (style.css, "a generation in the results column"). A press on the bar
+    // brings the row back for the rest of the run, and another puts it away:
+    // the mark is on the bar, which Forge removes when the run ends, so the
+    // next run starts without the row again. The keyboard needs none of this
+    // -- Forge's Escape and Alt+Enter press the buttons wherever they are --
+    // but a touchscreen has no Escape.
+
+    const SHOW_CONTROLS = "mc-theme-show-controls";
+    const RUNNING_BARS = "[id$='_results_panel'] > .progressDiv:not(.mc-progress-flash)";
+
+    // A press counts on the bar or in what it paints above itself -- the ooze
+    // rises 34 px over a bar 14 px tall, and a finger needs more than the bar
+    // -- by where it lands rather than by an element there: the room above the
+    // bar is empty, and a pseudo-element on the host's bar is a WebUI theme's
+    // (tests/test_progress.py holds that). Never a press on a control.
+    function pressBar(event) {
+        if (!event || root().getAttribute(ATTRIBUTE) !== "on") return false;
+        const target = event.target;
+        if (target && target.closest && target.closest("button, a, input, textarea, select, label")) {
+            return false;
+        }
+        const x = event.clientX;
+        const y = event.clientY;
+        const bars = document.querySelectorAll(RUNNING_BARS);
+        for (let index = 0; index < bars.length; index += 1) {
+            const bar = bars[index];
+            const box = bar.getBoundingClientRect();
+            if (!(box.width > 0 && box.height > 0)) continue;
+            let top = box.top;
+            Array.prototype.forEach.call(bar.children, (child) => {
+                if (window.getComputedStyle(child).position !== "absolute") return;
+                top = Math.min(top, child.getBoundingClientRect().top);
+            });
+            if (x >= box.left && x <= box.right && y >= top && y <= box.bottom) {
+                bar.classList.toggle(SHOW_CONTROLS);
+                return true;
+            }
+        }
+        return false;
+    }
+
     function wire() {
         if (state.wired) return;
         state.wired = true;
+        document.addEventListener("click", function (event) {
+            attempt("show or hide Interrupt and Skip", function () { pressBar(event); });
+        });
         document.addEventListener("click", function (event) {
             if (!state.header || state.header.menu.hidden) return;
             if (state.header.actions.contains(event.target)) return;
@@ -1172,7 +1219,7 @@
     window.mcTheme = {
         OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
-        parseInfotext, showNetworksPage, toggleNetworks,
+        parseInfotext, showNetworksPage, toggleNetworks, pressBar, SHOW_CONTROLS,
         icons: Object.keys(ICONS),
         glyphs: Object.keys(GLYPH),
     };
