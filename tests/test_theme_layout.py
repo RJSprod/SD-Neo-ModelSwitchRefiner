@@ -95,7 +95,11 @@ textarea { width: 100%; min-height: 60px; }
 .extra-networks-controls-div { align-self: center; margin-left: auto; }
 .extra-network-control { display: flex; width: 100%; }
 .extra-network-pane { display: flex; height: calc(100vh - 24rem); min-height: 52rem; flex-direction: column; overflow: hidden; }
-.extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; }
+.extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; position: relative; }
+.extra-network-pane .card .actions { position: absolute; bottom: 0; left: 0; right: 0; padding: 0.5em; }
+.extra-network-pane .card .actions .name { font-size: 1.7em; font-weight: bold; }
+.extra-network-control .extra-network-control--search-text { width: 16em; }
+button.lg { font-size: 16px; padding: 8px 16px; min-height: 40px; }
 .extra-page-prompts { display: none; }
 """
 
@@ -149,9 +153,11 @@ def pane_html(tabname: str, page: str, *, controls_built: bool) -> str:
         f'onclick="cardClicked(\'{tabname}\', \'{html_module.escape(added)}\')">'
         f'<div class="actions"><span class="name">{name}</span></div></div>'
         for name, added in CARDS[page])
+    dirs = "".join(f'<button class="lg secondary gradio-button custom-button">{name}</button>'
+                   for name in ("all", "krea2\\", "kreaCELEB\\", "kreat\\"))
     return (f'<div id="{full}_pane" class="extra-network-pane">'
             + ("" if controls_built else controls_html(tabname, page))
-            + f'<div class="extra-network-pane-content-dirs"><div id="{full}_dirs" class="extra-network-dirs"></div>'
+            + f'<div class="extra-network-pane-content-dirs"><div id="{full}_dirs" class="extra-network-dirs">{dirs}</div>'
             f'<div id="{full}_cards" class="extra-network-cards">{cards}</div></div></div>')
 
 
@@ -871,6 +877,39 @@ class TestTheExtraNetworksDrawer:
         assert found["toggle"]["disabled"] is False
         page.close()
 
+    def test_the_drawer_draws_a_page_at_its_own_density(self, browser):
+        """Forge draws a page for the window's width: the search and the sort
+        buttons in one row, a directory as a large button, a card's name at
+        1.7 em in bold. At a third of that width the user saw a tangle, a
+        wall of buttons and names over the pictures -- and "undefined" where
+        the drawer's close button should have been, a glyph the table lacked."""
+        page = open_page(browser)
+        page.click(".mc-theme-networks-toggle")
+        page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+        settle(page)
+        found = page.evaluate("""() => {
+            const q = (s) => document.querySelector(s);
+            const close = q(".mc-theme-networks-close");
+            const controls = q("#txt2img_lora_controls");
+            const search = q("#txt2img_lora_extra_search");
+            const sort = q("#txt2img_lora_extra_sort_dir");
+            const dir = q("#txt2img_lora_dirs button");
+            const name = q("#txt2img_lora_cards .card .actions .name");
+            const px = (node, prop) => parseFloat(getComputedStyle(node)[prop]);
+            return {closeSvg: !!close.querySelector("svg"), closeText: close.textContent.trim(),
+                    searchWidth: search.getBoundingClientRect().width, controlsWidth: controls.getBoundingClientRect().width,
+                    sortBelowSearch: sort.getBoundingClientRect().top >= search.getBoundingClientRect().bottom - 1,
+                    dirFont: px(dir, "fontSize"), dirHeight: dir.getBoundingClientRect().height,
+                    nameFont: px(name, "fontSize"), nameWeight: getComputedStyle(name).fontWeight};
+        }""")
+
+        assert found["closeSvg"] is True and found["closeText"] == "", found
+        assert found["searchWidth"] >= 0.9 * found["controlsWidth"], found
+        assert found["sortBelowSearch"] is True, found
+        assert found["dirFont"] <= 12 and found["dirHeight"] <= 28, found
+        assert found["nameFont"] <= 11.5 and found["nameWeight"] in ("600", "500"), found
+        page.close()
+
     def test_off_puts_the_pages_back_beside_generation(self, browser):
         page = open_page(browser)
         page.click(".mc-theme-networks-toggle")
@@ -1059,6 +1098,35 @@ class TestWithTheForgeAssistant:
         settle(page, 8)
         back = page.evaluate(FILLED)
         assert abs(back["generate"]["top"] - at_rest["generate"]["top"]) <= 1, (back, at_rest)
+        page.close()
+
+    def test_the_assistants_header_keeps_its_close_button_on_the_first_row(self, browser):
+        """The header's grip is what the row has left once the buttons have
+        taken their room, and the memory reading inside it is clipped to that:
+        counted, a reading one digit wider put the close button on a second
+        row, which the user saw on every page after a long generation."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page, 4)
+        page.evaluate("""() => {
+            const reading = document.querySelector(".forge-assistant-memory");
+            reading.textContent = "RAM 177.2  5090 31.4  3090 23.5  4090 12.0  2080 7.5";
+        }""")
+        settle(page, 4)
+        found = page.evaluate("""() => {
+            const header = document.querySelector(".forge-assistant-header");
+            const buttons = [...header.querySelectorAll("button")].filter((b) => b.getBoundingClientRect().height > 0);
+            const close = buttons.find((b) => b.textContent.trim() === "\u2715");
+            const rows = new Set(buttons.map((b) => Math.round(b.getBoundingClientRect().top)));
+            return {buttons: buttons.length, rows: rows.size, closeFound: !!close,
+                    closeTop: close && close.getBoundingClientRect().top, firstTop: buttons[0].getBoundingClientRect().top,
+                    headerHeight: header.getBoundingClientRect().height, buttonHeight: buttons[0].getBoundingClientRect().height};
+        }""")
+
+        assert found["closeFound"] is True and found["buttons"] >= 3, found
+        assert found["rows"] == 1, found
+        assert abs(found["closeTop"] - found["firstTop"]) <= 1, found
+        assert found["headerHeight"] < 2 * found["buttonHeight"], found
         page.close()
 
     def test_interrupt_and_skip_are_no_bright_spots(self, browser):

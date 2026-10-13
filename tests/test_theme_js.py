@@ -159,6 +159,21 @@ class TestTheIcons:
             assert emoji in found["icons"], emoji
 
 
+class TestTheGlyphs:
+    def test_every_glyph_the_script_asks_for_is_drawn(self):
+        """A header or drawer button is made by name from the glyph table; a
+        name the table lacks is the text "undefined" on the page -- the
+        drawer's close button was, on the user's machine."""
+        script = SCRIPT.read_text(encoding="utf-8")
+        asked = set(re.findall(r'action\("[^"]*",\s*"([a-z-]+)"', script))
+        asked |= set(re.findall(r'GLYPH\["([a-z-]+)"\]', script))
+        found = run("out.glyphs = T.glyphs;")
+
+        assert asked, "the script asks for glyphs by name"
+        assert asked <= set(found["glyphs"]), asked - set(found["glyphs"])
+        assert "x" in asked
+
+
 class TestTheSettingsAsRead:
     def test_nothing_set_is_the_defaults(self):
         found = run("out.config = T.normalise({});")
