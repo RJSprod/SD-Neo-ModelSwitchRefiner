@@ -67,14 +67,15 @@ TABS = [("tab_txt2img", "txt2img"), ("tab_img2img", "img2img"), ("tab_clipboard"
 HOST_CSS = """
 *, ::before, ::after { box-sizing: border-box; }
 html, body { margin: 0; }
-body { background: var(--body-background-fill); color: var(--body-text-color); font: 14px sans-serif;
+body { background: var(--body-background-fill); color: var(--body-text-color); font-family: sans-serif;
+       --text-md: 14px; --body-text-size: var(--text-md);
        --body-background-fill: #000; --body-text-color: #e6e6e6; --body-text-color-subdued: #8c8c8c;
        --background-fill-secondary: #141414; --border-color-primary: #262626; --block-background-fill: #0d0d0d;
        --block-border-color: #262626; --button-secondary-background-fill: #1a1a1a;
        --button-secondary-border-color: #2b2b2b; --button-secondary-text-color: #d9d9d9;
        --button-cancel-background-fill: #d93025; --button-cancel-text-color: #fff; --button-cancel-border-color: #d93025;
        --color-accent: #fff; --primary-500: #fff; --font-mono: monospace; --size-4: 16px; --shadow-drop-lg: none; }
-.app { padding: var(--size-4); }
+.app { padding: var(--size-4); font-size: var(--body-text-size); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; }
 .unequal-height { align-items: flex-start; }
 .column { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
@@ -401,6 +402,8 @@ MEASURE = """() => {
         txt2imgLabel: q("#tab_txt2img-button").textContent,
         modeLabel: q(".mc-theme-mode") && q(".mc-theme-mode").getAttribute("aria-label"),
         scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth,
+        bodyFont: getComputedStyle(document.body).fontSize,
+        outsideFont: q("#mc-theme-quick") ? getComputedStyle(q("#mc-theme-quick")).fontSize : null,
         generateHeight: q("#txt2img_generate").getBoundingClientRect().height,
         toolWidth: q("#paste").getBoundingClientRect().width,
     };
@@ -504,6 +507,22 @@ class TestTheBar:
         assert found["last"] == "mc-theme-actions"
         assert found["title"] == "Forge"
         assert found["directTabs"] == len(TABS)
+        page.close()
+
+    def test_the_pages_text_size_reaches_what_lives_outside_gradios_container(self, browser):
+        """Gradio sets its body text size on its container alone; the Forge
+        Assistant's panel and launcher live on the body, this theme's drawers
+        beside the container, and all of them were drawn at the browser's
+        16 px -- a seventh larger than the page, the launcher wider, the
+        panel's header wrapping. The page the user had set the body."""
+        page = open_page(browser)
+        found = page.evaluate(MEASURE)
+
+        assert found["bodyFont"] == "14px"
+        assert found["outsideFont"] == "14px"
+        page.evaluate("opts.model_chain_theme = false")
+        changed(page)
+        assert page.evaluate(MEASURE)["bodyFont"] == "16px"
         page.close()
 
     def test_it_stays_at_the_top_while_the_page_scrolls(self, browser):

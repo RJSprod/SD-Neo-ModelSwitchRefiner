@@ -667,8 +667,17 @@
 :root[data-mc-theme="on"] {
     --mc-theme-header: 64px;
     --mc-theme-radius: 8px;
-    --mc-theme-pad: 16px;
+    --mc-theme-pad: 12px;
     --mc-theme-quick-width: 280px;
+}
+
+/* The page's own text size, everywhere. Gradio puts its body text size on
+   its container alone, so anything outside it -- the Forge Assistant's
+   panel and launcher, which live on the body, this theme's drawers, a
+   dialog -- fell back to the browser's 16 px and was drawn a seventh larger
+   than the page; the page the user had set the body itself. */
+:root[data-mc-theme="on"] body {
+    font-size: var(--body-text-size, var(--text-md, 14px));
 }
 
 /* The accent by day. Gradio's --color-accent has one value for both modes
@@ -1109,7 +1118,7 @@
 :root[data-mc-theme="on"] [id$="_settings"] > [id$="_toprow"] {
     flex-direction: column;
     flex-wrap: nowrap;
-    gap: 12px;
+    gap: 8px;
     padding: 0;
     background: transparent;
 }

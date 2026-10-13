@@ -6324,6 +6324,12 @@ one second.
   and under the assistant's focus mode, where the bar is hidden and the
   workspace is the whole window, it is held at the workspace's padding
   instead, so the fitted gallery stays whole there too.
+- **The page's text size everywhere.** Gradio sets its body text size on its
+  container alone, so the Forge Assistant's panel and launcher, which live on
+  the page's body, and this theme's own drawers were drawn at the browser's
+  16 px, a seventh larger than the page. The theme gives the body the page's
+  size, as the Lobe page did, and keeps its own spacing a notch tighter
+  (12 px boxes, 8 px between the prompt boxes).
 - **Quick settings in a drawer** on the left, under the bar: *off* leaves the
   checkpoint row where Forge draws it; *collapsed* moves it into the drawer,
   opened from the header; *open* opens it at every load. The drawer remembers
