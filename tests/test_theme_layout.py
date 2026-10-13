@@ -81,6 +81,8 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
 .tab-nav { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--border-color-primary); }
 .tab-nav button { padding: 4px 16px; border: 1px solid transparent; background: transparent; color: inherit; }
 .tabitem[style*="display: none"] { display: none; }
+.tabitem { border: 1px solid var(--border-color-primary); border-top: none; padding: 10px; }
+#txt2img_generate, #img2img_generate { min-height: 4.5em; }
 .gradio-button.tool { max-width: 2.2em; min-width: 2.2em !important; height: 2.4em; }
 #quicksettings > div { width: fit-content; flex: 0 1 fit-content; }
 .block { min-height: 40px; }
@@ -567,6 +569,28 @@ class TestTheSplitView:
         assert page.evaluate("document.querySelectorAll('[data-mc-theme-moved]').length") == 10
         page.close()
 
+    def test_the_tab_panels_lose_their_frame_and_generate_is_44_px(self, browser):
+        """Gradio frames every tab panel (a border and its block padding), and
+        Forge's own tabs nest two of them around the generation UI; Forge
+        gives Generate a 4.5 em floor by id. The page the user had put the
+        content at the page's margin with a 44 px Generate."""
+        page = open_page(browser)
+        found = page.evaluate("""() => {
+            const box = (id) => { const s = getComputedStyle(document.getElementById(id));
+                                  return {padding: s.paddingLeft, border: s.borderLeftWidth}; };
+            return {outer: box("tab_txt2img"), inner: box("txt2img_generation"),
+                    generate: document.getElementById("txt2img_generate").getBoundingClientRect().height,
+                    contentLeft: document.getElementById("txt2img_prompt").getBoundingClientRect().left,
+                    pageLeft: document.querySelector(".gradio-container").getBoundingClientRect().left};
+        }""")
+
+        assert found["outer"] == {"padding": "0px", "border": "0px"}
+        assert found["inner"] == {"padding": "0px", "border": "0px"}
+        assert found["generate"] == 44
+        # The host's own 16 px page padding is the only margin left.
+        assert found["contentLeft"] - found["pageLeft"] == 16
+        page.close()
+
     def test_the_switch_off_puts_both_back_where_forge_had_them(self, browser):
         page = open_page(browser)
         page.evaluate("opts.model_chain_theme_split = false")
@@ -580,6 +604,40 @@ class TestTheSplitView:
         # And the rest of the theme is still on.
         assert found["attribute"] == "on"
         assert found["first"] == "mc-theme-title"
+        page.close()
+
+
+class TestTheDrawersPlace:
+    def test_the_drawers_live_inside_forges_app_element_where_its_lookups_reach(self, browser):
+        """Forge's scripts find things through gradioApp().querySelector,
+        which never looks outside the <gradio-app> element, and so does this
+        one. A drawer on the body put the quick settings out of both their
+        reach: this script then found no row, put it back, found it on the
+        next update, took it again -- the row showed and hid at the top of
+        the page on every update. And the extra-network pages' cards and
+        search boxes, which Forge's sort and card presses look up by id
+        through the same call, were out of Forge's reach."""
+        page = open_page(browser)
+        where = """() => ({
+            quick: !!document.getElementById("mc-theme-quick").closest("gradio-app"),
+            networks: !!document.getElementById("mc-theme-networks").closest("gradio-app"),
+            row: !!gradioApp().querySelector("#quicksettings"),
+            cards: !!gradioApp().querySelector("#txt2img_lora_cards"),
+            search: !!gradioApp().querySelector("#txt2img_lora_extra_search"),
+            rowParent: document.getElementById("quicksettings").parentElement.id,
+            drawers: document.querySelectorAll("#mc-theme-quick").length,
+        })"""
+        found = page.evaluate(where)
+        assert found == {"quick": True, "networks": True, "row": True, "cards": True, "search": True,
+                         "rowParent": "mc-theme-quick", "drawers": 1}
+
+        # Update after update -- an odd number and an even one -- the row
+        # stays in the one drawer.
+        for _ in range(3):
+            page.evaluate("hooks.after.forEach((fn) => fn())")
+            settle(page)
+            found = page.evaluate(where)
+            assert found["rowParent"] == "mc-theme-quick" and found["drawers"] == 1, found
         page.close()
 
 

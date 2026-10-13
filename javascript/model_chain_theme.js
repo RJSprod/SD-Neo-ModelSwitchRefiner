@@ -237,6 +237,18 @@
 
     function root() { return document.documentElement; }
 
+    /** Puts a node of this theme's own -- a drawer -- inside Forge's app
+     *  element. Forge's scripts, and this one, find things through
+     *  gradioApp().querySelector, which never looks outside that element: a
+     *  drawer on the body took the quick settings out of Forge's reach and
+     *  out of this script's, which then put them back, took them again, and
+     *  so on at every update of the page. */
+    function mount(node) {
+        const host = app();
+        const inside = host && host !== document && typeof host.appendChild === "function";
+        (inside ? host : document.body).appendChild(node);
+    }
+
     function query(selector, scope) {
         try { return (scope || app()).querySelector(selector); } catch (error) { return null; }
     }
@@ -609,7 +621,7 @@
             quick = make("aside", "mc-theme-drawer", {id: QUICK_ID, role: "complementary",
                                                        "aria-label": "Quick settings"});
             quick.hidden = true;
-            document.body.appendChild(quick);
+            mount(quick);
             state.quick = quick;
             const remembered = quickOpenState();
             const open = remembered ? remembered === "open" : config.quick === "open";
@@ -750,7 +762,7 @@
             aside.appendChild(strip);
             aside.appendChild(body);
             aside.hidden = true;
-            document.body.appendChild(aside);
+            mount(aside);
             networks = state.networks = {aside, strip, body, groups: {}};
             const remembered = networksOpenState();
             setNetworks(remembered ? remembered === "open" : config.networks === "open");
