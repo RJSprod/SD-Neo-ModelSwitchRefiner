@@ -2519,6 +2519,82 @@ the lift, the pair spacing, the ceiling, the bare read, the grid's pixels, the
 row height, the snap and the refresh on a picture's load. Not run on the user's
 machine or in Firefox.
 
+## 3.34 A drag takes only the handle
+
+Reported from the user's machine: "Sometimes when I drag it, it drags the
+whole page instead of just dragging the fly out menu button or the fly out
+menu itself. Can you make sure that the fly out menu when dragging the drag
+action does not impact anything else on the page? If I drag the fly out menu
+or its button, only that should move."
+
+### What the browser does with a press nobody cancelled
+
+`startDrag` took pointer capture and moved the panel, and left the press's
+own default to the browser. On a desktop that default is text selection: a
+press on the header -- its text, or the empty grip beside it -- began a
+selection that grew across the page's text as the hand moved, and the page
+lit up under the drag. Worse, a press *inside* a selection that already held
+the handle (the last drag's, or a select-all) is a native drag of that
+selection: the browser carries a ghost of everything selected -- the whole
+page -- under the cursor, fires `pointercancel`, and the panel goes nowhere.
+That is the report, and "sometimes" is the selection a previous drag left.
+On a phone the default is the pan: the handles have said `touch-action:
+none` since the first build, which is what tells the browser before the
+gesture begins that a finger on them is not a scroll, but a host's stylesheet
+can take it away (a reset's `button { touch-action: manipulation }` is
+common), and then the page scrolled under the finger.
+
+### Three things, each on its own
+
+1. **A mouse or pen press is the shell's.** `startDrag` cancels the
+   pointerdown once it is past its guards (a second button, a second finger,
+   a press on a control are still the browser's). A cancelled pointerdown
+   cancels the compatibility mouse events and with them the selection and
+   the native drag, and leaves the click the press becomes alone: a click on
+   the launcher still opens the panel, and the header's three presses still
+   toggle focus. **A finger's press is not cancelled.** A finger selects
+   nothing by dragging, and Chromium delivers the click after a cancelled
+   touch pointerdown with `detail` 0, which `headerClick` reads as a
+   keyboard activation: the first build cancelled every press, and three
+   taps on the header stopped toggling focus on the phone -- found by
+   driving the taps against HEAD's script and the build in Chromium, not by
+   a test, which is why there is one now.
+2. **The handles are nothing the browser may select or drag.** The launcher
+   and the header are `user-select: none` and `-webkit-user-drag: none`, so a
+   selection cannot start or end on them whichever way it is made, and a
+   `dragstart` on either is refused where it begins.
+3. **A finger's move under a live drag is cancelled** (`blockPan`): a
+   non-passive `touchmove` listener on each handle -- touch events follow
+   the touch that began on the handle wherever the finger goes, so the
+   handle hears every move -- that cancels the move while `this.drag` is
+   set and the event is still cancelable. It is wired on the handles and
+   never on the window, on purpose: a non-passive touchmove listener on the
+   window makes every scroll of the page wait for the main thread, which a
+   Gradio page can hold for a long moment; on the handles it costs only the
+   touches that start there, which must wait anyway. A press `startDrag`
+   refused leaves the gesture to the browser, as before.
+
+### Verified
+
+`tests/test_assistant_js.py` (`TestADragTakesOnlyTheHandle`): an accepted
+mouse press is cancelled and a pen's too; a finger's begins the drag
+uncancelled; a second button, a second finger and a press on a control are
+not cancelled and begin nothing; a move is cancelled only under a live drag,
+never one the browser already took, and not after the drag ends; the blocker
+is on the handles and no touch listener is on the window.
+`tests/test_assistant_layout.py` in Chromium: a mouse drag from the grip
+across the page's text moves the panel by exactly the drag and selects
+nothing; with the whole page selected first the panel still moves; a
+`dragstart` on either handle is refused; on a phone a finger takes the
+launcher 200 px up a page three windows tall and `scrollY` stays 0 while a
+finger on the page's text does scroll it; with a host rule `touch-action:
+auto !important` on both handles the page still stays still under the drag;
+and three taps on the header still toggle focus. Each of the seven was
+reverted one at a time and a test failed: the cancel, the finger's
+exemption, the `user-select`, the `touch-action`, the touchmove wiring, the
+live-drag guard, the `dragstart`. Not run on the user's machine or in
+Firefox, where the selection drag was seen.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

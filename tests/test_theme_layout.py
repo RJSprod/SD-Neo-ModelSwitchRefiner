@@ -99,6 +99,18 @@ textarea { width: 100%; min-height: 60px; }
 .extra-network-pane .card .actions { position: absolute; bottom: 0; left: 0; right: 0; padding: 0.5em; }
 .extra-network-pane .card .actions .name { font-size: 1.7em; font-weight: bold; }
 .extra-network-control .extra-network-control--search-text { width: 16em; }
+.extra-network-control small { line-height: 2.2rem; margin: 0 0.5rem 0 0.75rem; }
+.extra-network-control .extra-network-control--sort, .extra-network-control .extra-network-control--sort-dir,
+.extra-network-control .extra-network-control--tree-view, .extra-network-control .extra-network-control--refresh { padding: 0.25rem; display: inline-flex; }
+.extra-network-control .extra-network-control--icon { width: 1.5rem; height: 1.5rem; background: #888; display: block; }
+.global-popup { display: flex; position: fixed; z-index: 1001; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; }
+.global-popup-close { position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: rgba(20, 20, 20, 0.95); }
+.global-popup-inner { display: inline-block; margin: auto; padding: 2em; z-index: 1001; max-height: 90%; max-width: 90%; }
+.edit-user-metadata { width: 56em; background: var(--body-background-fill) !important; padding: 2em !important; }
+.edit-user-metadata .extra-network-name { font-size: 18pt; }
+.edit-user-metadata .file-metadata th, .edit-user-metadata .file-metadata td { padding: 0.3em 1em; }
+.prose table td, .prose table th { border: 1px solid #555; padding: 8px 12px; }
+.gap { gap: var(--layout-gap, 12px); }
 button.lg { font-size: 16px; padding: 8px 16px; min-height: 40px; }
 .extra-page-prompts { display: none; }
 """
@@ -139,11 +151,40 @@ def controls_html(tabname: str, page: str) -> str:
     """html/extra-networks-pane.html: the page's own controls, hidden until
     Forge's script gathers them into the tab strip and shows the page's."""
     full = f"{tabname}_{page}"
+    sorts = "".join(f'<div id="{full}_extra_sort_{key}" class="extra-network-control--sort" data-sortkey="{key}">'
+                    f'<i class="extra-network-control--icon extra-network-control--sort-icon"></i></div>'
+                    for key in ("default", "name", "date_created", "date_modified"))
     return (f'<div class="extra-network-control" id="{full}_controls" style="display:none">'
             f'<div class="extra-network-control--search"><input id="{full}_extra_search" '
             f'class="extra-network-control--search-text" type="search" placeholder="Search"></div>'
-            f'<div id="{full}_extra_sort_dir" class="extra-network-control--sort-dir" data-sortdir="Ascending"></div>'
-            f'<div id="{full}_extra_refresh" class="extra-network-control--refresh"></div></div>')
+            f'<small>Sort: </small>{sorts}<small> </small>'
+            f'<div id="{full}_extra_sort_dir" class="extra-network-control--sort-dir" data-sortdir="Ascending">'
+            f'<i class="extra-network-control--icon extra-network-control--sort-dir-icon"></i></div><small> </small>'
+            f'<div id="{full}_extra_tree_view" class="extra-network-control--tree-view">'
+            f'<i class="extra-network-control--icon extra-network-control--tree-view-icon"></i></div>'
+            f'<div id="{full}_extra_refresh" class="extra-network-control--refresh">'
+            f'<i class="extra-network-control--icon extra-network-control--refresh-icon"></i></div></div>')
+
+
+# A card's metadata editor, open: Forge's popup (javascript/ui.js, popup())
+# around the editor Gradio built (modules/ui_extra_networks_user_metadata.py,
+# extensions-builtin/sd_forge_lora/ui_edit_user_metadata.py).
+POPUP_HTML = """<div class="global-popup"><div class="global-popup-close"></div><div class="global-popup-inner">
+<div id="txt2img_lora_edit_user_metadata" class="edit-user-metadata block gap">
+  <div class="row gap"><div class="column gap" style="flex: 2">
+    <div class="block"><div class="prose extra-network-name">kreapov</div></div>
+    <div class="block"><label><span>Description</span><textarea rows="2"></textarea></label></div>
+    <div class="block"><div class="prose"><table class="file-metadata"><tr><th>Filename:</th><td>krea2\\kreapov.safetensors</td></tr>
+      <tr><th>File size:</th><td>218MB</td></tr><tr><th>Hash:</th><td>07ba28af4eef</td></tr>
+      <tr><th>Model:</th><td>urn:air:krea2:repository:huggingface:krea/Krea-2-Raw@main.tar</td></tr></table></div></div>
+  </div><div class="column gap" style="flex: 1; min-width: 0"><div class="block"><div class="prose"><div style="width: 100%; aspect-ratio: 2 / 3; background: #333"></div></div></div></div></div>
+  <div class="block"><label><span>Preset</span><input value="Unknown"></label></div>
+  <div class="block"><label><span>Activation Text</span><textarea rows="1"></textarea></label></div>
+  <div class="block"><label><span>Preferred Weight</span><input value="0.0"></label></div>
+  <div class="block"><label><span>Negative Prompt</span><textarea rows="1"></textarea></label></div>
+  <div class="block"><label><span>Notes</span><textarea rows="2"></textarea></label></div>
+  <div class="row gap edit-user-metadata-buttons"><button class="gradio-button">Cancel</button><button class="gradio-button primary">Replace preview</button><button class="gradio-button primary">Save</button></div>
+</div></div></div>"""
 
 
 def pane_html(tabname: str, page: str, *, controls_built: bool) -> str:
@@ -183,7 +224,7 @@ def extra_pages(tabname: str, *, controls_built: bool) -> str:
 
 
 def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
-              controls_built: bool = True, assistant: str = "") -> str:
+              controls_built: bool = True, assistant: str = "", popup: bool = False) -> str:
     """`assistant` is a user.css to put on a page that also runs the Forge
     Assistant's scripts, in Forge's order (its folder's scripts load before
     this one's), with Gradio's gallery markup for its fill to measure."""
@@ -265,6 +306,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
   {panels}
 </div>
 <div id="footer">footer</div>
+{POPUP_HTML if popup else ""}
 </div></gradio-app>
 <script>
 function gradioApp() {{
@@ -345,13 +387,13 @@ ON = {"model_chain_theme": True}
 
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
-              controls_built=True, assistant=""):
+              controls_built=True, assistant="", popup=False):
     """A page of its own context, or one in a context given -- two pages of
     one context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height})
     page = owner.new_page()
     html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
-                     assistant=assistant)
+                     assistant=assistant, popup=popup)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcTheme" + (" && !!(window.forgeAssistant && window.forgeAssistant.fill)"
@@ -744,6 +786,25 @@ class TestTheQuickSettingsDrawer:
         page.close()
 
 
+CONTROLS_ROW = """() => {
+    const q = (s) => document.querySelector(s);
+    const ids = ["txt2img_lora_extra_sort_default", "txt2img_lora_extra_sort_name", "txt2img_lora_extra_sort_date_created",
+                 "txt2img_lora_extra_sort_date_modified", "txt2img_lora_extra_sort_dir", "txt2img_lora_extra_tree_view",
+                 "txt2img_lora_extra_refresh"];
+    const boxes = ids.map((id) => document.getElementById(id).getBoundingClientRect());
+    const search = q("#txt2img_lora_extra_search").getBoundingClientRect();
+    const label = q("#txt2img_lora_controls small");
+    const spacers = [...document.querySelectorAll("#txt2img_lora_controls small")].slice(1)
+        .map((s) => getComputedStyle(s).display);
+    return {tops: boxes.map((b) => Math.round(b.top)), searchBottom: search.bottom,
+            label: getComputedStyle(label).display, labelTop: label.getBoundingClientRect().top,
+            labelHeight: label.getBoundingClientRect().height,
+            buttonHeight: Math.max(...boxes.map((b) => b.height)),
+            aside: q(".mc-theme-networks").getBoundingClientRect().width,
+            icon: q("#txt2img_lora_extra_sort_default i").getBoundingClientRect().width, spacers};
+}"""
+
+
 class TestTheExtraNetworksDrawer:
     def test_the_pages_leave_forges_tabs_for_a_drawer_on_the_right_and_generation_stays(self, browser):
         page = open_page(browser)
@@ -908,6 +969,34 @@ class TestTheExtraNetworksDrawer:
         assert found["sortBelowSearch"] is True, found
         assert found["dirFont"] <= 12 and found["dirHeight"] <= 28, found
         assert found["nameFont"] <= 11.5 and found["nameWeight"] in ("600", "500"), found
+        page.close()
+
+    def test_the_pages_controls_sit_on_one_row_under_the_search(self, browser):
+        """Forge's 24 px icons with half-rem spacers came to a few pixels more
+        than the drawer, and the tree view and refresh rolled onto a third
+        row. One row, with the label (Forge's is a 2.2 rem line) no taller
+        than the buttons beside it; and one row at the drawer's narrowest,
+        240 px, where the label goes before anything wraps."""
+        page = open_page(browser)
+        page.click(".mc-theme-networks-toggle")
+        page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+        settle(page)
+        found = page.evaluate(CONTROLS_ROW)
+
+        assert found["aside"] == 340, found
+        assert len(set(found["tops"])) == 1, found
+        assert found["tops"][0] >= found["searchBottom"] - 1, found
+        assert found["label"] != "none" and abs(found["labelTop"] - found["tops"][0]) <= 8, found
+        assert found["labelHeight"] <= found["buttonHeight"] + 1, found
+        assert found["icon"] <= 20 and all(d == "none" for d in found["spacers"]), found
+
+        page.evaluate("opts.model_chain_theme_networks_width = 240")
+        changed(page)
+        narrow = page.evaluate(CONTROLS_ROW)
+
+        assert narrow["aside"] == 240, narrow
+        assert len(set(narrow["tops"])) == 1, narrow
+        assert narrow["label"] == "none", narrow
         page.close()
 
     def test_off_puts_the_pages_back_beside_generation(self, browser):
@@ -1139,6 +1228,51 @@ class TestWithTheForgeAssistant:
         assert luminance(found["interrupt"]) < 0.3, found["interrupt"]
         assert found["interrupt"] != found["skip"]
         assert found["interruptBorder"] != found["interrupt"]
+        page.close()
+
+
+class TestForgesPopup:
+    def test_a_cards_metadata_editor_is_a_centred_dense_dialog(self, browser):
+        """Forge's popup is the window with a 56 em box inside, which on a
+        window not much wider runs past its 90% cap and sits off centre (the
+        box's auto margins are nothing once it overflows), with no scrolling
+        of its own, so a tall one scrolls the whole popup; its name at 18 pt
+        and its fields at prose padding. The page the user had drew it as a
+        dialog: centred, 24 px inside a window smaller than Forge's box both
+        ways, scrolling inside it, dense."""
+        width, height = 720, 560
+        page = open_page(browser, width=width, height=height, popup=True)
+        found = page.evaluate("""() => {
+            const q = (s) => document.querySelector(s);
+            const popup = q(".global-popup");
+            const innerNode = q(".global-popup-inner");
+            const inner = innerNode.getBoundingClientRect();
+            const editorNode = q(".edit-user-metadata");
+            const editor = editorNode.getBoundingClientRect();
+            const px = (node, prop) => parseFloat(getComputedStyle(node)[prop]);
+            const td = q(".file-metadata td");
+            return {inner: {left: inner.left, right: innerWidth - inner.right, top: inner.top,
+                            bottom: innerHeight - inner.bottom, width: inner.width, height: inner.height,
+                            scrolls: innerNode.scrollHeight > innerNode.clientHeight + 1},
+                    editor: {left: editor.left, right: innerWidth - editor.right, width: editor.width,
+                             inside: editor.left >= inner.left - 0.5 && editor.right <= inner.right + 0.5},
+                    popupScrolls: popup.scrollHeight > popup.clientHeight + 1,
+                    name: px(q(".extra-network-name"), "fontSize"),
+                    cellPad: px(td, "paddingTop"), cellBorder: px(td, "borderTopWidth"),
+                    gap: px(editorNode, "gap")};
+        }""")
+
+        inner, editor = found["inner"], found["editor"]
+        assert abs(inner["left"] - inner["right"]) <= 2 and abs(editor["left"] - editor["right"]) <= 2, found
+        assert abs(inner["top"] - inner["bottom"]) <= 2, found
+        assert inner["width"] <= width - 48 + 0.5 and editor["width"] <= width - 48 + 0.5, found
+        assert inner["height"] <= height - 48 + 0.5, found
+        assert editor["inside"], found
+        # Taller than the window, the dialog scrolls inside; the popup does not.
+        assert inner["scrolls"] is True and found["popupScrolls"] is False, found
+        assert found["name"] <= 16.5, found
+        assert found["cellPad"] <= 2.5 and found["cellBorder"] == 0, found
+        assert found["gap"] <= 8, found
         page.close()
 
 

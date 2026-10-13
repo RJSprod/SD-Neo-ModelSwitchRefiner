@@ -1273,6 +1273,22 @@
         if (target && target !== node && target.closest
             && target.closest("button, a, input, textarea, select")
             && target.closest("button, a, input, textarea, select") !== node) return;
+        // The press is this shell's. Left to the browser, a mouse or pen
+        // press on the header's text starts a selection that grows across
+        // the page as the hand moves, and a press inside a selection that
+        // already holds the handle starts a native drag of it -- a ghost of
+        // the whole page under the cursor, the panel going nowhere.
+        // Cancelling the pointerdown cancels both and leaves the click it
+        // becomes alone. Not a finger's press: a finger selects nothing by
+        // dragging (its pan is not a pointerdown default either -- that is
+        // the handles' `touch-action: none`, and `blockPan` under a drag
+        // that is live), and Chromium delivers the click after a cancelled
+        // touch pointerdown with `detail` 0, which `headerClick` reads as a
+        // keyboard activation: three taps on the header stopped toggling
+        // focus the one time this cancelled every press.
+        if (event.pointerType !== "touch" && typeof event.preventDefault === "function") {
+            event.preventDefault();
+        }
         // A new press. Whatever the last drag left for the header's click to
         // swallow, that click is not coming now.
         this.suppressHeaderClick = false;
@@ -1393,6 +1409,26 @@
             drag.node.releasePointerCapture(drag.pointerId);
         } catch (error) { /* never held, or already released */ }
         this.placeNow();
+    };
+
+    /** The page does not pan under a finger that is dragging a handle.
+     *
+     * The handles' `touch-action: none` is what tells the browser, before the
+     * gesture begins, that a finger on them is not a scroll; this says it
+     * again on every move of a drag that is live, for a host whose stylesheet
+     * gives a button a touch-action of its own (a reset's `button {
+     * touch-action: manipulation }` is a common one) and for a browser that
+     * read the handle's rule late. Wired on the handles, never the window: a
+     * non-passive touchmove listener makes every scroll that starts under it
+     * wait for the main thread, which a Gradio page can hold for a long
+     * moment, and a touch that starts on a handle is the only one that must.
+     * A press that `startDrag` refused -- on a control, a second finger --
+     * is the browser's gesture, and so is a move it has already taken (one
+     * that is not cancelable).
+     */
+    Shell.prototype.blockPan = function (event) {
+        if (!this.drag || !event || event.cancelable === false) return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
     };
 
     // -- wiring ------------------------------------------------------------- //
@@ -1595,6 +1631,14 @@
             this.on(handle, "pointerdown", (event) => {
                 this.startDrag(event, this.state.panelOpen ? nodes.panel : nodes.launcher);
             });
+            // Only the handle moves: not the page under a finger (see
+            // `blockPan`; touch events follow the touch that began on the
+            // handle wherever it goes, so the handle hears every move of the
+            // gesture), and not a ghost of a picture, a link or a selection
+            // the press landed in, which is what the browser drags instead
+            // of the panel when it starts a drag of its own.
+            this.on(handle, "touchmove", (event) => this.blockPan(event), {passive: false});
+            this.on(handle, "dragstart", (event) => event.preventDefault());
         });
         this.on(window, "pointermove", (event) => this.moveDrag(event));
         this.on(window, "pointerup", (event) => this.endDrag(event, false));
