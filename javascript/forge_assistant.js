@@ -1313,14 +1313,22 @@
             anchor: this.anchor(),
             committed: false,
         };
+        this.drag.watch = this.watchDrag(event, node);
         try {
             node.setPointerCapture(event.pointerId);
+            this.drag.watch.captured = true;
         } catch (error) { /* capture is an optimisation, not a requirement */ }
     };
 
     Shell.prototype.moveDrag = function (event) {
         const drag = this.drag;
         if (!drag || event.pointerId !== drag.pointerId) return;
+        if (drag.watch) {
+            drag.watch.moves += 1;
+            drag.watch.travel = Math.max(drag.watch.travel,
+                                         Math.hypot(event.clientX - drag.startX,
+                                                    event.clientY - drag.startY));
+        }
         // The button came up somewhere this page never heard about -- outside
         // the window, in another application, across a remote-desktop session
         // that changed hands. Without this the panel follows the cursor until
@@ -1409,6 +1417,133 @@
             drag.node.releasePointerCapture(drag.pointerId);
         } catch (error) { /* never held, or already released */ }
         this.placeNow();
+        if (drag.watch) {
+            try {
+                this.accountForDrag(drag, event, cancelled);
+            } catch (error) { /* an account is never worth a drag */ }
+        }
+    };
+
+    // -- the drag's account of itself -------------------------------------- //
+    //
+    // Reported from the user's machine, twice: "dragging the flyout button or
+    // menu still moves the whole page" -- on a page just loaded, nothing else
+    // touched -- and not reproduced here in Chromium by a mouse, a finger, a
+    // selection or a host rule on the handles. So every drag keeps an account
+    // of what else moved while it was live and writes it to the console when
+    // it ends (`forgeAssistant.shell.lastDrag` keeps the last one); a drag that
+    // found something else moved says so on the status line too, where a
+    // phone can read it with the panel open. The account: the pointer and what
+    // it pressed, the handle's computed touch-action and user-select, whether
+    // the press was cancelled and captured, the page's scroll, the visual
+    // viewport, the document's height, the tabs' place in the document and the
+    // selection before and after, the moves seen, the touch moves blocked, and
+    // how the drag ended.
+
+    /** A node, for the account: `button#forge-assistant-launcher.forge-assistant-launcher`. */
+    function describe(node) {
+        if (!node || node.nodeType !== 1) return String((node && node.nodeName) || "?");
+        const names = node.classList && node.classList.length
+            ? "." + Array.from(node.classList).slice(0, 2).join(".") : "";
+        return String(node.nodeName).toLowerCase() + (node.id ? "#" + node.id : "") + names;
+    }
+
+    /** What of the page might move under a drag, read before and after it. */
+    function pageState() {
+        const doc = document.documentElement;
+        const scroll = [Math.round(window.scrollX || 0), Math.round(window.scrollY || 0)];
+        const tabs = document.getElementById("tabs");
+        const box = tabs && tabs.getBoundingClientRect ? tabs.getBoundingClientRect() : null;
+        const visual = window.visualViewport;
+        let selection = 0;
+        try {
+            const found = window.getSelection && window.getSelection();
+            selection = found ? String(found).length : 0;
+        } catch (error) { /* a document without one */ }
+        return {
+            scroll,
+            visual: visual ? [Math.round(visual.offsetLeft || 0), Math.round(visual.offsetTop || 0),
+                              Math.round((Number(visual.scale) || 1) * 100) / 100] : null,
+            height: Number(doc && doc.scrollHeight) || 0,
+            // In the document's coordinates, so a scroll alone is not a move.
+            tabs: box ? [Math.round(box.left + scroll[0]), Math.round(box.top + scroll[1])] : null,
+            selection,
+        };
+    }
+
+    Shell.prototype.watchDrag = function (event, node) {
+        // The rules read are the pressed handle's -- the header's for a panel
+        // -- not the dragged node's.
+        const handle = event.currentTarget && event.currentTarget.nodeType === 1
+            ? event.currentTarget : node;
+        let style = null;
+        try {
+            style = window.getComputedStyle(handle);
+        } catch (error) { /* a stub for a node */ }
+        return {
+            handle: node === this.nodes.panel ? "panel" : "launcher",
+            pointer: event.pointerType || "unknown",
+            pressed: describe(event.target && event.target.nodeType === 1 ? event.target : node),
+            touchAction: (style && style.touchAction) || "?",
+            userSelect: (style && style.userSelect) || "?",
+            pressCancelled: !!event.defaultPrevented,
+            captured: false,
+            before: pageState(),
+            moves: 0,
+            travel: 0,
+            touchMoves: 0,
+            touchCancelable: 0,
+            touchBlocked: 0,
+            started: Date.now(),
+        };
+    };
+
+    Shell.prototype.accountForDrag = function (drag, event, cancelled) {
+        const watch = drag.watch;
+        const after = pageState();
+        const delta = (was, now) => (was && now ? was.map((value, i) => now[i] - value) : null);
+        const some = (values) => !!values && values.some((value) => value !== 0);
+        const report = {
+            handle: watch.handle,
+            pointer: watch.pointer,
+            pressed: watch.pressed,
+            ended: event && event.type ? event.type : "reset",
+            cancelled: !!cancelled,
+            moved: !!drag.moved,
+            moves: watch.moves,
+            travel: Math.round(watch.travel),
+            ms: Date.now() - watch.started,
+            pageScrolled: delta(watch.before.scroll, after.scroll),
+            viewportMoved: delta(watch.before.visual, after.visual),
+            heightChanged: after.height - watch.before.height,
+            tabsMoved: delta(watch.before.tabs, after.tabs),
+            selectionGrew: after.selection - watch.before.selection,
+            touchAction: watch.touchAction,
+            userSelect: watch.userSelect,
+            pressCancelled: watch.pressCancelled,
+            captured: watch.captured,
+            touchMoves: watch.touchMoves,
+            touchCancelable: watch.touchCancelable,
+            touchBlocked: watch.touchBlocked,
+            fullscreen: !!document.fullscreenElement,
+            astray: [],
+        };
+        if (some(report.pageScrolled)) report.astray.push("the page scrolled by " + report.pageScrolled.join(", "));
+        if (some(report.viewportMoved)) report.astray.push("the viewport moved by " + report.viewportMoved.join(", "));
+        if (some(report.tabsMoved)) report.astray.push("the tabs moved by " + report.tabsMoved.join(", "));
+        if (report.heightChanged) report.astray.push("the page's height changed by " + report.heightChanged);
+        if (report.selectionGrew > 0) report.astray.push("a selection grew by " + report.selectionGrew);
+        if (cancelled && event && event.type && event.type !== "pointerup") {
+            report.astray.push("the browser ended it (" + event.type + ")");
+        }
+        this.lastDrag = report;
+        try {
+            console.info("Forge Assistant drag: " + JSON.stringify(report));
+        } catch (error) { /* no console to write to */ }
+        if (report.astray.length && drag.moved) {
+            this.tell("That drag moved more than the handle: " + report.astray.join("; ")
+                      + ". The console has the account.", "warn");
+        }
     };
 
     /** The page does not pan under a finger that is dragging a handle.
@@ -1427,8 +1562,15 @@
      * that is not cancelable).
      */
     Shell.prototype.blockPan = function (event) {
-        if (!this.drag || !event || event.cancelable === false) return;
+        if (!this.drag || !event) return;
+        const watch = this.drag.watch;
+        if (watch) {
+            watch.touchMoves += 1;
+            if (event.cancelable !== false) watch.touchCancelable += 1;
+        }
+        if (event.cancelable === false) return;
         if (typeof event.preventDefault === "function") event.preventDefault();
+        if (watch) watch.touchBlocked += 1;
     };
 
     // -- wiring ------------------------------------------------------------- //

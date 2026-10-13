@@ -2891,7 +2891,8 @@ class TestADragTakesOnlyTheHandle:
         const press = (over) => Object.assign({
             pointerId: 1, button: 0, isPrimary: true, pointerType: "mouse",
             clientX: 950, clientY: 520, target: null, cancelled: false,
-            preventDefault() { this.cancelled = true; }}, over || {});
+            defaultPrevented: false,
+            preventDefault() { this.cancelled = true; this.defaultPrevented = true; }}, over || {});
         const move = (cancelable) => ({cancelable, cancelled: false,
                                        preventDefault() { this.cancelled = true; }});
     """
@@ -2961,6 +2962,48 @@ class TestADragTakesOnlyTheHandle:
         """, sources=("shell",))
 
         assert found == {"idle": False, "under": True, "taken": False, "after": False}
+
+    def test_every_drag_leaves_an_account_of_what_else_moved(self):
+        """Reported twice from the user's machine and not reproduced here:
+        the drag writes what it saw -- the press, the handle's rules, the
+        page's scroll before and after, the moves, how it ended -- to the
+        console, and keeps it as `lastDrag`. A page that scrolled under the
+        drag is said on the status line, where a phone can read it."""
+        found = run(self.SHELL + """
+            const lines = [];
+            console.info = (line) => lines.push(line);
+            shell.told = null;
+            shell.startDrag(press(), shell.nodes.panel);
+            shell.moveDrag(press({clientX: 960, clientY: 540}));
+            shell.moveDrag(press({clientX: 990, clientY: 560}));
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            const quiet = shell.lastDrag;
+            const quietTold = shell.told;
+            // The page scrolls while the next one is live.
+            shell.startDrag(press({pointerId: 2}), shell.nodes.panel);
+            shell.moveDrag(press({pointerId: 2, clientX: 900, clientY: 500}));
+            globalThis.scrollY = 120;
+            shell.endDrag({pointerId: 2, type: "pointercancel"}, true);
+            globalThis.scrollY = 0;
+            console.log(JSON.stringify({quiet, quietTold, lines: lines.length,
+                                        first: lines[0].slice(0, 22),
+                                        astray: shell.lastDrag.astray,
+                                        scrolled: shell.lastDrag.pageScrolled,
+                                        ended: shell.lastDrag.ended,
+                                        told: shell.told}));
+        """, sources=("shell",))
+
+        quiet = found["quiet"]
+        assert quiet["handle"] == "panel" and quiet["pointer"] == "mouse"
+        assert quiet["moves"] == 2 and quiet["travel"] == 57 and quiet["moved"] is True
+        assert quiet["ended"] == "pointerup" and quiet["cancelled"] is False
+        assert quiet["pressCancelled"] is True and quiet["captured"] is True
+        assert quiet["pageScrolled"] == [0, 0] and quiet["astray"] == []
+        assert found["quietTold"] is None, "nothing to say about a drag that moved the handle alone"
+        assert found["lines"] == 2 and found["first"] == "Forge Assistant drag: "
+        assert found["scrolled"] == [0, 120] and found["ended"] == "pointercancel"
+        assert found["astray"] == ["the page scrolled by 0, 120", "the browser ended it (pointercancel)"]
+        assert found["told"]["kind"] == "warn" and "the page scrolled by 0, 120" in found["told"]["text"]
 
     def test_the_pan_blocker_is_on_the_handles_and_never_the_window(self):
         """A non-passive touchmove listener on the window makes every scroll

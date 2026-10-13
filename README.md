@@ -3532,7 +3532,14 @@ no drag of a selection that happens to hold the handle (which carried a ghost
 of the whole page under the cursor while the panel went nowhere); the
 launcher and the header are nothing the browser can select or drag at all;
 and a finger on either does not scroll the page under it, even where a
-stylesheet has given buttons a touch-action of their own.
+stylesheet has given buttons a touch-action of their own. Every drag writes an
+account of itself to the browser's console, one `Forge Assistant drag:` line:
+what was pressed and with what, the handle's rules, whether the press was
+cancelled and captured, whether the page, the viewport, the selection or the
+tabs moved under it, the moves seen and the touch moves blocked, and how it
+ended; `forgeAssistant.shell.lastDrag` keeps the last. A drag that moved more
+than the handle says so on the panel's status line as well, where a phone can
+read it with the panel open.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the panel
 anywhere in the window. Turning it on leaves it exactly where it is rather than

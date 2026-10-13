@@ -2574,6 +2574,31 @@ common), and then the page scrolled under the finger.
    touches that start there, which must wait anyway. A press `startDrag`
    refused leaves the gesture to the browser, as before.
 
+### The account, after a second report
+
+The build above went to the user's machine and came back: "unfortunately
+that didn't work, dragging the flyout button or menu still moves the whole
+page" -- "i only touched the flyout and nothing else. just open the page and
+tried to drag it once the page finished loading". A page just loaded has no
+selection, so the mechanism above is not what they are seeing, and nothing
+in Chromium here -- a mouse, a finger, a select-all, a host rule on the
+handles -- moves anything but the handle. What their browser does with the
+press is not known from here. So every drag keeps an account of itself
+(`watchDrag` at the press, `accountForDrag` at the end): the pointer and
+what it pressed, the pressed handle's computed `touch-action` and
+`user-select`, whether the press was cancelled and captured, the page's
+scroll, the visual viewport's offset and scale, the document's height, the
+tabs' place in the document and the selection's length before and after,
+the moves seen and the furthest one, the touch moves the handle heard, how
+many were cancelable and how many it cancelled, how the drag ended
+(`pointerup`, `pointercancel`, `lostpointercapture`, or a reset) and whether
+the document was full screen. It is one `Forge Assistant drag:` line on the
+console with the account as JSON, kept as `forgeAssistant.shell.lastDrag`;
+and a drag that moved and found something else moved -- the page scrolled,
+the viewport moved, the tabs moved, the height changed, a selection grew,
+the browser ended it -- says so on the status line (`tell`, a warning), where
+a phone can read it with the panel open. The next report is that line.
+
 ### Verified
 
 `tests/test_assistant_js.py` (`TestADragTakesOnlyTheHandle`): an accepted
@@ -2589,11 +2614,16 @@ nothing; with the whole page selected first the panel still moves; a
 launcher 200 px up a page three windows tall and `scrollY` stays 0 while a
 finger on the page's text does scroll it; with a host rule `touch-action:
 auto !important` on both handles the page still stays still under the drag;
-and three taps on the header still toggle focus. Each of the seven was
-reverted one at a time and a test failed: the cancel, the finger's
-exemption, the `user-select`, the `touch-action`, the touchmove wiring, the
-live-drag guard, the `dragstart`. Not run on the user's machine or in
-Firefox, where the selection drag was seen.
+and three taps on the header still toggle focus. The account: a quiet drag's
+line says the press was cancelled and captured, the handle's rules, nothing
+moved; a page scrolled under a drag (by the test, mid-drag) is in the line
+and on the status line; a finger's line counts the moves the handle heard
+and blocked. Each of the seven was reverted one at a time and a test failed:
+the cancel, the finger's exemption, the `user-select`, the `touch-action`,
+the touchmove wiring, the live-drag guard, the `dragstart`; and four of the
+account's: never written, nothing said, the scroll not read, the touch
+moves not counted. Run on the user's machine once, and still moving the
+page there: the account is what the next run brings back.
 
 ## 4. Deliberate deviations
 
