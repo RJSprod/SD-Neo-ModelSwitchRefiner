@@ -6346,7 +6346,11 @@ one second.
   as it always did, because the pages are Forge's own elements, moved. A page
   is taken only once Forge's script has wired it (it does so after the page's
   HTML arrives, later than the page's load), and the drawer follows the tab:
-  Txt2Img's pages on Txt2Img, Img2Img's on Img2Img, nothing elsewhere.
+  Txt2Img's pages on Txt2Img, Img2Img's on Img2Img, nothing elsewhere. A page
+  is drawn at the drawer's density: the search box on a row of its own with
+  the sort buttons under it, the directories as small buttons, a card's name
+  at 11 px over its picture, where Forge's page, laid out for the window's
+  width, has them at a size that fills a drawer with buttons and names.
 - **Generation info as a panel**: the parameters Forge writes under the
   gallery, drawn as the prompt and the negative prompt in blocks with a copy
   button each, and every setting as a chip, with a button that copies the

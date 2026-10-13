@@ -2945,11 +2945,17 @@ class TestTheHeaderIsOneRow:
         assert found["children"] == ["SPAN"]
 
     def test_the_grip_can_take_the_rows_leftover_room(self):
+        """It grows into the row's leftover room, and from a basis of nothing:
+        with its content as the basis, the memory reading inside it was
+        counted before the row wrapped, and a reading one digit wider put the
+        close button on a second row (seen on the user's page under the Model
+        Chain theme; `tests/test_theme_layout.py` renders it)."""
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
         rule = css.split(".forge-assistant-grip {", 1)[1].split("}", 1)[0]
 
-        assert "flex: 1 1 auto" in rule
+        assert "flex: 1 1 0%" in rule
+        assert "flex: 1 1 auto" not in rule
 
     def test_the_rules_for_the_rows_that_went_are_gone_too(self):
         """Dead CSS that names a class nothing emits is the next person's
