@@ -3532,15 +3532,22 @@ no drag of a selection that happens to hold the handle (which carried a ghost
 of the whole page under the cursor while the panel went nowhere); the
 launcher and the header are nothing the browser can select or drag at all;
 and a finger on either does not scroll the page under it, even where a
-stylesheet has given buttons a touch-action of their own. Every drag writes an
-account of itself into the extension's own log, `<WebUI data
-directory>/model_chain_llm/logs/model_chain.log`, as one `Forge Assistant drag`
-line between whatever else was being logged: what was pressed and with what,
-the handle's rules, whether the press was cancelled and captured, whether the
-page, the viewport, the selection or the tabs moved under it, where the handle
-was put, the moves seen and the touch moves blocked, how it ended, the events
-as they came (the first sixty and the last, each with its time and what the
-browser said of it), and the page it happened on — the browser, the pointer the
+stylesheet has given buttons a touch-action of their own — and, because one
+browser pans the page under a finger whatever the page says about the touch,
+while a finger or a pen drags a handle the page cannot scroll at all: the
+scrolling element (and, under focus mode, the focused workspace) is held
+`overflow: hidden` with its scrollbar's gutter kept so nothing shifts, and let
+go the moment the finger lifts. A mouse never pans, so a mouse drag leaves the
+page alone. Every drag writes an account of itself into the extension's own
+log, `<WebUI data directory>/model_chain_llm/logs/model_chain.log`, as one
+`Forge Assistant drag` line between whatever else was being logged: what was
+pressed and with what, how long the press waited for the page, the handle's
+rules, whether the press was cancelled and captured, what the drag held,
+whether the page, the viewport, the selection or the tabs moved under it,
+where the handle was put, the moves seen and the touch moves blocked, how it
+ended, the events as they came (the first sixty and the last, each with its
+time and what the browser said of it, the page's scroll sampled along them),
+and the page it happened on — the browser, the pointer the
 device has, the window and the viewport, the document's size against the
 window's, the scroller, what the root and the body say about overflow and
 transforms, the theme, focus mode, full screen and the panel's state. The same

@@ -1316,11 +1316,56 @@
             anchor: this.anchor(),
             committed: false,
         };
-        this.drag.watch = this.watchDrag(event, node);
+        this.drag.watch = this.watchDrag(event, node, box);
+        // A mouse never pans the page; anything else can, and in one browser
+        // does whatever the handle says. See `lockScroll`.
+        if (event.pointerType && event.pointerType !== "mouse") this.lockScroll();
+        this.drag.watch.locked = (this.scrollLock || []).map((was) => describe(was.node));
         try {
             node.setPointerCapture(event.pointerId);
             this.drag.watch.captured = true;
         } catch (error) { /* capture is an optimisation, not a requirement */ }
+    };
+
+    /** The page's scroll, held while a finger (or a pen) drags a handle.
+     *
+     * From the user's log (docs/22 §3.34): a finger on the launcher in a
+     * Gecko browser, `touch-action: none` computed on the handle, every
+     * touchmove cancelable and cancelled, the drag ended by its own pointerup
+     * -- and the page panned by the finger's travel under every drag. Nothing
+     * the page says about a gesture reaches that browser's pan in time: its
+     * compositor gives the page a few hundred milliseconds to answer a touch
+     * and then pans on its own, and a Gradio page can be busy for longer. So
+     * for as long as such a drag lives the page is made unscrollable instead:
+     * `overflow: hidden` on the scrolling element, with the scrollbar's
+     * gutter kept so nothing shifts under the handle, and under focus mode
+     * on the focused root as well, which scrolls in the page's place. Inline,
+     * and put back as found. `endDrag` lets go, on every path a drag ends by.
+     */
+    Shell.prototype.lockScroll = function () {
+        if (this.scrollLock) return;
+        const targets = [];
+        const scroller = document.scrollingElement || document.documentElement;
+        if (scroller && scroller.style) targets.push(scroller);
+        const focused = typeof document.querySelector === "function"
+            ? document.querySelector(".forge-assistant-focus-root") : null;
+        if (focused && focused.style && focused !== scroller) targets.push(focused);
+        this.scrollLock = targets.map((node) => {
+            const was = {node, overflow: node.style.overflow, gutter: node.style.scrollbarGutter};
+            node.style.scrollbarGutter = "stable";
+            node.style.overflow = "hidden";
+            return was;
+        });
+    };
+
+    Shell.prototype.unlockScroll = function () {
+        const held = this.scrollLock;
+        if (!held) return;
+        this.scrollLock = null;
+        held.forEach((was) => {
+            was.node.style.overflow = was.overflow;
+            was.node.style.scrollbarGutter = was.gutter;
+        });
     };
 
     Shell.prototype.moveDrag = function (event) {
@@ -1331,8 +1376,18 @@
             drag.watch.travel = Math.max(drag.watch.travel,
                                          Math.hypot(event.clientX - drag.startX,
                                                     event.clientY - drag.startY));
-            traceEvent(drag.watch, {e: "pointermove", x: event.clientX, y: event.clientY,
-                                    b: event.buttons});
+            const entry = {e: "pointermove", x: event.clientX, y: event.clientY,
+                           b: event.buttons};
+            // The page's scroll, sampled ten times a second along the moves:
+            // when it starts to move against the finger is the question the
+            // account exists to answer. Not on every move, because reading it
+            // flushes layout.
+            const since = Date.now() - drag.watch.started;
+            if (since - drag.watch.sampled >= 100 || drag.watch.moves === 1) {
+                drag.watch.sampled = since;
+                entry.sy = Math.round(window.scrollY || 0);
+            }
+            traceEvent(drag.watch, entry);
         }
         // The button came up somewhere this page never heard about -- outside
         // the window, in another application, across a remote-desktop session
@@ -1394,6 +1449,7 @@
         // Cleared first. A `lostpointercapture` arriving after this must find
         // nothing to undo.
         this.drag = null;
+        this.unlockScroll();
         this.nodes.root.classList.remove("forge-assistant-dragging");
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
         if (!cancelled && drag.moved) {
@@ -1543,7 +1599,7 @@
         };
     }
 
-    Shell.prototype.watchDrag = function (event, node) {
+    Shell.prototype.watchDrag = function (event, node, box) {
         // The rules read are the pressed handle's -- the header's for a panel
         // -- not the dragged node's.
         const handle = event.currentTarget && event.currentTarget.nodeType === 1
@@ -1552,8 +1608,18 @@
         try {
             style = window.getComputedStyle(handle);
         } catch (error) { /* a stub for a node */ }
-        const box = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+        // How long the press waited for the page: the time between the
+        // browser's stamp on the event and this handler running. A browser
+        // that pans on its own after a few hundred milliseconds without an
+        // answer is read here.
+        let delay = null;
+        if (typeof event.timeStamp === "number" && typeof performance === "object"
+            && performance && typeof performance.now === "function") {
+            delay = Math.max(0, Math.round(performance.now() - event.timeStamp));
+        }
         const watch = {
+            delay,
+            sampled: 0,
             handle: node === this.nodes.panel ? "panel" : "launcher",
             pointer: event.pointerType || "unknown",
             pressed: describe(event.target && event.target.nodeType === 1 ? event.target : node),
@@ -1576,7 +1642,8 @@
             started: Date.now(),
         };
         traceEvent(watch, {e: "pointerdown", x: watch.from[0], y: watch.from[1],
-                           c: event.cancelable !== false, p: !!event.defaultPrevented});
+                           c: event.cancelable !== false, p: !!event.defaultPrevented,
+                           sy: watch.before.scroll[1]});
         return watch;
     };
 
@@ -1614,6 +1681,8 @@
             from: watch.from,
             box: watch.box,
             put: watch.put,
+            delay: watch.delay,
+            locked: watch.locked,
             astray: [],
         };
         if (some(report.pageScrolled)) report.astray.push("the page scrolled by " + report.pageScrolled.join(", "));
@@ -5027,6 +5096,7 @@
 
     Shell.prototype.dispose = function () {
         this.stopMemory();
+        this.unlockScroll();
         window.clearTimeout(this._generateShown);
         this.resetTaps();
         this.resetHeaderTaps();
