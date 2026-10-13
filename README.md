@@ -6317,7 +6317,13 @@ one second.
   the container against the window gets a gallery that size, and the Forge
   Assistant's fitted results column, which reads the gap between the gallery
   and its buttons as the one space it spaces everything by, reads the real
-  gap.
+  gap. With the assistant on the page, then, Generate, the progress bar, the
+  gallery and its buttons fit the view under the bar without a scroll, the
+  gallery as tall as that leaves, and what follows the buttons scrolls; the
+  results column is held a margin under the bar while the settings scroll,
+  and under the assistant's focus mode, where the bar is hidden and the
+  workspace is the whole window, it is held at the workspace's padding
+  instead, so the fitted gallery stays whole there too.
 - **Quick settings in a drawer** on the left, under the bar: *off* leaves the
   checkpoint row where Forge draws it; *collapsed* moves it into the drawer,
   opened from the header; *open* opens it at every load. The drawer remembers

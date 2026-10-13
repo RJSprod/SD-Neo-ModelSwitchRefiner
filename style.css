@@ -1197,7 +1197,10 @@
 }
 
 /* The results column stays in view while the settings scroll under the
-   header, held a margin below it. */
+   header, held a margin below it. Under the Forge Assistant's focus mode
+   the header is hidden and the workspace is the whole window: its focus
+   script closes this offset to the workspace's own inset (an inline `top`,
+   put back on leaving), and the theme's layout test holds it to that. */
 :root[data-mc-theme="on"] [id$="_results"] {
     position: sticky;
     top: calc(var(--mc-theme-header) + 16px);
