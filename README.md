@@ -6307,7 +6307,10 @@ one second.
 - **Generate above the gallery, the prompt boxes at the top of the settings
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
   compact prompt-box styles both handled. The results column stays in view
-  under the bar while the settings scroll.
+  under the bar while the settings scroll. Generate is 44 px tall (Forge gives
+  it a 4.5 em floor), and the frames Gradio draws around every tab panel, one
+  inside the other around the generation UI, are gone: the content sits at
+  the page's own margin.
 - **Quick settings in a drawer** on the left, under the bar: *off* leaves the
   checkpoint row where Forge draws it; *collapsed* moves it into the drawer,
   opened from the header; *open* opens it at every load. The drawer remembers
@@ -6338,6 +6341,10 @@ one second.
   span and never a word; the icons are Lucide's (ISC licence, the notice is in
   the script).
 - **Ask before leaving the page**, off by default.
+
+Both drawers live inside Forge's own `<gradio-app>` element, where Forge's
+scripts (and this one) look things up: a drawer outside it would put the
+quick settings and the extra-network pages out of their reach.
 
 Every switch but the palette is read live: turn one off and its element goes
 back where Forge had it, with nothing left behind; turn the whole theme off

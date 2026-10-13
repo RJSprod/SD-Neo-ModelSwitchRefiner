@@ -1124,6 +1124,25 @@
     min-height: 44px;
 }
 
+/* Forge gives Txt2Img's and Img2Img's Generate a 4.5 em floor by id, which
+   outranks any attribute selector; the same ids say 44 px. */
+:root[data-mc-theme="on"] #txt2img_generate,
+:root[data-mc-theme="on"] #img2img_generate {
+    height: 44px;
+    min-height: 44px;
+}
+
+/* Gradio frames every tab panel with a border and its block padding, and
+   Forge's own extra-network tabs nest a second frame around the generation
+   UI. The page the user had put the content at the page's margin, with no
+   frame around a workspace. */
+:root[data-mc-theme="on"] #tabs > .tabitem,
+:root[data-mc-theme="on"] .extra-networks > .tabitem {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+}
+
 :root[data-mc-theme="on"] button[id$="_interrupt"] {
     color: var(--button-cancel-text-color);
     background: var(--button-cancel-background-fill);
