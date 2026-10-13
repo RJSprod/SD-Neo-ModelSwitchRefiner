@@ -3026,7 +3026,8 @@ class TestADragTakesOnlyTheHandle:
                                         type: posts[0].options.headers["Content-Type"],
                                         kind: body.kind, traceLength: body.trace.length,
                                         first: body.trace[0], last: body.trace[body.trace.length - 1],
-                                        second: body.trace[1].e, dropped: body.dropped,
+                                        second: body.trace[1].e, secondSy: body.trace[1].sy,
+                                        delay: body.delay, locked: body.locked, dropped: body.dropped,
                                         touch: body.trace.some((e) => e.e === "touchmove" && e.p === true),
                                         environment: Object.keys(body.environment || {}).sort(),
                                         from: body.from, put: body.put, lastDragPut: shell.lastDrag.put}));
@@ -3037,6 +3038,10 @@ class TestADragTakesOnlyTheHandle:
         assert found["kind"] == "drag"
         assert found["first"]["e"] == "pointerdown" and found["first"]["p"] is True
         assert found["first"]["x"] == 950 and found["first"]["t"] == 0
+        assert found["first"]["sy"] == 0, "the page's scroll, at the press"
+        assert found["secondSy"] == 0, "and at the first move"
+        assert found["delay"] is None, "no stamp on a stub's event"
+        assert found["locked"] == [], "a mouse's drag holds nothing"
         assert found["second"] == "pointermove" and found["touch"] is True
         assert found["last"]["e"] == "pointerup" and found["last"]["x"] == 1030
         assert found["traceLength"] == 60 and found["dropped"] == 23, (
@@ -3070,6 +3075,58 @@ class TestADragTakesOnlyTheHandle:
 
         assert found["kept"] is True and found["second"] == "pointerup"
         assert found["noted"] == ["Forge Assistant: the journal was not written: The server answered 404"]
+
+    def test_a_fingers_drag_holds_the_pages_scroll_and_a_mouses_does_not(self):
+        """From the user's log: a finger on the launcher in a Gecko browser,
+        `touch-action: none` on the handle, every touchmove cancelled, and the
+        page panned by the finger's travel under every drag. So while a
+        finger or a pen drags, the scrolling element is `overflow: hidden`
+        with its scrollbar's gutter kept, put back as found when the drag
+        ends -- by its pointerup, by a cancel, by the shell going."""
+        found = run(self.SHELL + """
+            console.info = () => {};
+            const scroller = {style: {overflow: "auto", scrollbarGutter: ""}, nodeType: 1,
+                              nodeName: "HTML", classList: {length: 0}, id: ""};
+            document.scrollingElement = scroller;
+            const out = {};
+            shell.startDrag(press({pointerType: "touch"}), shell.nodes.launcher);
+            out.held = [scroller.style.overflow, scroller.style.scrollbarGutter];
+            out.noted = shell.drag.watch.locked;
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            out.released = [scroller.style.overflow, scroller.style.scrollbarGutter];
+            shell.startDrag(press({pointerType: "mouse"}), shell.nodes.launcher);
+            out.mouse = [scroller.style.overflow, shell.drag.watch.locked];
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            shell.startDrag(press({pointerType: "pen"}), shell.nodes.panel);
+            out.pen = scroller.style.overflow;
+            shell.cancelGestures();
+            out.cancelled = scroller.style.overflow;
+            // Under focus mode the focused root scrolls in the page's place.
+            const focused = {style: {overflow: "", scrollbarGutter: ""}, nodeType: 1,
+                             nodeName: "DIV", classList: {length: 1, 0: "forge-assistant-focus-root"},
+                             id: ""};
+            document.querySelector = (s) => (s === ".forge-assistant-focus-root" ? focused : null);
+            shell.startDrag(press({pointerType: "touch"}), shell.nodes.panel);
+            out.focus = [focused.style.overflow, scroller.style.overflow, shell.drag.watch.locked];
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            out.focusReleased = [focused.style.overflow, scroller.style.overflow];
+            document.querySelector = () => null;
+            shell.startDrag(press({pointerType: "touch"}), shell.nodes.panel);
+            shell.nodes.root.parentElement = null;
+            shell.disposers = [];
+            shell.stopMemory = () => {};
+            shell.dispose();
+            out.disposed = scroller.style.overflow;
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        assert found["held"] == ["hidden", "stable"] and found["noted"] == ["html"]
+        assert found["released"] == ["auto", ""], "put back as found"
+        assert found["mouse"] == ["auto", []], "a mouse never pans"
+        assert found["pen"] == "hidden" and found["cancelled"] == "auto"
+        assert found["focus"] == ["hidden", "hidden", ["html", "div.forge-assistant-focus-root"]]
+        assert found["focusReleased"] == ["", "auto"]
+        assert found["disposed"] == "auto"
 
     def test_the_pan_blocker_is_on_the_handles_and_never_the_window(self):
         """A non-passive touchmove listener on the window makes every scroll

@@ -1546,6 +1546,7 @@ def test_a_mouse_drag_by_the_header_moves_the_panel_and_selects_nothing(browser)
         assert account["touchAction"] == "none" and account["userSelect"] == "none", account
         assert account["ended"] == "pointerup" and account["moved"] is True, account
         assert account["pageScrolled"] == [0, 0] and account["astray"] == [], account
+        assert account["locked"] == [], "a mouse never pans, so nothing is held"
         assert page.evaluate("forgeAssistant.shell.told") is None
 
         # A page that scrolls under a drag is in the account, and on the
@@ -1633,6 +1634,49 @@ def test_three_taps_on_the_header_still_toggle_focus(browser):
             page.wait_for_timeout(80)
         settle(page)
         assert page.evaluate("forgeAssistant.shell.state.focusEnabled") is True
+    finally:
+        context.close()
+
+
+def test_a_finger_on_a_handle_holds_the_pages_scroll_until_it_lifts(browser):
+    """From the user's log: a Gecko browser panned the page by the finger's
+    travel under every drag, with `touch-action: none` on the handle and every
+    touchmove cancelled -- nothing the page says about a touch reaches that
+    pan in time. So while a finger drags, the scrolling element is
+    `overflow: hidden` (its gutter kept), and the page scrolls again the
+    moment the finger lifts."""
+    context, page = open_phone(browser, free_float=True)
+    try:
+        page.evaluate("forgeAssistant.shell.close()")
+        settle(page)
+        scroller = """() => { const s = getComputedStyle(document.scrollingElement);
+                              return [s.overflow, s.scrollbarGutter]; }"""
+        assert page.evaluate(scroller)[0] != "hidden"
+        centre = page.evaluate(HANDLES)["launcher"]["centre"]
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Input.dispatchTouchEvent",
+                 {"type": "touchStart", "touchPoints": [{"x": centre[0], "y": centre[1]}]})
+        for step in range(1, 5):
+            page.wait_for_timeout(16)
+            cdp.send("Input.dispatchTouchEvent",
+                     {"type": "touchMove", "touchPoints": [{"x": centre[0], "y": centre[1] - 30 * step}]})
+        settle(page)
+        held = page.evaluate(scroller)
+        assert held == ["hidden", "stable"], held
+        assert page.evaluate("forgeAssistant.shell.drag.watch.locked") == ["html"]
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        cdp.detach()
+        settle(page)
+        assert page.evaluate(scroller)[0] != "hidden"
+        account = page.evaluate("forgeAssistant.shell.lastDrag")
+        assert account["locked"] == ["html"] and account["pointer"] == "touch", account
+        assert isinstance(account["delay"], int) and account["delay"] >= 0, account
+        assert any("sy" in entry for entry in account["trace"]), account["trace"][:3]
+
+        # The page scrolls again.
+        touch_drag(page, (60, 500), (60, 300))
+        settle(page)
+        assert page.evaluate("window.scrollY") > 100
     finally:
         context.close()
 

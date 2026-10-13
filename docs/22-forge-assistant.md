@@ -2622,6 +2622,54 @@ purpose: the point is what the browser said. The console line and the status
 line stay; a server that refuses the post or is not there is a console line
 and never in the way of the drag. The next report is that log file.
 
+### The log's answer, and the hold
+
+The user sent `model_chain.log`. Eleven drags, 16:48:52 to 16:49:24, every
+one `pointer: touch`, on a browser whose account reads: `Mozilla/5.0
+(Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0`,
+`touchPoints: 0`, `coarse: false`, `hover: true`, a 886 × 898 window on a
+886 × 983 screen (taller than wide) at a pixel ratio of 2.22, the theme on,
+the document 886 wide (no sideways overflow) and 1620 tall once the page
+had filled in. A Gecko browser taking a finger while calling itself desktop
+Firefox with no touch points: LibreWolf on a Windows touchscreen under its
+fingerprinting defence, which spoofs the touch points and the pointer
+queries, or Firefox for Android with *Desktop site* on, which spoofs the
+same; the user has not said which.
+
+What every drag that moved says: `touchAction: "none"` and `userSelect:
+"none"` computed on the pressed handle, `pressCancelled: false` (a finger,
+by design), `captured: true`, every touchmove the handle heard **cancelable
+and cancelled** (`touchMoves` = `touchCancelable` = `touchBlocked`: 52, 77,
+107, 44, 34, 39, 27), the drag **ended by its own `pointerup`**, never a
+`pointercancel` -- and `pageScrolled` 282, 67, 473, −448, 484, −398: **the
+page panned by the finger's travel, against it** (the finger up, the
+content up), while the handle moved too (`put` against `box`). The first
+drag, on a page still 898 tall, scrolled nothing because there was nothing
+to scroll. Nothing on the main thread scrolls the page during a drag (no
+script here does, and the browser's own scroll anchoring excludes fixed
+boxes), so the pan is the browser's compositor, which in Gecko pans on its
+own once the page has not answered a touch within its content-response
+window (a few hundred milliseconds) -- a Gradio page can be busy longer --
+and which, on the evidence, did not read the handle's `touch-action` either.
+Whatever the page says about the gesture, in a listener or a rule, arrives
+after the decision.
+
+**So the page is made unscrollable for as long as a finger drags** (`lockScroll`,
+`unlockScroll`): `overflow: hidden` on the scrolling element, with
+`scrollbar-gutter: stable` so a classic scrollbar's width does not shift the
+page under the handle, and under focus mode on the focused root as well,
+which scrolls in the page's place; inline, and put back as found by
+`endDrag` on every path a drag ends by (its pointerup, a cancel, the shell
+disposed). A compositor cannot pan a frame that is not scrollable, and the
+hold is painted as soon as the main thread is free, which is the same moment
+the press is handled -- so a page that was busy at the touch may still move
+a little before the hold lands, and no further. A mouse never pans, so a
+mouse drag holds nothing. The account gained `delay` -- how long the press
+waited for the page, the event's stamp against the handler's clock, which is
+the number that would confirm the busy-page reading -- `locked` (what the
+hold took), and the page's scroll sampled along the trace (`sy`, ten times
+a second: when it starts to move against the finger is the question).
+
 ### Verified
 
 `tests/test_assistant_js.py` (`TestADragTakesOnlyTheHandle`): an accepted
@@ -2642,9 +2690,17 @@ line says the press was cancelled and captured, the handle's rules, nothing
 moved; a page scrolled under a drag (by the test, mid-drag) is in the line
 and on the status line; a finger's line counts the moves the handle heard
 and blocked. The post (`tests/test_assistant_js.py`): its path, method and
-body, the trace's first and last entries, the cap at sixty with the rest
-counted, a server that is not there costing the drag nothing; the Chromium
-mouse test reads what the page posted. The journal
+body, the trace's first and last entries with the scroll at the press and
+the first move, the cap at sixty with the rest counted, a server that is not
+there costing the drag nothing; the Chromium mouse test reads what the page
+posted. The hold: a finger's and a pen's drag make the scrolling element
+`overflow: hidden` with a stable gutter and the focused root too, put back
+as found by the pointerup, a cancel and `dispose`, a mouse's drag holding
+nothing (node); in Chromium a finger held on the launcher finds the root
+hidden with its gutter kept and the account naming it, and the page scrolls
+again once the finger lifts. Six mutations each fail a test: the scroll never
+held, never let go, the gutter not kept, a mouse's drag held too, the scroll
+never sampled, the focused root left scrollable. The journal
 (`tests/test_assistant_journal.py`): one line that reads before its JSON,
 the kind one word, what is not an account refused with its reason, the line
 landing in `model_chain.log` between two others through `mc_logfile`'s own
@@ -2655,8 +2711,9 @@ touchmove wiring, the live-drag guard, the `dragstart`; four of the
 account's: never written, nothing said, the scroll not read, the touch
 moves not counted; and seven of the journal's: the page never posting, no
 trace, no environment, the module logging nothing, the summary lost, the
-route unregistered, a bad kind accepted. Run on the user's machine once,
-and still moving the page there: the log is what the next run brings back.
+route unregistered, a bad kind accepted. Run on the user's machine twice:
+still moving the page the first time, and the second time with the log,
+which is where the hold comes from. The hold itself has not run there.
 
 ## 4. Deliberate deviations
 
