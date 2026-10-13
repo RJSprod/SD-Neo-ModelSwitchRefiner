@@ -50,10 +50,10 @@ What that file says, and what became of each line:
 | `confirmPageUnload` | false | **Ask before leaving the page** (`model_chain_theme_confirm_unload`) |
 | `primaryColor`, `neutralColor` | none | the automatic accent: white at night, black by day (`model_chain_theme_accent`) |
 | `logoCustomTitle` | none | **Title in the header** (`model_chain_theme_title`, "Forge") |
-| `enableExtraNetworkSidebar`, `extraNetworkSidebarExpand`, `extraNetworkSidebarWidth`, `extraNetworkCardSize`, `extraNetworkFixedMode` | true, false, 340, 86, fixed | **the next round**: the extra-network pages in a drawer on the right. Their values are kept in the import's record (`raw`) |
-| `enableImageInfo` | true | **the next round**: a formatted generation-info panel |
+| `enableExtraNetworkSidebar`, `extraNetworkSidebarExpand`, `extraNetworkSidebarWidth`, `extraNetworkCardSize` | true, false, 340, 86 | **The extra-network pages in a drawer** on the right, collapsed, 340 px, 86 px cards (`model_chain_theme_networks`, `_networks_width`, `_networks_card`). Built one round after the first import: a record from that round is read again for these (`IMPORT_VERSION`) |
+| `enableImageInfo` | true | **Generation info as a panel** (`model_chain_theme_image_info`): the prompt and the negative prompt in blocks with copy buttons, every setting a chip, Forge's paragraph kept out of view for what reads it |
 | `enableWebFont` | true | a **Typeface** setting of ours (`model_chain_theme_font`, a Google Fonts family; empty is the system's) |
-| `i18n`, `liteAnimation`, `promptEditor`, `enableHighlight`, `logoType`, `logoCustomUrl`, `sidebarFixedMode` | — | not built: translations, the background glow, Lobe's prompt editor and highlighter, its logo, floating panels |
+| `i18n`, `liteAnimation`, `promptEditor`, `enableHighlight`, `logoType`, `logoCustomUrl`, `sidebarFixedMode`, `extraNetworkFixedMode` | — | not built: translations, the background glow, Lobe's prompt editor and highlighter, its logo, floating panels |
 | `detail` | "Not Found" | a 404 body the theme once saved as a setting; ignored |
 
 The pieces, and where they are:
@@ -65,7 +65,8 @@ The pieces, and where they are:
   **settings section** *Model Chain: Theme*; the **one-time import** of the
   user's file (newest `extensions/*/lobe_theme_config.json`; only a switch
   still at its default is written; the record in a hidden option, with the
-  raw file for the next round).
+  raw file, which a later build reads again for what the earlier one could
+  not use — `_import_again`, the record's `version`).
 - `javascript/model_chain_theme.js` — the page work, every piece a switch
   read live and undone when it goes off: Forge's own `#tabs > .tab-nav` as a
   64 px sticky **header** (never moved or wrapped: Forge reads the current tab
@@ -76,24 +77,40 @@ The pieces, and where they are:
   Generate box to the head of the gallery's container, in both tabs, with the
   compact layout's box handled too); the **quick-settings drawer** (fixed
   under the header, opened from the header or by the setting, closed by
-  Escape, remembered per browser); **resizable prompts**; **icons** from the
-  ISC-licensed Lucide set (the notice is in the file); optional
+  Escape, remembered per browser); the **extra-network drawer** on the right
+  (Forge's `.extra-page` tabs and the controls strip Forge's script gathers
+  moved into an aside with a strip of its own, one page shown at a time,
+  Generation staying the selected Gradio tab; a page is taken only once that
+  strip exists, because Forge wires the pages after their HTML arrives and
+  looks for them as its own tabs' children; Forge's tab strip is hidden
+  under a class the script puts on it, never by a selector naming tab bars);
+  the **generation-info panel** (Forge's `html_info_*` paragraph read through
+  its `<br>`s and parsed as `infotext_utils` parses it — a last line of three
+  pairs or more is the parameters, a quoted value keeps its commas — drawn as
+  blocks and chips beside the paragraph, which the stylesheet clips out of
+  view; redrawn when the markup changes); **resizable prompts**; **icons**
+  from the ISC-licensed Lucide set (the notice is in the file); optional
   **tab names with spaces** ("Txt 2 Img", but "LoRA" and "WanGP" stay);
   **ask before leaving**; the **typeface** link. It **stands down** while a
   Lobe root is on the page (`data-mc-theme="lobe"`), and marks the root from
   the last configuration at the first paint so a themed page is themed before
   the host has said it is loaded.
 - `style.css`, *Model Chain -- the theme* — keyed on `data-mc-theme="on"`:
-  the header, the menu, the drawer, the split view's rows, the sticky results
-  column, the boxes down the settings column, the token-counter pill, the
-  36 px tool buttons, the gallery's checkerboard ground, the phone sizes.
-  Colours only from the host's variables; `!important` only where Forge says
-  it first.
+  the header, the menu, the two drawers (the extra-network one with its
+  strip, its page at the card size set, its pane as tall as its cards), the
+  info panel's blocks, chips and copy buttons, the split view's rows, the
+  sticky results column, the boxes down the settings column, the
+  token-counter pill, the 36 px tool buttons, the gallery's checkerboard
+  ground, the phone sizes. Colours only from the host's variables;
+  `!important` only where Forge, Gradio's inline style on a tab panel or a
+  card, or a theme's rule about every button says it first.
 - Tests: `tests/test_theme.py` (settings, palette, theme object, install,
-  import), `tests/test_theme_js.py` (the pure parts in node, the stylesheet
-  as text), `tests/test_theme_layout.py` (Chromium: the bar, the overflow,
-  the split, the drawer, the prompts, the icons, standing down, off, the
-  first paint, a phone width).
+  import, the record read again), `tests/test_theme_js.py` (the pure parts in
+  node, the infotext parser, the stylesheet as text),
+  `tests/test_theme_layout.py` (Chromium: the bar, the overflow, the split,
+  both drawers — the extra-network one against Forge's own markup, with the
+  pages wired late as Forge wires them — the info panel, the prompts, the
+  icons, standing down, off, the first paint, a phone width).
 
 How the user moves over: Settings → Model Chain: Theme → *Use the Model Chain
 theme* on, Apply, Reload UI (the imported switches are already there); then

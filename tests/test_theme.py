@@ -68,6 +68,10 @@ DEFAULTS = {
     mc_theme.OPT_CONFIRM_UNLOAD: False,
     mc_theme.OPT_ACCENT: "",
     mc_theme.OPT_FONT: "",
+    mc_theme.OPT_NETWORKS: "collapsed",
+    mc_theme.OPT_NETWORKS_WIDTH: 340,
+    mc_theme.OPT_NETWORKS_CARD: 120,
+    mc_theme.OPT_IMAGE_INFO: True,
     mc_theme.OPT_HIDE_FOOTER: True,
 }
 
@@ -387,15 +391,21 @@ class TestImportingTheUsersLobeSettings:
             mc_theme.OPT_SPLIT: True,
             mc_theme.OPT_QUICK: "collapsed",
             mc_theme.OPT_QUICK_WIDTH: 280,
+            mc_theme.OPT_NETWORKS: "collapsed",
+            mc_theme.OPT_NETWORKS_WIDTH: 340,
+            mc_theme.OPT_NETWORKS_CARD: 86,
             mc_theme.OPT_PROMPTS: True,
             mc_theme.OPT_ICONS: True,
             mc_theme.OPT_CONFIRM_UNLOAD: False,
             mc_theme.OPT_HIDE_FOOTER: True,
+            mc_theme.OPT_IMAGE_INFO: True,
         }
         assert opts.data[mc_theme.OPT_QUICK] == "collapsed"
         assert opts.data[mc_theme.OPT_QUICK_WIDTH] == 280
+        assert opts.data[mc_theme.OPT_NETWORKS_CARD] == 86
         assert record["from"] == str(path)
         assert record["kept"] == []
+        assert record["version"] == mc_theme.IMPORT_VERSION
         assert opts.saves == 1
 
     def test_the_theme_itself_is_not_switched_on_by_the_import(self, tmp_path):
@@ -407,17 +417,70 @@ class TestImportingTheUsersLobeSettings:
         assert mc_theme.OPT_ENABLED not in record["applied"]
         assert mc_theme.OPT_ENABLED not in opts.data
 
-    def test_what_is_not_built_yet_is_kept_in_the_record_for_later(self, tmp_path):
-        """The extra networks drawer and the image-info panel come next; their
-        values ride in ``raw`` so a later round needs no file."""
+    def test_what_is_not_built_is_said_so_and_the_file_rides_in_the_record(self, tmp_path):
+        """Lobe's floating panels, its prompt editor and the rest are not
+        built; the raw file rides in ``raw`` so a later round needs no file."""
         lobe_folder(tmp_path)
         _, record = run_import(tmp_path)
 
+        for key in ("extraNetworkFixedMode", "sidebarFixedMode", "promptEditor", "enableHighlight",
+                    "i18n", "liteAnimation", "logoType", "enableWebFont"):
+            assert key in record["ignored"], key
         for key in ("enableExtraNetworkSidebar", "extraNetworkSidebarExpand",
-                    "extraNetworkSidebarWidth", "enableImageInfo"):
-            assert key in record["ignored"]
+                    "extraNetworkSidebarWidth", "extraNetworkCardSize", "enableImageInfo"):
+            assert key not in record["ignored"], key
         assert record["raw"]["extraNetworkSidebarWidth"] == 340
         assert record["raw"]["enableImageInfo"] is True
+
+    def test_a_record_from_the_first_build_is_read_again_for_the_drawer_and_the_panel(self, tmp_path):
+        """The first build kept the drawer's and the panel's values in the
+        record's ``raw``; this one reads them from there, without the file,
+        writes the switches still at their defaults, and moves the record to
+        its version. A switch the user has set here since is theirs."""
+        first = {
+            "from": str(tmp_path / "gone" / mc_theme.LOBE_CONFIG_NAME),
+            "modified": 1.0, "when": "2026-10-13 10:00:00",
+            "applied": {mc_theme.OPT_SPLIT: True, mc_theme.OPT_QUICK: "collapsed",
+                        mc_theme.OPT_QUICK_WIDTH: 280, mc_theme.OPT_PROMPTS: True,
+                        mc_theme.OPT_ICONS: True, mc_theme.OPT_CONFIRM_UNLOAD: False,
+                        mc_theme.OPT_HIDE_FOOTER: True},
+            "kept": [mc_theme.OPT_TITLE],
+            "ignored": ["enableExtraNetworkSidebar", "extraNetworkSidebarExpand",
+                        "extraNetworkSidebarWidth", "extraNetworkCardSize", "enableImageInfo", "detail"],
+            "raw": dict(USER_CONFIG, extraNetworkSidebarExpand=True),
+        }
+        opts = Opts({mc_theme.OPT_IMPORT: json.dumps(first), mc_theme.OPT_TITLE: "SD",
+                     mc_theme.OPT_NETWORKS_WIDTH: 500})
+        opts, record = run_import(tmp_path, opts)   # no Lobe folder anywhere
+
+        assert record is not None
+        assert record["version"] == mc_theme.IMPORT_VERSION
+        assert opts.data[mc_theme.OPT_NETWORKS] == "open"
+        assert opts.data[mc_theme.OPT_NETWORKS_CARD] == 86
+        assert opts.data[mc_theme.OPT_IMAGE_INFO] is True
+        assert opts.data[mc_theme.OPT_NETWORKS_WIDTH] == 500
+        assert record["kept"] == [mc_theme.OPT_TITLE, mc_theme.OPT_NETWORKS_WIDTH]
+        assert record["applied"][mc_theme.OPT_NETWORKS] == "open"
+        assert record["applied"][mc_theme.OPT_QUICK] == "collapsed"
+        assert "enableImageInfo" not in record["ignored"]
+        assert "again" in record
+        assert opts.saves == 1
+        # The earlier switches are not written again.
+        assert mc_theme.OPT_SPLIT not in opts.data
+
+        again = mc_theme.import_lobe_settings(opts, tmp_path / "extensions", defaults=DEFAULTS,
+                                              save=opts.save)
+        assert again is None
+        assert opts.saves == 1
+
+    def test_a_record_with_nothing_to_read_again_is_left_as_it_is(self, tmp_path):
+        first = {"from": "x", "applied": {}, "kept": [], "ignored": [], "raw": "not a dict"}
+        opts = Opts({mc_theme.OPT_IMPORT: json.dumps(first)})
+        opts, record = run_import(tmp_path, opts)
+
+        assert record is None
+        assert set(opts.data) == {mc_theme.OPT_IMPORT}
+        assert opts.saves == 0
 
     def test_the_stray_404_body_falls_through(self, tmp_path):
         lobe_folder(tmp_path)
@@ -507,6 +570,25 @@ class TestImportingTheUsersLobeSettings:
         assert applied[mc_theme.OPT_QUICK_WIDTH] == mc_theme.QUICK_WIDTH_MIN
         applied, _ = mc_theme.translate({"sidebarWidth": 9000})
         assert applied[mc_theme.OPT_QUICK_WIDTH] == mc_theme.QUICK_WIDTH_MAX
+
+    def test_the_extra_network_switches_become_the_drawer_mode_and_its_sizes(self):
+        applied, _ = mc_theme.translate({"enableExtraNetworkSidebar": False, "extraNetworkSidebarExpand": True})
+        assert applied[mc_theme.OPT_NETWORKS] == "off"
+        applied, _ = mc_theme.translate({"enableExtraNetworkSidebar": True, "extraNetworkSidebarExpand": True})
+        assert applied[mc_theme.OPT_NETWORKS] == "open"
+        applied, _ = mc_theme.translate({"enableExtraNetworkSidebar": True, "extraNetworkSidebarExpand": False})
+        assert applied[mc_theme.OPT_NETWORKS] == "collapsed"
+        applied, _ = mc_theme.translate({"enableExtraNetworkSidebar": True})
+        assert applied[mc_theme.OPT_NETWORKS] == "collapsed"
+        applied, ignored = mc_theme.translate({"extraNetworkSidebarExpand": True})
+        assert mc_theme.OPT_NETWORKS not in applied and "extraNetworkSidebarExpand" in ignored
+        applied, _ = mc_theme.translate({"extraNetworkSidebarWidth": 50, "extraNetworkCardSize": 9000})
+        assert applied[mc_theme.OPT_NETWORKS_WIDTH] == mc_theme.NETWORKS_WIDTH_MIN
+        assert applied[mc_theme.OPT_NETWORKS_CARD] == mc_theme.NETWORKS_CARD_MAX
+        applied, _ = mc_theme.translate({"enableImageInfo": False})
+        assert applied[mc_theme.OPT_IMAGE_INFO] is False
+        applied, ignored = mc_theme.translate({"extraNetworkSidebarWidth": True, "enableImageInfo": "yes"})
+        assert applied == {} and set(ignored) == {"extraNetworkSidebarWidth", "enableImageInfo"}
 
     def test_a_key_of_the_wrong_shape_is_ignored_like_an_unknown_one(self):
         applied, ignored = mc_theme.translate({"layoutSplitPreview": "yes", "sidebarWidth": "wide",

@@ -60,11 +60,20 @@
         labels: "model_chain_theme_tab_labels",
         confirm: "model_chain_theme_confirm_unload",
         font: "model_chain_theme_font",
+        networks: "model_chain_theme_networks",
+        networksWidth: "model_chain_theme_networks_width",
+        networksCard: "model_chain_theme_networks_card",
+        info: "model_chain_theme_image_info",
     };
     const DEFAULTS = {
         enabled: false, split: true, quick: "collapsed", quickWidth: 280, prompts: true,
         icons: true, title: "Forge", labels: "as_forge", confirm: false, font: "",
+        networks: "collapsed", networksWidth: 340, networksCard: 120, info: true,
     };
+    const NETWORKS_WIDTH_MIN = 240;
+    const NETWORKS_WIDTH_MAX = 800;
+    const NETWORKS_CARD_MIN = 60;
+    const NETWORKS_CARD_MAX = 320;
     const QUICK_MODES = ["off", "collapsed", "open"];
     const LABEL_MODES = ["as_forge", "spaced"];
     const WIDTH_MIN = 200;
@@ -76,6 +85,12 @@
     const PROMPTS_ATTRIBUTE = "data-mc-theme-prompts";
     const CACHE = "mc-theme";                     // the last config, for the first paint
     const QUICK_STATE = "mc-theme-quick";         // "open" | "closed", per browser
+    const NETWORKS_STATE = "mc-theme-networks";   // the same, for the right-hand drawer
+    const NETWORKS_ID = "mc-theme-networks";
+    const NETWORKS_NAV_CLASS = "mc-theme-networks-nav";   // Forge's extra-network tab strip, out of the way
+    const NETWORKS_SHOWN_CLASS = "mc-theme-networks-shown"; // the one page the drawer shows
+    const INFO_CLASS = "mc-theme-info";
+    const INFO_SOURCE_CLASS = "mc-theme-info-source";       // Forge's own infotext, drawn as the panel instead
     const BAR_CLASS = "mc-theme-bar";
     const OVERFLOW_CLASS = "mc-theme-overflow";   // a tab button the bar has no room for
     const SETTINGS_SECTION = "Model Chain: Theme";
@@ -179,6 +194,16 @@
         out.labels = LABEL_MODES.indexOf(raw.labels) === -1 ? DEFAULTS.labels : raw.labels;
         out.confirm = !!raw.confirm;
         out.font = raw.font === undefined || raw.font === null ? "" : String(raw.font).trim();
+        out.networks = QUICK_MODES.indexOf(raw.networks) === -1 ? DEFAULTS.networks : raw.networks;
+        const networksWidth = Number(raw.networksWidth);
+        out.networksWidth = Number.isFinite(networksWidth)
+            ? Math.min(NETWORKS_WIDTH_MAX, Math.max(NETWORKS_WIDTH_MIN, Math.round(networksWidth)))
+            : DEFAULTS.networksWidth;
+        const card = Number(raw.networksCard);
+        out.networksCard = Number.isFinite(card)
+            ? Math.min(NETWORKS_CARD_MAX, Math.max(NETWORKS_CARD_MIN, Math.round(card)))
+            : DEFAULTS.networksCard;
+        out.info = raw.info === undefined ? DEFAULTS.info : !!raw.info;
         return out;
     }
 
@@ -278,6 +303,8 @@
         relabelled: [],     // tab buttons whose text was respaced
         header: null,       // {strip, title, actions, more, menu, quickToggle}
         quick: null,        // the drawer
+        networks: null,     // {aside, strip, body, groups: {tabname: {group, controls, pages, page}}}
+        infoPanels: new Map(), // Forge's infotext element -> {panel, html}
         unload: null,       // the beforeunload handler while asked for
         wired: false,
         fitPending: false,
@@ -347,6 +374,9 @@
             const quickToggle = action("mc-theme-quick-toggle", "sliders-horizontal", "Quick settings");
             quickToggle.setAttribute("aria-expanded", "false");
             quickToggle.setAttribute("aria-controls", QUICK_ID);
+            const networksToggle = action("mc-theme-networks-toggle", "layers", "Extra networks");
+            networksToggle.setAttribute("aria-expanded", "false");
+            networksToggle.setAttribute("aria-controls", NETWORKS_ID);
             const more = action("mc-theme-more", "ellipsis", "More tabs");
             more.setAttribute("aria-haspopup", "menu");
             more.setAttribute("aria-expanded", "false");
@@ -356,6 +386,7 @@
             const menu = make("div", "mc-theme-menu", {role: "menu"});
             menu.hidden = true;
             actions.appendChild(quickToggle);
+            actions.appendChild(networksToggle);
             actions.appendChild(more);
             actions.appendChild(mode);
             actions.appendChild(settings);
@@ -363,16 +394,18 @@
             strip.insertBefore(title, strip.firstChild);
             strip.appendChild(actions);
             quickToggle.addEventListener("click", function () { toggleQuick(); });
+            networksToggle.addEventListener("click", function () { toggleNetworks(); });
             more.addEventListener("click", function (event) { event.stopPropagation(); toggleMenu(); });
             mode.addEventListener("click", function () {
                 try { location.replace(nextThemeUrl(location.href, isDark())); } catch (error) { /* a stub */ }
             });
             settings.addEventListener("click", openSettings);
-            header = state.header = {strip, title, actions, more, menu, quickToggle};
+            header = state.header = {strip, title, actions, more, menu, quickToggle, networksToggle};
         }
         header.title.textContent = config.title;
         header.title.hidden = !config.title;
         header.quickToggle.hidden = config.quick === "off";
+        header.networksToggle.hidden = config.networks === "off";
     }
 
     function removeHeader() {
@@ -594,6 +627,379 @@
         }
     }
 
+    // -- the extra networks drawer ------------------------------------------------------ //
+    //
+    // Forge Neo keeps the extra-network pages -- Textual Inversion, Checkpoints,
+    // LoRA and the rest -- as tabs of `#<tab>_extra_tabs` beside Generation, so
+    // a page shows in place of the generation UI. The drawer moves those pages
+    // (and the controls strip Forge's own script builds for them) into an aside
+    // on the right and shows one of them by a strip of its own, while
+    // Generation stays the selected Gradio tab and in view. Nothing of Forge's
+    // wiring is touched: a card's click still writes into the prompt box, the
+    // search, sort and refresh controls are the same elements Forge wired, and
+    // Gradio's own updates to the pages' HTML land where they always did. A
+    // page is taken only once Forge's script has wired it, which it does well
+    // after the host says the page is loaded (it waits for the pages' HTML);
+    // until then Forge's tabs are as they were. The hidden tab strip is
+    // marked by this script and hidden by the stylesheet under that mark
+    // alone -- a tab bar is hidden by a script that knows it holds no
+    // workspace, never by a selector that names tab bars.
+
+    function currentTabName() {
+        // The selected button's aria-controls names the panel (Gradio 4);
+        // failing that, the one panel Gradio is displaying, as Forge's own
+        // get_uiCurrentTabContent reads it.
+        const strip = bar();
+        const selected = strip && tabButtons(strip).find((button) => button.classList.contains("selected"));
+        const controls = selected && selected.getAttribute("aria-controls");
+        if (controls && controls.indexOf("tab_") === 0) return controls.slice(4);
+        const panel = queryAll("#tabs > .tabitem[id^='tab_']").find(
+            (candidate) => (candidate.getAttribute("style") || "").indexOf("display: none") === -1);
+        return panel ? panel.id.slice(4) : null;
+    }
+
+    function setDisplay(element, value) {
+        if (element.style.display !== value) element.style.display = value;
+    }
+
+    function setVariable(element, name, value) {
+        if (element.style.getPropertyValue(name) !== value) element.style.setProperty(name, value);
+    }
+
+    function networksOpenState() {
+        try { return localStorage.getItem(NETWORKS_STATE); } catch (error) { return null; }
+    }
+
+    function rememberNetworks(open) {
+        try { localStorage.setItem(NETWORKS_STATE, open ? "open" : "closed"); } catch (error) { /* ignore */ }
+    }
+
+    function setNetworks(open) {
+        const networks = state.networks;
+        if (!networks) return;
+        networks.aside.hidden = !open;
+        if (state.header) state.header.networksToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    function toggleNetworks() {
+        const networks = state.networks;
+        if (!networks) return;
+        const open = networks.aside.hidden;
+        setNetworks(open);
+        rememberNetworks(open);
+    }
+
+    function showNetworksPage(tabname, pageId) {
+        const networks = state.networks;
+        const group = networks && networks.groups[tabname];
+        if (!group) return;
+        group.page = pageId;
+        group.pages.forEach((page) => {
+            page.classList.toggle(NETWORKS_SHOWN_CLASS, page.id === pageId);
+        });
+        Array.prototype.slice.call(networks.strip.children).forEach((button) => {
+            if (button.dataset.mcThemeTab !== tabname) return;   // the other tab keeps its page
+            const active = button.dataset.mcThemePage === pageId;
+            button.classList.toggle("mc-theme-networks-active", active);
+            button.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        // The page's own controls -- search, sort, refresh -- which Forge's
+        // script gathered into one strip; the same rule as its own
+        // extraNetworksShowControlsForPage, applied where the strip is now.
+        if (group.controls) {
+            Array.prototype.slice.call(group.controls.children).forEach((child) => {
+                setDisplay(child, child.id === pageId + "_controls" ? "" : "none");
+            });
+        }
+    }
+
+    function syncNetworks() {
+        const networks = state.networks;
+        if (!networks) return;
+        const current = currentTabName();
+        let any = false;
+        Object.keys(networks.groups).forEach((tabname) => {
+            const group = networks.groups[tabname];
+            const on = tabname === current && group.pages.length > 0;
+            group.group.hidden = !on;
+            if (on) any = true;
+        });
+        Array.prototype.slice.call(networks.strip.children).forEach((button) => {
+            button.hidden = button.dataset.mcThemeTab !== current;
+        });
+        networks.aside.classList.toggle("mc-theme-networks-empty", !any);
+        if (state.header) state.header.networksToggle.disabled = !any;
+    }
+
+    function installNetworks(config) {
+        if (config.networks === "off") { removeNetworks(); return; }
+        let networks = state.networks;
+        if (!networks) {
+            const aside = make("aside", "mc-theme-drawer mc-theme-networks",
+                               {id: NETWORKS_ID, role: "complementary", "aria-label": "Extra networks"});
+            const head = make("div", "mc-theme-networks-head");
+            const title = make("div", "mc-theme-networks-title");
+            title.textContent = "Extra networks";
+            const close = action("mc-theme-networks-close", "x", "Close");
+            close.addEventListener("click", function () { setNetworks(false); rememberNetworks(false); });
+            head.appendChild(title);
+            head.appendChild(close);
+            const strip = make("div", "mc-theme-networks-strip", {role: "tablist"});
+            const body = make("div", "mc-theme-networks-body");
+            aside.appendChild(head);
+            aside.appendChild(strip);
+            aside.appendChild(body);
+            aside.hidden = true;
+            document.body.appendChild(aside);
+            networks = state.networks = {aside, strip, body, groups: {}};
+            const remembered = networksOpenState();
+            setNetworks(remembered ? remembered === "open" : config.networks === "open");
+        }
+        setVariable(networks.aside, "--mc-theme-networks-width", config.networksWidth + "px");
+        setVariable(networks.aside, "--mc-theme-networks-card", config.networksCard + "px");
+
+        ["txt2img", "img2img"].forEach((tabname) => {
+            const tabs = query("#" + tabname + "_extra_tabs");
+            if (!tabs) return;
+            const children = Array.prototype.slice.call(tabs.children);
+            const nav = children.find(
+                (child) => child.classList.contains("tab-nav") || child.getAttribute("role") === "tablist");
+            const pages = children.filter((child) => child.classList.contains("extra-page"));
+            if (!nav || !pages.length) return;
+            // Forge wires a page's search, sort and refresh after the page's
+            // HTML has arrived, well after the host says it is loaded, and it
+            // looks for the pages as children of its own tabs. The strip it
+            // gathers their controls into is the sign that it has been: a
+            // page is taken only once that strip exists, so nothing is moved
+            // from under Forge's own script.
+            const gathered = nav.querySelector(":scope > .extra-networks-controls-div");
+            if (!gathered) return;
+            let group = networks.groups[tabname];
+            if (!group) {
+                const element = make("div", "mc-theme-networks-group", {"data-mc-theme-tab": tabname});
+                element.hidden = true;
+                networks.body.appendChild(element);
+                group = networks.groups[tabname] = {group: element, nav, controls: null, pages: [], page: null};
+            }
+            nav.classList.add(NETWORKS_NAV_CLASS);
+            if (group.controls !== gathered) {
+                move(gathered, group.group, group.group.firstChild, "networks");
+                group.controls = gathered;
+            }
+            const buttons = tabButtons(nav);
+            pages.forEach((page) => {
+                if (group.pages.indexOf(page) === -1) {
+                    group.pages.push(page);
+                    const entry = make("button", "mc-theme-networks-tab", {type: "button", role: "tab"});
+                    entry.textContent = pageLabel(page, pages, buttons);
+                    entry.dataset.mcThemeTab = tabname;
+                    entry.dataset.mcThemePage = page.id;
+                    entry.addEventListener("click", function () { showNetworksPage(tabname, page.id); });
+                    networks.strip.appendChild(entry);
+                }
+                if (page.parentElement !== group.group) move(page, group.group, null, "networks");
+            });
+            showNetworksPage(tabname, group.page || group.pages[0].id);
+        });
+        syncNetworks();
+    }
+
+    /** The name Forge's tab button gives a page: by aria-controls where
+     *  Gradio writes it, else by place (the buttons before the pages' are
+     *  Generation's), else the page's own id. */
+    function pageLabel(page, pages, buttons) {
+        const named = buttons.find((button) => button.getAttribute("aria-controls") === page.id);
+        if (named) return named.textContent.trim();
+        const byPlace = buttons[buttons.length - pages.length + pages.indexOf(page)];
+        if (byPlace && !byPlace.getAttribute("aria-controls")) return byPlace.textContent.trim();
+        return page.id.replace(/^(txt2img|img2img)_/, "").replace(/_/g, " ");
+    }
+
+    function removeNetworks() {
+        const networks = state.networks;
+        restoreMoves(["networks"]);
+        if (networks) {
+            Object.keys(networks.groups).forEach((tabname) => {
+                const group = networks.groups[tabname];
+                group.nav.classList.remove(NETWORKS_NAV_CLASS);
+                group.pages.forEach((page) => page.classList.remove(NETWORKS_SHOWN_CLASS));
+                // Generation is the selected tab, where Forge shows no page's controls.
+                if (group.controls) {
+                    Array.prototype.slice.call(group.controls.children).forEach((child) => setDisplay(child, "none"));
+                }
+            });
+            if (networks.aside.parentElement) networks.aside.parentElement.removeChild(networks.aside);
+            state.networks = null;
+        }
+        if (state.header) state.header.networksToggle.setAttribute("aria-expanded", "false");
+    }
+
+    // -- the generation info, as a panel ---------------------------------------------------- //
+    //
+    // Forge writes the parameters of the last generation under the gallery as
+    // one paragraph: the prompt, "Negative prompt: …" and a last line of
+    // "Steps: 8, Sampler: …, Seed: …" pairs, joined by line breaks. The panel
+    // draws the same text as three things -- the prompt and the negative
+    // prompt each in a block with a copy button, the pairs as chips -- beside
+    // Forge's paragraph, which the stylesheet then keeps out of view. Nothing
+    // is rewritten: the paragraph is still what Forge's own buttons read.
+
+    const PAIR = /\s*([\w\s\-\/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)/g;
+    const NEGATIVE = "Negative prompt:";
+
+    function unquote(value) {
+        const text = String(value).trim();
+        if (text.length >= 2 && text.charAt(0) === '"' && text.charAt(text.length - 1) === '"') {
+            try { return String(JSON.parse(text)); } catch (error) { return text.slice(1, -1); }
+        }
+        return text;
+    }
+
+    function pairsOf(line) {
+        const pairs = [];
+        PAIR.lastIndex = 0;
+        let match;
+        while ((match = PAIR.exec(line)) !== null) {
+            if (match.index === PAIR.lastIndex) PAIR.lastIndex += 1;
+            const key = match[1].trim();
+            const value = unquote(match[2]);
+            if (key) pairs.push([key, value]);
+            if (match[0] === "") break;
+        }
+        return pairs;
+    }
+
+    /** {prompt, negative, pairs} from an infotext, or null for nothing. */
+    function parseInfotext(text) {
+        const lines = String(text || "").replace(/\r/g, "").split("\n")
+            .map((line) => line.trim()).filter((line) => line.length);
+        if (!lines.length) return null;
+        let pairs = [];
+        let last = lines[lines.length - 1];
+        const found = pairsOf(last);
+        let body = lines;
+        if (found.length >= 3) { pairs = found; body = lines.slice(0, -1); }
+        const prompt = [];
+        const negative = [];
+        let inNegative = false;
+        body.forEach((line) => {
+            let piece = line;
+            if (piece.indexOf(NEGATIVE) === 0) { inNegative = true; piece = piece.slice(NEGATIVE.length).trim(); }
+            (inNegative ? negative : prompt).push(piece);
+        });
+        return {prompt: prompt.join("\n"), negative: negative.join("\n"), pairs};
+    }
+
+    function infotextOf(element) {
+        // The paragraph's lines, through the breaks Forge joins them with (a
+        // <br> and a newline each, so the newline after a break is the break's).
+        const html = element.innerHTML || "";
+        const holder = document.createElement("div");
+        holder.innerHTML = html.replace(/<br\s*\/?>\s*/gi, "\n");
+        return holder.textContent || "";
+    }
+
+    function copyText(text, button) {
+        const done = function () {
+            button.classList.add("mc-theme-info-copied");
+            setTimeout(function () { button.classList.remove("mc-theme-info-copied"); }, 1200);
+        };
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+                return;
+            }
+        } catch (error) { /* fall through */ }
+        fallbackCopy(text);
+        done();
+    }
+
+    function fallbackCopy(text) {
+        try {
+            const area = document.createElement("textarea");
+            area.value = text;
+            area.setAttribute("readonly", "");
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            document.body.appendChild(area);
+            area.select();
+            document.execCommand("copy");
+            document.body.removeChild(area);
+        } catch (error) { /* nothing to be done */ }
+    }
+
+    function infoBlock(label, text) {
+        const block = make("div", "mc-theme-info-block");
+        const head = make("div", "mc-theme-info-label");
+        head.textContent = label;
+        const copy = make("button", "mc-theme-info-copy", {type: "button", title: "Copy " + label.toLowerCase(),
+                                                           "aria-label": "Copy " + label.toLowerCase()});
+        copy.innerHTML = GLYPH["clipboard-list"];
+        copy.addEventListener("click", function () { copyText(text, copy); });
+        head.appendChild(copy);
+        const body = make("div", "mc-theme-info-text");
+        body.textContent = text;
+        block.appendChild(head);
+        block.appendChild(body);
+        return block;
+    }
+
+    function renderInfo(parsed, text) {
+        const panel = make("div", INFO_CLASS);
+        if (parsed.prompt) panel.appendChild(infoBlock("Prompt", parsed.prompt));
+        if (parsed.negative) panel.appendChild(infoBlock("Negative prompt", parsed.negative));
+        if (parsed.pairs.length) {
+            const chips = make("div", "mc-theme-info-params");
+            parsed.pairs.forEach(([key, value]) => {
+                const chip = make("span", "mc-theme-info-chip");
+                const name = make("b");
+                name.textContent = key;
+                chip.appendChild(name);
+                chip.appendChild(document.createTextNode(" " + value));
+                chip.title = key + ": " + value;
+                chips.appendChild(chip);
+            });
+            const all = make("button", "mc-theme-info-copy mc-theme-info-copy-all",
+                             {type: "button", title: "Copy everything", "aria-label": "Copy everything"});
+            all.innerHTML = GLYPH["clipboard-list"];
+            all.addEventListener("click", function () { copyText(text.trim(), all); });
+            chips.appendChild(all);
+            panel.appendChild(chips);
+        }
+        return panel;
+    }
+
+    function installInfo(config) {
+        if (!config.info) { removeInfo(); return; }
+        queryAll(".infotext[id^='html_info_']").forEach((source) => {
+            // Asked on every update of the page; the paragraph's markup says
+            // whether there is anything new to draw.
+            const html = source.innerHTML || "";
+            const known = state.infoPanels.get(source);
+            if (known && known.html === html) return;
+            const text = infotextOf(source);
+            const parsed = parseInfotext(text);
+            if (known && known.panel.parentElement) known.panel.parentElement.removeChild(known.panel);
+            if (!parsed || (!parsed.prompt && !parsed.negative && !parsed.pairs.length)) {
+                source.classList.remove(INFO_SOURCE_CLASS);
+                state.infoPanels.delete(source);
+                return;
+            }
+            const panel = renderInfo(parsed, text);
+            source.parentElement.insertBefore(panel, source.nextSibling);
+            source.classList.add(INFO_SOURCE_CLASS);
+            state.infoPanels.set(source, {panel, html});
+        });
+    }
+
+    function removeInfo() {
+        state.infoPanels.forEach((entry, source) => {
+            if (entry.panel.parentElement) entry.panel.parentElement.removeChild(entry.panel);
+            source.classList.remove(INFO_SOURCE_CLASS);
+        });
+        state.infoPanels.clear();
+    }
+
     // -- the prompt boxes ----------------------------------------------------------- //
 
     function installPrompts(config) {
@@ -668,6 +1074,8 @@
     // -- putting it together -------------------------------------------------------------- //
 
     function teardown() {
+        removeNetworks();
+        removeInfo();
         restoreMoves();
         restoreIcons();
         restoreLabels();
@@ -706,6 +1114,8 @@
         }
         attempt("lay out the split view", function () { installSplit(config); });
         attempt("install the quick settings drawer", function () { installQuick(config); });
+        attempt("install the extra networks drawer", function () { installNetworks(config); });
+        attempt("draw the generation info", function () { installInfo(config); });
         attempt("mark the prompt boxes", function () { installPrompts(config); });
         attempt("draw the icons", function () { installIcons(config); });
         attempt("ask before leaving", function () { installConfirm(config); });
@@ -724,7 +1134,8 @@
         document.addEventListener("keydown", function (event) {
             if (event.key !== "Escape") return;
             if (state.header && !state.header.menu.hidden) { closeMenu(); return; }
-            if (state.quick && !state.quick.hidden) { setQuick(false); rememberQuick(false); }
+            if (state.quick && !state.quick.hidden) { setQuick(false); rememberQuick(false); return; }
+            if (state.networks && !state.networks.aside.hidden) { setNetworks(false); rememberNetworks(false); }
         });
         window.addEventListener("resize", scheduleFit);
     }
@@ -743,11 +1154,12 @@
     if (typeof onUiLoaded === "function") onUiLoaded(apply);
     if (typeof onOptionsChanged === "function") onOptionsChanged(apply);
     if (typeof onAfterUiUpdate === "function") onAfterUiUpdate(apply);
-    if (typeof onUiTabChange === "function") onUiTabChange(scheduleFit);
+    if (typeof onUiTabChange === "function") onUiTabChange(function () { scheduleFit(); attempt("follow the tab", syncNetworks); });
 
     window.mcTheme = {
-        OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID,
+        OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
+        parseInfotext, showNetworksPage, toggleNetworks,
         icons: Object.keys(ICONS),
     };
 })();

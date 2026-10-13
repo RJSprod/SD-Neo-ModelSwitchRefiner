@@ -61,6 +61,10 @@ OPT_QUICK_WIDTH = "model_chain_theme_quick_width"
 OPT_PROMPTS = "model_chain_theme_prompts"
 OPT_ICONS = "model_chain_theme_icons"
 OPT_CONFIRM_UNLOAD = "model_chain_theme_confirm_unload"
+OPT_NETWORKS = "model_chain_theme_networks"
+OPT_NETWORKS_WIDTH = "model_chain_theme_networks_width"
+OPT_NETWORKS_CARD = "model_chain_theme_networks_card"
+OPT_IMAGE_INFO = "model_chain_theme_image_info"
 OPT_IMPORT = "model_chain_theme_import"
 """The record of the one-time import of the user's Lobe settings: hidden, so
 the import runs once and what it did can be read back."""
@@ -77,6 +81,16 @@ QUICK_WIDTH_MIN, QUICK_WIDTH_MAX = 200, 600
 TAB_LABEL_MODES = ("as_forge", "spaced")
 TAB_LABEL_DEFAULT = "as_forge"
 TITLE_DEFAULT = "Forge"
+NETWORKS_MODES = QUICK_MODES
+NETWORKS_DEFAULT = "collapsed"
+NETWORKS_WIDTH_DEFAULT = 340
+NETWORKS_WIDTH_MIN, NETWORKS_WIDTH_MAX = 240, 800
+NETWORKS_CARD_DEFAULT = 120
+NETWORKS_CARD_MIN, NETWORKS_CARD_MAX = 60, 320
+IMPORT_VERSION = 2
+"""The import record's version. A record from an earlier build is read again
+for the keys that build could not use yet (the extra-network drawer and the
+generation-info panel came one round after the first import)."""
 
 ACCENT_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 NIGHT_ACCENT = "#ffffff"
@@ -524,6 +538,38 @@ def settings(shared) -> dict:
             "get drawn icons in place of their emoji. Only a button whose whole text is "
             "one of those emoji is touched, never a span or a word"
         ),
+        OPT_NETWORKS: OptionInfo(
+            NETWORKS_DEFAULT,
+            "Extra networks",
+            gr.Radio,
+            {"choices": list(NETWORKS_MODES)},
+        ).info(
+            "<b>off</b> leaves Forge's Textual Inversion, Checkpoints and LoRA pages as "
+            "tabs beside Generation · <b>collapsed</b> moves those pages into a drawer on "
+            "the right, opened from the header, with Generation always in view · "
+            "<b>open</b> the same drawer, open at every load. The drawer remembers "
+            "whether you left it open, per browser"
+        ),
+        OPT_NETWORKS_WIDTH: OptionInfo(
+            NETWORKS_WIDTH_DEFAULT,
+            "Extra networks drawer width (px)",
+            gr.Slider,
+            {"minimum": NETWORKS_WIDTH_MIN, "maximum": NETWORKS_WIDTH_MAX, "step": 10},
+        ),
+        OPT_NETWORKS_CARD: OptionInfo(
+            NETWORKS_CARD_DEFAULT,
+            "Extra networks card size in the drawer (px)",
+            gr.Slider,
+            {"minimum": NETWORKS_CARD_MIN, "maximum": NETWORKS_CARD_MAX, "step": 2},
+        ).info("the width of a card in the drawer; a card is half as tall again"),
+        OPT_IMAGE_INFO: OptionInfo(
+            True,
+            "Generation info as a panel",
+        ).info(
+            "the parameters under the gallery drawn as a panel: the prompt and the "
+            "negative prompt each in a block with a copy button, and every setting as a "
+            "chip. Off leaves Forge's own text"
+        ),
         OPT_CONFIRM_UNLOAD: OptionInfo(
             False,
             "Ask before leaving the page",
@@ -544,14 +590,11 @@ def hidden_settings(shared) -> dict:
 LOBE_CONFIG_NAME = "lobe_theme_config.json"
 
 IGNORED_LOBE_KEYS = (
-    # Features this theme does not build (Lobe's prompt editor, highlighter,
-    # translations, animated background, web fonts from its CDN, its logo).
+    # Features this theme does not build: Lobe's prompt editor, highlighter,
+    # translations, animated background, web fonts from its CDN, its logo, and
+    # the floating (as against fixed) kind of panel.
     "i18n", "liteAnimation", "promptEditor", "enableHighlight", "neutralColor",
-    "enableWebFont", "logoType", "logoCustomUrl",
-    # The extra networks drawer and the image-info panel: the next round. Their
-    # values stay readable in the record's ``raw``.
-    "enableExtraNetworkSidebar", "extraNetworkSidebarExpand", "extraNetworkSidebarWidth",
-    "extraNetworkFixedMode", "extraNetworkCardSize", "enableImageInfo", "sidebarFixedMode",
+    "enableWebFont", "logoType", "logoCustomUrl", "extraNetworkFixedMode", "sidebarFixedMode",
 )
 
 
@@ -612,13 +655,31 @@ def translate(raw: dict) -> tuple:
         applied[OPT_QUICK_WIDTH] = int(min(QUICK_WIDTH_MAX, max(QUICK_WIDTH_MIN, width)))
         consumed.add("sidebarWidth")
 
+    networks = boolean("enableExtraNetworkSidebar")
+    if networks is not None:
+        consumed.add("enableExtraNetworkSidebar")
+        if not networks:
+            applied[OPT_NETWORKS] = "off"
+        else:
+            applied[OPT_NETWORKS] = "open" if boolean("extraNetworkSidebarExpand") else "collapsed"
+        if boolean("extraNetworkSidebarExpand") is not None:
+            consumed.add("extraNetworkSidebarExpand")
+    width = raw.get("extraNetworkSidebarWidth")
+    if isinstance(width, (int, float)) and not isinstance(width, bool):
+        applied[OPT_NETWORKS_WIDTH] = int(min(NETWORKS_WIDTH_MAX, max(NETWORKS_WIDTH_MIN, width)))
+        consumed.add("extraNetworkSidebarWidth")
+    card = raw.get("extraNetworkCardSize")
+    if isinstance(card, (int, float)) and not isinstance(card, bool):
+        applied[OPT_NETWORKS_CARD] = int(min(NETWORKS_CARD_MAX, max(NETWORKS_CARD_MIN, card)))
+        consumed.add("extraNetworkCardSize")
+
     kind = raw.get("promptTextareaType")
     if kind in ("resizable", "scroll"):
         applied[OPT_PROMPTS] = kind == "resizable"
         consumed.add("promptTextareaType")
 
     for key, option in (("svgIcon", OPT_ICONS), ("confirmPageUnload", OPT_CONFIRM_UNLOAD),
-                        ("layoutHideFooter", OPT_HIDE_FOOTER)):
+                        ("layoutHideFooter", OPT_HIDE_FOOTER), ("enableImageInfo", OPT_IMAGE_INFO)):
         if boolean(key) is not None:
             applied[option] = boolean(key)
             consumed.add(key)
@@ -655,7 +716,7 @@ def import_lobe_settings(opts, extensions_dir, *, defaults: dict, save=None, now
     if not isinstance(data, dict):
         return None
     if data.get(OPT_IMPORT):
-        return None
+        return _import_again(opts, defaults=defaults, save=save, now=now)
     found = find_lobe_config(extensions_dir)
     if found is None:
         return None
@@ -680,6 +741,7 @@ def import_lobe_settings(opts, extensions_dir, *, defaults: dict, save=None, now
         written[name] = value
 
     record = {
+        "version": IMPORT_VERSION,
         "from": str(found),
         "modified": found.stat().st_mtime,
         "when": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now() if now else time.time())),
@@ -696,6 +758,51 @@ def import_lobe_settings(opts, extensions_dir, *, defaults: dict, save=None, now
             logger.warning("Model Chain theme: the import could not be saved", exc_info=True)
     logger.info("Model Chain theme: imported %d setting(s) from %s (%s kept as you set them)",
                 len(written), found, len(kept))
+    return record
+
+
+def _import_again(opts, *, defaults: dict, save=None, now=None) -> dict | None:
+    """A record from an earlier build, read again for what that build could
+    not use: the raw file is in the record, so no file is needed. Only keys
+    neither applied nor kept the first time, and still at their defaults,
+    are written; the record moves to this version and is saved once."""
+    record = import_record(opts)
+    if not record or int(record.get("version", 1) or 1) >= IMPORT_VERSION:
+        return None
+    raw = record.get("raw")
+    if not isinstance(raw, dict):
+        record["version"] = IMPORT_VERSION
+        opts.set(OPT_IMPORT, json.dumps(record, ensure_ascii=False))
+        return None
+    applied, ignored = translate(raw)
+    done = set(record.get("applied") or {}) | set(record.get("kept") or [])
+    written = {}
+    kept = list(record.get("kept") or [])
+    data = opts.data
+    for name, value in applied.items():
+        if name in done:
+            continue
+        current = data.get(name)
+        if current is not None and current != defaults.get(name):
+            kept.append(name)
+            continue
+        opts.set(name, value)
+        written[name] = value
+    record["version"] = IMPORT_VERSION
+    record["applied"] = dict(record.get("applied") or {}, **written)
+    record["kept"] = kept
+    record["ignored"] = ignored
+    record["again"] = time.strftime("%Y-%m-%d %H:%M:%S",
+                                    time.localtime(now() if now else time.time()))
+    opts.set(OPT_IMPORT, json.dumps(record, ensure_ascii=False))
+    if save is not None:
+        try:
+            save()
+        except Exception:
+            logger.warning("Model Chain theme: the import could not be saved", exc_info=True)
+    if written:
+        logger.info("Model Chain theme: imported %d more setting(s) from the earlier record",
+                    len(written))
     return record
 
 

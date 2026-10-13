@@ -4,8 +4,9 @@ section as text.
 Node has no layout, so the header's fit, the drawer and the moves are checked
 in Chromium (``tests/test_theme_layout.py``). What node holds is what is pure:
 the tab-name spacing, the plan of which tabs fit, the emoji-to-icon match, the
-settings' normalisation, the theme toggle's address, the first paint from the
-last configuration, and the hooks the script asks the host for.
+settings' normalisation, the theme toggle's address, the reading of Forge's
+generation parameters, the first paint from the last configuration, and the
+hooks the script asks the host for.
 """
 
 from __future__ import annotations
@@ -174,6 +175,15 @@ class TestTheSettingsAsRead:
             out.badLabels = T.normalise({labels: "camel"}).labels;
             out.title = T.normalise({title: "  SD  "}).title;
             out.enabled = T.normalise({enabled: 1}).enabled;
+            out.networks = T.normalise({networks: "sideways"}).networks;
+            out.networksOpen = T.normalise({networks: "open"}).networks;
+            out.networksNarrow = T.normalise({networksWidth: 10}).networksWidth;
+            out.networksWide = T.normalise({networksWidth: 5000}).networksWidth;
+            out.cardSmall = T.normalise({networksCard: 1}).networksCard;
+            out.cardLarge = T.normalise({networksCard: 999}).networksCard;
+            out.cardText = T.normalise({networksCard: "big"}).networksCard;
+            out.infoOff = T.normalise({info: false}).info;
+            out.infoUnset = T.normalise({}).info;
         """)
 
         assert found["quick"] == "collapsed"
@@ -184,6 +194,15 @@ class TestTheSettingsAsRead:
         assert found["badLabels"] == "as_forge"
         assert found["title"] == "SD"
         assert found["enabled"] is True
+        assert found["networks"] == "collapsed"
+        assert found["networksOpen"] == "open"
+        assert found["networksNarrow"] == mc_theme.NETWORKS_WIDTH_MIN
+        assert found["networksWide"] == mc_theme.NETWORKS_WIDTH_MAX
+        assert found["cardSmall"] == mc_theme.NETWORKS_CARD_MIN
+        assert found["cardLarge"] == mc_theme.NETWORKS_CARD_MAX
+        assert found["cardText"] == mc_theme.NETWORKS_CARD_DEFAULT
+        assert found["infoOff"] is False
+        assert found["infoUnset"] is True
 
     def test_the_script_reads_the_options_by_the_names_python_registers(self):
         script = SCRIPT.read_text(encoding="utf-8")
@@ -191,7 +210,8 @@ class TestTheSettingsAsRead:
         for name in (mc_theme.OPT_ENABLED, mc_theme.OPT_SPLIT, mc_theme.OPT_QUICK,
                      mc_theme.OPT_QUICK_WIDTH, mc_theme.OPT_PROMPTS, mc_theme.OPT_ICONS,
                      mc_theme.OPT_TITLE, mc_theme.OPT_TAB_LABELS, mc_theme.OPT_CONFIRM_UNLOAD,
-                     mc_theme.OPT_FONT):
+                     mc_theme.OPT_FONT, mc_theme.OPT_NETWORKS, mc_theme.OPT_NETWORKS_WIDTH,
+                     mc_theme.OPT_NETWORKS_CARD, mc_theme.OPT_IMAGE_INFO):
             assert f'"{name}"' in script, name
 
     def test_the_defaults_here_match_pythons(self):
@@ -202,12 +222,71 @@ class TestTheSettingsAsRead:
         assert found["defaults"]["labels"] == mc_theme.TAB_LABEL_DEFAULT
         assert found["defaults"]["title"] == mc_theme.TITLE_DEFAULT
         assert found["defaults"]["enabled"] is False
+        assert found["defaults"]["networks"] == mc_theme.NETWORKS_DEFAULT
+        assert found["defaults"]["networksWidth"] == mc_theme.NETWORKS_WIDTH_DEFAULT
+        assert found["defaults"]["networksCard"] == mc_theme.NETWORKS_CARD_DEFAULT
+        assert found["defaults"]["info"] is True
 
 
 def T_DEFAULTS():
     return {"enabled": False, "split": True, "quick": "collapsed", "quickWidth": 280,
             "prompts": True, "icons": True, "title": "Forge", "labels": "as_forge",
-            "confirm": False, "font": ""}
+            "confirm": False, "font": "", "networks": "collapsed", "networksWidth": 340,
+            "networksCard": 120, "info": True}
+
+
+# What Forge writes under the gallery (modules/ui_common.py, plaintext_to_html:
+# the lines of the infotext joined by <br>), as the text of that paragraph.
+INFOTEXT = (
+    'a cat in a hat, <lora:detail:0.8>\n'
+    'Negative prompt: blurry, (low quality:1.2)\n'
+    'Steps: 8, Sampler: Euler a, Schedule type: Automatic, CFG scale: 1, Seed: 42, '
+    'Size: 1024x1024, Model hash: abc123, Model: krea2, '
+    'Lora hashes: "detail: deadbeef, other: cafe", Version: neo'
+)
+
+
+class TestTheGenerationInfo:
+    def test_the_prompt_the_negative_and_the_pairs_are_read_as_forge_reads_them(self):
+        """modules/infotext_utils.parse_generation_parameters: the last line
+        is the parameters when it holds three pairs or more, a quoted value
+        keeps its commas, and 'Negative prompt:' starts the negative."""
+        found = run(f"out.parsed = T.parseInfotext({json.dumps(INFOTEXT)});")
+
+        assert found["parsed"]["prompt"] == "a cat in a hat, <lora:detail:0.8>"
+        assert found["parsed"]["negative"] == "blurry, (low quality:1.2)"
+        assert found["parsed"]["pairs"] == [
+            ["Steps", "8"], ["Sampler", "Euler a"], ["Schedule type", "Automatic"],
+            ["CFG scale", "1"], ["Seed", "42"], ["Size", "1024x1024"], ["Model hash", "abc123"],
+            ["Model", "krea2"], ["Lora hashes", "detail: deadbeef, other: cafe"], ["Version", "neo"]]
+
+    def test_a_prompt_of_several_lines_and_no_negative(self):
+        found = run("""
+            out.lines = T.parseInfotext("one\\ntwo\\n\\nSteps: 1, Sampler: a, Seed: 3");
+            out.negativeLines = T.parseInfotext("one\\nNegative prompt: bad\\nworse\\nSteps: 1, Sampler: a, Seed: 3");
+        """)
+
+        assert found["lines"] == {"prompt": "one\ntwo", "negative": "", "pairs": [["Steps", "1"], ["Sampler", "a"], ["Seed", "3"]]}
+        assert found["negativeLines"]["prompt"] == "one"
+        assert found["negativeLines"]["negative"] == "bad\nworse"
+
+    def test_a_last_line_with_fewer_than_three_pairs_is_prompt(self):
+        found = run("""
+            out.short = T.parseInfotext("a prompt\\nSteps: 8");
+            out.only = T.parseInfotext("just a prompt");
+        """)
+
+        assert found["short"] == {"prompt": "a prompt\nSteps: 8", "negative": "", "pairs": []}
+        assert found["only"] == {"prompt": "just a prompt", "negative": "", "pairs": []}
+
+    def test_nothing_is_nothing(self):
+        found = run("""
+            out.empty = T.parseInfotext("");
+            out.blank = T.parseInfotext("  \\n\\r\\n ");
+            out.none = T.parseInfotext(null);
+        """)
+
+        assert found["empty"] is None and found["blank"] is None and found["none"] is None
 
 
 class TestTheThemeToggle:
@@ -325,8 +404,13 @@ class TestTheStylesheetSection:
             assert ".svelte" not in selector, selector
 
     def test_important_only_where_the_host_says_it_first(self):
+        # Each is a place where the host, Gradio's inline style on a tab panel
+        # or a card, or a theme's rule about every button says !important
+        # first; a drawer's own rule needs none.
         allowed = ("[hidden]", "mc-theme-overflow", ".gradio-button.tool", "token-counter",
-                   "#quicksettings", "gradio-accordion", "_toprow", ".mc-theme-action")
+                   "#quicksettings", "gradio-accordion", "_toprow", ".mc-theme-action",
+                   ".mc-theme-networks-nav", ".mc-theme-networks-group > .extra-page",
+                   ".mc-theme-networks .extra-network-pane .card", ".mc-theme-info-copy")
         for selector, body in rules(section()):
             if "!important" not in body:
                 continue
@@ -351,6 +435,18 @@ class TestTheStylesheetSection:
                                       ("mc-theme-menu-item", "mc-theme-menu-item"),
                                       ("mc-theme-overflow", "mc-theme-overflow"),
                                       ("mc-theme-drawer", "mc-theme-drawer"),
+                                      ("mc-theme-networks", "mc-theme-networks"),
+                                      ("mc-theme-networks-nav", "mc-theme-networks-nav"),
+                                      ("mc-theme-networks-shown", "mc-theme-networks-shown"),
+                                      ("mc-theme-networks-tab", "mc-theme-networks-tab"),
+                                      ("mc-theme-networks-active", "mc-theme-networks-active"),
+                                      ("mc-theme-networks-empty", "mc-theme-networks-empty"),
+                                      ("mc-theme-networks-group", "mc-theme-networks-group"),
+                                      ("mc-theme-info-source", "mc-theme-info-source"),
+                                      ("mc-theme-info-block", "mc-theme-info-block"),
+                                      ("mc-theme-info-chip", "mc-theme-info-chip"),
+                                      ("mc-theme-info-copy", "mc-theme-info-copy"),
+                                      ("mc-theme-info-copied", "mc-theme-info-copied"),
                                       ("data-mc-theme-prompts", "data-mc-theme-prompts"),
                                       ("data-mc-theme-icon", "mcThemeIcon")):
             assert script_name in script, script_name

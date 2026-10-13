@@ -6313,6 +6313,23 @@ one second.
   opened from the header; *open* opens it at every load. The drawer remembers
   whether you left it open, per browser, Escape closes it, and its width is a
   setting.
+- **The extra-network pages in a drawer** on the right: Textual Inversion,
+  Checkpoints, LoRA and the rest leave Forge's tabs beside Generation for a
+  drawer opened from the header, so a page shows beside the generation UI
+  rather than in its place. *off* leaves them as Forge's tabs; *collapsed*
+  moves them into the drawer; *open* opens it at every load; it remembers
+  whether you left it open, Escape closes it, and its width and the cards'
+  size are settings. The drawer's strip shows one page at a time with that
+  page's own search, sort and refresh; a card's press writes into the prompt
+  as it always did, because the pages are Forge's own elements, moved. A page
+  is taken only once Forge's script has wired it (it does so after the page's
+  HTML arrives, later than the page's load), and the drawer follows the tab:
+  Txt2Img's pages on Txt2Img, Img2Img's on Img2Img, nothing elsewhere.
+- **Generation info as a panel**: the parameters Forge writes under the
+  gallery, drawn as the prompt and the negative prompt in blocks with a copy
+  button each, and every setting as a chip, with a button that copies the
+  whole text. Forge's own paragraph stays in the page, out of view, for the
+  buttons that read it. Off leaves Forge's text.
 - **Resizable prompt boxes**, in the monospace face, with the token counter as
   a pill on the corner.
 - **Drawn icons** on the tool buttons — paste, clear, styles, refresh, the
@@ -6333,18 +6350,19 @@ browser remembered.
 On the first start after the update the extension reads your own
 `lobe_theme_config.json` from the Lobe extension's folder, once, and starts
 its switches where yours were: the split view, the quick settings drawer and
-its width, the prompt boxes, the icons, the footer, the confirmation, a custom
-title and a named primary colour. A switch you have already set here is
-yours and is not overwritten; the file is never written to; the record of what
-was read, kept and ignored is in a hidden setting. Then: turn the theme on,
-Reload UI, disable `sd-webui-lobe-theme` under Extensions, restart. Mini Paint
-NEO needs nothing: it reads the page's variables and the dark class, and both
-are there.
+its width, the extra-network drawer, its width and its card size, the
+generation-info panel, the prompt boxes, the icons, the footer, the
+confirmation, a custom title and a named primary colour. A switch you have
+already set here is yours and is not overwritten; the file is never written
+to; the record of what was read, kept and ignored is in a hidden setting, with
+the file itself, so a build that learns to use more of it (the drawer and the
+panel came one round after the first import) reads the record again rather
+than the file. Then: turn the theme on, Reload UI, disable
+`sd-webui-lobe-theme` under Extensions, restart. Mini Paint NEO needs nothing:
+it reads the page's variables and the dark class, and both are there.
 
-Not built yet, and kept in that record for when they are: the extra-network
-pages in a drawer on the right, and the formatted generation-info panel. Not
-built at all: Lobe's prompt editor and highlighter, its translations, its
-background glow, its logo.
+Not built: Lobe's prompt editor and highlighter, its translations, its
+background glow, its logo, and its floating (as against fixed) panels.
 
 The reasoning, the review of the Lobe repository it came from and the
 licence question that decided the approach are in
@@ -6492,7 +6510,7 @@ javascript/forge_assistant.js        the panel: docking, transcript, composer
 javascript/forge_assistant_store.js  the page's copy of the conversation
 javascript/forge_assistant_host.js   Forge's tabs and header, as an adapter
 javascript/forge_assistant_focus.js  workspace focus, as a reversible transaction
-javascript/model_chain_theme.js      the theme's page work: header, split view, drawer, icons
+javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
 javascript/model_chain_night.js      the quieter night mode's one attribute
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
