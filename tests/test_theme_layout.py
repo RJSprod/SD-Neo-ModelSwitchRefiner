@@ -83,6 +83,8 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
 .tabitem[style*="display: none"] { display: none; }
 .tabitem { border: 1px solid var(--border-color-primary); border-top: none; padding: 10px; }
 #txt2img_generate, #img2img_generate { min-height: 4.5em; }
+.generate-box { position: relative; }
+.gradio-button.generate-box-skip, .gradio-button.generate-box-interrupt { position: absolute; width: 50%; height: 100%; display: none; background: #b4c0cc; }
 .gradio-button.tool { max-width: 2.2em; min-width: 2.2em !important; height: 2.4em; }
 #quicksettings > div { width: fit-content; flex: 0 1 fit-content; }
 .block { min-height: 40px; }
@@ -94,6 +96,28 @@ textarea { width: 100%; min-height: 60px; }
 .extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; }
 .extra-page-prompts { display: none; }
 """
+
+# What Gradio 4.40 and the Forge Assistant's own tests give the gallery and
+# its container, for a page the assistant's scripts run on too.
+ASSISTANT_HOST_CSS = """
+.gr-group, .styler { display: flex; flex-direction: column; overflow: hidden; }
+.grid-wrap { position: relative; padding: 8px; overflow-y: scroll; }
+.grid-container { display: grid; position: relative; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: minmax(100px, 1fr); }
+.fixed-height { min-height: 320px; max-height: 55vh; }
+.panel { margin: 0 !important; padding: 16px !important; }
+#image_buttons_txt2img button { flex: 1 1 100px; height: 32px; }
+"""
+
+# The person's user.css, as the assistant's tests carry it: the gallery and its
+# container sized against the window. And the container alone, which is what
+# a theme that lets the gallery stop short of it turns into half a window of
+# nothing between the gallery and its buttons.
+USER_CSS_WHOLE = """
+#txt2img_gallery, #img2img_gallery { min-height: 80vh; }
+#txt2img_gallery_container, #img2img_gallery_container { height: 85vh !important; }
+#txt2img_gallery > .grid-wrap, #txt2img_gallery > .preview { max-height: 80vh; }
+"""
+USER_CSS_CONTAINER = "#txt2img_gallery_container, #img2img_gallery_container { height: 85vh !important; }"
 
 # Forge's extra-network pages (modules/ui_extra_networks.py: a tab with the
 # class `extra-page` per page, after Generation) and their cards.
@@ -151,7 +175,10 @@ def extra_pages(tabname: str, *, controls_built: bool) -> str:
 
 
 def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
-              controls_built: bool = True) -> str:
+              controls_built: bool = True, assistant: str = "") -> str:
+    """`assistant` is a user.css to put on a page that also runs the Forge
+    Assistant's scripts, in Forge's order (its folder's scripts load before
+    this one's), with Gradio's gallery markup for its fill to measure."""
     buttons = "".join(
         f'<button role="tab" id="{tab}-button" aria-controls="{tab}" '
         f'aria-selected="{"true" if i == 0 else "false"}" class="{"selected" if i == 0 else ""}">{label}</button>'
@@ -164,8 +191,9 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
                  '<div role="tab">Txt 2 Img</div></div></header></div>' if lobe else "")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{HOST_CSS}</style>
+<style>{HOST_CSS}{ASSISTANT_HOST_CSS if assistant else ""}</style>
 <link rel="stylesheet" href="/style.css">
+<style id="user-css">{assistant}</style>
 </head><body class="dark">
 <gradio-app>{lobe_root}<div class="gradio-container app">
 <div id="quicksettings" class="row"><div class="block gradio-dropdown" id="setting_sd_model_checkpoint">Checkpoint</div><div class="block" id="setting_sd_vae">VAE</div></div>
@@ -179,7 +207,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
       </div>
       <div id="txt2img_actions_column" class="column">
         <div id="txt2img_generate_box" class="row generate-box">
-          <button id="txt2img_interrupt">Interrupt</button><button id="txt2img_skip">Skip</button>
+          <button id="txt2img_interrupt" class="gradio-button generate-box-interrupt">Interrupt</button><button id="txt2img_skip" class="gradio-button generate-box-skip">Skip</button>
           <button id="txt2img_generate" class="lg primary gradio-button">Generate</button>
         </div>
         <div id="txt2img_tools" class="row">
@@ -198,7 +226,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
           <div id="txt2img_results" class="column">
             <div id="txt2img_results_panel" class="column panel">
               <div id="txt2img_gallery_container" class="gr-group">
-                <div id="txt2img_gallery" class="block gradio-gallery" style="height: 300px"></div>
+                {'<div class="styler"><div id="txt2img_gallery" class="block gradio-gallery"><div class="grid-wrap fixed-height"><div class="grid-container"></div></div></div></div>' if assistant else '<div id="txt2img_gallery" class="block gradio-gallery" style="height: 300px"></div>'}
               </div>
               <div id="image_buttons_txt2img" class="row image-buttons">
                 <button id="txt2img_open_folder" class="gradio-button tool" title="Open images output directory">📂</button>
@@ -257,6 +285,7 @@ function cardClicked(tabname, text) {{
     area.value = (area.value ? area.value + ', ' : '') + text;
 }}
 </script>
+{"".join(f'<script src="/javascript/{path.name}"></script>' for path in sorted((ROOT / "javascript").glob("forge_assistant*.js"))) if assistant else ""}
 <script src="/javascript/model_chain_theme.js"></script>
 </body></html>"""
 
@@ -267,8 +296,9 @@ def _answer(route, html: str) -> None:
         route.fulfill(status=200, content_type="text/html", body=html)
     elif path == "/style.css":
         route.fulfill(status=200, content_type="text/css", body=STYLE.read_text(encoding="utf-8"))
-    elif path == "/javascript/model_chain_theme.js":
-        route.fulfill(status=200, content_type="text/javascript", body=SCRIPT.read_text(encoding="utf-8"))
+    elif path.startswith("/javascript/") and "/" not in path[12:] and (ROOT / path[1:]).is_file():
+        route.fulfill(status=200, content_type="text/javascript",
+                      body=(ROOT / path[1:]).read_text(encoding="utf-8"))
     else:
         route.fulfill(status=404, body="")
 
@@ -307,15 +337,17 @@ ON = {"model_chain_theme": True}
 
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
-              controls_built=True):
+              controls_built=True, assistant=""):
     """A page of its own context, or one in a context given -- two pages of
     one context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height})
     page = owner.new_page()
-    html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built)
+    html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
+                     assistant=assistant)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
-    page.wait_for_function("!!window.mcTheme")
+    page.wait_for_function("!!window.mcTheme" + (" && !!(window.forgeAssistant && window.forgeAssistant.fill)"
+                                                 if assistant else ""))
     if loaded:
         page.evaluate("hooks.loaded.forEach((fn) => fn())")
         settle(page)
@@ -904,6 +936,77 @@ class TestTheGenerationInfo:
         assert found["sourceMarked"] is False
         assert found["sourcePosition"] == "static"
         assert page.evaluate(MEASURE)["attribute"] == "on"
+        page.close()
+
+
+FILLED = """() => {
+    const q = (s) => document.querySelector(s);
+    const box = (s) => { const r = q(s).getBoundingClientRect(); return {top: r.top, bottom: r.bottom, height: r.height}; };
+    const results = q("#txt2img_results");
+    const found = forgeAssistant.fill.explain()[0];
+    const interrupt = getComputedStyle(q("#txt2img_interrupt"));
+    const skip = getComputedStyle(q("#txt2img_skip"));
+    return {
+        marked: results.hasAttribute("data-forge-assistant-fill"), reason: found.reason, height: found.height,
+        header: box("#tabs > .tab-nav"), generate: box("#txt2img_generate_box"), gallery: box("#txt2img_gallery"),
+        container: box("#txt2img_gallery_container"), buttons: box("#image_buttons_txt2img"),
+        inner: window.innerHeight,
+        interrupt: interrupt.backgroundColor, skip: skip.backgroundColor, interruptBorder: interrupt.borderTopColor,
+    };
+}"""
+
+
+def luminance(colour: str) -> float:
+    """Relative brightness, 0 to 1, of a colour Chromium reports as rgb(a) or color(srgb)."""
+    import re as _re
+    numbers = [float(n) for n in _re.findall(r"[\d.]+", colour)]
+    if colour.startswith("color("):
+        r, g, b = numbers[:3]
+    else:
+        r, g, b = [n / 255 for n in numbers[:3]]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+class TestWithTheForgeAssistant:
+    """The Forge Assistant fits the results column to the window (docs/22
+    §3.33): one space above the panel, the gallery taking what is left, the
+    buttons one space over the view's bottom. On the user's page under the
+    theme it fitted nothing: a user.css sized the gallery's container against
+    the window, the gallery stopped short of it, and the gap between the
+    gallery and its buttons -- which the assistant reads as the theme's one
+    space -- was half a window. And where it did fit, it put Generate under
+    the header: the bar sits inside the page's padding at scroll 0, and the
+    assistant asked only the first pixel of the window what was drawn there.
+    The assistant's scripts load before this one's, as on Forge, and nothing
+    here measures by hand: the fill's own observers have to."""
+
+    @pytest.mark.parametrize("user_css", [USER_CSS_WHOLE, USER_CSS_CONTAINER], ids=["whole", "container"])
+    def test_the_gallery_is_fitted_to_the_window_under_the_header(self, browser, user_css):
+        page = open_page(browser, assistant=user_css)
+        settle(page, 8)
+        found = page.evaluate(FILLED)
+
+        assert found["marked"] is True and found["reason"] == "", found
+        space = found["buttons"]["top"] - found["gallery"]["bottom"]
+        assert 4 <= space <= 24, found
+        # The first kept thing is under the header, not under it: one space
+        # and the panel's padding below the bar's bottom edge.
+        assert found["generate"]["top"] >= found["header"]["bottom"] + space - 1, found
+        assert found["generate"]["top"] <= found["header"]["bottom"] + space + 24, found
+        assert abs(found["inner"] - found["buttons"]["bottom"] - space) <= 1, found
+        assert found["gallery"]["height"] > 0.5 * found["inner"], found
+        page.close()
+
+    def test_interrupt_and_skip_are_no_bright_spots(self, browser):
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        found = page.evaluate(FILLED)
+
+        # Forge's own light grey (#b4c0cc, 0.55) and the cancel red are gone;
+        # both sit near the page, Interrupt tinted apart from Skip.
+        assert luminance(found["skip"]) < 0.2, found["skip"]
+        assert luminance(found["interrupt"]) < 0.3, found["interrupt"]
+        assert found["interrupt"] != found["skip"]
+        assert found["interruptBorder"] != found["interrupt"]
         page.close()
 
 

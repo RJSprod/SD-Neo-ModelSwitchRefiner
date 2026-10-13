@@ -2505,7 +2505,16 @@ a progress bar, with an infotext, resized, with the theme's padding over the
 column (brought up under the tab buttons, then under the header), the panel one
 space under the ceiling with Generate at its padding edge, and the grid of
 thirty portrait pictures inside an extra wrapper under a theme's `max-height`
-cap. Each of these was reverted one at a time and a test failed:
+cap. And by `tests/test_theme_layout.py` on the Model Chain theme's page with
+these scripts loaded before the theme's, as Forge loads them: that theme's
+header is sticky *inside the page's padding*, so at scroll 0 the first pixel
+of the window is the page's own margin and `coveredTop` found no bar there and
+put Generate under it; it now asks the rows just under the top too, eight
+pixels at a time down to sixty-four, until something answers. The same page
+showed what a theme that lets the gallery stop short of a tall container does
+to the measure: the gap between the gallery and its buttons, read as the one
+space, was half a window, and nothing fitted. The theme now grows the gallery
+into its container, as Lobe's did. Each of these was reverted one at a time and a test failed:
 the lift, the pair spacing, the ceiling, the bare read, the grid's pixels, the
 row height, the snap and the refresh on a picture's load. Not run on the user's
 machine or in Firefox.

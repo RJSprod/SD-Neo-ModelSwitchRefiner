@@ -6310,7 +6310,14 @@ one second.
   under the bar while the settings scroll. Generate is 44 px tall (Forge gives
   it a 4.5 em floor), and the frames Gradio draws around every tab panel, one
   inside the other around the generation UI, are gone: the content sits at
-  the page's own margin.
+  the page's own margin. Interrupt and Skip, which Forge draws as light grey
+  blocks over Generate's place, are the secondary surface with a line,
+  Interrupt's tinted with the cancel colour: no bright spots. The gallery
+  fills its container, as the Lobe page drew it, so a `user.css` that sizes
+  the container against the window gets a gallery that size, and the Forge
+  Assistant's fitted results column, which reads the gap between the gallery
+  and its buttons as the one space it spaces everything by, reads the real
+  gap.
 - **Quick settings in a drawer** on the left, under the bar: *off* leaves the
   checkpoint row where Forge draws it; *collapsed* moves it into the drawer,
   opened from the header; *open* opens it at every load. The drawer remembers
