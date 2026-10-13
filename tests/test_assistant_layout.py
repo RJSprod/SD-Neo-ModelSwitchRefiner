@@ -1427,3 +1427,163 @@ def test_on_a_phone_a_drag_on_a_docked_text_box_scrolls_the_column(browser):
         assert tapped["engaged"] == ["t_text"] and tapped["active"] == "t_area", tapped
     finally:
         context.close()
+
+
+# -- a drag takes only the handle --------------------------------------------- #
+#
+# Reported: "sometimes when I drag it, it drags the whole page instead of just
+# dragging the fly out menu button or the fly out menu itself ... If I drag the
+# fly out menu or its button, only that should move." Left to the browser, a
+# press on the header's text begins a selection that grows across the page as
+# the hand moves; a press inside a selection that already holds the handle
+# begins a native drag of it, the whole page as a ghost under the cursor with
+# the panel going nowhere; and a finger on a handle whose `touch-action` a
+# host's stylesheet took pans the page. `startDrag` cancels the press, the
+# handles are nothing the browser may select or drag, and `blockPan` cancels
+# the page's pan on every move of a live drag.
+
+HANDLES = """() => {
+    const style = (node) => getComputedStyle(node);
+    const launcher = document.getElementById("forge-assistant-launcher");
+    const header = document.querySelector(".forge-assistant-header");
+    const selection = document.getSelection();
+    const grip = document.querySelector(".forge-assistant-grip").getBoundingClientRect();
+    const panel = document.getElementById("forge-assistant-panel").getBoundingClientRect();
+    const box = launcher.getBoundingClientRect();
+    return {select: [style(launcher).userSelect, style(header).userSelect],
+            drag: [style(launcher).webkitUserDrag, style(header).webkitUserDrag],
+            touch: [style(launcher).touchAction, style(header).touchAction],
+            selected: selection ? selection.toString() : null,
+            grip: [grip.left + grip.width / 2, grip.top + grip.height / 2],
+            panel: [panel.left, panel.top],
+            launcher: {centre: [box.left + box.width / 2, box.top + box.height / 2],
+                       left: box.left, top: box.top},
+            scrollY: window.scrollY, page: document.documentElement.scrollHeight,
+            inner: innerHeight, at: forgeAssistant.shell.state.floatAt,
+            open: forgeAssistant.shell.state.panelOpen};
+}"""
+
+
+def mouse_drag(page, start, end, steps: int = 10) -> None:
+    """A hand's drag, the button still down at the end: what is measured is
+    measured during the drag, before anything is let go or snaps."""
+    page.mouse.move(*start)
+    page.mouse.down()
+    for step in range(1, steps + 1):
+        page.mouse.move(start[0] + (end[0] - start[0]) * step / steps,
+                        start[1] + (end[1] - start[1]) * step / steps)
+        page.wait_for_timeout(16)
+
+
+def moved_by(before, during):
+    return [round(during["panel"][0] - before["panel"][0]),
+            round(during["panel"][1] - before["panel"][1])]
+
+
+def test_a_mouse_drag_by_the_header_moves_the_panel_and_selects_nothing(browser):
+    page = open_page(browser)
+    try:
+        page.evaluate("forgeAssistant.shell.setFreeFloat(true)")
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        before = page.evaluate(HANDLES)
+        # Nothing the browser may select or drag for itself.
+        assert before["select"] == ["none", "none"], before
+        assert before["drag"] == ["none", "none"], before
+
+        mouse_drag(page, before["grip"], (before["grip"][0] - 400, before["grip"][1] - 300))
+        during = page.evaluate(HANDLES)
+        page.mouse.up()
+        settle(page)
+        assert moved_by(before, during) == [-400, -300], (before, during)
+        assert during["selected"] == "", during
+        after = page.evaluate(HANDLES)
+        assert after["selected"] == "" and after["scrollY"] == 0, after
+
+        # A selection that already holds the page is not dragged in the
+        # panel's place: the panel moves, and the selection stays what it was.
+        page.evaluate("() => { const range = document.createRange(); "
+                      "range.selectNodeContents(document.body); "
+                      "const selection = getSelection(); "
+                      "selection.removeAllRanges(); selection.addRange(range); }")
+        held = page.evaluate(HANDLES)
+        assert held["selected"], "the page's text is selected"
+        mouse_drag(page, held["grip"], (held["grip"][0] + 200, held["grip"][1] - 250))
+        moved = page.evaluate(HANDLES)
+        page.mouse.up()
+        settle(page)
+        assert moved_by(held, moved) == [200, -250], (held, moved)
+
+        # A drag the browser would start on a handle of its own accord is
+        # refused where it begins.
+        started = page.evaluate("() => [document.getElementById('forge-assistant-launcher'), "
+                                "document.querySelector('.forge-assistant-header')]"
+                                ".map((node) => node.dispatchEvent("
+                                "new Event('dragstart', {bubbles: true, cancelable: true})))")
+        assert started == [False, False], started
+    finally:
+        page.close()
+
+
+def finger_on_the_launcher(browser, host_rule: str = ""):
+    """A phone, the panel closed, the page well taller than the window; a
+    finger takes the launcher 200 px up the screen."""
+    context, page = open_phone(browser, free_float=True)
+    page.evaluate("forgeAssistant.shell.close()")
+    settle(page)
+    if host_rule:
+        page.add_style_tag(content=host_rule)
+        settle(page)
+    before = page.evaluate(HANDLES)
+    assert before["open"] is False and before["page"] > before["inner"] + 400, before
+    centre = before["launcher"]["centre"]
+    touch_drag(page, centre, (centre[0], centre[1] - 200))
+    settle(page)
+    return context, page, before, page.evaluate(HANDLES)
+
+
+def test_a_finger_on_the_launcher_moves_it_and_pans_nothing(browser):
+    context, page, before, after = finger_on_the_launcher(browser)
+    try:
+        assert before["touch"] == ["none", "none"], before
+        assert abs(after["launcher"]["top"] - (before["launcher"]["top"] - 200)) <= 1, (before, after)
+        assert after["at"] is not None, "the drag was the launcher's"
+        assert after["scrollY"] == 0, after
+        # The page could have scrolled: a finger on its text does.
+        touch_drag(page, (60, 500), (60, 300))
+        settle(page)
+        assert page.evaluate("window.scrollY") > 100
+    finally:
+        context.close()
+
+
+def test_three_taps_on_the_header_still_toggle_focus(browser):
+    """The one time the drag cancelled every press, Chromium delivered a
+    finger's click with `detail` 0 -- a keyboard activation to `headerClick`
+    -- and the header's three taps stopped toggling focus. A finger's press
+    begins the drag uncancelled."""
+    context, page = open_phone(browser, free_float=False)
+    try:
+        assert page.evaluate("forgeAssistant.shell.state.focusEnabled") is False
+        grip = page.evaluate(PANEL_BOX)["grip"]
+        for _ in range(3):
+            page.touchscreen.tap(*grip)
+            page.wait_for_timeout(80)
+        settle(page)
+        assert page.evaluate("forgeAssistant.shell.state.focusEnabled") is True
+    finally:
+        context.close()
+
+
+def test_the_page_stays_still_where_a_host_rule_took_the_handles_touch_action(browser):
+    """`touch-action: none` is the browser's own word on it; a reset's
+    `button { touch-action: manipulation }`, or anything stronger, takes it
+    away. The drag's own move then says it (`blockPan`)."""
+    rule = ".forge-assistant-launcher, .forge-assistant-header { touch-action: auto !important }"
+    context, page, before, after = finger_on_the_launcher(browser, rule)
+    try:
+        assert before["touch"] == ["auto", "auto"], before
+        assert after["scrollY"] == 0, after
+        assert abs(after["launcher"]["top"] - (before["launcher"]["top"] - 200)) <= 1, (before, after)
+    finally:
+        context.close()

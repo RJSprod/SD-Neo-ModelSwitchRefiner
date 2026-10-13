@@ -3526,7 +3526,13 @@ What is stored is which of the six, never a pixel position: a window resized
 between sessions must not be able to leave the launcher off-screen. Dragging is
 one gesture for a mouse, a finger and a pen, it costs six pixels of movement
 before it counts as a drag rather than a tap, and it never fires the click it
-was.
+was. And it moves only what you took hold of: a mouse or pen press that begins
+a drag is the panel's own, so the browser starts no text selection from the header and
+no drag of a selection that happens to hold the handle (which carried a ghost
+of the whole page under the cursor while the panel went nowhere); the
+launcher and the header are nothing the browser can select or drag at all;
+and a finger on either does not scroll the page under it, even where a
+stylesheet has given buttons a touch-action of their own.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the panel
 anywhere in the window. Turning it on leaves it exactly where it is rather than
@@ -6348,9 +6354,23 @@ one second.
   HTML arrives, later than the page's load), and the drawer follows the tab:
   Txt2Img's pages on Txt2Img, Img2Img's on Img2Img, nothing elsewhere. A page
   is drawn at the drawer's density: the search box on a row of its own with
-  the sort buttons under it, the directories as small buttons, a card's name
-  at 11 px over its picture, where Forge's page, laid out for the window's
-  width, has them at a size that fills a drawer with buttons and names.
+  the sort buttons, the direction, the tree view and refresh on one row under
+  it (Forge's spacers between the groups are gone and its icons are 20 px,
+  which is what had rolled the last two onto a third row; in a drawer
+  narrower than 300 px the *Sort:* label goes too, because the row has no
+  room for it beside the seven buttons, which say what they do as tooltips),
+  the directories as small buttons, a card's name at 11 px over its picture,
+  where Forge's page, laid out for the window's width, has them at a size
+  that fills a drawer with buttons and names.
+- **A card's metadata editor as a dialog.** Forge's popup is the window: a
+  backdrop with a 56 em box inside it, which on a window not much wider runs
+  past the 90% it is capped to and sits off centre, with no scrolling of its
+  own, so a tall one scrolls the whole popup; its name at 18 pt, its fields
+  at Gradio's prose padding and gaps. Under the theme it is a dialog: centred,
+  24 px inside the window both ways, no wider than the window, scrolling
+  inside its box when it is taller, the name at 16 px, the file's details in
+  a tight table and the fields at the theme's gaps. Only the box changes;
+  the editor is Forge's.
 - **Generation info as a panel**: the parameters Forge writes under the
   gallery, drawn as the prompt and the negative prompt in blocks with a copy
   button each, and every setting as a chip, with a button that copies the

@@ -422,10 +422,13 @@ class TestTheStylesheetSection:
         # Each is a place where the host, Gradio's inline style on a tab panel
         # or a card, or a theme's rule about every button says !important
         # first; a drawer's own rule needs none.
+        # Forge's `.edit-user-metadata` says `padding` and `background`
+        # !important itself, so the dialog's own padding and surface must too.
         allowed = ("[hidden]", "mc-theme-overflow", ".gradio-button.tool", "token-counter",
                    "#quicksettings", "gradio-accordion", "_toprow", ".mc-theme-action",
                    ".mc-theme-networks-nav", ".mc-theme-networks-group > .extra-page",
-                   ".mc-theme-networks .extra-network-pane .card", ".mc-theme-info-copy")
+                   ".mc-theme-networks .extra-network-pane .card", ".mc-theme-info-copy",
+                   ".edit-user-metadata")
         for selector, body in rules(section()):
             if "!important" not in body:
                 continue

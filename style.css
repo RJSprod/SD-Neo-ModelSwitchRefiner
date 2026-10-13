@@ -994,6 +994,49 @@
     box-sizing: border-box;
 }
 
+/* The sort buttons, the direction, the tree view and refresh in one row
+   under the search: Forge's 24 px icons with a half-rem spacer between the
+   groups came to a few pixels more than the drawer, and the last two rolled
+   onto a third row. The spacers go, the icons are 20 px in 2 px of padding,
+   and the label is the drawer's size and no taller than the buttons beside
+   it, where Forge's 2.2 rem line made the row a third taller than its
+   buttons. */
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control small {
+    margin: 0 4px 0 0;
+    font-size: var(--text-xs, 12px);
+    line-height: 1.6;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control small:not(:first-of-type) {
+    display: none;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control .extra-network-control--sort,
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control .extra-network-control--sort-dir,
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control .extra-network-control--tree-view,
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control .extra-network-control--refresh {
+    padding: 2px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-control .extra-network-control--icon {
+    width: 20px;
+    height: 20px;
+}
+
+/* Narrower than 300 px -- the drawer can be set down to 240 -- the row has
+   no room for the label beside its seven buttons, and the label goes before
+   anything wraps; the buttons say what they do as tooltips. Asked of the
+   strip Forge gathers the controls into, which the drawer's width sizes. */
+:root[data-mc-theme="on"] .mc-theme-networks .extra-networks-controls-div {
+    container-type: inline-size;
+}
+
+@container (max-width: 299px) {
+    :root[data-mc-theme="on"] .mc-theme-networks .extra-network-control small:first-of-type {
+        display: none;
+    }
+}
+
 :root[data-mc-theme="on"] .mc-theme-networks .extra-network-dirs {
     display: flex;
     flex-wrap: wrap;
@@ -1059,6 +1102,92 @@
     display: block;
     color: var(--body-text-color-subdued);
     font-size: var(--text-sm, 13px);
+}
+
+/* -- Forge's popups: a card's metadata editor, as a dialog ------------------- */
+
+/* Forge's popup is the window: a backdrop over everything and an inline
+   box inside it at 56 em plus 2 em of padding, which on a window not much
+   wider than that runs past the 90% it is capped to and sits off centre
+   (an overflowing box's auto margins are nothing), with no scrolling of
+   its own, so the window scrolls the whole popup instead; inside, a name
+   at 18 pt, a table of fields at Gradio's prose padding, and Gradio's own
+   gaps. The page the user had drew it as a dialog: centred by the auto
+   margins Forge gives the box, held 24 px inside the window both ways,
+   scrolling inside when taller, dense. */
+:root[data-mc-theme="on"] .global-popup {
+    padding: 24px;
+    box-sizing: border-box;
+}
+
+:root[data-mc-theme="on"] .global-popup-inner {
+    max-width: 100%;
+    max-height: 100%;
+    margin: auto;
+    padding: 0;
+    overflow: auto;
+    border-radius: var(--mc-theme-radius);
+}
+
+:root[data-mc-theme="on"] .global-popup-close::before {
+    top: 8px;
+    right: 16px;
+    font-size: 28px;
+    line-height: 1;
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata {
+    --layout-gap: 8px;
+    --block-padding: 8px;
+    --input-padding: 6px 10px;
+    box-sizing: border-box;
+    width: min(56em, calc(100vw - 48px));
+    max-width: 100%;
+    padding: 16px 20px !important;
+    background: var(--block-background-fill) !important;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--mc-theme-radius);
+    font-size: var(--text-sm, 13px);
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata .extra-network-name {
+    margin: 0 0 4px;
+    font-size: var(--text-lg, 16px);
+    font-weight: 600;
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata .file-metadata {
+    width: 100%;
+    margin: 0;
+    font-size: var(--text-sm, 13px);
+    border-collapse: collapse;
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata .file-metadata th,
+:root[data-mc-theme="on"] .edit-user-metadata .file-metadata td {
+    padding: 2px 8px 2px 0;
+    border: 0;
+    line-height: 1.4;
+    vertical-align: top;
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata .file-metadata th {
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--body-text-color-subdued);
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata label > span,
+:root[data-mc-theme="on"] .edit-user-metadata .block > span {
+    font-size: var(--text-xs, 12px);
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata textarea {
+    min-height: 0;
+}
+
+:root[data-mc-theme="on"] .edit-user-metadata-buttons {
+    margin-top: 8px;
 }
 
 /* -- the generation info ----------------------------------------------------- */
@@ -6544,6 +6673,21 @@
     font-size: 0.95em;
     cursor: pointer;
     touch-action: none;
+}
+
+/* A drag by a handle moves the handle and nothing else. The two handles are
+   nothing the browser may select or drag for itself: a press on the header's
+   text used to begin a selection that grew across the page as the hand moved,
+   and a press inside a selection that already held the handle began a native
+   drag of it -- the whole page as a ghost under the cursor, the panel left
+   where it was. `startDrag` cancels the press as well; this keeps a selection
+   from ever starting or ending on a handle, whichever way it is made. The pan
+   a finger would start is `touch-action: none`, above and below. */
+.forge-assistant-launcher,
+.forge-assistant-header {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
 }
 
 .forge-assistant-launcher-label {

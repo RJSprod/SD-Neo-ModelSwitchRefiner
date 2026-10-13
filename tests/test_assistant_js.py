@@ -2865,6 +2865,119 @@ class TestFreeFloat:
         assert found["seen"] == ["758px", "294px", "798px", "120px"]
 
 
+class TestADragTakesOnlyTheHandle:
+    """Reported: "sometimes when I drag it, it drags the whole page instead of
+    just dragging the fly out menu button or the fly out menu itself." Left to
+    the browser, a press on the header's text begins a selection that grows
+    across the page as the hand moves, and a press inside a selection that
+    already holds the handle begins a native drag of it -- the whole page as a
+    ghost under the cursor, the panel going nowhere. So the press an accepted
+    drag begins with is cancelled, and one the shell refuses is still the
+    browser's. The pan a finger would start is the handles' `touch-action`,
+    and `blockPan` under a live drag for a host whose stylesheet took it
+    (`tests/test_assistant_layout.py` drives both in Chromium)."""
+
+    SHELL = PANEL + """
+        sized(1280, 900);
+        const shell = panel({state: {freeFloat: true}});
+        [shell.nodes.panel, shell.nodes.launcher].forEach((node) => {
+            node.setPointerCapture = () => {};
+            node.releasePointerCapture = () => {};
+        });
+        shell.anchor = () => "bottom-right";
+        shell.placeNow = () => {};
+        shell._saveFloat = () => {};
+        shell.syncDock = () => {};
+        const press = (over) => Object.assign({
+            pointerId: 1, button: 0, isPrimary: true, pointerType: "mouse",
+            clientX: 950, clientY: 520, target: null, cancelled: false,
+            preventDefault() { this.cancelled = true; }}, over || {});
+        const move = (cancelable) => ({cancelable, cancelled: false,
+                                       preventDefault() { this.cancelled = true; }});
+    """
+
+    def test_an_accepted_press_is_cancelled(self):
+        found = run(self.SHELL + """
+            const event = press();
+            shell.startDrag(event, shell.nodes.panel);
+            console.log(JSON.stringify({cancelled: event.cancelled, dragging: !!shell.drag}));
+        """, sources=("shell",))
+
+        assert found == {"cancelled": True, "dragging": True}
+
+    def test_a_fingers_press_begins_the_drag_uncancelled(self):
+        """A finger selects nothing by dragging, and Chromium delivers the
+        click after a cancelled touch pointerdown with `detail` 0, which
+        `headerClick` reads as a keyboard activation: cancelled, three taps
+        on the header stopped toggling focus (seen in Chromium, not guessed).
+        A pen is a mouse here: it selects as one."""
+        found = run(self.SHELL + """
+            const finger = press({pointerType: "touch"});
+            shell.startDrag(finger, shell.nodes.panel);
+            const began = !!shell.drag;
+            shell.endDrag({pointerId: 1}, true);
+            const pen = press({pointerType: "pen"});
+            shell.startDrag(pen, shell.nodes.panel);
+            console.log(JSON.stringify({finger: finger.cancelled, began, pen: pen.cancelled,
+                                        penBegan: !!shell.drag}));
+        """, sources=("shell",))
+
+        assert found == {"finger": False, "began": True, "pen": True, "penBegan": True}
+
+    def test_a_press_the_shell_refuses_is_left_to_the_browser(self):
+        """A second button, a second finger, a press on a control: none of
+        them begins a drag, and the browser does with them what it does."""
+        found = run(self.SHELL + """
+            const control = {closest: () => control};
+            const out = {};
+            [["secondButton", press({button: 2})],
+             ["secondFinger", press({isPrimary: false})],
+             ["control", press({target: control})]].forEach(([name, event]) => {
+                shell.startDrag(event, shell.nodes.panel);
+                out[name] = {cancelled: event.cancelled, dragging: !!shell.drag};
+            });
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        assert found == {name: {"cancelled": False, "dragging": False}
+                         for name in ("secondButton", "secondFinger", "control")}
+
+    def test_a_fingers_move_is_cancelled_only_under_a_live_drag(self):
+        """Never a move the browser has already taken (one that is not
+        cancelable), nothing before a drag, and nothing once it has ended."""
+        found = run(self.SHELL + """
+            const idle = move(true);
+            shell.blockPan(idle);
+            shell.startDrag(press(), shell.nodes.panel);
+            const under = move(true);
+            shell.blockPan(under);
+            const taken = move(false);
+            shell.blockPan(taken);
+            shell.endDrag({pointerId: 1}, true);
+            const after = move(true);
+            shell.blockPan(after);
+            console.log(JSON.stringify({idle: idle.cancelled, under: under.cancelled,
+                                        taken: taken.cancelled, after: after.cancelled}));
+        """, sources=("shell",))
+
+        assert found == {"idle": False, "under": True, "taken": False, "after": False}
+
+    def test_the_pan_blocker_is_on_the_handles_and_never_the_window(self):
+        """A non-passive touchmove listener on the window makes every scroll
+        of the page wait for the main thread, which a Gradio page can hold for
+        a long moment. On the handles it costs only the touches that start
+        there, which wait anyway. And the browser's own drag of a handle is
+        refused where it would begin."""
+        source = SHELL.read_text(encoding="utf-8")
+        wiring = re.search(r"\[nodes\.launcher, nodes\.header\]\.forEach\(\(handle\) => \{(.*?)\n        \}\);",
+                           source, re.S)
+        assert wiring, "the two handles are wired together"
+        assert re.search(r'this\.on\(handle, "touchmove", [^;]*\{passive: false\}\);',
+                         wiring.group(1)), "a non-passive touchmove on each handle"
+        assert re.search(r'this\.on\(handle, "dragstart", ', wiring.group(1))
+        assert not re.search(r'this\.on\(window, "touch(move|start)"', source)
+
+
 class TestTheHeaderIsOneRow:
     """Asked for: one row carrying Workspace, Focus, ⋯ and ✕, with the title
     gone. It was two rows, and above a collapsed conversation that was most of
