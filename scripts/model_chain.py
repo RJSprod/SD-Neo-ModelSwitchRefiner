@@ -47,6 +47,7 @@ import mc_profile_state
 import mc_progress
 import mc_references
 import mc_styles
+import mc_theme
 import mc_turns
 import mc_turns_guests
 import mc_voice_api
@@ -1198,6 +1199,18 @@ try:
     shared.options_templates.update(shared.options_section(VOICE_SECTION, _VOICE_OPTIONS))
 except Exception:
     errors.report("Model Chain: could not register the Voice Chat settings section",
+                  exc_info=True)
+
+# The theme: a section of its own, and one hidden option -- the record of the
+# one-time import of the user's Lobe settings, which is what makes that import
+# run once (the host draws no control for an option whose section id is None).
+try:
+    shared.options_templates.update(
+        shared.options_section(mc_theme.SECTION, mc_theme.settings(shared)))
+    shared.options_templates.update(
+        shared.options_section(mc_theme.HIDDEN_SECTION, mc_theme.hidden_settings(shared)))
+except Exception:
+    errors.report("Model Chain: could not register the theme settings section",
                   exc_info=True)
 
 mc_progress.install()
@@ -4347,5 +4360,10 @@ try:
     # host has one.
     script_callbacks.on_app_started(mc_llm_conversation_api.install)
     script_callbacks.on_app_started(mc_llm_conversation_startup.on_app_started)
+    # The theme's palette is the host's theme object, read when the page is
+    # built, so it is installed just before that -- and the user's Lobe
+    # settings are imported there too, once, so the first page already has
+    # their switches.
+    script_callbacks.on_before_ui(mc_theme.on_before_ui)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

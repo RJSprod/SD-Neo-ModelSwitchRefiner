@@ -27,6 +27,85 @@ not wait on anything below.
 
 ---
 
+## 0. The decision, and what was built instead (2026-10-13, same day)
+
+The user read section 8 and declined the licence: *"i really dont want that
+license. Can we just recreate the parts of the theme i want, reverse
+engineered?"* So **sections 4 and 7 below are retired** — nothing of the
+Lobe extension is vendored, served or patched — and what was built is an
+independent theme of this extension's own, from a description of the page and
+from Forge's own DOM, with nothing taken from `src/`. The user then sent their
+`lobe_theme_config.json`, which is the specification of what they had on and
+is read once, as their data, to start the new switches where theirs were.
+
+What that file says, and what became of each line:
+
+| Lobe setting | Value | Here |
+|---|---|---|
+| `layoutSplitPreview` | true | **Generate above the gallery, prompts at the top of the settings column** (`model_chain_theme_split`) |
+| `enableSidebar`, `sidebarExpand`, `sidebarWidth` | true, false, 280 | **Quick settings** in a drawer, collapsed, 280 px (`model_chain_theme_quick`, `_quick_width`) |
+| `promptTextareaType` | resizable | **Resizable prompt boxes** (`model_chain_theme_prompts`) |
+| `svgIcon` | true | **Drawn icons** on the tool buttons (`model_chain_theme_icons`), buttons whose whole text is the emoji and nothing else |
+| `layoutHideFooter` | true | **Hide the WebUI footer**, which this extension already had |
+| `confirmPageUnload` | false | **Ask before leaving the page** (`model_chain_theme_confirm_unload`) |
+| `primaryColor`, `neutralColor` | none | the automatic accent: white at night, black by day (`model_chain_theme_accent`) |
+| `logoCustomTitle` | none | **Title in the header** (`model_chain_theme_title`, "Forge") |
+| `enableExtraNetworkSidebar`, `extraNetworkSidebarExpand`, `extraNetworkSidebarWidth`, `extraNetworkCardSize`, `extraNetworkFixedMode` | true, false, 340, 86, fixed | **the next round**: the extra-network pages in a drawer on the right. Their values are kept in the import's record (`raw`) |
+| `enableImageInfo` | true | **the next round**: a formatted generation-info panel |
+| `enableWebFont` | true | a **Typeface** setting of ours (`model_chain_theme_font`, a Google Fonts family; empty is the system's) |
+| `i18n`, `liteAnimation`, `promptEditor`, `enableHighlight`, `logoType`, `logoCustomUrl`, `sidebarFixedMode` | — | not built: translations, the background glow, Lobe's prompt editor and highlighter, its logo, floating panels |
+| `detail` | "Not Found" | a 404 body the theme once saved as a setting; ignored |
+
+The pieces, and where they are:
+
+- `mc_theme.py` — the **palette as a Gradio theme object** (the host's own
+  mechanism: `gr.Blocks(theme=shared.gradio_theme)`; every attribute becomes a
+  CSS variable, light and dark), installed on `on_before_ui` while the master
+  switch is on and the host's own theme object put back when it is off; the
+  **settings section** *Model Chain: Theme*; the **one-time import** of the
+  user's file (newest `extensions/*/lobe_theme_config.json`; only a switch
+  still at its default is written; the record in a hidden option, with the
+  raw file for the next round).
+- `javascript/model_chain_theme.js` — the page work, every piece a switch
+  read live and undone when it goes off: Forge's own `#tabs > .tab-nav` as a
+  64 px sticky **header** (never moved or wrapped: Forge reads the current tab
+  from `#tabs > .tab-nav > button.selected`), with a title first, and last a
+  quick-settings button, a **⋯ menu of the tabs that do not fit** (the
+  selected one is always shown), a theme toggle and a settings button; the
+  **split view** (the classic top row to the head of the settings column, the
+  Generate box to the head of the gallery's container, in both tabs, with the
+  compact layout's box handled too); the **quick-settings drawer** (fixed
+  under the header, opened from the header or by the setting, closed by
+  Escape, remembered per browser); **resizable prompts**; **icons** from the
+  ISC-licensed Lucide set (the notice is in the file); optional
+  **tab names with spaces** ("Txt 2 Img", but "LoRA" and "WanGP" stay);
+  **ask before leaving**; the **typeface** link. It **stands down** while a
+  Lobe root is on the page (`data-mc-theme="lobe"`), and marks the root from
+  the last configuration at the first paint so a themed page is themed before
+  the host has said it is loaded.
+- `style.css`, *Model Chain -- the theme* — keyed on `data-mc-theme="on"`:
+  the header, the menu, the drawer, the split view's rows, the sticky results
+  column, the boxes down the settings column, the token-counter pill, the
+  36 px tool buttons, the gallery's checkerboard ground, the phone sizes.
+  Colours only from the host's variables; `!important` only where Forge says
+  it first.
+- Tests: `tests/test_theme.py` (settings, palette, theme object, install,
+  import), `tests/test_theme_js.py` (the pure parts in node, the stylesheet
+  as text), `tests/test_theme_layout.py` (Chromium: the bar, the overflow,
+  the split, the drawer, the prompts, the icons, standing down, off, the
+  first paint, a phone width).
+
+How the user moves over: Settings → Model Chain: Theme → *Use the Model Chain
+theme* on, Apply, Reload UI (the imported switches are already there); then
+Extensions → disable `sd-webui-lobe-theme`, Apply and restart; the page is
+the same page, drawn by this extension. Lobe's folder is never written to.
+
+The analysis below is kept as the record of what was found in the Lobe
+repository and how Forge loads a theme, which is what the rebuild was designed
+from; its plan is not.
+
+---
+
 ## 1. What the Lobe extension is made of
 
 | | |

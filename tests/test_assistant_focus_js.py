@@ -750,18 +750,48 @@ class TestEntering:
         """The rule this replaced. It is asserted *absent*, because it is the
         kind of thing that looks like a free safety net and reads as an
         improvement in a diff -- and it hid the whole page on a real host.
+
+        Styling a tab bar by name is a theme's ordinary business (the Model
+        Chain theme makes Forge's own bar its header, in place), so what is
+        forbidden is a selector that names a tab bar and *hides* it: no
+        display, visibility, opacity, zero size, clip or scale on it. A tab
+        bar is hidden by the script, which can check whether it contains the
+        workspace, and never by a selector, which cannot.
         """
+        import re
+
         css = (pathlib.Path(__file__).resolve().parent.parent
                / "style.css").read_text(encoding="utf-8")
-        rules = [piece.split("{", 1)[0]
-                 for piece in css.split("}") if "{" in piece]
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        rules = [piece.split("{", 1) for piece in css.split("}") if "{" in piece]
 
-        for selector in rules:
-            naked = selector.split("/*")[-1]
-            assert ".tab-nav" not in naked and "tablist" not in naked, (
+        def hides(body: str) -> str:
+            for declaration in body.split(";"):
+                if ":" not in declaration:
+                    continue
+                name, value = (part.strip().lower() for part in declaration.split(":", 1))
+                value = value.replace("!important", "").strip()
+                if name == "display" and value == "none":
+                    return declaration
+                if name == "visibility" and value in ("hidden", "collapse"):
+                    return declaration
+                if name == "opacity" and re.fullmatch(r"0(\.0+)?", value):
+                    return declaration
+                if name in ("height", "max-height", "width", "max-width", "font-size") \
+                        and re.fullmatch(r"0(px|em|rem|%|vh|vw)?", value):
+                    return declaration
+                if name in ("clip", "clip-path") or (name == "transform" and "scale(0" in value):
+                    return declaration
+            return ""
+
+        for selector, body in rules:
+            if ".tab-nav" not in selector and "tablist" not in selector:
+                continue
+            hidden = hides(body)
+            assert not hidden, (
                 "a tab bar is hidden by the script, which can check whether it "
                 "contains the workspace, and never by a selector, which cannot: "
-                + selector.strip())
+                + selector.strip() + " { " + hidden.strip() + " }")
 
 
 class TestLeaving:

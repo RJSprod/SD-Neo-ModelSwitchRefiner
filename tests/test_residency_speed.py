@@ -358,6 +358,10 @@ class TestPinnedEncoders:
         for any code path that reads the option before the settings page has
         been built.
         """
+        # Registered on import, so the option is there to take away whether or
+        # not an earlier test in this process has imported the extension.
+        import model_chain  # noqa: F401
+
         monkeypatch.delitem(host.shared.options_templates, mc_memory.OPT_PIN_ENCODERS)
         assert not hasattr(host.shared.opts, mc_memory.OPT_PIN_ENCODERS)
         assert mc_memory.capture_stage_1_encoders() == 2
@@ -1574,14 +1578,26 @@ class TestSettingsRegistration:
             if name.startswith("model_chain_")
         ]
         assert ours, "no Model Chain settings were registered at all"
-        # Two sections, deliberately. Voice Chat is an install-level capability
+        # Three sections, deliberately. Voice Chat is an install-level capability
         # with two downloads behind it, and burying it under a heading about
         # image model chaining would make it findable only by somebody who
-        # already knew it was there.
-        known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION}
-        for option in ours:
+        # already knew it was there; the theme is a page-wide choice with a
+        # dozen switches of its own, and the same argument holds.
+        import mc_theme
+
+        known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION, mc_theme.SECTION}
+        # The one deliberate use of the host's hidden idiom: the record of the
+        # one-time import of the user's Lobe settings, which is read back and
+        # never meant to be changed by hand. Not a setting, so not drawn.
+        records = {mc_theme.OPT_IMPORT}
+        for name, option in host.shared.options_templates.items():
+            if name in records:
+                assert option.section[0] is None, f"{name} is a record and must not be drawn"
+        for name, option in host.shared.options_templates.items():
+            if not name.startswith("model_chain_") or name in records:
+                continue
             assert option.section in known, (
-                f"{option.label} is in {option.section}, which is neither of this "
+                f"{option.label} is in {option.section}, which is none of this "
                 f"extension's settings sections")
             assert option.section[0] is not None, f"{option.label} would never be drawn"
 
