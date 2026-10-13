@@ -1143,15 +1143,57 @@
     border-radius: 0;
 }
 
-:root[data-mc-theme="on"] button[id$="_interrupt"] {
-    color: var(--button-cancel-text-color);
-    background: var(--button-cancel-background-fill);
-    border-color: var(--button-cancel-border-color);
+/* Interrupt and Skip, quietly. Forge draws both as light grey blocks over
+   Generate's place, and the first build drew Interrupt in the cancel red:
+   three bright spots on a dark page, the very thing the quieter night mode
+   is against. Both are the secondary surface with a line; Interrupt's is
+   tinted with the cancel colour where the browser can mix, so it still reads
+   as the one that stops. */
+:root[data-mc-theme="on"] button[id$="_interrupt"],
+:root[data-mc-theme="on"] button[id$="_skip"] {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+    border: 1px solid var(--border-color-primary);
 }
 
-:root[data-mc-theme="on"] button[id$="_interrupt"]:hover {
-    background: var(--button-cancel-background-fill-hover);
-    border-color: var(--button-cancel-border-color-hover);
+:root[data-mc-theme="on"] button[id$="_interrupt"]:hover,
+:root[data-mc-theme="on"] button[id$="_skip"]:hover {
+    background: var(--background-fill-secondary-hover, var(--background-fill-secondary));
+    border-color: var(--border-color-accent-subdued, var(--border-color-primary));
+}
+
+@supports (background: color-mix(in srgb, red 10%, blue)) {
+    :root[data-mc-theme="on"] button[id$="_interrupt"] {
+        background: color-mix(in srgb, var(--button-cancel-background-fill) 22%, var(--body-background-fill));
+        border-color: color-mix(in srgb, var(--button-cancel-background-fill) 45%, var(--body-background-fill));
+    }
+
+    :root[data-mc-theme="on"] button[id$="_interrupt"]:hover {
+        background: color-mix(in srgb, var(--button-cancel-background-fill) 32%, var(--body-background-fill));
+        border-color: color-mix(in srgb, var(--button-cancel-background-fill) 60%, var(--body-background-fill));
+    }
+}
+
+/* The gallery fills its container, as the page the user had drew it. A
+   container sized against the window by a user.css (85vh) held a gallery at
+   its own height, with the rest empty; and the Forge Assistant, which reads
+   the gap between the gallery and its buttons as the theme's one space,
+   read half a window there and fitted nothing. The progress bar and the
+   live preview Forge puts in the container keep their own size. */
+:root[data-mc-theme="on"] [id$="_gallery_container"] {
+    display: flex;
+    flex-direction: column;
+}
+
+:root[data-mc-theme="on"] [id$="_gallery_container"] > div:not([id$="_generate_box"]):not(.progressDiv):not(.livePreview):not(.block) {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+:root[data-mc-theme="on"] [id$="_gallery_container"] .block.gradio-gallery {
+    flex: 1 1 auto;
 }
 
 /* The results column stays in view while the settings scroll under the

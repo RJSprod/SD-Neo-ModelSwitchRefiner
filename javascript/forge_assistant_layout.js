@@ -90,6 +90,10 @@
     // Below this the gallery is not a gallery, and a window that short is better
     // served by the page scrolling than by a strip.
     const FILL_FLOOR = 240;
+    // How far under the top of the window a header is looked for, and in
+    // what steps: a page's padding above a sticky bar, at scroll 0.
+    const PROBE_DEPTH = 64;
+    const PROBE_STEP = 8;
 
     function app() {
         return (typeof gradioApp === "function" ? gradioApp() : null) || document;
@@ -225,10 +229,25 @@
         for (let round = 0; round < 3; round += 1) {
             let found = covered;
             let hits = [];
-            try {
-                hits = document.elementsFromPoint(x, covered + 1);
-            } catch (error) {
-                hits = [];
+            // A bar that starts a little under the top -- the Model Chain
+            // theme's, sticky inside the page's padding at scroll 0, so the
+            // first pixels of the window are the page's own margin -- is a
+            // bar over the top of the view all the same: the rows just under
+            // the top are asked too, until something answers.
+            for (let probe = 1; probe <= PROBE_DEPTH && !hits.length; probe += PROBE_STEP) {
+                try {
+                    hits = document.elementsFromPoint(x, covered + probe).filter((hit) => {
+                        let walk = hit;
+                        while (walk && walk !== document.body && walk !== document.documentElement) {
+                            const style = styleOf(walk);
+                            if (style && (style.position === "fixed" || style.position === "sticky")) return true;
+                            walk = walk.parentElement;
+                        }
+                        return false;
+                    });
+                } catch (error) {
+                    hits = [];
+                }
             }
             hits.forEach((hit) => {
                 if (!hit || (hit.closest && hit.closest("#" + ASSISTANT_ROOT))) return;
