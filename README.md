@@ -537,6 +537,10 @@ Under **Settings → Model Chain**:
 - **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
   colour** and the toggles below them — see
   [Progress-bar appearance](#progress-bar-appearance).
+- **Quieter night mode: dim the primary buttons in the dark theme** (default
+  on) — Generate and every other primary button drawn as a dim surface tinted
+  with the theme's accent instead of a solid block of it. See
+  [A quieter night mode](#a-quieter-night-mode).
 - **Show the Forge Assistant** (default on), **Forge Assistant label**,
   **launcher** and **position** — the floating panel, what it is called, whether
   it draws its name, an icon or both, and which of the six resting places it
@@ -727,6 +731,41 @@ otherwise put a second moving pattern on the same small element, so the sheen
 detects that and stands down by itself, leaving the colour and glow to carry the
 look. That check measures the actual conflict rather than looking for a theme by
 name, so it works for any theme that decorates the bar the same way.
+
+### A quieter night mode
+
+**On by default.** In the dark theme, Gradio paints a primary button as a solid
+block of the theme's accent, and a theme is entitled to a light accent: the Lobe
+theme's night mode has a white one out of the box, so **Generate** — 44 pixels
+tall and the width of its column — was the brightest thing on a black page, with
+**Send**, **Apply settings**, Mini Paint's **Add to Queue** and every other
+primary button the same white.
+
+**Quieter night mode** in Settings → Model Chain draws those buttons as a dim
+surface instead: the accent let through at a low opacity over whatever is
+behind the button, a somewhat stronger line of the same accent around it, and
+the page's ordinary text on it. Hovering and pressing strengthen the tint rather
+than filling the button in. The accent is still the theme's own, so a theme with
+a blue accent gets a blue-tinted Generate and one with a white accent a grey
+one; nothing here states a colour of its own. The same surface replaces the
+yellow the Lobe theme puts on a dropdown's keyboard-highlighted row, and the
+white on the primary buttons of Lobe's own dialogs.
+
+What it does not do: it touches only the dark theme (Lobe's day mode has a
+black accent, and a black Generate is no bright spot), only how those buttons
+are painted and never their size — Lobe fixes Generate at 44 pixels and the
+Forge Assistant measures that box, and both still hold — and nothing else that
+the accent colours: slider thumbs, ticked checkboxes, the selected tab's
+underline and Interrupt's red are as the theme draws them. It applies to every
+tab, under any WebUI theme, because the buttons are Gradio's; and turning it
+off puts the solid buttons straight back, no reload needed, because the rule is
+a stylesheet keyed on one attribute the page reads live. A browser without
+`color-mix()` gets the theme's secondary button surface in place of the tint,
+which is the same idea with less finesse.
+
+Checked for real, not on a stub: `tests/test_night_mode.py` renders a
+Lobe-shaped night page in Chromium and measures what Generate is painted with
+the setting on and off.
 
 ## How it behaves
 
@@ -6239,10 +6278,101 @@ the token and played from memory. A request that is refused says why with the
 status that fits — 400 for a bad value, 404 for something no longer there, 409
 for something that cannot happen right now, 413 for too large.
 
+## Theme
+
+A theme of this extension's own: the page the Lobe theme drew, without the Lobe
+theme. **Off by default.** Turn it on under **Settings → Model Chain: Theme →
+Use the Model Chain theme**, then Reload UI; with the Lobe extension still
+enabled the theme stands down by itself (the page says `data-mc-theme="lobe"`
+on its root and nothing is touched), so turn this on first and disable that
+one second.
+
+### What it draws
+
+- **A black page** with calm surfaces: blocks a step above the page, lines a
+  step above those, text at 90% white, no shadows but under a dropdown's list.
+  By day, the same page in light. The palette is a Gradio theme — the host's
+  own mechanism, which every control reads in both modes — so it takes a
+  Reload UI to apply, and so does the **Accent colour** (a hex colour; empty is
+  white at night and black by day, which is where [A quieter night
+  mode](#a-quieter-night-mode) comes in) and the **Typeface** (a Google Fonts
+  family name; empty is the system's).
+- **The tabs in a 64 px bar** at the top, which stays there while the page
+  scrolls. It is Forge's own tab bar, styled in place and never moved, with a
+  **title** first (a setting), and last a quick-settings button, a **⋯ menu of
+  the tabs the bar has no room for** (the selected one is always shown), a
+  light/dark toggle and a button that opens these settings. **Tab names** can
+  be left as Forge writes them or spaced ("Txt 2 Img"; "LoRA" and "WanGP" stay
+  whole).
+- **Generate above the gallery, the prompt boxes at the top of the settings
+  column** — the split view — in Txt2Img and Img2Img, with the classic and the
+  compact prompt-box styles both handled. The results column stays in view
+  under the bar while the settings scroll.
+- **Quick settings in a drawer** on the left, under the bar: *off* leaves the
+  checkpoint row where Forge draws it; *collapsed* moves it into the drawer,
+  opened from the header; *open* opens it at every load. The drawer remembers
+  whether you left it open, per browser, Escape closes it, and its width is a
+  setting.
+- **The extra-network pages in a drawer** on the right: Textual Inversion,
+  Checkpoints, LoRA and the rest leave Forge's tabs beside Generation for a
+  drawer opened from the header, so a page shows beside the generation UI
+  rather than in its place. *off* leaves them as Forge's tabs; *collapsed*
+  moves them into the drawer; *open* opens it at every load; it remembers
+  whether you left it open, Escape closes it, and its width and the cards'
+  size are settings. The drawer's strip shows one page at a time with that
+  page's own search, sort and refresh; a card's press writes into the prompt
+  as it always did, because the pages are Forge's own elements, moved. A page
+  is taken only once Forge's script has wired it (it does so after the page's
+  HTML arrives, later than the page's load), and the drawer follows the tab:
+  Txt2Img's pages on Txt2Img, Img2Img's on Img2Img, nothing elsewhere.
+- **Generation info as a panel**: the parameters Forge writes under the
+  gallery, drawn as the prompt and the negative prompt in blocks with a copy
+  button each, and every setting as a chip, with a button that copies the
+  whole text. Forge's own paragraph stays in the page, out of view, for the
+  buttons that read it. Off leaves Forge's text.
+- **Resizable prompt boxes**, in the monospace face, with the token counter as
+  a pill on the corner.
+- **Drawn icons** on the tool buttons — paste, clear, styles, refresh, the
+  seed buttons, folder, save, the send-to buttons — in place of their emoji.
+  Only a button whose *whole* text is one of those emoji is touched, never a
+  span and never a word; the icons are Lucide's (ISC licence, the notice is in
+  the script).
+- **Ask before leaving the page**, off by default.
+
+Every switch but the palette is read live: turn one off and its element goes
+back where Forge had it, with nothing left behind; turn the whole theme off
+and the page is Forge's again without a reload. A page that was themed
+yesterday is themed before the host has said it is loaded, from what the
+browser remembered.
+
+### Moving over from the Lobe theme
+
+On the first start after the update the extension reads your own
+`lobe_theme_config.json` from the Lobe extension's folder, once, and starts
+its switches where yours were: the split view, the quick settings drawer and
+its width, the extra-network drawer, its width and its card size, the
+generation-info panel, the prompt boxes, the icons, the footer, the
+confirmation, a custom title and a named primary colour. A switch you have
+already set here is yours and is not overwritten; the file is never written
+to; the record of what was read, kept and ignored is in a hidden setting, with
+the file itself, so a build that learns to use more of it (the drawer and the
+panel came one round after the first import) reads the record again rather
+than the file. Then: turn the theme on, Reload UI, disable
+`sd-webui-lobe-theme` under Extensions, restart. Mini Paint NEO needs nothing:
+it reads the page's variables and the dark class, and both are there.
+
+Not built: Lobe's prompt editor and highlighter, its translations, its
+background glow, its logo, and its floating (as against fixed) panels.
+
+The reasoning, the review of the Lobe repository it came from and the
+licence question that decided the approach are in
+[`docs/24-lobe-theme-host.md`](docs/24-lobe-theme-host.md).
+
 ## Layout
 
 ```
 mc_arch.py            architecture detection + per-architecture geometry
+mc_theme.py           the theme: palette as a Gradio theme object, settings, the Lobe import
 mc_pipeline_panel.py  the Image Pipeline shell: four stage rows, the drawer
                       every disclosure is made with, and the slots they offer
 mc_literal_prompts.py the two Literal Prompt boxes, and the out-of-sight note
@@ -6380,6 +6510,8 @@ javascript/forge_assistant.js        the panel: docking, transcript, composer
 javascript/forge_assistant_store.js  the page's copy of the conversation
 javascript/forge_assistant_host.js   Forge's tabs and header, as an adapter
 javascript/forge_assistant_focus.js  workspace focus, as a reversible transaction
+javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
+javascript/model_chain_night.js      the quieter night mode's one attribute
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension

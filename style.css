@@ -521,6 +521,739 @@
 }
 
 /* ==========================================================================
+   Model Chain -- a quieter night mode
+   ==========================================================================
+
+   Inert until javascript/model_chain_night.js puts `data-mc-night="quiet"`
+   on the root, which it does while the Settings toggle is on (and it is on by
+   default). Nothing here touches the light theme: every rule also asks for
+   `.dark`, which Forge's dark theme is on the body, and LobeTheme puts there
+   too.
+
+   What it is for. Gradio paints a primary button as a solid block of the
+   theme's accent, and a theme is entitled to a light accent: LobeTheme's
+   night mode has a white one out of the box, so Generate -- 44 pixels tall
+   and the width of its column -- was the brightest thing on a black page,
+   with Send, Apply settings, Add to Queue and every other primary button the
+   same white. The ask was fewer bright spots at night, Generate first.
+
+   What it does. The block becomes a dim surface: the accent at a low opacity
+   over whatever is behind it, a somewhat stronger line of the same accent
+   around it, and the page's ordinary text colour on it. Hovering and pressing
+   strengthen the tint rather than filling the button in. The accent is still
+   the theme's own -- `--color-accent`, which Gradio defines and Lobe
+   redefines -- so a theme with a blue accent gets a blue-tinted Generate and
+   one with a white accent a grey one; nothing here states a colour.
+
+   Three rules, all three learned elsewhere in this file:
+
+   1. Colours only ever come from the host's variables. A literal would be
+      right for one theme and wrong for the next.
+   2. A solid declaration comes before the mixed one, and the mix is under
+      @supports: a browser without color-mix() gets the theme's secondary
+      button surface, which is the same idea with less finesse.
+   3. No geometry. Height, padding and radius stay whatever the theme set --
+      Lobe fixes Generate at 44 px -- so nothing moves when the toggle does.
+
+   Specificity, since these compete with two stylesheets. Gradio's own
+   `.primary` rule carries a generated class and comes to (0,2,0) or so;
+   Lobe's rules on the generate button set only its height, and its rule on
+   the primary buttons of its own dialogs is (0,2,0) with `!important` on
+   hover. Every selector here is (0,3,1) or more, this stylesheet is linked
+   after both, and `!important` is said only where Lobe says it first -- on
+   its own dialogs' buttons and on the dropdown row below -- so a user
+   stylesheet can still override the Generate rule the ordinary way. */
+
+:root[data-mc-night="quiet"] .dark button.gradio-button.primary {
+    background: var(--button-secondary-background-fill);
+    border-color: var(--button-secondary-border-color);
+    color: var(--body-text-color);
+}
+
+:root[data-mc-night="quiet"] .dark button.gradio-button.primary:hover:not([disabled]),
+:root[data-mc-night="quiet"] .dark button.gradio-button.primary:focus-visible {
+    background: var(--button-secondary-background-fill-hover);
+    border-color: var(--button-secondary-border-color-hover);
+    color: var(--body-text-color);
+}
+
+/* LobeTheme's own dialogs -- its settings, its share sheet -- draw their
+   primary buttons with antd, and Lobe fills those with the same accent. The
+   same surface, with `!important` because Lobe's hover rule says it. */
+:root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous) {
+    background: var(--button-secondary-background-fill);
+    border-color: var(--button-secondary-border-color);
+    color: var(--body-text-color);
+}
+
+:root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):hover,
+:root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):active {
+    background: var(--button-secondary-background-fill-hover) !important;
+    border-color: var(--button-secondary-border-color-hover) !important;
+    color: var(--body-text-color) !important;
+}
+
+/* A dropdown's keyboard-highlighted row. Lobe paints the row the arrow keys
+   or a typed filter land on in its yellow, with black text -- at night the
+   one block of colour on the page. The same dim surface, and the text colour
+   stays the text colour; `!important` and the longer selector because Lobe's
+   rule says `!important`. */
+:root[data-mc-night="quiet"] .dark ul.options li.active:not(.selected) {
+    background: var(--button-secondary-background-fill-hover) !important;
+    color: var(--body-text-color) !important;
+}
+
+/* The finesse: the accent itself, let through at a low opacity, so the button
+   keeps a trace of the colour that marks it as the primary action. Over the
+   solid rules above, for the browsers that can mix. */
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary,
+    :root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous) {
+        background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 38%, transparent);
+    }
+
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary:hover:not([disabled]),
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary:focus-visible {
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 56%, transparent);
+    }
+
+    :root[data-mc-night="quiet"] .dark button.gradio-button.primary:active:not([disabled]) {
+        background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+    }
+
+    :root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):hover {
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent) !important;
+        border-color: color-mix(in srgb, var(--color-accent) 56%, transparent) !important;
+    }
+
+    :root[data-mc-night="quiet"] .dark .ant-btn-primary:not(.ant-btn-dangerous):active {
+        background: color-mix(in srgb, var(--color-accent) 30%, transparent) !important;
+    }
+
+    :root[data-mc-night="quiet"] .dark ul.options li.active:not(.selected) {
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent) !important;
+    }
+}
+
+/* ==========================================================================
+   Model Chain -- the theme
+   ==========================================================================
+
+   Inert until javascript/model_chain_theme.js puts `data-mc-theme="on"` on
+   the root, which it does while Settings -> Model Chain: Theme is on and the
+   Lobe theme's own bundle is not on the page. The palette is not here: it is
+   a Gradio theme object (mc_theme.py), installed when the host builds the
+   page, which is what every control's colours come from in both modes. This
+   section is the shape the palette cannot give: the tab bar as a header, the
+   quick-settings drawer, the split view, the prompt boxes, the tool buttons,
+   the boxes down the settings column, the gallery's ground.
+
+   Nothing in it is from sd-webui-lobe-theme; the page it draws is the one
+   the user had there, described and rebuilt (handoff 43, docs/24). Three
+   rules, the same three as the night mode's: colours only from the host's
+   variables; `!important` only where the host says it first (its tool-button
+   width, its token counter); and a theme turned off leaves nothing behind --
+   every rule here is under the attribute the script takes off again.
+
+   The header is Gradio's own `#tabs > .tab-nav`, made sticky and laid out as
+   a bar, with the script's title before its buttons and its actions after
+   them. It is never moved or wrapped: Forge reads the current tab from
+   `#tabs > .tab-nav > button.selected`, a direct-child selector, and the
+   Forge Assistant's host adapter takes the shallowest tab bar under #tabs for
+   Forge's. The selected tab is a pill with the accent along its bottom edge. */
+
+:root[data-mc-theme="on"] {
+    --mc-theme-header: 64px;
+    --mc-theme-radius: 8px;
+    --mc-theme-pad: 16px;
+    --mc-theme-quick-width: 280px;
+}
+
+/* The accent by day. Gradio's --color-accent has one value for both modes
+   and the theme object gives it the night one; it also carries the day one
+   as a variable of its own, and the light theme takes that. The fallback is
+   the page's own primary, for the moment between turning the theme on and
+   the Reload UI that installs its palette. */
+:root[data-mc-theme="on"] body:not(.dark) {
+    --color-accent: var(--mc-theme-accent-day, var(--primary-500));
+}
+
+:root[data-mc-theme="on"] [hidden],
+:root[data-mc-theme="on"] .mc-theme-drawer[hidden],
+:root[data-mc-theme="on"] .mc-theme-menu[hidden] {
+    display: none !important;
+}
+
+/* -- the header ------------------------------------------------------------ */
+
+:root[data-mc-theme="on"] #tabs > .tab-nav {
+    position: sticky;
+    top: 0;
+    z-index: 940;
+    isolation: isolate;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 4px;
+    box-sizing: border-box;
+    height: var(--mc-theme-header);
+    min-height: var(--mc-theme-header);
+    margin: 0 0 16px;
+    padding: 0;
+    overflow: visible;
+    background: var(--body-background-fill);
+    border: 0;
+    border-bottom: 1px solid var(--border-color-primary);
+}
+
+/* The bar's ground, reaching into the page's side padding so the content
+   scrolls under a bar that spans the window, not one 16 px short of it. */
+:root[data-mc-theme="on"] #tabs > .tab-nav::before {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    top: 0;
+    bottom: -1px;
+    left: calc(-1 * var(--size-4, 16px));
+    right: calc(-1 * var(--size-4, 16px));
+    background: var(--body-background-fill);
+    border-bottom: 1px solid var(--border-color-primary);
+}
+
+:root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"] {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--body-text-color-subdued);
+    font-size: var(--text-md, 14px);
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+:root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"]:hover,
+:root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"]:focus-visible {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+}
+
+:root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"].selected {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+    border-color: transparent;
+    box-shadow: inset 0 -2px 0 var(--color-accent);
+    font-weight: 600;
+}
+
+/* A tab the bar has no room for lives in the menu under the ellipsis. The
+   button alone is named, never the bar: focus mode's own rule is that no
+   stylesheet hides a tab bar by name, and this hides one tab of it. */
+:root[data-mc-theme="on"] button[role="tab"].mc-theme-overflow {
+    display: none !important;
+}
+
+:root[data-mc-theme="on"] .mc-theme-title {
+    flex: 0 0 auto;
+    margin-right: 12px;
+    color: var(--body-text-color);
+    font-size: var(--text-lg, 16px);
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+}
+
+:root[data-mc-theme="on"] .mc-theme-actions {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+}
+
+:root[data-mc-theme="on"] .mc-theme-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    min-width: 36px !important;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--body-text-color-subdued);
+    cursor: pointer;
+}
+
+:root[data-mc-theme="on"] .mc-theme-action:hover,
+:root[data-mc-theme="on"] .mc-theme-action:focus-visible,
+:root[data-mc-theme="on"] .mc-theme-action[aria-expanded="true"] {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+}
+
+:root[data-mc-theme="on"] .mc-theme-action > svg {
+    width: 18px;
+    height: 18px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 950;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 180px;
+    max-height: calc(100vh - var(--mc-theme-header) - 16px);
+    overflow: auto;
+    padding: 4px;
+    background: var(--background-fill-secondary);
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--mc-theme-radius);
+    box-shadow: var(--shadow-drop-lg);
+}
+
+:root[data-mc-theme="on"] .mc-theme-menu-item {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--body-text-color);
+    font-size: var(--text-md, 14px);
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+:root[data-mc-theme="on"] .mc-theme-menu-item:hover,
+:root[data-mc-theme="on"] .mc-theme-menu-item:focus-visible {
+    background: var(--body-background-fill);
+}
+
+/* -- the quick settings drawer ------------------------------------------- */
+
+:root[data-mc-theme="on"] .mc-theme-drawer {
+    position: fixed;
+    top: var(--mc-theme-header);
+    bottom: 0;
+    left: 0;
+    z-index: 930;
+    box-sizing: border-box;
+    width: var(--mc-theme-quick-width);
+    max-width: 100vw;
+    overflow: auto;
+    padding: var(--mc-theme-pad);
+    background: var(--body-background-fill);
+    border-right: 1px solid var(--border-color-primary);
+    box-shadow: var(--shadow-drop-lg);
+}
+
+/* Forge lays the quick settings out as a row of fitted boxes; in the drawer
+   they are a column, each as wide as the drawer. */
+:root[data-mc-theme="on"] .mc-theme-drawer #quicksettings {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-drawer #quicksettings > * {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 0 0 auto !important;
+    margin: 0 !important;
+}
+
+/* -- the extra networks drawer --------------------------------------------- */
+
+/* Forge's extra-network tab strip, once the script has taken its pages into
+   the drawer: marked by the script, which knows that strip holds no
+   workspace, and hidden under that mark alone. */
+:root[data-mc-theme="on"] .mc-theme-networks-nav {
+    display: none !important;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks {
+    right: 0;
+    left: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: var(--mc-theme-networks-width, 340px);
+    border-right: 0;
+    border-left: 1px solid var(--border-color-primary);
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-title {
+    font-size: var(--text-md, 14px);
+    font-weight: 600;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-tab {
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--body-text-color-subdued);
+    font-size: var(--text-sm, 13px);
+    font-weight: 500;
+    cursor: pointer;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-tab:hover,
+:root[data-mc-theme="on"] .mc-theme-networks-tab:focus-visible {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-tab.mc-theme-networks-active {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+    box-shadow: inset 0 -2px 0 var(--color-accent);
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* The page's own controls -- search, sort, refresh -- in one row. */
+:root[data-mc-theme="on"] .mc-theme-networks-group > .extra-networks-controls-div {
+    margin: 0;
+    align-self: stretch;
+}
+
+/* Forge sizes a page's pane to the window less the generation UI, which is
+   not above it here: in the drawer the pane is as tall as its cards and the
+   drawer's body scrolls. */
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-pane {
+    height: auto;
+    min-height: 0;
+    resize: none;
+}
+
+/* A page the drawer shows, over the inline display Gradio's tabs gave it.
+   Its contents are Forge's, drawn as Forge draws them, at the card size the
+   drawer is set to (the card's own inline size is Forge's setting, so the
+   drawer's has to say !important). */
+:root[data-mc-theme="on"] .mc-theme-networks-group > .extra-page {
+    display: none !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-group > .extra-page.mc-theme-networks-shown {
+    display: block !important;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks .extra-network-pane .card {
+    width: var(--mc-theme-networks-card, 120px) !important;
+    height: calc(var(--mc-theme-networks-card, 120px) * 1.5) !important;
+    margin: 4px !important;
+    font-size: 12px !important;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks.mc-theme-networks-empty .mc-theme-networks-body::before {
+    content: "No extra networks here yet.";
+    display: block;
+    color: var(--body-text-color-subdued);
+    font-size: var(--text-sm, 13px);
+}
+
+/* -- the generation info ----------------------------------------------------- */
+
+/* Forge's own paragraph, kept for what reads it, drawn as the panel instead. */
+:root[data-mc-theme="on"] .mc-theme-info-source {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-block {
+    padding: 10px 12px;
+    background: var(--block-background-fill);
+    border: 1px solid var(--block-border-color);
+    border-radius: var(--mc-theme-radius);
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+    color: var(--body-text-color-subdued);
+    font-size: var(--text-xs, 12px);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-text {
+    color: var(--body-text-color);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-params {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 4px 10px;
+    background: var(--background-fill-secondary);
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    color: var(--body-text-color);
+    font-size: var(--text-sm, 13px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-chip > b {
+    color: var(--body-text-color-subdued);
+    font-weight: 600;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-copy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    min-width: 28px !important;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--body-text-color-subdued);
+    cursor: pointer;
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-copy:hover,
+:root[data-mc-theme="on"] .mc-theme-info-copy:focus-visible {
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-copy.mc-theme-info-copied {
+    color: var(--color-accent);
+}
+
+:root[data-mc-theme="on"] .mc-theme-info-copy > svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* -- the split view --------------------------------------------------------- */
+
+/* The classic top row, moved to the head of the settings column: its prompt
+   container and its actions column one above the other, both as wide as the
+   column. */
+:root[data-mc-theme="on"] [id$="_settings"] > [id$="_toprow"] {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 12px;
+    padding: 0;
+    background: transparent;
+}
+
+:root[data-mc-theme="on"] [id$="_settings"] > [id$="_toprow"] > * {
+    width: 100%;
+    min-width: 0 !important;
+    flex: 0 0 auto;
+}
+
+:root[data-mc-theme="on"] button[id$="_generate"] {
+    min-height: 44px;
+}
+
+:root[data-mc-theme="on"] button[id$="_interrupt"] {
+    color: var(--button-cancel-text-color);
+    background: var(--button-cancel-background-fill);
+    border-color: var(--button-cancel-border-color);
+}
+
+:root[data-mc-theme="on"] button[id$="_interrupt"]:hover {
+    background: var(--button-cancel-background-fill-hover);
+    border-color: var(--button-cancel-border-color-hover);
+}
+
+/* The results column stays in view while the settings scroll under the
+   header, held a margin below it. */
+:root[data-mc-theme="on"] [id$="_results"] {
+    position: sticky;
+    top: calc(var(--mc-theme-header) + 16px);
+}
+
+/* -- the settings column ------------------------------------------------------ */
+
+/* Each group down the column is a box: a surface a step above the page, a
+   line around it, the theme's padding. The prompts, the top row and the
+   script container are not boxes themselves -- the first two stand on the
+   page, the third holds the scripts' own accordions, which Forge boxes. */
+:root[data-mc-theme="on"] [id$="_settings"] > :not(.hidden):not([id$="_toprow"]):not([id$="_prompt_container"]):not(.toprow-compact-stylerow):not([id$="_script_container"]):not([id$="_accordions"]):not(.mc-theme-plain) {
+    box-sizing: border-box;
+    padding: var(--mc-theme-pad);
+    background: var(--block-background-fill);
+    border: 1px solid var(--block-border-color);
+    border-radius: var(--mc-theme-radius);
+}
+
+:root[data-mc-theme="on"] [id$="_settings"] > [id$="_accordions"] {
+    gap: 12px;
+}
+
+:root[data-mc-theme="on"] div.block.gradio-accordion {
+    margin: 0 !important;
+    padding: 12px var(--mc-theme-pad) !important;
+    background: var(--block-background-fill);
+    border-radius: var(--mc-theme-radius) !important;
+}
+
+/* -- the prompt boxes ---------------------------------------------------------- */
+
+:root[data-mc-theme-prompts="resizable"] [id$="_prompt"] textarea,
+:root[data-mc-theme-prompts="resizable"] [id$="_neg_prompt"] textarea {
+    resize: vertical;
+    min-height: 74px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* The token counter, a pill on the box's corner: the theme's secondary
+   surface and one line, in place of the host's grey ring. `!important`
+   because the host's own rule says it. */
+:root[data-mc-theme="on"] .block.token-counter span {
+    padding: 2px 10px;
+    background: var(--background-fill-secondary) !important;
+    border: 1px solid var(--border-color-primary) !important;
+    border-radius: 999px;
+    box-shadow: none;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+/* -- the tool buttons ---------------------------------------------------------- */
+
+:root[data-mc-theme="on"] .gradio-button.tool {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    min-width: 36px !important;
+    max-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid var(--button-secondary-border-color);
+    border-radius: 6px;
+    background: var(--button-secondary-background-fill);
+    color: var(--button-secondary-text-color);
+    font-size: var(--text-md, 14px);
+    line-height: 1;
+}
+
+:root[data-mc-theme="on"] .gradio-button.tool:hover {
+    background: var(--button-secondary-background-fill-hover);
+    border-color: var(--button-secondary-border-color-hover);
+    color: var(--button-secondary-text-color-hover);
+}
+
+:root[data-mc-theme="on"] button[data-mc-theme-icon] > svg {
+    width: 18px;
+    height: 18px;
+    pointer-events: none;
+}
+
+/* -- the gallery's ground ------------------------------------------------------- */
+
+:root[data-mc-theme="on"] .block.gradio-gallery,
+:root[data-mc-theme="on"] .block.gradio-image {
+    background-color: var(--block-background-fill);
+    background-image: repeating-conic-gradient(var(--background-fill-secondary) 0 25%, transparent 0 50%);
+    background-size: 20px 20px;
+    border: 2px solid var(--block-border-color);
+    border-radius: var(--mc-theme-radius);
+}
+
+/* -- phones ---------------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+    :root[data-mc-theme="on"] {
+        --mc-theme-header: 56px;
+    }
+
+    :root[data-mc-theme="on"] .mc-theme-title {
+        margin-right: 8px;
+        font-size: var(--text-md, 14px);
+    }
+
+    :root[data-mc-theme="on"] .mc-theme-drawer,
+    :root[data-mc-theme="on"] .mc-theme-networks {
+        width: 100vw;
+        max-width: 100vw;
+    }
+}
+
+/* ==========================================================================
    LLM Studio
    ==========================================================================
 

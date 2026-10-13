@@ -47,6 +47,7 @@ import mc_profile_state
 import mc_progress
 import mc_references
 import mc_styles
+import mc_theme
 import mc_turns
 import mc_turns_guests
 import mc_voice_api
@@ -181,6 +182,24 @@ Default on, because the ask was *"can we just make the footer go away"* and the
 footer's contents (the API link, the Github link, the Gradio credit, the version
 line) are not things anybody reads twice. Off puts it straight back -- no
 reload, because the rule is CSS keyed on an attribute this reads live.
+"""
+
+OPT_QUIET_NIGHT = "model_chain_quiet_night"
+"""Draw the dark theme's primary buttons as a dim surface rather than a solid
+block of the accent. Read by javascript/model_chain_night.js.
+
+Gradio paints a primary button -- Generate above all -- in the theme's accent,
+and a theme is entitled to a light accent: LobeTheme's night mode has a white
+one out of the box, so Generate was the brightest thing on a black page, with
+every other primary button the same white. The ask was fewer bright spots at
+night, Generate first.
+
+Only the dark theme is touched, only how those buttons are painted (never
+their size), and the colours still come from the theme's own variables, so a
+blue accent gives a blue-tinted button and a white one a grey one. Default on,
+because that was the ask. Off puts the solid buttons straight back -- no
+reload, for the same reason as the footer above: the rule is CSS keyed on an
+attribute the script reads live.
 """
 
 OPT_STYLE_ENABLE = "model_chain_style_enable"
@@ -365,6 +384,19 @@ shared.options_templates.update(
                 "and this is the one strip under it that no layout here can reach. Applies "
                 "to every tab, because the footer is one element on the page; turning it "
                 "off puts it straight back"
+            ),
+            OPT_QUIET_NIGHT: shared.OptionInfo(
+                True,
+                "Quieter night mode: dim the primary buttons in the dark theme",
+            ).info(
+                "in the dark theme, Generate and every other primary button is a solid "
+                "block of the theme's accent — white, under the Lobe theme — and the "
+                "brightest thing on the page. This draws them as a dim surface tinted "
+                "with that accent, with the accent as a line around them and the page's "
+                "ordinary text on them; hovering strengthens the tint. Only the dark "
+                "theme, only the colours (nothing changes size), and the colours are "
+                "still the theme's own. Applies to every tab, under any WebUI theme; "
+                "turning it off puts the solid buttons straight back"
             ),
             # -- appearance, deliberately independent of everything above --- #
             # These change how the host's bar looks and never what it reports,
@@ -1167,6 +1199,18 @@ try:
     shared.options_templates.update(shared.options_section(VOICE_SECTION, _VOICE_OPTIONS))
 except Exception:
     errors.report("Model Chain: could not register the Voice Chat settings section",
+                  exc_info=True)
+
+# The theme: a section of its own, and one hidden option -- the record of the
+# one-time import of the user's Lobe settings, which is what makes that import
+# run once (the host draws no control for an option whose section id is None).
+try:
+    shared.options_templates.update(
+        shared.options_section(mc_theme.SECTION, mc_theme.settings(shared)))
+    shared.options_templates.update(
+        shared.options_section(mc_theme.HIDDEN_SECTION, mc_theme.hidden_settings(shared)))
+except Exception:
+    errors.report("Model Chain: could not register the theme settings section",
                   exc_info=True)
 
 mc_progress.install()
@@ -4316,5 +4360,10 @@ try:
     # host has one.
     script_callbacks.on_app_started(mc_llm_conversation_api.install)
     script_callbacks.on_app_started(mc_llm_conversation_startup.on_app_started)
+    # The theme's palette is the host's theme object, read when the page is
+    # built, so it is installed just before that -- and the user's Lobe
+    # settings are imported there too, once, so the first page already has
+    # their switches.
+    script_callbacks.on_before_ui(mc_theme.on_before_ui)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

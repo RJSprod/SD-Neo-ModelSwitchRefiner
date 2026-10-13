@@ -665,13 +665,15 @@ def _install_modules() -> None:
     # otherwise be swallowed and never noticed until somebody looked for a tab
     # that was not there.
     script_callbacks.registered = {"script_unloaded": [], "ui_tabs": [],
-                                  "app_started": []}
+                                  "app_started": [], "before_ui": []}
     script_callbacks.on_script_unloaded = lambda cb, **k: (
         script_callbacks.registered["script_unloaded"].append(cb))
     script_callbacks.on_ui_tabs = lambda cb, **k: (
         script_callbacks.registered["ui_tabs"].append(cb))
     script_callbacks.on_app_started = lambda cb, **k: (
         script_callbacks.registered["app_started"].append(cb))
+    script_callbacks.on_before_ui = lambda cb, **k: (
+        script_callbacks.registered["before_ui"].append(cb))
 
     modules.errors = errors
     modules.images = images
