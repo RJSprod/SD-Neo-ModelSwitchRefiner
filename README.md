@@ -3532,7 +3532,22 @@ no drag of a selection that happens to hold the handle (which carried a ghost
 of the whole page under the cursor while the panel went nowhere); the
 launcher and the header are nothing the browser can select or drag at all;
 and a finger on either does not scroll the page under it, even where a
-stylesheet has given buttons a touch-action of their own.
+stylesheet has given buttons a touch-action of their own. Every drag writes an
+account of itself into the extension's own log, `<WebUI data
+directory>/model_chain_llm/logs/model_chain.log`, as one `Forge Assistant drag`
+line between whatever else was being logged: what was pressed and with what,
+the handle's rules, whether the press was cancelled and captured, whether the
+page, the viewport, the selection or the tabs moved under it, where the handle
+was put, the moves seen and the touch moves blocked, how it ended, the events
+as they came (the first sixty and the last, each with its time and what the
+browser said of it), and the page it happened on — the browser, the pointer the
+device has, the window and the viewport, the document's size against the
+window's, the scroller, what the root and the body say about overflow and
+transforms, the theme, focus mode, full screen and the panel's state. The same
+line goes to the browser's console, and `forgeAssistant.shell.lastDrag` keeps
+the last. A drag that moved more than the handle says so on the panel's status
+line as well, where a phone can read it with the panel open. To report a drag
+that went wrong, drag once and send that log file.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the panel
 anywhere in the window. Turning it on leaves it exactly where it is rather than

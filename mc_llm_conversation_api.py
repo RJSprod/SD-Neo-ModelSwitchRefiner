@@ -74,6 +74,7 @@ READ_ALOUD_ROUTE = f"{PREFIX}/read-aloud"
 SYSTEM_PROMPT_ROUTE = f"{PREFIX}/system-prompt"
 MEMORY_ROUTE = f"{PREFIX}/memory"
 LORA_RAM_ROUTE = f"{PREFIX}/lora-ram"
+JOURNAL_ROUTE = f"{PREFIX}/journal"
 """Warm LoRA or Cold LoRA (:mod:`mc_lora_ram`): GET reads, POST ``?mode=`` sets.
 
 The mode travels as a query parameter rather than a body so the handler can be
@@ -84,7 +85,7 @@ two locks, and that belongs in Starlette's threadpool, not on the event loop.
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
           WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE,
-          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE, LORA_RAM_ROUTE)
+          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE, LORA_RAM_ROUTE, JOURNAL_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -588,6 +589,25 @@ def set_system_prompt(body: dict) -> tuple[dict, int]:
         return {"ok": False, "error": refusal.payload()}, refusal.status
 
 
+def journal(body: dict) -> tuple[dict, int]:
+    """One entry of the page's account of itself, into the extension's log.
+
+    The flyout's drag: what was pressed, the handle's rules, what else moved,
+    the events as they came, the browser and the page (``mc_assistant_journal``).
+    One line of ``model_chain.log`` through the ``model_chain`` logger, as the
+    user asked: with the other logging content. A body that is not an account
+    is refused.
+    """
+    import mc_assistant_journal
+
+    try:
+        written = mc_assistant_journal.record(body)
+    except ValueError as refusal:
+        return {"ok": False, "error": {"code": service.INVALID_INPUT, "message": str(refusal),
+                                       "retryable": False}}, 400
+    return {"ok": True, "file": written}, 200
+
+
 def _unload_host_models() -> bool:
     """Ask the host to put its own checkpoint down, the way its own button does.
 
@@ -889,6 +909,18 @@ def install(_demo=None, app=None) -> bool:
         except Exception:
             return _failed("could not change the LoRA mode", "The LoRA mode could not be changed.")
 
+    async def journal_route(request: Request):
+        try:
+            checked(request)
+            body = await _body(request)
+        except Refused as exc:
+            return _refusal(exc)
+        try:
+            payload, status = journal(body)
+            return _json(payload, status)
+        except Exception:
+            return _failed("could not write the journal", "The journal could not be written.")
+
     async def served_route(request: Request):
         """One stored picture, by ticket. The flyout's transcript reads these.
 
@@ -932,6 +964,7 @@ def install(_demo=None, app=None) -> bool:
                 (SYSTEM_PROMPT_ROUTE, system_prompt_route, ["GET", "POST"]),
                 (MEMORY_ROUTE, memory_route, ["GET"]),
                 (LORA_RAM_ROUTE, lora_ram_route, ["GET", "POST"]),
+                (JOURNAL_ROUTE, journal_route, ["POST"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

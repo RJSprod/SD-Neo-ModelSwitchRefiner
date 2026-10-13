@@ -2891,7 +2891,8 @@ class TestADragTakesOnlyTheHandle:
         const press = (over) => Object.assign({
             pointerId: 1, button: 0, isPrimary: true, pointerType: "mouse",
             clientX: 950, clientY: 520, target: null, cancelled: false,
-            preventDefault() { this.cancelled = true; }}, over || {});
+            defaultPrevented: false,
+            preventDefault() { this.cancelled = true; this.defaultPrevented = true; }}, over || {});
         const move = (cancelable) => ({cancelable, cancelled: false,
                                        preventDefault() { this.cancelled = true; }});
     """
@@ -2961,6 +2962,114 @@ class TestADragTakesOnlyTheHandle:
         """, sources=("shell",))
 
         assert found == {"idle": False, "under": True, "taken": False, "after": False}
+
+    def test_every_drag_leaves_an_account_of_what_else_moved(self):
+        """Reported twice from the user's machine and not reproduced here:
+        the drag writes what it saw -- the press, the handle's rules, the
+        page's scroll before and after, the moves, how it ended -- to the
+        console, and keeps it as `lastDrag`. A page that scrolled under the
+        drag is said on the status line, where a phone can read it."""
+        found = run(self.SHELL + """
+            const lines = [];
+            console.info = (line) => lines.push(line);
+            shell.told = null;
+            shell.startDrag(press(), shell.nodes.panel);
+            shell.moveDrag(press({clientX: 960, clientY: 540}));
+            shell.moveDrag(press({clientX: 990, clientY: 560}));
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            const quiet = shell.lastDrag;
+            const quietTold = shell.told;
+            // The page scrolls while the next one is live.
+            shell.startDrag(press({pointerId: 2}), shell.nodes.panel);
+            shell.moveDrag(press({pointerId: 2, clientX: 900, clientY: 500}));
+            globalThis.scrollY = 120;
+            shell.endDrag({pointerId: 2, type: "pointercancel"}, true);
+            globalThis.scrollY = 0;
+            console.log(JSON.stringify({quiet, quietTold, lines: lines.length,
+                                        first: lines[0].slice(0, 22),
+                                        astray: shell.lastDrag.astray,
+                                        scrolled: shell.lastDrag.pageScrolled,
+                                        ended: shell.lastDrag.ended,
+                                        told: shell.told}));
+        """, sources=("shell",))
+
+        quiet = found["quiet"]
+        assert quiet["handle"] == "panel" and quiet["pointer"] == "mouse"
+        assert quiet["moves"] == 2 and quiet["travel"] == 57 and quiet["moved"] is True
+        assert quiet["ended"] == "pointerup" and quiet["cancelled"] is False
+        assert quiet["pressCancelled"] is True and quiet["captured"] is True
+        assert quiet["pageScrolled"] == [0, 0] and quiet["astray"] == []
+        assert found["quietTold"] is None, "nothing to say about a drag that moved the handle alone"
+        assert found["lines"] == 2 and found["first"] == "Forge Assistant drag: "
+        assert found["scrolled"] == [0, 120] and found["ended"] == "pointercancel"
+        assert found["astray"] == ["the page scrolled by 0, 120", "the browser ended it (pointercancel)"]
+        assert found["told"]["kind"] == "warn" and "the page scrolled by 0, 120" in found["told"]["text"]
+
+    def test_the_account_goes_to_the_servers_log_with_the_events_and_the_page(self):
+        """"i meant our log file ... write it here, with other logging
+        content": each account is posted to the journal route, for one line
+        of model_chain.log, with the events as they came (the first and the
+        last, what the browser said of each) and the page it happened on."""
+        found = run(self.SHELL + """
+            console.info = () => {};
+            const posts = [];
+            shell.store = {request: (path, options) => { posts.push({path, options}); return Promise.resolve({ok: true}); }};
+            shell.startDrag(press(), shell.nodes.panel);
+            for (let i = 1; i <= 80; i += 1) {
+                shell.moveDrag(press({clientX: 950 + i, clientY: 520 + i}));
+                if (i === 3) shell.blockPan({cancelable: true, preventDefault() {}});
+            }
+            shell.endDrag({pointerId: 1, type: "pointerup", clientX: 1030, clientY: 600}, false);
+            const body = JSON.parse(posts[0].options.body);
+            console.log(JSON.stringify({count: posts.length, path: posts[0].path,
+                                        method: posts[0].options.method,
+                                        type: posts[0].options.headers["Content-Type"],
+                                        kind: body.kind, traceLength: body.trace.length,
+                                        first: body.trace[0], last: body.trace[body.trace.length - 1],
+                                        second: body.trace[1].e, dropped: body.dropped,
+                                        touch: body.trace.some((e) => e.e === "touchmove" && e.p === true),
+                                        environment: Object.keys(body.environment || {}).sort(),
+                                        from: body.from, put: body.put, lastDragPut: shell.lastDrag.put}));
+        """, sources=("shell",))
+
+        assert found["count"] == 1 and found["path"] == "/journal"
+        assert found["method"] == "POST" and found["type"] == "application/json"
+        assert found["kind"] == "drag"
+        assert found["first"]["e"] == "pointerdown" and found["first"]["p"] is True
+        assert found["first"]["x"] == 950 and found["first"]["t"] == 0
+        assert found["second"] == "pointermove" and found["touch"] is True
+        assert found["last"]["e"] == "pointerup" and found["last"]["x"] == 1030
+        assert found["traceLength"] == 60 and found["dropped"] == 23, (
+            "sixty kept of eighty-three: the press, fifty-eight moves and the touch "
+            "move among them, the end; the rest counted")
+        assert found["environment"] == ["body", "coarse", "document", "focused", "freeFloat",
+                                        "fullscreen", "hover", "panelOpen", "pixelRatio", "root",
+                                        "screen", "scroller", "sheet", "theme", "touchPoints",
+                                        "userAgent", "visual", "window"]
+        assert found["from"] == [950, 520]
+        assert found["put"] == found["lastDragPut"] and found["put"] is not None
+
+    def test_a_server_that_is_not_there_costs_the_drag_nothing(self):
+        found = run(self.SHELL + """
+            console.info = () => {};
+            const noted = [];
+            console.debug = (line) => noted.push(line);
+            shell.store = {request: () => Promise.reject(new Error("The server answered 404"))};
+            shell.startDrag(press(), shell.nodes.panel);
+            shell.moveDrag(press({clientX: 990, clientY: 560}));
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            const kept = shell.lastDrag.moved;
+            shell.store = null;
+            shell.startDrag(press({pointerId: 2}), shell.nodes.panel);
+            shell.endDrag({pointerId: 2, type: "pointerup"}, false);
+            setTimeout = (fn) => fn();
+            Promise.resolve().then(() => Promise.resolve()).then(() => {
+                console.log(JSON.stringify({kept, noted, second: shell.lastDrag.ended}));
+            });
+        """, sources=("shell",))
+
+        assert found["kept"] is True and found["second"] == "pointerup"
+        assert found["noted"] == ["Forge Assistant: the journal was not written: The server answered 404"]
 
     def test_the_pan_blocker_is_on_the_handles_and_never_the_window(self):
         """A non-passive touchmove listener on the window makes every scroll
