@@ -6676,7 +6676,24 @@
 
     position: fixed;
     inset: 0;
+    /* The same box as `inset: 0` gives, said as a size as well: Gecko takes
+       a contained box for a reflow root only when its size is written down.
+       Over-constrained, the right and bottom insets yield, to the same
+       pixels. */
+    width: 100%;
+    height: 100%;
     z-index: var(--forge-assistant-layer);
+    /* Contained: what changes inside the panel -- a reply streaming into the
+       transcript, a text box growing -- is laid out and painted within this
+       root and never reaches the page's layout, and the page's never reaches
+       in (about a third less layout for a streaming reply in Chromium; in Gecko
+       the root reflows on its own). Safe here and nowhere in Forge's own
+       columns: containment makes a box a stacking context and the
+       containing block of its fixed descendants, which would paint a
+       column's dropdown list under the next column and move Forge's popups.
+       Every child of this root is fixed to the viewport this root is, and
+       its dialogs are in the top layer, which containment does not reach. */
+    contain: strict;
     /* The root covers the page and catches nothing. Only what is drawn inside
        it takes a pointer, which is what lets a full-viewport root sit over the
        workspace without being a full-viewport click shield. */

@@ -378,7 +378,7 @@
     }
 
     function installHeader(strip, config) {
-        strip.classList.add(BAR_CLASS);
+        setClass(strip, BAR_CLASS, true);
         let header = state.header;
         if (!header || header.strip !== strip) {
             if (header) removeHeader();
@@ -415,10 +415,29 @@
             settings.addEventListener("click", openSettings);
             header = state.header = {strip, title, actions, more, menu, quickToggle, networksToggle};
         }
-        header.title.textContent = config.title;
-        header.title.hidden = !config.title;
-        header.quickToggle.hidden = config.quick === "off";
-        header.networksToggle.hidden = config.networks === "off";
+        // Written only when they differ. Forge runs every after-update
+        // callback 250 ms after any change to a child list inside its app
+        // element, and this is one of those callbacks: writing the same
+        // title is a new text node to that observer, and the first build
+        // wrote it on every apply -- the page updated every 300 ms, on every
+        // tab, for as long as it was open (`fit` had the same fault).
+        if (header.title.textContent !== config.title) header.title.textContent = config.title;
+        show(header.title, !!config.title);
+        show(header.quickToggle, config.quick !== "off");
+        show(header.networksToggle, config.networks !== "off");
+    }
+
+    /** `hidden`, written only when it changes: an attribute written to the
+     *  same value still wakes every observer of it. */
+    function show(node, shown) {
+        if (node.hidden !== !shown) node.hidden = !shown;
+    }
+
+    /** A class put on or taken off only when that changes, for the same
+     *  reason. */
+    function setClass(node, name, on) {
+        if (node.classList.contains(name) === !!on) return;
+        if (on) node.classList.add(name); else node.classList.remove(name);
     }
 
     function removeHeader() {
@@ -458,8 +477,9 @@
         const strip = header.strip;
         const buttons = tabButtons(strip);
         if (!buttons.length) return;
-        buttons.forEach((button) => button.classList.remove(OVERFLOW_CLASS));
-        header.more.hidden = false;
+        // Every button shown for the measurement: a hidden one has no width.
+        buttons.forEach((button) => setClass(button, OVERFLOW_CLASS, false));
+        show(header.more, true);
         const widths = buttons.map((button) => button.getBoundingClientRect().width + HEADER_GAP_PX);
         const style = window.getComputedStyle ? window.getComputedStyle(strip) : null;
         const padding = style ? (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0) : 0;
@@ -468,17 +488,27 @@
         const available = strip.getBoundingClientRect().width - padding - fixed;
         const selected = buttons.findIndex((button) => button.classList.contains("selected"));
         const result = plan(widths, available, selected);
-        result.hidden.forEach((i) => buttons[i].classList.add(OVERFLOW_CLASS));
-        header.more.hidden = result.hidden.length === 0;
-        if (result.hidden.length === 0) header.menu.hidden = true;
+        result.hidden.forEach((i) => setClass(buttons[i], OVERFLOW_CLASS, true));
+        show(header.more, result.hidden.length > 0);
+        if (result.hidden.length === 0) show(header.menu, false);
+        // The menu is rebuilt only when what it would hold changed: the same
+        // buttons under the same names. Emptying and refilling it on every
+        // fit was a child-list change Forge answered with the next
+        // after-update, which fitted again, without end (see installHeader).
+        const hidden = result.hidden.map((i) => buttons[i]);
+        const was = header.menuFor || [];
+        const same = was.length === hidden.length
+            && was.every((entry, i) => entry.button === hidden[i] && entry.label === hidden[i].textContent);
+        if (same) return;
+        header.menuFor = hidden.map((button) => ({button, label: button.textContent}));
         while (header.menu.firstChild) header.menu.removeChild(header.menu.firstChild);
-        result.hidden.forEach((i) => {
+        hidden.forEach((button) => {
             const item = make("button", "mc-theme-menu-item", {type: "button", role: "menuitem"});
-            item.textContent = buttons[i].textContent;
+            item.textContent = button.textContent;
             item.addEventListener("click", function (event) {
                 event.stopPropagation();
                 closeMenu();
-                buttons[i].click();
+                button.click();
             });
             header.menu.appendChild(item);
         });

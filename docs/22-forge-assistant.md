@@ -2767,6 +2767,155 @@ a hidden bar hiding it; the press ignored by it; the bar or its fill at 20 px;
 the press never wired, on the bar alone, counted on a control, or beside
 the bar. Not run on the user's machine or in Firefox.
 
+## 3.36 Steadier drags: what the page did on its own, and what a move cost
+
+Asked for after #277: "dragging the fly out on the text to image tab has
+worst performance than dragging it on a tab with simpler UI, like PNG info
+... Is something on text to image constantly loading? Even image to image
+tab is better handling. Maybe could it be this other extension?" -- with
+`sd-gallery-quadrant` attached. Then, on the evaluation: "Let's do all 6, i
+need smoothness. Make one giant PR with all 6 changes. I should see no UI
+impact other than enhanced performance."
+
+The attached extension is not the cause: one idempotent after-update
+callback (dataset flags) and hover listeners on the gallery's preview. What
+was, measured in Chromium against the user's own drag log:
+
+### Two loops that never stopped
+
+Forge's `script.js` observes its app element (`childList`, `subtree`) and
+runs every `onAfterUiUpdate` callback 250 ms after any burst of changes. A
+callback that changes a child list on every run therefore raises the next
+run itself, forever, on every tab. Two of this extension's did:
+
+- **The theme's header** (`installHeader`, `fit`): the title's text written
+  on every apply -- the same words, a new text node -- and the ⋯ menu emptied
+  and refilled on every fit. Twenty runs and sixty records in five idle
+  seconds.
+- **The spatial compact canvas** (`wireCompact` → `compactLoad` →
+  `compactPaint`): the regions holder emptied and redrawn on every run
+  whenever the saved layout held a region. Nineteen runs and fifty-seven
+  records in five idle seconds; none with no region.
+
+The user's log showed the result: under every drag, a stall of about 50 ms
+every 300 -- the debounce plus one turn of every extension's callbacks, nine
+of them this extension's, each costing what the visible tab costs to query.
+Txt2Img is the biggest tab, the canvas's rewrites live in it, and PNG Info is
+the smallest: hence the difference the user felt.
+
+Fixed by writing only what changed: the title when it differs (`show`,
+`setClass` for the attributes), the menu when the hidden tabs or their names
+differ (`menuFor`, compared button by button); the canvas when the saved text
+or the holder it was drawn into changed (`drawnFrom`, `drawnInto`). Zero runs
+in five idle seconds, both; the menu and the region still drawn. And a watch
+for the next one: the shell counts after-update runs (`watchChurn`,
+`noteUpdate`) and, at twenty within ten seconds with nothing pressed for
+three and no generation or reply running (`pageBusy`), writes one `churn`
+line to the journal naming the nodes whose child lists changed most, once per
+page -- where to look when another extension does it.
+
+### The dock, 85 layouts a move
+
+With the settings column docked, every move of the panel placed the column
+again (`Dock.place`), and the guard's observer -- which refits every text box
+when Gradio restyles one -- took the dock's own style writes for Gradio's and
+ran `fitAll`: one forced layout per box. Measured: 85 layouts a move, 1,867 ms
+of layout over 61 moves, about 30 ms a frame. Now a drag shifts the column by
+the panel's own transform (`Dock.shift`, settled by the next `place`), the
+dock tells the guard to forget its own writes (`Guard.forget` after every
+placement), and `fitAll` sets every box to measure, measures them all, then
+writes them all: 0 layouts and 0 fits over 30 moves of a docked drag; a
+refit of 25 boxes 4 layouts instead of 25.
+
+### The hold, lazy
+
+§3.34's hold -- `overflow: hidden` and `scrollbar-gutter: stable` on the
+scrolling element at a finger's press -- cost the whole visible tab a layout
+at the press and another at the release: 8 ms on a 3,400-element Txt2Img,
+65 on a 9,500-element one, under a millisecond on PNG Info, on every drag,
+in browsers that never pan at all. (Measured apart, it is the gutter's
+change that relays out the page, not the overflow's, 17 and 53 ms against
+0.09; the gutter stays, because without it the page shifts by a scrollbar's
+width under the handle on a browser with classic scrollbars.) The hold now
+waits for the pan: `watchPan` listens for `scroll` on the document in the
+capture phase while a finger's or a pen's drag is live -- the page's own
+scroll arrives at the document, the focused root's at itself, a box's inside
+the page is not the page -- and the first one holds the page (`holdPage`:
+`lockScroll`, the page put back to where the press found it, once, and a pan
+the browser keeps making against the hold not fought frame by frame). A
+browser that honours the handle's word pays nothing. The account gains
+`held: {t, by}` and a `hold` trace entry; `locked` names what was held, `[]`
+when nothing was.
+
+### A move by transform, and once-a-drag housekeeping
+
+`moveDrag` wrote `left` and `top` on every move: a layout of the handle's
+subtree and, in Gecko, a repaint of the whole panel, every frame. Now the
+handle is moved by `transform: translate(dx, dy)` with `will-change:
+transform` for the drag's duration -- a layer of its own, composited where it
+lands -- and `endDrag` clears both before the placement writes the position
+once. The launcher with a look is already `isolation: isolate` and the
+panel's fixed children are top-layer dialogs, so the stacking context a
+transform makes changes nothing visible. Per move, what cannot change under a
+drag is read or written once: the safe-area insets (`drag.inset`), the
+`forge-assistant-dragging` class, the viewport read once and passed along,
+and the ghost drawn only when the anchor changes (`drag.previewed`).
+
+### Containment, where it is safe
+
+Measured on the heavy page with 300 messages in the transcript: `contain:
+strict` on `#forge-assistant-root` (with `width: 100%; height: 100%`, the
+same box as `inset: 0`, said as a size because Gecko takes a contained box
+for a reflow root only when its size is written down) makes 20 transcript
+appends 5.2 ms of layout against 7.5, with a page relayout and a drag
+unchanged. Every child of the root is fixed to the viewport the root is, and
+its dialogs are in the top layer, which containment does not reach. Not on
+Forge's own columns, which the evaluation had offered: `contain: layout`
+makes a column a stacking context and the containing block of its fixed
+descendants, and a probe in Chromium showed it -- a 1,400 px dropdown list
+from inside the settings column is hit by `elementFromPoint` without
+containment and the gallery's `grid-wrap` is hit with it, the list painted
+under the next column. A stylesheet test now forbids `contain` outside the
+assistant's root.
+
+### Verified
+
+`tests/test_theme_layout.py`: applied three times to a settled 820 px page
+with the ⋯ menu holding tabs, the theme makes no child-list change Forge's
+observer would hear, and the menu still holds the hidden tabs; a changed
+title and a renamed hidden tab still reach the bar and the menu (four
+mutations: the title written every apply, the menu rebuilt every fit, the
+menu never rebuilt, the title never rewritten). `tests/test_krea_spatial_js.py`:
+wired twice more with nothing changed, the very same region elements are
+still there and the note is unchanged; new saved text and a holder Gradio
+rebuilt are drawn again (three mutations). `tests/test_assistant_layout.py`
+in Chromium with CDP's layout counter: thirty moves of a docked drag measure
+no text box and lay nothing out; twelve placements measure none and a new
+width refits once; one `fitAll` of 25 boxes is at most six layouts (three
+mutations, the unbatched `fitAll` among them, and the column placed on every
+move). The hold: a finger's drag on a phone holds nothing while the page
+stays still, holds it at the first `scrollBy` with the page put back to 0
+and the account naming the hold, and lets go at the lift (node: nothing at
+the press, held once with the start restored, a mouse watching nothing, the
+focused root, a cancel, `dispose`; the listener on the document in the
+capture phase, deaf to a box's scroll, removed with the drag; five
+mutations). The transform: in Chromium the panel's inline transform is
+`translate(-300px, 40px)` mid-drag with its position untouched, the column's
+the same with `!important`, both empty and the position written once after
+the release (node: the same, and `put` still the box's position; two
+mutations). Housekeeping: the insets read as often for thirty moves as for
+three, the class put on once, the ghost written for the first anchor and
+four times for a new one (three mutations). The watch: twenty runs with
+nothing pressed for five seconds report once with the nodes counted, a
+twenty-first and twenty-five more report nothing, a press, a generation
+(Forge's Interrupt shown) and a reply in flight (the store's operation not
+terminal) each count from nothing again; in Chromium twenty-five bursts
+against the settings column post one `churn` account naming
+`div#txt2img_settings.column` and ten more post nothing (six mutations, and
+the summary's on the server). Containment: the root's rule and no `contain`
+elsewhere (two mutations). The full suite is green. Nothing of this has run
+on the user's machine.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

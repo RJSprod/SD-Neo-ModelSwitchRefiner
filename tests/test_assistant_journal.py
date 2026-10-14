@@ -70,6 +70,21 @@ class TestTheLine:
 
         assert found == "touch on the panel, ended by pointerup, nothing else moved"
 
+    def test_a_page_that_never_settles_is_summed_up_by_what_kept_changing(self):
+        """The quiet-page watch's line: how often the page updated while
+        nobody was doing anything, and the nodes whose child lists changed
+        most, which is where the callback that keeps it updating is found."""
+        found = journal.line({"kind": "churn", "runs": 24, "seconds": 7.3, "quiet": 12,
+                              "targets": [{"node": "div#txt2img_settings", "count": 40},
+                                          {"node": "div.progress", "count": 12}]})
+
+        head, _, tail = found.partition("): ")
+        assert head == ("Model Chain: Forge Assistant churn (24 after-update runs in 7.3 s, "
+                        "nothing pressed for 12 s; most changed: div#txt2img_settings 40, "
+                        "div.progress 12")
+        assert json.loads(tail)["runs"] == 24
+        assert journal.summary({"kind": "churn"}) == "? after-update runs"
+
     def test_the_kind_defaults_to_a_drag_and_is_one_word(self):
         assert journal.line({"pointer": "pen"}).startswith("Model Chain: Forge Assistant drag (")
         for bad in ("no spaces", "", "Drag", 7, None):

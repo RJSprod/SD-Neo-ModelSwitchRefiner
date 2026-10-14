@@ -423,6 +423,17 @@ def changed(page):
     settle(page)
 
 
+# What Forge's own after-update observer would hear: every change to a child
+# list inside its app element, by the changed node.
+HEARD = """() => {
+    window.heard = [];
+    new MutationObserver((records) => records.forEach((record) => {
+        const node = record.target;
+        window.heard.push((node.id || node.className || node.nodeName).toString().slice(0, 40));
+    })).observe(document.querySelector("gradio-app"), {childList: true, subtree: true});
+}"""
+
+
 MEASURE = """() => {
     const q = (s) => document.querySelector(s);
     const nav = q("#tabs > .tab-nav");
@@ -639,6 +650,46 @@ class TestTheBar:
         settle(page, 6)
 
         assert page.evaluate(MEASURE)["hidden"]
+        page.close()
+
+    def test_applied_to_a_settled_page_it_changes_no_child_list(self, browser):
+        """Forge runs every after-update callback 250 ms after any change to
+        a child list inside its app element, and `apply` is one of them. The
+        first build wrote the title's text and rebuilt the ⋯ menu on every
+        apply -- the same words, new nodes -- so each apply raised the next:
+        the page updated every 300 ms on every tab for as long as it was
+        open, with every extension's callbacks running each time (the user's
+        drag log showed the stalls, about 50 ms every 300). Applied again to
+        a settled page, the theme changes nothing that observer would hear,
+        and the menu still holds the tabs that do not fit."""
+        page = open_page(browser, width=820)
+        assert page.evaluate(MEASURE)["hidden"], "the ⋯ menu holds tabs at this width"
+        page.evaluate(HEARD)
+        for _ in range(3):
+            page.evaluate("hooks.after.forEach((fn) => fn())")
+            settle(page, 6)
+
+        assert page.evaluate("window.heard") == []
+        found = page.evaluate(MEASURE)
+        assert found["hidden"] and found["menuItems"] == found["hidden"]
+        assert found["title"] == "Forge"
+        page.close()
+
+    def test_a_tab_renamed_or_a_title_changed_still_reaches_the_bar(self, browser):
+        """The quiet apply above is not a frozen one: the title follows the
+        setting, and a menu entry follows its tab's name."""
+        page = open_page(browser, width=820)
+        before = page.evaluate(MEASURE)
+        assert "Extras" in before["hidden"] and before["title"] == "Forge"
+        page.evaluate("opts.model_chain_theme_title = 'Mine'")
+        changed(page)
+        assert page.evaluate(MEASURE)["title"] == "Mine"
+
+        page.evaluate("document.querySelector('#tab_extras-button').textContent = 'Extras (3)'")
+        page.evaluate("hooks.after.forEach((fn) => fn())")
+        settle(page, 6)
+        found = page.evaluate(MEASURE)
+        assert "Extras (3)" in found["hidden"] and found["menuItems"] == found["hidden"]
         page.close()
 
     def test_the_theme_toggle_offers_the_other_mode(self, browser):

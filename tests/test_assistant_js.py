@@ -569,6 +569,26 @@ class TestTheStylesheetCanHideThings:
             "a plain declaration ties with the display rules below it and loses "
             "on source order")
 
+    def test_the_root_is_contained_and_sized_as_the_viewport_it_covers(self):
+        """What changes inside the panel is laid out within the root and
+        never reaches the page's layout (Chromium: about a third less layout for a
+        streaming reply; Gecko reflows a contained box of a written size on
+        its own). Nowhere in Forge's own columns: containment makes a box a
+        stacking context and the containing block of its fixed descendants,
+        which paints a column's dropdown list under the next column (seen
+        in Chromium, `document.elementFromPoint` on a probe) and moves
+        Forge's popups."""
+        css = self.stylesheet()
+        root = only(css, "#forge-assistant-root")
+
+        assert "contain: strict" in root
+        assert "inset: 0" in root and "width: 100%" in root and "height: 100%" in root, (
+            "the same box, said as a size as well, for Gecko's reflow root")
+        for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)):
+            selector, body = rule.group(1), rule.group(2)
+            if "contain:" in body and "forge-assistant-root" not in selector:
+                raise AssertionError("containment outside the assistant's root: " + selector.strip())
+
     def test_every_part_that_is_hidden_from_script_is_inside_that_root(self):
         """The rule is scoped to the assistant's root, so anything the script
         hides has to be a descendant of it or the rule does not reach it."""
@@ -2865,6 +2885,102 @@ class TestFreeFloat:
         assert found["seen"] == ["758px", "294px", "798px", "120px"]
 
 
+class TestThePageThatNeverSettles:
+    """Forge runs every extension's after-update callbacks 250 ms after any
+    change to a child list inside its app element, and a callback that makes
+    such a change on every run raises the next run itself: the page updates
+    forever, about 50 ms out of every 300 on the user's machine, which their
+    drag log showed as a stall under every drag. Two of this extension's own
+    did it (the theme's header and the spatial canvas, since fixed); another
+    extension's cannot be seen from here. So the shell counts the runs and,
+    when they go on while nobody is doing anything, writes one line to the
+    journal naming what kept changing -- once per page."""
+
+    WATCH = PANEL + """
+        sized(1280, 900);
+        const shell = panel({});
+        shell.disposers = [];
+        shell.told = null;
+        const posts = [];
+        shell.store = {request: (path, options) => { posts.push(JSON.parse(options.body));
+                                                     return Promise.resolve({ok: true}); }};
+        const hooks = [];
+        globalThis.onAfterUiUpdate = (fn) => hooks.push(fn);
+        const listened = [];
+        globalThis.addEventListener = (type, fn, options) => listened.push([type, options]);
+        globalThis.removeEventListener = () => {};
+        globalThis.gradioApp = () => ({nodeType: 1});
+        let observing = null;
+        globalThis.MutationObserver = function (callback) {
+            return {observe(node, options) { observing = {node, options, callback}; },
+                    disconnect() { observing = null; }};
+        };
+        console.info = () => {};
+        const watched = shell.watchChurn();
+        const runs = (n) => { let last = null; for (let i = 0; i < n; i += 1) last = shell.noteUpdate(); return last; };
+    """
+
+    def test_runs_that_go_on_while_nobody_does_anything_are_reported_once_with_what_changed(self):
+        found = run(self.WATCH + """
+            const node = {nodeType: 1, nodeName: "DIV", id: "txt2img_settings", classList: {length: 0}};
+            const other = {nodeType: 1, nodeName: "SPAN", id: "", classList: {length: 1, 0: "progress"}};
+            const options = observing.options;
+            observing.callback([{target: node}, {target: node}, {target: other}]);
+            shell.churn.lastInput = Date.now() - 5000;
+            const early = runs(19);
+            const report = runs(1);
+            const again = runs(25);
+            console.log(JSON.stringify({watched, hooks: hooks.length, listened, options,
+                                        observed: observing === null, early, report, again, posts}));
+        """, sources=("shell",))
+
+        assert found["watched"] is True and found["hooks"] == 1
+        assert found["options"] == {"childList": True, "subtree": True}, "what Forge's own observer hears"
+        assert found["listened"] == [[kind, {"capture": True, "passive": True}]
+                                     for kind in ("pointerdown", "keydown", "wheel", "touchstart")]
+        assert found["early"] is None, "nineteen runs are not yet a page that never settles"
+        report = found["report"]
+        assert report["kind"] == "churn" and report["runs"] == 20 and report["quiet"] >= 5
+        assert report["targets"] == [{"node": "div#txt2img_settings", "count": 2},
+                                     {"node": "span.progress", "count": 1}]
+        assert found["again"] is None and found["posts"] == [report], "once per page"
+        assert found["observed"] is True, "and counted no more"
+
+    def test_a_press_a_generation_or_a_reply_in_flight_is_not_churn(self):
+        """A page updating because somebody is using it, or because a
+        generation or a reply is running, is a page doing its job."""
+        found = run(self.WATCH + """
+            const out = {};
+            shell.churn.lastInput = Date.now();
+            out.pressed = [runs(20), shell.churn.runs.length];
+            shell.churn.lastInput = Date.now() - 5000;
+            element("txt2img_interrupt").style.display = "block";
+            out.generating = [runs(20), shell.churn.runs.length];
+            element("txt2img_interrupt").style.display = "none";
+            shell.store.snapshot = () => ({operation: {terminal: false}});
+            out.replying = runs(20);
+            shell.store.snapshot = () => ({operation: {terminal: true}});
+            out.settled = runs(20) !== null;
+            console.log(JSON.stringify(Object.assign(out, {posts: posts.length})));
+        """, sources=("shell",))
+
+        assert found["pressed"] == [None, 0], "a press just now: counted from nothing again"
+        assert found["generating"] == [None, 0]
+        assert found["replying"] is None
+        assert found["settled"] is True and found["posts"] == 1
+
+    def test_a_page_without_forges_hooks_is_not_watched(self):
+        found = run(PANEL + """
+            const shell = panel({});
+            shell.disposers = [];
+            delete globalThis.onAfterUiUpdate;
+            console.log(JSON.stringify({watched: shell.watchChurn(), churn: shell.churn === undefined,
+                                        noted: shell.noteUpdate()}));
+        """, sources=("shell",))
+
+        assert found == {"watched": False, "churn": True, "noted": None}
+
+
 class TestADragTakesOnlyTheHandle:
     """Reported: "sometimes when I drag it, it drags the whole page instead of
     just dragging the fly out menu button or the fly out menu itself." Left to
@@ -3076,42 +3192,74 @@ class TestADragTakesOnlyTheHandle:
         assert found["kept"] is True and found["second"] == "pointerup"
         assert found["noted"] == ["Forge Assistant: the journal was not written: The server answered 404"]
 
-    def test_a_fingers_drag_holds_the_pages_scroll_and_a_mouses_does_not(self):
+    HELD = """
+        console.info = () => {};
+        const scroller = {style: {overflow: "auto", scrollbarGutter: ""}, nodeType: 1,
+                          nodeName: "HTML", classList: {length: 0}, id: ""};
+        document.scrollingElement = scroller;
+        const scrolledTo = [];
+        globalThis.scrollTo = (x, y) => { scrolledTo.push([x, y]); globalThis.scrollX = x; globalThis.scrollY = y; };
+        globalThis.scrollX = 0;
+        globalThis.scrollY = 0;
+    """
+
+    def test_a_fingers_drag_holds_the_pages_scroll_once_it_moves_and_a_mouses_never(self):
         """From the user's log: a finger on the launcher in a Gecko browser,
         `touch-action: none` on the handle, every touchmove cancelled, and the
-        page panned by the finger's travel under every drag. So while a
-        finger or a pen drags, the scrolling element is `overflow: hidden`
-        with its scrollbar's gutter kept, put back as found when the drag
-        ends -- by its pointerup, by a cancel, by the shell going."""
-        found = run(self.SHELL + """
-            console.info = () => {};
-            const scroller = {style: {overflow: "auto", scrollbarGutter: ""}, nodeType: 1,
-                              nodeName: "HTML", classList: {length: 0}, id: ""};
-            document.scrollingElement = scroller;
+        page panned by the finger's travel under every drag. Held at the
+        press, the hold cost the whole visible tab a layout at the press and
+        another at the release, on every drag, in browsers that never pan.
+        So the hold waits for the pan: nothing is held at the press; the
+        first scroll of the page under a finger's (or a pen's) drag holds it
+        -- the scrolling element `overflow: hidden` with its gutter kept, the
+        page put back where the press found it -- once, and the drag's end
+        puts it back as found, by its pointerup, by a cancel, by the shell
+        going. A mouse's drag watches nothing."""
+        found = run(self.SHELL + self.HELD + """
             const out = {};
             shell.startDrag(press({pointerType: "touch"}), shell.nodes.launcher);
-            out.held = [scroller.style.overflow, scroller.style.scrollbarGutter];
-            out.noted = shell.drag.watch.locked;
+            out.pressed = [scroller.style.overflow, shell.drag.watch.locked, !!shell.drag.pan,
+                           shell.drag.pan.held];
+            // The page pans 48 px under the finger: a compositor that read
+            // nothing the handle said.
+            globalThis.scrollY = 48;
+            out.held = [shell.holdPage(shell.drag), scroller.style.overflow, scroller.style.scrollbarGutter,
+                        shell.drag.watch.locked, shell.drag.watch.held.by, scrolledTo.slice(), scrollY];
+            // Once: a pan the browser keeps making against the hold is not
+            // fought frame by frame.
+            globalThis.scrollY = 60;
+            out.again = [shell.holdPage(shell.drag), scrolledTo.length];
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
-            out.released = [scroller.style.overflow, scroller.style.scrollbarGutter];
+            out.released = [scroller.style.overflow, scroller.style.scrollbarGutter,
+                            shell.lastDrag.held.by, shell.lastDrag.locked,
+                            shell.lastDrag.trace.some((entry) => entry.e === "hold" && entry.sy === 48)];
+            globalThis.scrollY = 0;
             shell.startDrag(press({pointerType: "mouse"}), shell.nodes.launcher);
-            out.mouse = [scroller.style.overflow, shell.drag.watch.locked];
+            out.mouse = [scroller.style.overflow, shell.drag.watch.locked, shell.drag.pan === undefined,
+                         shell.holdPage(shell.drag)];
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            out.mouseAccount = [shell.lastDrag.locked, shell.lastDrag.held];
             shell.startDrag(press({pointerType: "pen"}), shell.nodes.panel);
-            out.pen = scroller.style.overflow;
+            out.pen = [scroller.style.overflow, !!shell.drag.pan];
+            shell.holdPage(shell.drag);
+            out.penHeld = scroller.style.overflow;
             shell.cancelGestures();
             out.cancelled = scroller.style.overflow;
             // Under focus mode the focused root scrolls in the page's place.
             const focused = {style: {overflow: "", scrollbarGutter: ""}, nodeType: 1,
                              nodeName: "DIV", classList: {length: 1, 0: "forge-assistant-focus-root"},
-                             id: ""};
+                             id: "", scrollTop: 10, scrollLeft: 0};
             document.querySelector = (s) => (s === ".forge-assistant-focus-root" ? focused : null);
             shell.startDrag(press({pointerType: "touch"}), shell.nodes.panel);
-            out.focus = [focused.style.overflow, scroller.style.overflow, shell.drag.watch.locked];
+            focused.scrollTop = 130;
+            shell.holdPage(shell.drag);
+            out.focus = [focused.style.overflow, scroller.style.overflow, shell.drag.watch.locked,
+                         focused.scrollTop, shell.drag.watch.held.by];
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
             out.focusReleased = [focused.style.overflow, scroller.style.overflow];
             document.querySelector = () => null;
             shell.startDrag(press({pointerType: "touch"}), shell.nodes.panel);
+            shell.holdPage(shell.drag);
             shell.nodes.root.parentElement = null;
             shell.disposers = [];
             shell.stopMemory = () => {};
@@ -3120,13 +3268,157 @@ class TestADragTakesOnlyTheHandle:
             console.log(JSON.stringify(out));
         """, sources=("shell",))
 
-        assert found["held"] == ["hidden", "stable"] and found["noted"] == ["html"]
-        assert found["released"] == ["auto", ""], "put back as found"
-        assert found["mouse"] == ["auto", []], "a mouse never pans"
-        assert found["pen"] == "hidden" and found["cancelled"] == "auto"
-        assert found["focus"] == ["hidden", "hidden", ["html", "div.forge-assistant-focus-root"]]
+        assert found["pressed"] == ["auto", [], True, False], "nothing is held at the press"
+        assert found["held"] == [True, "hidden", "stable", ["html"], [0, 48], [[0, 0]], 0]
+        assert found["again"] == [False, 1], "held once"
+        assert found["released"] == ["auto", "", [0, 48], ["html"], True], "put back as found"
+        assert found["mouse"] == ["auto", [], True, False], "a mouse never pans"
+        assert found["mouseAccount"] == [[], None]
+        assert found["pen"] == ["auto", True] and found["penHeld"] == "hidden"
+        assert found["cancelled"] == "auto"
+        assert found["focus"] == ["hidden", "hidden", ["html", "div.forge-assistant-focus-root"], 10, [0, 120]]
         assert found["focusReleased"] == ["", "auto"]
         assert found["disposed"] == "auto"
+
+    def test_the_hold_hears_the_pages_scroll_and_not_a_boxs(self):
+        """Heard on the document in the capture phase, so the page's own
+        scroll (at the document) and the focused root's (at itself) both
+        reach it; a box scrolling inside the page -- the transcript, the
+        docked column -- is not the page moving. Nothing is heard after the
+        drag, and the listener goes with it."""
+        found = run(self.SHELL + self.HELD + """
+            const added = [];
+            const removed = [];
+            let heard = null;
+            document.addEventListener = (type, fn, options) => { added.push([type, options]); heard = fn; };
+            document.removeEventListener = (type, fn, options) => { removed.push([type, options, fn === heard]); };
+            shell.startDrag(press({pointerType: "touch"}), shell.nodes.launcher);
+            heard({target: {nodeType: 1, nodeName: "DIV"}});
+            const box = scroller.style.overflow;
+            heard({target: document});
+            const page = scroller.style.overflow;
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            heard({target: document});
+            console.log(JSON.stringify({added, removed, box, page, after: scroller.style.overflow}));
+        """, sources=("shell",))
+
+        assert found["added"] == [["scroll", {"capture": True, "passive": True}]]
+        assert found["box"] == "auto", "a box's scroll is not the page's"
+        assert found["page"] == "hidden"
+        assert found["after"] == "auto"
+        assert found["removed"] == [["scroll", {"capture": True, "passive": True}, True]]
+
+    def test_a_drag_moves_the_handle_by_transform_and_settles_it_by_position(self):
+        """A box moved by `left` and `top` is laid out and painted again on
+        every move -- in Gecko the whole panel, every frame. Dragged, the
+        handle is moved by a transform on a layer of its own, and where it
+        is let go is written once, as a position, by the placement."""
+        found = run(self.SHELL + """
+            console.info = () => {};
+            const handle = shell.nodes.panel;
+            let placements = 0;
+            shell.placeNow = () => { placements += 1; };
+            shell.startDrag(press(), handle);
+            shell.moveDrag(press({clientX: 960, clientY: 541}));
+            const first = [handle.style.transform, handle.style.willChange,
+                           handle.style.left || "", handle.style.top || ""];
+            shell.moveDrag(press({clientX: 1000, clientY: 600}));
+            const second = [handle.style.transform, shell.drag.watch.put];
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            console.log(JSON.stringify({first, second, placed: placements,
+                                        after: [handle.style.transform, handle.style.willChange,
+                                                handle.style.left || "", handle.style.top || ""],
+                                        put: shell.lastDrag.put}));
+        """, sources=("shell",))
+
+        assert found["first"] == ["translate(10px, 21px)", "transform", "", ""]
+        # The box was at 900, 500 and pressed at 950, 520: the position the
+        # account reports is where the box is, not where the pointer is.
+        assert found["second"] == ["translate(50px, 80px)", [950, 580]]
+        assert found["after"] == ["", "", "", ""] and found["placed"] == 1
+        assert found["put"] == [950, 580]
+
+    def test_a_dragged_panel_shifts_the_docked_column_and_places_it_where_it_is_let_go(self):
+        """The docked settings column travels with the panel by the panel's
+        own transform (`Dock.shift`), and is placed again -- laid out once --
+        where the panel is let go. Placed on every move, its guard measured
+        every text box in it each time. The launcher's drag carries no
+        column."""
+        found = run(self.SHELL + """
+            console.info = () => {};
+            const shifts = [];
+            let placements = 0;
+            NS.dock = {shift(dx, dy) { shifts.push([dx, dy]); return true; },
+                       place() { placements += 1; return true; },
+                       release() { return true; },
+                       available() { return true; }};
+            shell.state.settingsDocked = true;
+            shell.syncDock = NS.Shell.prototype.syncDock;
+            shell.placeNow = NS.Shell.prototype.placeNow;
+            shell.placePanel = () => {};
+            shell.nodes.dock = {hidden: false,
+                                getBoundingClientRect: () => ({left: 1, top: 2, width: 300, height: 400})};
+            shell.startDrag(press(), shell.nodes.panel);
+            shell.moveDrag(press({clientX: 960, clientY: 540}));
+            shell.moveDrag(press({clientX: 970, clientY: 550}));
+            const during = placements;
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            const afterPanel = placements;
+            shell.startDrag(press(), shell.nodes.launcher);
+            shell.moveDrag(press({clientX: 960, clientY: 540}));
+            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+            console.log(JSON.stringify({shifts, during, afterPanel, placed: placements}));
+        """, sources=("shell",))
+
+        assert found["shifts"] == [[10, 20], [20, 30]]
+        assert found["during"] == 0 and found["afterPanel"] == 1
+        assert found["placed"] == 2, "the launcher's end places too, and shifts nothing"
+
+    def test_a_drags_housekeeping_is_done_once(self):
+        """What cannot change under a drag is read or written once: the
+        safe-area insets (a computed style), the dragging class on the root,
+        and the outline at the anchor the drag would snap to, drawn again
+        only when that anchor changes. Four style writes a move on the ghost
+        woke whatever watched the root, for the same box at the same corner."""
+        found = run(self.SHELL + """
+            console.info = () => {};
+            element("forge-assistant-root");
+            let styled = 0;
+            const realStyle = globalThis.getComputedStyle;
+            globalThis.getComputedStyle = (node) => { styled += 1; return realStyle(node); };
+            let classed = 0;
+            const rootClasses = shell.nodes.root.classList;
+            const realAdd = rootClasses.add.bind(rootClasses);
+            rootClasses.add = (name) => { if (name === "forge-assistant-dragging") classed += 1; realAdd(name); };
+            shell.state.freeFloat = false;
+            const oneDrag = (moves, far) => {
+                styled = 0;
+                classed = 0;
+                shell.startDrag(press(), shell.nodes.panel);
+                let ghostWrites = null;
+                for (let i = 1; i <= moves; i += 1) {
+                    shell.moveDrag(press({clientX: 950 + 8 * i, clientY: 520 + 8 * i}));
+                    if (i === 1) {
+                        ghostWrites = {count: 0};
+                        shell.nodes.ghost.style = new Proxy(shell.nodes.ghost.style, {
+                            set(target, key, value) { ghostWrites.count += 1; target[key] = value; return true; }});
+                    }
+                }
+                const settled = ghostWrites.count;
+                if (far) shell.moveDrag(press({clientX: 40, clientY: 40}));
+                const out = {styled, classed, settled, moved: ghostWrites.count - settled,
+                             anchor: shell.drag.anchor};
+                shell.endDrag({pointerId: 1, type: "pointerup"}, false);
+                return out;
+            };
+            console.log(JSON.stringify({three: oneDrag(3, false), thirty: oneDrag(30, false), far: oneDrag(30, true)}));
+        """, sources=("shell",))
+
+        three, thirty, far = found["three"], found["thirty"], found["far"]
+        assert three["styled"] == thirty["styled"] <= 6, "the insets once a drag, not once a move"
+        assert three["classed"] == thirty["classed"] == 1
+        assert three["settled"] == thirty["settled"] == 0, "the ghost drawn once for one anchor"
+        assert far["moved"] == 4 and far["anchor"] == "top-left", "and again where the anchor changed"
 
     def test_the_pan_blocker_is_on_the_handles_and_never_the_window(self):
         """A non-passive touchmove listener on the window makes every scroll

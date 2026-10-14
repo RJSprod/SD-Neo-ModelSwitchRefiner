@@ -222,6 +222,9 @@ function gradioApp() {{
 }}
 const uiLoaded = [];
 function onUiLoaded(fn) {{ uiLoaded.push(fn); }}
+// Forge's after-update hook, collected: a test that wants a run calls them.
+const afterUpdate = [];
+function onAfterUiUpdate(fn) {{ afterUpdate.push(fn); }}
 </script>
 <script>{MOBILE_JS}</script>
 {scripts}
@@ -1004,6 +1007,216 @@ def test_the_docked_column_follows_the_panel_and_the_workspace(browser):
         page.close()
 
 
+def test_a_drag_moves_the_panel_by_transform_and_the_docked_column_with_it(browser):
+    """A box moved by `left` and `top` is laid out and painted again on every
+    move -- in Gecko the whole panel, every frame. Dragged, the panel is moved
+    by a transform on a layer of its own, the docked column by the same one
+    (`Dock.shift`), and where the panel is let go both are placed once, as
+    positions, with nothing of the drag left on either."""
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.click(".forge-assistant-settings")
+        settle(page)
+        grip = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-grip')"
+                             ".getBoundingClientRect(); return [r.left + r.width / 2,"
+                             " r.top + r.height / 2]; })()")
+        inline = """() => {
+            const panel = document.getElementById("forge-assistant-panel");
+            const column = document.getElementById("txt2img_settings");
+            return {panel: [panel.style.transform, panel.style.willChange, panel.style.left, panel.style.top],
+                    column: [column.style.transform, column.style.getPropertyPriority("transform"),
+                             column.style.willChange]};
+        }"""
+        rest = page.evaluate(inline)
+        start = page.evaluate(WHERE)
+        page.mouse.move(*grip)
+        page.mouse.down()
+        page.mouse.move(grip[0] - 300, grip[1] + 40, steps=6)
+        moving = page.evaluate(inline)
+        where = page.evaluate(WHERE)
+        page.mouse.up()
+        settle(page)
+        after = page.evaluate(inline)
+        landed = page.evaluate(WHERE)
+
+        assert moving["panel"][0] == "translate(-300px, 40px)" and moving["panel"][1] == "transform", moving
+        assert moving["panel"][2:] == rest["panel"][2:], "the position is not written under a drag"
+        assert moving["column"] == ["translate(-300px, 40px)", "important", "transform"], moving
+        assert where["column"] == where["slot"], where
+        assert where["column"][0] == start["column"][0] - 300 and where["column"][1] == start["column"][1] + 40
+        assert after["panel"][:2] == ["", ""] and after["column"] == ["", "", ""], after
+        assert after["panel"][2:] != rest["panel"][2:], "let go, the position is written once"
+        assert landed["column"] == landed["slot"] and landed["column"][0] < start["column"][0] - 250, landed
+    finally:
+        page.close()
+
+
+# -- the dock's cost ---------------------------------------------------------- #
+
+ADD_BOXES = """(n) => {
+    const column = document.getElementById("txt2img_settings");
+    for (let i = 0; i < n; i += 1) {
+        const block = document.createElement("div");
+        block.className = "block";
+        const area = document.createElement("textarea");
+        area.value = "line\\nline\\nline";
+        block.appendChild(area);
+        column.appendChild(block);
+    }
+}"""
+
+COUNT_FITS = """() => {
+    const guard = forgeAssistant.dock.guard;
+    window.fits = 0;
+    const real = guard.fitAll;
+    guard.fitAll = function () { window.fits += 1; return real.apply(this, arguments); };
+}"""
+
+
+def docked_with_boxes(browser, boxes: int = 24):
+    """Txt2Img with `boxes` text boxes in its settings column, the panel open
+    and the column docked in it."""
+    page = open_page(browser, 1600, 900)
+    page.evaluate(ADD_BOXES, boxes)
+    page.evaluate("forgeAssistant.shell.open()")
+    settle(page)
+    page.click(".forge-assistant-settings")
+    settle(page)
+    return page
+
+
+def layouts(cdp) -> int:
+    return int(next(metric["value"] for metric in cdp.send("Performance.getMetrics")["metrics"]
+                    if metric["name"] == "LayoutCount"))
+
+
+def test_moving_the_docked_panel_measures_no_text_box_and_lays_nothing_out(browser):
+    """Measured on the user's Txt2Img before this: 85 layouts for one move of
+    the docked panel, about 30 ms a frame, because every move placed the
+    column again and its guard -- which refits every text box when Gradio
+    restyles one -- took the dock's own writes for Gradio's. A move now
+    shifts the column by a transform the guard is told to forget: no box is
+    measured, and nothing is laid out."""
+    page = docked_with_boxes(browser)
+    try:
+        page.evaluate(COUNT_FITS)
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Performance.enable")
+        grip = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-grip')"
+                             ".getBoundingClientRect(); return [r.left + r.width / 2,"
+                             " r.top + r.height / 2]; })()")
+        page.mouse.move(*grip)
+        page.mouse.down()
+        page.mouse.move(grip[0] - 6, grip[1] - 6)
+        settle(page, 2)
+        before = layouts(cdp)
+        for step in range(1, 31):
+            page.mouse.move(grip[0] - 6 - 8 * step, grip[1] - 6 + 3 * step)
+            page.wait_for_timeout(16)
+        settle(page, 2)
+        during = layouts(cdp) - before
+        page.mouse.up()
+        settle(page)
+        cdp.detach()
+
+        assert page.evaluate("window.fits") == 0, "no text box measured for a move"
+        assert during <= 2, during
+    finally:
+        page.close()
+
+
+def test_placing_the_docked_column_again_measures_no_text_box_until_its_width_changes(browser):
+    """`place` is also what every placement of the panel calls -- a resize, a
+    menu, a view -- and the guard hears none of those either. A narrower or
+    wider slot rewraps every box, and that one refits, once."""
+    page = docked_with_boxes(browser)
+    try:
+        frame = ("await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));")
+        page.evaluate("async () => { forgeAssistant.dock.place({left: 100, top: 60, width: 340, height: 600}); "
+                      + frame + " }")
+        page.evaluate(COUNT_FITS)
+        page.evaluate("async () => { for (let i = 0; i < 12; i += 1) { forgeAssistant.dock.place("
+                      "{left: 100 + i, top: 60 + i, width: 340, height: 600}); " + frame + " } }")
+        assert page.evaluate("window.fits") == 0, "twelve placements, nothing measured"
+        page.evaluate("async () => { forgeAssistant.dock.place({left: 100, top: 60, width: 300, height: 600}); "
+                      + frame + " }")
+        assert page.evaluate("window.fits") == 1, "a new width refits, once"
+        heights = page.evaluate("[...document.querySelectorAll('#txt2img_settings textarea')]"
+                                ".map((area) => area.style.height)")
+        assert heights and all(height.endswith("px") for height in heights), heights
+    finally:
+        page.close()
+
+
+def test_fitting_every_box_lays_the_column_out_a_few_times_not_once_per_box(browser):
+    """Fitted one by one, each box's measure came after the box before it was
+    written, and the column was laid out again for every box. Fitted at once
+    -- all set to measure, all measured, all written -- it is laid out a
+    handful of times however many boxes there are."""
+    page = docked_with_boxes(browser, 24)
+    try:
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Performance.enable")
+        page.evaluate("document.querySelectorAll('#txt2img_settings textarea')"
+                      ".forEach((area) => { area.value += '\\nmore'; })")
+        before = layouts(cdp)
+        page.evaluate("forgeAssistant.dock.guard.fitAll()")
+        cost = layouts(cdp) - before
+        cdp.detach()
+        heights = page.evaluate("[...document.querySelectorAll('#txt2img_settings textarea')]"
+                                ".map((area) => [area.style.height, area.scrollHeight, area.clientHeight])")
+
+        assert cost <= 6, cost
+        assert len(heights) == 25 and all(entry[1] <= entry[2] + 1 for entry in heights), heights
+    finally:
+        page.close()
+
+
+def test_a_page_that_keeps_updating_while_idle_is_written_to_the_journal_once(browser):
+    """The quiet-page watch, on a page with Forge's after-update hook: a
+    child list inside the app element changed on every run -- what the
+    theme's header and the spatial canvas each did -- is counted by the
+    node it changed, and once the runs go on with nothing pressed, one
+    account goes to the journal naming it. Once: the next runs write
+    nothing."""
+    page = open_page(browser)
+    journalled = []
+
+    def take(route):
+        journalled.append(json.loads(route.request.post_data))
+        route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+    page.route(JOURNAL, take)
+    try:
+        assert page.evaluate("!!forgeAssistant.shell.churn") is True
+        bursts = """async (n) => {
+            const column = document.getElementById("txt2img_settings");
+            for (let i = 0; i < n; i += 1) {
+                const node = document.createElement("div");
+                column.appendChild(node);
+                column.removeChild(node);
+                await new Promise((done) => setTimeout(done, 0));
+                afterUpdate.forEach((fn) => fn());
+            }
+        }"""
+        page.evaluate("forgeAssistant.shell.churn.lastInput = Date.now() - 5000")
+        page.evaluate(bursts, 25)
+        page.wait_for_function("forgeAssistant.shell.churn.reported === true")
+        settle(page)
+        page.evaluate(bursts, 10)
+        settle(page)
+
+        assert len(journalled) == 1, journalled
+        entry = journalled[0]
+        assert entry["kind"] == "churn" and entry["runs"] >= 20, entry
+        assert entry["targets"][0]["node"] == "div#txt2img_settings.column", entry
+        assert entry["targets"][0]["count"] >= 40, "an append and a removal, each burst"
+        assert entry["quiet"] >= 5
+    finally:
+        page.close()
+
+
 def press_three_times(page, selector) -> None:
     box = page.evaluate("(s) => { const r = document.querySelector(s).getBoundingClientRect();"
                         " return [r.left + r.width / 2, r.top + r.height / 2]; }", selector)
@@ -1723,13 +1936,17 @@ def test_three_taps_on_the_header_still_toggle_focus(browser):
         context.close()
 
 
-def test_a_finger_on_a_handle_holds_the_pages_scroll_until_it_lifts(browser):
+def test_a_finger_on_a_handle_holds_the_pages_scroll_once_it_moves_and_until_it_lifts(browser):
     """From the user's log: a Gecko browser panned the page by the finger's
     travel under every drag, with `touch-action: none` on the handle and every
     touchmove cancelled -- nothing the page says about a touch reaches that
-    pan in time. So while a finger drags, the scrolling element is
-    `overflow: hidden` (its gutter kept), and the page scrolls again the
-    moment the finger lifts."""
+    pan in time. Held at the press, the hold cost the whole visible tab a
+    layout when the finger landed and another when it lifted, on every drag,
+    in browsers that never pan at all. So the hold waits for the pan: while
+    the page stays still under the finger nothing is held; the first scroll
+    of the page under the drag holds it -- the scrolling element
+    `overflow: hidden` (its gutter kept), the page put back where the press
+    found it -- and the page scrolls again the moment the finger lifts."""
     context, page = open_phone(browser, free_float=True)
     try:
         page.evaluate("forgeAssistant.shell.close()")
@@ -1746,15 +1963,27 @@ def test_a_finger_on_a_handle_holds_the_pages_scroll_until_it_lifts(browser):
             cdp.send("Input.dispatchTouchEvent",
                      {"type": "touchMove", "touchPoints": [{"x": centre[0], "y": centre[1] - 30 * step}]})
         settle(page)
+        assert page.evaluate(scroller)[0] != "hidden", "nothing held while the page stays still"
+        assert page.evaluate("forgeAssistant.shell.drag.watch.locked") == []
+        assert page.evaluate("forgeAssistant.shell.drag.watch.held") is None
+
+        # The page moves under the finger -- what that compositor does on
+        # its own -- and the hold engages at the first scroll.
+        page.evaluate("window.scrollBy(0, 48)")
+        settle(page, 4)
         held = page.evaluate(scroller)
         assert held == ["hidden", "stable"], held
+        assert page.evaluate("window.scrollY") == 0, "put back where the press found it"
         assert page.evaluate("forgeAssistant.shell.drag.watch.locked") == ["html"]
+        assert page.evaluate("forgeAssistant.shell.drag.watch.held")["by"] == [0, 48]
         cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         cdp.detach()
         settle(page)
         assert page.evaluate(scroller)[0] != "hidden"
         account = page.evaluate("forgeAssistant.shell.lastDrag")
         assert account["locked"] == ["html"] and account["pointer"] == "touch", account
+        assert account["held"]["by"] == [0, 48] and account["held"]["t"] >= 0, account
+        assert any(entry.get("e") == "hold" and entry.get("sy") == 48 for entry in account["trace"]), account["trace"]
         assert isinstance(account["delay"], int) and account["delay"] >= 0, account
         assert any("sy" in entry for entry in account["trace"]), account["trace"][:3]
 
@@ -1762,6 +1991,13 @@ def test_a_finger_on_a_handle_holds_the_pages_scroll_until_it_lifts(browser):
         touch_drag(page, (60, 500), (60, 300))
         settle(page)
         assert page.evaluate("window.scrollY") > 100
+
+        # A drag the page stayed still under held nothing, and says so.
+        centre = page.evaluate(HANDLES)["launcher"]["centre"]
+        touch_drag(page, centre, (centre[0], centre[1] - 100))
+        settle(page)
+        quiet = page.evaluate("forgeAssistant.shell.lastDrag")
+        assert quiet["locked"] == [] and quiet["held"] is None, quiet
     finally:
         context.close()
 

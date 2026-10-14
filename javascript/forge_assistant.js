@@ -969,6 +969,19 @@
         dock.place(showing ? slot.getBoundingClientRect() : null);
     };
 
+    /** The docked column carried through a drag of the panel: moved by the
+     *  panel's own transform (`Dock.shift`) and placed once more where the
+     *  panel is let go (`placeNow` -> `syncDock`). Placed on every move, the
+     *  column was laid out each time, and its guard -- which refits every
+     *  text box when Gradio restyles one -- took the dock's own writes for
+     *  Gradio's: 85 layouts a move on the user's Txt2Img. */
+    Shell.prototype.shiftDock = function (dx, dy) {
+        const dock = NS.dock;
+        if (!dock || !this.state.settingsDocked) return;
+        if (typeof dock.shift === "function") dock.shift(dx, dy);
+        else this.syncDock();
+    };
+
     /** The docked view is as tall as the conversation is at its fullest.
      *
      *  Asked for after the first build, which made the docked panel the
@@ -1317,17 +1330,19 @@
             committed: false,
         };
         this.drag.watch = this.watchDrag(event, node, box);
+        this.drag.watch.locked = [];
+        this.drag.watch.held = null;
         // A mouse never pans the page; anything else can, and in one browser
-        // does whatever the handle says. See `lockScroll`.
-        if (event.pointerType && event.pointerType !== "mouse") this.lockScroll();
-        this.drag.watch.locked = (this.scrollLock || []).map((was) => describe(was.node));
+        // does whatever the handle says. See `watchPan`.
+        if (event.pointerType && event.pointerType !== "mouse") this.watchPan(this.drag);
         try {
             node.setPointerCapture(event.pointerId);
             this.drag.watch.captured = true;
         } catch (error) { /* capture is an optimisation, not a requirement */ }
     };
 
-    /** The page's scroll, held while a finger (or a pen) drags a handle.
+    /** The page's scroll, held the moment it moves under a finger's (or a
+     * pen's) drag -- and not before.
      *
      * From the user's log (docs/22 §3.34): a finger on the launcher in a
      * Gecko browser, `touch-action: none` computed on the handle, every
@@ -1336,12 +1351,85 @@
      * the page says about a gesture reaches that browser's pan in time: its
      * compositor gives the page a few hundred milliseconds to answer a touch
      * and then pans on its own, and a Gradio page can be busy for longer. So
-     * for as long as such a drag lives the page is made unscrollable instead:
-     * `overflow: hidden` on the scrolling element, with the scrollbar's
-     * gutter kept so nothing shifts under the handle, and under focus mode
-     * on the focused root as well, which scrolls in the page's place. Inline,
-     * and put back as found. `endDrag` lets go, on every path a drag ends by.
+     * for as long as such a drag lives the page is made unscrollable instead
+     * (`lockScroll`): `overflow: hidden` on the scrolling element, with the
+     * scrollbar's gutter kept so nothing shifts under the handle, and under
+     * focus mode on the focused root as well, which scrolls in the page's
+     * place. Inline, and put back as found.
+     *
+     * Held at the press, that cost the whole visible tab a layout when the
+     * finger landed and another when it lifted -- 8 ms on a small Txt2Img,
+     * 65 on a large one, under a millisecond on PNG Info -- on every drag,
+     * in browsers that never pan at all. So the hold waits for the pan: a
+     * scroll of the page, or of the focused root, while the drag is live is
+     * the pan beginning, and only then is the page held and put back where
+     * the press found it (`holdPage`). A browser that honours the handle's
+     * word pays nothing. `endDrag` lets go, on every path a drag ends by.
      */
+    Shell.prototype.watchPan = function (drag) {
+        if (typeof document.addEventListener !== "function") return;
+        const scroller = document.scrollingElement || document.documentElement || null;
+        const focused = typeof document.querySelector === "function"
+            ? document.querySelector(".forge-assistant-focus-root") : null;
+        const pan = {
+            scroller,
+            focused,
+            at: [window.scrollX || 0, window.scrollY || 0],
+            focusedAt: focused ? [focused.scrollLeft || 0, focused.scrollTop || 0] : null,
+            held: false,
+            stop: null,
+        };
+        const heard = (event) => {
+            if (this.drag !== drag) return;
+            const target = event ? event.target : null;
+            // The page's own scroll arrives at the document; the focused
+            // root's at itself. A box scrolling inside the page -- the
+            // transcript, the docked column -- is not the page moving.
+            if (target !== document && target !== scroller
+                && !(focused && target === focused)) return;
+            this.holdPage(drag);
+        };
+        const options = {capture: true, passive: true};
+        document.addEventListener("scroll", heard, options);
+        pan.stop = () => {
+            pan.stop = null;
+            document.removeEventListener("scroll", heard, options);
+        };
+        drag.pan = pan;
+    };
+
+    /** The page held where the press found it. Once per drag: the pan that
+     * got in before the hold is undone, and a pan the browser keeps making
+     * against the hold is not fought frame by frame. */
+    Shell.prototype.holdPage = function (drag) {
+        const pan = drag && drag.pan;
+        if (!pan || pan.held) return false;
+        pan.held = true;
+        this.lockScroll();
+        const now = [window.scrollX || 0, window.scrollY || 0];
+        const by = [now[0] - pan.at[0], now[1] - pan.at[1]];
+        if (pan.focused && pan.focusedAt) {
+            by[0] += (pan.focused.scrollLeft || 0) - pan.focusedAt[0];
+            by[1] += (pan.focused.scrollTop || 0) - pan.focusedAt[1];
+        }
+        if (typeof window.scrollTo === "function" && (now[0] !== pan.at[0] || now[1] !== pan.at[1])) {
+            try {
+                window.scrollTo(pan.at[0], pan.at[1]);
+            } catch (error) { /* a stub */ }
+        }
+        if (pan.focused && pan.focusedAt) {
+            if (pan.focused.scrollLeft !== pan.focusedAt[0]) pan.focused.scrollLeft = pan.focusedAt[0];
+            if (pan.focused.scrollTop !== pan.focusedAt[1]) pan.focused.scrollTop = pan.focusedAt[1];
+        }
+        const watch = drag.watch;
+        if (watch) {
+            watch.locked = (this.scrollLock || []).map((was) => describe(was.node));
+            watch.held = {t: Date.now() - watch.started, by};
+            traceEvent(watch, {e: "hold", sy: now[1], by});
+        }
+        return true;
+    };
+
     Shell.prototype.lockScroll = function () {
         if (this.scrollLock) return;
         const targets = [];
@@ -1402,40 +1490,57 @@
         if (!drag.moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) {
             return;
         }
-        drag.moved = true;
-        this.nodes.root.classList.add("forge-assistant-dragging");
+        if (!drag.moved) {
+            drag.moved = true;
+            // Once: a class put on again, or an inset read again, is a cost
+            // on every move for an answer that cannot change under a drag.
+            this.nodes.root.classList.add("forge-assistant-dragging");
+            // A layer of its own for the drag's duration. A transformed
+            // layer is composited where it lands; a box moved by `left` and
+            // `top` is laid out and painted again on every move, and in
+            // Gecko that is the whole panel, every frame.
+            drag.node.style.willChange = "transform";
+        }
+        if (!drag.inset) drag.inset = insets();
         const left = event.clientX - drag.offsetX;
         const top = event.clientY - drag.offsetY;
-        drag.node.style.left = Math.round(left) + "px";
-        drag.node.style.top = Math.round(top) + "px";
+        // Moved by a transform. `endDrag` writes the position once, where
+        // the handle is let go.
+        drag.node.style.transform = "translate(" + Math.round(dx) + "px, " + Math.round(dy) + "px)";
         if (drag.watch) drag.watch.put = [Math.round(left), Math.round(top)];
         // A docked settings column travels with the panel it is drawn in.
-        if (drag.node === this.nodes.panel) this.syncDock();
+        if (drag.node === this.nodes.panel) this.shiftDock(dx, dy);
+        const view = viewport();
         // Free float has nothing to snap to, so there is nothing to preview
         // and nothing to choose: where it is put is where it stays.
         if (this.state.freeFloat) {
-            if (!drag.inset) drag.inset = insets();
             if (drag.hold === undefined) drag.hold = this.floatHold(drag.node);
             drag.at = fractionOf({left, top, width: drag.width, height: drag.height},
-                                 viewport(), drag.inset, this.state.floatAt, drag.hold);
+                                 view, drag.inset, this.state.floatAt, drag.hold);
             return;
         }
         const centre = {x: left + drag.width / 2, y: top + drag.height / 2};
         drag.anchor = nearestAnchor(centre, {width: drag.width, height: drag.height},
-                                    viewport(), insets(), drag.anchor);
-        this.preview(drag.anchor);
+                                    view, drag.inset, drag.anchor);
+        this.preview(drag.anchor, view);
     };
 
-    Shell.prototype.preview = function (anchor) {
+    /** The outline at the anchor a drag would snap to. Drawn again only when
+     *  that anchor changes: it is the same box at the same corner for every
+     *  move in between, and four style writes a move wake whatever watches
+     *  the root. */
+    Shell.prototype.preview = function (anchor, view) {
+        const drag = this.drag;
         let ghost = this.nodes.ghost;
+        if (ghost && !ghost.hidden && drag.previewed === anchor) return;
         if (!ghost) {
             ghost = this.nodes.ghost = element("div", "forge-assistant-ghost");
             ghost.setAttribute("aria-hidden", "true");
             this.nodes.root.appendChild(ghost);
         }
-        const drag = this.drag;
+        drag.previewed = anchor;
         const at = anchorPoint(anchor, {width: drag.width, height: drag.height},
-                               viewport(), insets());
+                               view || viewport(), drag.inset || insets());
         ghost.hidden = false;
         ghost.style.left = at.left + "px";
         ghost.style.top = at.top + "px";
@@ -1449,6 +1554,7 @@
         // Cleared first. A `lostpointercapture` arriving after this must find
         // nothing to undo.
         this.drag = null;
+        if (drag.pan && drag.pan.stop) drag.pan.stop();
         this.unlockScroll();
         this.nodes.root.classList.remove("forge-assistant-dragging");
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
@@ -1475,6 +1581,10 @@
         }
         drag.node.style.left = "";
         drag.node.style.top = "";
+        // The drag's transform and its layer go before the placement reads
+        // anything: where the handle was let go is written as a position.
+        drag.node.style.transform = "";
+        drag.node.style.willChange = "";
         try {
             drag.node.releasePointerCapture(drag.pointerId);
         } catch (error) { /* never held, or already released */ }
@@ -1683,6 +1793,7 @@
             put: watch.put,
             delay: watch.delay,
             locked: watch.locked,
+            held: watch.held,
             astray: [],
         };
         if (some(report.pageScrolled)) report.astray.push("the page scrolled by " + report.pageScrolled.join(", "));
@@ -1737,6 +1848,99 @@
             });
         }
         return sent;
+    };
+
+    // -- the page that never settles ----------------------------------------- //
+    //
+    // Forge runs every extension's after-update callbacks 250 ms after any
+    // change to a child list inside its app element. A callback that makes
+    // such a change on every run raises the next run itself, and the page
+    // updates forever: on the user's machine about 50 ms out of every 300,
+    // which their drag log showed as a stall under every drag. Two of this
+    // extension's own did exactly that (the theme's header and the spatial
+    // canvas, since fixed); another extension's cannot be seen from here. So
+    // the shell counts the runs, and when they go on while nobody is doing
+    // anything -- nothing pressed for a while, no generation, no reply in
+    // flight -- it writes one line to the journal naming what kept changing,
+    // once per page: where to look.
+
+    const CHURN_RUNS = 20;           // this many after-update runs ...
+    const CHURN_WINDOW_MS = 10000;   // ... within ten seconds ...
+    const CHURN_QUIET_MS = 3000;     // ... with nothing pressed for this long
+    const CHURN_NAMED = 6;           // the nodes named: the most changed
+    const CHURN_RECORDS = 200;       // of one burst, counted at most
+
+    Shell.prototype.watchChurn = function () {
+        if (typeof onAfterUiUpdate !== "function" || typeof MutationObserver !== "function") return false;
+        const app = typeof gradioApp === "function" ? gradioApp() : null;
+        if (!app || app.nodeType !== 1) return false;
+        const churn = this.churn = {runs: [], changed: new Map(), reported: false,
+                                    lastInput: Date.now(), observer: null};
+        const noted = () => { churn.lastInput = Date.now(); };
+        const types = ["pointerdown", "keydown", "wheel", "touchstart"];
+        const options = {capture: true, passive: true};
+        types.forEach((type) => window.addEventListener(type, noted, options));
+        // What Forge's own observer hears, by the node that changed. Bounded
+        // per burst: a generation's preview is hundreds of records a second.
+        churn.observer = new MutationObserver((records) => {
+            if (churn.reported) return;
+            const limit = Math.min(records.length, CHURN_RECORDS);
+            for (let i = 0; i < limit; i += 1) {
+                const key = describe(records[i].target);
+                churn.changed.set(key, (churn.changed.get(key) || 0) + 1);
+            }
+        });
+        churn.observer.observe(app, {childList: true, subtree: true});
+        onAfterUiUpdate(() => this.noteUpdate());
+        this.disposers.push(() => {
+            types.forEach((type) => window.removeEventListener(type, noted, options));
+            if (churn.observer) churn.observer.disconnect();
+        });
+        return true;
+    };
+
+    /** Is the page changing on its own account: a generation running, a
+     * reply in flight here or in LLM Studio? Asked only once the runs have
+     * reached the count, because asking reads computed styles. */
+    Shell.prototype.pageBusy = function () {
+        if (["txt2img", "img2img"].some((name) => generating(name))) return true;
+        const view = this.store && typeof this.store.snapshot === "function"
+            ? this.store.snapshot() : null;
+        if (view && view.operation && !view.operation.terminal) return true;
+        return typeof document.querySelector === "function" && !!document.querySelector(".mc-llm-busy");
+    };
+
+    /** One after-update run. The report, once, when they go on while the
+     * page is idle; null otherwise. */
+    Shell.prototype.noteUpdate = function () {
+        const churn = this.churn;
+        if (!churn || churn.reported) return null;
+        const now = Date.now();
+        churn.runs.push(now);
+        while (churn.runs.length && now - churn.runs[0] > CHURN_WINDOW_MS) churn.runs.shift();
+        if (churn.runs.length < CHURN_RUNS) return null;
+        if (now - churn.lastInput < CHURN_QUIET_MS || this.pageBusy()) {
+            churn.runs.length = 0;
+            churn.changed.clear();
+            return null;
+        }
+        churn.reported = true;
+        if (churn.observer) churn.observer.disconnect();
+        const targets = Array.from(churn.changed.entries())
+            .sort((a, b) => b[1] - a[1]).slice(0, CHURN_NAMED)
+            .map(([node, count]) => ({node, count}));
+        const report = {
+            kind: "churn",
+            runs: churn.runs.length,
+            seconds: Math.round((now - churn.runs[0]) / 100) / 10,
+            quiet: Math.round((now - churn.lastInput) / 1000),
+            targets,
+        };
+        try {
+            console.info("Forge Assistant churn: " + JSON.stringify(report));
+        } catch (error) { /* no console to write to */ }
+        this.journal(report);
+        return report;
     };
 
     /** The page does not pan under a finger that is dragging a handle.
@@ -5096,6 +5300,7 @@
 
     Shell.prototype.dispose = function () {
         this.stopMemory();
+        if (this.drag && this.drag.pan && this.drag.pan.stop) this.drag.pan.stop();
         this.unlockScroll();
         window.clearTimeout(this._generateShown);
         this.resetTaps();
@@ -5213,6 +5418,9 @@
         }
         NS.shell = shell;
         store.start();
+        try {
+            shell.watchChurn();
+        } catch (error) { /* a page without Forge's hooks; the watch is a diagnostic */ }
     }
 
     NS.memoryText = memoryText;

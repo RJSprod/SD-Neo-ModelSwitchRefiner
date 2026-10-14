@@ -2918,6 +2918,8 @@
         dirty: false,       // moved since the last commit, with Auto Save off
         drag: null,         // {id, from, origin}
         pointer: null,
+        drawnFrom: null,    // the saved text the canvas was last drawn from
+        drawnInto: null,    // and the holder it was drawn into
     };
 
     const COMPACT_IDS = {
@@ -2953,8 +2955,23 @@
         // and reloading under somebody's finger would undo the move they are
         // making.
         if (!force && (compact.drag || compact.dirty)) return;
+        // Nothing new to draw draws nothing. `wire` runs on every after-update,
+        // and Forge raises the next one 250 ms after any change to a child
+        // list inside its app element -- which emptying and refilling the
+        // regions holder is. Drawn on every run, this canvas kept the page
+        // updating for as long as the layout held a region, on every tab,
+        // with every extension's callbacks running each time. The same saved
+        // text in the same holder, still on the page, is already drawn; a
+        // holder Gradio rebuilt under it, or new text, is drawn again.
+        const box = stateBox();
+        const text = box ? String(box.value || "") : "";
+        const holder = byId(COMPACT_IDS.regions);
+        if (!force && compact.working && text === compact.drawnFrom
+            && holder && holder === compact.drawnInto && holder.isConnected !== false) return;
         const read = readLayout();
         if (read === null) return;     // unreadable; Python says so in words
+        compact.drawnFrom = text;
+        compact.drawnInto = holder;
         compact.working = read;
         compact.past.length = 0;
         compact.dirty = false;
