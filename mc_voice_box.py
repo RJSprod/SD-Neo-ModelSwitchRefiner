@@ -1,5 +1,5 @@
 """Voice Box: the samples, prompts, configurations, pipelines and outputs of a
-VibeVoice render, and the service that renders them.
+render, and the service that renders them with whichever engine is active.
 
 The page (``javascript/voice_box.js``) is four stages in a row -- INPUT, PROMPT,
 CONFIGURATION, OUTPUTS -- and a pipeline is one pass through them, kept like a
@@ -10,13 +10,21 @@ cannot write a stale copy over a folder the user chose a minute ago.
 
 This module does the arithmetic and the files. It never touches a card: a
 render asks for its card through the client :func:`use_turns` was handed
-(:mod:`mc_turns_guests`), and speaks through the runtime :func:`use_runtime`
-names (:mod:`mc_voice_vibevoice_runtime`). Both are seams, because the
-independence of the voice side from the memory side is an invariant
+(:mod:`mc_turns_guests`), and speaks through the active engine's runtime
+(:mod:`mc_voice_box_engines`: VibeVoice 7B or Breeze TTS 2), or the one
+:func:`use_runtime` names in a test. Both are seams, because the independence
+of the voice side from the memory side is an invariant
 (``tests/test_voice_independence.py``) and because a render service whose rules
 could only be tested with a GPU would be one whose rules nobody had tested.
 
-Sound is 16-bit mono PCM at 24 kHz throughout -- the rate VibeVoice speaks at.
+What an engine renders with -- VibeVoice's diffusion steps and solver, Breeze's
+line gap -- is its own vocabulary, and this module reads it as data from the
+engine's adapter (``FIELDS``, ``clean``, ``refuse``, ``infotext``,
+``capabilities``) rather than knowing it; docs/25-voice-box-engines.md is the
+contract. A configuration keeps every engine's options side by side, so moving
+between engines loses nothing.
+
+Sound is 16-bit mono PCM at 24 kHz throughout -- the rate both engines speak at.
 A sample arrives from the browser already trimmed to the selection the user
 made, as a WAV, and :func:`mc_voice_reference.normalize` makes it canonical the
 way it does for every engine that clones from a recording. An output is what
@@ -42,9 +50,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import mc_voice_box_engines as engines
+import mc_voice_box_fields as box_fields
+import mc_voice_box_render as render_types
 import mc_voice_paths as paths
 import mc_voice_reference as reference
-from vibevoice_worker import worker as vibevoice_protocol
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -58,6 +68,12 @@ class VoiceBoxError(RuntimeError):
 
 class NotFound(VoiceBoxError):
     status = 404
+
+
+class Unavailable(VoiceBoxError):
+    """Something this machine lacks right now, which the page can say and offer to fix."""
+
+    status = 409
 
 
 # --------------------------------------------------------------------------- #
@@ -79,7 +95,7 @@ always a WAV: it is what the model is conditioned on, and never lossy."""
 META_FILENAME = "meta.json"
 
 SAMPLE_RATE = 24000
-"""VibeVoice's rate, for samples and outputs alike."""
+"""Both engines' rate, for samples and outputs alike."""
 
 PEAKS = 240
 """Points in a waveform drawn from a list rather than from the audio."""
@@ -99,13 +115,32 @@ PAUSE_DEFAULT_MS = 700
 PAUSE_MIN_MS = 50
 PAUSE_MAX_MS = 10_000
 
-STEPS_RANGE = (1, 50)
-BATCH_RANGE = (1, vibevoice_protocol.MAX_TAKES)
-CFG_RANGE = (1.0, 3.0)
-TEMPERATURE_RANGE = (0.1, 2.0)
-TOP_P_RANGE = (0.05, 1.0)
+MAX_TAKES = 4
+"""The most takes one render makes when an engine does not say (both say 4)."""
 SEED_MAX = 2**31 - 1
-TOKENS_MAX = 65_536
+
+MAX_TRANSCRIPT_CHARS = 2000
+MAX_DESCRIPTION_CHARS = 1000
+MAX_DIRECTION_CHARS = 300
+MAX_DESIGN_TEXT_CHARS = 1000
+"""A sample's transcript, a slot's voice description and standing direction,
+and the sentence a designed voice speaks: each a few lines of text at most."""
+
+TRANSCRIPT_SOURCES = ("typed", "whisper", "design")
+
+DESIGN_TEXT = ("Hello, and welcome. This is the voice I will use from now on: clear, steady "
+               "and easy to listen to, whether the story is quiet or full of surprises.")
+DESIGN_TEXT_ZH = ("你好，欢迎收听。从现在开始，我会用这个声音为你讲述每一个故事，无论平静还是"
+                  "充满惊喜，都清楚而自然。")
+"""What a designed voice says when the page sends no sentence of its own: about
+nine seconds, comfortably inside a sample's three to sixty, and the transcript
+of the sample it becomes. Chinese when the description is mostly Chinese,
+because Breeze's authors ask that the description's language match the text's."""
+
+TRANSCRIBE_RATE = 16000
+"""The rate Whisper hears at, which is the rate Voice Chat's dictation sends."""
+
+KIND_RENDER, KIND_DESIGN = "render", "design"
 
 MP3_BITRATE = 160_000
 MP3_QUALITY = 0
@@ -121,14 +156,29 @@ back exactly the samples that went in and a looped render has no gap. About
 1.2 MB a minute, where a WAV of the same sound is 2.9."""
 MEDIA_TYPES = {"mp3": "audio/mpeg", "wav": "audio/wav"}
 SOFTWARE = "Voice Box (VibeVoice)"
+"""What a VibeVoice render's file says made it; another engine's says its own
+name the same way (:func:`software`)."""
+
+
+def software(label: str = "VibeVoice") -> str:
+    return f"Voice Box ({label or 'VibeVoice'})"
+
 
 ENVELOPE = reference.Envelope(engine="VibeVoice", minimum_seconds=SAMPLE_MIN_SECONDS,
                               maximum_seconds=SAMPLE_MAX_SECONDS,
                               maximum_bytes=MAX_SAMPLE_BYTES, target_rate=SAMPLE_RATE,
                               minimum_peak=SAMPLE_MIN_PEAK)
-"""What a sample may be. Three seconds is the least VibeVoice conditions on
-usefully; a minute is more than any speaker prompt needs and keeps a sample a
-sample rather than an archive."""
+"""What a sample may be. Three seconds is the least either engine conditions
+on usefully; a minute is more than any speaker prompt needs and keeps a sample
+a sample rather than an archive. A refusal names the engine that is active
+(:func:`_envelope`), since samples serve both."""
+
+
+def _envelope() -> reference.Envelope:
+    return reference.Envelope(engine=engines.label(), minimum_seconds=SAMPLE_MIN_SECONDS,
+                              maximum_seconds=SAMPLE_MAX_SECONDS,
+                              maximum_bytes=MAX_SAMPLE_BYTES, target_rate=SAMPLE_RATE,
+                              minimum_peak=SAMPLE_MIN_PEAK)
 
 QUEUED, WAITING, LOADING, RENDERING, DONE, FAILED, CANCELLED = (
     "queued", "waiting", "loading", "rendering", "done", "failed", "cancelled")
@@ -172,19 +222,55 @@ def use_engine(module) -> None:
 
 
 def _runtime():
+    """The active engine's runtime, or the one a test handed :func:`use_runtime`."""
     if _runtime_module is not None:
         return _runtime_module
-    import mc_voice_vibevoice_runtime
-
-    return mc_voice_vibevoice_runtime
+    return engines.runtime()
 
 
 def _engine():
+    """The active engine's adapter, or the one a test handed :func:`use_engine`."""
     if _engine_module is not None:
         return _engine_module
-    import mc_voice_vibevoice
+    return engines.adapter()
 
-    return mc_voice_vibevoice
+
+def _engine_id(engine=None) -> str:
+    """The registry's id for ``engine``: its own ``ID``, else the active engine's."""
+    found = str(getattr(engine if engine is not None else _engine(), "ID", "") or "")
+    return found if engines.known(found) else engines.active_id()
+
+
+def _vocabulary(engine_id: str):
+    """The adapter whose fields, infotext and capabilities ``engine_id`` renders with."""
+    return engines.adapter(engine_id)
+
+
+def _capabilities(engine=None) -> dict:
+    """What the engine can be asked for beyond a script and its samples."""
+    engine = engine if engine is not None else _engine()
+    ask = getattr(engine, "capabilities", None)
+    if ask is None:
+        ask = _vocabulary(_engine_id(engine)).capabilities
+    try:
+        found = ask()
+    except Exception:
+        logger.debug("Model Chain: the Voice Box could not read the engine's capabilities",
+                     exc_info=True)
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _label(engine=None) -> str:
+    engine = engine if engine is not None else _engine()
+    return str(getattr(engine, "LABEL", "") or engines.label(_engine_id(engine)))
+
+
+def _max_takes(engine_id: str) -> int:
+    try:
+        return max(1, int(getattr(_vocabulary(engine_id), "MAX_TAKES", MAX_TAKES)))
+    except Exception:
+        return MAX_TAKES
 
 
 # --------------------------------------------------------------------------- #
@@ -465,15 +551,22 @@ def _sample_audio(identifier: str) -> Path:
     return _samples_root() / identifier / AUDIO_FILENAME
 
 
-def add_sample(wav: bytes, title: str = "", source: str = "file") -> dict:
+def add_sample(wav: bytes, title: str = "", source: str = "file", transcript: str = "",
+               design: dict | None = None) -> dict:
     """Take a recording -- the browser's trimmed selection -- into the library.
 
-    ``source`` says where it came from: ``file``, ``microphone`` or
-    ``output:<id>`` for a piece of a render trimmed back into a sample.
+    ``source`` says where it came from: ``file``, ``microphone``,
+    ``output:<id>`` for a piece of a render trimmed back into a sample, or
+    ``design`` for a voice Breeze designed from a description. ``transcript``
+    is the sample's exact words, which Breeze clones from and VibeVoice does
+    not need; a designed sample is born with the sentence it spoke, and keeps
+    ``design`` -- the description, seed, CFG and sentence that made it -- so
+    the page can say where the voice came from.
     """
-    canonical, _seconds = reference.normalize(wav, ENVELOPE, error=VoiceBoxError)
+    canonical, _seconds = reference.normalize(wav, _envelope(), error=VoiceBoxError)
     pcm16, rate = pcm_of(canonical)
     identifier = _new_id()
+    words = _text(transcript, MAX_TRANSCRIPT_CHARS, "A transcript")
     entry = {
         "id": identifier,
         "title": _title(title, f"Sample {len(samples()) + 1}"),
@@ -482,6 +575,9 @@ def add_sample(wav: bytes, title: str = "", source: str = "file") -> dict:
         "peaks": peaks_of(pcm16),
         "source": str(source or "file")[:64],
         "created": _now(),
+        "transcript": words,
+        "transcript_source": ("design" if design else "typed") if words else "",
+        "design": _design_record(design) if design else None,
     }
     with _lock:
         _write_bytes(_sample_audio(identifier), wav_bytes(pcm16, rate))
@@ -491,13 +587,41 @@ def add_sample(wav: bytes, title: str = "", source: str = "file") -> dict:
     return entry
 
 
+SAMPLE_FIELDS = {"transcript": "", "transcript_source": "", "design": None}
+"""What a sample kept before transcripts existed reads with."""
+
+
+def _sample_complete(entry: dict) -> dict:
+    found = dict(entry)
+    for key, value in SAMPLE_FIELDS.items():
+        found.setdefault(key, value)
+    return found
+
+
+def _text(value, limit: int, what: str) -> str:
+    """Words as one line: whitespace runs collapsed, refused past ``limit`` characters."""
+    words = " ".join(str(value or "").split())
+    if len(words) > limit:
+        raise VoiceBoxError(f"{what} may be at most {limit} characters.")
+    return words
+
+
+def _design_record(design: dict) -> dict:
+    found = dict(design or {})
+    return {"description": _text(found.get("description"), MAX_DESCRIPTION_CHARS,
+                                 "A voice description"),
+            "seed": found.get("seed"),
+            "cfg_scale": found.get("cfg_scale"),
+            "text": _text(found.get("text"), MAX_DESIGN_TEXT_CHARS, "The design sentence")}
+
+
 def samples() -> list[dict]:
     with _lock:
         found = []
         for child in sorted(_samples_root().iterdir()) if _samples_root().exists() else []:
             entry = _read_json(child / META_FILENAME, {})
             if entry.get("id") and (child / AUDIO_FILENAME).exists():
-                found.append(entry)
+                found.append(_sample_complete(entry))
     found.sort(key=lambda entry: entry.get("created", 0))
     return found
 
@@ -507,6 +631,22 @@ def sample(identifier: str) -> dict:
     entry = _read_json(_sample_meta(identifier), {})
     if not entry or not _sample_audio(identifier).exists():
         raise NotFound("That sample is no longer in the library.")
+    return _sample_complete(entry)
+
+
+def set_transcript(identifier: str, transcript: str, source: str = "typed") -> dict:
+    """Keep a sample's exact words, or clear them with ``""``.
+
+    Written only in the sample's own record, beside its sound: a transcript is
+    as private as the recording it describes, and goes where it goes.
+    """
+    words = _text(transcript, MAX_TRANSCRIPT_CHARS, "A transcript")
+    with _lock:
+        entry = sample(identifier)
+        entry["transcript"] = words
+        entry["transcript_source"] = (source if source in TRANSCRIPT_SOURCES else "typed") \
+            if words else ""
+        _write_json(_sample_meta(entry["id"]), entry)
     return entry
 
 
@@ -619,35 +759,61 @@ def delete_prompt(identifier: str) -> dict:
 # Configurations
 # --------------------------------------------------------------------------- #
 
-CONFIGURATION_DEFAULTS = {
+SHARED_DEFAULTS = {
     "name": "Default",
     "model_id": "",
     "card_uuid": "",
-    "steps": 12,
-    "cfg_scale": 1.3,
-    "solver": vibevoice_protocol.SOLVER_DEFAULT,
-    "attention": vibevoice_protocol.ATTENTION_DEFAULT,
     "seed": None,
     "batch": 1,
-    "max_new_tokens": None,
-    "sampling": False,
-    "temperature": 0.95,
-    "top_p": 0.95,
     "speakers": {},
+    "slots": {},
 }
-"""A configuration's fields. ``model_id`` and ``card_uuid`` empty mean the
-engine's default model and the card chosen in Voice Box's settings.
+"""A configuration's own fields, whatever the engine. ``model_id`` and
+``card_uuid`` empty mean the engine's default model and the card chosen in
+Voice Box's settings; a model id that is not the rendering engine's is read as
+its default. ``batch`` is how many takes one render makes, one output each,
+the first at the seed and every next one at the seed after. ``speakers`` maps a
+slot ("1".."4") to a sample; ``slots`` holds what a slot says beyond its sample
+-- ``instruction``, a standing direction, and ``description``, a voice to
+design -- for an engine that takes them (Breeze)."""
 
-``solver`` and ``attention`` are ids of the worker's own tables
-(:data:`vibevoice_worker.worker.SOLVERS` and ``ATTENTION``): the model's own
-DPM++ 2M and SDPA unless changed. ``batch`` is how many takes one render makes,
-one output each, the first at the seed and every next one at the seed after.
+FIRST = engines.DEFAULT_ENGINE
+"""The engine the Voice Box had before it had two (VibeVoice): its options are
+what a configuration and an output held *flat*, beside the shared fields."""
 
-``sampling`` off is the model's own greedy choice, as upstream ships it;
-``temperature`` and ``top_p`` are kept either way, and used only while it is
-on. The model's language part only picks control tokens -- keep speaking, end
-a stretch of speech, stop -- so sampling varies the pacing from take to take,
-never the voice; a seeded render samples the same way every time."""
+
+def _flat_keys() -> tuple:
+    """The first engine's options as a configuration held them before there was a
+    second engine: flat, beside the shared fields -- its adapter's own ``FLAT``.
+    Still read from a configuration or a page that sends them, and still written
+    beside ``options`` so a reader that knows only them reads what it always
+    read."""
+    try:
+        return tuple(getattr(_vocabulary(FIRST), "FLAT", ()) or ())
+    except Exception:
+        logger.debug("Model Chain: the Voice Box could not read the first engine's fields",
+                     exc_info=True)
+        return ()
+
+
+def _flat_places() -> tuple:
+    """:func:`_flat_keys` split as the configuration drew them: before the seed and
+    the batch, and after (each field's ``place``)."""
+    keys = _flat_keys()
+    try:
+        fields = list(_vocabulary(FIRST).FIELDS)
+    except Exception:
+        return keys, ()
+    head = tuple(field["key"] for field in fields
+                 if field["key"] in keys and field.get("place") == "head")
+    return head, tuple(key for key in keys if key not in head)
+
+
+CONFIGURATION_DEFAULTS = dict(SHARED_DEFAULTS, engine=FIRST, options={}, engines_saved=[])
+"""The shape :func:`configurations` answers in. ``options`` is every engine's
+own fields, by engine id, defaults where an engine was never saved; ``engine``
+the engine it was last saved for; ``engines_saved`` the engines whose options
+were ever saved in it."""
 
 
 def _configurations_root() -> Path:
@@ -670,16 +836,6 @@ def _bounded_int(value, low: int, high: int, what: str, none_ok: bool = False):
     return number
 
 
-def _bounded_float(value, low: float, high: float, what: str) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        raise VoiceBoxError(f"{what} must be a number.") from None
-    if not low <= number <= high:
-        raise VoiceBoxError(f"{what} must be between {low:g} and {high:g}.")
-    return round(number, 3)
-
-
 def _clean_speakers(value) -> dict:
     found = {}
     if not isinstance(value, dict):
@@ -695,72 +851,149 @@ def _clean_speakers(value) -> dict:
     return found
 
 
-def _sampling_value(value, bounds: tuple, what: str, strict: bool, fallback: float) -> float:
-    """Temperature or top-p: checked while sampling is on, held in range while it is off.
+def _clean_slots(value) -> dict:
+    """``{"1": {"instruction", "description"}}`` for the slots that say something."""
+    found = {}
+    if not isinstance(value, dict):
+        return found
+    for number, slot in value.items():
+        try:
+            n = int(number)
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= n <= MAX_SPEAKERS or not isinstance(slot, dict):
+            continue
+        instruction = _text(slot.get("instruction"), MAX_DIRECTION_CHARS, "A direction")
+        description = _text(slot.get("description"), MAX_DESCRIPTION_CHARS,
+                            "A voice description")
+        if instruction or description:
+            found[str(n)] = {"instruction": instruction, "description": description}
+    return found
 
-    Off, the page greys the field out, so a value typed out of range before
-    sampling was switched off could not be corrected there, and refusing it
-    would refuse every Save and Render until sampling was switched on again to
-    fix a number that is not being used. It is brought into range instead; a
-    value that is not a number goes back to its default.
-    """
-    if strict:
-        return _bounded_float(value, *bounds, what=what)
+
+def _stored_options(entry: dict) -> dict:
+    """An entry's options map as stored: ``options``, or the first engine's flat keys."""
+    found = {key: dict(value) for key, value in dict(entry.get("options") or {}).items()
+             if isinstance(value, dict) and engines.known(key)}
+    if FIRST not in found:
+        flat = {key: entry[key] for key in _flat_keys() if key in entry}
+        if flat:
+            found[FIRST] = flat
+    return found
+
+
+def _options_of(engine_id: str, stored: dict | None) -> dict:
+    """An engine's options with its defaults where ``stored`` says nothing. Never raises."""
     try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    if number != number:
-        return fallback
-    return round(min(max(number, bounds[0]), bounds[1]), 3)
+        found = dict(_vocabulary(engine_id).defaults())
+    except Exception:
+        logger.debug("Model Chain: the Voice Box could not read %s's fields", engine_id,
+                     exc_info=True)
+        return dict(stored or {})
+    for key, value in dict(stored or {}).items():
+        if key in found:
+            found[key] = value
+    return found
 
 
-def _one_of(value, table: dict, what: str) -> str:
-    """An id of ``table``, or a sentence saying it is not one."""
-    text = str(value or "").strip()
-    if text not in table:
-        raise VoiceBoxError(f"{text or 'Nothing'} is not {what} VibeVoice has.")
-    return text
+def _clean_options(engine_id: str, values: dict, previous: dict | None) -> dict:
+    """One engine's options checked by its own adapter, in the Voice Box's sentences."""
+    try:
+        return _vocabulary(engine_id).clean(dict(values or {}), previous)
+    except VoiceBoxError:
+        raise
+    except Exception as exc:
+        if isinstance(exc, (ValueError, RuntimeError)):
+            raise VoiceBoxError(str(exc)) from None
+        raise
 
 
-def _clean_configuration(values: dict, existing: dict | None = None) -> dict:
-    base = dict(existing or CONFIGURATION_DEFAULTS)
+def _flat(found: dict) -> dict:
+    """The configuration with the first engine's options mirrored flat, as before."""
+    first = dict((found.get("options") or {}).get(FIRST) or {})
+    for key in _flat_keys():
+        if key in first:
+            found[key] = first[key]
+    return found
+
+
+def _clean_configuration(values: dict, existing: dict | None = None,
+                         engine_id: str = "") -> dict:
+    """A configuration as it is saved or rendered, validated field by field.
+
+    The shared fields here; each engine's options by its own adapter
+    (:func:`_clean_options`). ``values["options"]`` changes only the engines
+    it names, and the rest keep what ``existing`` had. The first engine's flat
+    keys (VibeVoice's) are its options, as an older page sends them.
+    """
+    values = dict(values or {})
+    engine_id = engine_id if engines.known(engine_id) else engines.active_id()
+    base = _complete(dict(existing)) if existing else _complete({})
     merged = dict(base)
-    for key in CONFIGURATION_DEFAULTS:
+    for key in SHARED_DEFAULTS:
         if key in values:
             merged[key] = values[key]
-    # Only a real ``true``, as the worker reads it: anything else is the
-    # model's own greedy choice.
-    sampling = merged.get("sampling") is True
-    return {
+    asked = {key: dict(value) for key, value in dict(values.get("options") or {}).items()
+             if isinstance(value, dict) and engines.known(key)}
+    flat = {key: values[key] for key in _flat_keys() if key in values}
+    if flat:
+        # An older page sends the first engine's options flat -- alone, or
+        # beside the ``options`` map it was answered with and sends back
+        # untouched. A flat value that differs from that map's is an edit only
+        # such a page makes (this page never sends flat keys), so it wins; an
+        # equal one is the server's own mirror and changes nothing.
+        mine = asked.setdefault(FIRST, {})
+        for key, value in flat.items():
+            if key not in mine or mine[key] != value:
+                mine[key] = value
+    options = {}
+    for known in engines.ENGINES:
+        previous = base["options"].get(known)
+        if known in asked:
+            options[known] = _clean_options(known, asked[known], previous)
+        else:
+            options[known] = _options_of(known, previous)
+    saved = [known for known in engines.ENGINES
+             if known in asked or known in (base.get("engines_saved") or [])]
+    found = {
         "name": _title(merged.get("name"), base.get("name") or "Configuration"),
+        "engine": engine_id,
         "model_id": str(merged.get("model_id") or "")[:64],
         "card_uuid": str(merged.get("card_uuid") or "")[:64],
-        "steps": _bounded_int(merged.get("steps"), *STEPS_RANGE, what="Diffusion steps"),
-        "cfg_scale": _bounded_float(merged.get("cfg_scale"), *CFG_RANGE, what="CFG"),
-        "solver": _one_of(merged.get("solver"), vibevoice_protocol.SOLVERS, "a solver"),
-        "attention": _one_of(merged.get("attention"), vibevoice_protocol.ATTENTION,
-                             "an attention"),
         "seed": _bounded_int(merged.get("seed"), 0, SEED_MAX, what="The seed", none_ok=True),
-        "batch": _bounded_int(merged.get("batch"), *BATCH_RANGE, what="The batch"),
-        "max_new_tokens": _bounded_int(merged.get("max_new_tokens"), 1, TOKENS_MAX,
-                                       what="Max new tokens", none_ok=True),
-        "sampling": sampling,
-        "temperature": _sampling_value(merged.get("temperature"), TEMPERATURE_RANGE,
-                                       "Temperature", sampling,
-                                       CONFIGURATION_DEFAULTS["temperature"]),
-        "top_p": _sampling_value(merged.get("top_p"), TOP_P_RANGE, "Top-p", sampling,
-                                 CONFIGURATION_DEFAULTS["top_p"]),
+        "batch": _bounded_int(merged.get("batch"), 1, _max_takes(engine_id), what="The batch"),
         "speakers": _clean_speakers(merged.get("speakers")),
+        "slots": _clean_slots(merged.get("slots")),
+        "options": options,
+        "engines_saved": saved,
     }
+    return _flat(found)
 
 
 def _complete(entry: dict) -> dict:
-    """A stored configuration with every field, those it predates at their defaults."""
-    found = dict(CONFIGURATION_DEFAULTS)
+    """A stored configuration with every field, those it predates at their defaults.
+
+    A configuration saved before there were two engines holds VibeVoice's
+    options flat: they are VibeVoice's, it was saved for VibeVoice, and every
+    other engine starts at its defaults in it.
+    """
+    stored = _stored_options(entry)
+    found = dict(SHARED_DEFAULTS)
     found.update(entry)
     found["speakers"] = dict(found.get("speakers") or {})
-    return found
+    found["slots"] = {key: dict(value) for key, value in dict(found.get("slots") or {}).items()
+                      if isinstance(value, dict)}
+    found["options"] = {known: _options_of(known, stored.get(known))
+                        for known in engines.ENGINES}
+    if isinstance(entry.get("engines_saved"), list):
+        found["engines_saved"] = [known for known in entry["engines_saved"]
+                                  if engines.known(known)]
+    else:
+        found["engines_saved"] = [known for known in engines.ENGINES if known in stored]
+    engine = str(entry.get("engine") or "")
+    found["engine"] = engine if engines.known(engine) else (
+        found["engines_saved"][0] if found["engines_saved"] else engines.DEFAULT_ENGINE)
+    return _flat(found)
 
 
 def configurations() -> list[dict]:
@@ -939,31 +1172,39 @@ def infotext(entry: dict) -> str:
     configuration left the seed blank. Written into the file itself (the MP3's
     comment, the WAV's ``ICMT``) and shown on the page. An output made before
     seeds were recorded has none to give, and its line says nothing of one.
+
+    The parameters are the engine's own (``adapter.infotext``): VibeVoice's
+    line is exactly what it was before there was a second engine, and any other
+    engine's starts by naming it -- ``Engine: Breeze TTS 2, …``. A render made
+    before engines were recorded is VibeVoice's.
     """
     render = entry.get("render") if isinstance(entry.get("render"), dict) else {}
+    engine_id = str(render.get("engine") or engines.DEFAULT_ENGINE)
     parts: list[str] = []
 
     def add(label: str, value) -> None:
         if value not in (None, ""):
             parts.append(f"{label}: {_quoted(value)}")
 
-    def number(value):
-        return f"{float(value):g}" if isinstance(value, (int, float)) else value
-
-    add("Steps", render.get("steps"))
-    add("Solver", vibevoice_protocol.SOLVERS.get(str(render.get("solver") or ""),
-                                                 {}).get("name"))
-    add("CFG scale", number(render.get("cfg_scale")))
-    add("Seed", render.get("seed"))
-    if render.get("sampling"):
-        add("Temperature", number(render.get("temperature")))
-        add("Top-p", number(render.get("top_p")))
-    add("Attention", vibevoice_protocol.ATTENTION.get(str(render.get("attention") or "")))
-    add("Model", render.get("model_id"))
+    speakers = []
     for speaker in render.get("speakers") or ():
         if isinstance(speaker, dict):
-            add(f"Speaker {speaker.get('n')}", speaker.get("title") or speaker.get("sample_id"))
-    add("Max new tokens", render.get("max_new_tokens"))
+            speakers.append((f"Speaker {speaker.get('n')}",
+                             speaker.get("title") or speaker.get("sample_id")))
+            if speaker.get("instruction"):
+                speakers.append((f"Speaker {speaker.get('n')} direction",
+                                 speaker.get("instruction")))
+    shared = {"seed": render.get("seed"), "model": render.get("model_id"), "speakers": speakers}
+    try:
+        lines = list(_vocabulary(engine_id).infotext(render, shared))
+    except Exception:
+        logger.debug("Model Chain: the Voice Box could not word an output's parameters",
+                     exc_info=True)
+        lines = [("Seed", shared["seed"]), ("Model", shared["model"])] + speakers
+    if engine_id != engines.DEFAULT_ENGINE:
+        add("Engine", engines.label(engine_id))
+    for label, value in lines:
+        add(label, value)
     sections = render.get("sections")
     add("Sections", sections if isinstance(sections, int) and sections > 1 else None)
     if entry.get("seconds") is not None:
@@ -1019,9 +1260,11 @@ def add_output(samples: bytes, rate: int, name: str, pipeline_id: str, render: d
         "render": dict(render or {}),
     }
     text = infotext(entry)
+    maker = software(engines.label(str(entry["render"].get("engine") or
+                                       engines.DEFAULT_ENGINE)))
     encoded = _encode_mp3(samples, rate, {
         "comment": text,
-        "encoded_by": SOFTWARE,
+        "encoded_by": maker,
         "voicebox": json.dumps({"id": identifier, "render": entry["render"]},
                                ensure_ascii=False),
     })
@@ -1033,7 +1276,7 @@ def add_output(samples: bytes, rate: int, name: str, pipeline_id: str, render: d
         else:
             audio = folder / AUDIO_FILENAME
             _write_bytes(audio, _with_info(wav_bytes(pcm16, rate),
-                                           {"ICMT": text, "ISFT": SOFTWARE}))
+                                           {"ICMT": text, "ISFT": maker}))
         _write_json(_output_meta(identifier), entry)
     if pipeline_id:
         _attach_output(pipeline_id, identifier)
@@ -1128,7 +1371,12 @@ def save_output(identifier: str) -> str:
 # Settings
 # --------------------------------------------------------------------------- #
 
-SETTINGS_DEFAULTS = {"save_folder": "", "card_uuid": "", "model_id": "", "keep_warm": True}
+SETTINGS_DEFAULTS = {"save_folder": "", "card_uuid": "", "model_id": "", "keep_warm": True,
+                     "engine": FIRST}
+"""``engine`` is the engine every render uses, one at a time: a Voice Box
+setting beside the card and the warm stay rather than a configuration's field.
+It changes only through :func:`mc_voice_box_engines.select`, which makes sure
+the other engine has let go of every card first."""
 
 
 def _settings_path() -> Path:
@@ -1142,6 +1390,8 @@ def settings() -> dict:
         if key in stored:
             found[key] = stored[key]
     found["keep_warm"] = bool(found.get("keep_warm", True))
+    engine = str(found.get("engine") or "").strip().lower()
+    found["engine"] = engine if engine in engines.ENGINES else engines.DEFAULT_ENGINE
     return found
 
 
@@ -1166,6 +1416,11 @@ def set_settings(values: dict) -> dict:
             found["model_id"] = str(values.get("model_id") or "")[:64]
         if "keep_warm" in values:
             found["keep_warm"] = bool(values.get("keep_warm"))
+        if "engine" in values:
+            wanted = str(values.get("engine") or "").strip().lower()
+            if wanted not in engines.ENGINES:
+                raise VoiceBoxError(f"{wanted or 'Nothing'} is not an engine the Voice Box has.")
+            found["engine"] = wanted
         _write_json(_settings_path(), found)
     return found
 
@@ -1196,14 +1451,21 @@ class Section:
 
     lines: list = field(default_factory=list)
     pause_ms: int | None = None
+    directions: list = field(default_factory=list)
+    """Each line's direction (``Speaker 2 (whispering): …``), ``""`` for none,
+    in step with ``lines``. An engine that cannot be directed never sees them."""
 
     @property
     def speakers(self) -> list[int]:
         return sorted({number for number, _ in self.lines})
 
+    def direction(self, index: int) -> str:
+        return str(self.directions[index]) if index < len(self.directions) else ""
+
 
 _PAUSE = re.compile(r"\[\s*pause(?:\s*[:=]\s*(\d{1,6})\s*(?:ms)?)?\s*\]", re.IGNORECASE)
-_SPEAKER = re.compile(r"^\s*(?:speaker\s*(\d+)|\[\s*(\d+)\s*\])\s*[:：]\s*(.*)$", re.IGNORECASE)
+_SPEAKER = re.compile(r"^\s*(?:speaker\s*(\d+)|\[\s*(\d+)\s*\])\s*(?:\(([^()]*)\))?\s*[:：]\s*(.*)$",
+                      re.IGNORECASE)
 
 
 def parse_script(text: str) -> list[Section]:
@@ -1211,9 +1473,15 @@ def parse_script(text: str) -> list[Section]:
 
     ``Speaker 2:`` (or ``[2]:``) at the start of a line names its speaker; a
     line with no name continues the one before it, or is Speaker 1's when none
-    has spoken. ``[pause]`` and ``[pause:1500]`` end a section and put that much
-    silence before the next -- the default :data:`PAUSE_DEFAULT_MS`, clamped to
-    :data:`PAUSE_MIN_MS`..:data:`PAUSE_MAX_MS`.
+    has spoken. ``Speaker 2 (whispering, afraid):`` names its speaker and how
+    the line is said: an engine that takes directions (Breeze) says it that
+    way, and one that does not (VibeVoice) accepts the syntax and drops the
+    direction, so a script moves between engines without edits. ``[pause]``
+    and ``[pause:1500]`` end a section and put that much silence before the
+    next -- the default :data:`PAUSE_DEFAULT_MS`, clamped to
+    :data:`PAUSE_MIN_MS`..:data:`PAUSE_MAX_MS`. Breeze's vocal events --
+    ``(laugh)`` in a line's words, ``[笑]`` in Chinese -- are words here, and
+    pass through untouched: the tags this parser reads are matched exactly.
     """
     words = str(text or "")
     if len(words) > MAX_PROMPT_CHARS:
@@ -1229,9 +1497,11 @@ def parse_script(text: str) -> list[Section]:
         cursor = match.end()
     pieces.append((words[cursor:], None))
     for chunk, pause in pieces:
-        lines = _lines_of(chunk)
-        if lines:
-            sections.append(Section(lines=lines, pause_ms=pending_pause if sections else None))
+        found = _lines_of(chunk)
+        if found:
+            sections.append(Section(lines=[(number, body) for number, body, _ in found],
+                                    pause_ms=pending_pause if sections else None,
+                                    directions=[direction for _, _, direction in found]))
             pending_pause = None
         if pause is None:
             continue
@@ -1245,8 +1515,9 @@ def parse_script(text: str) -> list[Section]:
     return sections
 
 
-def _lines_of(chunk: str) -> list[tuple[int, str]]:
-    lines: list[tuple[int, str]] = []
+def _lines_of(chunk: str) -> list[tuple[int, str, str]]:
+    """``(speaker, words, direction)`` per line of a section's text."""
+    lines: list[tuple[int, str, str]] = []
     current: int | None = None
     for raw in chunk.splitlines():
         match = _SPEAKER.match(raw)
@@ -1256,19 +1527,20 @@ def _lines_of(chunk: str) -> list[tuple[int, str]]:
                 raise VoiceBoxError(f"Speakers are numbered 1 to {MAX_SPEAKERS}; "
                                     f"the prompt names Speaker {number}.")
             current = number
-            body = " ".join(match.group(3).split())
-            lines.append((number, body))
+            direction = " ".join(str(match.group(3) or "").split())[:MAX_DIRECTION_CHARS]
+            body = " ".join(match.group(4).split())
+            lines.append((number, body, direction))
             continue
         body = " ".join(raw.split())
         if not body:
             continue
         if current is None:
             current = 1
-            lines.append((1, body))
+            lines.append((1, body, ""))
         else:
-            number, previous = lines[-1]
-            lines[-1] = (number, f"{previous} {body}".strip())
-    return [(number, body) for number, body in lines if body]
+            number, previous, direction = lines[-1]
+            lines[-1] = (number, f"{previous} {body}".strip(), direction)
+    return [(number, body, direction) for number, body, direction in lines if body]
 
 
 def script_summary(text: str) -> dict:
@@ -1311,11 +1583,23 @@ class Job:
     origin: dict = field(default_factory=dict)
     """Who asked, when it was not the Voice Box's own Render: :data:`ORIGIN_KEYS`.
 
-    LLM Studio's Send to VibeVoice sends a message's text with the thread, the
+    LLM Studio's Send to Voice Box sends a message's text with the thread, the
     message and a digest of its words as one ``key``, and finds the render
     again after a reload by asking :func:`outputs` for that key. Kept on the
-    output's record for that reason, and shown nowhere else.
+    output's record for that reason, with the engine that rendered it, and
+    shown nowhere else.
     """
+    kind: str = KIND_RENDER
+    """``render``, which makes outputs, or ``design``, which makes one take a
+    slot can keep as a sample (:func:`design`)."""
+    engine: str = ""
+    """The registry's id for the engine this job renders with."""
+    options: dict = field(default_factory=dict)
+    """The engine's options as the render uses them (:func:`mc_voice_box_fields.effective`)."""
+    design: dict = field(default_factory=dict)
+    """A design's description, sentence and CFG; once done, its take's length and seed."""
+    design_pcm: bytes = field(default=b"", repr=False)
+    """A design's take, 16-bit, until it is kept or the job is forgotten."""
     output_ids: list = field(default_factory=list)
     phase: str = QUEUED
     reason: str = ""
@@ -1352,7 +1636,10 @@ class Job:
                 "output_ids": list(self.output_ids), "batch": self.batch,
                 "created": self.created, "started": self.started, "ended": self.ended,
                 "elapsed": self.elapsed(), "seed": self.seed, "seed_drawn": self.seed_drawn,
-                "card": self.card, "live": self.phase in LIVE}
+                "card": self.card, "live": self.phase in LIVE, "kind": self.kind,
+                "engine": self.engine,
+                "design": (dict(self.design, ready=bool(self.design_pcm))
+                           if self.kind == KIND_DESIGN else None)}
 
 
 class _Service:
@@ -1410,7 +1697,14 @@ class _Service:
         """Outputs a pipeline's live jobs will make: a take each."""
         with self.lock:
             return sum(max(1, int(job.batch or 1)) for job in self.jobs
-                       if job.pipeline_id == pipeline_id and job.phase in LIVE)
+                       if job.pipeline_id == pipeline_id and job.phase in LIVE
+                       and job.kind == KIND_RENDER)
+
+    def live(self) -> bool:
+        """Whether anything -- a render or a design, on any card -- is queued or running."""
+        with self.lock:
+            return any(job.phase in LIVE for job in self.jobs) \
+                or any(queue for queue in self.queues.values()) or bool(self.current)
 
     def clear(self) -> int:
         """Withdraw every job still queued, on every card; how many were. Running ones stay."""
@@ -1486,7 +1780,8 @@ Another tab on the page names itself (``kind``), the thing it rendered
 is kept on the job and the output, so it is held to a shape the file format
 and the page can take whatever a caller sends: a key is cut to
 :data:`ORIGIN_CHARS`, a value that is not a string is dropped, and anything
-that is not a mapping is no origin at all.
+that is not a mapping is no origin at all. The Voice Box adds one word of its
+own, ``engine`` -- which engine rendered it -- and only to an origin there is.
 """
 
 
@@ -1502,6 +1797,74 @@ def _clean_origin(value) -> dict:
     return found
 
 
+def _chosen_configuration(configuration_id: str, inline: dict | None) -> tuple[dict, str]:
+    """The configuration a press renders with, and the saved one it came from.
+
+    ``inline`` -- the page's unsaved values -- validated the way a save is, and
+    recorded against the saved configuration it changed while that still
+    exists; otherwise the saved one; otherwise the defaults.
+    """
+    if inline is not None:
+        chosen = _clean_configuration(dict(inline))
+        source = ""
+        if configuration_id:
+            # Unsaved changes to a saved configuration: rendered as shown, and
+            # the output still says which configuration they were made to.
+            try:
+                source = configuration(configuration_id)["id"]
+            except NotFound:
+                source = ""
+        return chosen, source
+    if configuration_id:
+        stored = configuration(configuration_id)
+        return dict(stored, **_clean_configuration(stored, stored)), stored["id"]
+    return _clean_configuration({}), ""
+
+
+def _engine_options(engine, chosen: dict) -> tuple[str, dict]:
+    """``(engine id, the options a render sends)`` for the configuration chosen."""
+    engine_id = _engine_id(engine)
+    options = dict((chosen.get("options") or {}).get(engine_id) or {})
+    try:
+        fields = _vocabulary(engine_id).FIELDS
+    except Exception:
+        fields = ()
+    return engine_id, box_fields.effective(fields, options)
+
+
+def _refuse_options(engine, engine_id: str, options: dict) -> None:
+    """Refuse at the press what the engine's runtime could not render (Flash attention 2)."""
+    ask = getattr(engine, "refuse", None)
+    if ask is None:
+        ask = _vocabulary(engine_id).refuse
+    refused = ask(options)
+    if refused:
+        raise VoiceBoxError(refused)
+
+
+def _card_of(chosen: dict, engine) -> str:
+    card = chosen.get("card_uuid") or settings().get("card_uuid") or ""
+    if not card:
+        raise VoiceBoxError(f"Choose the card {_label(engine)} renders on, in the configuration "
+                            f"or in Voice Box's settings.")
+    return card
+
+
+def _seed_for(chosen: dict, batch: int, asked=None) -> tuple[int, bool]:
+    """The seed a job renders with, and whether it was drawn for it."""
+    seed = asked if asked is not None else chosen.get("seed")
+    if seed is None:
+        # Drawn so the whole batch fits: take k renders at seed + k.
+        return secrets.randbelow(SEED_MAX - batch + 2), True
+    seed = int(seed)
+    if not 0 <= seed <= SEED_MAX:
+        raise VoiceBoxError(f"The seed must be between 0 and {SEED_MAX}.")
+    if seed + batch - 1 > SEED_MAX:
+        raise VoiceBoxError(f"A batch of {batch} from seed {seed} would pass {SEED_MAX}, the "
+                            f"largest seed: choose a smaller seed or a smaller batch.")
+    return seed, False
+
+
 def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str = "",
            inline: dict | None = None, origin: dict | None = None) -> dict:
     """Queue a render of ``prompt`` with a configuration, for a pipeline. Returns the job.
@@ -1512,6 +1875,11 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     prompt is parsed, the configuration read, the speakers checked against the
     samples, the card decided. What follows -- the turn, the load, the render --
     happens on the card's own thread and is read back from the job.
+
+    The render uses the active engine and that engine's options in the
+    configuration. An engine that clones from a transcript (Breeze) refuses a
+    speaker whose sample has none, and a slot that only describes a voice it
+    has not designed yet.
 
     A configuration with no seed gets one drawn here, so the job says from the
     start which seed it renders with and its output records it.
@@ -1524,49 +1892,35 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
         raise VoiceBoxError("Voice Box is not connected to the cards on this WebUI.")
     owner = pipeline(pipeline_id)
     sections = parse_script(prompt)
-    source = ""
-    if inline is not None:
-        chosen = _clean_configuration(dict(inline))
-        if configuration_id:
-            # Unsaved changes to a saved configuration: rendered as shown, and
-            # the output still says which configuration they were made to.
-            try:
-                source = configuration(configuration_id)["id"]
-            except NotFound:
-                source = ""
-    elif configuration_id:
-        stored = configuration(configuration_id)
-        chosen = dict(stored, **_clean_configuration(stored, stored))
-        source = stored["id"]
-    else:
-        chosen = _clean_configuration({})
+    chosen, source = _chosen_configuration(configuration_id, inline)
+    engine = _engine()
+    label = _label(engine)
+    capabilities = _capabilities(engine)
+    voice = capabilities.get("voice") or {}
     wanted = sorted({number for section in sections for number in section.speakers})
     for number in wanted:
-        if not chosen["speakers"].get(str(number)):
+        sample_id = chosen["speakers"].get(str(number))
+        if not sample_id:
+            slot = (chosen.get("slots") or {}).get(str(number)) or {}
+            if voice.get("description") and slot.get("description"):
+                raise VoiceBoxError(f"Speaker {number} has a description but no voice yet — "
+                                    f"Design it and Keep it first.")
             raise VoiceBoxError(f"Speaker {number} has no sample — choose one in the "
                                 f"configuration's speaker {number} slot.")
-    card = chosen.get("card_uuid") or settings().get("card_uuid") or ""
-    if not card:
-        raise VoiceBoxError("Choose the card VibeVoice renders on, in the configuration "
-                            "or in Voice Box's settings.")
-    engine = _engine()
+        if voice.get("transcript"):
+            found = sample(sample_id)
+            if not str(found.get("transcript") or "").strip():
+                raise VoiceBoxError(f"Speaker {number}'s sample “{found.get('title') or 'Untitled'}” "
+                                    f"has no transcript — {label} clones a voice only from its "
+                                    f"exact words. Add one in the sample's row.")
+    card = _card_of(chosen, engine)
     refused = engine.refusal()
     if refused:
         raise VoiceBoxError(refused)
-    if chosen["attention"] == "flash_attention_2":
-        installed = getattr(engine, "flash_attention_installed", None)
-        if installed is None or not installed():
-            raise VoiceBoxError("Flash attention 2 needs the flash-attn package in VibeVoice's "
-                                "runtime, which it does not have. Choose SDPA or Eager.")
+    engine_id, options = _engine_options(engine, chosen)
+    _refuse_options(engine, engine_id, options)
     batch = int(chosen["batch"])
-    seed = chosen.get("seed")
-    drawn = seed is None
-    if drawn:
-        # Drawn so the whole batch fits: take k renders at seed + k.
-        seed = secrets.randbelow(SEED_MAX - batch + 2)
-    elif int(seed) + batch - 1 > SEED_MAX:
-        raise VoiceBoxError(f"A batch of {batch} from seed {seed} would pass {SEED_MAX}, the "
-                            f"largest seed: choose a smaller seed or a smaller batch.")
+    seed, drawn = _seed_for(chosen, batch)
     remember_prompt(prompt)
     if name:
         names = [_title(name, "Render")] if batch == 1 else \
@@ -1581,43 +1935,89 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
         made = len(pipeline(owner["id"]).get("outputs") or [])
         names = [f"{owner.get('name') or 'Render'} {made + waiting + 1 + take}"
                  for take in range(batch)]
+    origin = _clean_origin(origin)
+    if origin:
+        # Which engine answered the tab that asked: its record says so beside
+        # the three strings it sent.
+        origin["engine"] = engine_id
     job = Job(id=_new_id(), name=names[0], pipeline_id=owner["id"],
               prompt=str(prompt), configuration=chosen, card=card, configuration_id=source,
               seed=int(seed), seed_drawn=drawn, batch=batch, names=names,
-              origin=_clean_origin(origin))
+              origin=origin, kind=KIND_RENDER, engine=engine_id, options=options)
     # The answer is the job as it was queued. Read after the card's thread has
     # it, it could already say the job had started, depending on who ran first.
     queued = job.to_dict()
     _service.submit(job)
-    logger.info("Model Chain: Voice Box queued “%s” (%d section%s, %d speaker%s)", job.name,
-                len(sections), "" if len(sections) == 1 else "s", len(wanted),
+    logger.info("Model Chain: Voice Box queued “%s” with %s (%d section%s, %d speaker%s)",
+                job.name, label, len(sections), "" if len(sections) == 1 else "s", len(wanted),
                 "" if len(wanted) == 1 else "s")
     return queued
+
+
+def busy() -> bool:
+    """Whether a render or a design is queued or running, on any card."""
+    return _service.live()
+
+
+def _voices_for(job: Job, sections) -> dict | None:
+    """Each speaker's :class:`mc_voice_box_render.Voice`, or ``None`` after failing the job."""
+    if job.kind == KIND_DESIGN:
+        return {1: render_types.Voice(pcm=b"", rate=SAMPLE_RATE,
+                                      description=str(job.design.get("description") or ""))}
+    voices = {}
+    slots = job.configuration.get("slots") or {}
+    for number in sorted({n for section in sections for n in section.speakers}):
+        sample_id = job.configuration["speakers"].get(str(number))
+        try:
+            pcm16, rate = sample_pcm(sample_id)
+            entry = sample(sample_id)
+        except VoiceBoxError:
+            _end(job, FAILED, warning=f"Speaker {number}'s sample is no longer in the library.")
+            return None
+        slot = slots.get(str(number)) or {}
+        voices[number] = render_types.Voice(
+            pcm=float32_of(pcm16), rate=rate, sample_id=sample_id,
+            title=str(entry.get("title") or ""), transcript=str(entry.get("transcript") or ""),
+            instruction=str(slot.get("instruction") or ""))
+    return voices
+
+
+def _sections_of(job: Job) -> list:
+    if job.kind == KIND_DESIGN:
+        return [Section(lines=[(1, str(job.design.get("text") or ""))], directions=[""])]
+    return parse_script(job.prompt)
+
+
+def _model_for(job: Job, engine) -> str:
+    """The configuration's model when it is one of the engine's, else the settings', else ``""``."""
+    known = getattr(engine, "model_ids", None)
+    try:
+        listed = tuple(known()) if callable(known) else ()
+    except Exception:
+        listed = ()
+    for candidate in (job.configuration.get("model_id"), settings().get("model_id")):
+        candidate = str(candidate or "")
+        if candidate and (not listed or candidate in listed):
+            return candidate
+    return ""
 
 
 def _perform(job: Job) -> None:
     engine = _engine()
     runtime = _runtime()
-    sections = parse_script(job.prompt)
-    voices = {}
-    for number in sorted({n for section in sections for n in section.speakers}):
-        sample_id = job.configuration["speakers"].get(str(number))
-        try:
-            pcm16, rate = sample_pcm(sample_id)
-            title = sample(sample_id).get("title", "")
-        except VoiceBoxError:
-            _end(job, FAILED, warning=f"Speaker {number}'s sample is no longer in the library.")
-            return
-        voices[number] = {"pcm": float32_of(pcm16), "rate": rate, "sample_id": sample_id,
-                          "title": title}
-    model_id = job.configuration.get("model_id") or settings().get("model_id") or ""
+    sections = _sections_of(job)
+    voices = _voices_for(job, sections)
+    if voices is None:
+        return
+    model_id = _model_for(job, engine)
     job.started = _now()
     job.phase = WAITING
     job.reason = "asking for the card"
     turn = _turns.request(job.card,
                           need_vram=int(engine.need_vram_bytes(model_id, takes=job.batch)),
                           need_ram=int(engine.need_ram_bytes(model_id)),
-                          label=f"{engine.LABEL} — {job.name}")
+                          label=f"{_label(engine)} — {job.name}",
+                          guest=str(getattr(engine, "GUEST", "") or ""))
     made = None
     try:
         while True:
@@ -1646,15 +2046,20 @@ def _perform(job: Job) -> None:
     if made is not None:
         # The card is handed back first: making the files is work for the
         # processor, and an image job has no reason to wait for it.
-        _keep(job, made)
+        if job.kind == KIND_DESIGN:
+            _keep_design_take(job, made)
+        else:
+            _keep(job, made)
 
 
 def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
     """Load, render every section, and return each take's ``(samples, rate, record)``.
 
     ``samples`` is the take's 32-bit float sound, its sections joined by their
-    pauses. ``None`` when cancelled. Every section is rendered as the whole
-    batch at once, and take k is the same take in every section.
+    pauses. ``None`` when cancelled. Every section is one request to the
+    engine's runtime for the whole batch, and take k is the same take in every
+    section: VibeVoice makes a section's takes in one ``generate``, Breeze one
+    after another, line by line, and the Voice Box never knows which.
     """
     job.phase = LOADING
     job.reason = "loading the model"
@@ -1662,15 +2067,15 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
         # The runtime loads the model the engine's settings name; the
         # configuration's choice is made that name before the load.
         engine.set_settings({"model_id": model_id})
-    runtime.load(job.card)
+    runtime.load(job.card, options=dict(job.options))
     takes = max(1, int(job.batch or 1))
     pieces: list[list[bytes]] = [[] for _take in range(takes)]
     total_seconds = 0.0
-    sampling = bool(job.configuration.get("sampling"))
     peak = 0
     rate = SAMPLE_RATE
     render_seconds = 0.0
     tokens = [0] * takes
+    capped = [False] * takes
     for index, section in enumerate(sections):
         if job.cancelled:
             break
@@ -1684,25 +2089,23 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
             total_seconds += section.pause_ms / 1000.0
 
         def progressed(found: dict, _base=total_seconds, _index=index):
-            job.progress = {"section": _index + 1, "sections": len(sections),
-                            "seconds": round(_base + float(found.get("seconds") or 0.0), 1)}
+            progress = {"section": _index + 1, "sections": len(sections),
+                        "seconds": round(_base + float(found.get("seconds") or 0.0), 1)}
+            for key in ("line", "lines", "take", "takes"):
+                if isinstance(found.get(key), int):
+                    progress[key] = found[key]
+            job.progress = progress
 
         job.render_id = f"{job.id}:{index + 1}"
-        request = runtime.RenderJob(
+        request = render_types.RenderJob(
             id=job.render_id,
-            script=[(number, body) for number, body in section.lines],
-            voices={number: (voice["pcm"], voice["rate"]) for number, voice in voices.items()
+            lines=[render_types.Line(number, body, section.direction(line))
+                   for line, (number, body) in enumerate(section.lines)],
+            voices={number: voice for number, voice in voices.items()
                     if number in section.speakers},
-            cfg_scale=float(job.configuration["cfg_scale"]),
-            steps=int(job.configuration["steps"]),
             seed=job.seed,
-            max_new_tokens=job.configuration.get("max_new_tokens"),
-            sampling=sampling,
-            temperature=job.configuration.get("temperature") if sampling else None,
-            top_p=job.configuration.get("top_p") if sampling else None,
-            solver=str(job.configuration["solver"]),
-            attention=str(job.configuration["attention"]),
-            takes=takes)
+            takes=takes,
+            options=dict(job.options))
         result = runtime.render(job.card, request, on_progress=progressed)
         peak = max(peak, int(getattr(result, "peak_bytes", 0) or 0))
         render_seconds += float(getattr(result, "render_seconds", 0.0) or 0.0)
@@ -1712,68 +2115,90 @@ def _render_granted(job: Job, sections, voices, model_id: str, engine, runtime):
         rate = int(getattr(result, "sample_rate", 0) or SAMPLE_RATE)
         made = list(result.takes)
         if len(made) != takes:
-            raise VoiceBoxError("VibeVoice answered with a different number of takes than it "
-                                "was asked for.")
+            raise VoiceBoxError(f"{_label(engine)} answered with a different number of takes "
+                                f"than it was asked for.")
         for take, found in enumerate(made):
             pieces[take].append(bytes(found.pcm))
             tokens[take] += int(found.tokens or 0)
+            capped[take] = capped[take] or bool(getattr(found, "capped", False))
         total_seconds += max(len(found.pcm) for found in made) / 4 / float(rate)
     if job.cancelled or not pieces[0]:
         _end(job, CANCELLED)
         return None
     # The calibration figure is not noted here: the runtime notes every
     # render's peak itself, and a second note would count each render twice.
-    configured = job.configuration
     kept = []
     for take in range(takes):
         seed = int(job.seed) + take
-        kept.append((b"".join(pieces[take]), rate, {
-            "model_id": model_id or _model_in_use(engine),
-            "card": job.card,
-            "seed": seed,
-            "seed_drawn": job.seed_drawn,
-            "steps": configured["steps"],
-            "cfg_scale": configured["cfg_scale"],
-            "solver": configured["solver"],
-            "attention": configured["attention"],
-            "max_new_tokens": configured.get("max_new_tokens"),
-            "sampling": sampling,
-            "temperature": configured.get("temperature") if sampling else None,
-            "top_p": configured.get("top_p") if sampling else None,
-            "speakers": [{"n": number, "sample_id": voice["sample_id"], "title": voice["title"]}
-                         for number, voice in sorted(voices.items())],
-            "prompt": job.prompt,
-            "origin": dict(job.origin),
-            "sections": len(sections),
-            "take": take + 1,
-            "takes": takes,
-            "render_seconds": round(render_seconds, 1),
-            "peak_bytes": peak,
-            "tokens": tokens[take],
-            # The configuration as the render used it, to be put back by the
-            # page's Reuse settings: the seed is this take's own, so the same
-            # take comes out again first; model and card are the
-            # configuration's own ("" is the default), and every speaker slot is
-            # kept, used by this script or not.
-            "configuration": {
-                "id": job.configuration_id,
-                "name": str(configured.get("name") or ""),
-                "model_id": str(configured.get("model_id") or ""),
-                "card_uuid": str(configured.get("card_uuid") or ""),
-                "steps": configured["steps"],
-                "cfg_scale": configured["cfg_scale"],
-                "solver": configured["solver"],
-                "attention": configured["attention"],
-                "seed": seed,
-                "batch": takes,
-                "max_new_tokens": configured.get("max_new_tokens"),
-                "sampling": sampling,
-                "temperature": configured.get("temperature"),
-                "top_p": configured.get("top_p"),
-                "speakers": dict(configured.get("speakers") or {}),
-            },
-        }))
+        kept.append((b"".join(pieces[take]), rate,
+                     _record(job, voices, model_id or _model_in_use(engine), seed, take,
+                             takes, len(sections), render_seconds, peak, tokens[take],
+                             capped[take])))
     return kept
+
+
+def _record(job: Job, voices: dict, model_id: str, seed: int, take: int, takes: int,
+            sections: int, render_seconds: float, peak: int, tokens: int,
+            capped: bool) -> dict:
+    """One take's ``render`` record: what made it, and the configuration to make it again.
+
+    The configuration is the one the render used, for the page's Reuse
+    settings: the seed is this take's own, so the same take comes out again
+    first; model and card are the configuration's own (``""`` is the default),
+    and every speaker slot is kept, used by this script or not. ``options`` is
+    the engine's options as rendered; a VibeVoice render also writes them flat,
+    exactly as every VibeVoice render before it did.
+    """
+    configured = job.configuration
+    engine_id = job.engine or engines.DEFAULT_ENGINE
+    speakers = []
+    for number, voice in sorted(voices.items()):
+        entry = {"n": number, "sample_id": voice.sample_id, "title": voice.title}
+        if voice.instruction:
+            entry["instruction"] = voice.instruction
+        speakers.append(entry)
+    stored = dict((configured.get("options") or {}).get(engine_id) or {})
+    record = {
+        "model_id": model_id,
+        "card": job.card,
+        "seed": seed,
+        "seed_drawn": job.seed_drawn,
+    }
+    head, tail = _flat_places() if engine_id == FIRST else ((), ())
+    if engine_id == FIRST:
+        record.update({key: job.options.get(key) for key in head + tail})
+    record.update({
+        "speakers": speakers,
+        "prompt": job.prompt,
+        "origin": dict(job.origin),
+        "sections": sections,
+        "take": take + 1,
+        "takes": takes,
+        "render_seconds": round(render_seconds, 1),
+        "peak_bytes": peak,
+        "tokens": tokens,
+        "engine": engine_id,
+        "options": dict(job.options),
+    })
+    if capped:
+        record["capped"] = True
+    configuration = {
+        "id": job.configuration_id,
+        "name": str(configured.get("name") or ""),
+        "model_id": str(configured.get("model_id") or ""),
+        "card_uuid": str(configured.get("card_uuid") or ""),
+    }
+    configuration.update({key: stored.get(key) for key in head})
+    configuration.update({"seed": seed, "batch": takes})
+    configuration.update({key: stored.get(key) for key in tail})
+    configuration.update({
+        "speakers": dict(configured.get("speakers") or {}),
+        "slots": {key: dict(value) for key, value in dict(configured.get("slots") or {}).items()},
+        "engine": engine_id,
+        "options": {engine_id: stored},
+    })
+    record["configuration"] = configuration
+    return record
 
 
 def _model_in_use(engine) -> str:
@@ -1803,6 +2228,180 @@ def _keep(job: Job, made: list) -> None:
     logger.info("Model Chain: Voice Box rendered “%s” — %s of speech in %.0f s (%s)",
                 job.name, ", ".join(f"{entry['seconds']:.1f} s" for entry in entries),
                 float(made[0][2].get("render_seconds") or 0.0), entries[0]["format"].upper())
+
+
+# --------------------------------------------------------------------------- #
+# Voice design (Breeze): a voice from a description, made once and kept
+# --------------------------------------------------------------------------- #
+
+_HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+
+
+def design_text(description: str) -> str:
+    """The sentence a designed voice speaks when the page sends none."""
+    words = str(description or "")
+    letters = [character for character in words if not character.isspace()]
+    han = len(_HAN.findall(words))
+    return DESIGN_TEXT_ZH if letters and han * 2 >= len(letters) else DESIGN_TEXT
+
+
+def design(description: str, text: str = "", seed=None, configuration_id: str = "",
+           inline: dict | None = None) -> dict:
+    """Queue a design: one take of ``text`` in a voice made from ``description``.
+
+    An engine that designs (Breeze) samples a new voice from a description on
+    every call, so a voice is designed once, listened to, redrawn with the
+    next seed until it is the one, and then kept as a sample with its
+    transcript already filled (:func:`keep_design`); every line after that is
+    a clone of it, and the voice holds across lines, sections and renders.
+
+    The configuration supplies the card and the engine's options -- its CFG
+    above all, which guides the description -- and ``seed`` overrides its
+    seed (``None``: the configuration's, or one drawn). Nothing is made in any
+    pipeline. Returns the job.
+    """
+    if _turns is None:
+        raise VoiceBoxError("Voice Box is not connected to the cards on this WebUI.")
+    engine = _engine()
+    if not _capabilities(engine).get("design"):
+        raise VoiceBoxError(f"{_label(engine)} does not design voices.")
+    words = _text(description, MAX_DESCRIPTION_CHARS, "A voice description")
+    if not words:
+        raise VoiceBoxError("Describe the voice to design first.")
+    sentence = _text(text, MAX_DESIGN_TEXT_CHARS, "The design sentence") or design_text(words)
+    chosen, source = _chosen_configuration(configuration_id, inline)
+    card = _card_of(chosen, engine)
+    refused = engine.refusal()
+    if refused:
+        raise VoiceBoxError(refused)
+    engine_id, options = _engine_options(engine, chosen)
+    _refuse_options(engine, engine_id, options)
+    if seed in ("", None):
+        seed = None
+    else:
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            raise VoiceBoxError("The seed must be a whole number.") from None
+    found_seed, drawn = _seed_for(chosen, 1, seed)
+    job = Job(id=_new_id(), name=f"Design — {_title(words, 'a voice')[:40]}", pipeline_id="",
+              prompt=sentence, configuration=dict(chosen, batch=1), card=card,
+              configuration_id=source, seed=int(found_seed), seed_drawn=drawn, batch=1,
+              names=["Designed voice"], kind=KIND_DESIGN, engine=engine_id, options=options,
+              design={"description": words, "text": sentence,
+                      "cfg_scale": options.get("cfg_scale"), "seed": int(found_seed)})
+    queued = job.to_dict()
+    _service.submit(job)
+    logger.info("Model Chain: Voice Box queued a voice design with %s", _label(engine))
+    return queued
+
+
+def _keep_design_take(job: Job, made: list) -> None:
+    samples, rate, _record_ = made[0]
+    pcm16 = pcm16_of(samples)
+    job.design_pcm = pcm16
+    job.design.update({"seconds": round(seconds_of(pcm16, rate), 2), "rate": int(rate),
+                       "seed": int(job.seed)})
+    job.progress = {"section": 1, "sections": 1, "seconds": job.design["seconds"]}
+    _end(job, DONE)
+    logger.info("Model Chain: Voice Box designed a voice — %.1f s at seed %d",
+                job.design["seconds"], int(job.seed))
+
+
+def _design_job(identifier: str) -> Job:
+    found = _service.find(_identifier(identifier))
+    if found is None or found.kind != KIND_DESIGN:
+        raise NotFound("That design is no longer listed.")
+    if found.phase != DONE or not found.design_pcm:
+        raise NotFound("That design has not finished.")
+    return found
+
+
+def design_audio(identifier: str) -> bytes:
+    """A finished design's take, as a 16-bit WAV."""
+    found = _design_job(identifier)
+    return wav_bytes(found.design_pcm, int(found.design.get("rate") or SAMPLE_RATE))
+
+
+def keep_design(identifier: str, title: str = "") -> dict:
+    """Keep a finished design's take as a sample, its transcript the sentence it spoke."""
+    found = _design_job(identifier)
+    wav = wav_bytes(found.design_pcm, int(found.design.get("rate") or SAMPLE_RATE))
+    entry = add_sample(wav, title or "Designed voice", source="design",
+                       transcript=str(found.design.get("text") or ""),
+                       design={"description": found.design.get("description"),
+                               "seed": found.design.get("seed"),
+                               "cfg_scale": found.design.get("cfg_scale"),
+                               "text": found.design.get("text")})
+    logger.info("Model Chain: Voice Box kept a designed voice as “%s”", entry["title"])
+    return entry
+
+
+# --------------------------------------------------------------------------- #
+# Transcripts by Whisper (Voice Chat's speech recognition)
+# --------------------------------------------------------------------------- #
+
+
+def stt_status() -> dict:
+    """``{"available", "message"}``: whether Whisper can fill a sample's transcript here.
+
+    Voice Chat's recognizer runs in its own CPU worker beside Kokoro, and is
+    there whatever Voice Chat engine is selected -- once Voice Chat's models
+    are installed. Read from disk; starts nothing.
+    """
+    try:
+        import mc_voice_models
+
+        state = mc_voice_models.status()
+    except Exception:
+        logger.debug("Model Chain: the Voice Box could not read Voice Chat's installation",
+                     exc_info=True)
+        return {"available": False,
+                "message": "Voice Chat's speech recognition could not be read."}
+    if state.ready:
+        return {"available": True, "message": ""}
+    return {"available": False,
+            "message": "Whisper is Voice Chat's speech recognition — install Voice Chat's "
+                       "models in Settings → Voice Chat to fill transcripts with it."}
+
+
+def transcribe(identifier: str) -> dict:
+    """Whisper's reading of a sample, for the page to put in its transcript box. Not saved.
+
+    The sample is resampled to the 16 kHz Voice Chat's dictation sends, and
+    Voice Chat's worker transcribes it -- in thirty-second windows cut at the
+    quietest moments when it is longer, because Whisper hears thirty seconds
+    at a time. A result that is only one of Whisper's non-speech annotations
+    is no transcript. The person checks the words and saves them: Breeze
+    clones from the exact words, and a recognizer's guess is a draft.
+    """
+    entry = sample(identifier)
+    state = stt_status()
+    if not state["available"]:
+        raise Unavailable(state["message"])
+    import array as _array
+
+    import mc_voice_hearing as hearing
+    import mc_voice_runtime
+
+    pcm16, rate = sample_pcm(entry["id"])
+    samples = _array.array("h")
+    samples.frombytes(pcm16[:len(pcm16) // 2 * 2])
+    if struct.pack("<h", 1) != struct.pack("=h", 1):
+        samples.byteswap()
+    narrowed = reference.resample(samples, rate, TRANSCRIBE_RATE)
+    if struct.pack("<h", 1) != struct.pack("=h", 1):
+        narrowed.byteswap()
+    try:
+        found = mc_voice_runtime.transcribe(wav_bytes(narrowed.tobytes(), TRANSCRIBE_RATE))
+    except mc_voice_runtime.VoiceRuntimeError as exc:
+        raise Unavailable(str(exc)) from None
+    words = " ".join(hearing.speech(str(found.get("text") or "")).split())
+    if not words:
+        raise VoiceBoxError("Whisper heard no words in that sample.")
+    logger.info("Model Chain: Voice Box transcribed a sample — %.1f s of audio",
+                float(entry.get("seconds") or 0.0))
+    return {"text": words[:MAX_TRANSCRIPT_CHARS], "seconds": entry.get("seconds")}
 
 
 def jobs() -> list[dict]:

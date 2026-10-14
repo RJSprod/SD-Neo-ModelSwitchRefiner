@@ -267,13 +267,22 @@ def pcm(seconds: float) -> bytes:
     return struct.pack("<f", 0.25) * int(seconds * RATE)
 
 
+OPTION_KEYS = ("cfg_scale", "steps", "max_new_tokens", "sampling", "temperature", "top_p",
+               "solver", "attention")
+"""What a job carries as VibeVoice's own options since the Voice Box has two
+engines; the script is its lines, and a voice is still a ``(pcm, rate)`` pair."""
+
+
 def job_for(identifier="job-1", **values):
     found = dict(id=identifier,
                  script=[(1, "Hello there."), (2, "Hi.")],
                  voices={1: (pcm(0.5), RATE), 2: (pcm(0.25), RATE)},
                  cfg_scale=1.3, steps=10, seed=7, max_new_tokens=None)
     found.update(values)
-    return runtime.RenderJob(**found)
+    options = {key: found.pop(key) for key in OPTION_KEYS if key in found}
+    return runtime.RenderJob(id=found.pop("id"), lines=found.pop("script"),
+                             voices=found.pop("voices"), seed=found.pop("seed", None),
+                             takes=found.pop("takes", 1), options=options)
 
 
 class Stub:
@@ -685,6 +694,57 @@ class TestLoadingAndRendering:
         assert results and results[0].cancelled is True
         assert results[0].seconds == 0.5, "the audio there was"
         assert runtime.rendering(CARD) is False
+
+    def test_a_cancel_never_overtakes_its_render_on_the_pipe(self, stub, monkeypatch):
+        """The card is marked rendering a moment before the render's frame is
+        written. A cancel made in that moment used to reach a worker with
+        nothing to stop -- which said no, and then ran the whole render it was
+        meant to stop. It waits for the frame now."""
+        built = runtime._render_frame
+
+        def slowly(job):
+            time.sleep(0.5)
+            return built(job)
+
+        monkeypatch.setattr(runtime, "_render_frame", slowly)
+        stub.plan["render_seconds"] = 20.0
+        runtime.load(CARD)
+        results = []
+        thread = threading.Thread(target=lambda: results.append(runtime.render(CARD, job_for())),
+                                  daemon=True)
+        thread.start()
+        wait_until(lambda: runtime.rendering(CARD), what="the card rendering")
+        assert stub.lines("render_requests") == [], "the cancel comes before the frame is out"
+        began = time.monotonic()
+        assert runtime.cancel(CARD, "job-1") is True
+        thread.join(timeout=10.0)
+        assert not thread.is_alive() and time.monotonic() - began < 5.0
+        assert results and results[0].cancelled is True
+
+    def test_a_cancel_waiting_for_a_render_that_never_went_out_is_let_go(self, stub,
+                                                                        monkeypatch):
+        def broken(job):
+            time.sleep(0.5)
+            raise ValueError("a voice that is not a voice")
+
+        monkeypatch.setattr(runtime, "_render_frame", broken)
+        runtime.load(CARD)
+        errors = []
+
+        def run():
+            try:
+                runtime.render(CARD, job_for())
+            except ValueError as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        wait_until(lambda: runtime.rendering(CARD), what="the card rendering")
+        began = time.monotonic()
+        assert runtime.cancel(CARD, "job-1") is False
+        assert time.monotonic() - began < runtime.CANCEL_TIMEOUT / 2, "let go, not timed out"
+        thread.join(timeout=5.0)
+        assert errors and runtime.rendering(CARD) is False
 
     def test_cancel_with_nothing_rendering_is_false(self, stub):
         assert runtime.cancel(CARD, "job-1") is False

@@ -76,6 +76,9 @@ class TestRegistration:
         methods = {route.path: set(getattr(route, "methods", ())) for route in app.routes}
         assert methods[api.SAMPLE_AUDIO_ROUTE] == {"GET"}
         assert methods[api.OUTPUT_AUDIO_ROUTE] == {"GET"}
+        assert methods[api.DESIGN_AUDIO_ROUTE] == {"GET"}
+        assert {route for route in api.ROUTES if methods[route] == {"GET"}} \
+            == set(api.AUDIO_ROUTES)
         assert methods[api.RENDER_ROUTE] == {"POST"}
 
     def test_no_app_means_no_routes_and_no_error(self):
@@ -85,7 +88,7 @@ class TestRegistration:
 class TestThePageToken:
     def test_every_route_refuses_without_the_token(self, client):
         for route in api.ROUTES:
-            if route in (api.SAMPLE_AUDIO_ROUTE, api.OUTPUT_AUDIO_ROUTE):
+            if route in api.AUDIO_ROUTES:
                 answer = client.get(route, params={"id": "0" * 16})
             else:
                 answer = client.post(route, content=b"{}")
@@ -235,10 +238,10 @@ class TestRenderingOverTheWire:
             "pipeline_id": prepared["pipeline"]["id"], "prompt": "Speaker 1: Hello.",
             "configuration_id": prepared["configuration"]["id"], "name": "Message 4",
             "origin": dict(origin, junk="dropped")}).json()["job"]
-        assert job["origin"] == origin
+        assert job["origin"] == dict(origin, engine="vibevoice"), "and which engine answered"
         done = settled(job["id"])
         entry, = post(client, api.OUTPUTS_ROUTE, key, {"pipeline_id": ""}).json()["outputs"]
-        assert entry["id"] == done["output_id"] and entry["render"]["origin"] == origin
+        assert entry["id"] == done["output_id"] and entry["render"]["origin"] == job["origin"]
 
     def test_an_mp3_render_is_served_and_downloaded_as_one(self, client, key, prepared,
                                                            monkeypatch):
@@ -349,3 +352,128 @@ class TestPromptsAndPipelinesOverTheWire:
                     {"id": made["pipeline"]["id"]}).json()["pipelines"] == []
         bad = post(client, api.CONFIGURATION_SAVE_ROUTE, key, {"configuration": {"steps": 99}})
         assert bad.status_code == 400 and "between 1 and 50" in bad.json()["error"]
+
+
+class TestTheSecondEngineOverTheWire:
+    """The routes Breeze brought: the engine switch, transcripts, and voice design."""
+
+    def test_the_status_lists_the_engines_and_whisper(self, client, key, monkeypatch):
+        import mc_voice_models
+
+        monkeypatch.setattr(mc_voice_models, "status",
+                            lambda: type("Missing", (), {"ready": False})())
+        found = post(client, api.STATUS_ROUTE, key).json()
+        assert found["engines"]["active"] == "vibevoice"
+        assert [row["id"] for row in found["engines"]["available"]] == ["vibevoice", "breeze"]
+        assert found["stt"]["available"] is False and "Voice Chat" in found["stt"]["message"]
+        assert found["settings"]["engine"] == "vibevoice"
+
+    def test_the_engine_is_switched_by_its_own_route_and_not_by_settings(self, client, key,
+                                                                         monkeypatch):
+        import mc_voice_box_engines as engines
+
+        class Idle:
+            def status(self, card=""):
+                return {"cards": {}}
+
+            def shutdown(self):
+                pass
+
+        real = engines.importlib.import_module
+        monkeypatch.setattr(engines.importlib, "import_module",
+                            lambda name: Idle() if name.endswith("_runtime") else real(name))
+        refused = post(client, api.SETTINGS_ROUTE, key, {"engine": "breeze"}).json()
+        assert refused["settings"]["engine"] == "vibevoice", "settings never switch the engine"
+        answer = post(client, api.ENGINE_ROUTE, key, {"engine": "breeze"})
+        assert answer.status_code == 200
+        assert answer.json()["changed"] is True and answer.json()["settings"]["engine"] == \
+            "breeze"
+        unknown = post(client, api.ENGINE_ROUTE, key, {"engine": "kokoro"})
+        assert unknown.status_code == 400 and "not an engine" in unknown.json()["error"]
+
+    def test_a_switch_while_rendering_is_the_409_the_page_acts_on(self, client, key):
+        first = box.add_sample(spoken(), "Ada")
+        configuration = box.save_configuration({"name": "S", "card_uuid": CARD,
+                                                "speakers": {"1": first["id"]}})
+        pipeline = box.new_pipeline("P")
+        box._runtime().hold = __import__("threading").Event()
+        job = box.render(pipeline["id"], "Speaker 1: Hi.", configuration["id"])
+        try:
+            answer = post(client, api.ENGINE_ROUTE, key, {"engine": "breeze"})
+            assert answer.status_code == 409
+            assert "cancel it or clear the queue" in answer.json()["error"]
+        finally:
+            box._runtime().hold.set()
+            settled(job["id"])
+
+    def test_a_transcript_is_saved_and_whisper_refused_where_it_is_not_installed(
+            self, client, key, monkeypatch):
+        import mc_voice_models
+
+        found = box.add_sample(spoken(), "Ada")
+        saved = post(client, api.SAMPLE_TRANSCRIPT_ROUTE, key,
+                     {"id": found["id"], "transcript": " Hello  there. "}).json()
+        assert saved["sample"]["transcript"] == "Hello there."
+        monkeypatch.setattr(mc_voice_models, "status",
+                            lambda: type("Missing", (), {"ready": False})())
+        answer = post(client, api.SAMPLE_TRANSCRIBE_ROUTE, key, {"id": found["id"]})
+        assert answer.status_code == 409 and "Voice Chat" in answer.json()["error"]
+
+    def test_a_design_is_queued_heard_and_kept_over_the_wire(self, client, key):
+        import mc_voice_breeze
+
+        class Breeze(FakeEngine):
+            ID, LABEL, GUEST = "breeze", "Breeze TTS 2", "Breeze"
+
+            def capabilities(self):
+                return mc_voice_breeze.capabilities()
+
+            def refuse(self, chosen):
+                return ""
+
+        box.use_engine(Breeze())
+        box._runtime().seconds = 4.0
+        box.set_settings({"engine": "breeze", "card_uuid": CARD})
+        answer = post(client, api.DESIGN_ROUTE, key, {"description": "A warm voice.",
+                                                      "seed": 9})
+        assert answer.status_code == 200
+        job = answer.json()["job"]
+        assert job["kind"] == "design"
+        settled(job["id"])
+        audio = client.get(api.DESIGN_AUDIO_ROUTE, params={"id": job["id"]}, headers=key)
+        assert audio.status_code == 200 and audio.content[:4] == b"RIFF"
+        assert audio.headers["content-type"].startswith("audio/wav")
+        kept = post(client, api.DESIGN_KEEP_ROUTE, key, {"id": job["id"], "title": "Warm"})
+        assert kept.status_code == 200 and kept.json()["sample"]["source"] == "design"
+        missing = client.get(api.DESIGN_AUDIO_ROUTE, params={"id": "0" * 16}, headers=key)
+        assert missing.status_code == 404
+
+
+class TestTheSharedModelSetting:
+    def test_a_model_of_the_other_engines_is_not_told_to_this_one(self, client, key,
+                                                                  monkeypatch):
+        """The model is one Voice Box setting shared by both engines; a page that has
+        not caught up with a switch sends the other engine's, which is no refusal."""
+        told = []
+
+        class Breeze(FakeEngine):
+            SETTINGS_KEYS = ("card_uuid", "model_id", "fast_path", "keep_warm")
+
+            def model_ids(self):
+                return ("breeze-tts-2",)
+
+            def set_settings(self, values):
+                if values.get("model_id") not in (None, "", "breeze-tts-2"):
+                    raise ValueError("not a Breeze model")
+                told.append(dict(values))
+                return dict(values)
+
+        engine = Breeze()
+        monkeypatch.setattr(api, "_engine", lambda: engine)
+        answer = post(client, api.SETTINGS_ROUTE, key, {"model_id": "vibevoice-7b",
+                                                         "card_uuid": CARD})
+        assert answer.status_code == 200 and told == [{"card_uuid": CARD}]
+        assert answer.json()["settings"]["model_id"] == "vibevoice-7b", \
+            "the Voice Box's own setting keeps it for the other engine"
+        post(client, api.SETTINGS_ROUTE, key, {"model_id": "breeze-tts-2"})
+        assert told[-1] == {"model_id": "breeze-tts-2"}

@@ -618,7 +618,7 @@ class TestKeepingAnOpenedSectionInView:
 # per message and no more than one, show it on a tap and put it away on the
 # next, say *which* message a button is on at the moment of the press, and put
 # the rows away entirely rather than guess when the bubbles are a shape it does
-# not recognise. Copy, Send to VibeVoice and Play never reach Python, so they
+# not recognise. Copy, Send to Voice Box and Play never reach Python, so they
 # are driven here against a clipboard and a Voice Box that record what they
 # were asked.
 #
@@ -978,7 +978,7 @@ PROMPT_ROW = ["edit", "resend", "branch", "copy", "vibe", "play", "delete", "del
 class TestTheActionRow:
     def test_every_message_gets_one_row_in_the_order_that_reads(self):
         """Edit and the ways of asking again, then Branch; Copy and the two
-        VibeVoice buttons; the two that lose something last. A prompt of yours
+        Voice Box buttons; the two that lose something last. A prompt of yours
         has Send again where a reply has Regenerate and Continue."""
         found = row([("assistant", "reply 0"), ("user", "ask 1"), ("assistant", "reply 1")])
 
@@ -1037,7 +1037,7 @@ class TestTheActionRow:
         """)
 
         assert found["after"]["open"] is True
-        assert found["note"] == "Sent to VibeVoice…" and found["same"] is True
+        assert found["note"] == "Sent to the Voice Box…" and found["same"] is True
 
     def test_a_row_is_drawn_again_when_the_marker_under_it_changes(self):
         """A version paged, a reply still arriving: the row reads the marker
@@ -1257,7 +1257,7 @@ class TestGradiosOwnBubble:
         assert found["presses"] == [["regenerate", "assistant:1"], ["resend", "user:0"]]
 
 
-class TestCopyAndVibeVoice:
+class TestCopyAndTheVoiceBox:
     def test_copy_puts_the_words_on_the_clipboard_without_the_row_or_the_marker(self):
         found = row([("assistant", "Hello there, friend.")], """
             pressAction(bubbles[0], "copy");
@@ -1366,7 +1366,34 @@ class TestCopyAndVibeVoice:
 
         assert found["state"]["send"]["disabled"] is True
         assert "Voice Box is not on this page" in found["state"]["send"]["title"]
-        assert found["note"] == "Send this message to VibeVoice first."
+        assert found["note"] == "Send this message to the Voice Box first."
+
+    def test_the_two_buttons_name_the_voice_box_and_never_an_engine(self):
+        """The Voice Box renders with whichever engine it is set to, so the two
+        buttons -- and everything they say on the way -- name the Voice Box."""
+        found = row([("assistant", "Hello there.", {"key": "thread-1:abc123"})], """
+            const names = (action) => [buttonOf(bubbles[0], action).getAttribute("aria-label"),
+                                       buttonOf(bubbles[0], action).title];
+            out.idle = {send: names("vibe"), play: names("play")};
+            pressAction(bubbles[0], "vibe");
+            out.sent = noteOf(bubbles[0]);
+            await settle();
+            out.pending = names("vibe");
+            pressAction(bubbles[0], "play");
+            out.early = noteOf(bubbles[0]);
+            voiceBox.jobs.j1 = {id: "j1", phase: "done", live: false, output_id: "o1"};
+            look();
+            pressAction(bubbles[0], "play");
+            await settle();
+            out.playing = names("play");
+        """)
+
+        assert found["idle"] == {"send": ["Send to Voice Box", "Send to Voice Box"],
+                                 "play": ["Play Voice Box", "Play Voice Box"]}
+        assert found["sent"] == "Sent to the Voice Box…"
+        assert found["pending"] == ["Rendering in the Voice Box…", "Rendering in the Voice Box…"]
+        assert found["early"] == "The Voice Box is still rendering this message."
+        assert found["playing"] == ["Pause Voice Box", "Pause Voice Box"]
 
     def test_a_reload_finds_the_renders_already_made_for_the_thread(self):
         """Read once per thread from the Voice Box's outputs by their origin

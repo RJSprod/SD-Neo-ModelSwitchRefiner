@@ -129,6 +129,7 @@ import io
 import json
 import os
 import queue
+import re
 import struct
 import sys
 import threading
@@ -247,6 +248,118 @@ def decode_wav(data: bytes) -> tuple[list, int]:
         samples.byteswap()
     scale = 1.0 / 32768.0
     return [value * scale for value in samples], rate
+
+
+STT_WINDOW_SECONDS = 30.0
+"""What sherpa's Whisper decodes of one stream: "Only waves less than 30 seconds
+are supported. We process only the first 30 seconds and discard the remaining
+data" (libsherpa-onnx, 1.13.6)."""
+
+STT_PIECE_SECONDS = 28.0
+"""The longest piece one decode is handed: under the window with room to spare."""
+
+STT_SEARCH_SECONDS = 4.0
+"""How far back from a piece's longest end its cut is looked for."""
+
+STT_FRAME_SECONDS = 0.02
+"""The frame the quietest moment is measured in: twenty milliseconds."""
+
+
+def stt_pieces(samples, rate: int) -> list:
+    """``[(begin, end)]``: ``samples`` cut into pieces Whisper hears whole.
+
+    A recording within the window is one piece. A longer one is cut, piece by
+    piece, at the quietest :data:`STT_FRAME_SECONDS` frame of the last
+    :data:`STT_SEARCH_SECONDS` before :data:`STT_PIECE_SECONDS` -- a pause
+    between words where there is one, so no word is split -- and the cut is at
+    that frame's middle. Pure Python: this runtime has no NumPy.
+    """
+    count = len(samples)
+    rate = int(rate or SAMPLE_RATE)
+    if count <= int((STT_WINDOW_SECONDS - 0.5) * rate):
+        return [(0, count)] if count else []
+    longest = int(STT_PIECE_SECONDS * rate)
+    search = int(STT_SEARCH_SECONDS * rate)
+    frame = max(1, int(STT_FRAME_SECONDS * rate))
+    pieces = []
+    begin = 0
+    while count - begin > longest:
+        last = begin + longest
+        first = max(begin + 1, last - search)
+        best, quietest = last, None
+        position = first
+        while position + frame <= last:
+            energy = 0.0
+            for value in samples[position:position + frame]:
+                energy += value * value
+            if quietest is None or energy < quietest:
+                best, quietest = position + frame // 2, energy
+            position += frame
+        pieces.append((begin, best))
+        begin = best
+    pieces.append((begin, count))
+    return pieces
+
+
+_CJK_TEXT = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
+                       r"　-〿＀-￯]")
+
+
+STT_NON_SPEECH = re.compile(
+    r"""^\s*(?:
+          [\(\[\{<*]\s*[^)\]\}>*]{0,60}\s*[\)\]\}>*]   # (music) [BLANK_AUDIO] *sighs*
+        | [♪♫♬♩―—\-\.\,\!\?…\s]+  # a line of musical
+                                                                     # notes or punctuation
+        )\s*$""",
+    re.VERBOSE | re.UNICODE)
+STT_FILLERS = (
+    "thank you for watching",
+    "thanks for watching",
+    "thank you for watching!",
+    "thanks for watching!",
+    "subtitles by the amara.org community",
+    "subscribe to my channel",
+    "please subscribe",
+    "you",
+    "bye",
+    "bye.",
+    ".",
+    "...",
+)
+"""What Whisper says of a stretch with nothing in it: an annotation, a line of
+marks, or one of its training data's sign-offs. The parent's own rules
+(``mc_voice_hearing.NON_SPEECH`` and ``FILLERS``), copied because this process
+cannot import the extension, and held equal by a test. Applied here to one
+piece of a long recording: a piece that heard nothing is left out of the
+join, where the parent's whole-result rule could no longer see it."""
+
+
+def _heard_nothing(text: str) -> bool:
+    found = str(text or "").strip()
+    if not found or STT_NON_SPEECH.match(found):
+        return True
+    return found.casefold().strip().strip("♪♫ \t") in STT_FILLERS
+
+
+def join_readings(readings) -> str:
+    """Pieces' readings as one text: a space between words, none between CJK characters.
+
+    A piece that heard nothing (:func:`_heard_nothing`) is left out while
+    another heard words. When none did, the first piece's reading is the
+    answer -- what one decode of the first thirty seconds said before -- so a
+    silent minute is still "nothing heard" to the parent's whole-result rules.
+    """
+    texts = [" ".join(str(reading or "").split()) for reading in readings]
+    texts = [text for text in texts if text]
+    spoken = [text for text in texts if not _heard_nothing(text)]
+    if not spoken:
+        return texts[0] if texts else ""
+    found = ""
+    for text in spoken:
+        if found and not (_CJK_TEXT.match(found[-1]) and _CJK_TEXT.match(text[0])):
+            found += " "
+        found += text
+    return found
 
 
 def encode_wav(samples, rate: int) -> bytes:
@@ -714,10 +827,22 @@ class Engines:
         return wanted
 
     def transcribe(self, samples, rate: int) -> str:
-        stream = self.recognizer.create_stream()
-        stream.accept_waveform(rate, samples)
-        self.recognizer.decode_stream(stream)
-        return (stream.result.text or "").strip()
+        """Whisper's reading of ``samples``, however long, up to :data:`MAX_SECONDS`.
+
+        sherpa's Whisper decodes the first thirty seconds of a stream and
+        discards the rest -- its own log line says so, and a sixty-second
+        dictation or Voice Box sample came back as its first half. So a longer
+        recording is decoded in pieces of at most :data:`STT_PIECE_SECONDS`,
+        each cut at the quietest moment near its end (:func:`stt_pieces`), and
+        the readings are joined (:func:`join_readings`).
+        """
+        readings = []
+        for begin, end in stt_pieces(samples, rate):
+            stream = self.recognizer.create_stream()
+            stream.accept_waveform(rate, samples[begin:end])
+            self.recognizer.decode_stream(stream)
+            readings.append((stream.result.text or "").strip())
+        return join_readings(readings)
 
     def synthesize(self, text: str, sid: int = 0, delivery: "Delivery" = None):
         """One complete string, shaped, as float samples and a rate.

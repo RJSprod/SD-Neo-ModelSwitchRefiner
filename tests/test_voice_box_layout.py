@@ -52,6 +52,9 @@ import pytest
 sync_api = pytest.importorskip("playwright.sync_api")
 
 import mc_voice_box_ui  # noqa: E402  (after the skip: nothing to import it for otherwise)
+# The engines as the status describes them, shared with the page's node tests.
+from test_voice_box_js import (BREEZE_CAPABILITIES, BREEZE_OPTIONS, VIBEVOICE_CAPABILITIES,  # noqa: E402
+                               VIBEVOICE_OPTIONS, breeze_fields, engines, vibevoice_fields)
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "javascript" / "voice_box.js"
@@ -80,16 +83,41 @@ def _peaks(seed: int) -> list[float]:
     return [round(0.12 + 0.6 * abs(math.sin(index * 0.37 + seed)), 3) for index in range(240)]
 
 
-def fixtures() -> dict:
-    """Every route's answer, with lists long enough to scroll."""
+def _transcript(index: int) -> str:
+    """Every third sample has no transcript (Breeze cannot clone from it yet), and
+    every third a long one, which a phone's card shows whole."""
+    if index % 3 == 0:
+        return ""
+    if index % 3 == 1:
+        return f"Hello, this is voice number {index + 1}."
+    return (f"Voice {index + 1} reading a passage long enough to wrap: the quick brown fox jumps over "
+            "the lazy dog, and then it does it again, slower, so that every word is clear and the "
+            "pauses between the phrases are long enough to hear.")
+
+
+def fixtures(engine: str = "vibevoice") -> dict:
+    """Every route's answer, with lists long enough to scroll, for ``engine`` in use."""
+    breeze = engine == "breeze"
     samples = [{"id": _identifier("a", index), "title": f"Voice {index + 1}", "seconds": 8.0 + index % 5,
-                "rate": 24000, "peaks": _peaks(index), "source": "file", "created": 1 + index}
+                "rate": 24000, "peaks": _peaks(index), "source": "file", "created": 1 + index,
+                "transcript": _transcript(index), "transcript_source": "typed" if _transcript(index) else "",
+                "design": None}
                for index in range(SAMPLES)]
+    # One voice designed from words: its description is its title's tooltip.
+    samples[4].update(title="Designed narrator", source="design", transcript_source="design",
+                      design={"description": "A deep, calm narrator with a slight rasp, close to the microphone.",
+                              "seed": 7, "cfg_scale": 4.0, "text": samples[4]["transcript"]})
     configuration = {"id": _identifier("c", 1), "name": "Default", "model_id": "vibevoice-7b",
-                     "card_uuid": "GPU-a", "steps": 10, "cfg_scale": 1.3, "seed": None,
-                     "max_new_tokens": None,
+                     "card_uuid": "GPU-a", "seed": None, "batch": 1,
                      "speakers": {"1": samples[0]["id"], "2": samples[1]["id"]},
+                     "slots": {"1": {"instruction": "warm and unhurried, close to the microphone",
+                                     "description": "A deep, calm narrator's voice with a slight rasp."},
+                               "2": {"instruction": "", "description": ""}},
+                     "engine": "vibevoice", "engines_saved": ["vibevoice"],
+                     "options": {"vibevoice": dict(VIBEVOICE_OPTIONS), "breeze": dict(BREEZE_OPTIONS)},
                      "created": 1, "updated": 1}
+    # VibeVoice's options again, flat, as the server keeps them for an older reader.
+    configuration.update(configuration["options"]["vibevoice"])
     pipeline = {"id": _identifier("p", 1), "name": "Trailer", "configuration_id": configuration["id"],
                 "prompt": "Speaker 1: Welcome back to the show.\nSpeaker 2: Thanks for having me.",
                 "outputs": [], "created": 1, "updated": 1}
@@ -113,18 +141,28 @@ def fixtures() -> dict:
     history = [{"id": _identifier("h", index), "favourite": index < FAVOURITES,
                 "text": f"Speaker 1: Line number {index + 1} of a script long enough to be cut.",
                 "used": 1} for index in range(HISTORY)]
+    vibevoice = {"id": "vibevoice", "installed": True, "ready": True, "supported": True, "message": "Installed",
+                 "label": "VibeVoice", "model_id": "vibevoice-7b", "model_label": "VibeVoice 7B",
+                 "models": [{"id": "vibevoice-7b", "label": "VibeVoice 7B"}],
+                 "download_bytes": 0, "parts": [], "stale": False, "stale_message": "", "max_takes": 4,
+                 "fields": vibevoice_fields(), "capabilities": VIBEVOICE_CAPABILITIES}
+    breeze_engine = {"id": "breeze", "installed": True, "ready": True, "supported": True, "message": "Installed.",
+                     "label": "Breeze TTS 2", "model_id": "breeze-tts-2", "model_label": "Breeze TTS 2",
+                     "models": [{"id": "breeze-tts-2", "label": "Breeze TTS 2"}],
+                     "download_bytes": 0, "parts": [], "stale": False, "stale_message": "", "max_takes": 4,
+                     "fields": breeze_fields(), "capabilities": BREEZE_CAPABILITIES}
     status = {
         "ok": True,
-        "engine": {"installed": True, "ready": True, "supported": True, "message": "Installed",
-                   "label": "VibeVoice", "model_id": "vibevoice-7b", "model_label": "VibeVoice 7B",
-                   "models": [{"id": "vibevoice-7b", "label": "VibeVoice 7B"}],
-                   "download_bytes": 0, "parts": []},
+        "engine": breeze_engine if breeze else vibevoice,
+        "engines": engines(engine),
+        "stt": {"available": True, "message": ""},
         "progress": {"running": False, "text": "", "fraction": 0.0, "failed": False, "model": ""},
-        "engine_settings": {"card_uuid": "GPU-a", "model_id": "vibevoice-7b", "steps": 10,
-                            "cfg_scale": 1.3, "seed": None, "max_new_tokens": None,
-                            "keep_warm": True},
+        "engine_settings": ({"card_uuid": "GPU-a", "model_id": "breeze-tts-2", "keep_warm": True,
+                             "fast_path": False} if breeze else
+                            {"card_uuid": "GPU-a", "model_id": "vibevoice-7b", "steps": 10,
+                             "cfg_scale": 1.3, "seed": None, "max_new_tokens": None, "keep_warm": True}),
         "settings": {"save_folder": "", "card_uuid": "GPU-a", "model_id": "vibevoice-7b",
-                     "keep_warm": True},
+                     "keep_warm": True, "engine": engine},
         "cards": [{"uuid": "GPU-a", "key": "a", "index": 0, "name": "NVIDIA GeForce RTX 3090",
                    "image_card": False, "wangp_card": False}],
         "runtime": {"cards": {}, "last_error": ""},
@@ -254,15 +292,33 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
         route.fulfill(status=200, content_type="text/javascript", body=script)
     elif path.startswith(PREFIX + "/"):
         name = path[len(PREFIX):]
-        if name in ("/outputs/audio", "/samples/audio"):
+        if name in ("/outputs/audio", "/samples/audio", "/design/audio"):
             route.fulfill(status=200, content_type="audio/mpeg", body=b"\x00" * 64)
-        elif name == "/settings":
-            # As the server does: the setting is kept, and the answer carries them all.
-            settings = answers["/status"]["settings"]
-            settings.update(json.loads(route.request.post_data or "{}"))
+        elif name == "/design":
+            # As the server does: the job is queued, and the next status has it
+            # done, its take described.
+            body = json.loads(route.request.post_data or "{}")
+            job = {"id": "d1", "name": "", "kind": "design", "engine": "breeze", "phase": "queued",
+                   "live": True, "reason": "", "warning": "", "progress": {}, "output_id": "",
+                   "output_ids": [], "created": 1, "started": None, "ended": None, "elapsed": None,
+                   "card": "GPU-a", "batch": 1, "seed": None, "design": None}
+            answers["/status"]["jobs"] = [dict(job, phase="done", live=False, elapsed=6.0, design={
+                "seconds": 7.5, "seed": 31, "text": body.get("text") or "Hello.",
+                "description": body.get("description", ""), "cfg_scale": 4.0, "ready": True})]
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"ok": True, "settings": settings,
-                                           "engine_settings": answers["/status"]["engine_settings"]}))
+                          body=json.dumps({"ok": True, "job": job}))
+        elif name == "/settings":
+            # As the server does: each setting is kept where it belongs -- the
+            # engine's own (Breeze's fast path) in the engine's settings, Voice
+            # Box's in its own, a mirrored one (the card, Keep warm) in both --
+            # and the answer carries them all.
+            posted = json.loads(route.request.post_data or "{}")
+            settings, engine_settings = answers["/status"]["settings"], answers["/status"]["engine_settings"]
+            engine_settings.update({key: value for key, value in posted.items() if key in engine_settings})
+            settings.update({key: value for key, value in posted.items()
+                             if key in settings or key not in engine_settings})
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "settings": settings, "engine_settings": engine_settings}))
         else:
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(answers.get(name, {"ok": True})))
@@ -270,13 +326,19 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
         route.fulfill(status=404, body="")
 
 
-def open_tab(browser, width: int, height: int, *, dark: bool = False, hostile=(), configuration=None):
+def open_tab(browser, width: int, height: int, *, dark: bool = False, hostile=(), configuration=None,
+             engine: str = "vibevoice"):
     """A page at ``width`` x ``height`` with the tab booted, its lists drawn and fitted;
-    ``hostile`` names the parts of HOSTILE the page's theme has, and ``configuration``
-    what the saved configuration holds besides the fixture's."""
+    ``hostile`` names the parts of HOSTILE the page's theme has, ``configuration``
+    what the saved configuration holds besides the fixture's (VibeVoice's options in
+    its options and flat, as the server keeps them), and ``engine`` the engine in use."""
     page = browser.new_page(viewport={"width": width, "height": height})
-    answers, html, script = fixtures(), page_html(hostile), SCRIPT.read_text(encoding="utf-8")
-    answers["/configurations"]["configurations"][0].update(configuration or {})
+    answers, html, script = fixtures(engine), page_html(hostile), SCRIPT.read_text(encoding="utf-8")
+    saved = answers["/configurations"]["configurations"][0]
+    for key, value in (configuration or {}).items():
+        if key in VIBEVOICE_OPTIONS:
+            saved["options"]["vibevoice"][key] = value
+        saved[key] = value
     if dark:
         html = html.replace("<body>", '<body class="dark">', 1)
     page.route(ORIGIN + "/**", lambda route: _answer(route, answers, html, script))
@@ -844,7 +906,7 @@ class TestTheConfigurationManager:
         for width, found in seen.items():
             cells = {cell["key"]: cell for cell in found["cells"]}
             assert [cell["key"] for cell in found["cells"]] == [
-                "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed", "batch",
+                "engine", "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed", "batch",
                 "max_new_tokens", "sampling", "temperature", "top_p"], width
             assert found["held"] == ["dpmpp_2m_sde", "flash_attention_2",
                                      "Flash attention 2 (upstream) — not installed", True, "4"], (width, found)
@@ -853,7 +915,7 @@ class TestTheConfigurationManager:
                 assert cell["right"] <= found["stage"]["right"] + 1, (width, cell, found["stage"])
                 assert cell["controlLeft"] >= cell["left"] - 1, (width, cell)
                 assert cell["controlRight"] <= cell["right"] + 1, (width, cell)
-            for key in ("solver", "attention", "batch"):
+            for key in ("engine", "solver", "attention", "batch"):
                 assert _near(cells[key]["height"], cells["model_id"]["height"]), (width, cells[key])
             for part in ("body", "form", "page"):
                 assert found[part]["scroll"] <= found[part]["client"] + 1, (width, part, found[part])
@@ -916,9 +978,11 @@ class TestUnderAHostileTheme:
     """The same page with a theme that does not play fair (HOSTILE), and with
     LobeTheme's icon swap run over it once it is built (LOBE_ICON_SWAP)."""
 
+    # Fast path is Breeze's: under VibeVoice its switch is in the page, hidden.
     HIDDEN = [".mc-voice-box-status-dismiss", ".mc-voice-box-status-cancel", ".mc-voice-box-status-clear",
               ".mc-voice-box-status-unloads", ".mc-voice-box-install", ".mc-voice-box-trimmer",
-              ".mc-voice-box-lane-details", ".mc-voice-box-stage-outputs .mc-voice-box-empty"]
+              ".mc-voice-box-lane-details", ".mc-voice-box-stage-outputs .mc-voice-box-empty",
+              ".mc-voice-box-fast-path"]
 
     def test_nothing_hidden_shows_when_a_theme_gives_everything_a_display(self, browser):
         page = open_tab(browser, 1440, 900, hostile=("display",))
@@ -1042,6 +1106,254 @@ class TestUnderAHostileTheme:
             assert third == first, (name, states)
         assert (spaced, entered) == ("true", "false")
         assert ring == {"visible": True, "outline": "solid"}
+
+
+BREEZE_ORDER = ["engine", "model_id", "card_uuid", "cfg_scale", "attention", "seed", "batch",
+                "max_new_tokens", "line_gap_ms", "sampling", "temperature", "top_p"]
+
+# Speaker 1's design panel opened, Design pressed, and the take waited for: the
+# panel at its fullest -- description, words, Design, the take's transport,
+# Redraw and Keep. Then words typed into the first sample's transcript, so its
+# Save shows too. Clicks by the script, as a phone's off-screen card is never
+# scrolled into view for them.
+OPEN_DESIGN = """async () => {
+    const slot = document.querySelector('#mc-voice-box .mc-voice-box-speaker[data-speaker="1"]');
+    slot.querySelector(".mc-voice-box-speaker-design").click();
+    [...slot.querySelectorAll("button")].filter((b) => b.textContent === "Design")[0].click();
+    let arrived = false;
+    for (let tries = 0; tries < 100 && !arrived; tries += 1) {
+        await new Promise((done) => setTimeout(done, 30));
+        const box = slot.querySelector(".mc-voice-box-design .mc-voice-box-transport");
+        arrived = !!box && !box.hidden;
+    }
+    const transcript = document.querySelector("#mc-voice-box .mc-voice-box-sample-transcript");
+    transcript.value = "Words typed and not saved yet, long enough to wrap onto a second line of the box.";
+    transcript.dispatchEvent(new Event("input", {bubbles: true}));
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    return arrived;
+}"""
+
+# Everything drawn in a stage, held to the stage's sides; the controls held to
+# their cells; the heights of the one-line controls; what scrolls sideways.
+MEASURE_STAGE = """(key) => {
+    const root = document.getElementById("mc-voice-box");
+    const stage = root.querySelector(".mc-voice-box-stage-" + key);
+    const s = stage.getBoundingClientRect();
+    const name = (node) => node.getAttribute("class") || node.tagName;
+    const outside = [];
+    for (const node of stage.querySelectorAll("*")) {
+        const r = node.getBoundingClientRect();
+        if (!r.width && !r.height) continue;
+        if (r.left < s.left - 1 || r.right > s.right + 1) outside.push(name(node));
+    }
+    const height = (node) => node.getBoundingClientRect().height;
+    const inside = (node, box) => {
+        const r = node.getBoundingClientRect(), b = box.getBoundingClientRect();
+        return r.left >= b.left - 1 && r.right <= b.right + 1;
+    };
+    const wide = (node) => ({scroll: node.scrollWidth, client: node.clientWidth});
+    const cells = [...stage.querySelectorAll(".mc-voice-box-fields > .mc-voice-box-field")].map((cell) => {
+        const control = cell.querySelector("select, input, button");
+        return {key: control.dataset.field, inside: inside(control, cell), height: height(control)};
+    });
+    const scrollers = [];
+    for (const body of root.querySelectorAll(".mc-voice-box-stage-body")) {
+        for (const node of body.querySelectorAll("*")) {
+            const style = getComputedStyle(node);
+            if (/(auto|scroll)/.test(style.overflowY) || /(auto|scroll)/.test(style.overflowX)) scrollers.push(name(node));
+        }
+    }
+    const shownIn = (node, selector) => {
+        const found = node.querySelector(selector);
+        return !!found && found.getBoundingClientRect().width > 0;
+    };
+    const slot = stage.querySelector('.mc-voice-box-speaker[data-speaker="1"]');
+    const panel = slot ? slot.querySelector(".mc-voice-box-design") : null;
+    const attention = stage.querySelector('[data-field="attention"]');
+    const held = attention ? attention.options[attention.selectedIndex] : null;
+    const rows = [...stage.querySelectorAll(".mc-voice-box-sample")].map((row) => {
+        const box = row.querySelector(".mc-voice-box-sample-transcript");
+        const style = box ? getComputedStyle(box) : null;
+        return box ? {inside: [box, row.querySelector(".mc-voice-box-sample-transcribe")].every((node) => inside(node, row)),
+                      mark: row.getAttribute("data-transcript"), overflowY: style.overflowY,
+                      scroll: box.scrollHeight, client: box.clientHeight, height: height(box),
+                      length: box.value.length} : null;
+    });
+    const save = stage.querySelector(".mc-voice-box-sample-transcript-save:not([hidden])");
+    return {
+        layout: root.getAttribute("data-layout"), outside, cells, scrollers,
+        order: [...stage.querySelectorAll("[data-field]")].map((node) => node.dataset.field),
+        heights: {model: stage.querySelector('[data-field="model_id"]') ? height(stage.querySelector('[data-field="model_id"]')) : 0,
+                  direction: slot ? height(slot.querySelector(".mc-voice-box-speaker-direction")) : 0,
+                  words: panel ? height(panel.querySelector(".mc-voice-box-design-text")) : 0},
+        panel: panel ? {shown: panel.getBoundingClientRect().height > 0,
+                        take: [".mc-voice-box-transport", ".mc-voice-box-design-redraw", ".mc-voice-box-design-keep"]
+                            .map((selector) => shownIn(panel, selector)),
+                        inside: [...panel.querySelectorAll("button, textarea, input")].every((node) => inside(node, panel)),
+                        slot: inside(panel, slot)} : null,
+        held: held ? [attention.value, held.textContent, held.disabled] : null,
+        rows, save: save ? {width: save.getBoundingClientRect().width, height: height(save),
+                            dot: getComputedStyle(save, "::after").content} : null,
+        body: wide(stage.querySelector(".mc-voice-box-stage-body")),
+        page: {scroll: document.documentElement.scrollWidth, client: innerWidth},
+    };
+}"""
+
+
+# Keep warm and Fast path, measured; Fast path pressed twice, each press saved
+# and read back from the engine's settings in the answer.
+SWITCH_ROW = """async () => {
+    const root = document.getElementById("mc-voice-box");
+    const stage = root.querySelector(".mc-voice-box-stage-configuration").getBoundingClientRect();
+    const fast = root.querySelector(".mc-voice-box-fast-path");
+    const warm = root.querySelector(".mc-voice-box-keep-warm");
+    const wait = () => new Promise((done) => setTimeout(done, 150));
+    const box = (node) => {
+        const r = node.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, width: r.width, height: r.height};
+    };
+    const look = (node) => {
+        const r = node.getBoundingClientRect();
+        const knob = node.querySelector(".mc-voice-box-switch-thumb").getBoundingClientRect();
+        return {checked: node.getAttribute("aria-checked"), knob: knob.left - r.left,
+                fill: getComputedStyle(node.querySelector(".mc-voice-box-switch-track")).fill,
+                border: getComputedStyle(node).borderTopColor};
+    };
+    const out = {fast: box(fast), warm: box(warm), stage: {left: stage.left, right: stage.right},
+                 display: getComputedStyle(fast).display, first: look(fast)};
+    fast.click();
+    await wait();
+    out.second = look(fast);
+    fast.click();
+    await wait();
+    out.third = look(fast);
+    return out;
+}"""
+
+
+class TestUnderBreeze:
+    """Breeze TTS 2 in use: its own fields, a direction and a design panel in
+    every speaker slot, a transcript under every sample -- at the widths the
+    rest of the page is held to."""
+
+    WIDTHS = ((1440, 900), (390, 844), (360, 780))
+
+    def _measured(self, browser, key: str) -> dict:
+        seen = {}
+        for width, height in self.WIDTHS:
+            page = open_tab(browser, width, height, engine="breeze")
+            arrived = page.evaluate(OPEN_DESIGN)
+            settle(page)
+            seen[width] = dict(page.evaluate(MEASURE_STAGE, key), arrived=arrived)
+            page.close()
+        return seen
+
+    def test_the_configuration_stage_fits_with_a_design_panel_open(self, browser):
+        for width, found in self._measured(browser, "configuration").items():
+            assert found["arrived"] is True, width
+            assert found["order"] == BREEZE_ORDER, width
+            assert found["outside"] == [], (width, found["outside"])
+            for cell in found["cells"]:
+                assert cell["inside"], (width, cell)
+            cells = {cell["key"]: cell for cell in found["cells"]}
+            for key in ("engine", "card_uuid", "cfg_scale", "attention", "seed", "batch", "max_new_tokens",
+                        "line_gap_ms", "temperature", "top_p"):
+                assert _near(cells[key]["height"], cells["model_id"]["height"]), (width, key, cells[key])
+            # The one-line boxes the slot adds are as tall as Model's select.
+            for part in ("direction", "words"):
+                assert _near(found["heights"][part], found["heights"]["model"]), (width, part, found["heights"])
+            assert found["panel"] == {"shown": True, "take": [True, True, True], "inside": True, "slot": True}, width
+            assert found["held"] == ["flash_attention_2", "Flash attention 2 — not installed", True], width
+            for part in ("body", "page"):
+                assert found[part]["scroll"] <= found[part]["client"] + 1, (width, part, found[part])
+
+    def test_the_input_stage_fits_with_a_transcript_under_every_sample(self, browser):
+        for width, found in self._measured(browser, "input").items():
+            rows = found["rows"]
+            assert len(rows) == SAMPLES and all(rows), width
+            assert found["outside"] == [], (width, found["outside"])
+            assert all(row["inside"] for row in rows), width
+            # Every third sample has no transcript, and says so.
+            assert [row["mark"] for row in rows] == [
+                "missing" if index % 3 == 0 else None for index in range(SAMPLES)], width
+            # The typed transcript's Save is a square icon with the accent dot.
+            assert found["save"] is not None and _near(found["save"]["width"], found["save"]["height"]), width
+            assert found["save"]["dot"] == '""', width
+            for part in ("body", "page"):
+                assert found[part]["scroll"] <= found[part]["client"] + 1, (width, part, found[part])
+            if found["layout"] == "stack":
+                # On a phone's card a transcript is as tall as its words.
+                for row in rows:
+                    assert row["overflowY"] == "hidden", (width, row)
+                    assert row["scroll"] <= row["client"] + 1, (width, row)
+                longest = max(rows, key=lambda row: row["length"])
+                shortest = min(rows, key=lambda row: row["length"])
+                assert longest["height"] > shortest["height"] + 10, (width, longest, shortest)
+            else:
+                assert {row["overflowY"] for row in rows} == {"auto"}, width
+
+    def test_fast_path_is_keep_warms_kind_of_switch_on_its_row_when_a_theme_squeezes_inputs(self, browser):
+        """Shown under Breeze, as tall as Keep warm and after it on its row at
+        a desktop's width, inside the stage at a phone's; a press moves its
+        knob and changes its colours, and the engine's answer keeps it there."""
+        for width, height in self.WIDTHS:
+            page = open_tab(browser, width, height, hostile=("inputs",), engine="breeze")
+            found = page.evaluate(SWITCH_ROW)
+            page.close()
+
+            fast, warm, stage = found["fast"], found["warm"], found["stage"]
+            assert found["display"] != "none", width
+            assert fast["width"] >= 32 and fast["height"] >= 24, (width, fast)
+            assert _near(fast["height"], warm["height"]), (width, fast, warm)
+            for part in (fast, warm):
+                assert part["left"] >= stage["left"] - 1 and part["right"] <= stage["right"] + 1, (width, part, stage)
+            if width >= 900:
+                assert _near(fast["top"], warm["top"]), (width, fast, warm)
+                assert fast["left"] >= warm["right"] + 2, (width, fast, warm)
+            first, second, third = found["first"], found["second"], found["third"]
+            assert (first["checked"], second["checked"]) == ("false", "true"), (width, found)
+            assert second["knob"] > first["knob"] + 4, (width, found)
+            assert second["fill"] != first["fill"] and second["border"] != first["border"], (width, found)
+            assert third == first, (width, found)
+
+    def test_on_a_phone_nothing_inside_a_stage_is_a_scroll_area_of_its_own(self, browser):
+        """With the transcripts and an open design panel, as without them."""
+        for width, found in self._measured(browser, "configuration").items():
+            if found["layout"] == "stack":
+                assert found["scrollers"] == [], (width, found["scrollers"])
+
+    def test_what_is_hidden_stays_hidden_under_a_hostile_theme_and_lobes_swap_takes_nothing(self, browser):
+        page = open_tab(browser, 1440, 900, hostile=("display",), engine="breeze")
+        page.evaluate("""() => {
+            const slot = document.querySelector('#mc-voice-box .mc-voice-box-speaker[data-speaker="2"]');
+            slot.querySelector(".mc-voice-box-speaker-design").click();
+        }""")
+        settle(page)
+        found = page.evaluate("""() => {
+            const root = document.getElementById("mc-voice-box");
+            const boxes = (selector) => [...root.querySelectorAll(selector)].map((node) => {
+                const r = node.getBoundingClientRect();
+                return {hidden: node.hidden, width: r.width, height: r.height};
+            });
+            const open = root.querySelector('.mc-voice-box-speaker[data-speaker="2"] .mc-voice-box-design');
+            return {saves: boxes(".mc-voice-box-sample-transcript-save"),
+                    closed: boxes('.mc-voice-box-speaker:not([data-speaker="2"]) .mc-voice-box-design'),
+                    take: [".mc-voice-box-transport", ".mc-voice-box-design-redraw", ".mc-voice-box-design-keep"]
+                        .map((selector) => open.querySelector(selector).getBoundingClientRect().width),
+                    open: open.getBoundingClientRect().height > 0};
+        }""")
+        before = page.evaluate("() => document.getElementById('mc-voice-box').innerHTML")
+        swapped = page.evaluate(LOBE_ICON_SWAP)
+        after = page.evaluate("""() => ({html: document.getElementById("mc-voice-box").innerHTML,
+                                         lobe: document.querySelectorAll("#mc-voice-box .lobe-x").length})""")
+        page.close()
+
+        hidden = {"hidden": True, "width": 0, "height": 0}
+        assert len(found["saves"]) == SAMPLES and all(entry == hidden for entry in found["saves"])
+        assert len(found["closed"]) == 3 and all(entry == hidden for entry in found["closed"])
+        assert found["open"] is True and found["take"] == [0, 0, 0]
+        assert swapped == 1
+        assert after == {"html": before, "lobe": 0}
 
 
 class TestBelowTheFloor:

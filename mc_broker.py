@@ -71,7 +71,7 @@ _GB = 1024**3
 FAMILY_IMAGE = "image"
 FAMILY_LLM = "llm"
 FAMILY_VOICE = "voice"
-"""A GPU speech engine a user put on a card: VibeVoice, in Voice Box.
+"""A GPU speech engine a user put on a card: VibeVoice or Breeze, in Voice Box.
 
 A guest, not a tenant. It takes a card only for a turn the user asked for
 (:mod:`mc_turns`), and between turns it may stay warm in VRAM the card's own
@@ -458,7 +458,7 @@ def _named(family: str) -> str:
     return _NAMES.get(family, str(family))
 
 
-_NAMES = {FAMILY_IMAGE: "image", FAMILY_LLM: "LLM", FAMILY_VOICE: "VibeVoice"}
+_NAMES = {FAMILY_IMAGE: "image", FAMILY_LLM: "LLM", FAMILY_VOICE: "Voice Box"}
 
 
 def option(name: str, default):

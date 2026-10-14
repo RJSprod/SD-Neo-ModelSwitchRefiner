@@ -795,10 +795,36 @@ await (async function () {
 # --------------------------------------------------------------------------- #
 
 SAMPLE = {"id": "s1", "title": "Ada", "seconds": 8.0, "rate": 24000, "peaks": [0.2] * 240,
-          "source": "file", "created": 1}
-CONFIGURATION = {"id": "c1", "name": "Default", "model_id": "vibevoice-7b", "card_uuid": "GPU-a",
-                 "steps": 10, "cfg_scale": 1.3, "seed": None, "max_new_tokens": None,
-                 "speakers": {"1": "s1"}, "created": 1, "updated": 1}
+          "source": "file", "created": 1, "transcript": "", "transcript_source": "", "design": None}
+VIBEVOICE_OPTIONS = {"steps": 10, "cfg_scale": 1.3, "solver": "dpmpp_2m", "attention": "sdpa",
+                     "max_new_tokens": None, "sampling": False, "temperature": 0.95, "top_p": 0.95}
+"""VibeVoice's options in the fixture configuration: ten steps, the rest the defaults."""
+BREEZE_OPTIONS = {"cfg_scale": 4.0, "attention": "flash_attention_2", "max_new_tokens": None,
+                  "line_gap_ms": 150, "sampling": True, "temperature": 0.9, "top_p": 1.0}
+"""Breeze's defaults, as a configuration never saved for Breeze holds them."""
+
+
+def configuration(breeze=None, **changes) -> dict:
+    """A configuration as the server hands one out: the shared keys and slots,
+    every engine's options under ``options``, and VibeVoice's again, flat, for
+    an older reader. A VibeVoice option among ``changes`` goes into both;
+    ``breeze`` changes Breeze's options."""
+    found = {"id": "c1", "name": "Default", "model_id": "vibevoice-7b", "card_uuid": "GPU-a",
+             "seed": None, "batch": 1, "speakers": {"1": "s1"}, "slots": {},
+             "engine": "vibevoice", "engines_saved": ["vibevoice"],
+             "options": {"vibevoice": dict(VIBEVOICE_OPTIONS), "breeze": dict(BREEZE_OPTIONS)},
+             "created": 1, "updated": 1}
+    for key, value in changes.items():
+        if key in VIBEVOICE_OPTIONS:
+            found["options"]["vibevoice"][key] = value
+        else:
+            found[key] = value
+    found["options"]["breeze"].update(breeze or {})
+    found.update(found["options"]["vibevoice"])
+    return json.loads(json.dumps(found))
+
+
+CONFIGURATION = configuration()
 PIPELINE = {"id": "p1", "name": "Pipeline 1", "prompt": "Speaker 1: Hello there.",
             "configuration_id": "c1", "outputs": ["o1"], "created": 1, "updated": 1}
 INFOTEXT = ("Speaker 1: Hello there.\nSteps: 10, CFG scale: 1.3, Seed: 42, Model: vibevoice-7b, "
@@ -815,8 +841,9 @@ OUTPUT = {"id": "o1", "name": "Take 1", "pipeline_id": "p1", "seconds": 4.5, "ra
                                        "card_uuid": "GPU-a", "steps": 10, "cfg_scale": 1.3,
                                        "seed": 42, "max_new_tokens": None,
                                        "speakers": {"1": "s1"}}}}
-"""An output as the server hands one out now: an MP3, its infotext, the seed it
-used and the configuration it was made with. 1600695200 is 21 Sep 2020 13:33 UTC."""
+"""An output as the server handed one out before engines had options of their own: an
+MP3, its infotext, the seed it used and the configuration it was made with, VibeVoice's
+keys flat in both. 1600695200 is 21 Sep 2020 13:33 UTC."""
 OLD_OUTPUT = {"id": "o0", "name": "Old take", "pipeline_id": "p1", "seconds": 3.0, "rate": 24000,
               "peaks": [0.1] * 240, "loop": False, "created": 1600000000, "format": "wav",
               "infotext": "Speaker 1: Before.\nSteps: 12, CFG scale: 2, Model: vibevoice-7b",
@@ -826,7 +853,7 @@ OLD_OUTPUT = {"id": "o0", "name": "Old take", "pipeline_id": "p1", "seconds": 3.
                          "prompt": "Speaker 1: Before.", "render_seconds": 2.0,
                          "peak_bytes": 1, "sections": 1}}
 """One made before seeds and configurations were recorded, with a blank seed."""
-SAMPLING_CONFIGURATION = dict(CONFIGURATION, sampling=True, temperature=1.4, top_p=0.6)
+SAMPLING_CONFIGURATION = configuration(sampling=True, temperature=1.4, top_p=0.6)
 """A configuration saved with Sampling on, the way the server hands one out now."""
 JOB = {"id": "j1", "name": "Pipeline 1 2", "pipeline_id": "p1", "phase": "queued", "reason": "",
        "warning": "", "progress": {}, "output_id": "", "output_ids": [], "created": 3, "started": None,
@@ -849,6 +876,85 @@ OPTIONS = {
 """What a render may ask for, as the status's engine part says it (status.engine.options)."""
 
 
+def field(key, label, kind, *, default=None, place="head", low=None, high=None, step=None, blank="",
+          options=None, needs="", wide=False, hint="", infotext=None) -> dict:
+    """One configuration field as the status lists it (status.engine.fields)."""
+    found = {"key": key, "label": label, "kind": kind, "blank": blank, "default": default,
+             "needs": needs, "place": place, "wide": wide, "hint": hint, "infotext": infotext or label}
+    if kind in ("int", "float"):
+        found.update({"min": low, "max": high, "step": step})
+    if kind == "choice":
+        found["options"] = json.loads(json.dumps(options or []))
+    return found
+
+
+def vibevoice_fields(defaults=None, solvers=None, attention=None) -> list:
+    """VibeVoice's fields, in their order, with ``defaults`` and choices of a test's own."""
+    chosen = dict({"steps": 12, "cfg_scale": 1.3, "solver": "dpmpp_2m", "attention": "sdpa"},
+                  **(defaults or {}))
+    return [
+        field("steps", "Diffusion steps", "int", low=1, high=50, step=1, default=chosen["steps"],
+              infotext="Steps"),
+        field("cfg_scale", "CFG", "float", low=1.0, high=3.0, step=0.1, default=chosen["cfg_scale"],
+              infotext="CFG scale"),
+        field("solver", "Solver", "choice", options=solvers or OPTIONS["solvers"], default=chosen["solver"]),
+        field("attention", "Attention", "choice", options=attention or OPTIONS["attention"],
+              default=chosen["attention"]),
+        field("max_new_tokens", "Max new tokens", "int", low=1, high=65536, step=1, blank="automatic",
+              place="tail"),
+        field("sampling", "Sampling", "bool", default=False, wide=True, place="tail"),
+        field("temperature", "Temperature", "float", low=0.1, high=2.0, step=0.05, default=0.95,
+              needs="sampling", place="tail"),
+        field("top_p", "Top-p", "float", low=0.05, high=1.0, step=0.01, default=0.95, needs="sampling",
+              place="tail"),
+    ]
+
+
+BREEZE_ATTENTION = [
+    {"id": "flash_attention_2", "name": "Flash attention 2", "label": "Flash attention 2",
+     "available": False, "reason": "not installed"},
+    {"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True, "reason": ""},
+    {"id": "eager", "name": "Eager", "label": "Eager (upstream)", "available": True, "reason": ""}]
+
+
+def breeze_fields(attention=None) -> list:
+    """Breeze's fields, in their order (CONTRACT_SERVER section 3)."""
+    return [
+        field("cfg_scale", "CFG", "float", low=1.0, high=8.0, step=0.1, default=4.0, infotext="CFG scale"),
+        field("attention", "Attention", "choice", options=attention or BREEZE_ATTENTION,
+              default="flash_attention_2"),
+        field("max_new_tokens", "Max new tokens", "int", low=1, high=1500, step=1, blank="automatic",
+              place="tail"),
+        field("line_gap_ms", "Line gap (ms)", "int", low=0, high=2000, step=10, default=150, place="tail",
+              hint="Silence between two lines"),
+        field("sampling", "Sampling", "bool", default=True, wide=True, place="tail"),
+        field("temperature", "Temperature", "float", low=0.1, high=2.0, step=0.05, default=0.9,
+              needs="sampling", place="tail"),
+        field("top_p", "Top-p", "float", low=0.05, high=1.0, step=0.01, default=1.0, needs="sampling",
+              place="tail"),
+    ]
+
+
+VIBEVOICE_CAPABILITIES = {"speakers": "native", "takes": "batch", "design": False, "directions": False,
+                          "voice": {"sample": True, "transcript": False, "description": False,
+                                    "instruction": False},
+                          "events": None, "languages": ["en", "zh"]}
+BREEZE_CAPABILITIES = {"speakers": "per_line", "takes": "sequential", "design": True, "directions": True,
+                       "voice": {"sample": True, "transcript": True, "description": True, "instruction": True},
+                       "events": {"en": ["(laugh)", "(sigh)", "(cough)", "(clears throat)"],
+                                  "zh": ["[笑]", "[叹气]", "[咳嗽]", "[清嗓子]"]},
+                       "languages": ["en", "zh"]}
+
+
+def engines(active: str, breeze_installed: bool = True) -> dict:
+    """status.engines: both engines, ``active`` the one in use."""
+    return {"active": active, "available": [
+        {"id": "vibevoice", "label": "VibeVoice", "installed": True, "ready": True, "supported": True,
+         "message": "Installed."},
+        {"id": "breeze", "label": "Breeze TTS 2", "installed": breeze_installed, "ready": breeze_installed,
+         "supported": True, "message": "Installed." if breeze_installed else "Setup required."}]}
+
+
 def fnv_hue(text: str) -> int:
     """The page's hue for a sample id, worked out independently: FNV-1a over the
     UTF-16 code units, 32 bits, modulo 360."""
@@ -860,15 +966,18 @@ def fnv_hue(text: str) -> int:
     return value % 360
 STATUS = {
     "ok": True,
-    "engine": {"installed": True, "ready": True, "supported": True, "message": "Installed",
+    "engine": {"id": "vibevoice", "installed": True, "ready": True, "supported": True, "message": "Installed",
                "label": "VibeVoice", "model_id": "vibevoice-7b", "model_label": "VibeVoice 7B",
                "models": [{"id": "vibevoice-7b", "label": "VibeVoice 7B"}],
-               "download_bytes": 0, "parts": [], "options": OPTIONS},
+               "download_bytes": 0, "parts": [], "options": OPTIONS, "stale": False, "stale_message": "",
+               "max_takes": 4, "fields": vibevoice_fields(), "capabilities": VIBEVOICE_CAPABILITIES},
+    "engines": engines("vibevoice"),
+    "stt": {"available": True, "message": ""},
     "progress": {"running": False, "text": "", "fraction": 0.0, "failed": False, "model": ""},
     "engine_settings": {"card_uuid": "GPU-a", "model_id": "vibevoice-7b", "steps": 10,
                         "cfg_scale": 1.3, "seed": None, "max_new_tokens": None, "keep_warm": True},
     "settings": {"save_folder": "", "card_uuid": "GPU-a", "model_id": "vibevoice-7b",
-                 "keep_warm": True},
+                 "keep_warm": True, "engine": "vibevoice"},
     "cards": [{"uuid": "GPU-a", "key": "a", "index": 0, "name": "RTX 3090", "image_card": True,
                "wangp_card": False},
               {"uuid": "GPU-b", "key": "b", "index": 1, "name": "RTX 5090", "image_card": False,
@@ -877,6 +986,20 @@ STATUS = {
     "turns": [],
     "jobs": [],
 }
+BREEZE_STATUS = dict(STATUS, **{
+    "engine": {"id": "breeze", "installed": True, "ready": True, "supported": True, "message": "Installed.",
+               "label": "Breeze TTS 2", "model_id": "breeze-tts-2", "model_label": "Breeze TTS 2",
+               "models": [{"id": "breeze-tts-2", "label": "Breeze TTS 2"}],
+               "download_bytes": 0, "parts": [], "stale": False, "stale_message": "",
+               "max_takes": 4, "fields": breeze_fields(), "capabilities": BREEZE_CAPABILITIES},
+    "engines": engines("breeze"),
+    "engine_settings": {"card_uuid": "GPU-a", "model_id": "breeze-tts-2", "keep_warm": True,
+                        "fast_path": False},
+    "settings": {"save_folder": "", "card_uuid": "GPU-a", "model_id": "vibevoice-7b",
+                 "keep_warm": True, "engine": "breeze"},
+})
+"""The same machine with Breeze TTS 2 the engine in use. Voice Box's own setting still
+names the model chosen last under VibeVoice: Breeze does not have it."""
 ANSWERS = {
     "/status": {"json": STATUS},
     "/samples": {"json": {"ok": True, "samples": [SAMPLE]}},
@@ -904,6 +1027,17 @@ def status_with(**changes) -> dict:
     found = json.loads(json.dumps(STATUS))
     found.update(changes)
     return found
+
+
+def breeze_status(**changes) -> dict:
+    found = json.loads(json.dumps(BREEZE_STATUS))
+    found.update(changes)
+    return found
+
+
+def vibe(found: dict) -> dict:
+    """The working copy's VibeVoice options, as a scenario's report has them."""
+    return found["state"]["working"]["options"]["vibevoice"]
 
 
 def _node(harness: str) -> dict:
@@ -1907,7 +2041,9 @@ class TestTheRenderGate:
         body = found["render"][0]["body"]
         assert body["configuration_id"] == "c1"
         assert body["configuration"]["speakers"] == {"1": "s1", "2": "s1"}
-        assert body["configuration"]["steps"] == 10
+        # The engine's options go under its name, for the engine in use.
+        assert body["configuration"]["engine"] == "vibevoice"
+        assert body["configuration"]["options"]["vibevoice"]["steps"] == 10
         assert found["saves"] == 0
 
     def test_save_writes_the_configuration_and_keep_warm_is_a_setting(self):
@@ -1925,7 +2061,8 @@ class TestTheRenderGate:
         """)
 
         save = found["save"][0]["body"]
-        assert save["id"] == "c1" and save["name"] == "Default" and save["steps"] == 20
+        assert save["id"] == "c1" and save["name"] == "Default"
+        assert save["engine"] == "vibevoice" and save["options"]["vibevoice"]["steps"] == 20
         assert "keep_warm" not in save
         assert [r["body"] for r in found["settings"]] == [{"keep_warm": False}]
 
@@ -3353,11 +3490,11 @@ class TestSampling:
         assert found["offAgain"]["top_p"] == {"value": "0.8", "disabled": True, "greyed": "true"}
         assert found["onAgain"]["temperature"] == {"value": "1.2", "disabled": False, "greyed": "false"}
         assert found["onAgain"]["top_p"] == {"value": "0.8", "disabled": False, "greyed": "false"}
-        working = found["state"]["working"]
+        working = vibe(found)
         assert (working["sampling"], working["temperature"], working["top_p"]) == (True, 1.2, 0.8)
         assert found["described"] is None and found["descriptions"] == 0
-        assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed",
-                                  "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
+        assert found["order"] == ["engine", "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention",
+                                  "seed", "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
         assert found["sampling"] == ["BUTTON", "switch", "Sampling"]
         assert found["kinds"] == [["number", "0.1", "2", "0.05"], ["number", "0.05", "1", "0.01"]]
         assert "mc-voice-box-field-wide" in found["wide"].split()
@@ -3407,14 +3544,16 @@ class TestSampling:
             report({before, render: requestsTo("/render").map((r) => r.body)});
         """, answers={"/configurations": {"json": {"ok": True, "configurations": [SAMPLING_CONFIGURATION]}}})
 
-        inline = on["render"][0]["configuration"]
+        inline = on["render"][0]["configuration"]["options"]["vibevoice"]
         assert on["render"][0]["configuration_id"] == "c1"
         assert (inline["sampling"], inline["temperature"], inline["top_p"]) == (True, 1.25, 0.9)
         saved = on["saved"][0]
-        assert (saved["id"], saved["sampling"], saved["temperature"], saved["top_p"]) == ("c1", True, 1.25, 0.9)
+        options = saved["options"]["vibevoice"]
+        assert (saved["id"], options["sampling"], options["temperature"], options["top_p"]) == (
+            "c1", True, 1.25, 0.9)
         # Off is sent as off, with the values the configuration keeps.
         assert off["before"]["temperature"] == {"value": "1.4", "disabled": False, "greyed": "false"}
-        inline = off["render"][0]["configuration"]
+        inline = off["render"][0]["configuration"]["options"]["vibevoice"]
         assert (inline["sampling"], inline["temperature"], inline["top_p"]) == (False, 1.4, 0.6)
 
     def test_reuse_puts_back_how_the_render_sampled(self):
@@ -3424,7 +3563,7 @@ class TestSampling:
         found = run(self.FIELDS + TestReuseSettings.REUSE + "report({fields: read()});",
                     answers={"/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
 
-        working = found["state"]["working"]
+        working = vibe(found)
         assert (working["sampling"], working["temperature"], working["top_p"]) == (True, 1.1, 0.7)
         assert found["fields"] == {"sampling": True,
                                    "temperature": {"value": "1.1", "disabled": False, "greyed": "false"},
@@ -3438,7 +3577,7 @@ class TestSampling:
                     answers={"/configurations": {"json": {"ok": True,
                                                           "configurations": [SAMPLING_CONFIGURATION]}}})
 
-        working = found["state"]["working"]
+        working = vibe(found)
         assert (working["sampling"], working["temperature"], working["top_p"]) == (False, 1.4, 0.6)
         assert found["fields"] == {"sampling": False,
                                    "temperature": {"value": "1.4", "disabled": True, "greyed": "true"},
@@ -3448,7 +3587,7 @@ class TestSampling:
     def test_reuse_compares_the_three_with_the_saved_configuration(self):
         """A render that sampled as the configuration stands leaves nothing to
         save; one whose temperature differs does."""
-        saved = dict(SAMPLING_CONFIGURATION, seed=42)
+        saved = configuration(sampling=True, temperature=1.4, top_p=0.6, seed=42)
 
         def reused(temperature):
             render = dict(OUTPUT["render"], sampling=True, temperature=temperature, top_p=0.6,
@@ -3496,10 +3635,12 @@ CHOICES = """
 
 
 def engine_with(**changes) -> dict:
-    """The status's engine part with ``changes``; ``options=None`` leaves the options out."""
+    """The status's engine part with ``changes``; ``options=None``, ``fields=None`` and
+    ``max_takes=None`` leave those parts out, as an older server's status does."""
     engine = dict(STATUS["engine"], **changes)
-    if engine.get("options") is None:
-        engine.pop("options", None)
+    for part in ("options", "fields", "max_takes"):
+        if part in changes and changes[part] is None:
+            engine.pop(part, None)
     return json.loads(json.dumps(engine))
 
 
@@ -3518,16 +3659,14 @@ def take(number: int, of: int, solver: str = "dpmpp_2m", attention: str = "sdpa"
 class TestSolverAttentionAndBatch:
     def test_they_are_selects_in_their_places_offering_whatever_the_server_lists(self):
         """Solver and Attention after CFG, Batch after Seed; the lists are the
-        server's, whatever they hold, and Batch counts from one to its cap. A
-        saved configuration that names none of the three shows the server's
-        defaults."""
-        options = dict(OPTIONS, batch_max=3,
-                       solvers=[{"id": "dpmpp_2m", "name": "DPM++ 2M", "label": "DPM++ 2M (upstream)"},
-                                {"id": "unipc", "name": "UniPC", "label": "UniPC"}],
-                       attention=[{"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True,
-                                   "reason": ""},
-                                  {"id": "flex", "name": "Flex", "label": "Flex attention", "available": True,
-                                   "reason": ""}])
+        server's, whatever they hold, and Batch counts from one to the engine's
+        most takes. A saved configuration that names none of the three shows
+        the server's defaults."""
+        solvers = [{"id": "dpmpp_2m", "name": "DPM++ 2M", "label": "DPM++ 2M (upstream)"},
+                   {"id": "unipc", "name": "UniPC", "label": "UniPC"}]
+        attention = [{"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True, "reason": ""},
+                     {"id": "flex", "name": "Flex", "label": "Flex attention", "available": True, "reason": ""}]
+        options = dict(OPTIONS, batch_max=3, solvers=solvers, attention=attention)
         found = run(CHOICES + """
             await flush();
             report({order: all("[data-field]").map((node) => node.getAttribute("data-field")),
@@ -3536,28 +3675,35 @@ class TestSolverAttentionAndBatch:
                                                                           field(key).getAttribute("aria-label")]),
                     solvers: choices("solver"), attention: choices("attention"), batch: choices("batch"),
                     chosen: chosen()});
-        """, answers={"/status": {"json": status_with(engine=engine_with(options=options))}})
+        """, answers={"/status": {"json": status_with(engine=engine_with(
+            options=options, max_takes=3, fields=vibevoice_fields(solvers=solvers, attention=attention)))}})
 
-        assert found["order"] == ["model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed",
-                                  "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
-        assert found["captions"] == ["Model", "Card", "Diffusion steps", "CFG", "Solver", "Attention", "Seed",
-                                     "Batch", "Max new tokens", "Temperature", "Top-p"]
+        assert found["order"] == ["engine", "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention",
+                                  "seed", "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
+        assert found["captions"] == ["Engine", "Model", "Card", "Diffusion steps", "CFG", "Solver", "Attention",
+                                     "Seed", "Batch", "Max new tokens", "Temperature", "Top-p"]
         assert found["kinds"] == [["SELECT", "Solver"], ["SELECT", "Attention"], ["SELECT", "Batch"]]
         assert found["solvers"] == [["dpmpp_2m", "DPM++ 2M (upstream)", False], ["unipc", "UniPC", False]]
         assert found["attention"] == [["sdpa", "SDPA", False], ["flex", "Flex attention", False]]
         assert found["batch"] == [["1", "1", False], ["2", "2", False], ["3", "3", False]]
         assert found["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "10"}
-        working = found["state"]["working"]
-        assert (working["solver"], working["attention"], working["batch"]) == ("dpmpp_2m", "sdpa", 1)
+        working = vibe(found)
+        assert (working["solver"], working["attention"], found["state"]["working"]["batch"]) == (
+            "dpmpp_2m", "sdpa", 1)
 
     def test_a_status_without_options_offers_the_lists_the_page_was_written_against(self):
-        """An older server, or a status whose engine part failed: the page's own
-        lists, Flash attention 2 among them and unavailable, and four takes."""
+        """An older server, or a status whose engine part failed -- no field
+        list and no options: the page's own fields and lists, Flash attention 2
+        among them and unavailable, and four takes."""
         found = run(CHOICES + """
             await flush();
             report({solvers: choices("solver"), attention: choices("attention"), batch: choices("batch"),
-                    chosen: chosen()});
-        """, answers={"/status": {"json": status_with(engine=engine_with(options=None))}})
+                    chosen: chosen(), order: all("[data-field]").map((node) => node.getAttribute("data-field"))});
+        """, answers={"/status": {"json": status_with(engine=engine_with(options=None, fields=None,
+                                                                          max_takes=None))}})
+
+        assert found["order"] == ["engine", "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention",
+                                  "seed", "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
 
         assert found["solvers"] == [["dpmpp_2m", "DPM++ 2M (upstream)", False],
                                     ["dpmpp_2m_sde", "DPM++ 2M SDE (upstream demo)", False],
@@ -3572,12 +3718,13 @@ class TestSolverAttentionAndBatch:
         """A configuration that holds one shows it selected; Render is not held
         back for it, and the server's refusal is the status line's, as any
         refusal is."""
-        options = dict(OPTIONS, attention=[
+        attention = [
             {"id": "sdpa", "name": "SDPA", "label": "SDPA", "available": True, "reason": ""},
             {"id": "eager", "name": "Eager", "label": "Eager", "available": False,
              "reason": "needs a newer runtime"},
             {"id": "flash_attention_2", "name": "Flash attention 2", "label": "Flash attention 2 (upstream)",
-             "available": False, "reason": "not installed"}])
+             "available": False, "reason": "not installed"}]
+        options = dict(OPTIONS, attention=attention)
         refusal = "Flash attention 2 needs the flash-attn package, which VibeVoice's runtime does not have."
         found = run(CHOICES + """
             await flush();
@@ -3586,9 +3733,10 @@ class TestSolverAttentionAndBatch:
             press("Render");
             await flush();
             report({shown, line: line(), render: requestsTo("/render").map((r) => r.body)});
-        """, answers={"/status": {"json": status_with(engine=engine_with(options=options))},
+        """, answers={"/status": {"json": status_with(engine=engine_with(
+            options=options, fields=vibevoice_fields(attention=attention)))},
                       "/configurations": {"json": {"ok": True, "configurations": [
-                          dict(CONFIGURATION, attention="flash_attention_2")]}},
+                          configuration(attention="flash_attention_2")]}},
                       "/render": {"status": 400, "json": {"ok": False, "error": refusal}}})
 
         assert found["shown"]["attention"] == [
@@ -3603,25 +3751,30 @@ class TestSolverAttentionAndBatch:
         """With nothing saved the editor holds a new configuration: the engine
         settings' steps where they name some, the server's default steps where
         they do not, and twelve where nobody says; the server's solver,
-        attention and batch, and the page's own where the status has none."""
+        attention and batch, and the page's own where the status has none.
+        The server says its defaults in its field list (and VibeVoice's
+        options); an older server's options alone say them too."""
         unnamed = {key: value for key, value in STATUS["engine_settings"].items() if key != "steps"}
         own = dict(OPTIONS, defaults={"solver": "dpmpp_3m", "attention": "eager", "batch": 2, "steps": 16})
+        listed = vibevoice_fields(defaults={"solver": "dpmpp_3m", "attention": "eager", "steps": 16})
 
         def fresh(engine, engine_settings):
             return run(CHOICES + "await flush(); report({chosen: chosen(), save: saveLabel()});",
                        answers={"/configurations": {"json": {"ok": True, "configurations": []}},
                                 "/status": {"json": status_with(engine=engine, engine_settings=engine_settings)}})
 
-        told = fresh(engine_with(options=own), unnamed)
-        untold = fresh(engine_with(options=None), unnamed)
-        named = fresh(engine_with(options=own), dict(unnamed, steps=20))
+        told = fresh(engine_with(options=own, fields=listed), unnamed)
+        older = fresh(engine_with(options=own, fields=None), unnamed)
+        untold = fresh(engine_with(options=None, fields=None), unnamed)
+        named = fresh(engine_with(options=own, fields=listed), dict(unnamed, steps=20))
 
         assert told["chosen"] == {"solver": "dpmpp_3m", "attention": "eager", "batch": "2", "steps": "16"}
-        working = told["state"]["working"]
-        assert (working["solver"], working["attention"], working["batch"], working["steps"]) == (
+        working = vibe(told)
+        assert (working["solver"], working["attention"], told["state"]["working"]["batch"], working["steps"]) == (
             "dpmpp_3m", "eager", 2, 16)
+        assert older["chosen"] == told["chosen"]
         assert untold["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "12"}
-        assert untold["state"]["working"]["steps"] == 12
+        assert vibe(untold)["steps"] == 12
         assert named["chosen"]["steps"] == "20"
         assert told["state"]["configurationId"] == "" and told["save"] == "Save"
 
@@ -3641,7 +3794,8 @@ class TestSolverAttentionAndBatch:
                 reset();
                 const before = saveLabel();
                 choose(key, value);
-                marks[key] = [before, saveLabel(), globalThis.mcVoiceBox.state().working[key]];
+                const working = globalThis.mcVoiceBox.state().working;
+                marks[key] = [before, saveLabel(), key === "batch" ? working.batch : working.options.vibevoice[key]];
             }
             reset();
             choose("solver", "dpmpp_2m_sde");
@@ -3661,12 +3815,12 @@ class TestSolverAttentionAndBatch:
                                   "batch": ["Save", "Save — unsaved changes", 3]}
         body = found["render"][0]
         assert body["configuration_id"] == "c1"
-        inline = body["configuration"]
-        assert (inline["solver"], inline["attention"], inline["batch"], inline["steps"]) == (
+        inline = body["configuration"]["options"]["vibevoice"]
+        assert (inline["solver"], inline["attention"], body["configuration"]["batch"], inline["steps"]) == (
             "dpmpp_2m_sde", "eager", 4, 10)
         saved = found["saved"][0]
-        assert (saved["id"], saved["solver"], saved["attention"], saved["batch"]) == (
-            "c1", "dpmpp_2m_sde", "eager", 4)
+        assert (saved["id"], saved["options"]["vibevoice"]["solver"], saved["options"]["vibevoice"]["attention"],
+                saved["batch"]) == ("c1", "dpmpp_2m_sde", "eager", 4)
         assert found["settings"] == []
 
     def test_reuse_settings_puts_back_the_solver_the_attention_and_the_batch(self):
@@ -3680,11 +3834,11 @@ class TestSolverAttentionAndBatch:
                        answers={"/configurations": {"json": {"ok": True, "configurations": [saved]}},
                                 "/outputs": {"json": {"ok": True, "outputs": [second]}}})
 
-        differing = reused(dict(CONFIGURATION, seed=43))
-        matching = reused(dict(CONFIGURATION, seed=43, solver="dpmpp_3m", attention="eager", batch=3))
+        differing = reused(configuration(seed=43))
+        matching = reused(configuration(seed=43, solver="dpmpp_3m", attention="eager", batch=3))
 
         working = differing["state"]["working"]
-        assert (working["solver"], working["attention"], working["batch"], working["seed"]) == (
+        assert (vibe(differing)["solver"], vibe(differing)["attention"], working["batch"], working["seed"]) == (
             "dpmpp_3m", "eager", 3, 43)
         assert differing["chosen"] == {"solver": "dpmpp_3m", "attention": "eager", "batch": "3", "steps": "10"}
         assert differing["save"] == "Save — unsaved changes"
@@ -3697,7 +3851,7 @@ class TestSolverAttentionAndBatch:
         whatever it held."""
         found = run(CHOICES + TestReuseSettings.REUSE + "report({chosen: chosen(), save: saveLabel()});",
                     answers={"/configurations": {"json": {"ok": True, "configurations": [
-                        dict(CONFIGURATION, solver="dpmpp_3m", attention="eager", batch=4)]}}})
+                        configuration(solver="dpmpp_3m", attention="eager", batch=4)]}}})
 
         assert found["chosen"] == {"solver": "dpmpp_2m", "attention": "sdpa", "batch": "1", "steps": "10"}
         assert found["save"] == "Save — unsaved changes"
@@ -3764,20 +3918,20 @@ class TestSolverAttentionAndBatch:
         the options stay the same elements until what they offer changes."""
         found = run(CHOICES + """
             await flush();
-            const keys = ["model_id", "card_uuid", "solver", "attention", "batch"];
+            const keys = ["engine", "model_id", "card_uuid", "solver", "attention", "batch"];
             keys.forEach((key) => { field(key).options[0].kept = true; });
             const kept = () => keys.map((key) => field(key).options[0].kept === true);
             await poll();
             const polled = kept();
             const base = answers["/status"].json;
             answers["/status"] = {json: Object.assign({}, base, {engine: Object.assign({}, base.engine,
-                {options: Object.assign({}, base.engine.options, {batch_max: 2})})})};
+                {max_takes: 2})})};
             await poll();
             report({polled, changed: kept(), batch: choices("batch"), chosen: chosen()});
         """)
 
-        assert found["polled"] == [True, True, True, True, True]
-        assert found["changed"] == [True, True, True, True, False]
+        assert found["polled"] == [True, True, True, True, True, True]
+        assert found["changed"] == [True, True, True, True, True, False]
         assert found["batch"] == [["1", "1", False], ["2", "2", False]]
         assert found["chosen"]["batch"] == "1"
 
@@ -3899,8 +4053,7 @@ class TestReuseSettings:
                       configuration=dict(OUTPUT["render"]["configuration"], steps=20, cfg_scale=1.5,
                                          seed=42, max_new_tokens=900,
                                          speakers={"1": "s1", "2": "s2"}))
-        other = dict(CONFIGURATION, id="c2", name="Other", steps=30, cfg_scale=2.5,
-                     speakers={"1": "s2"})
+        other = configuration(id="c2", name="Other", steps=30, cfg_scale=2.5, speakers={"1": "s2"})
         found = run(self.REUSE + """
             const now = {prompt: find(".mc-voice-box-prompt").value,
                          chosen: find(".mc-voice-box-configuration-select").value,
@@ -3919,8 +4072,9 @@ class TestReuseSettings:
         assert found["now"] == {"prompt": "Speaker 1: Hi.\nSpeaker 2: Yo.", "chosen": "c1",
                                 "save": "Save — unsaved changes", "steps": "20", "slot2": "Bo"}
         working = found["state"]["working"]
-        assert (working["model_id"], working["card_uuid"], working["steps"], working["cfg_scale"],
-                working["seed"], working["max_new_tokens"]) == ("vibevoice-7b", "GPU-a", 20, 1.5, 42, 900)
+        options = vibe(found)
+        assert (working["model_id"], working["card_uuid"], options["steps"], options["cfg_scale"],
+                working["seed"], options["max_new_tokens"]) == ("vibevoice-7b", "GPU-a", 20, 1.5, 42, 900)
         assert working["speakers"] == {"1": "s1", "2": "s2"}
         assert found["state"]["configurationId"] == "c1"
         assert found["early"] == [{"id": "p1", "configuration_id": "c1"}]
@@ -3930,7 +4084,7 @@ class TestReuseSettings:
                                    "save the configuration to keep them.")
 
     def test_the_configuration_as_it_stands_leaves_nothing_to_save(self):
-        saved = dict(CONFIGURATION, seed=7)
+        saved = configuration(seed=7)
         render = dict(OUTPUT["render"], configuration=dict(OUTPUT["render"]["configuration"], seed=7))
         found = run(self.REUSE + """
             report({save: saveLabel()});
@@ -3957,7 +4111,7 @@ class TestReuseSettings:
         saved = found["saved"][0]
         assert saved["name"] == "Take 1"
         assert "id" not in saved
-        assert (saved["steps"], saved["seed"], saved["speakers"]) == (12, 42, {"1": "s1"})
+        assert (saved["options"]["vibevoice"]["steps"], saved["seed"], saved["speakers"]) == (12, 42, {"1": "s1"})
 
     def test_a_speaker_whose_sample_has_left_the_library_is_left_empty_and_said(self):
         render = dict(OUTPUT["render"],
@@ -3993,11 +4147,12 @@ class TestReuseSettings:
         """, answers={"/outputs": {"json": {"ok": True, "outputs": [OLD_OUTPUT]}}})
 
         working = found["state"]["working"]
+        options = vibe(found)
         assert found["state"]["configurationId"] == ""
         assert found["prompt"] == "Speaker 1: Before."
         assert found["label"] == "(unsaved) Old take"
-        assert (working["name"], working["model_id"], working["card_uuid"], working["steps"],
-                working["cfg_scale"], working["seed"], working["max_new_tokens"]) == (
+        assert (working["name"], working["model_id"], working["card_uuid"], options["steps"],
+                options["cfg_scale"], working["seed"], options["max_new_tokens"]) == (
             "Old take", "vibevoice-7b", "GPU-b", 12, 2.0, None, 900)
         assert working["speakers"] == {"1": "s1"}
         assert found["state"]["dirty"]["configuration"] is True
@@ -4781,6 +4936,1030 @@ class TestDeselecting:
 
         assert (found["dragged"], found["synthetic"], found["hidden"]) == ("o1", "o1", "o1")
         assert found["tapped"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Two engines: the Engine select, an engine's own fields, its words
+# --------------------------------------------------------------------------- #
+
+ENGINE = """
+    const field = (key) => find('[data-field="' + key + '"]');
+    const choices = (key) => field(key).options.map((option) => [option.value, option.textContent,
+                                                                 !!option.disabled]);
+    const choose = (key, value) => { field(key).value = value; field(key).dispatchEvent({type: "change"}); };
+    const set = (key, value) => { field(key).value = value; field(key).dispatchEvent({type: "input"}); };
+    const order = () => all("[data-field]").map((node) => node.getAttribute("data-field"));
+    const slot = (number) => find('.mc-voice-box-speaker[data-speaker="' + number + '"]');
+    const row = (id) => find('.mc-voice-box-sample[data-id="' + id + '"]');
+    const box = (id) => row(id).querySelector(".mc-voice-box-sample-transcript");
+    const working = () => globalThis.mcVoiceBox.state().working;
+"""
+"""A scenario's hands for the engines' tests."""
+
+VIBEVOICE_ORDER = ["engine", "model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed",
+                   "batch", "max_new_tokens", "sampling", "temperature", "top_p"]
+BREEZE_ORDER = ["engine", "model_id", "card_uuid", "cfg_scale", "attention", "seed", "batch",
+                "max_new_tokens", "line_gap_ms", "sampling", "temperature", "top_p"]
+ENGINE_CHANGED = {"json": {"ok": True, "changed": True, "engine": "breeze",
+                           "settings": BREEZE_STATUS["settings"], "engines": BREEZE_STATUS["engines"]}}
+TRANSCRIBED = dict(SAMPLE, id="s2", title="Bo", transcript="Hello there, this is Bo.",
+                   transcript_source="typed")
+"""A sample whose exact words are saved."""
+DESIGN = dict(JOB, id="d1", name="", kind="design", engine="breeze", phase="rendering", started=5,
+              elapsed=3.1, design=None)
+"""A voice being designed, on its card."""
+
+
+def designed(job_id: str, seed: int) -> dict:
+    """A design job that is done, its take described as the server records it."""
+    return dict(DESIGN, id=job_id, phase="done", live=False, elapsed=8.0,
+                design={"seconds": 8.2, "seed": seed, "text": "Hello, this is my voice.",
+                        "description": "A warm, low voice, close to the microphone.", "cfg_scale": 4.0,
+                        "ready": True})
+
+
+def with_engine_records(scenario: str) -> str:
+    for name, value in (("BREEZE_STATUS", BREEZE_STATUS), ("VIBEVOICE_STATUS", STATUS)):
+        scenario = scenario.replace(name, json.dumps(value))
+    return scenario
+
+
+class TestTheEngineSelect:
+    def test_it_is_the_first_field_and_offers_every_engine_installed_or_not(self):
+        found = run(ENGINE + """
+            await flush();
+            const select = field("engine");
+            report({order: order(), tag: select.tagName, classes: select.className.split(" "),
+                    caption: select.parentNode.querySelector(".mc-voice-box-field-label").textContent,
+                    label: select.getAttribute("aria-label"), choices: choices("engine"), value: select.value,
+                    first: find(".mc-voice-box-fields").children[0] === select.parentNode});
+        """, answers={"/status": {"json": status_with(engines=engines("vibevoice", breeze_installed=False))}})
+
+        assert found["order"] == VIBEVOICE_ORDER
+        assert found["tag"] == "SELECT" and "mc-voice-box-field-input" in found["classes"]
+        assert (found["caption"], found["label"]) == ("Engine", "Engine")
+        assert found["choices"] == [["vibevoice", "VibeVoice", False], ["breeze", "Breeze TTS 2", False]]
+        assert found["value"] == "vibevoice"
+        assert found["first"] is True
+
+    def test_a_change_posts_the_engine_and_draws_the_new_engines_fields(self):
+        """The server switches; the page reads the status and the
+        configurations again and draws Breeze's fields. The working copy keeps
+        what the engines share and edits Breeze's options."""
+        found = run(ENGINE + with_engine_records("""
+            await flush();
+            const statuses = requestsTo("/status").length;
+            const lists = requestsTo("/configurations").length;
+            set("seed", "77");
+            answers["/status"] = {json: BREEZE_STATUS};
+            choose("engine", "breeze");
+            await flush(10);
+            report({posted: requestsTo("/engine").map(plain), order: order(), value: field("engine").value,
+                    statuses: requestsTo("/status").length - statuses,
+                    lists: requestsTo("/configurations").length - lists, cfg: field("cfg_scale").value,
+                    seed: field("seed").value});
+        """), answers={"/engine": ENGINE_CHANGED})
+
+        posted = found["posted"]
+        assert [(request["method"], request["body"]) for request in posted] == [("POST", {"engine": "breeze"})]
+        assert posted[0]["headers"]["x-model-chain-voice"] == TOKEN and posted[0]["signal"] is True
+        assert (found["statuses"], found["lists"]) == (1, 1)
+        assert found["order"] == BREEZE_ORDER
+        assert found["value"] == "breeze"
+        working = found["state"]["working"]
+        assert working["engine"] == "breeze" and working["seed"] == 77 and found["seed"] == "77"
+        assert working["options"]["breeze"] == BREEZE_OPTIONS and found["cfg"] == "4"
+        assert working["options"]["vibevoice"]["steps"] == 10
+
+    def test_a_refused_switch_puts_the_select_back_and_says_why(self):
+        """A job is live: the server's sentence is the status line's, and the
+        running render's Cancel is there once it is put away."""
+        refusal = "A render is running on a card: switch engines once it has finished."
+        found = run(ENGINE + """
+            await flush();
+            const statuses = requestsTo("/status").length;
+            choose("engine", "breeze");
+            await flush(10);
+            const refused = {value: field("engine").value, line: line(), order: order(),
+                             statuses: requestsTo("/status").length - statuses};
+            press("Dismiss", find(".mc-voice-box-status-line"));
+            report({refused, after: line()});
+        """, answers={"/engine": {"status": 409, "json": {"ok": False, "error": refusal}},
+                      "/status": {"json": status_with(jobs=[RUNNING])}})
+
+        refused = found["refused"]
+        assert refused["value"] == "vibevoice"
+        assert (refused["line"]["text"], refused["line"]["kind"]) == (refusal, "error")
+        assert refused["order"] == VIBEVOICE_ORDER
+        assert refused["statuses"] == 0
+        assert found["after"]["state"] == "job" and "Cancel" in found["after"]["buttons"]
+        assert found["state"]["working"]["engine"] == "vibevoice"
+
+    def test_while_the_switch_is_on_its_way_a_poll_does_not_put_the_select_back(self):
+        found = run(ENGINE + with_engine_records("""
+            await flush();
+            choose("engine", "breeze");
+            await flush();
+            await poll();
+            const during = field("engine").value;
+            answers["/status"] = {json: BREEZE_STATUS};
+            release("/engine");
+            await flush(10);
+            report({during, after: field("engine").value, order: order()});
+        """), held=["/engine"], answers={"/engine": ENGINE_CHANGED})
+
+        assert found["during"] == "breeze"
+        assert found["after"] == "breeze" and found["order"] == BREEZE_ORDER
+
+
+class TestAnEnginesFields:
+    def test_breezes_fields_are_drawn_from_the_status_head_seed_batch_tail(self):
+        found = run(ENGINE + """
+            await flush();
+            const describe = (key) => {
+                const node = field(key);
+                return [node.tagName, node.getAttribute("type"), node.getAttribute("min"), node.getAttribute("max"),
+                        node.getAttribute("step"), node.getAttribute("placeholder")];
+            };
+            report({order: order(),
+                    captions: all(".mc-voice-box-fields .mc-voice-box-field-label").map((node) => node.textContent),
+                    kinds: ["cfg_scale", "attention", "max_new_tokens", "line_gap_ms"].map(describe),
+                    sampling: [field("sampling").tagName, field("sampling").getAttribute("role"),
+                               field("sampling").getAttribute("aria-checked"),
+                               field("sampling").parentNode.className.split(" ")],
+                    values: ["cfg_scale", "attention", "max_new_tokens", "line_gap_ms", "temperature", "top_p"]
+                        .map((key) => field(key).value),
+                    hint: field("line_gap_ms").getAttribute("title"),
+                    hinted: all("*").filter((node) => node._text && node._text.indexOf("Silence") !== -1).length,
+                    models: choices("model_id"), model: field("model_id").value, batch: choices("batch")});
+        """, answers={"/status": {"json": breeze_status(engine=dict(BREEZE_STATUS["engine"], max_takes=2))}})
+
+        assert found["order"] == BREEZE_ORDER
+        assert found["captions"] == ["Engine", "Model", "Card", "CFG", "Attention", "Seed", "Batch",
+                                     "Max new tokens", "Line gap (ms)", "Temperature", "Top-p"]
+        assert found["kinds"] == [["INPUT", "number", "1", "8", "0.1", None],
+                                  ["SELECT", None, None, None, None, None],
+                                  ["INPUT", "text", None, None, None, "automatic"],
+                                  ["INPUT", "number", "0", "2000", "10", None]]
+        assert found["sampling"][:3] == ["BUTTON", "switch", "true"]
+        assert "mc-voice-box-field-wide" in found["sampling"][3]
+        assert found["values"] == ["4", "flash_attention_2", "", "150", "0.9", "1"]
+        # A hint is the field's tooltip and nothing on the page.
+        assert (found["hint"], found["hinted"]) == ("Silence between two lines", 0)
+        # The model the configuration names is VibeVoice's: Breeze shows its own.
+        assert (found["models"], found["model"]) == ([["breeze-tts-2", "Breeze TTS 2", False]], "breeze-tts-2")
+        assert found["batch"] == [["1", "1", False], ["2", "2", False]]
+
+    def test_a_switch_greys_the_fields_that_need_it_and_keeps_their_values(self):
+        found = run(ENGINE + """
+            await flush();
+            const look = () => ["temperature", "top_p"].map((key) => [field(key).value, field(key).disabled,
+                                                                       field(key).parentNode.getAttribute("data-disabled")]);
+            const on = look();
+            set("temperature", "1.3");
+            field("sampling").click();
+            const off = look();
+            report({on, off});
+        """, answers={"/status": {"json": BREEZE_STATUS}})
+
+        assert found["on"] == [["0.9", False, "false"], ["1", False, "false"]]
+        assert found["off"] == [["1.3", True, "true"], ["1", True, "true"]]
+        options = found["state"]["working"]["options"]["breeze"]
+        assert (options["sampling"], options["temperature"], options["top_p"]) == (False, 1.3, 1.0)
+
+    def test_an_unavailable_choice_is_disabled_and_still_selected_where_it_is_held(self):
+        found = run(ENGINE + """
+            await flush();
+            report({attention: choices("attention"), value: field("attention").value});
+        """, answers={"/status": {"json": BREEZE_STATUS}})
+
+        assert found["attention"] == [["flash_attention_2", "Flash attention 2 — not installed", True],
+                                      ["sdpa", "SDPA", False], ["eager", "Eager (upstream)", False]]
+        assert found["value"] == "flash_attention_2"
+
+    def test_the_fields_are_drawn_again_only_when_their_list_changes(self):
+        """A poll brings the same list: the same nodes. A choice that becomes
+        available changes the choices and no node. Another engine's list is
+        new nodes, in its order."""
+        installed = [dict(option, available=True, reason="") for option in BREEZE_ATTENTION]
+        found = run(ENGINE + with_engine_records("""
+            await flush();
+            const before = field("cfg_scale");
+            const engineSelect = field("engine");
+            await poll();
+            const polled = field("cfg_scale") === before;
+            answers["/status"] = {json: Object.assign({}, BREEZE_STATUS, {engine: Object.assign({},
+                BREEZE_STATUS.engine, {fields: FIELDS})})};
+            await poll();
+            const offered = {same: field("cfg_scale") === before, attention: choices("attention")};
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            await poll();
+            report({polled, offered, replaced: field("cfg_scale") !== before, order: order(),
+                    engineKept: field("engine") === engineSelect});
+        """).replace("FIELDS", json.dumps(breeze_fields(attention=installed))),
+            answers={"/status": {"json": BREEZE_STATUS}})
+
+        assert found["polled"] is True
+        assert found["offered"] == {"same": True, "attention": [["flash_attention_2", "Flash attention 2", False],
+                                                                ["sdpa", "SDPA", False],
+                                                                ["eager", "Eager (upstream)", False]]}
+        assert found["replaced"] is True and found["order"] == VIBEVOICE_ORDER
+        assert found["engineKept"] is True
+
+
+class TestSwitchingEngines:
+    def test_each_engine_keeps_its_options_and_save_sends_the_whole_map(self):
+        found = run(ENGINE + with_engine_records("""
+            await flush();
+            set("steps", "20");
+            answers["/status"] = {json: BREEZE_STATUS};
+            choose("engine", "breeze");
+            await flush(10);
+            const onBreeze = {order: order(), cfg: field("cfg_scale").value};
+            set("cfg_scale", "5.5");
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            choose("engine", "vibevoice");
+            await flush(10);
+            const back = {order: order(), steps: field("steps").value, save: saveLabel()};
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({onBreeze, back, saved: requestsTo("/configurations/save").map((r) => r.body),
+                    switched: requestsTo("/engine").map((r) => r.body)});
+        """))
+
+        assert found["onBreeze"] == {"order": BREEZE_ORDER, "cfg": "4"}
+        assert found["back"] == {"order": VIBEVOICE_ORDER, "steps": "20", "save": "Save — unsaved changes"}
+        assert found["switched"] == [{"engine": "breeze"}, {"engine": "vibevoice"}]
+        saved = found["saved"][0]
+        assert (saved["id"], saved["engine"]) == ("c1", "vibevoice")
+        assert saved["options"]["vibevoice"]["steps"] == 20
+        assert saved["options"]["breeze"] == dict(BREEZE_OPTIONS, cfg_scale=5.5)
+        assert saved["slots"] == {} and saved["speakers"] == {"1": "s1"}
+
+    def test_render_sends_the_configuration_for_the_engine_in_use(self):
+        """Breeze has no model by VibeVoice's id: it is shown as Breeze's own
+        and sent as "", the engine's default."""
+        found = run(ENGINE + """
+            await flush();
+            set("cfg_scale", "6");
+            press("Render");
+            await flush();
+            report({render: requestsTo("/render").map((r) => r.body), model: field("model_id").value});
+        """, answers={"/status": {"json": BREEZE_STATUS}})
+
+        body = found["render"][0]
+        assert body["configuration_id"] == "c1"
+        inline = body["configuration"]
+        assert inline["engine"] == "breeze"
+        assert inline["options"]["breeze"]["cfg_scale"] == 6
+        assert inline["options"]["vibevoice"] == VIBEVOICE_OPTIONS
+        assert (inline["model_id"], found["model"]) == ("", "breeze-tts-2")
+        assert found["state"]["working"]["model_id"] == "vibevoice-7b"
+
+    def test_a_configuration_saved_for_another_engine_says_so_once_when_chosen(self):
+        both = configuration(id="c2", name="Both", engines_saved=["vibevoice", "breeze"])
+        never = configuration(id="c3", name="Never", engines_saved=[])
+        found = run(ENGINE + """
+            await flush();
+            const seen = [];
+            const pick = (id) => {
+                const select = find(".mc-voice-box-configuration-select");
+                select.value = id;
+                select.dispatchEvent({type: "change"});
+                seen.push([id, line().state, line().text, line().kind]);
+            };
+            seen.push(["boot", line().state, line().text, line().kind]);
+            pick("c3");
+            pick("c1");
+            advance(5000);
+            await poll();
+            seen.push(["later", line().state, line().text, line().kind]);
+            pick("c2");
+            report({seen});
+        """, answers={"/status": {"json": BREEZE_STATUS},
+                      "/configurations": {"json": {"ok": True, "configurations": [CONFIGURATION, both, never]}},
+                      "/pipelines": {"json": {"ok": True, "pipelines": [dict(PIPELINE, configuration_id="c2")]}}})
+
+        note = "Saved for VibeVoice — Breeze TTS 2's settings start at their defaults."
+        assert found["seen"] == [["boot", "ready", "Ready", "info"],
+                                 ["c3", "ready", "Ready", "info"],
+                                 ["c1", "message", note, "info"],
+                                 ["later", "ready", "Ready", "info"],
+                                 ["c2", "ready", "Ready", "info"]]
+
+
+class TestSpeakerSlotsUnderAnEngine:
+    PARTS = """
+        const parts = () => all(".mc-voice-box-speaker").map((node) =>
+            node.children.map((child) => child.className.split(" ").pop()));
+    """
+
+    def test_vibevoices_slots_are_the_four_parts_they_were(self):
+        found = run(ENGINE + self.PARTS + """
+            await flush();
+            report({parts: parts(), extras: all(".mc-voice-box-speaker-direction, .mc-voice-box-speaker-design, "
+                                                + ".mc-voice-box-design").length});
+        """)
+
+        assert found["parts"] == [["mc-voice-box-speaker-label", "mc-voice-box-speaker-wave",
+                                   "mc-voice-box-speaker-title", "mc-voice-box-speaker-clear"]] * 4
+        assert found["extras"] == 0
+        assert found["state"]["designs"] == {}
+
+    def test_an_engine_with_directions_and_design_adds_them_and_takes_them_away(self):
+        found = run(ENGINE + self.PARTS + with_engine_records("""
+            await flush();
+            const breeze = parts();
+            const direction = slot(1).querySelector(".mc-voice-box-speaker-direction");
+            const wand = slot(1).querySelector(".mc-voice-box-speaker-design");
+            const looks = {direction: [direction.getAttribute("type"), direction.getAttribute("placeholder"),
+                                       direction.getAttribute("title")],
+                           wand: [wand.getAttribute("aria-label"), wand.getAttribute("data-icon"),
+                                  wand.getAttribute("aria-expanded"), wand.textContent],
+                           panel: slot(1).querySelector(".mc-voice-box-design").hidden};
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            await poll();
+            report({breeze, looks, vibevoice: parts()});
+        """), answers={"/status": {"json": BREEZE_STATUS}})
+
+        assert found["breeze"] == [["mc-voice-box-speaker-label", "mc-voice-box-speaker-wave",
+                                    "mc-voice-box-speaker-title", "mc-voice-box-speaker-design",
+                                    "mc-voice-box-speaker-clear", "mc-voice-box-speaker-direction",
+                                    "mc-voice-box-design"]] * 4
+        assert found["looks"] == {
+            "direction": ["text", "Direction",
+                          "A standing direction for every line this speaker says, e.g. calm, slow"],
+            "wand": ["Design a voice for speaker 1", "wand", "false", ""], "panel": True}
+        assert found["vibevoice"] == [["mc-voice-box-speaker-label", "mc-voice-box-speaker-wave",
+                                       "mc-voice-box-speaker-title", "mc-voice-box-speaker-clear"]] * 4
+
+    def test_a_direction_is_the_slots_standing_instruction(self):
+        found = run(ENGINE + """
+            await flush();
+            type(slot(2).querySelector(".mc-voice-box-speaker-direction"), "whispering, close");
+            const dirty = saveLabel();
+            press("Render");
+            await flush();
+            find(".mc-voice-box-configuration-save").click();
+            await flush();
+            report({dirty, render: requestsTo("/render").map((r) => r.body),
+                    saved: requestsTo("/configurations/save").map((r) => r.body)});
+        """, answers={"/status": {"json": BREEZE_STATUS}})
+
+        assert found["dirty"] == "Save — unsaved changes"
+        slots = {"2": {"instruction": "whispering, close", "description": ""}}
+        assert found["render"][0]["configuration"]["slots"] == slots
+        assert found["saved"][0]["slots"] == slots
+
+    def test_a_voice_is_designed_played_redrawn_and_kept_in_its_slot(self):
+        kept = dict(TRANSCRIBED, id="s9", title="Speaker 2 voice", transcript="Hello, this is my voice.",
+                    transcript_source="design",
+                    design={"description": "A warm, low voice, close to the microphone.", "seed": 124,
+                            "cfg_scale": 4.0, "text": "Hello, this is my voice."})
+        queued = dict(DESIGN, phase="queued", started=None, elapsed=None)
+        found = run(ENGINE + """
+            await flush();
+            const statusWith = (jobs) => ({json: Object.assign({}, answers["/status"].json, {jobs})});
+            const shownIn = (node, selector) => shown(node.querySelector(selector));
+            press("Design a voice for speaker 2", slot(2));
+            const panel = slot(2).querySelector(".mc-voice-box-design");
+            const opened = {panel: shown(panel), expanded: slot(2).querySelector(".mc-voice-box-speaker-design")
+                                .getAttribute("aria-expanded"),
+                            design: [buttonNamed("Design", slot(2)).disabled,
+                                     buttonNamed("Design", slot(2)).getAttribute("title")],
+                            take: [shownIn(panel, ".mc-voice-box-transport"),
+                                   shownIn(panel, ".mc-voice-box-design-redraw"),
+                                   shownIn(panel, ".mc-voice-box-design-keep")]};
+            type(slot(2).querySelector(".mc-voice-box-design-description"),
+                 "A warm, low voice, close to the microphone.");
+            type(slot(2).querySelector(".mc-voice-box-design-text"), "Hello, this is my voice.");
+            answers["/status"] = statusWith([DESIGN]);
+            press("Design", slot(2));
+            await flush(10);
+            const designing = {line: line(), timers: pendingDelays().filter((ms) => ms === 1000).length};
+            answers["/status"] = statusWith([DONE1]);
+            advance(1000);
+            await flush(10);
+            const done = {take: [shownIn(panel, ".mc-voice-box-transport"),
+                                 shownIn(panel, ".mc-voice-box-design-redraw"),
+                                 shownIn(panel, ".mc-voice-box-design-keep")],
+                          faces: faces(panel).map((face) => face.label), line: line().text};
+            press("Play", slot(2));
+            await flush();
+            const audio = panel.querySelector("audio");
+            const played = {playing: !audio.paused, src: audio.src, face: faces(panel)[0].label,
+                            active: globalThis.mcVoiceBox.state().activePlayer};
+            answers["/status"] = statusWith([DONE1, Object.assign({}, DESIGN, {id: "d2"})]);
+            press("Redraw", slot(2));
+            await flush(10);
+            const redrawn = {paused: audio.paused, active: globalThis.mcVoiceBox.state().activePlayer};
+            answers["/status"] = statusWith([DONE1, DONE2]);
+            advance(1000);
+            await flush(10);
+            press("Keep", slot(2));
+            await flush(10);
+            report({opened, designing, done, played, redrawn,
+                    designs: requestsTo("/design").map(plain), audio: requestsTo("/design/audio").map(plain),
+                    keeps: requestsTo("/design/keep").map((r) => r.body), samples: requestsTo("/samples").length,
+                    after: {panel: shown(panel), title: slot(2).querySelector(".mc-voice-box-speaker-title").textContent,
+                            line: line().text, save: saveLabel(),
+                            expanded: slot(2).querySelector(".mc-voice-box-speaker-design").getAttribute("aria-expanded")}});
+        """.replace("DONE1", json.dumps(designed("d1", 123))).replace("DONE2", json.dumps(designed("d2", 124)))
+           .replace("DESIGN", json.dumps(DESIGN)),
+            answers={"/status": {"json": BREEZE_STATUS},
+                     "/design": {"sequence": [{"json": {"ok": True, "job": queued}},
+                                              {"json": {"ok": True, "job": dict(queued, id="d2")}}]},
+                     "/design/audio": {"bytes": 2044},
+                     "/design/keep": {"json": {"ok": True, "sample": kept}},
+                     "/samples": {"sequence": [{"json": {"ok": True, "samples": [SAMPLE]}},
+                                               {"json": {"ok": True, "samples": [SAMPLE, kept]}}]}})
+
+        assert found["opened"] == {"panel": True, "expanded": "true",
+                                   "design": [True, "Describe the voice first."], "take": [False, False, False]}
+        assert found["designing"] == {"line": {"text": "Designing · Speaker 2 · 3.1 s", "state": "job",
+                                               "kind": "info", "buttons": ["Cancel"]}, "timers": 2}
+        first = found["designs"][0]
+        assert first["body"] == {"description": "A warm, low voice, close to the microphone.",
+                                 "text": "Hello, this is my voice.", "seed": None, "configuration_id": "c1",
+                                 "configuration": first["body"]["configuration"]}
+        assert first["body"]["configuration"]["slots"]["2"]["description"].startswith("A warm, low voice")
+        assert first["headers"]["x-model-chain-voice"] == TOKEN and first["signal"] is True
+        assert found["done"] == {"take": [True, True, True], "faces": ["Play", "Play from the start", "Stop"],
+                                 "line": "Ready"}
+        assert [(r["method"], r["url"].split("/voice-box")[1]) for r in found["audio"]] == [
+            ("GET", "/design/audio?id=d1")]
+        assert found["audio"][0]["headers"]["x-model-chain-voice"] == TOKEN
+        assert found["played"] == {"playing": True, "src": "blob:test-1", "face": "Pause",
+                                   "active": {"kind": "design", "id": "2"}}
+        assert {"owner": "voice-box", "kind": "playback"} in found["focusEvents"]
+        # Redraw: the next seed after the take's, and the take before stops.
+        assert found["designs"][1]["body"]["seed"] == 124
+        assert found["redrawn"] == {"paused": True, "active": None}
+        assert found["keeps"] == [{"id": "d2", "title": "Speaker 2 voice"}]
+        assert found["samples"] == 2
+        assert found["state"]["working"]["speakers"] == {"1": "s1", "2": "s9"}
+        assert found["after"] == {"panel": False, "title": "Speaker 2 voice", "line": "Kept as a sample.",
+                                  "save": "Save — unsaved changes", "expanded": "false"}
+
+    def test_design_says_why_it_cannot_be_pressed(self):
+        scenario = ENGINE + """
+            await flush();
+            press("Design a voice for speaker 1", slot(1));
+            type(slot(1).querySelector(".mc-voice-box-design-description"), "A bright young voice.");
+            const design = buttonNamed("Design", slot(1));
+            report({disabled: design.disabled, title: design.getAttribute("title")});
+        """
+        ready = run(scenario, answers={"/status": {"json": BREEZE_STATUS}})
+        missing = run(scenario, answers={"/status": {"json": breeze_status(engine=dict(
+            BREEZE_STATUS["engine"], ready=False, message="Breeze TTS 2 is not installed."))}})
+        cardless = run(scenario, answers={
+            "/status": {"json": breeze_status(settings=dict(BREEZE_STATUS["settings"], card_uuid=""),
+                                              engine_settings=dict(BREEZE_STATUS["engine_settings"], card_uuid=""),
+                                              cards=[])},
+            "/configurations": {"json": {"ok": True, "configurations": [configuration(card_uuid="")]}}})
+
+        assert (ready["disabled"], ready["title"]) == (False, "Design a voice from the description")
+        assert (missing["disabled"], missing["title"]) == (True, "Breeze TTS 2 is not installed.")
+        assert (cardless["disabled"], cardless["title"]) == (True, "Choose the card Breeze TTS 2 renders on.")
+
+    def test_a_design_on_its_card_can_be_cancelled_and_a_failed_one_says_so(self):
+        foreign = run("""
+            await flush();
+            const shown = line();
+            press("Cancel", find(".mc-voice-box-status-line"));
+            await flush();
+            report({shown, cancel: requestsTo("/jobs/cancel").map((r) => r.body)});
+        """, answers={"/status": {"json": breeze_status(jobs=[DESIGN])}})
+        failed = run(ENGINE + """
+            await flush();
+            press("Design a voice for speaker 1", slot(1));
+            type(slot(1).querySelector(".mc-voice-box-design-description"), "A bright young voice.");
+            answers["/status"] = {json: Object.assign({}, answers["/status"].json, {jobs: [FAILED_DESIGN]})};
+            press("Design", slot(1));
+            await flush(10);
+            report({line: line()});
+        """.replace("FAILED_DESIGN", json.dumps(dict(DESIGN, phase="failed", live=False,
+                                                     warning="The card could not be made ready."))),
+            answers={"/status": {"json": BREEZE_STATUS}, "/design": {"json": {"ok": True, "job": DESIGN}}})
+
+        assert foreign["shown"]["text"] == "Designing · a voice · 3.1 s"
+        assert foreign["cancel"] == [{"id": "d1"}]
+        assert (failed["line"]["text"], failed["line"]["kind"]) == (
+            "Last design failed: The card could not be made ready.", "error")
+
+    def test_a_slot_whose_sample_has_no_transcript_says_so(self):
+        scenario = ENGINE + """
+            await flush();
+            report({mark: slot(1).getAttribute("data-transcript"),
+                    title: slot(1).querySelector(".mc-voice-box-speaker-title").textContent,
+                    other: slot(2).getAttribute("data-transcript")});
+        """
+        breeze = run(scenario, answers={"/status": {"json": BREEZE_STATUS},
+                                        "/samples": {"json": {"ok": True, "samples": [SAMPLE, TRANSCRIBED]}},
+                                        "/configurations": {"json": {"ok": True, "configurations": [
+                                            configuration(speakers={"1": "s1", "2": "s2"})]}}})
+        vibevoice = run(scenario)
+
+        assert (breeze["mark"], breeze["title"], breeze["other"]) == ("missing", "Ada · needs a transcript", None)
+        assert (vibevoice["mark"], vibevoice["title"]) == (None, "Ada")
+
+
+class TestTranscripts:
+    SAMPLES = {"/samples": {"json": {"ok": True, "samples": [SAMPLE, TRANSCRIBED]}}}
+
+    def test_an_engine_that_clones_from_exact_words_gets_a_transcript_under_every_sample(self):
+        scenario = ENGINE + """
+            await flush();
+            report({rows: all(".mc-voice-box-sample").map((node) => {
+                const editor = node.querySelector(".mc-voice-box-sample-transcript");
+                return {mark: node.getAttribute("data-transcript"),
+                        meta: node.querySelector(".mc-voice-box-sample-meta").textContent,
+                        box: editor ? [editor.tagName, editor.getAttribute("rows"), editor.getAttribute("placeholder"),
+                                       editor.value] : null,
+                        buttons: labels(node).filter((label) => label.indexOf("ranscri") !== -1)};
+            })});
+        """
+        breeze = run(scenario, answers=dict(self.SAMPLES, **{"/status": {"json": BREEZE_STATUS}}))
+        vibevoice = run(scenario, answers=self.SAMPLES)
+
+        placeholder = "Transcript — the exact words"
+        assert breeze["rows"] == [
+            {"mark": "missing", "meta": "8.0 s · needs a transcript",
+             "box": ["TEXTAREA", "2", placeholder, ""], "buttons": ["Transcribe with Whisper"]},
+            {"mark": None, "meta": "8.0 s", "box": ["TEXTAREA", "2", placeholder, "Hello there, this is Bo."],
+             "buttons": ["Transcribe with Whisper"]}]
+        assert vibevoice["rows"] == [{"mark": None, "meta": "8.0 s", "box": None, "buttons": []}] * 2
+
+    def test_transcribe_puts_whispers_reading_in_the_box_unsaved(self):
+        found = run(ENGINE + """
+            await flush();
+            press("Transcribe with Whisper", row("s1"));
+            await flush();
+            const waiting = pendingDelays().filter((ms) => ms === 120000).length;
+            release("/samples/transcribe");
+            await flush();
+            const save = row("s1").querySelector(".mc-voice-box-sample-transcript-save");
+            report({waiting, posted: requestsTo("/samples/transcribe").map(plain), value: box("s1").value,
+                    save: [shown(save), save.getAttribute("data-dirty")], line: line(),
+                    saves: requestsTo("/samples/transcript").length});
+        """, held=["/samples/transcribe"],
+            answers={"/status": {"json": BREEZE_STATUS},
+                     "/samples/transcribe": {"json": {"ok": True, "text": "Hello, it's Ada.", "seconds": 2.1}}})
+
+        assert found["waiting"] == 1, "two minutes for Whisper, as for audio"
+        assert [(r["method"], r["body"]) for r in found["posted"]] == [("POST", {"id": "s1"})]
+        assert found["posted"][0]["headers"]["x-model-chain-voice"] == TOKEN
+        assert found["value"] == "Hello, it's Ada."
+        assert found["save"] == [True, "true"]
+        assert (found["line"]["text"], found["line"]["kind"]) == (
+            "Whisper's transcript is in the box — check it, then save.", "info")
+        assert found["saves"] == 0
+        assert found["state"]["transcripts"] == {"s1": "Hello, it's Ada."}
+
+    def test_save_by_its_button_or_by_ctrl_enter_posts_the_transcript(self):
+        found = run(ENGINE + """
+            await flush();
+            const save = () => row("s1").querySelector(".mc-voice-box-sample-transcript-save");
+            const saved = () => shown(save());
+            const before = saved();
+            type(box("s1"), "Hello  there");
+            const typed = {save: saved(), dirty: save().getAttribute("data-dirty"), label: save().getAttribute("aria-label")};
+            press("Save the transcript", row("s1"));
+            await flush();
+            const after = {save: saved(), mark: row("s1").getAttribute("data-transcript"),
+                           meta: row("s1").querySelector(".mc-voice-box-sample-meta").textContent,
+                           value: box("s1").value, line: line().text};
+            type(box("s1"), "Hello there again.");
+            box("s1").dispatchEvent({type: "keydown", key: "Enter", ctrlKey: true, preventDefault() {}});
+            await flush();
+            const plainEnter = requestsTo("/samples/transcript").length;
+            type(box("s1"), "Hello there again, and more.");
+            box("s1").dispatchEvent({type: "keydown", key: "Enter", preventDefault() {}});
+            await flush();
+            report({before, typed, after, plainEnter, bodies: requestsTo("/samples/transcript").map((r) => r.body)});
+        """, answers={"/status": {"json": BREEZE_STATUS},
+                      "/samples/transcript": {"sequence": [
+                          {"json": {"ok": True, "sample": dict(SAMPLE, transcript="Hello there", transcript_source="typed")}},
+                          {"json": {"ok": True, "sample": dict(SAMPLE, transcript="Hello there again.",
+                                                               transcript_source="typed")}}]}})
+
+        assert found["before"] is False
+        assert found["typed"] == {"save": True, "dirty": "true", "label": "Save the transcript"}
+        assert found["after"] == {"save": False, "mark": None, "meta": "8.0 s", "value": "Hello there",
+                                  "line": "Transcript saved."}
+        assert found["plainEnter"] == 2
+        assert found["bodies"] == [{"id": "s1", "transcript": "Hello  there"},
+                                   {"id": "s1", "transcript": "Hello there again."}]
+
+    def test_an_unsaved_transcript_survives_a_poll_and_every_redraw_of_the_library(self):
+        """The words are kept by sample until saved; the box that had the
+        focus has it again after the list is rebuilt under it."""
+        found = run(ENGINE + """
+            await flush();
+            const look = () => ({value: box("s1").value,
+                                 save: shown(row("s1").querySelector(".mc-voice-box-sample-transcript-save"))});
+            box("s1").focus();
+            type(box("s1"), "Half typed");
+            await poll();
+            const polled = look();
+            press("2", row("s1"));
+            const redrawn = Object.assign(look(), {focused: document.activeElement === box("s1")});
+            press("Delete", row("s2"));
+            await flush();
+            report({polled, redrawn, refreshed: look(), rows: all(".mc-voice-box-sample").length});
+        """, answers={"/status": {"json": BREEZE_STATUS},
+                      "/samples": {"sequence": [{"json": {"ok": True, "samples": [SAMPLE, TRANSCRIBED]}},
+                                                {"json": {"ok": True, "samples": [SAMPLE]}}]}})
+
+        assert found["polled"] == {"value": "Half typed", "save": True}
+        assert found["redrawn"] == {"value": "Half typed", "save": True, "focused": True}
+        assert found["refreshed"] == {"value": "Half typed", "save": True}
+        assert found["rows"] == 1
+
+    def test_transcribe_is_disabled_with_the_reason_while_speech_recognition_is_missing(self):
+        reason = "Speech recognition is not installed: install Whisper in the Voice Chat tab."
+        found = run(ENGINE + with_engine_records("""
+            await flush();
+            const button = row("s1").querySelector(".mc-voice-box-sample-transcribe");
+            const missing = [button.disabled, button.getAttribute("title"), button.getAttribute("aria-label")];
+            answers["/status"] = {json: BREEZE_STATUS};
+            await poll();
+            report({missing, same: row("s1").querySelector(".mc-voice-box-sample-transcribe") === button,
+                    installed: [button.disabled, button.getAttribute("title")]});
+        """), answers={"/status": {"json": breeze_status(stt={"available": False, "message": reason})}})
+
+        assert found["missing"] == [True, reason, "Transcribe with Whisper"]
+        assert found["same"] is True
+        assert found["installed"] == [False, "Transcribe with Whisper"]
+
+    def test_a_designed_samples_title_has_its_description_for_a_tooltip(self):
+        voice = dict(TRANSCRIBED, id="s9", title="Speaker 2 voice", transcript_source="design",
+                     design={"description": "A warm, low voice.", "seed": 4, "cfg_scale": 4.0, "text": "Hi."})
+        scenario = """
+            await flush();
+            report({titles: all(".mc-voice-box-sample-title").map((node) => node.getAttribute("title"))});
+        """
+        breeze = run(scenario, answers={"/status": {"json": BREEZE_STATUS},
+                                        "/samples": {"json": {"ok": True, "samples": [SAMPLE, voice]}}})
+        vibevoice = run(scenario, answers={"/samples": {"json": {"ok": True, "samples": [SAMPLE, voice]}}})
+
+        assert breeze["titles"] == ["Double-click to rename", "A warm, low voice."]
+        assert vibevoice["titles"] == ["Double-click to rename", "Double-click to rename"]
+
+
+class TestThePromptUnderAnEngine:
+    def test_the_placeholder_shows_directions_and_events_where_the_engine_performs_them(self):
+        scenario = "await flush(); report({example: find('.mc-voice-box-prompt').getAttribute('placeholder')});"
+        breeze = run(scenario, answers={"/status": {"json": BREEZE_STATUS}})
+        vibevoice = run(scenario)
+
+        assert breeze["example"] == ("Speaker 1: (laugh) Welcome back to the show.\n"
+                                     "Speaker 2 (warmly): Thanks for having me.\n[pause]\nSpeaker 1: Today…")
+        assert vibevoice["example"] == ("Speaker 1: Welcome back to the show.\nSpeaker 2: Thanks for having me.\n"
+                                        "[pause]\nSpeaker 1: Today…")
+
+    def test_an_engine_that_performs_no_events_says_it_reads_the_first_as_words(self):
+        scenario = """
+            await flush();
+            const said = [];
+            for (const text of TEXTS) {
+                type(find(".mc-voice-box-prompt"), text);
+                said.push(find(".mc-voice-box-prompt-summary").textContent);
+            }
+            report({said});
+        """.replace("TEXTS", json.dumps(["Speaker 1: Hello. (sigh) Then [笑] and (laugh).",
+                                         "Speaker 1: Well [叹气] fine.", "Speaker 1: (Laugh) out loud.",
+                                         "Speaker 1: Nothing here."]))
+        vibevoice = run(scenario)
+        breeze = run(scenario, answers={"/status": {"json": BREEZE_STATUS}})
+
+        assert vibevoice["said"] == ["1 speaker, 0 pauses, ~6 words · VibeVoice reads (sigh) as words",
+                                     "1 speaker, 0 pauses, ~3 words · VibeVoice reads [叹气] as words",
+                                     "1 speaker, 0 pauses, ~3 words · VibeVoice reads (Laugh) as words",
+                                     "1 speaker, 0 pauses, ~2 words"]
+        assert breeze["said"] == ["1 speaker, 0 pauses, ~6 words", "1 speaker, 0 pauses, ~3 words",
+                                  "1 speaker, 0 pauses, ~3 words", "1 speaker, 0 pauses, ~2 words"]
+
+    def test_a_direction_is_the_lines_and_not_its_words(self):
+        """`Speaker 2 (warmly): ...` starts Speaker 2's line, under either
+        engine: VibeVoice drops the direction, so the script moves between
+        engines as it is."""
+        found = run("""
+            await flush();
+            const s = globalThis.mcVoiceBox.summarize;
+            type(find(".mc-voice-box-prompt"), "Speaker 2 (whispering): hi");
+            report({two: s("Speaker 1: Hi.\\nSpeaker 2 (warmly): Thanks a lot."), bracket: s("[3] (softly): hey you"),
+                    why: find(".mc-voice-box-render").getAttribute("title")});
+        """)
+
+        assert found["two"] == "2 speakers, 0 pauses, ~4 words"
+        assert found["bracket"] == "1 speaker, 0 pauses, ~2 words"
+        assert found["why"] == "Speaker 2 has no sample."
+
+
+class TestReuseAcrossEngines:
+    def test_a_render_of_another_engine_brings_back_what_the_engines_share_and_says_so(self):
+        """A VibeVoice render reused under Breeze: the seed, the card, the batch
+        and the speakers come back, and the prompt; Breeze's own settings stay
+        as they were."""
+        found = run(ENGINE + TestReuseSettings.REUSE + """
+            report({line: line(), cfg: field("cfg_scale").value, prompt: find(".mc-voice-box-prompt").value});
+        """, answers={"/status": {"json": BREEZE_STATUS},
+                      "/configurations": {"json": {"ok": True, "configurations": [
+                          configuration(seed=5, card_uuid="GPU-b", speakers={}, breeze={"cfg_scale": 6.0})]}}})
+
+        working = found["state"]["working"]
+        assert (working["seed"], working["card_uuid"], working["batch"], working["speakers"]) == (
+            42, "GPU-a", 1, {"1": "s1"})
+        assert working["options"]["breeze"] == dict(BREEZE_OPTIONS, cfg_scale=6.0) and found["cfg"] == "6"
+        assert (found["line"]["text"], found["line"]["kind"]) == (
+            "Made with VibeVoice — its own settings were not restored.", "info")
+        assert found["prompt"] == "Speaker 1: Hello there."
+
+    def test_a_breeze_render_under_vibevoice_leaves_vibevoices_settings(self):
+        render = {"engine": "breeze", "model_id": "breeze-tts-2", "card": "GPU-b", "seed": 9,
+                  "options": dict(BREEZE_OPTIONS, cfg_scale=7.0),
+                  "speakers": [{"n": 1, "sample_id": "s1", "title": "Ada"}], "prompt": "Speaker 1: Hi.",
+                  "configuration": configuration(seed=9, card_uuid="GPU-b", breeze={"cfg_scale": 7.0},
+                                                 steps=30, engine="breeze")}
+        found = run(TestReuseSettings.REUSE + "report({line: line()});",
+                    answers={"/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, render=render)]}}})
+
+        assert vibe(found) == VIBEVOICE_OPTIONS
+        assert (found["state"]["working"]["seed"], found["state"]["working"]["card_uuid"]) == (9, "GPU-b")
+        assert found["line"]["text"] == "Made with Breeze TTS 2 — its own settings were not restored."
+
+    def test_on_the_engine_it_was_made_with_its_options_and_slots_come_back(self):
+        options = {"cfg_scale": 6.5, "attention": "sdpa", "max_new_tokens": 900, "line_gap_ms": 400,
+                   "sampling": False, "temperature": 0.7, "top_p": 0.8}
+        slots = {"1": {"instruction": "calm, slow", "description": ""}}
+        render = {"engine": "breeze", "model_id": "breeze-tts-2", "card": "GPU-a", "seed": 7, "options": options,
+                  "speakers": [{"n": 1, "sample_id": "s1", "title": "Ada"}], "prompt": "Speaker 1: Hi.",
+                  "configuration": configuration(seed=7, batch=2, slots=slots, breeze=options, engine="breeze",
+                                                 engines_saved=["breeze"])}
+        found = run(ENGINE + TestReuseSettings.REUSE + """
+            report({line: line(), values: ["cfg_scale", "attention", "max_new_tokens", "line_gap_ms", "temperature",
+                                           "top_p", "batch"].map((key) => field(key).value),
+                    direction: slot(1).querySelector(".mc-voice-box-speaker-direction").value});
+        """, answers={"/status": {"json": BREEZE_STATUS},
+                      "/outputs": {"json": {"ok": True, "outputs": [dict(OUTPUT, name="Breezy", render=render)]}}})
+
+        working = found["state"]["working"]
+        assert working["options"]["breeze"] == options
+        assert (working["seed"], working["batch"], working["slots"]) == (7, 2, slots)
+        assert found["values"] == ["6.5", "sdpa", "900", "400", "0.7", "0.8", "2"]
+        assert found["direction"] == "calm, slow"
+        assert found["line"]["text"] == ("Loaded the prompt and settings of “Breezy”; "
+                                         "save the configuration to keep them.")
+
+
+class TestTheEnginesNameInItsWords:
+    """Install, Keep warm, Unload and the status line say the engine's name,
+    from the status: Breeze TTS 2's under Breeze, and under VibeVoice exactly
+    what they said before there was a choice."""
+
+    WORDS = """
+        await flush();
+        const words = {};
+        const base = answers["/status"].json;
+        const answer = (changes) => { answers["/status"] = {json: Object.assign({}, base, changes)}; };
+        const install = find(".mc-voice-box-install");
+        const warm = find(".mc-voice-box-keep-warm");
+        words.keepWarm = [warm.getAttribute("aria-label"), warm.getAttribute("title")];
+        answer({engine: Object.assign({}, base.engine, {ready: false, message: "", download_bytes: 4000000000})});
+        await poll();
+        words.install = [install.textContent, install.getAttribute("aria-label"), install.getAttribute("title"),
+                         find(".mc-voice-box-render").getAttribute("title")];
+        answer({progress: {running: true, text: "", fraction: 0, failed: false}});
+        await poll();
+        words.installing = line().text;
+        answer({runtime: RUNTIME});
+        await poll();
+        const unload = find(".mc-voice-box-unload");
+        words.warm = [line().text, unload.getAttribute("aria-label"),
+                      find(".mc-voice-box-status").getAttribute("title").split("\\n")[1]];
+        press("Unload", find(".mc-voice-box-status-line"));
+        await flush();
+        words.unloaded = line().text;
+        press("Dismiss", find(".mc-voice-box-status-line"));
+        answer({jobs: [LOADING]});
+        await poll();
+        words.loading = line().text;
+        answer({settings: Object.assign({}, base.settings, {card_uuid: ""})});
+        working().card_uuid = "";
+        await poll();
+        words.card = find(".mc-voice-box-render").getAttribute("title");
+        report({words});
+    """
+
+    @classmethod
+    def words(cls, status: dict) -> dict:
+        loading = dict(RUNNING, phase="loading", elapsed=3.0, progress={})
+        scenario = (ENGINE + cls.WORDS).replace("RUNTIME", json.dumps(WARM)).replace("LOADING", json.dumps(loading))
+        return run(scenario, answers={"/status": {"json": status}})["words"]
+
+    def test_breeze_says_breeze_tts_2(self):
+        words = self.words(BREEZE_STATUS)
+
+        assert words == {
+            "keepWarm": ["Keep Breeze TTS 2 warm between renders"] * 2,
+            "install": ["Install Breeze TTS 2 (4.0 GB)", "Install the Breeze TTS 2 runtime and model",
+                        "Install the Breeze TTS 2 runtime and model", "Breeze TTS 2 is not installed."],
+            "installing": "Installing Breeze TTS 2…",
+            "warm": ["Breeze TTS 2 warm on NVIDIA GeForce RTX 3090",
+                     "Unload Breeze TTS 2 from NVIDIA GeForce RTX 3090",
+                     "Breeze TTS 2 loaded on NVIDIA GeForce RTX 3090 (19.3 GB)"],
+            "unloaded": "Breeze TTS 2 was unloaded from NVIDIA GeForce RTX 3090.",
+            "loading": "Loading Breeze TTS 2 · “Trailer 3” · 0:03",
+            "card": "Choose the card Breeze TTS 2 renders on.",
+        }
+
+    def test_vibevoice_says_vibevoice_as_it_always_has(self):
+        words = self.words(STATUS)
+
+        assert words == {
+            "keepWarm": ["Keep VibeVoice warm between renders"] * 2,
+            "install": ["Install VibeVoice (4.0 GB)", "Install the VibeVoice runtime and model",
+                        "Install the VibeVoice runtime and model", "VibeVoice is not installed."],
+            "installing": "Installing VibeVoice…",
+            "warm": ["VibeVoice warm on NVIDIA GeForce RTX 3090", "Unload VibeVoice from NVIDIA GeForce RTX 3090",
+                     "VibeVoice loaded on NVIDIA GeForce RTX 3090 (19.3 GB)"],
+            "unloaded": "VibeVoice was unloaded from NVIDIA GeForce RTX 3090.",
+            "loading": "Loading VibeVoice · “Trailer 3” · 0:03",
+            "card": "Choose the card VibeVoice renders on.",
+        }
+
+    def test_a_breeze_render_says_which_take_and_which_line_it_is_on(self):
+        rendering = dict(RUNNING, batch=2, engine="breeze",
+                         progress={"section": 1, "sections": 1, "seconds": 4.2, "line": 3, "lines": 5,
+                                   "take": 1, "takes": 2})
+        found = run("await flush(); report({line: line()});",
+                    answers={"/status": {"json": breeze_status(jobs=[rendering])}})
+
+        assert found["line"]["text"] == "Rendering “Trailer 3” · 2 takes · take 1 of 2 · line 3 of 5 · 0:42"
+
+
+FAST_PATH_TITLE = ("Breeze's CUDA-graph fast path: slower first line after a load, faster after; "
+                   "about 7 GB more of the card while warm. Takes effect on the next load.")
+
+
+class TestFastPath:
+    """Breeze's fast path: a switch beside Keep warm, saved at once into the
+    engine's own settings, and there only while those settings have the key --
+    VibeVoice's have none, so its page is as it was and it is never sent one."""
+
+    HANDS = TestSwitches.LOOK + """
+        const fast = () => find(".mc-voice-box-fast-path");
+        const place = () => {
+            const node = fast(), warm = find(".mc-voice-box-keep-warm");
+            return {together: node.parentNode === warm.parentNode,
+                    after: node.parentNode.children.indexOf(node) - warm.parentNode.children.indexOf(warm)};
+        };
+        const hiddenOf = (node) => [!!node.hidden, node.hasAttribute("hidden")];
+    """
+
+    @staticmethod
+    def breeze_settings(**changes) -> dict:
+        return {"json": {"ok": True, "settings": BREEZE_STATUS["settings"],
+                         "engine_settings": dict(BREEZE_STATUS["engine_settings"], **changes)}}
+
+    def test_it_is_beside_keep_warm_under_breeze_and_a_press_sends_only_its_value(self):
+        found = run(self.HANDS + with_engine_records("""
+            await flush();
+            const before = Object.assign(look(fast()), {hidden: hiddenOf(fast())}, place());
+            fast().click();
+            await flush();
+            const on = [look(fast()).checked, look(fast()).knob];
+            fast().click();
+            await flush();
+            const off = [look(fast()).checked, look(fast()).knob];
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            await poll();
+            report({before, on, off, vibevoice: hiddenOf(fast()),
+                    bodies: requestsTo("/settings").map((r) => r.body)});
+        """), answers={"/status": {"json": BREEZE_STATUS},
+                       "/settings": {"sequence": [self.breeze_settings(fast_path=True),
+                                                  self.breeze_settings(fast_path=False)]}})
+
+        assert found["before"] == {"role": "switch", "checked": "false", "knob": "7", "text": "Fast path",
+                                   "label": None, "title": FAST_PATH_TITLE, "tag": "BUTTON",
+                                   "hidden": [False, False], "together": True, "after": 1}
+        assert found["on"] == ["true", "17"]
+        assert found["off"] == ["false", "7"]
+        assert found["bodies"] == [{"fast_path": True}, {"fast_path": False}]
+        assert found["vibevoice"] == [True, True]
+
+    def test_under_vibevoice_it_is_hidden_from_the_start(self):
+        found = run(self.HANDS + """
+            await flush();
+            report({hidden: hiddenOf(fast()), place: place(), shown: shown(fast())});
+        """)
+
+        assert found["hidden"] == [True, True]
+        assert found["shown"] is False
+        assert found["place"] == {"together": True, "after": 1}
+        assert found["requests"] and not [r for r in found["requests"] if r["route"] == "/settings"]
+
+    def test_it_reads_back_from_the_engines_settings_and_writes_only_a_change(self):
+        """The next status puts it where the engine's settings say; a status
+        that says the same writes nothing to it, and one without the key hides
+        it once. While a save is on its way a status with the old value does
+        not flip it back."""
+        found = run(self.HANDS + with_engine_records("""
+            await flush();
+            const node = fast();
+            const writes = [];
+            for (const target of [node, node.mcVoiceBoxThumb]) {
+                for (const method of ["setAttribute", "removeAttribute"]) {
+                    const original = target[method];
+                    target[method] = function (...args) {
+                        writes.push([method].concat(args));
+                        return original.apply(this, args);
+                    };
+                }
+            }
+            const status = (value) => ({json: Object.assign({}, BREEZE_STATUS, {
+                engine_settings: Object.assign({}, BREEZE_STATUS.engine_settings, {fast_path: value})})});
+            answers["/status"] = status(true);
+            await poll();
+            const read = [look(node).checked, look(node).knob, writes.length];
+            writes.length = 0;
+            await poll();
+            const same = writes.length;
+            node.click();
+            await flush();
+            const pressed = look(node).checked;
+            await poll();
+            const polled = look(node).checked;
+            release("/settings");
+            await flush();
+            const settled = look(node).checked;
+            writes.length = 0;
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            await poll();
+            const hiding = writes.slice();
+            writes.length = 0;
+            await poll();
+            report({read, same, pressed, polled, settled, hiding, again: writes.length,
+                    hidden: hiddenOf(node), bodies: requestsTo("/settings").map((r) => r.body)});
+        """), answers={"/status": {"json": BREEZE_STATUS},
+                       "/settings": self.breeze_settings(fast_path=False)}, held=["/settings"])
+
+        assert found["read"] == ["true", "17", 2]
+        assert found["same"] == 0
+        assert (found["pressed"], found["polled"], found["settled"]) == ("false", "false", "false")
+        assert found["bodies"] == [{"fast_path": False}]
+        assert found["hiding"] == [["setAttribute", "hidden", ""]]
+        assert found["again"] == 0
+        assert found["hidden"] == [True, True]
+
+    def test_a_press_while_the_engine_changes_sends_nothing(self):
+        """Between the Engine select's change and the status after it, the
+        engine may already be VibeVoice: a press there is put back and posts
+        nothing, and once VibeVoice's status is in, the switch is hidden and a
+        press that reached it anyway posts nothing either."""
+        changed = {"json": {"ok": True, "changed": True, "engine": "vibevoice",
+                            "settings": STATUS["settings"], "engines": STATUS["engines"]}}
+        found = run(self.HANDS + ENGINE + with_engine_records("""
+            await flush();
+            choose("engine", "vibevoice");
+            await flush();
+            fast().click();
+            await flush();
+            const switching = {checked: look(fast()).checked, hidden: hiddenOf(fast())};
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            release("/engine");
+            await flush(10);
+            fast().click();
+            await flush();
+            report({switching, after: {checked: look(fast()).checked, hidden: hiddenOf(fast())},
+                    sent: requestsTo("/settings").map((r) => r.body),
+                    engine: requestsTo("/engine").map((r) => r.body)});
+        """), answers={"/status": {"json": BREEZE_STATUS}, "/engine": changed}, held=["/engine"])
+
+        assert found["switching"] == {"checked": "false", "hidden": [False, False]}
+        assert found["after"] == {"checked": "false", "hidden": [True, True]}
+        assert found["sent"] == []
+        assert found["engine"] == [{"engine": "vibevoice"}]
+
+
+class TestTheLaneNamesItsEngine:
+    def test_another_engines_render_is_named_and_read_from_its_options(self):
+        """A Breeze render records its options under `options`, and no flat
+        keys: its details line starts with the engine's name. A VibeVoice
+        render reads as it always has."""
+        breeze = dict(OUTPUT, id="o2", name="Breezy", created=OUTPUT["created"] + 60,
+                      render={"engine": "breeze", "model_id": "breeze-tts-2", "card": "GPU-a", "seed": 7,
+                              "options": dict(BREEZE_OPTIONS), "speakers": OUTPUT["render"]["speakers"],
+                              "prompt": "Speaker 1: Hi."})
+        found = run("""
+            await flush();
+            report({meta: all(".mc-voice-box-lane-meta").map((node) => node.textContent)});
+        """, answers={"/outputs": {"json": {"ok": True, "outputs": [breeze, OUTPUT]}}})
+
+        assert found["meta"] == [
+            "Breeze TTS 2 · seed 7 · CFG 4 · sampling · temperature 0.9 · top-p 1 · S1 Ada · 4.5 s · GPU-a",
+            "vibevoice-7b · seed 42 · 10 steps · CFG 1.3 · S1 Ada · 4.5 s · GPU-a"]
 
 
 # --------------------------------------------------------------------------- #

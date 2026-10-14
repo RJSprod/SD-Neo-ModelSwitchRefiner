@@ -82,9 +82,9 @@ class FakeTurns:
         self.requests: list = []
         self.unloaded: list = []
 
-    def request(self, card, *, need_vram, need_ram=0, label=""):
+    def request(self, card, *, need_vram, need_ram=0, label="", guest=""):
         self.requests.append({"card": card, "need_vram": need_vram, "need_ram": need_ram,
-                              "label": label})
+                              "label": label, "guest": guest})
         return self.turn
 
     def snapshot(self):
@@ -94,7 +94,7 @@ class FakeTurns:
         return [{"uuid": CARD, "key": "1111222233334444555566667777888", "index": 1,
                  "name": "NVIDIA GeForce RTX 5090", "image_card": False, "wangp_card": True}]
 
-    def unload(self, card, reason):
+    def unload(self, card, reason, guest=""):
         self.unloaded.append((card, reason))
         return 18 * _GB
 
@@ -126,20 +126,32 @@ class RenderJob:
         self.__dict__.update(fields)
 
 
+def script_of(job) -> list:
+    """A section's lines as ``(speaker, text)``, as the job named them before engines."""
+    return [(line.speaker, line.text) for line in job.line_list()]
+
+
+def sampling_of(job) -> tuple:
+    return (job.options.get("sampling"), job.options.get("temperature"),
+            job.options.get("top_p"))
+
+
 class FakeRuntime:
     RenderJob = RenderJob
 
     def __init__(self, seconds: float = 1.0):
         self.seconds = seconds
         self.loaded: list = []
+        self.load_options: list = []
         self.renders: list = []
         self.cancelled: list = []
         self.fail = None
         self.cancel_on_render = False
         self.hold = None
 
-    def load(self, card):
+    def load(self, card, options=None):
         self.loaded.append(card)
+        self.load_options.append(dict(options or {}))
         return {"resident_bytes": 18 * _GB}
 
     def render(self, card, job, on_progress=None):
@@ -168,6 +180,7 @@ class FakeRuntime:
 
 
 class FakeEngine:
+    ID = "vibevoice"
     LABEL = "VibeVoice 7B"
     GUEST = "VibeVoice"
 
@@ -191,6 +204,14 @@ class FakeEngine:
 
     def flash_attention_installed(self):
         return self.flash
+
+    def refuse(self, chosen):
+        """VibeVoice's own refusal, against this stand-in's idea of the runtime."""
+        if str((chosen or {}).get("attention") or "") == "flash_attention_2" \
+                and not self.flash:
+            return ("Flash attention 2 needs the flash-attn package in VibeVoice's runtime, "
+                    "which it does not have. Choose SDPA or Eager.")
+        return ""
 
     def settings(self):
         return dict(self.values)
@@ -494,7 +515,7 @@ class TestOutputs:
         found = box.set_settings({"card_uuid": CARD, "model_id": "vibevoice-7b",
                                   "keep_warm": 0, "save_folder": ""})
         assert found == {"save_folder": "", "card_uuid": CARD, "model_id": "vibevoice-7b",
-                         "keep_warm": False}
+                         "keep_warm": False, "engine": "vibevoice"}
         assert box.settings() == found
 
 
@@ -550,13 +571,16 @@ class TestRendering:
         job = settled(found["id"])
         assert job["phase"] == "done" and job["output_id"], job
         assert turns.requests == [{"card": CARD, "need_vram": 20 * _GB, "need_ram": 3 * _GB,
-                                   "label": "VibeVoice 7B — Two lines"}]
+                                   "label": "VibeVoice 7B — Two lines",
+                                   "guest": "VibeVoice"}]
         assert turns.turn.finished == [None]
         assert runtime.loaded == [CARD] and len(runtime.renders) == 2
-        assert runtime.renders[0].script == [(1, "Hi.")] and runtime.renders[1].script == [(2, "Yo.")]
+        assert script_of(runtime.renders[0]) == [(1, "Hi.")] \
+            and script_of(runtime.renders[1]) == [(2, "Yo.")]
         assert list(runtime.renders[0].voices) == [1] and list(runtime.renders[1].voices) == [2]
-        assert runtime.renders[0].cfg_scale == 1.3 and runtime.renders[0].steps == 12
-        assert (runtime.renders[0].solver, runtime.renders[0].attention,
+        assert runtime.renders[0].options["cfg_scale"] == 1.3 \
+            and runtime.renders[0].options["steps"] == 12
+        assert (runtime.renders[0].options["solver"], runtime.renders[0].options["attention"],
                 runtime.renders[0].takes) == ("dpmpp_2m", "sdpa", 1), \
             "the model's own solver and SDPA, one take, unless the configuration says otherwise"
         entry = box.output(job["output_id"])
@@ -581,7 +605,7 @@ class TestRendering:
                            origin={"kind": "llm", "key": "thread-1:3:abcd1234",
                                    "label": "Message 4", "junk": "no", "nested": {"a": 1}})
         assert found["origin"] == {"kind": "llm", "key": "thread-1:3:abcd1234",
-                                   "label": "Message 4"}
+                                   "label": "Message 4", "engine": "vibevoice"}
 
         job = settled(found["id"])
         entry = box.output(job["output_id"])
@@ -596,7 +620,7 @@ class TestRendering:
                           origin={"kind": 5, "key": ["x"]})["origin"] == {}
         long = box.render(pipeline, "Speaker 1: Hi.", configuration,
                           origin={"key": "k" * 500})["origin"]
-        assert long == {"key": "k" * box.ORIGIN_CHARS}
+        assert long == {"key": "k" * box.ORIGIN_CHARS, "engine": "vibevoice"}
         assert box.render(pipeline, "Speaker 1: Hi.", configuration)["origin"] == {}
         for job in box.jobs():
             settled(job["id"])
@@ -788,12 +812,17 @@ class TestTheRecordedConfiguration:
                            ready["configuration"]["id"])
         record = box.output(settled(found["id"])["output_id"])["render"]["configuration"]
 
+        options = {"steps": 12, "cfg_scale": 1.3, "solver": "dpmpp_2m", "attention": "sdpa",
+                   "max_new_tokens": None, "sampling": False, "temperature": 0.95,
+                   "top_p": 0.95}
         assert record == {"id": ready["configuration"]["id"], "name": "Studio",
                           "model_id": "vibevoice-7b", "card_uuid": CARD, "steps": 12,
                           "cfg_scale": 1.3, "solver": "dpmpp_2m", "attention": "sdpa",
                           "seed": found["seed"], "batch": 1, "max_new_tokens": None,
                           "sampling": False, "temperature": 0.95, "top_p": 0.95,
-                          "speakers": {"1": first["id"], "2": second["id"]}}, \
+                          "speakers": {"1": first["id"], "2": second["id"]},
+                          "slots": {}, "engine": "vibevoice",
+                          "options": {"vibevoice": options}}, \
             "every slot is kept, used by this script or not"
 
     def test_unsaved_changes_are_recorded_with_the_configuration_they_changed(self, ready):
@@ -803,7 +832,7 @@ class TestTheRecordedConfiguration:
         record = box.output(settled(found["id"])["output_id"])["render"]["configuration"]
         assert record["id"] == ready["configuration"]["id"]
         assert record["steps"] == 20 and record["cfg_scale"] == 2.0
-        assert box._runtime().renders[0].steps == 20
+        assert box._runtime().renders[0].options["steps"] == 20
 
     def test_changes_to_a_deleted_configuration_still_render_and_name_none(self, ready):
         box.delete_configuration(ready["configuration"]["id"])
@@ -1160,7 +1189,7 @@ class TestSampling:
         entry = box.output(settled(found["id"])["output_id"])
 
         for request in box._runtime().renders:
-            assert (request.sampling, request.temperature, request.top_p) == (True, 0.8, 0.9)
+            assert sampling_of(request) == (True, 0.8, 0.9)
             assert request.seed == found["seed"], "a sampled render is seeded like any other"
         render = entry["render"]
         assert (render["sampling"], render["temperature"], render["top_p"]) == (True, 0.8, 0.9)
@@ -1178,7 +1207,7 @@ class TestSampling:
         entry = box.output(settled(found["id"])["output_id"])
 
         request, = box._runtime().renders
-        assert (request.sampling, request.temperature, request.top_p) == (False, None, None)
+        assert sampling_of(request) == (False, None, None)
         render = entry["render"]
         assert (render["sampling"], render["temperature"], render["top_p"]) == \
             (False, None, None)
@@ -1192,7 +1221,7 @@ class TestSampling:
                            ready["configuration"]["id"], inline=inline)
         settled(found["id"])
         request, = box._runtime().renders
-        assert (request.sampling, request.temperature, request.top_p) == (True, 1.2, 0.5)
+        assert sampling_of(request) == (True, 1.2, 0.5)
 
 
 # --------------------------------------------------------------------------- #
@@ -1255,8 +1284,9 @@ class TestSolverAttentionAndTakes:
         job = settled(found["id"])
         assert job["phase"] == "done"
         assert len(runtime.renders) == 2, "one render a section, every take at once"
-        assert all((request.takes, request.seed, request.solver, request.attention) ==
-                   (4, 9990, "dpmpp_2m_sde", "eager") for request in runtime.renders)
+        assert all((request.takes, request.seed, request.options["solver"],
+                    request.options["attention"]) == (4, 9990, "dpmpp_2m_sde", "eager")
+                   for request in runtime.renders)
         assert turns.requests[0]["need_vram"] == 20 * _GB + 3 * 2 * _GB, \
             "the turn asks for the weights once and a working set a take"
 
@@ -1326,7 +1356,7 @@ class TestSolverAttentionAndTakes:
         found = box.render(ready["pipeline"]["id"], "Speaker 1: Hi.",
                            ready["configuration"]["id"])
         assert settled(found["id"])["phase"] == "done"
-        assert box._runtime().renders[0].attention == "flash_attention_2"
+        assert box._runtime().renders[0].options["attention"] == "flash_attention_2"
 
     def test_a_cancelled_batch_keeps_no_take(self, ready):
         box.save_configuration({"id": ready["configuration"]["id"], "batch": 2})
@@ -1336,3 +1366,51 @@ class TestSolverAttentionAndTakes:
         job = settled(found["id"])
         assert job["phase"] == "cancelled" and job["output_ids"] == []
         assert box.outputs() == []
+
+
+class TestAVibeVoiceOutputReadsAsItAlwaysDid:
+    """Every line below was written by the Voice Box before it had a second engine,
+    from these very records. VibeVoice's parameters moved into its adapter
+    (``mc_voice_vibevoice.infotext``); what an output says did not move at all."""
+
+    RECORDS = {
+        "full_sampled": ({"id": "a" * 16, "name": "Trailer 3", "seconds": 12.34, "render": {
+            "model_id": "vibevoice-7b", "card": CARD, "seed": 1234567, "seed_drawn": True,
+            "steps": 12, "cfg_scale": 1.3, "solver": "dpmpp_2m_sde", "attention": "sdpa",
+            "max_new_tokens": None, "sampling": True, "temperature": 0.95, "top_p": 0.9,
+            "speakers": [{"n": 1, "sample_id": "b" * 16, "title": "Ada, the host"},
+                         {"n": 2, "sample_id": "c" * 16, "title": "Brook"}],
+            "prompt": "Speaker 1: Welcome back.\nSpeaker 2: Thanks: it's \"good\" to be here.",
+            "origin": {}, "sections": 2, "take": 1, "takes": 2, "render_seconds": 41.26,
+            "peak_bytes": 20000000000, "tokens": 300}},
+            "Speaker 1: Welcome back.\nSpeaker 2: Thanks: it's \"good\" to be here.\n"
+            "Steps: 12, Solver: DPM++ 2M SDE, CFG scale: 1.3, Seed: 1234567, Temperature: "
+            "0.95, Top-p: 0.9, Attention: SDPA, Model: vibevoice-7b, Speaker 1: \"Ada, the "
+            "host\", Speaker 2: Brook, Sections: 2, Length: 12.3 s, Render time: 41.3 s"),
+        "greedy_one": ({"id": "d" * 16, "name": "Solo", "seconds": 3.0, "render": {
+            "model_id": "vibevoice-7b", "card": "GPU-1", "seed": 7, "steps": 10,
+            "cfg_scale": 1.5, "solver": "dpmpp_2m", "attention": "flash_attention_2",
+            "max_new_tokens": 4096, "sampling": False, "temperature": None, "top_p": None,
+            "speakers": [{"n": 1, "sample_id": "e" * 16, "title": "Narrator"}],
+            "prompt": "Hello there.", "sections": 1, "render_seconds": 9.0}},
+            "Hello there.\nSteps: 10, Solver: DPM++ 2M, CFG scale: 1.5, Seed: 7, Attention: "
+            "Flash attention 2, Model: vibevoice-7b, Speaker 1: Narrator, Max new tokens: "
+            "4096, Length: 3.0 s, Render time: 9.0 s"),
+        "legacy_no_seed": ({"id": "f" * 16, "name": "Old", "seconds": 5.5, "render": {
+            "model_id": "vibevoice-7b", "steps": 10, "cfg_scale": 1.3,
+            "speakers": [{"n": 1, "sample_id": "e" * 16, "title": "N"}], "prompt": "",
+            "sections": 1}},
+            "Steps: 10, CFG scale: 1.3, Model: vibevoice-7b, Speaker 1: N, Length: 5.5 s"),
+        "empty": ({"id": "0" * 16, "name": "Nothing", "render": {}}, ""),
+    }
+
+    @pytest.mark.parametrize("name", sorted(RECORDS))
+    def test_byte_for_byte(self, name):
+        entry, line = self.RECORDS[name]
+        assert box.infotext(entry) == line
+
+    def test_a_record_that_names_its_engine_and_options_reads_the_same(self):
+        entry, line = self.RECORDS["full_sampled"]
+        render = dict(entry["render"], engine="vibevoice",
+                      options={key: entry["render"][key] for key in box._flat_keys()})
+        assert box.infotext(dict(entry, render=render)) == line

@@ -41,8 +41,17 @@
 // stage's header. The line shows the first of: a message a press just caused
 // (for a few seconds), an install running, the job on a card -- how many
 // takes, for a batch -- with its time ticking from the server's own count, the
-// queue, the last render this page started having failed, VibeVoice warm on a
+// queue, the last render this page started having failed, the engine warm on a
 // card, why Render is disabled, Ready.
+//
+// One speech engine is active at a time -- VibeVoice, or Breeze TTS 2 -- and
+// the server says which, with that engine's configuration fields and what it
+// can do (status.engine.fields, .capabilities). The page draws whatever it is
+// told: the Configuration stage's fields from the list, a speaker slot's
+// direction and voice design where the engine has them, a sample's transcript
+// where the engine clones from exact words. Every word that names the engine
+// is its label from the status. A configuration keeps every engine's options
+// side by side (`options`), so switching engines and back loses nothing.
 //
 // Every player -- a sample row, the trimmer, the selected output lane -- has
 // the same transport: Play/Pause, From the start and Stop, as icons. One
@@ -108,6 +117,8 @@
         sampleRename: "/samples/rename",
         sampleDelete: "/samples/delete",
         sampleAudio: "/samples/audio",
+        sampleTranscript: "/samples/transcript",
+        sampleTranscribe: "/samples/transcribe",
         prompts: "/prompts",
         promptAdd: "/prompts/add",
         promptFavourite: "/prompts/favourite",
@@ -129,6 +140,10 @@
         outputSave: "/outputs/save",
         outputAudio: "/outputs/audio",
         runtime: "/runtime",
+        engine: "/engine",
+        design: "/design",
+        designAudio: "/design/audio",
+        designKeep: "/design/keep",
     };
 
     // -- state ----------------------------------------------------------------- //
@@ -178,6 +193,17 @@
         activePlayer: null,
         // The stage the phone's stage bar marks: the one in view.
         stage: "input",
+        // The engine a switch was asked for, while the request is on its way:
+        // the Engine select shows it rather than a poll's answer from before.
+        engineSwitch: "",
+        // A sample's transcript as typed and not yet saved, by sample id. It
+        // is kept only while it differs from the saved one, and a redraw of
+        // the library -- or a refresh of it -- puts it back in the box.
+        transcripts: {},
+        // Each speaker slot's voice design, by slot number ("1".."4"): whether
+        // its panel is open, the words the voice is to say, and the design job
+        // this page started for it last (the job holds the seed and the take).
+        designs: {},
     };
 
     const nodes = {lanes: {}};
@@ -626,6 +652,7 @@
         });
         drawSampleRows();
         drawTrimmer();
+        drawDesignPlayers();
     }
 
     function setTouch(canvas, on) {
@@ -725,6 +752,20 @@
                            "stroke-width": "1.4", "stroke-linejoin": "round"}],
                  ["path", {d: "M6.6 6.6v4.6M9.4 6.6v4.6", fill: "none", stroke: "currentColor",
                            "stroke-width": "1.2", "stroke-linecap": "round"}]],
+        // A wand with a four-pointed spark at its tip and a small one beside
+        // it: a voice designed from a description. Drawn, never the emoji,
+        // which Lobe's icon swap would take.
+        wand: [["path", {d: "M2.5 13.5l7-7", fill: "none", stroke: "currentColor", "stroke-width": "1.8",
+                         "stroke-linecap": "round"}],
+               ["path", {d: "M12 1.5l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z"}],
+               ["path", {d: "M4.5 2.5v2.2M3.4 3.6h2.2", fill: "none", stroke: "currentColor",
+                         "stroke-width": "1.2", "stroke-linecap": "round"}]],
+        // Three bars of sound and three lines of words: a sample transcribed.
+        transcribe: [["rect", {x: "1.5", y: "6", width: "1.6", height: "4", rx: "0.8"}],
+                     ["rect", {x: "4.2", y: "3.5", width: "1.6", height: "9", rx: "0.8"}],
+                     ["rect", {x: "6.9", y: "5.5", width: "1.6", height: "5", rx: "0.8"}],
+                     ["path", {d: "M10.5 4.5h4M10.5 8h4M10.5 11.5h2.8", fill: "none", stroke: "currentColor",
+                               "stroke-width": "1.4", "stroke-linecap": "round"}]],
     };
 
     function svgNode(tag, attributes) {
@@ -950,10 +991,19 @@
     // render will do: pause tags split the script into sections; inside one,
     // `Speaker N:` or `[N]:` starts a line and a line without a name continues
     // the line before it (Speaker 1's when nobody has spoken yet); the pauses
-    // are the gaps between sections, so a tag at either end adds none.
+    // are the gaps between sections, so a tag at either end adds none. A
+    // direction in brackets between the name and the colon --
+    // `Speaker 2 (whispering): ...` -- is the line's, not its words: an engine
+    // with directions performs it, and VibeVoice drops it, so a script moves
+    // between engines unchanged.
     const PAUSE_TAG = /\[\s*pause(?:\s*[:=]\s*(\d{1,6})\s*(?:ms)?)?\s*\]/gi;
-    const SPEAKER_PREFIX = /^\s*(?:speaker\s*(\d+)|\[\s*(\d+)\s*\])\s*[:：]\s*(.*)$/i;
+    const SPEAKER_PREFIX = /^\s*(?:speaker\s*(\d+)|\[\s*(\d+)\s*\])\s*(?:\(([^()]*)\)\s*)?[:：]\s*(.*)$/i;
     const MAX_SPEAKERS = 4;
+    // The vocal events an engine may perform inline. One that performs none
+    // (status.engine.capabilities.events is null) reads them as words, which
+    // the summary under the script says.
+    const VOCAL_EVENTS = ["(laugh)", "(sigh)", "(cough)", "(clears throat)", "[笑]", "[叹气]", "[咳嗽]",
+                          "[清嗓子]"];
 
     function squeeze(words) {
         return String(words || "").split(/\s+/).filter(Boolean).join(" ");
@@ -971,7 +1021,7 @@
                                     + "; the prompt names Speaker " + number + ".");
                 }
                 current = number;
-                lines.push({speaker: number, text: squeeze(match[3])});
+                lines.push({speaker: number, text: squeeze(match[4])});
                 return;
             }
             const body = squeeze(raw);
@@ -1024,14 +1074,43 @@
         return number + " " + (number === 1 ? singular : plural);
     }
 
-    function summarize(text) {
-        const parsed = parseScript(text);
+    function summaryOf(parsed) {
         if (parsed.error) return parsed.error;
         if (!parsed.words) return "Nothing to render yet.";
         const speakers = Object.keys(parsed.speakers).length;
         return count(speakers, "speaker", "speakers") + ", "
             + count(parsed.pauses, "pause", "pauses") + ", ~"
             + parsed.words + " words";
+    }
+
+    function summarize(text) {
+        return summaryOf(parseScript(text));
+    }
+
+    // The first vocal event in the script, as it is written there, when the
+    // active engine performs none: " · VibeVoice reads (laugh) as words".
+    function eventsNote(text) {
+        if (capabilities().events) return "";
+        const words = String(text || "");
+        const lower = words.toLowerCase();
+        let at = -1;
+        let found = "";
+        VOCAL_EVENTS.forEach(function (event) {
+            const index = lower.indexOf(event.toLowerCase());
+            if (index !== -1 && (at === -1 || index < at)) {
+                at = index;
+                found = words.slice(index, index + event.length);
+            }
+        });
+        return found ? " · " + activeLabel() + " reads " + found + " as words" : "";
+    }
+
+    // The line under the script: what the render will do, and the event the
+    // engine will read aloud, when there is one.
+    function promptSummary(text) {
+        const parsed = parseScript(text);
+        const summary = summaryOf(parsed);
+        return parsed.error || !parsed.words ? summary : summary + eventsNote(text);
     }
 
     // -- the selection's arithmetic -------------------------------------------- //
@@ -1500,10 +1579,13 @@
     // The list is rebuilt whole, and it scrolls inside its stage (or, on a
     // phone, the stage's body does): the scroll is put back afterwards, or
     // pressing a speaker button on a sample far down the list would throw the
-    // list back to its top.
+    // list back to its top. A transcript being typed survives it -- its words
+    // are kept in `state.transcripts` until saved, and the box that had the
+    // focus has it again.
     function renderSamples() {
         if (!nodes.samples) return;
         const restore = keepScroll([nodes.samples, nodes.stage_input]);
+        const typing = focusedTranscript();
         clear(nodes.samples);
         if (!state.samples.length) {
             nodes.samples.appendChild(el("li", "mc-voice-box-empty",
@@ -1512,9 +1594,15 @@
             return;
         }
         const speakers = (state.working && state.working.speakers) || {};
+        // An engine that clones a voice from its exact words: every row gets
+        // a transcript to write, and one without says so.
+        const transcripts = capabilities().voice.transcript;
+        settleTranscripts();
         state.samples.forEach(function (sample) {
             const row = el("li", "mc-voice-box-sample");
             row.setAttribute("data-id", sample.id);
+            const missing = transcripts && !hasTranscript(sample);
+            if (missing) row.setAttribute("data-transcript", "missing");
             const edge = edgeOf([sample.id]);
             if (edge) row.appendChild(edge);
             const wave = canvasOf("mc-voice-box-sample-wave");
@@ -1525,7 +1613,11 @@
             row.appendChild(wave);
             const line = el("div", "mc-voice-box-row");
             const title = el("span", "mc-voice-box-sample-title", sample.title || "Untitled");
-            title.setAttribute("title", "Double-click to rename");
+            // A voice designed from words keeps them: its description is the
+            // title's tooltip.
+            const designed = transcripts && sample.design && typeof sample.design === "object"
+                ? String(sample.design.description || "") : "";
+            title.setAttribute("title", designed || "Double-click to rename");
             title.addEventListener("dblclick", function () {
                 renameInline(title, sample.title || "", function (name) {
                     return request("samples/rename", ROUTES.sampleRename,
@@ -1534,8 +1626,9 @@
                 });
             });
             line.appendChild(title);
+            const length = sample.seconds ? seconds(sample.seconds) : "";
             const meta = el("span", "mc-voice-box-sample-meta",
-                            sample.seconds ? seconds(sample.seconds) : "");
+                            missing ? (length ? length + " · " : "") + "needs a transcript" : length);
             line.appendChild(meta);
             const controls = transport("mc-voice-box-sample", {
                 play: function () { return playSample(sample); },
@@ -1556,12 +1649,233 @@
                                     function () { return deleteSample(sample); },
                                     "mc-voice-box-sample-delete"));
             row.appendChild(line);
+            const editor = transcripts ? transcriptEditor(sample) : null;
+            if (editor) row.appendChild(editor.node);
             row.mcVoiceBoxSample = {id: sample.id, seconds: sample.seconds, wave: wave,
-                                    peaks: sample.peaks || [], controls: controls};
+                                    peaks: sample.peaks || [], controls: controls, transcript: editor};
             nodes.samples.appendChild(row);
             drawSampleRow(row);
         });
+        fitBoxes(transcriptBoxes(), []);
+        restoreTranscriptFocus(typing);
         restore();
+    }
+
+    // -- a sample's transcript: the exact words, for an engine that clones
+    // from them -- //
+
+    // Under the sample's line: the words in a box, Transcribe (Whisper's
+    // reading, into the box unsaved) and Save, which shows only while the box
+    // holds something the server does not -- with the accent dot the
+    // configuration's Save has. Ctrl or Cmd with Enter in the box saves.
+    function transcriptEditor(sample) {
+        const id = sample.id;
+        const node = el("div", "mc-voice-box-row mc-voice-box-sample-transcript-row");
+        const box = el("textarea", "mc-voice-box-sample-transcript");
+        box.setAttribute("rows", "2");
+        box.setAttribute("placeholder", "Transcript — the exact words");
+        box.setAttribute("aria-label", "Transcript of " + (sample.title || "this sample"));
+        box.setAttribute("maxlength", "2000");
+        box.value = state.transcripts[id] !== undefined ? state.transcripts[id] : String(sample.transcript || "");
+        const transcribe = iconButton("transcribe", "Transcribe with Whisper", function () {
+            return transcribeSample(id);
+        }, "mc-voice-box-sample-transcribe");
+        const save = iconButton("save", "Save the transcript", function () {
+            return saveTranscript(id);
+        }, "mc-voice-box-sample-transcript-save");
+        save.setAttribute("data-dirty", "true");
+        const parts = {node: node, box: box, transcribe: transcribe, save: save};
+        box.addEventListener("input", function () {
+            noteTranscript(id, box.value);
+            syncTranscript(id, parts);
+            fitBoxes([box], [nodes.stage_input]);
+        });
+        // The press is the box's alone: Forge's own Ctrl+Enter, on the
+        // document, is Generate.
+        box.addEventListener("keydown", function (event) {
+            if (!event || event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+            if (typeof event.preventDefault === "function") event.preventDefault();
+            if (typeof event.stopPropagation === "function") event.stopPropagation();
+            saveTranscript(id).catch(report);
+        });
+        node.appendChild(box);
+        node.appendChild(transcribe);
+        node.appendChild(save);
+        syncTranscript(id, parts);
+        return parts;
+    }
+
+    // What a box holds that the server does not, by sample id; nothing for a
+    // box whose words are the saved ones (the server collapses runs of white
+    // space, so neither does this).
+    function noteTranscript(id, text) {
+        const sample = sampleById(id);
+        const saved = sample ? String(sample.transcript || "") : "";
+        if (squeeze(text) === squeeze(saved)) delete state.transcripts[id];
+        else state.transcripts[id] = String(text);
+    }
+
+    // After the library is read again: words typed for a sample that has
+    // gone, or that the server now holds, are nothing left to save.
+    function settleTranscripts() {
+        Object.keys(state.transcripts).forEach(function (id) {
+            const sample = sampleById(id);
+            if (!sample || squeeze(state.transcripts[id]) === squeeze(sample.transcript || "")) {
+                delete state.transcripts[id];
+            }
+        });
+    }
+
+    // Save while there is something to save; Transcribe while speech
+    // recognition is installed, and otherwise disabled with the reason as its
+    // tooltip. Drawn on every poll, so written only when it changes.
+    function syncTranscript(id, parts) {
+        reveal(parts.save, state.transcripts[id] !== undefined);
+        const stt = (state.status && state.status.stt) || {};
+        const ready = stt.available === true;
+        if (parts.transcribe.disabled !== !ready) parts.transcribe.disabled = !ready;
+        setFlag(parts.transcribe, "title", ready ? "Transcribe with Whisper"
+            : (String(stt.message || "") || "Speech recognition is not installed."));
+    }
+
+    function syncTranscripts() {
+        sampleRows().forEach(function (row) {
+            const entry = row.mcVoiceBoxSample;
+            if (entry.transcript) syncTranscript(entry.id, entry.transcript);
+        });
+    }
+
+    function sampleRow(id) {
+        return sampleRows().filter(function (row) { return row.mcVoiceBoxSample.id === id; })[0] || null;
+    }
+
+    function transcriptBoxes() {
+        return sampleRows().map(function (row) {
+            return row.mcVoiceBoxSample.transcript ? row.mcVoiceBoxSample.transcript.box : null;
+        }).filter(Boolean);
+    }
+
+    // The transcript box that has the focus, and where its caret is, so a
+    // rebuilt library can give both back.
+    function focusedTranscript() {
+        const active = document.activeElement;
+        if (!active) return null;
+        const row = sampleRows().filter(function (found) {
+            return !!found.mcVoiceBoxSample.transcript && found.mcVoiceBoxSample.transcript.box === active;
+        })[0];
+        if (!row) return null;
+        return {id: row.mcVoiceBoxSample.id, start: active.selectionStart, end: active.selectionEnd};
+    }
+
+    function restoreTranscriptFocus(kept) {
+        const row = kept ? sampleRow(kept.id) : null;
+        const box = row && row.mcVoiceBoxSample.transcript ? row.mcVoiceBoxSample.transcript.box : null;
+        if (!box) return;
+        try {
+            box.focus({preventScroll: true});
+            if (typeof box.setSelectionRange === "function" && typeof kept.start === "number") {
+                box.setSelectionRange(kept.start, typeof kept.end === "number" ? kept.end : kept.start);
+            }
+        } catch (error) { /* a box that will not take the focus back is still there */ }
+    }
+
+    // Whisper's reading of the sample, into the box -- unsaved, to be read
+    // through and saved.
+    function transcribeSample(id) {
+        return request("samples/transcribe:" + id, ROUTES.sampleTranscribe,
+                       {body: {id: id}, deadline: DEADLINE.audio})
+            .then(function (reply) {
+                const text = String((reply && reply.text) || "");
+                noteTranscript(id, text);
+                const row = sampleRow(id);
+                const parts = row ? row.mcVoiceBoxSample.transcript : null;
+                if (parts) {
+                    parts.box.value = text;
+                    syncTranscript(id, parts);
+                    fitBoxes([parts.box], [nodes.stage_input]);
+                }
+                say("Whisper's transcript is in the box — check it, then save.", "info");
+            });
+    }
+
+    // The box's words become the sample's transcript. What was typed after
+    // the save went is still the box's to save.
+    function saveTranscript(id) {
+        const row = sampleRow(id);
+        const parts = row ? row.mcVoiceBoxSample.transcript : null;
+        const text = parts ? String(parts.box.value || "")
+            : String(state.transcripts[id] !== undefined ? state.transcripts[id] : "");
+        return request("samples/transcript:" + id, ROUTES.sampleTranscript,
+                       {body: {id: id, transcript: text}, queue: true})
+            .then(function (reply) {
+                const saved = recordOf(reply, "sample");
+                if (saved && saved.id === id) {
+                    state.samples = state.samples.map(function (sample) {
+                        return sample.id === id ? Object.assign({}, sample, saved) : sample;
+                    });
+                    return null;
+                }
+                return refreshSamples();
+            })
+            .then(function () {
+                const now = sampleRow(id);
+                const box = now && now.mcVoiceBoxSample.transcript ? now.mcVoiceBoxSample.transcript.box : null;
+                if (box) noteTranscript(id, box.value);
+                renderSamples();
+                drawSpeakers();
+                renderStatus();
+                say("Transcript saved.", "info");
+            });
+    }
+
+    // A text box on a phone's card is as tall as its words, so the card's
+    // body stays its one vertical scroller (the script box does the same,
+    // fitPrompt); side by side it keeps the stylesheet's height and scrolls
+    // inside itself, and only a height written here is taken back. All the
+    // boxes are set back first and measured after, so a list of them is laid
+    // out once rather than once a box; a box with no layout (a tab not on
+    // screen, a panel shut) is left as it was. The scrollers named are put
+    // back where they were, the measuring having shortened them a moment.
+    function fitBoxes(boxes, scrollers) {
+        const list = (boxes || []).filter(function (box) { return !!box && !!box.style; });
+        if (!list.length) return;
+        if (state.layout.mode !== "stack") {
+            list.forEach(function (box) {
+                if (!box.mcVoiceBoxGrown) return;
+                box.style.height = "";
+                box.mcVoiceBoxGrown = false;
+            });
+            return;
+        }
+        const restore = keepScroll(scrollers || []);
+        list.forEach(function (box) {
+            if (box.style.height) box.style.height = "";
+        });
+        const heights = list.map(function (box) {
+            const inside = Number(box.scrollHeight) || 0;
+            if (!inside) return 0;
+            const style = styleOf(box);
+            return Math.ceil(inside + pixels(style.borderTopWidth) + pixels(style.borderBottomWidth));
+        });
+        list.forEach(function (box, index) {
+            if (!heights[index]) return;
+            box.style.height = heights[index] + "px";
+            box.mcVoiceBoxGrown = true;
+        });
+        restore();
+    }
+
+    // Every box fitBoxes keeps: the transcripts and the open design panels'
+    // descriptions -- after the layout changed.
+    function fitAllBoxes() {
+        const boxes = transcriptBoxes();
+        if (nodes.speakers) {
+            [1, 2, 3, 4].forEach(function (number) {
+                const slot = nodes.speakers[number];
+                if (slot && slot.design && designOf(number).open) boxes.push(slot.design.description);
+            });
+        }
+        fitBoxes(boxes, [nodes.stage_input, nodes.stage_configuration]);
     }
 
     // -- the tint a sample carries onto its outputs ---------------------------- //
@@ -2305,12 +2619,19 @@
 
     // -- PROMPT ---------------------------------------------------------------- //
 
+    // No description under the box (the user asked for none): the empty box's
+    // placeholder is an example of the script's syntax -- with a direction and
+    // an event in it while the engine performs them.
+    const PLACEHOLDER = {
+        plain: "Speaker 1: Welcome back to the show.\nSpeaker 2: Thanks for having me.\n[pause]\nSpeaker 1: Today…",
+        directions: "Speaker 1: (laugh) Welcome back to the show.\nSpeaker 2 (warmly): Thanks for having me."
+            + "\n[pause]\nSpeaker 1: Today…",
+    };
+
     function buildPrompt(body) {
         nodes.prompt = el("textarea", "mc-voice-box-prompt");
         nodes.prompt.setAttribute("aria-label", "Script");
-        // No description under the box (the user asked for none): the empty
-        // box's placeholder is an example of the script's syntax.
-        nodes.prompt.setAttribute("placeholder", "Speaker 1: Welcome back to the show.\nSpeaker 2: Thanks for having me.\n[pause]\nSpeaker 1: Today…");
+        nodes.prompt.setAttribute("placeholder", PLACEHOLDER.plain);
         nodes.prompt.setAttribute("rows", "10");
         nodes.prompt.setAttribute("maxlength", "20000");
         nodes.prompt.addEventListener("input", promptChanged);
@@ -2359,9 +2680,18 @@
         restore();
     }
 
+    // The summary is written only when its words change: it is drawn again on
+    // every engine change and every keystroke, and a text node replaced for
+    // nothing is a change Forge's observer hears.
+    function writeSummary() {
+        if (!nodes.summary) return;
+        const text = promptSummary(state.prompt);
+        if (nodes.summary.textContent !== text) nodes.summary.textContent = text;
+    }
+
     function promptChanged() {
         state.prompt = nodes.prompt.value || "";
-        nodes.summary.textContent = summarize(state.prompt);
+        writeSummary();
         fitPrompt();
         state.dirty.prompt = true;
         if (timers.prompt) window.clearTimeout(timers.prompt);
@@ -2389,7 +2719,11 @@
         if (nodes.prompt.value !== state.prompt && !focused(nodes.prompt)) {
             nodes.prompt.value = state.prompt;
         }
-        nodes.summary.textContent = summarize(state.prompt);
+        const placeholder = capabilities().directions ? PLACEHOLDER.directions : PLACEHOLDER.plain;
+        if (nodes.prompt.getAttribute("placeholder") !== placeholder) {
+            nodes.prompt.setAttribute("placeholder", placeholder);
+        }
+        writeSummary();
         fitPrompt();
     }
 
@@ -2439,27 +2773,29 @@
 
     // -- CONFIGURATION --------------------------------------------------------- //
 
-    // `needs` names the switch a field means nothing without: while it is
-    // off the field is disabled, and keeps its value for when it is on again.
-    // `list` names the server's list a select offers (engineOptions).
-    const FIELDS = [
-        {key: "model_id", label: "Model", kind: "select"},
-        {key: "card_uuid", label: "Card", kind: "select"},
-        {key: "steps", label: "Diffusion steps", kind: "number", min: 1, max: 50, step: 1},
-        {key: "cfg_scale", label: "CFG", kind: "number", min: 1, max: 3, step: 0.1},
-        {key: "solver", label: "Solver", kind: "select", list: "solvers"},
-        {key: "attention", label: "Attention", kind: "select", list: "attention"},
-        {key: "seed", label: "Seed", kind: "text", placeholder: "random"},
-        {key: "batch", label: "Batch", kind: "select"},
-        {key: "max_new_tokens", label: "Max new tokens", kind: "text", placeholder: "automatic"},
-        {key: "sampling", label: "Sampling", kind: "switch", wide: true},
-        {key: "temperature", label: "Temperature", kind: "number", min: 0.1, max: 2, step: 0.05,
-         needs: "sampling"},
-        {key: "top_p", label: "Top-p", kind: "number", min: 0.05, max: 1, step: 0.01, needs: "sampling"},
-    ];
-    // The server's defaults for them (mc_voice_box.CONFIGURATION_DEFAULTS):
-    // off is the model's own greedy choice.
-    const SAMPLING = {sampling: false, temperature: 0.95, top_p: 0.95};
+    // The fields every engine has, drawn around the engine's own: Engine, Model
+    // and Card first, Seed and Batch between the engine's head fields and its
+    // tail fields. Their values are the configuration's own keys; an engine's
+    // fields (status.engine.fields) read and write `options[<engine>]`.
+    const SHARED_FIELDS = {
+        engine: {key: "engine", label: "Engine", kind: "select", shared: true},
+        model_id: {key: "model_id", label: "Model", kind: "select", shared: true},
+        card_uuid: {key: "card_uuid", label: "Card", kind: "select", shared: true},
+        seed: {key: "seed", label: "Seed", kind: "text", placeholder: "random", shared: true},
+        batch: {key: "batch", label: "Batch", kind: "select", shared: true},
+    };
+    // A configuration's keys that are no engine's: what Save, Render and
+    // "unsaved changes" read beside the active engine's options.
+    const SHARED_KEYS = ["model_id", "card_uuid", "seed", "batch"];
+    // VibeVoice's options as a configuration held them before every engine had
+    // options of its own -- flat, beside the shared keys -- and as a render
+    // made before then recorded them.
+    const VIBEVOICE_KEYS = ["steps", "cfg_scale", "solver", "attention", "max_new_tokens", "sampling",
+                            "temperature", "top_p"];
+    // The kinds of field the page draws: a number input for int and float (an
+    // int that may be left blank is a text box whose placeholder says what
+    // blank means), a drawn switch for bool, a select for choice.
+    const KINDS = {int: true, float: true, bool: true, choice: true};
     // What a render may ask for when the status does not say (an older
     // server, or a part of the status that failed): the lists this page was
     // written against (mc_voice_vibevoice.options), Flash attention 2
@@ -2480,8 +2816,194 @@
         batch_max: 4,
         defaults: {solver: "dpmpp_2m", attention: "sdpa", batch: 1, steps: 12},
     };
-    // The fields whose values are picked from those lists.
-    const LISTED = ["solver", "attention", "batch"];
+    // What an engine that does not say can do: VibeVoice's -- one voice per
+    // speaker from its sample, no directions, no voice design, and inline
+    // events read as words.
+    const CAPABILITIES_FALLBACK = {design: false, directions: false,
+                                   voice: {transcript: false, instruction: false}, events: null};
+    // The engines this page knows by name, for a status that lists none.
+    const ENGINE_LABELS = {vibevoice: "VibeVoice", breeze: "Breeze TTS 2"};
+    // The Fast path switch's tooltip: what it buys, what it costs, and when.
+    const FAST_PATH_TITLE = "Breeze's CUDA-graph fast path: slower first line after a load, faster after; "
+        + "about 7 GB more of the card while warm. Takes effect on the next load.";
+
+    // -- which engine, and what it has -- //
+
+    function engineList() {
+        const status = state.status || {};
+        const engines = status.engines && typeof status.engines === "object" ? status.engines : {};
+        return (Array.isArray(engines.available) ? engines.available : []).filter(function (engine) {
+            return !!engine && typeof engine.id === "string" && !!engine.id;
+        });
+    }
+
+    // The engine the server renders with: status.engines.active, the engine
+    // part's own id in a status without the list, and VibeVoice before either.
+    function activeEngine() {
+        const status = state.status || {};
+        const engines = status.engines && typeof status.engines === "object" ? status.engines : {};
+        if (typeof engines.active === "string" && engines.active) return engines.active;
+        const engine = status.engine || {};
+        return typeof engine.id === "string" && engine.id ? engine.id : "vibevoice";
+    }
+
+    // An engine's name for people: as the status lists it, then as the active
+    // engine's own part says, then the page's own for an engine it knows.
+    function engineLabel(id) {
+        const found = engineList().filter(function (engine) { return engine.id === id; })[0];
+        if (found && found.label) return String(found.label);
+        const engine = (state.status && state.status.engine) || {};
+        if (id === activeEngine() && engine.label) return String(engine.label);
+        return ENGINE_LABELS[id] || String(id || "");
+    }
+
+    // The words every status line, button and tooltip uses for the engine.
+    function activeLabel() {
+        const engine = (state.status && state.status.engine) || {};
+        return engine.label ? String(engine.label) : engineLabel(activeEngine());
+    }
+
+    // The Engine select's choices. An engine that is not installed is offered
+    // too: switching to it brings its Install button.
+    function engineChoices() {
+        const active = activeEngine();
+        const listed = engineList().map(function (engine) {
+            return {value: engine.id, label: String(engine.label || engine.id)};
+        });
+        if (!listed.some(function (choice) { return choice.value === active; })) {
+            listed.unshift({value: active, label: engineLabel(active)});
+        }
+        return listed;
+    }
+
+    // What the active engine can do, read the way the page uses it.
+    function capabilities() {
+        const engine = (state.status && state.status.engine) || {};
+        const given = engine.capabilities && typeof engine.capabilities === "object" ? engine.capabilities : null;
+        if (!given) return CAPABILITIES_FALLBACK;
+        const voice = given.voice && typeof given.voice === "object" ? given.voice : {};
+        return {design: given.design === true, directions: given.directions === true,
+                voice: {transcript: voice.transcript === true, instruction: voice.instruction === true},
+                events: given.events && typeof given.events === "object" ? given.events : null};
+    }
+
+    // What the server lists for VibeVoice's selects (status.engine.options),
+    // a part it did not send taken from OPTIONS_FALLBACK: the fallback field
+    // list's choices and defaults, and Batch's top where the engine part does
+    // not say its own.
+    function engineOptions() {
+        const engine = (state.status && state.status.engine) || {};
+        const sent = engine.options && typeof engine.options === "object" ? engine.options : {};
+        const listed = function (key) {
+            const found = listedOptions(sent[key]);
+            return found.length ? found : OPTIONS_FALLBACK[key];
+        };
+        const given = sent.defaults && typeof sent.defaults === "object" ? sent.defaults : {};
+        const defaults = {};
+        Object.keys(OPTIONS_FALLBACK.defaults).forEach(function (key) {
+            defaults[key] = pick(given[key], OPTIONS_FALLBACK.defaults[key]);
+        });
+        const most = Math.floor(Number(sent.batch_max));
+        return {solvers: listed("solvers"), attention: listed("attention"),
+                batch_max: most >= 1 ? most : OPTIONS_FALLBACK.batch_max, defaults: defaults};
+    }
+
+    function listedOptions(options) {
+        return (Array.isArray(options) ? options : []).filter(function (option) {
+            return !!option && typeof option.id === "string" && !!option.id;
+        });
+    }
+
+    function numberOf(value) {
+        if (value === null || value === undefined || value === "") return undefined;
+        const number = Number(value);
+        return isFinite(number) ? number : undefined;
+    }
+
+    // One field as the server lists it, checked: a key no shared field has and
+    // a kind the page draws. Anything else is left out rather than drawn wrong.
+    function fieldOf(given) {
+        if (!given || typeof given.key !== "string" || !given.key || SHARED_FIELDS[given.key]) return null;
+        if (!KINDS[given.kind]) return null;
+        return {key: given.key, label: String(given.label || given.key), kind: given.kind,
+                min: numberOf(given.min), max: numberOf(given.max), step: numberOf(given.step),
+                blank: given.kind === "int" && given.blank ? String(given.blank) : "",
+                default: given.default === undefined ? null : given.default,
+                options: given.kind === "choice" ? listedOptions(given.options) : [],
+                needs: typeof given.needs === "string" ? given.needs : "",
+                place: given.place === "tail" ? "tail" : "head",
+                wide: given.wide === true, hint: given.hint ? String(given.hint) : ""};
+    }
+
+    // VibeVoice's fields, for a status that lists none: the fields this page
+    // drew before the server listed them, their choices and defaults as
+    // status.engine.options says where it does.
+    function fallbackFields() {
+        const options = engineOptions();
+        return [
+            {key: "steps", label: "Diffusion steps", kind: "int", min: 1, max: 50, step: 1,
+             default: options.defaults.steps, place: "head"},
+            {key: "cfg_scale", label: "CFG", kind: "float", min: 1, max: 3, step: 0.1, default: 1.3,
+             place: "head"},
+            {key: "solver", label: "Solver", kind: "choice", options: options.solvers,
+             default: options.defaults.solver, place: "head"},
+            {key: "attention", label: "Attention", kind: "choice", options: options.attention,
+             default: options.defaults.attention, place: "head"},
+            {key: "max_new_tokens", label: "Max new tokens", kind: "int", min: 1, max: 65536, step: 1,
+             blank: "automatic", default: null, place: "tail"},
+            {key: "sampling", label: "Sampling", kind: "bool", wide: true, default: false, place: "tail"},
+            {key: "temperature", label: "Temperature", kind: "float", min: 0.1, max: 2, step: 0.05,
+             default: 0.95, needs: "sampling", place: "tail"},
+            {key: "top_p", label: "Top-p", kind: "float", min: 0.05, max: 1, step: 0.01, default: 0.95,
+             needs: "sampling", place: "tail"},
+        ].map(fieldOf);
+    }
+
+    // The active engine's fields, in the order the server lists them.
+    function engineFields() {
+        const engine = (state.status && state.status.engine) || {};
+        const given = (Array.isArray(engine.fields) ? engine.fields : []).map(fieldOf).filter(Boolean);
+        return given.length ? given : fallbackFields();
+    }
+
+    // What a field's nodes are made from. A list with the same key is drawn
+    // already, and its nodes are kept: a poll brings the same list every
+    // time, and a field rebuilt under the user's finger loses the press.
+    function fieldsKey(fields) {
+        return JSON.stringify(fields.map(function (field) {
+            return [field.key, field.kind, field.label, field.min, field.max, field.step, field.blank,
+                    field.needs, field.place, field.wide, field.hint];
+        }));
+    }
+
+    // The active engine's models, as its status lists them; with no list,
+    // the one model it names.
+    function engineModels() {
+        const engine = (state.status && state.status.engine) || {};
+        const found = [];
+        (Array.isArray(engine.models) ? engine.models : []).forEach(function (model) {
+            if (model && model.id) found.push({id: model.id, label: model.label || model.id});
+        });
+        if (!found.length && engine.model_id) {
+            found.push({id: engine.model_id, label: engine.model_label || engine.label || engine.model_id});
+        }
+        return found;
+    }
+
+    // The model id is shared by the engines; one the active engine does not
+    // have is shown as the engine's first model, and sent as "" -- the
+    // engine's own default -- so a configuration moves between engines.
+    function knownModel(id) {
+        return !!id && engineModels().some(function (model) { return model.id === id; });
+    }
+
+    // The most takes one render may make: the engine's own count, VibeVoice's
+    // options' where an older status says only that, four otherwise.
+    function maxTakes() {
+        const engine = (state.status && state.status.engine) || {};
+        const most = Math.floor(Number(engine.max_takes));
+        return most >= 1 ? most : engineOptions().batch_max;
+    }
 
     // Render, Install and the one status line with its buttons sit in the
     // stage's header, above the configuration, and stay there while the
@@ -2533,7 +3055,7 @@
         nodes.configurationSelect = el("select", "mc-voice-box-configuration-select");
         nodes.configurationSelect.setAttribute("aria-label", "Configuration");
         nodes.configurationSelect.addEventListener("change", function () {
-            chooseConfiguration(nodes.configurationSelect.value).catch(report);
+            chooseConfiguration(nodes.configurationSelect.value, true).catch(report);
         });
         bar.appendChild(nodes.configurationSelect);
         nodes.configurationSave = iconButton("save", "Save", function () {
@@ -2554,57 +3076,28 @@
         nodes.configurationForm = form;
         body.appendChild(form);
 
+        // The shared fields, built once and never moved; the engine's own are
+        // drawn among them by syncFieldNodes.
         const fields = el("div", "mc-voice-box-fields");
+        nodes.fieldsGrid = fields;
         nodes.fields = {};
         nodes.fieldBoxes = {};
-        FIELDS.forEach(function (field) {
-            if (field.kind === "switch") {
-                const toggle = switchButton(field.label, "", function () { fieldChanged(field, toggle); },
-                                            "mc-voice-box-field-switch");
-                toggle.setAttribute("data-field", field.key);
-                nodes.fields[field.key] = toggle;
-                const cell = el("div", "mc-voice-box-field mc-voice-box-field-toggle"
-                                + (field.wide ? " mc-voice-box-field-wide" : ""));
-                cell.appendChild(toggle);
-                nodes.fieldBoxes[field.key] = cell;
-                fields.appendChild(cell);
-                return;
-            }
-            const wrap = el("label", "mc-voice-box-field" + (field.wide ? " mc-voice-box-field-wide" : ""));
-            const caption = el("span", "mc-voice-box-field-label", field.label);
-            let input;
-            if (field.kind === "select") {
-                input = el("select", "mc-voice-box-field-input");
-            } else {
-                input = el("input", "mc-voice-box-field-input");
-                input.setAttribute("type", field.kind);
-                input.type = field.kind;
-                if (field.min !== undefined) input.setAttribute("min", String(field.min));
-                if (field.max !== undefined) input.setAttribute("max", String(field.max));
-                if (field.step !== undefined) input.setAttribute("step", String(field.step));
-                if (field.placeholder) input.setAttribute("placeholder", field.placeholder);
-            }
-            input.setAttribute("aria-label", field.label);
-            input.setAttribute("data-field", field.key);
-            const changed = function () { fieldChanged(field, input); };
-            input.addEventListener("change", changed);
-            if (field.kind === "text" || field.kind === "number") input.addEventListener("input", changed);
-            wrap.appendChild(caption);
-            wrap.appendChild(input);
-            nodes.fields[field.key] = input;
-            nodes.fieldBoxes[field.key] = wrap;
-            fields.appendChild(wrap);
+        nodes.engineFields = [];
+        nodes.fieldsKey = "";
+        ["engine", "model_id", "card_uuid", "seed", "batch"].forEach(function (key) {
+            fields.appendChild(fieldNode(SHARED_FIELDS[key]).cell);
         });
         form.appendChild(fields);
+        syncFieldNodes();
 
         // Keep warm is Voice Box's setting rather than a configuration's field
         // (the server keeps it beside the save folder), so it saves at once.
-        // Its face says "Keep warm"; its name is the whole sentence. While a
-        // save is on its way -- two, after two quick presses -- a status that
-        // arrives with the old value does not flip it back
-        // (renderConfigurationFields); the last answer decides.
-        const warm = el("div", "mc-voice-box-field mc-voice-box-field-toggle");
-        nodes.keepWarm = switchButton("Keep warm", "Keep VibeVoice warm between renders", function (on) {
+        // Its face says "Keep warm"; its name is the whole sentence, with the
+        // engine's label in it. While a save is on its way -- two, after two
+        // quick presses -- a status that arrives with the old value does not
+        // flip it back (renderConfigurationFields); the last answer decides.
+        const warm = el("div", "mc-voice-box-field mc-voice-box-field-toggle mc-voice-box-field-switches");
+        nodes.keepWarm = switchButton("Keep warm", "Keep " + activeLabel() + " warm between renders", function (on) {
             const settle = function () {
                 nodes.keepWarm.mcVoiceBoxSaving -= 1;
                 renderConfigurationFields();
@@ -2616,8 +3109,35 @@
             });
         }, "mc-voice-box-keep-warm");
         warm.appendChild(nodes.keepWarm);
+        // Fast path is an engine's own setting (Breeze's), beside Keep warm and
+        // saved at once the same way. It is shown only while the engine's
+        // settings have the key: VibeVoice's have none, and are never sent it --
+        // a press while an engine change is on its way sends nothing. Its name
+        // is its face; the tooltip says what it costs.
+        nodes.fastPath = switchButton("Fast path", "", function (on) {
+            if (!hasFastPath() || state.engineSwitch) {
+                setSwitch(nodes.fastPath, !on);
+                renderConfigurationFields();
+                return null;
+            }
+            const settle = function () {
+                nodes.fastPath.mcVoiceBoxSaving -= 1;
+                renderConfigurationFields();
+            };
+            nodes.fastPath.mcVoiceBoxSaving = (nodes.fastPath.mcVoiceBoxSaving || 0) + 1;
+            return saveSettings({fast_path: on}).then(settle, function (error) {
+                settle();
+                throw error;
+            });
+        }, "mc-voice-box-fast-path");
+        nodes.fastPath.setAttribute("title", FAST_PATH_TITLE);
+        show(nodes.fastPath, hasFastPath());
+        warm.appendChild(nodes.fastPath);
         form.appendChild(warm);
 
+        // A speaker slot is its sample: its name, a waveform and Clear. An
+        // engine with directions and voice design adds a direction box and a
+        // design panel to it (syncSlotExtras), and takes them away again.
         const speakers = el("div", "mc-voice-box-speakers");
         nodes.speakers = {};
         [1, 2, 3, 4].forEach(function (number) {
@@ -2632,21 +3152,98 @@
                 clearSpeaker(number);
             }, "mc-voice-box-speaker-clear");
             slot.appendChild(clearButton);
-            nodes.speakers[number] = {wave: wave, title: title, clear: clearButton};
+            nodes.speakers[number] = {number: number, node: slot, wave: wave, title: title, clear: clearButton,
+                                      direction: null, design: null};
             speakers.appendChild(slot);
         });
         form.appendChild(speakers);
     }
 
+    // A field's cell: its caption over its control, or -- for an on/off
+    // setting -- one drawn switch with its name on its face. `hint` is the
+    // control's tooltip and nothing else: the page carries no descriptions.
+    function fieldNode(field) {
+        let cell;
+        let input;
+        if (field.kind === "bool") {
+            input = switchButton(field.label, "", function () { fieldChanged(field, input); },
+                                 "mc-voice-box-field-switch");
+            if (field.hint) input.setAttribute("title", field.hint);
+            cell = el("div", "mc-voice-box-field mc-voice-box-field-toggle"
+                      + (field.wide ? " mc-voice-box-field-wide" : ""));
+            cell.appendChild(input);
+        } else {
+            cell = el("label", "mc-voice-box-field" + (field.wide ? " mc-voice-box-field-wide" : ""));
+            const caption = el("span", "mc-voice-box-field-label", field.label);
+            const typed = !(field.kind === "select" || field.kind === "choice");
+            if (!typed) {
+                input = el("select", "mc-voice-box-field-input");
+            } else {
+                // A number, or text: Seed, and a count that may be left blank,
+                // whose placeholder says what blank means.
+                const type = field.kind === "text" || field.blank ? "text" : "number";
+                input = el("input", "mc-voice-box-field-input");
+                input.setAttribute("type", type);
+                input.type = type;
+                if (type === "number") {
+                    if (field.min !== undefined) input.setAttribute("min", String(field.min));
+                    if (field.max !== undefined) input.setAttribute("max", String(field.max));
+                    if (field.step !== undefined) input.setAttribute("step", String(field.step));
+                }
+                const placeholder = field.placeholder || field.blank;
+                if (placeholder) input.setAttribute("placeholder", placeholder);
+            }
+            if (field.hint) input.setAttribute("title", field.hint);
+            input.setAttribute("aria-label", field.label);
+            if (field.key === "engine") {
+                input.addEventListener("change", function () { chooseEngine(input.value).catch(report); });
+            } else {
+                const changed = function () { fieldChanged(field, input); };
+                input.addEventListener("change", changed);
+                if (typed) input.addEventListener("input", changed);
+            }
+            cell.appendChild(caption);
+            cell.appendChild(input);
+        }
+        input.setAttribute("data-field", field.key);
+        nodes.fields[field.key] = input;
+        nodes.fieldBoxes[field.key] = cell;
+        return {cell: cell, input: input};
+    }
+
+    // The engine's fields, drawn where they go -- its head fields before
+    // Seed, its tail fields after Batch -- and drawn again only when the list
+    // itself changes (another engine, or a server that lists other fields):
+    // the shared fields are never moved, so a select open under the user's
+    // finger stays open. Returns the list as the status has it now, choices
+    // and defaults included.
+    function syncFieldNodes() {
+        const fields = engineFields();
+        const key = fieldsKey(fields);
+        if (!nodes.fieldsGrid || nodes.fieldsKey === key) return fields;
+        nodes.fieldsKey = key;
+        (nodes.engineFields || []).forEach(function (field) {
+            const cell = nodes.fieldBoxes[field.key];
+            if (cell && cell.parentNode) cell.parentNode.removeChild(cell);
+            delete nodes.fields[field.key];
+            delete nodes.fieldBoxes[field.key];
+        });
+        const seed = nodes.fieldBoxes.seed;
+        fields.forEach(function (field) {
+            const made = fieldNode(field);
+            if (field.place === "head") nodes.fieldsGrid.insertBefore(made.cell, seed);
+            else nodes.fieldsGrid.appendChild(made.cell);
+        });
+        nodes.engineFields = fields;
+        return fields;
+    }
+
     function fieldChanged(field, input) {
         const working = ensureWorking();
         let value;
-        if (field.kind === "switch") {
+        if (field.kind === "bool") {
             value = switchOn(input);
-        } else if (field.kind === "number") {
-            value = input.value === "" ? null : Number(input.value);
-            if (value !== null && !isFinite(value)) value = null;
-        } else if (field.key === "seed" || field.key === "max_new_tokens") {
+        } else if (field.kind === "int" || field.kind === "float" || field.key === "seed") {
             const text = String(input.value || "").trim();
             value = text === "" ? null : Number(text);
             if (value !== null && !isFinite(value)) value = null;
@@ -2656,10 +3253,11 @@
         } else {
             value = input.value;
         }
-        if (working[field.key] === value) return;
-        working[field.key] = value;
+        const target = field.shared ? working : engineValues(working);
+        if (target[field.key] === value) return;
+        target[field.key] = value;
         markConfigurationDirty();
-        if (field.kind === "switch") syncNeeds();
+        if (field.kind === "bool") syncNeeds();
         // The card and the model chosen last become Voice Box's defaults as
         // well, so the next configuration -- and a render with none -- starts
         // from them (design intent section 9: the chosen card is stored).
@@ -2670,6 +3268,13 @@
         }
     }
 
+    // Whether the engine in use has a fast path to switch: its settings say so
+    // by having the key at all (Breeze's do; VibeVoice's do not).
+    function hasFastPath() {
+        const engineSettings = (state.status && state.status.engine_settings) || {};
+        return Object.prototype.hasOwnProperty.call(engineSettings, "fast_path");
+    }
+
     function saveSettings(values) {
         return request("settings", ROUTES.settings, {body: values, queue: true}).then(function (reply) {
             if (!state.status) state.status = {};
@@ -2677,42 +3282,6 @@
             if (reply && reply.engine_settings) state.status.engine_settings = reply.engine_settings;
             renderConfigurationFields();
         });
-    }
-
-    function engineModels() {
-        const engine = (state.status && state.status.engine) || {};
-        const found = [];
-        (engine.models || []).forEach(function (model) {
-            if (model && model.id) found.push({id: model.id, label: model.label || model.id});
-        });
-        const chosen = engine.model_id || "vibevoice-7b";
-        if (!found.some(function (model) { return model.id === chosen; })) {
-            found.unshift({id: chosen, label: engine.model_label || engine.label || chosen});
-        }
-        return found;
-    }
-
-    // What a render may ask for -- its solvers, attentions, most takes and
-    // their defaults -- as the server lists them (status.engine.options), a
-    // part it did not send taken from OPTIONS_FALLBACK. Whatever the lists
-    // hold is what the selects offer.
-    function engineOptions() {
-        const engine = (state.status && state.status.engine) || {};
-        const sent = engine.options && typeof engine.options === "object" ? engine.options : {};
-        const listed = function (key) {
-            const found = (Array.isArray(sent[key]) ? sent[key] : []).filter(function (option) {
-                return !!option && typeof option.id === "string" && !!option.id;
-            });
-            return found.length ? found : OPTIONS_FALLBACK[key];
-        };
-        const given = sent.defaults && typeof sent.defaults === "object" ? sent.defaults : {};
-        const defaults = {};
-        Object.keys(OPTIONS_FALLBACK.defaults).forEach(function (key) {
-            defaults[key] = pick(given[key], OPTIONS_FALLBACK.defaults[key]);
-        });
-        const most = Math.floor(Number(sent.batch_max));
-        return {solvers: listed("solvers"), attention: listed("attention"),
-                batch_max: most >= 1 ? most : OPTIONS_FALLBACK.batch_max, defaults: defaults};
     }
 
     // An option as its select shows it: its label; one the server lists but
@@ -2757,48 +3326,122 @@
         if (select.value !== value) select.value = value;
     }
 
+    // -- the working copy: shared keys, slots, and every engine's options -- //
+
+    // A new configuration's options for the active engine: each field's
+    // default, and the engine's own settings where they name a value -- the
+    // steps, CFG and token cap Forge's settings give VibeVoice.
+    function freshOptions() {
+        const engineSettings = (state.status && state.status.engine_settings) || {};
+        const found = {};
+        engineFields().forEach(function (field) {
+            found[field.key] = field.default === undefined ? null : field.default;
+        });
+        ["steps", "cfg_scale", "max_new_tokens"].forEach(function (key) {
+            if (Object.prototype.hasOwnProperty.call(found, key)
+                && engineSettings[key] !== undefined && engineSettings[key] !== null) {
+                found[key] = engineSettings[key];
+            }
+        });
+        return found;
+    }
+
+    // The active engine's options in a configuration: made when it has none,
+    // and filled where it lacks a field -- a configuration saved before a
+    // field existed reads it at its default. The copy is now the active
+    // engine's (`engine`), whatever it was saved for.
+    function engineValues(working) {
+        const active = activeEngine();
+        if (!working.options || typeof working.options !== "object") working.options = {};
+        let values = working.options[active];
+        if (!values || typeof values !== "object") {
+            values = {};
+            working.options[active] = values;
+        }
+        const fresh = freshOptions();
+        Object.keys(fresh).forEach(function (key) {
+            if (values[key] === undefined) values[key] = fresh[key];
+        });
+        working.engine = active;
+        return values;
+    }
+
     // A new configuration starts from Voice Box's settings (the card and model
-    // chosen last), the engine's (its steps, CFG, seed and token cap) and the
-    // server's defaults for the rest (a solver, an attention, one take, and
-    // twelve steps where the engine names none).
+    // chosen last), the engine's (its seed, and the steps, CFG and token cap
+    // freshOptions takes), the fields' defaults and one take -- or as many as
+    // VibeVoice's options say.
     function defaultConfiguration() {
         const status = state.status || {};
         const settings = status.settings || {};
         const engineSettings = status.engine_settings || {};
         const cards = status.cards || [];
-        const defaults = engineOptions().defaults;
-        return {
+        const models = engineModels();
+        const found = {
             id: "",
             name: "",
-            model_id: settings.model_id || engineSettings.model_id || engineModels()[0].id,
+            engine: activeEngine(),
+            model_id: settings.model_id || engineSettings.model_id || (models[0] ? models[0].id : ""),
             card_uuid: settings.card_uuid || engineSettings.card_uuid
                 || (cards[0] ? cards[0].uuid : ""),
-            steps: pick(engineSettings.steps, defaults.steps),
-            cfg_scale: pick(engineSettings.cfg_scale, 1.3),
-            solver: defaults.solver,
-            attention: defaults.attention,
             seed: pick(engineSettings.seed, null),
-            batch: defaults.batch,
-            max_new_tokens: pick(engineSettings.max_new_tokens, null),
-            sampling: SAMPLING.sampling,
-            temperature: SAMPLING.temperature,
-            top_p: SAMPLING.top_p,
+            batch: engineOptions().defaults.batch,
             speakers: {},
+            slots: {},
+            options: {},
         };
+        engineValues(found);
+        return found;
+    }
+
+    // Every engine's options a configuration holds, copied: its `options` map
+    // whole -- so switching engines and back loses nothing -- and VibeVoice's
+    // from its flat keys where the map has none (one saved before the map).
+    function optionsOf(found) {
+        const options = {};
+        const map = found && found.options && typeof found.options === "object" ? found.options : {};
+        Object.keys(map).forEach(function (engine) {
+            if (map[engine] && typeof map[engine] === "object") options[engine] = Object.assign({}, map[engine]);
+        });
+        if (!options.vibevoice && found) {
+            const flat = {};
+            VIBEVOICE_KEYS.forEach(function (key) {
+                if (found[key] !== undefined) flat[key] = found[key];
+            });
+            if (Object.keys(flat).length) options.vibevoice = flat;
+        }
+        return options;
+    }
+
+    // A configuration's speaker slots -- a standing direction and a voice's
+    // description each, by slot number -- copied.
+    function slotsOf(given) {
+        const slots = {};
+        if (!given || typeof given !== "object") return slots;
+        Object.keys(given).forEach(function (number) {
+            const slot = given[number];
+            if (!slot || typeof slot !== "object") return;
+            slots[String(number)] = {instruction: String(slot.instruction || ""),
+                                     description: String(slot.description || "")};
+        });
+        return slots;
     }
 
     function copyConfiguration(found) {
         const base = defaultConfiguration();
         if (!found) return base;
-        Object.keys(base).forEach(function (key) {
+        ["id", "name"].concat(SHARED_KEYS).forEach(function (key) {
             if (found[key] !== undefined) base[key] = found[key];
         });
         base.speakers = Object.assign({}, found.speakers || {});
+        base.slots = slotsOf(found.slots);
+        base.options = optionsOf(found);
+        engineValues(base);
         return base;
     }
 
     function ensureWorking() {
         if (!state.working) state.working = copyConfiguration(configurationById(state.configurationId));
+        engineValues(state.working);
         return state.working;
     }
 
@@ -2817,18 +3460,72 @@
         renderStatus();
     }
 
-    function chooseConfiguration(id) {
+    // A configuration as Save and Render send it: the working copy for the
+    // engine in use, with every engine's options and the slots -- and a model
+    // the engine does not have sent as "", the engine's own default. A copy,
+    // not the working copy itself: a request queued behind another is
+    // written out when it goes, and edits made meanwhile are not its.
+    function sentConfiguration(working) {
+        const body = JSON.parse(JSON.stringify(working));
+        body.engine = activeEngine();
+        if (!knownModel(working.model_id)) body.model_id = "";
+        body.slots = slotsOf(working.slots);
+        return body;
+    }
+
+    // `noted`: chosen from the list by the user, who is told when it was
+    // saved for another engine than the one in use.
+    function chooseConfiguration(id, noted) {
         state.configurationId = configurationById(id) ? id : "";
         loadWorking();
         renderConfiguration();
         renderSamples();
         renderStatus();
+        if (noted) noteSavedFor(configurationById(state.configurationId));
         const pipeline = pipelineById(state.pipelineId);
         if (!pipeline || pipeline.configuration_id === state.configurationId) return Promise.resolve();
         return request("pipelines/save", ROUTES.pipelineSave,
                        {body: {id: state.pipelineId, configuration_id: state.configurationId},
                         queue: true})
             .then(function () { pipeline.configuration_id = state.configurationId; });
+    }
+
+    // A configuration saved only for other engines than the one in use holds
+    // that engine's settings at their defaults; the line says so, once.
+    function noteSavedFor(found) {
+        const saved = found && Array.isArray(found.engines_saved) ? found.engines_saved.filter(Boolean) : [];
+        if (!saved.length || saved.indexOf(activeEngine()) !== -1) return;
+        say("Saved for " + saved.map(engineLabel).join(" and ") + " — " + activeLabel()
+            + "'s settings start at their defaults.", "info");
+    }
+
+    // The Engine select. The server switches -- refused while a job is live,
+    // with a sentence the status line shows -- and the page reads the engine
+    // back: its fields, its words, what it can do. The working copy keeps its
+    // shared values and edits the new engine's options, which a configuration
+    // chosen from the list brought with it. A switch that fails puts the
+    // select back on the engine in use.
+    function chooseEngine(id) {
+        if (!id || (id === activeEngine() && !state.engineSwitch)) return Promise.resolve(null);
+        state.engineSwitch = id;
+        return request("engine", ROUTES.engine, {body: {engine: id}, queue: true}).then(function () {
+            if (state.engineSwitch === id) state.engineSwitch = "";
+            return Promise.all([refreshStatus(true), refreshConfigurations()]).then(function () {
+                const existing = configurationById(state.configurationId);
+                const working = ensureWorking();
+                // Unsaved changes are the shared values, the engine in use's
+                // options, the speakers and the slots, measured again now that
+                // the engine in use is another.
+                if (existing) state.dirty.configuration = !sameConfiguration(working, copyConfiguration(existing));
+                renderConfiguration();
+                renderStatus();
+                noteSavedFor(existing);
+            });
+        }, function (error) {
+            if (state.engineSwitch === id) state.engineSwitch = "";
+            renderConfigurationFields();
+            throw error;
+        });
     }
 
     // Save writes the working copy over the selected configuration; Save as (or
@@ -2847,7 +3544,8 @@
             name = ask("Name this configuration", suggested);
             if (name === null) return Promise.resolve(null);
         }
-        const body = Object.assign({}, working, {name: name});
+        const body = sentConfiguration(working);
+        body.name = name;
         if (existing) body.id = existing.id; else delete body.id;
         return request("configurations/save", ROUTES.configurationSave, {body: body, queue: true})
             .then(function (reply) {
@@ -2920,83 +3618,463 @@
         nodes.configurationDelete.disabled = !state.configurationId;
     }
 
+    // Every field as the working copy holds it. Drawn on every poll, so each
+    // part is written only when it changed.
     function renderConfigurationFields() {
         if (!nodes.fields) return;
+        const fields = syncFieldNodes();
         const working = ensureWorking();
+        const values = engineValues(working);
         const cards = (state.status && state.status.cards) || [];
-        const options = engineOptions();
-        FIELDS.forEach(function (field) {
+        fillSelect(nodes.fields.engine, engineChoices(), state.engineSwitch || activeEngine());
+        const models = engineModels();
+        fillSelect(nodes.fields.model_id, models.map(function (model) {
+            return {value: model.id, label: model.label};
+        }), knownModel(working.model_id) ? working.model_id : (models[0] ? models[0].id : ""));
+        const cardOptions = cards.map(function (card) {
+            return {value: card.uuid || "", label: cardLabel(card)};
+        });
+        if (!cardOptions.some(function (option) { return option.value === (working.card_uuid || ""); })) {
+            cardOptions.unshift({value: working.card_uuid || "",
+                                 label: working.card_uuid ? working.card_uuid : "(no card reported yet)"});
+        }
+        fillSelect(nodes.fields.card_uuid, cardOptions, working.card_uuid || "");
+        const seed = nodes.fields.seed;
+        if (!focused(seed)) {
+            const text = working.seed === null || working.seed === undefined ? "" : String(working.seed);
+            if (seed.value !== text) seed.value = text;
+        }
+        const counts = [];
+        for (let count = 1; count <= maxTakes(); count += 1) {
+            counts.push({value: String(count), label: String(count)});
+        }
+        fillSelect(nodes.fields.batch, counts, String(working.batch || ""));
+        fields.forEach(function (field) {
             const input = nodes.fields[field.key];
-            if (field.list) {
+            if (!input) return;
+            const value = values[field.key];
+            if (field.kind === "choice") {
                 // What the configuration holds stays selected even where it
                 // cannot run: Render is then refused, with the server's reason.
-                fillSelect(input, options[field.list].map(choiceOf), String(working[field.key] || ""));
+                fillSelect(input, field.options.map(choiceOf),
+                           value === null || value === undefined ? "" : String(value));
                 return;
             }
-            if (field.key === "batch") {
-                const counts = [];
-                for (let count = 1; count <= options.batch_max; count += 1) {
-                    counts.push({value: String(count), label: String(count)});
-                }
-                fillSelect(input, counts, String(working.batch || ""));
-                return;
-            }
-            if (field.key === "model_id") {
-                fillSelect(input, engineModels().map(function (model) {
-                    return {value: model.id, label: model.label};
-                }), working.model_id || "");
-                return;
-            }
-            if (field.key === "card_uuid") {
-                const options = cards.map(function (card) {
-                    return {value: card.uuid || "", label: cardLabel(card)};
-                });
-                if (!options.some(function (option) { return option.value === (working.card_uuid || ""); })) {
-                    options.unshift({value: working.card_uuid || "",
-                                     label: working.card_uuid ? working.card_uuid : "(no card reported yet)"});
-                }
-                fillSelect(input, options, working.card_uuid || "");
-                return;
-            }
-            if (field.kind === "switch") {
-                setSwitch(input, working[field.key] === true);
+            if (field.kind === "bool") {
+                setSwitch(input, value === true);
                 return;
             }
             if (focused(input)) return;
-            const value = working[field.key];
             const text = value === null || value === undefined ? "" : String(value);
             if (input.value !== text) input.value = text;
         });
         syncNeeds();
-        if (nodes.keepWarm && !nodes.keepWarm.mcVoiceBoxSaving) {
-            const settings = (state.status && state.status.settings) || {};
-            setSwitch(nodes.keepWarm, settings.keep_warm !== false);
+        if (nodes.keepWarm) {
+            const name = "Keep " + activeLabel() + " warm between renders";
+            if (nodes.keepWarm.getAttribute("aria-label") !== name) nodes.keepWarm.setAttribute("aria-label", name);
+            if (nodes.keepWarm.getAttribute("title") !== name) nodes.keepWarm.setAttribute("title", name);
+            if (!nodes.keepWarm.mcVoiceBoxSaving) {
+                const settings = (state.status && state.status.settings) || {};
+                setSwitch(nodes.keepWarm, settings.keep_warm !== false);
+            }
+        }
+        if (nodes.fastPath) {
+            const has = hasFastPath();
+            reveal(nodes.fastPath, has);
+            if (has && !nodes.fastPath.mcVoiceBoxSaving) {
+                setSwitch(nodes.fastPath, state.status.engine_settings.fast_path === true);
+            }
         }
     }
 
-    // Temperature and Top-p while Sampling is off: greyed and not editable,
-    // their values kept in the fields and in the configuration.
+    // A field whose switch is off -- Temperature and Top-p while Sampling is --
+    // is greyed and not editable, its value kept in the field and in the
+    // configuration.
     function syncNeeds() {
         if (!nodes.fields) return;
-        const working = ensureWorking();
-        FIELDS.forEach(function (field) {
+        const values = engineValues(ensureWorking());
+        (nodes.engineFields || []).forEach(function (field) {
             if (!field.needs) return;
-            const off = working[field.needs] !== true;
-            nodes.fields[field.key].disabled = off;
-            nodes.fieldBoxes[field.key].setAttribute("data-disabled", off ? "true" : "false");
+            const input = nodes.fields[field.key];
+            const box = nodes.fieldBoxes[field.key];
+            if (!input || !box) return;
+            const off = values[field.needs] !== true;
+            if (input.disabled !== off) input.disabled = off;
+            const flag = off ? "true" : "false";
+            if (box.getAttribute("data-disabled") !== flag) box.setAttribute("data-disabled", flag);
         });
+    }
+
+    // -- speaker slots: the sample, and where the engine has them, a direction
+    // and a designed voice -- //
+
+    function hasTranscript(sample) {
+        return !!sample && !!String(sample.transcript || "").trim();
+    }
+
+    // An attribute that is there with a value, or not there at all (null),
+    // written only when that changes.
+    function setFlag(node, name, value) {
+        if (!node) return;
+        if (value === null || value === undefined) {
+            if (node.hasAttribute(name)) node.removeAttribute(name);
+        } else if (node.getAttribute(name) !== value) {
+            node.setAttribute(name, value);
+        }
+    }
+
+    // show(), for what is drawn again on every poll: written only when it
+    // changes.
+    function reveal(node, on) {
+        if (!node) return;
+        if (node.hasAttribute("hidden") === !on && !!node.hidden === !on) return;
+        show(node, on);
     }
 
     function drawSpeakers() {
         if (!nodes.speakers) return;
         const working = ensureWorking();
+        const can = capabilities();
         [1, 2, 3, 4].forEach(function (number) {
             const slot = nodes.speakers[number];
+            syncSlotExtras(slot, can);
             const sample = sampleById(working.speakers[String(number)]);
-            slot.title.textContent = sample ? (sample.title || "Untitled") : "no sample";
+            // An engine that clones from exact words cannot use a sample
+            // without them; the slot says so, as Render's refusal does.
+            const missing = !!sample && can.voice.transcript && !hasTranscript(sample);
+            const text = sample ? (sample.title || "Untitled") + (missing ? " · needs a transcript" : "")
+                : "no sample";
+            if (slot.title.textContent !== text) slot.title.textContent = text;
+            setFlag(slot.node, "data-transcript", missing ? "missing" : null);
             slot.clear.disabled = !sample;
             draw(slot.wave, sample ? (sample.peaks || []) : []);
+            if (slot.direction && !focused(slot.direction)) {
+                const instruction = slotOf(number).instruction;
+                if (slot.direction.value !== instruction) slot.direction.value = instruction;
+            }
+            drawDesign(number);
         });
+    }
+
+    // The working copy's slot `number`, read: a standing direction and a
+    // voice's description, "" where it has none.
+    function slotOf(number) {
+        const working = ensureWorking();
+        const slot = (working.slots && working.slots[String(number)]) || {};
+        return {instruction: String(slot.instruction || ""), description: String(slot.description || "")};
+    }
+
+    function setSlot(number, key, value) {
+        const working = ensureWorking();
+        if (!working.slots || typeof working.slots !== "object") working.slots = {};
+        const name = String(number);
+        const entry = working.slots[name] || (working.slots[name] = {instruction: "", description: ""});
+        if (entry[key] === value) return;
+        entry[key] = value;
+        markConfigurationDirty();
+        if (key === "description") drawDesign(number);
+    }
+
+    // A slot's direction box and design panel, while the engine has them; for
+    // an engine without, the slot is the four parts it always was.
+    function syncSlotExtras(slot, can) {
+        const number = slot.number;
+        if (can.voice.instruction && !slot.direction) {
+            const input = el("input", "mc-voice-box-speaker-direction");
+            input.setAttribute("type", "text");
+            input.type = "text";
+            input.setAttribute("placeholder", "Direction");
+            input.setAttribute("title", "A standing direction for every line this speaker says, e.g. calm, slow");
+            input.setAttribute("aria-label", "Direction for speaker " + number);
+            const changed = function () { setSlot(number, "instruction", input.value); };
+            input.addEventListener("input", changed);
+            input.addEventListener("change", changed);
+            slot.node.insertBefore(input, slot.design ? slot.design.panel : null);
+            slot.direction = input;
+        } else if (!can.voice.instruction && slot.direction) {
+            if (slot.direction.parentNode) slot.direction.parentNode.removeChild(slot.direction);
+            slot.direction = null;
+        }
+        if (can.design && !slot.design) {
+            slot.design = designParts(slot);
+        } else if (!can.design && slot.design) {
+            dropDesign(slot);
+        }
+    }
+
+    // The design panel: the voice described in words, the words it is to
+    // say, and Design; once a take is back, its transport, Redraw (the next
+    // seed) and Keep (the take as a sample, in this slot). The wand beside the
+    // slot's name opens and closes it.
+    function designParts(slot) {
+        const number = slot.number;
+        const toggle = iconButton("wand", "Design a voice for speaker " + number, function () {
+            toggleDesign(number);
+        }, "mc-voice-box-speaker-design");
+        toggle.setAttribute("aria-expanded", "false");
+        slot.node.insertBefore(toggle, slot.clear);
+        const panel = el("div", "mc-voice-box-design");
+        const description = el("textarea", "mc-voice-box-design-description");
+        description.setAttribute("rows", "2");
+        description.setAttribute("placeholder", "Describe the voice");
+        description.setAttribute("aria-label", "Describe speaker " + number + "'s voice");
+        description.setAttribute("maxlength", "1000");
+        description.addEventListener("input", function () {
+            setSlot(number, "description", description.value);
+            fitBoxes([description], [nodes.stage_configuration]);
+        });
+        const words = el("input", "mc-voice-box-design-text");
+        words.setAttribute("type", "text");
+        words.type = "text";
+        words.setAttribute("placeholder", "What the voice says");
+        words.setAttribute("aria-label", "What speaker " + number + "'s designed voice says");
+        words.setAttribute("maxlength", "1000");
+        words.addEventListener("input", function () { designOf(number).text = words.value; });
+        const row = el("div", "mc-voice-box-row mc-voice-box-design-row");
+        const render = button("Design", "Design a voice from the description", function () {
+            return designVoice(number, null);
+        }, "mc-voice-box-design-render");
+        const controls = transport("mc-voice-box-design", {
+            play: function () { return playDesign(number); },
+            start: function () { return playDesignFromStart(number); },
+            stop: function () { stopDesign(number); },
+        });
+        const redraw = button("Redraw", "Design again with the next seed", function () {
+            return redrawDesign(number);
+        }, "mc-voice-box-design-redraw");
+        const keep = button("Keep", "Keep this voice as a sample for speaker " + number, function () {
+            return keepDesign(number);
+        }, "mc-voice-box-design-keep");
+        [render, controls.box, redraw, keep].forEach(function (node) { row.appendChild(node); });
+        const audio = player("mc-voice-box-design-audio");
+        ["play", "pause", "ended"].forEach(function (type) {
+            audio.addEventListener(type, function () { drawDesignPlayer(number); });
+        });
+        panel.appendChild(description);
+        panel.appendChild(words);
+        panel.appendChild(row);
+        panel.appendChild(audio);
+        show(panel, false);
+        slot.node.appendChild(panel);
+        return {toggle: toggle, panel: panel, description: description, words: words, render: render,
+                controls: controls, redraw: redraw, keep: keep, audio: audio};
+    }
+
+    // The engine has no voice design any more: the panel goes, its player
+    // with it -- stopped, and out of the page's players.
+    function dropDesign(slot) {
+        const parts = slot.design;
+        slot.design = null;
+        stopAudio(parts.audio, 0);
+        if (isActivePlayer("design", String(slot.number))) state.activePlayer = null;
+        const at = players.indexOf(parts.audio);
+        if (at !== -1) players.splice(at, 1);
+        [parts.toggle, parts.panel].forEach(function (node) {
+            if (node.parentNode) node.parentNode.removeChild(node);
+        });
+    }
+
+    function designOf(number) {
+        const name = String(number);
+        if (!state.designs[name]) state.designs[name] = {open: false, text: "", job: ""};
+        return state.designs[name];
+    }
+
+    // The take a design job made, once it is done: {seconds, seed, text, ...}.
+    function takeOf(job) {
+        if (!job || job.phase !== "done" || !job.design || typeof job.design !== "object") return null;
+        return job.design.ready === false ? null : job.design;
+    }
+
+    // The slot a design job of this page's is for, "" for one it did not start.
+    function designSlotOf(jobId) {
+        let found = "";
+        Object.keys(state.designs).forEach(function (name) {
+            if (jobId && state.designs[name].job === jobId) found = name;
+        });
+        return found;
+    }
+
+    // Why Design cannot be pressed for slot `number`, or "".
+    function designBlocker(number) {
+        if (!slotOf(number).description.trim()) return "Describe the voice first.";
+        if (!state.status) return "Loading…";
+        const engine = state.status.engine || {};
+        if (engine.ready === false) return engine.message || (activeLabel() + " is not installed.");
+        const working = ensureWorking();
+        const settings = state.status.settings || {};
+        if (!working.card_uuid && !settings.card_uuid) return "Choose the card " + activeLabel() + " renders on.";
+        return "";
+    }
+
+    function toggleDesign(number) {
+        const design = designOf(number);
+        design.open = !design.open;
+        drawDesign(number);
+    }
+
+    // A slot's design panel as it stands: open or shut, its words, whether
+    // Design can be pressed, and the take's controls once there is one.
+    // Drawn again on every poll, so each part is written only when it changes.
+    function drawDesign(number) {
+        const slot = nodes.speakers && nodes.speakers[number];
+        if (!slot || !slot.design) return;
+        const parts = slot.design;
+        const design = designOf(number);
+        const opening = !!design.open && parts.panel.hasAttribute("hidden");
+        reveal(parts.panel, !!design.open);
+        setFlag(parts.toggle, "aria-expanded", design.open ? "true" : "false");
+        const description = slotOf(number).description;
+        if (!focused(parts.description) && parts.description.value !== description) {
+            parts.description.value = description;
+        }
+        if (!focused(parts.words) && parts.words.value !== (design.text || "")) parts.words.value = design.text || "";
+        const job = design.job ? jobById(design.job) : null;
+        const live = !!job && isLive(job);
+        const take = takeOf(job);
+        const why = live ? "Designing…" : designBlocker(number);
+        if (parts.render.disabled !== !!why) parts.render.disabled = !!why;
+        setFlag(parts.render, "title", why || "Design a voice from the description");
+        reveal(parts.controls.box, !!take);
+        reveal(parts.redraw, !!take);
+        reveal(parts.keep, !!take);
+        if (parts.redraw.disabled !== !!why) parts.redraw.disabled = !!why;
+        if (parts.keep.disabled !== !take) parts.keep.disabled = !take;
+        drawDesignPlayer(number);
+        // Measured once it has a layout: when the panel opens, and as it is
+        // typed in (designParts), never on a poll.
+        if (opening) fitBoxes([parts.description], [nodes.stage_configuration]);
+    }
+
+    function drawDesignPanels() {
+        if (!nodes.speakers) return;
+        [1, 2, 3, 4].forEach(drawDesign);
+    }
+
+    // A configuration's part of a request, as a render sends it: the saved
+    // configuration by id, and what the screen shows inline while it is
+    // unsaved -- validated by the server the same way.
+    function withConfiguration(body) {
+        const working = ensureWorking();
+        body.configuration_id = state.configurationId;
+        if (state.dirty.configuration || !configurationById(state.configurationId)) {
+            body.configuration = sentConfiguration(working);
+        }
+        return body;
+    }
+
+    // Design: the slot's description, the words it is to say ("" for the
+    // server's own sentence), a seed (null to draw one), with the
+    // configuration's card, attention, sampling and CFG. The job is this
+    // page's: the status line shows it and polls it, Cancel cancels it.
+    function designVoice(number, seed) {
+        const why = designBlocker(number);
+        if (why) {
+            say(why, "warn");
+            return Promise.resolve(null);
+        }
+        const design = designOf(number);
+        const body = withConfiguration({description: slotOf(number).description,
+                                        text: String(design.text || ""),
+                                        seed: typeof seed === "number" && isFinite(seed) ? seed : null});
+        return request("design:" + number, ROUTES.design, {body: body}).then(function (reply) {
+            const before = design.job;
+            const job = recordOf(reply, "job");
+            if (job.id) {
+                // The take before goes: its player stops and its sound is let
+                // go. The new job is the slot's before the line first shows it.
+                if (before && before !== job.id) {
+                    stopDesign(number);
+                    forget("design:" + before);
+                }
+                design.job = job.id;
+            }
+            adoptJob(reply);
+            drawDesign(number);
+            return refreshStatus();
+        });
+    }
+
+    // Redraw: the same description with the next seed after the last take's.
+    function redrawDesign(number) {
+        const design = designOf(number);
+        const take = takeOf(design.job ? jobById(design.job) : null);
+        const seed = take ? Number(take.seed) : NaN;
+        return designVoice(number, isFinite(seed) ? seed + 1 : null);
+    }
+
+    // Keep: the take becomes a sample (its transcript the words it says) and
+    // this slot's voice, an unsaved change to the configuration.
+    function keepDesign(number) {
+        const design = designOf(number);
+        const job = design.job ? jobById(design.job) : null;
+        if (!takeOf(job)) return Promise.resolve(null);
+        const title = ask("Name this voice", "Speaker " + number + " voice");
+        if (title === null) return Promise.resolve(null);
+        return request("design/keep:" + job.id, ROUTES.designKeep, {body: {id: job.id, title: title}})
+            .then(function (reply) {
+                const sample = recordOf(reply, "sample");
+                return refreshSamples().then(function () {
+                    const working = ensureWorking();
+                    if (sample && sample.id) working.speakers[String(number)] = sample.id;
+                    stopDesign(number);
+                    design.open = false;
+                    markConfigurationDirty();
+                    renderSamples();
+                    drawSpeakers();
+                    say("Kept as a sample.", "info");
+                });
+            });
+    }
+
+    function designAddress(number) {
+        const id = String(designOf(number).job || "");
+        return audioUrl("design:" + id, ROUTES.designAudio + "?id=" + encodeURIComponent(id));
+    }
+
+    // The take's transport: Play pauses it while it plays, and otherwise plays
+    // on from where it was; it is the active player while it is one.
+    function playDesign(number) {
+        const slot = nodes.speakers[number];
+        if (!slot || !slot.design) return Promise.resolve();
+        const audio = slot.design.audio;
+        if (isActivePlayer("design", String(number)) && playing(audio)) {
+            audio.pause();
+            return Promise.resolve();
+        }
+        return designAddress(number).then(function (address) {
+            setActivePlayer("design", String(number));
+            return startPlayback(audio, address);
+        });
+    }
+
+    function playDesignFromStart(number) {
+        const slot = nodes.speakers[number];
+        if (!slot || !slot.design) return Promise.resolve();
+        return designAddress(number).then(function (address) {
+            setActivePlayer("design", String(number));
+            return startPlayback(slot.design.audio, address, 0);
+        });
+    }
+
+    function stopDesign(number) {
+        const slot = nodes.speakers && nodes.speakers[number];
+        if (!slot || !slot.design) return;
+        stopAudio(slot.design.audio, 0);
+        if (isActivePlayer("design", String(number))) setActivePlayer(null);
+        else drawDesignPlayer(number);
+    }
+
+    function drawDesignPlayer(number) {
+        const slot = nodes.speakers && nodes.speakers[number];
+        if (!slot || !slot.design) return;
+        showPlaying(slot.design.controls,
+                    isActivePlayer("design", String(number)) && playing(slot.design.audio));
+    }
+
+    function drawDesignPlayers() {
+        if (!nodes.speakers) return;
+        [1, 2, 3, 4].forEach(drawDesignPlayer);
     }
 
     function renderConfiguration() {
@@ -3020,19 +4098,33 @@
         return state.outputs.filter(function (output) { return output.id === id; })[0] || null;
     }
 
+    // The engine a render was made with: its record says, and one made before
+    // there was a choice was VibeVoice's.
+    function engineOf(output) {
+        const render = (output && output.render) || {};
+        return typeof render.engine === "string" && render.engine ? render.engine : "vibevoice";
+    }
+
+    // The selected lane's details line. A VibeVoice render starts with its
+    // model, as it always has; another engine's with the engine's name. The
+    // engine's options are the render's `options` where it recorded them, its
+    // flat keys where it is older.
     function metadata(output) {
         const render = output.render || {};
+        const engine = engineOf(output);
+        const values = render.options && typeof render.options === "object" ? render.options : render;
         const parts = [];
-        if (render.model_id) parts.push(render.model_id);
+        if (engine !== "vibevoice") parts.push(engineLabel(engine));
+        else if (render.model_id) parts.push(render.model_id);
         if (render.seed !== undefined && render.seed !== null) parts.push("seed " + render.seed);
-        if (render.steps) parts.push(render.steps + " steps");
-        if (render.cfg_scale) parts.push("CFG " + render.cfg_scale);
+        if (values.steps) parts.push(values.steps + " steps");
+        if (values.cfg_scale) parts.push("CFG " + values.cfg_scale);
         // "sampling · temperature 0.95 · top-p 0.95", for a render that
         // sampled; a greedy one (or one made before the choice) says nothing.
-        if (render.sampling === true) {
+        if (values.sampling === true) {
             parts.push("sampling");
-            if (typeof render.temperature === "number") parts.push("temperature " + render.temperature);
-            if (typeof render.top_p === "number") parts.push("top-p " + render.top_p);
+            if (typeof values.temperature === "number") parts.push("temperature " + values.temperature);
+            if (typeof values.top_p === "number") parts.push("top-p " + values.top_p);
         }
         if (Array.isArray(render.speakers) && render.speakers.length) {
             parts.push(render.speakers.map(function (speaker) {
@@ -3621,52 +4713,117 @@
             + (state.dirty.configuration ? "; save it to keep it." : "."), "info");
     }
 
-    const REUSED = ["model_id", "card_uuid", "steps", "cfg_scale", "solver", "attention", "seed", "batch",
-                    "max_new_tokens"];
-    const SAMPLED = ["sampling", "temperature", "top_p"];
-
     // The configuration a render used: the one it recorded, or -- for a render
     // made before configurations were recorded -- rebuilt from the fields it
-    // did record. Sampling, Temperature, Top-p, Solver, Attention and Batch
-    // are there only when the render recorded them.
+    // did record. Its engine's options are the recorded `options[<engine>]`;
+    // a VibeVoice render made before every engine had options of its own has
+    // them flat (`flat`), and has Sampling, Temperature, Top-p, Solver,
+    // Attention and Batch only where it recorded them.
     function renderedConfiguration(output) {
         const render = (output && output.render) || {};
+        const engine = engineOf(output);
         const recorded = render.configuration && typeof render.configuration === "object"
             ? render.configuration : null;
+        const found = {id: "", engine: engine, speakers: {}, slots: null, options: null, flat: false};
+        let flat = null;
+        let keys = VIBEVOICE_KEYS;
         if (recorded) {
-            const found = {id: String(recorded.id || ""),
-                           speakers: Object.assign({}, recorded.speakers || {})};
-            REUSED.concat(SAMPLED).forEach(function (key) { found[key] = recorded[key]; });
-            return found;
+            found.id = String(recorded.id || "");
+            found.speakers = Object.assign({}, recorded.speakers || {});
+            SHARED_KEYS.forEach(function (key) { found[key] = recorded[key]; });
+            if (recorded.slots && typeof recorded.slots === "object") found.slots = slotsOf(recorded.slots);
+            const map = recorded.options && typeof recorded.options === "object" ? recorded.options : null;
+            if (map && map[engine] && typeof map[engine] === "object") found.options = Object.assign({}, map[engine]);
+            else flat = recorded;
+        } else {
+            (Array.isArray(render.speakers) ? render.speakers : []).forEach(function (speaker) {
+                if (speaker && speaker.n !== undefined && speaker.n !== null && speaker.sample_id) {
+                    found.speakers[String(speaker.n)] = speaker.sample_id;
+                }
+            });
+            found.model_id = render.model_id;
+            found.card_uuid = render.card;
+            found.seed = render.seed;
+            if (render.options && typeof render.options === "object") found.options = Object.assign({}, render.options);
+            else flat = render;
+            keys = ["steps", "cfg_scale", "max_new_tokens", "sampling", "temperature", "top_p"];
         }
-        const speakers = {};
-        (Array.isArray(render.speakers) ? render.speakers : []).forEach(function (speaker) {
-            if (speaker && speaker.n !== undefined && speaker.n !== null && speaker.sample_id) {
-                speakers[String(speaker.n)] = speaker.sample_id;
-            }
-        });
-        return {id: "", model_id: render.model_id, card_uuid: render.card, steps: render.steps,
-                cfg_scale: render.cfg_scale, seed: render.seed, max_new_tokens: render.max_new_tokens,
-                sampling: render.sampling, temperature: render.temperature, top_p: render.top_p,
-                speakers: speakers};
+        if (!found.options && flat && engine === "vibevoice") {
+            found.options = {};
+            keys.forEach(function (key) { found.options[key] = flat[key]; });
+            found.flat = true;
+        }
+        return found;
     }
 
+    // A render's engine options into the editor's, for the engine in use.
+    function applyRenderedOptions(target, values) {
+        const options = values.options || {};
+        if (!values.flat) {
+            engineFields().forEach(function (field) {
+                if (options[field.key] !== undefined) target[field.key] = options[field.key];
+            });
+            return;
+        }
+        ["steps", "cfg_scale", "solver", "attention", "max_new_tokens"].forEach(function (key) {
+            const value = options[key];
+            if (value === undefined) return;
+            target[key] = value === "" ? null : value;
+        });
+        // A render made before Solver and Attention were choices recorded
+        // neither, and was made with the model's own solver and SDPA: the
+        // fallback's defaults, which it puts back.
+        ["solver", "attention"].forEach(function (key) {
+            if (options[key] === undefined || options[key] === null || options[key] === "") {
+                target[key] = OPTIONS_FALLBACK.defaults[key];
+            }
+        });
+        // Sampling is on only when the render says it was: one made before
+        // the choice existed was greedy. Temperature and Top-p are taken when
+        // recorded, and otherwise the editor keeps its own.
+        target.sampling = options.sampling === true;
+        ["temperature", "top_p"].forEach(function (key) {
+            const value = options[key];
+            if (typeof value === "number" && isFinite(value)) target[key] = value;
+        });
+    }
+
+    // Unsaved changes, measured: the shared values, the engine in use's
+    // options, the speakers and the slots. Another engine's options are not
+    // on the screen, and do not count.
     function sameConfiguration(working, saved) {
         if (!working || !saved) return false;
-        const same = REUSED.concat(SAMPLED).every(function (key) {
+        const shared = SHARED_KEYS.every(function (key) {
             return pick(working[key], null) === pick(saved[key], null);
+        });
+        const active = activeEngine();
+        const mine = (working.options && working.options[active]) || {};
+        const theirs = (saved.options && saved.options[active]) || {};
+        const options = engineFields().every(function (field) {
+            return pick(mine[field.key], null) === pick(theirs[field.key], null);
         });
         const a = working.speakers || {};
         const b = saved.speakers || {};
         const keys = Object.keys(a).concat(Object.keys(b));
-        return same && keys.every(function (key) { return (a[key] || "") === (b[key] || ""); });
+        const speakers = keys.every(function (key) { return (a[key] || "") === (b[key] || ""); });
+        const slots = ["1", "2", "3", "4"].every(function (number) {
+            const x = (working.slots && working.slots[number]) || {};
+            const y = (saved.slots && saved.slots[number]) || {};
+            return (x.instruction || "") === (y.instruction || "")
+                && (x.description || "") === (y.description || "");
+        });
+        return shared && options && speakers && slots;
     }
 
     // The prompt goes into the box as if typed (so the pipeline keeps it the
     // usual way), and the configuration into the editor as unsaved edits: over
     // the configuration it came from while that still exists, otherwise over a
-    // new, unsaved one named after the render. A speaker whose sample has left
-    // the library is left empty, and the status line says so.
+    // new, unsaved one named after the render. What the engines share -- the
+    // model, the card, the seed, the batch, the speakers and their slots -- is
+    // always put back; the engine's own settings only when the render was made
+    // with the engine in use, and otherwise the status line says they were
+    // not. A speaker whose sample has left the library is left empty, and the
+    // line says that too.
     function reuseSettings(output) {
         const render = (output && output.render) || {};
         const values = renderedConfiguration(output);
@@ -3679,7 +4836,7 @@
         const chosen = chooseConfiguration(existing ? existing.id : "");
         const working = ensureWorking();
         if (!existing) working.name = (output && output.name) || "";
-        REUSED.forEach(function (key) {
+        SHARED_KEYS.forEach(function (key) {
             const value = values[key];
             if (value === undefined) return;
             // A recorded model or card of "" is the configuration's way of
@@ -3687,22 +4844,14 @@
             if (value === "" && (key === "model_id" || key === "card_uuid")) return;
             working[key] = value === "" ? null : value;
         });
-        // A render made before Solver, Attention and Batch were choices
-        // recorded none of them, and was made with the model's own solver,
-        // SDPA and one take: the fallback's defaults, which it puts back.
-        LISTED.forEach(function (key) {
-            if (values[key] === undefined || values[key] === null || values[key] === "") {
-                working[key] = OPTIONS_FALLBACK.defaults[key];
-            }
-        });
-        // Sampling is on only when the render says it was: one made before
-        // the choice existed was greedy. Temperature and Top-p are taken when
-        // recorded, and otherwise the editor keeps its own.
-        working.sampling = values.sampling === true;
-        ["temperature", "top_p"].forEach(function (key) {
-            const value = values[key];
-            if (typeof value === "number" && isFinite(value)) working[key] = value;
-        });
+        // A render made before Batch was a choice recorded none, and was one
+        // take: the fallback's default, which it puts back.
+        if (values.batch === undefined || values.batch === null || values.batch === "") {
+            working.batch = OPTIONS_FALLBACK.defaults.batch;
+        }
+        const same = values.engine === activeEngine();
+        if (same) applyRenderedOptions(engineValues(working), values);
+        if (values.slots) working.slots = values.slots;
         working.speakers = {};
         const missing = [];
         Object.keys(values.speakers || {}).sort(function (a, b) { return Number(a) - Number(b); })
@@ -3726,7 +4875,10 @@
         renderSamples();
         renderStatus();
         const name = "“" + ((output && output.name) || "this render") + "”";
-        if (missing.length) say(missing.join(" "), "warn");
+        const other = same ? ""
+            : "Made with " + engineLabel(values.engine) + " — its own settings were not restored.";
+        if (missing.length) say(missing.concat(other ? [other] : []).join(" "), "warn");
+        else if (other) say(other, "info");
         else say("Loaded the prompt and settings of " + name
                  + (state.dirty.configuration ? "; save the configuration to keep them." : "."), "info");
         return chosen;
@@ -3834,9 +4986,22 @@
         return state.jobs.filter(function (job) { return job.id === id; })[0] || null;
     }
 
-    function refreshStatus() {
+    // Which engine is in use and what it can do, as one string: a poll that
+    // brings another (the engine switched here, or in another tab) redraws
+    // what the engine decides -- the library's transcripts, the speaker slots,
+    // the script's placeholder and summary -- and one that brings the same
+    // redraws none of it.
+    function engineShape() {
+        return JSON.stringify([activeEngine(), capabilities()]);
+    }
+
+    // `fresh`: a read that must come after a change, which a poll already in
+    // flight -- sent before the change -- would answer from before it. It
+    // goes after that poll instead of being folded into it.
+    function refreshStatus(fresh) {
         const before = liveJobIds();
-        return request("status", ROUTES.status, {body: {}}).then(function (found) {
+        return request("status", ROUTES.status, {body: {}, queue: fresh === true}).then(function (found) {
+            const shape = engineShape();
             state.status = found || {};
             state.jobs = Array.isArray(state.status.jobs) ? state.status.jobs : [];
             state.answeredAt = now();
@@ -3844,9 +5009,21 @@
                 return !isLive(jobById(id));
             });
             finished.forEach(noteFinished);
+            if (engineShape() !== shape) {
+                renderSamples();
+                drawSpeakers();
+                renderPrompt();
+            }
             renderStatus();
             renderConfigurationFields();
-            if (finished.length) {
+            syncTranscripts();
+            // A design makes no output: only a finished render brings new
+            // lanes and a new line in the history.
+            const rendered = finished.some(function (id) {
+                const job = jobById(id);
+                return !job || job.kind !== "design";
+            });
+            if (rendered) {
                 return Promise.all([refreshOutputs(), refreshPrompts()]).then(function () {
                     return found;
                 });
@@ -3857,10 +5034,17 @@
 
     // A render this page started has ended: its output becomes the selected
     // lane, or its failure the status line's until dismissed or the next
-    // Render press.
+    // Render press. A design that has ended shows its take in its panel; one
+    // that failed is the status line's the same way.
     function noteFinished(id) {
         const job = jobById(id);
         if (!job) return;
+        if (job.kind === "design") {
+            if (job.phase === "failed") {
+                state.lastFailure = {id: job.id, name: job.name || "", warning: job.warning || "", kind: "design"};
+            }
+            return;
+        }
         if (job.phase === "done" && job.output_id) {
             state.selectedOutput = job.output_id;
             state.revealOutput = job.output_id;
@@ -3947,7 +5131,7 @@
             if (progress.failed && !progress.running && progress.text) {
                 return "Install failed: " + progress.text;
             }
-            return engine.message || "VibeVoice is not installed.";
+            return engine.message || (activeLabel() + " is not installed.");
         }
         if (!state.pipelineId) return "No pipeline.";
         const parsed = parseScript(text);
@@ -3955,7 +5139,7 @@
         if (!parsed.words) return emptyMessage || "Nothing to speak.";
         const working = ensureWorking();
         const settings = state.status.settings || {};
-        if (!working.card_uuid && !settings.card_uuid) return "Choose the card VibeVoice renders on.";
+        if (!working.card_uuid && !settings.card_uuid) return "Choose the card " + activeLabel() + " renders on.";
         const numbers = Object.keys(parsed.speakers).map(Number).sort();
         for (let index = 0; index < numbers.length; index += 1) {
             const number = numbers[index];
@@ -3976,14 +5160,12 @@
 
     // The render request for `prompt` as the page would send its own: the
     // pipeline on screen, the saved configuration by id when the screen shows it
-    // unchanged, otherwise what the screen shows inline, validated by the
-    // server the same way. `name` and `origin` are another tab's to give.
+    // unchanged, otherwise what the screen shows inline -- for the engine in
+    // use, with every engine's options -- validated by the server the same
+    // way. `name` and `origin` are another tab's to give.
     function renderBody(prompt, name, origin) {
-        const working = ensureWorking();
-        const unsaved = state.dirty.configuration || !configurationById(state.configurationId);
-        const body = {pipeline_id: state.pipelineId, prompt: String(prompt || ""),
-                      configuration_id: state.configurationId, name: String(name || "")};
-        if (unsaved) body.configuration = Object.assign({}, working);
+        const body = withConfiguration({pipeline_id: state.pipelineId, prompt: String(prompt || ""),
+                                        name: String(name || "")});
         if (origin && typeof origin === "object") body.origin = origin;
         return body;
     }
@@ -4022,7 +5204,7 @@
 
     // -- another tab's render ----------------------------------------------- //
     //
-    // LLM Studio's Send to VibeVoice: a message's words rendered with whatever
+    // LLM Studio's Send to Voice Box: a message's words rendered with whatever
     // this page is set up with -- its pipeline, its configuration and the
     // samples in it -- and nothing of the page's own prompt touched. The job is
     // this page's as much as a Render press's: it shows on the status line,
@@ -4104,7 +5286,7 @@
         return request("runtime:" + card.uuid, ROUTES.runtime,
                        {body: {action: "unload", card_uuid: card.uuid}})
             .then(function () {
-                say("VibeVoice was unloaded from " + card.name + ".", "info");
+                say(activeLabel() + " was unloaded from " + card.name + ".", "info");
                 return refreshStatus();
             });
     }
@@ -4186,7 +5368,26 @@
         return count > 1 ? " · " + count + " takes" : "";
     }
 
+    // " · take 1 of 2 · line 3 of 5": where an engine that renders a script
+    // line by line, and its takes one after another, has got to. Nothing for
+    // a part it does not report, or that is one of one.
+    function stepsOf(progress) {
+        let text = "";
+        const takes = Number(progress.takes) || 0;
+        if (takes > 1) text += " · take " + (Number(progress.take) || 1) + " of " + takes;
+        const lines = Number(progress.lines) || 0;
+        if (lines > 1) text += " · line " + (Number(progress.line) || 1) + " of " + lines;
+        return text;
+    }
+
+    // The engine a job runs on, for its words: the job says, and the engine in
+    // use where it does not.
+    function jobEngineLabel(job) {
+        return job && typeof job.engine === "string" && job.engine ? engineLabel(job.engine) : activeLabel();
+    }
+
     function jobLine(job, queued) {
+        if (job.kind === "design") return designLine(job, queued);
         const name = "“" + (job.name || "a render") + "”" + takesOf(job);
         let before;
         if (job.phase === "rendering") {
@@ -4194,8 +5395,9 @@
             const progress = job.progress || {};
             const sections = Number(progress.sections) || 0;
             if (sections > 1) before += " · section " + (Number(progress.section) || 1) + " of " + sections;
+            before += stepsOf(progress);
         } else if (job.phase === "loading") {
-            before = "Loading VibeVoice · " + name;
+            before = "Loading " + jobEngineLabel(job) + " · " + name;
         } else {
             before = "Waiting for the card" + (job.reason ? ": " + job.reason : "") + " · " + name;
         }
@@ -4205,14 +5407,34 @@
                 after: queued ? " · " + queued + " queued" : ""};
     }
 
-    // One flat record (mc_voice_vibevoice.progress): running, text, fraction,
-    // failed. "Installing the runtime — 45 %"; the words alone before a
-    // fraction is known.
+    // A voice being designed, on the line the way a render is -- its Cancel
+    // cancels it -- named by the slot it is for, its time in seconds:
+    // "Designing · Speaker 2 · 3.1 s".
+    function designLine(job, queued) {
+        const slot = designSlotOf(job.id);
+        const name = "Designing · " + (slot ? "Speaker " + slot : (job.name || "a voice"));
+        let before;
+        if (job.phase === "rendering") {
+            before = name;
+        } else if (job.phase === "loading") {
+            before = "Loading " + jobEngineLabel(job) + " · " + name;
+        } else {
+            before = "Waiting for the card" + (job.reason ? ": " + job.reason : "") + " · " + name;
+        }
+        const elapsed = elapsedOf(job);
+        return {before: elapsed === null ? before : before + " · ",
+                clock: elapsed === null ? undefined : seconds(elapsed),
+                after: queued ? " · " + queued + " queued" : ""};
+    }
+
+    // One flat record (the engine's install progress): running, text,
+    // fraction, failed. "Installing the runtime — 45 %"; the words alone
+    // before a fraction is known.
     function installLine(progress) {
-        const words = String(progress.text || "") || "Installing VibeVoice…";
+        const words = String(progress.text || "") || "Installing " + activeLabel() + "…";
         const fraction = Math.max(0, Math.min(1, Number(progress.fraction) || 0));
         if (!(fraction > 0)) return words;
-        return (words.replace(/[\s.…]+$/, "") || "Installing VibeVoice") + " — "
+        return (words.replace(/[\s.…]+$/, "") || "Installing " + activeLabel()) + " — "
             + Math.round(fraction * 100) + " %";
     }
 
@@ -4227,7 +5449,7 @@
         return found ? (found.name || "") : "";
     }
 
-    // Where VibeVoice is up and not rendering: its worker's own report first,
+    // Where the engine is up and not rendering: its worker's own report first,
     // then the turn system's warm stays.
     function warmCards() {
         const status = state.status || {};
@@ -4266,7 +5488,7 @@
         Object.keys(runtime).forEach(function (key) {
             const card = runtime[key] || {};
             if (!card.running) return;
-            parts.push("VibeVoice " + (card.rendering ? "rendering" : (card.loaded ? "loaded" : "starting"))
+            parts.push(activeLabel() + " " + (card.rendering ? "rendering" : (card.loaded ? "loaded" : "starting"))
                        + " on " + (card.device_name || key) + " (" + gigabytes(card.resident_bytes) + ")");
         });
         if (status.runtime && status.runtime.last_error) parts.push("last error: " + status.runtime.last_error);
@@ -4275,8 +5497,8 @@
 
     // The first that applies: a fresh message, an install running, a job on a
     // card (with its time and the queue), the queue alone, this page's last
-    // render having failed, VibeVoice warm on a card, why Render is disabled,
-    // and otherwise Ready.
+    // render or design having failed, the engine warm on a card, why Render
+    // is disabled, and otherwise Ready.
     function statusLine() {
         if (state.message) {
             return {state: "message", kind: state.messageKind || "info", before: state.message};
@@ -4293,13 +5515,14 @@
         if (queued) return {state: "queued", kind: "info", queued: queued, before: queued + " queued"};
         if (state.lastFailure) {
             return {state: "failed", kind: "error",
-                    before: "Last render failed" + (state.lastFailure.warning
-                        ? ": " + state.lastFailure.warning : ".")};
+                    before: "Last " + (state.lastFailure.kind === "design" ? "design" : "render") + " failed"
+                        + (state.lastFailure.warning ? ": " + state.lastFailure.warning : ".")};
         }
         const warm = warmCards();
         if (warm.length) {
             return {state: "warm", kind: "info", warm: warm,
-                    before: "VibeVoice warm on " + warm.map(function (card) { return card.name; }).join(" and ")};
+                    before: activeLabel() + " warm on "
+                        + warm.map(function (card) { return card.name; }).join(" and ")};
         }
         const why = renderBlocker();
         if (why) return {state: "blocked", kind: "info", before: why};
@@ -4332,16 +5555,18 @@
                                   + (details ? "\n" + details : ""));
     }
 
-    // One Unload per card VibeVoice is warm on, rebuilt only when that set
-    // changes -- a button replaced under a finger loses the press.
+    // One Unload per card the engine is warm on, rebuilt only when that set
+    // changes -- a button replaced under a finger loses the press -- or the
+    // engine whose name it carries does.
     function syncUnloads(warm) {
-        const key = warm.map(function (card) { return card.uuid + "=" + card.name; }).join("|");
+        const label = activeLabel();
+        const key = label + "|" + warm.map(function (card) { return card.uuid + "=" + card.name; }).join("|");
         if (nodes.unloadKey === key) return;
         nodes.unloadKey = key;
         clear(nodes.statusUnloads);
         warm.forEach(function (card) {
             nodes.statusUnloads.appendChild(button(warm.length > 1 ? "Unload from " + card.name : "Unload",
-                                                   "Unload VibeVoice from " + card.name, function () {
+                                                   "Unload " + label + " from " + card.name, function () {
                                                        return unloadCard(card);
                                                    }, "mc-voice-box-unload"));
         });
@@ -4359,9 +5584,16 @@
         const installable = !!state.status && engine.ready === false && engine.supported !== false;
         show(nodes.install, installable);
         if (installable) {
-            nodes.install.textContent = "Install VibeVoice"
+            // Written only when it changes: this runs every second a job runs.
+            const label = activeLabel();
+            const text = "Install " + label
                 + (engine.download_bytes ? " (" + gigabytes(engine.download_bytes) + ")" : "");
+            if (nodes.install.textContent !== text) nodes.install.textContent = text;
+            const name = "Install the " + label + " runtime and model";
+            setFlag(nodes.install, "aria-label", name);
+            setFlag(nodes.install, "title", name);
         }
+        drawDesignPanels();
         const line = statusLine();
         state.statusLine = line.state;
         writeStatus(line);
@@ -4531,6 +5763,7 @@
             state.layout.width = width;
             redrawAll();
             fitPrompt();
+            fitAllBoxes();
         }
     }
 
@@ -4595,7 +5828,7 @@
     window.mcVoiceBox = {
         state: function () { return state; },
         boot: boot,
-        // For another tab on this page. LLM Studio's Send to VibeVoice reads
+        // For another tab on this page. LLM Studio's Send to Voice Box reads
         // these five and nothing else: why a text cannot be rendered right
         // now, a render of it with the page's current setup, a job by id (the
         // page's poll keeps `state.jobs` current while one is live), the

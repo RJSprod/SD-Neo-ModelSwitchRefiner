@@ -4235,6 +4235,11 @@ moment. *"Copy should just copy."*
 
 ### 39.4 Send to VibeVoice, Play VibeVoice
 
+*Renamed **Send to Voice Box** and **Play Voice Box** on 2026-10-14, when the
+Voice Box gained a second engine (docs/25): the buttons send to the Voice Box,
+which renders with whichever engine it is set to, and a render's origin names
+that engine. What follows is otherwise unchanged.*
+
 > *"When i send to vibevoice, it should try to use the set up already in the
 > page … This button simply feeds in the prompt (for now). … It does not auto
 > play, but i would like to have something like a blinking stroke on taht

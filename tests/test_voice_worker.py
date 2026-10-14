@@ -19,6 +19,7 @@ perfectly. These tests are that bug, written down.
 
 from __future__ import annotations
 
+import math
 import pathlib
 
 import pytest
@@ -744,3 +745,107 @@ class TestPacing:
     def test_no_pause_is_no_bytes(self):
         assert worker.silence(24000, 0) == b""
         assert worker.silence(0, 250) == b""
+
+
+class Recognizer:
+    """A sherpa OfflineRecognizer that hears thirty seconds, as the real one does.
+
+    Each stream keeps only the first thirty seconds it is handed -- sherpa's
+    Whisper says "We process only the first 30 seconds and discard the
+    remaining data" -- and reads back how many samples it kept, as one word,
+    so what a decode lost is visible in the text.
+    """
+
+    def __init__(self):
+        self.accepted = []
+
+    def create_stream(self):
+        recognizer = self
+
+        class Stream:
+            def __init__(self):
+                self.samples = []
+                self.rate = 0
+                self.result = type("Result", (), {"text": ""})()
+
+            def accept_waveform(self, rate, samples):
+                self.rate = rate
+                self.samples = list(samples)
+                recognizer.accepted.append(len(self.samples) / float(rate))
+
+        return Stream()
+
+    def decode_stream(self, stream):
+        kept = stream.samples[: int(worker.STT_WINDOW_SECONDS * stream.rate)]
+        stream.result.text = str(len(kept))
+
+
+def _speech(seconds: float, rate: int = 16000, pauses=()):
+    """A tone with silent pauses at ``pauses`` (``(start, length)`` in seconds)."""
+    found = []
+    for index in range(int(seconds * rate)):
+        moment = index / rate
+        quiet = any(start <= moment < start + length for start, length in pauses)
+        found.append(0.0 if quiet else 0.3 * math.sin(2 * math.pi * 220 * moment))
+    return found
+
+
+class TestWhisperHearsALongRecordingWhole:
+    """sherpa's Whisper decodes thirty seconds of a stream and drops the rest, so a
+    sixty-second dictation or Voice Box sample came back as its first half. The
+    worker decodes a longer recording in pieces cut at its quietest moments."""
+
+    def test_a_recording_within_the_window_is_one_piece(self):
+        assert worker.stt_pieces([0.1] * (29 * 16000), 16000) == [(0, 29 * 16000)]
+        assert worker.stt_pieces([], 16000) == []
+
+    def test_a_longer_one_is_cut_in_its_pause(self):
+        rate = 16000
+        samples = _speech(50, rate, pauses=[(25.0, 0.3)])
+        pieces = worker.stt_pieces(samples, rate)
+        assert len(pieces) == 2
+        cut = pieces[0][1] / rate
+        assert 25.0 <= cut <= 25.3, cut
+
+    def test_the_pieces_cover_every_sample_once_and_none_is_too_long(self):
+        rate = 16000
+        samples = _speech(60, rate, pauses=[(13.0, 0.2), (40.0, 0.2)])
+        pieces = worker.stt_pieces(samples, rate)
+        assert pieces[0][0] == 0 and pieces[-1][1] == len(samples)
+        for (_begin, end), (begin, _end) in zip(pieces, pieces[1:]):
+            assert end == begin
+        assert all((end - begin) / rate <= worker.STT_PIECE_SECONDS for begin, end in pieces)
+
+    def test_a_minute_of_speech_reads_back_whole(self):
+        found = worker.Engines({})
+        found.recognizer = Recognizer()
+        samples = _speech(60, 16000, pauses=[(26.5, 0.2), (52.0, 0.2)])
+        text = found.transcribe(samples, 16000)
+        assert sum(int(word) for word in text.split()) == len(samples)
+        assert all(seconds <= worker.STT_PIECE_SECONDS for seconds in found.recognizer.accepted)
+
+    def test_readings_join_with_a_space_except_between_cjk_characters(self):
+        assert worker.join_readings(["Hello there", " world. ", "", "Again"]) \
+            == "Hello there world. Again"
+        assert worker.join_readings(["你好", "世界", "OK"]) == "你好世界 OK"
+
+    def test_a_piece_that_heard_nothing_is_left_out_of_the_join(self):
+        """Whisper describes a silent stretch rather than transcribing it. Joined
+        into a minute's dictation the description would be words; alone it is
+        what the parent's whole-result rule already throws away."""
+        assert worker.join_readings(["Hello there.", "[BLANK_AUDIO]"]) == "Hello there."
+        assert worker.join_readings(["(music)", "Hi.", "Thank you for watching!"]) == "Hi."
+
+    def test_a_recording_that_heard_nothing_anywhere_is_still_nothing_to_the_parent(self):
+        import mc_voice_hearing
+
+        joined = worker.join_readings(["(music)", "[BLANK_AUDIO]", "you"])
+        assert mc_voice_hearing.speech(joined) == ""
+
+    def test_the_rules_are_the_parents_own(self):
+        """Copied, because this process cannot import the extension; held equal here."""
+        import mc_voice_hearing
+
+        assert worker.STT_NON_SPEECH.pattern == mc_voice_hearing.NON_SPEECH.pattern
+        assert worker.STT_NON_SPEECH.flags == mc_voice_hearing.NON_SPEECH.flags
+        assert worker.STT_FILLERS == mc_voice_hearing.FILLERS

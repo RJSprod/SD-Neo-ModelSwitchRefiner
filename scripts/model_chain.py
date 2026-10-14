@@ -53,6 +53,7 @@ import mc_turns_guests
 import mc_voice_api
 import mc_voice_box
 import mc_voice_box_api
+import mc_voice_box_engines
 import mc_voice_box_ui
 import mc_voice_clone
 import mc_voice_device
@@ -72,6 +73,8 @@ import mc_voice_pocket_profile
 import mc_voice_pocket_runtime
 import mc_voice_vibevoice
 import mc_voice_vibevoice_runtime
+import mc_voice_breeze
+import mc_voice_breeze_runtime
 import mc_voice_pipeline
 import mc_voice_pipeline_runtime
 import mc_voice_state
@@ -662,26 +665,28 @@ shared.options_templates.update(
             ),
             mc_turns.OPT_IMAGE_RETURN: shared.OptionInfo(
                 mc_turns.RETURN_AUTOMATIC,
-                "Bring the image model back after VibeVoice",
+                "Bring the image model back after a Voice Box render",
                 gr.Radio,
                 {"choices": [label for _, label in mc_turns.RETURN_MODES]},
             ).info(
-                "when VibeVoice takes its turn on the card the image model lives on, the "
-                "image model makes room and comes back afterwards. From system RAM keeps "
-                "the very same model — LoRAs included — and moves it back in about twenty "
-                "seconds, but holds its size in RAM while VibeVoice runs; From its recipe "
+                "when the Voice Box's engine (VibeVoice or Breeze) takes its turn on the card "
+                "the image model lives on, the image model makes room and comes back "
+                "afterwards. From system RAM keeps the very same model — LoRAs included — "
+                "and moves it back in about twenty seconds, but holds its size in RAM while "
+                "the Voice Box renders; From its recipe "
                 "frees the RAM too and reloads it from its own files. Nothing is ever "
                 "written to disk, and a request that would push system RAM into the "
                 "pagefile is refused with a warning instead"
             ),
             mc_turns.OPT_KEEP_WARM: shared.OptionInfo(
                 mc_turns.WARM_EVERY,
-                "Keep VibeVoice warm between requests",
+                "Keep the Voice Box's engine warm between requests",
                 gr.Radio,
                 {"choices": [label for _, label in mc_turns.WARM_MODES]},
             ).info(
-                "a warm VibeVoice starts the next request in seconds instead of loading "
-                "eighteen gigabytes again. It never keeps a card from anything else: an "
+                "a warm engine starts the next request in seconds instead of loading its "
+                "model again — eighteen gigabytes for VibeVoice, eight for Breeze. It never "
+                "keeps a card from anything else: an "
                 "image generation, WanGP or the LLM that needs the card unloads it first, "
                 "and a request already running is never cut off"
             ),
@@ -4283,10 +4288,12 @@ def _on_script_unloaded():
     # not stop the cleanup of the others.
     for name, stop in (
             # The Voice Box's renders first, so that no job asks for a card
-            # while the door is closing, then VibeVoice's worker, which holds a
-            # card's worth of memory and is a process of its own (docs/23).
+            # while the door is closing, then every Voice Box engine's workers
+            # -- VibeVoice's and Breeze's, whichever is active, from the
+            # registry -- each of which holds a card's worth of memory and is a
+            # process of its own (docs/23, docs/25).
             ("the Voice Box's renders", mc_voice_box.stop),
-            ("VibeVoice", mc_voice_vibevoice_runtime.shutdown),
+            *mc_voice_box_engines.shutdowns(),
             ("Kokoro", mc_voice_runtime.shutdown),
             ("Sopro", mc_voice_sopro_runtime.shutdown),
             # PocketTTS's ordinary Stop drains an abandoned unit; this is not

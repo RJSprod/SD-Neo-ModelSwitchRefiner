@@ -86,6 +86,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import mc_voice_box_fields as box_fields
 import mc_voice_models as models
 import mc_voice_paths as paths
 import mc_voice_wheelindex as wheelindex
@@ -93,6 +94,9 @@ from vibevoice_worker import worker as protocol
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
+
+ID = "vibevoice"
+"""This engine's id in the Voice Box's registry (:mod:`mc_voice_box_engines`)."""
 
 LABEL = "VibeVoice"
 
@@ -768,6 +772,141 @@ def options() -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# The engine's vocabulary, as data the Voice Box reads
+# --------------------------------------------------------------------------- #
+
+CONFIGURATION_TOKENS_MAX = 65_536
+"""The most a configuration's token cap may name: the Voice Box's own bound,
+held from before the engine had fields, so a configuration that validated then
+validates now. The worker's own budget never asks past the model's context."""
+
+FIELDS = (
+    {"key": "steps", "label": "Diffusion steps", "kind": "int", "min": STEPS_MIN,
+     "max": STEPS_MAX, "step": 1, "default": STEPS_DEFAULT, "place": "head",
+     "infotext": "Steps"},
+    {"key": "cfg_scale", "label": "CFG", "kind": "float", "min": CFG_MIN, "max": CFG_MAX,
+     "step": 0.1, "default": CFG_DEFAULT, "place": "head", "infotext": "CFG scale"},
+    {"key": "solver", "label": "Solver", "kind": "choice", "noun": "a solver",
+     "options": [{"id": key, "name": entry["name"]} for key, entry in protocol.SOLVERS.items()],
+     "default": protocol.SOLVER_DEFAULT, "place": "head", "infotext": "Solver"},
+    {"key": "attention", "label": "Attention", "kind": "choice", "noun": "an attention",
+     "options": [{"id": key, "name": name} for key, name in protocol.ATTENTION.items()],
+     "default": protocol.ATTENTION_DEFAULT, "place": "head", "infotext": "Attention"},
+    {"key": "max_new_tokens", "label": "Max new tokens", "kind": "int", "min": 1,
+     "max": CONFIGURATION_TOKENS_MAX, "step": 1, "blank": "automatic", "default": None,
+     "place": "tail", "infotext": "Max new tokens"},
+    {"key": "sampling", "label": "Sampling", "kind": "bool", "default": False,
+     "place": "tail", "wide": True},
+    {"key": "temperature", "label": "Temperature", "kind": "float", "min": 0.1, "max": 2.0,
+     "step": 0.05, "default": protocol.SAMPLING_TEMPERATURE, "needs": "sampling",
+     "place": "tail", "infotext": "Temperature"},
+    {"key": "top_p", "label": "Top-p", "kind": "float", "min": 0.05, "max": 1.0, "step": 0.01,
+     "default": protocol.SAMPLING_TOP_P, "needs": "sampling", "place": "tail",
+     "infotext": "Top-p"},
+)
+"""VibeVoice's configuration fields, in the order the Configuration stage draws
+them: steps, CFG, solver and attention before the seed and the batch; the token
+cap and the pacer's sampling after. The field list is what the page used to
+hold itself (``FIELDS`` and ``OPTIONS_FALLBACK`` in voice_box.js), now said
+once, here, and sent to it."""
+
+
+FLAT = tuple(field["key"] for field in FIELDS)
+"""VibeVoice's options as configurations and outputs held them before the Voice
+Box had a second engine: flat, beside the shared fields. The Voice Box still
+reads them from a configuration or a page that sends them, and still writes
+them beside ``options``, so a reader that knows only them reads what it
+always read."""
+
+
+def fields() -> list:
+    """:data:`FIELDS` as the page draws them: every choice labelled, and an
+    attention this runtime cannot run listed unavailable with the reason."""
+    listed = options()
+    found = []
+    for field in FIELDS:
+        entry = dict(field)
+        if field["key"] == "solver":
+            entry["options"] = [dict(option) for option in listed["solvers"]]
+        elif field["key"] == "attention":
+            entry["options"] = [dict(option) for option in listed["attention"]]
+        found.append(entry)
+    return found
+
+
+def defaults() -> dict:
+    """A new configuration's options for VibeVoice."""
+    return box_fields.defaults(FIELDS)
+
+
+def clean(values: dict, previous: "dict | None" = None) -> dict:
+    """One configuration's VibeVoice options, checked against :data:`FIELDS`.
+
+    Raises :class:`VibeVoiceError` with the Voice Box's sentence for a value a
+    field does not take; ``previous`` (or the defaults) fills what ``values``
+    does not say.
+    """
+    try:
+        return box_fields.clean(FIELDS, values, previous, engine=LABEL)
+    except box_fields.FieldError as exc:
+        raise VibeVoiceError(str(exc)) from None
+
+
+def refuse(chosen: dict) -> str:
+    """Why a configuration's options cannot render on this machine, or ``""``."""
+    if str((chosen or {}).get("attention") or "") == "flash_attention_2" \
+            and not flash_attention_installed():
+        return ("Flash attention 2 needs the flash-attn package in VibeVoice's runtime, which "
+                "it does not have. Choose SDPA or Eager.")
+    return ""
+
+
+def capabilities() -> dict:
+    """What the Voice Box may ask of VibeVoice beyond a script and its samples.
+
+    A section in one ``generate``, its speakers native to the model; a batch
+    of takes in one ``generate`` too; a voice is a sample and nothing else,
+    with no transcript, description or direction; and no inline vocal events
+    -- ``(laugh)`` is read as a word.
+    """
+    return {"speakers": "native", "takes": "batch", "design": False, "directions": False,
+            "voice": {"sample": True, "transcript": False, "description": False,
+                      "instruction": False},
+            "events": None, "languages": ["en", "zh"]}
+
+
+def infotext(render: dict, shared: dict) -> list:
+    """The parameters of a VibeVoice output's infotext, in order, as ``(label, value)``.
+
+    Exactly the line the Voice Box wrote before it had a second engine --
+    Steps, Solver, CFG scale, Seed, Temperature and Top-p while sampling,
+    Attention, Model, each speaker, Max new tokens -- so a render made then
+    reads the same now. ``shared`` holds the Voice Box's own parts: the seed,
+    the model and the speakers.
+    """
+    values = dict(render or {})
+    values.update({key: value for key, value in dict(values.get("options") or {}).items()
+                   if key not in values})
+
+    def number(value):
+        return f"{float(value):g}" if isinstance(value, (int, float)) \
+            and not isinstance(value, bool) else value
+
+    parts = [("Steps", values.get("steps")),
+             ("Solver", protocol.SOLVERS.get(str(values.get("solver") or ""), {}).get("name")),
+             ("CFG scale", number(values.get("cfg_scale"))),
+             ("Seed", shared.get("seed"))]
+    if values.get("sampling"):
+        parts += [("Temperature", number(values.get("temperature"))),
+                  ("Top-p", number(values.get("top_p")))]
+    parts += [("Attention", protocol.ATTENTION.get(str(values.get("attention") or ""))),
+              ("Model", shared.get("model"))]
+    parts += list(shared.get("speakers") or ())
+    parts.append(("Max new tokens", values.get("max_new_tokens")))
+    return parts
+
+
 def public_status() -> dict:
     """Everything the page needs, JSON-safe, in one answer."""
     found = status()
@@ -780,6 +919,7 @@ def public_status() -> dict:
     except Exception:
         vram, ram = 0, 0
     return {
+        "id": ID,
         "installed": found.ready,
         "ready": found.ready,
         "supported": found.supported,
@@ -808,6 +948,11 @@ def public_status() -> dict:
         ],
         "settings": settings(),
         "options": options(),
+        "fields": fields(),
+        "capabilities": capabilities(),
+        "max_takes": MAX_TAKES,
+        "stale": False,
+        "stale_message": "",
         "need_vram_bytes": int(vram),
         "need_ram_bytes": int(ram),
         "refusal": refusal(),

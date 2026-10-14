@@ -98,6 +98,23 @@ class TestTheGuest:
         assert mc_turns._guest(guests.GUEST) is not None
         assert isinstance(box.turns(), guests.TurnClient)
 
+    def test_every_engine_is_a_guest_and_named_by_its_label_in_a_sentence(self, machine,
+                                                                           stub, monkeypatch):
+        """A turn's sentences -- the gate's notice, a hand-back -- say *Breeze TTS 2*,
+        not the name it was registered under, and a request names its engine's guest."""
+        breeze = StubRuntime()
+        monkeypatch.setitem(sys.modules, "mc_voice_breeze_runtime", breeze)
+        guests.install()
+        assert set(guests.GUESTS) == {"VibeVoice", "Breeze"}
+        assert mc_turns._display("Breeze") == "Breeze TTS 2"
+        assert mc_turns._display("VibeVoice") == "VibeVoice"
+        breeze.held[key(WANGP_UUID)] = 9 * _GB
+        assert mc_turns._guest("Breeze").resident_bytes(WANGP_UUID) == 9 * _GB
+        assert stub.resident_bytes(WANGP_UUID) == 0, "each guest reaches its own runtime"
+        turn = box.turns().request(WANGP_UUID, need_vram=1, guest="Breeze")
+        assert turn.guest == "Breeze"
+        turn.cancel()
+
 
 class TestTheClient:
     def test_a_request_is_a_turn_for_the_guest_and_is_granted_on_a_free_card(self, machine, stub):
