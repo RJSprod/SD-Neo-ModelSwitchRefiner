@@ -197,6 +197,8 @@ class TestTheSettingsAsRead:
             out.cardSmall = T.normalise({networksCard: 1}).networksCard;
             out.cardLarge = T.normalise({networksCard: 999}).networksCard;
             out.cardText = T.normalise({networksCard: "big"}).networksCard;
+            out.layout = T.normalise({networksMode: "column"}).networksMode;
+            out.badLayout = T.normalise({networksMode: "sideways"}).networksMode;
             out.infoOff = T.normalise({info: false}).info;
             out.infoUnset = T.normalise({}).info;
         """)
@@ -216,6 +218,7 @@ class TestTheSettingsAsRead:
         assert found["cardSmall"] == mc_theme.NETWORKS_CARD_MIN
         assert found["cardLarge"] == mc_theme.NETWORKS_CARD_MAX
         assert found["cardText"] == mc_theme.NETWORKS_CARD_DEFAULT
+        assert found["layout"] == "column" and found["badLayout"] == "drawer"
         assert found["infoOff"] is False
         assert found["infoUnset"] is True
 
@@ -226,7 +229,7 @@ class TestTheSettingsAsRead:
                      mc_theme.OPT_QUICK_WIDTH, mc_theme.OPT_PROMPTS, mc_theme.OPT_ICONS,
                      mc_theme.OPT_TITLE, mc_theme.OPT_TAB_LABELS, mc_theme.OPT_CONFIRM_UNLOAD,
                      mc_theme.OPT_FONT, mc_theme.OPT_NETWORKS, mc_theme.OPT_NETWORKS_WIDTH,
-                     mc_theme.OPT_NETWORKS_CARD, mc_theme.OPT_IMAGE_INFO):
+                     mc_theme.OPT_NETWORKS_CARD, mc_theme.OPT_NETWORKS_MODE, mc_theme.OPT_IMAGE_INFO):
             assert f'"{name}"' in script, name
 
     def test_the_defaults_here_match_pythons(self):
@@ -240,6 +243,7 @@ class TestTheSettingsAsRead:
         assert found["defaults"]["networks"] == mc_theme.NETWORKS_DEFAULT
         assert found["defaults"]["networksWidth"] == mc_theme.NETWORKS_WIDTH_DEFAULT
         assert found["defaults"]["networksCard"] == mc_theme.NETWORKS_CARD_DEFAULT
+        assert found["defaults"]["networksMode"] == mc_theme.NETWORKS_LAYOUT_DEFAULT
         assert found["defaults"]["info"] is True
 
 
@@ -247,7 +251,7 @@ def T_DEFAULTS():
     return {"enabled": False, "split": True, "quick": "collapsed", "quickWidth": 280,
             "prompts": True, "icons": True, "title": "Forge", "labels": "as_forge",
             "confirm": False, "font": "", "networks": "collapsed", "networksWidth": 340,
-            "networksCard": 120, "info": True}
+            "networksCard": 120, "networksMode": "drawer", "info": True}
 
 
 # What Forge writes under the gallery (modules/ui_common.py, plaintext_to_html:
@@ -426,9 +430,9 @@ class TestTheStylesheetSection:
         # !important itself, so the dialog's own padding and surface must too.
         allowed = ("[hidden]", "mc-theme-overflow", ".gradio-button.tool", "token-counter",
                    "#quicksettings", "gradio-accordion", "_toprow", ".mc-theme-action",
-                   ".mc-theme-networks-nav", ".mc-theme-networks-group > .extra-page",
-                   ".mc-theme-networks .extra-network-pane .card", ".mc-theme-info-copy",
-                   ".edit-user-metadata")
+                   ".mc-theme-networks-nav", ".mc-theme-networks-page",
+                   ".mc-theme-networks-page .extra-network-pane .card", ".mc-theme-info-copy",
+                   ".edit-user-metadata", "forge-assistant-focused")
         for selector, body in rules(section()):
             if "!important" not in body:
                 continue
@@ -458,8 +462,12 @@ class TestTheStylesheetSection:
                                       ("mc-theme-networks-shown", "mc-theme-networks-shown"),
                                       ("mc-theme-networks-tab", "mc-theme-networks-tab"),
                                       ("mc-theme-networks-active", "mc-theme-networks-active"),
-                                      ("mc-theme-networks-empty", "mc-theme-networks-empty"),
-                                      ("mc-theme-networks-group", "mc-theme-networks-group"),
+                                      ("mc-theme-networks-host", "mc-theme-networks-host"),
+                                      ("mc-theme-networks-open", "mc-theme-networks-open"),
+                                      ("mc-theme-networks-page", "mc-theme-networks-page"),
+                                      ("mc-theme-networks-handle", "mc-theme-networks-handle"),
+                                      ("mc-theme-networks-resizing", "mc-theme-networks-resizing"),
+                                      ("data-mc-theme-networks", "data-mc-theme-networks"),
                                       ("mc-theme-info-source", "mc-theme-info-source"),
                                       ("mc-theme-info-block", "mc-theme-info-block"),
                                       ("mc-theme-info-chip", "mc-theme-info-chip"),
