@@ -9620,12 +9620,21 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     align-items: flex-start;
 }
 
-/* A switch -- Sampling, Keep warm -- is one button: a drawn track and knob,
-   then the setting's name, and all of it is the press. No native checkbox:
-   a theme's rules about inputs squeezed Sampling's to a sliver nobody could
-   tell was a control. Off, the knob sits left in an outlined track; on, it
-   sits right in a track filled with the accent, and the button's border
-   takes the accent too -- the knob's side says it without the colour. */
+/* Keep warm, and beside it an engine's own switch where it has one (Breeze's
+   Fast path): one row, the second wrapping under the first where the stage is
+   too narrow for both. With Keep warm alone it sits where it always has. */
+#mc-voice-box .mc-voice-box-field-switches {
+    flex-flow: row wrap;
+    gap: 0.4em;
+}
+
+/* A switch -- Sampling, Keep warm, Fast path -- is one button: a drawn track
+   and knob, then the setting's name, and all of it is the press. No native
+   checkbox: a theme's rules about inputs squeezed Sampling's to a sliver
+   nobody could tell was a control. Off, the knob sits left in an outlined
+   track; on, it sits right in a track filled with the accent, and the
+   button's border takes the accent too -- the knob's side says it without
+   the colour. */
 #mc-voice-box .mc-voice-box-switch-button {
     gap: 0.5em;
     justify-content: flex-start;

@@ -2823,6 +2823,9 @@
                                    voice: {transcript: false, instruction: false}, events: null};
     // The engines this page knows by name, for a status that lists none.
     const ENGINE_LABELS = {vibevoice: "VibeVoice", breeze: "Breeze TTS 2"};
+    // The Fast path switch's tooltip: what it buys, what it costs, and when.
+    const FAST_PATH_TITLE = "Breeze's CUDA-graph fast path: slower first line after a load, faster after; "
+        + "about 7 GB more of the card while warm. Takes effect on the next load.";
 
     // -- which engine, and what it has -- //
 
@@ -3093,7 +3096,7 @@
         // engine's label in it. While a save is on its way -- two, after two
         // quick presses -- a status that arrives with the old value does not
         // flip it back (renderConfigurationFields); the last answer decides.
-        const warm = el("div", "mc-voice-box-field mc-voice-box-field-toggle");
+        const warm = el("div", "mc-voice-box-field mc-voice-box-field-toggle mc-voice-box-field-switches");
         nodes.keepWarm = switchButton("Keep warm", "Keep " + activeLabel() + " warm between renders", function (on) {
             const settle = function () {
                 nodes.keepWarm.mcVoiceBoxSaving -= 1;
@@ -3106,6 +3109,30 @@
             });
         }, "mc-voice-box-keep-warm");
         warm.appendChild(nodes.keepWarm);
+        // Fast path is an engine's own setting (Breeze's), beside Keep warm and
+        // saved at once the same way. It is shown only while the engine's
+        // settings have the key: VibeVoice's have none, and are never sent it --
+        // a press while an engine change is on its way sends nothing. Its name
+        // is its face; the tooltip says what it costs.
+        nodes.fastPath = switchButton("Fast path", "", function (on) {
+            if (!hasFastPath() || state.engineSwitch) {
+                setSwitch(nodes.fastPath, !on);
+                renderConfigurationFields();
+                return null;
+            }
+            const settle = function () {
+                nodes.fastPath.mcVoiceBoxSaving -= 1;
+                renderConfigurationFields();
+            };
+            nodes.fastPath.mcVoiceBoxSaving = (nodes.fastPath.mcVoiceBoxSaving || 0) + 1;
+            return saveSettings({fast_path: on}).then(settle, function (error) {
+                settle();
+                throw error;
+            });
+        }, "mc-voice-box-fast-path");
+        nodes.fastPath.setAttribute("title", FAST_PATH_TITLE);
+        show(nodes.fastPath, hasFastPath());
+        warm.appendChild(nodes.fastPath);
         form.appendChild(warm);
 
         // A speaker slot is its sample: its name, a waveform and Clear. An
@@ -3239,6 +3266,13 @@
             change[field.key] = value || "";
             saveSettings(change).catch(report);
         }
+    }
+
+    // Whether the engine in use has a fast path to switch: its settings say so
+    // by having the key at all (Breeze's do; VibeVoice's do not).
+    function hasFastPath() {
+        const engineSettings = (state.status && state.status.engine_settings) || {};
+        return Object.prototype.hasOwnProperty.call(engineSettings, "fast_path");
     }
 
     function saveSettings(values) {
@@ -3642,6 +3676,13 @@
             if (!nodes.keepWarm.mcVoiceBoxSaving) {
                 const settings = (state.status && state.status.settings) || {};
                 setSwitch(nodes.keepWarm, settings.keep_warm !== false);
+            }
+        }
+        if (nodes.fastPath) {
+            const has = hasFastPath();
+            reveal(nodes.fastPath, has);
+            if (has && !nodes.fastPath.mcVoiceBoxSaving) {
+                setSwitch(nodes.fastPath, state.status.engine_settings.fast_path === true);
             }
         }
     }

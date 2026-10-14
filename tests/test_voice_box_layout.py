@@ -308,12 +308,17 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"ok": True, "job": job}))
         elif name == "/settings":
-            # As the server does: the setting is kept, and the answer carries them all.
-            settings = answers["/status"]["settings"]
-            settings.update(json.loads(route.request.post_data or "{}"))
+            # As the server does: each setting is kept where it belongs -- the
+            # engine's own (Breeze's fast path) in the engine's settings, Voice
+            # Box's in its own, a mirrored one (the card, Keep warm) in both --
+            # and the answer carries them all.
+            posted = json.loads(route.request.post_data or "{}")
+            settings, engine_settings = answers["/status"]["settings"], answers["/status"]["engine_settings"]
+            engine_settings.update({key: value for key, value in posted.items() if key in engine_settings})
+            settings.update({key: value for key, value in posted.items()
+                             if key in settings or key not in engine_settings})
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"ok": True, "settings": settings,
-                                           "engine_settings": answers["/status"]["engine_settings"]}))
+                          body=json.dumps({"ok": True, "settings": settings, "engine_settings": engine_settings}))
         else:
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(answers.get(name, {"ok": True})))
@@ -973,9 +978,11 @@ class TestUnderAHostileTheme:
     """The same page with a theme that does not play fair (HOSTILE), and with
     LobeTheme's icon swap run over it once it is built (LOBE_ICON_SWAP)."""
 
+    # Fast path is Breeze's: under VibeVoice its switch is in the page, hidden.
     HIDDEN = [".mc-voice-box-status-dismiss", ".mc-voice-box-status-cancel", ".mc-voice-box-status-clear",
               ".mc-voice-box-status-unloads", ".mc-voice-box-install", ".mc-voice-box-trimmer",
-              ".mc-voice-box-lane-details", ".mc-voice-box-stage-outputs .mc-voice-box-empty"]
+              ".mc-voice-box-lane-details", ".mc-voice-box-stage-outputs .mc-voice-box-empty",
+              ".mc-voice-box-fast-path"]
 
     def test_nothing_hidden_shows_when_a_theme_gives_everything_a_display(self, browser):
         page = open_tab(browser, 1440, 900, hostile=("display",))
@@ -1193,6 +1200,37 @@ MEASURE_STAGE = """(key) => {
 }"""
 
 
+# Keep warm and Fast path, measured; Fast path pressed twice, each press saved
+# and read back from the engine's settings in the answer.
+SWITCH_ROW = """async () => {
+    const root = document.getElementById("mc-voice-box");
+    const stage = root.querySelector(".mc-voice-box-stage-configuration").getBoundingClientRect();
+    const fast = root.querySelector(".mc-voice-box-fast-path");
+    const warm = root.querySelector(".mc-voice-box-keep-warm");
+    const wait = () => new Promise((done) => setTimeout(done, 150));
+    const box = (node) => {
+        const r = node.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, width: r.width, height: r.height};
+    };
+    const look = (node) => {
+        const r = node.getBoundingClientRect();
+        const knob = node.querySelector(".mc-voice-box-switch-thumb").getBoundingClientRect();
+        return {checked: node.getAttribute("aria-checked"), knob: knob.left - r.left,
+                fill: getComputedStyle(node.querySelector(".mc-voice-box-switch-track")).fill,
+                border: getComputedStyle(node).borderTopColor};
+    };
+    const out = {fast: box(fast), warm: box(warm), stage: {left: stage.left, right: stage.right},
+                 display: getComputedStyle(fast).display, first: look(fast)};
+    fast.click();
+    await wait();
+    out.second = look(fast);
+    fast.click();
+    await wait();
+    out.third = look(fast);
+    return out;
+}"""
+
+
 class TestUnderBreeze:
     """Breeze TTS 2 in use: its own fields, a direction and a design panel in
     every speaker slot, a transcript under every sample -- at the widths the
@@ -1253,6 +1291,30 @@ class TestUnderBreeze:
                 assert longest["height"] > shortest["height"] + 10, (width, longest, shortest)
             else:
                 assert {row["overflowY"] for row in rows} == {"auto"}, width
+
+    def test_fast_path_is_keep_warms_kind_of_switch_on_its_row_when_a_theme_squeezes_inputs(self, browser):
+        """Shown under Breeze, as tall as Keep warm and after it on its row at
+        a desktop's width, inside the stage at a phone's; a press moves its
+        knob and changes its colours, and the engine's answer keeps it there."""
+        for width, height in self.WIDTHS:
+            page = open_tab(browser, width, height, hostile=("inputs",), engine="breeze")
+            found = page.evaluate(SWITCH_ROW)
+            page.close()
+
+            fast, warm, stage = found["fast"], found["warm"], found["stage"]
+            assert found["display"] != "none", width
+            assert fast["width"] >= 32 and fast["height"] >= 24, (width, fast)
+            assert _near(fast["height"], warm["height"]), (width, fast, warm)
+            for part in (fast, warm):
+                assert part["left"] >= stage["left"] - 1 and part["right"] <= stage["right"] + 1, (width, part, stage)
+            if width >= 900:
+                assert _near(fast["top"], warm["top"]), (width, fast, warm)
+                assert fast["left"] >= warm["right"] + 2, (width, fast, warm)
+            first, second, third = found["first"], found["second"], found["third"]
+            assert (first["checked"], second["checked"]) == ("false", "true"), (width, found)
+            assert second["knob"] > first["knob"] + 4, (width, found)
+            assert second["fill"] != first["fill"] and second["border"] != first["border"], (width, found)
+            assert third == first, (width, found)
 
     def test_on_a_phone_nothing_inside_a_stage_is_a_scroll_area_of_its_own(self, browser):
         """With the transcripts and an open design panel, as without them."""

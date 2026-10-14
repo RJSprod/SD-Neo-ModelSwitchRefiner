@@ -5799,6 +5799,150 @@ class TestTheEnginesNameInItsWords:
         assert found["line"]["text"] == "Rendering “Trailer 3” · 2 takes · take 1 of 2 · line 3 of 5 · 0:42"
 
 
+FAST_PATH_TITLE = ("Breeze's CUDA-graph fast path: slower first line after a load, faster after; "
+                   "about 7 GB more of the card while warm. Takes effect on the next load.")
+
+
+class TestFastPath:
+    """Breeze's fast path: a switch beside Keep warm, saved at once into the
+    engine's own settings, and there only while those settings have the key --
+    VibeVoice's have none, so its page is as it was and it is never sent one."""
+
+    HANDS = TestSwitches.LOOK + """
+        const fast = () => find(".mc-voice-box-fast-path");
+        const place = () => {
+            const node = fast(), warm = find(".mc-voice-box-keep-warm");
+            return {together: node.parentNode === warm.parentNode,
+                    after: node.parentNode.children.indexOf(node) - warm.parentNode.children.indexOf(warm)};
+        };
+        const hiddenOf = (node) => [!!node.hidden, node.hasAttribute("hidden")];
+    """
+
+    @staticmethod
+    def breeze_settings(**changes) -> dict:
+        return {"json": {"ok": True, "settings": BREEZE_STATUS["settings"],
+                         "engine_settings": dict(BREEZE_STATUS["engine_settings"], **changes)}}
+
+    def test_it_is_beside_keep_warm_under_breeze_and_a_press_sends_only_its_value(self):
+        found = run(self.HANDS + with_engine_records("""
+            await flush();
+            const before = Object.assign(look(fast()), {hidden: hiddenOf(fast())}, place());
+            fast().click();
+            await flush();
+            const on = [look(fast()).checked, look(fast()).knob];
+            fast().click();
+            await flush();
+            const off = [look(fast()).checked, look(fast()).knob];
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            await poll();
+            report({before, on, off, vibevoice: hiddenOf(fast()),
+                    bodies: requestsTo("/settings").map((r) => r.body)});
+        """), answers={"/status": {"json": BREEZE_STATUS},
+                       "/settings": {"sequence": [self.breeze_settings(fast_path=True),
+                                                  self.breeze_settings(fast_path=False)]}})
+
+        assert found["before"] == {"role": "switch", "checked": "false", "knob": "7", "text": "Fast path",
+                                   "label": None, "title": FAST_PATH_TITLE, "tag": "BUTTON",
+                                   "hidden": [False, False], "together": True, "after": 1}
+        assert found["on"] == ["true", "17"]
+        assert found["off"] == ["false", "7"]
+        assert found["bodies"] == [{"fast_path": True}, {"fast_path": False}]
+        assert found["vibevoice"] == [True, True]
+
+    def test_under_vibevoice_it_is_hidden_from_the_start(self):
+        found = run(self.HANDS + """
+            await flush();
+            report({hidden: hiddenOf(fast()), place: place(), shown: shown(fast())});
+        """)
+
+        assert found["hidden"] == [True, True]
+        assert found["shown"] is False
+        assert found["place"] == {"together": True, "after": 1}
+        assert found["requests"] and not [r for r in found["requests"] if r["route"] == "/settings"]
+
+    def test_it_reads_back_from_the_engines_settings_and_writes_only_a_change(self):
+        """The next status puts it where the engine's settings say; a status
+        that says the same writes nothing to it, and one without the key hides
+        it once. While a save is on its way a status with the old value does
+        not flip it back."""
+        found = run(self.HANDS + with_engine_records("""
+            await flush();
+            const node = fast();
+            const writes = [];
+            for (const target of [node, node.mcVoiceBoxThumb]) {
+                for (const method of ["setAttribute", "removeAttribute"]) {
+                    const original = target[method];
+                    target[method] = function (...args) {
+                        writes.push([method].concat(args));
+                        return original.apply(this, args);
+                    };
+                }
+            }
+            const status = (value) => ({json: Object.assign({}, BREEZE_STATUS, {
+                engine_settings: Object.assign({}, BREEZE_STATUS.engine_settings, {fast_path: value})})});
+            answers["/status"] = status(true);
+            await poll();
+            const read = [look(node).checked, look(node).knob, writes.length];
+            writes.length = 0;
+            await poll();
+            const same = writes.length;
+            node.click();
+            await flush();
+            const pressed = look(node).checked;
+            await poll();
+            const polled = look(node).checked;
+            release("/settings");
+            await flush();
+            const settled = look(node).checked;
+            writes.length = 0;
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            await poll();
+            const hiding = writes.slice();
+            writes.length = 0;
+            await poll();
+            report({read, same, pressed, polled, settled, hiding, again: writes.length,
+                    hidden: hiddenOf(node), bodies: requestsTo("/settings").map((r) => r.body)});
+        """), answers={"/status": {"json": BREEZE_STATUS},
+                       "/settings": self.breeze_settings(fast_path=False)}, held=["/settings"])
+
+        assert found["read"] == ["true", "17", 2]
+        assert found["same"] == 0
+        assert (found["pressed"], found["polled"], found["settled"]) == ("false", "false", "false")
+        assert found["bodies"] == [{"fast_path": False}]
+        assert found["hiding"] == [["setAttribute", "hidden", ""]]
+        assert found["again"] == 0
+        assert found["hidden"] == [True, True]
+
+    def test_a_press_while_the_engine_changes_sends_nothing(self):
+        """Between the Engine select's change and the status after it, the
+        engine may already be VibeVoice: a press there is put back and posts
+        nothing, and once VibeVoice's status is in, the switch is hidden and a
+        press that reached it anyway posts nothing either."""
+        changed = {"json": {"ok": True, "changed": True, "engine": "vibevoice",
+                            "settings": STATUS["settings"], "engines": STATUS["engines"]}}
+        found = run(self.HANDS + ENGINE + with_engine_records("""
+            await flush();
+            choose("engine", "vibevoice");
+            await flush();
+            fast().click();
+            await flush();
+            const switching = {checked: look(fast()).checked, hidden: hiddenOf(fast())};
+            answers["/status"] = {json: VIBEVOICE_STATUS};
+            release("/engine");
+            await flush(10);
+            fast().click();
+            await flush();
+            report({switching, after: {checked: look(fast()).checked, hidden: hiddenOf(fast())},
+                    sent: requestsTo("/settings").map((r) => r.body),
+                    engine: requestsTo("/engine").map((r) => r.body)});
+        """), answers={"/status": {"json": BREEZE_STATUS}, "/engine": changed}, held=["/engine"])
+
+        assert found["switching"] == {"checked": "false", "hidden": [False, False]}
+        assert found["after"] == {"checked": "false", "hidden": [True, True]}
+        assert found["sent"] == []
+        assert found["engine"] == [{"engine": "vibevoice"}]
+
+
 class TestTheLaneNamesItsEngine:
     def test_another_engines_render_is_named_and_read_from_its_options(self):
         """A Breeze render records its options under `options`, and no flat
