@@ -28,3 +28,4 @@ voice/managed-sopro-models.local.json
 # manifest would turn every later pull into a merge conflict full of hashes.
 voice/managed-pocket-models.local.json
 voice/managed-vibevoice-models.local.json
+voice/managed-breeze-models.local.json

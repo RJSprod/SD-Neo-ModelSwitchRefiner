@@ -530,10 +530,10 @@ Under **Settings → Model Chain**:
   set changes.
 - **Predict progress and ETA for the whole chained job** (default on) — see
   [Progress and ETA](#progress-and-eta).
-- **Bring the image model back after VibeVoice** (default Automatic) and **Keep
-  VibeVoice warm between requests** (default on every card) — see
-  [Whose turn it is on each card](#whose-turn-it-is-on-each-card). Neither does
-  anything until Voice Box's VibeVoice is installed.
+- **Bring the image model back after a Voice Box render** (default Automatic) and
+  **Keep the Voice Box's engine warm between requests** (default on every card) —
+  see [Whose turn it is on each card](#whose-turn-it-is-on-each-card). Neither
+  does anything until one of the Voice Box's engines is installed.
 - **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
   colour** and the toggles below them — see
   [Progress-bar appearance](#progress-bar-appearance).
@@ -1820,12 +1820,15 @@ generation and says so rather than corrupting the loaded model.
 
 ### Whose turn it is on each card
 
-Voice Box — VibeVoice 7B, a text-to-speech model of about eighteen gigabytes,
-as a tab of its own — is being built in phases (`docs/23-voice-box.md`). It runs
-on whichever card you choose and shares that card with whatever already lives
-there, so the part that decides *whose turn it is* ships first. Until VibeVoice
-itself is installed nothing asks for a turn, and the check every generation
-makes is one dictionary lookup.
+Voice Box — a tab of its own that speaks a script with VibeVoice 7B, a
+text-to-speech model of about eighteen gigabytes, or Breeze TTS 2, of about
+eight (`docs/23-voice-box.md`, `docs/25-voice-box-engines.md`) — runs on
+whichever card you choose and shares that card with whatever already lives
+there; this is the part that decides *whose turn it is*. Below, *VibeVoice*
+stands for whichever of the two engines the Voice Box renders with: each takes
+its turns under its own name, one engine at a time, and the sentences name it
+(*Waiting for Breeze TTS 2 on …*). Until an engine is installed nothing asks for
+a turn, and the check every generation makes is one dictionary lookup.
 
 The rules, for one card:
 
@@ -1857,7 +1860,7 @@ Extras and API calls wait as well; it takes that queue only when it is free,
 because queueing for it would put VibeVoice behind everything already waiting.
 
 **The image model makes room, and comes back.** *Bring the image model back
-after VibeVoice*:
+after a Voice Box render*:
 
 | Choice | While VibeVoice runs | Afterwards |
 | --- | --- | --- |
@@ -1875,8 +1878,9 @@ turn on that card, or with the next generation, whichever is first. Whether the
 next turn has to park anything is decided by what is on the card, not by that
 record, so a checkpoint loaded back by hand in between is parked like any other.
 
-*Keep VibeVoice warm between requests*: **On every card** (default), **Not on the
-image model's card** (there the image model comes straight back) or **Off**.
+*Keep the Voice Box's engine warm between requests*: **On every card**
+(default), **Not on the image model's card** (there the image model comes
+straight back) or **Off**.
 
 **Never the pagefile, in numbers.** A request is refused when it would leave less
 than 4 GB of system RAM available — twice the host floor, because Windows starts
@@ -3394,8 +3398,8 @@ that lose something:
 | ↪ | **Send again from here** (one of yours) | Answer one of your own messages again, in a **branch**. The thread it came from keeps every message that followed — it used to delete them, which is the same thing Regenerate was fixed for and was never applied here. Your *last* message has nothing after it to keep, so that one is answered in place, in the same thread. |
 | ⎇ | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | ⧉ | **Copy** | The message's words, as written, onto the clipboard — just the words, not the row. The button reads ✓ for a moment. |
-| a waveform | **Send to VibeVoice** | Render the message with the Voice Box's setup, as it stands on that tab. Below. |
-| ▶︎ | **Play VibeVoice** | Play (and pause) the render made for this message. Dark until there is one. |
+| a waveform | **Send to Voice Box** | Render the message with the Voice Box's setup, as it stands on that tab — its engine included. Below. |
+| ▶︎ | **Play Voice Box** | Play (and pause) the render made for this message. Dark until there is one. |
 | ✕ | **Delete message** | One message. |
 | ⤓ | **Delete from here** | That message and everything after it. |
 
@@ -3405,15 +3409,16 @@ to show it. Every button has a name a screen reader can say, and the row is
 drawn once per message and kept while a reply streams into it, so it does not
 close or blink when a word arrives.
 
-**Send to VibeVoice** renders the message with the Voice Box tab's own setup —
-the samples, the speakers and the configuration as they are on that page: the
-message's words are the script, nothing else is changed, and the render joins
-the card's queue exactly as a press of Render there would. VibeVoice has to be
-installed, and what the Voice Box would refuse at its own Render — no sample
-for Speaker 1, no card chosen, nothing to speak — is said in the row instead of
-sending. While the render runs the bubble's edge pulses and Play is dark; when
+**Send to Voice Box** renders the message with the Voice Box tab's own setup —
+the engine, the samples, the speakers and the configuration as they are on that
+page: the message's words are the script, nothing else is changed, and the
+render joins the card's queue exactly as a press of Render there would. The
+Voice Box renders with whichever engine it is set to (VibeVoice or Breeze TTS
+2), which has to be installed, and what the Voice Box would refuse at its own
+Render — no sample for Speaker 1, a sample without its transcript for Breeze, no
+card chosen, nothing to speak — is said in the row instead of sending. While the render runs the bubble's edge pulses and Play is dark; when
 it lands the edge **blinks** until the audio has been played once, and **Play
-VibeVoice** plays it — and pauses it — in the tab. It never plays by itself.
+Voice Box** plays it — and pauses it — in the tab. It never plays by itself.
 Sending the same message again darkens Play until the new render is done, and
 only the render of the **last** press is ever offered — one to one: a render
 still coming back for an earlier press is left to the Voice Box's own list and
@@ -5632,7 +5637,11 @@ moment you tap them, so there is no Apply to remember.
 - Under a quarter of a second is treated as a slip, not an utterance — measured
   from the first frame of audio, so a device that was slow to wake spends its own
   time and not yours. Sixty seconds is the ceiling, counted the same way, at
-  which point it stops and transcribes what it has. Letting go while it is still
+  which point it stops and transcribes what it has — all of it: Whisper hears
+  thirty seconds at a time (its runtime drops the rest of a longer stream), so a
+  longer recording is heard in pieces of at most twenty-eight seconds, each cut
+  at the quietest moment near its end, and the words joined; a piece that heard
+  nothing adds nothing. Letting go while it is still
   opening sends nothing, says nothing about being too short, and stops the
   microphone the moment the browser gets round to handing it over.
 - If your browser will not open a microphone at all, Voice Chat says which of
@@ -5914,15 +5923,45 @@ three minutes, which buried the line that explained it.
 
 ## Voice Box
 
-A tab that turns a script into speech with **VibeVoice 7B** — Microsoft's
-long-form, multi-speaker text-to-speech model, as it survives in MIT-licensed
-community copies — on whichever of your cards you choose. It is the second
-thing in this extension that wants a whole graphics card, and everything about
-how it shares one is in [Whose turn it is on each card](#whose-turn-it-is-on-each-card):
-a render goes *next* on its card and never cuts anything off, the image model
-that made room for it comes back, and a request that would overflow VRAM or RAM
-is refused with the numbers before anything loads. This section is about the
-rest — the page, what it keeps, and the worker behind it.
+A tab that turns a script into speech on whichever of your cards you choose,
+with one of two engines: **VibeVoice 7B** — Microsoft's long-form, multi-speaker
+text-to-speech model, as it survives in MIT-licensed community copies — or
+**Breeze TTS 2**, BreezeBlue's expressive single-speaker model that clones a
+voice from a sample *and its words*, designs one from a description and takes a
+direction per line. It is the second thing in this extension that wants a whole
+graphics card, and everything about how it shares one is in [Whose turn it is on
+each card](#whose-turn-it-is-on-each-card): a render goes *next* on its card and
+never cuts anything off, the image model that made room for it comes back, and a
+request that would overflow VRAM or RAM is refused with the numbers before
+anything loads. This section is about the rest — the engines, the page, what it
+keeps, and the workers behind it. The design is in `docs/23-voice-box.md` and,
+for the two engines, `docs/25-voice-box-engines.md`.
+
+### Engines
+
+The **Engine** select heads the Configuration stage. One engine renders at a
+time: switching is refused while anything is queued or rendering (the page
+says so and offers Cancel and Clear queue), and a switch ends the other engine's
+workers on every card first — through the turn system, so a parked image model
+comes back and WanGP's card is handed back — and starts nothing; the chosen
+engine's worker starts with its first render. An engine that is not installed is
+still selectable, and its Install appears. Everything on the page that names an
+engine — Install, Keep warm, Unload, the status line — names the one chosen.
+
+| | VibeVoice 7B | Breeze TTS 2 |
+|---|---|---|
+| A section | One generation, every speaker in it: a conversation in one breath | A line at a time in its speaker's voice, joined with a gap between speakers |
+| A voice | A sample | A sample **with its exact transcript**, or a **description** designed once and kept as a sample |
+| Direction | — (accepted in the script and dropped) | A slot's standing direction, and a line's own: `Speaker 2 (whispering):` |
+| Vocal events | Read as words | `(laugh)`, `(sigh)`, `(cough)`, `(clears throat)`; `[笑]`, `[叹气]`, `[咳嗽]`, `[清嗓子]` |
+| Takes | A batch in one pass | One after another |
+| Memory | About 19 GB of weights | About 7.7 GB eager; 7 GB more on the fast path |
+| Licence | MIT | **Research and non-commercial use only** (the BreezeBlue Research and Non-Commercial License; the inference code is Apache-2.0) |
+
+Breeze's runtime is its own closure — PyTorch 2.9.1 for CUDA 12.8, transformers
+4.57.3, Qwen's codec, the community Flash attention 2 wheel and Breeze's own code
+at a pinned commit — in its own folder, beside VibeVoice's and sharing nothing
+with it.
 
 ### The page
 
@@ -6009,6 +6048,16 @@ sample itself, as a thin edge on its row; every output made with it carries the
 same edge, one stripe per sample it used, so a glance says which voices a render
 was made from. The tint is only a help to the eye: the names say the same.
 
+With Breeze chosen, each sample row also holds the sample's **transcript** — the
+exact words spoken in it, which Breeze clones a voice from. A sample without one
+is marked *needs a transcript*, and a speaker that uses it refuses Render, naming
+the sample. Type the words, or press **Transcribe**: Voice Chat's Whisper reads
+the sample (once Voice Chat's models are installed — the button says so when they
+are not) and puts what it heard in the box for you to check and save; nothing is
+saved until you do. The words are kept in the sample's own record beside its
+sound and nowhere else. A sample kept from a voice design is born with the
+sentence it spoke.
+
 ### Prompt
 
 The script. `Speaker 1:` … `Speaker 4:` at the start of a line names who says
@@ -6021,6 +6070,15 @@ between them, which is why the summary under the box says how many sections
 there are, along with the speakers and the word count. A prompt with no words,
 or one naming a fifth speaker, is refused before anything is asked of a card.
 
+`Speaker 2 (whispering, afraid): I heard something.` gives that line a
+**direction**. Breeze says the line that way — over the slot's standing direction,
+if it has one — and VibeVoice accepts the syntax and drops the direction, so a
+script moves between the engines without edits. Breeze also performs **vocal
+events** written into a line where they happen — `(laugh)`, `(sigh)`, `(cough)`,
+`(clears throat)`, and in Chinese `[笑]`, `[叹气]`, `[咳嗽]`, `[清嗓子]`; VibeVoice
+reads them as words. The Voice Box's own tags (`[pause]`, `[pause:ms]`, a leading
+`[2]:`) are matched exactly, so they never clash.
+
 Every render puts its prompt at the top of the **history**; the same words are
 one entry. The history keeps a hundred and lets the oldest go; a prompt you
 **star** is a favourite and is never let go.
@@ -6029,20 +6087,56 @@ one entry. The history keeps a hundred and lets the oldest go; a prompt you
 
 A named set of the knobs a render takes, kept and chosen by name. The list of
 configurations heads the stage on one row with three icon buttons: **Save**,
-**Save as** (a new configuration) and **Delete**. A configuration holds the model,
-the card (each named, and marked when it is the image model's card or WanGP's),
-**diffusion steps** (1–50, twelve by default), **CFG** (1.0–3.0, 1.3 by default),
-the **solver** and the **attention** (below), a **seed** (blank for a different
-one each time — drawn when the render is queued and written on its output, so
-every render has a seed that makes it again), the **batch** (one to four takes),
-**max new tokens** (blank for the model's own limit), **sampling** with its
-**temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by default, and
-the four **speaker** slots, each holding one sample. A configuration saved
-before a field existed reads with that field's default and keeps every value it
-was saved with — its step count included.
+**Save as** (a new configuration) and **Delete**. Every configuration holds the
+model, the card (each named, and marked when it is the image model's card or
+WanGP's), a **seed** (blank for a different one each time — drawn when the render
+is queued and written on its output, so every render has a seed that makes it
+again), the **batch** (one to four takes), the four **speaker** slots, each
+holding one sample, and **each engine's own fields**, drawn from the engine and
+kept for each engine separately: switching engines and back loses nothing, and a
+configuration last saved for the other engine says so once ("Saved for
+VibeVoice — Breeze TTS 2's settings start at their defaults").
 
-**Solver** is how the diffusion head walks each frame of speech from noise, and
-every solver VibeVoice's own scheduler can finish is listed: **DPM++ 2M**, the
+VibeVoice's fields are **diffusion steps** (1–50, twelve by default), **CFG**
+(1.0–3.0, 1.3 by default), the **solver** and the **attention** (below), **max new
+tokens** (blank for the model's own limit), and **sampling** with its
+**temperature** (0.1–2.0) and **top-p** (0.05–1.0), both 0.95 by default. A
+configuration saved before a field existed reads with that field's default and
+keeps every value it was saved with — its step count included.
+
+Breeze's fields are **CFG** (1.0–8.0, 4 by default), which guides a line with a
+direction and a designed voice — a line spoken plainly in a cloned voice is
+always at 1, all upstream's cloning allows; the **attention** (below); **max new
+tokens** (1–1500 codec frames, twelve and a half to a second; blank sizes each
+line, and a line longer than one call allows is split at its sentence ends and
+cloned piece by piece from the same sample); the **line gap** (0–2000 ms, 150 by
+default), the silence between one speaker's line and the next speaker's — none
+between one speaker's lines; and **sampling**, **on** by default as upstream ships
+it, with **temperature** 0.9 and **top-p** 1.0, applied to both of Breeze's
+decoders; off is greedy. Each speaker slot also takes a standing **direction**
+("calm and slow") and a **description** of a voice to design (below).
+
+Breeze's **attention** is **Flash attention 2** by default, then **SDPA** and
+**Eager** (upstream's). Flash attention 2 runs Breeze's text encoder; its two
+decoders hand transformers a kind of attention mask its Flash attention path
+cannot read, so under that choice they run Eager — the same model, so switching
+between the two needs no reload, where SDPA does. The Flash attention 2 wheel is
+installed with Breeze's runtime and proved by importing it; until it loads the
+choice is listed greyed with *not installed* or *installed, but it would not
+load*, and refused at Render.
+
+**Design** turns a slot's description into a voice: one take of a short sentence
+(English, Chinese for a mostly Chinese description, or your own) in a voice made
+from it, with the configuration's card, attention, sampling, CFG and seed, played
+when it lands; **Redraw** makes another at the next seed. **Keep** makes the take
+a sample — its transcript the sentence it spoke, the description, seed and CFG
+kept with it — and puts it in the slot, so every line after that is a clone of
+the same voice across lines, sections and renders. A slot with a description and
+no voice yet refuses Render with *Design it and Keep it first*. A design makes
+nothing in any pipeline.
+
+VibeVoice's **solver** is how its diffusion head walks each frame of speech from
+noise, and every solver its own scheduler can finish is listed: **DPM++ 2M**, the
 one the model is built with and upstream's `inference_from_file.py` renders with
 (the default, marked *upstream*); **DPM++ 2M SDE**, which upstream's Gradio demo
 switches to the moment it loads (*upstream demo*); **DPM++ 3M**; and the
@@ -6054,7 +6148,7 @@ noise schedule both put several steps on timestep 999 and the scheduler runs
 off the end of its noise levels on the last step — at 45 and 42 of the step
 counts from 1 to 50 (`tests/test_vibevoice_upstream.py` shows it).
 
-**Attention** is how the model's language part attends: **SDPA**, PyTorch's
+VibeVoice's **attention** is how its language part attends: **SDPA**, PyTorch's
 fused kernels (the default); **Eager**, plain matrix products with the softmax
 in 32-bit float; and **Flash attention 2**, which upstream loads on a CUDA card
 (*upstream*) and which needs the `flash-attn` package in VibeVoice's runtime.
@@ -6063,21 +6157,24 @@ configuration that holds it is refused at Render. The three compute the same
 attention and differ only in rounding; switching needs no second load of the
 model.
 
-**Batch** renders one to four takes of the script at once, each its own output:
-the first at the seed and every next one at the next seed — a batch of four from
+**Batch** renders one to four takes of the script, each its own output: the
+first at the seed and every next one at the next seed — a batch of four from
 9990 is 9990, 9991, 9992 and 9993 — and each is the take its seed makes on its
 own, so **Use seed** on any of them makes that take again (give or take the last
-bit of a batched sum). The takes are one pass through the model, which reads its
-weights once for all of them, so four take much less than four times as long;
-the card is asked for the weights once and a working set for each take. A drawn
+bit of a batched sum). VibeVoice makes the takes in one pass through the model,
+which reads its weights once for all of them, so four take much less than four
+times as long; the card is asked for the weights once and a working set for each
+take. Breeze makes them one after another, the whole script per take, so four
+take four times as long and the card is asked for one take's memory. A drawn
 seed is drawn low enough that the whole batch fits below the largest seed; a
 fixed one that would pass it is refused at Render.
 
 **Sampling** is a switch: the whole button, its name included, turns it on or
-off, and its knob sits to the right, on a filled track, while it is on. It is
-off by default, and then temperature and top-p are greyed out and not used.
-Off, the model makes its own most likely choice at every step — greedy
-decoding, as its publisher ships it and as both upstream scripts run it. VibeVoice has two parts: the voice — tone, texture, how each word
+off, and its knob sits to the right, on a filled track, while it is on. While it
+is off, temperature and top-p are greyed out and not used. VibeVoice's is off by
+default: off, the model makes its own most likely choice at every step — greedy
+decoding, as its publisher ships it and as both upstream scripts run it.
+VibeVoice has two parts: the voice — tone, texture, how each word
 comes out, which the seed, CFG and steps shape — and a pacer that decides,
 every eighth of a second of speech, whether to keep talking, take a break or
 stop. Sampling only touches the pacer: with it on, pauses land in different
@@ -6134,7 +6231,12 @@ image's: the prompt as it was, then one line — `Steps: 12, Solver: DPM++ 2M,
 CFG scale: 1.3, Seed: 1234567, Attention: SDPA, Model: vibevoice-7b, Speaker 1:
 Ada, Speaker 2: Brook, Sections: 2, Length: 41.3 s, Render time: 95.0 s`, with
 `Temperature: 0.95, Top-p: 0.95` after the seed when the render sampled. A render
-made before the solver and the attention were recorded says nothing of either. **Copy** puts it on the clipboard. It
+made before the solver and the attention were recorded says nothing of either.
+A Breeze render's line names its engine first and lists Breeze's own fields —
+`Engine: Breeze TTS 2, CFG scale: 4, Seed: 7, Temperature: 0.9, Top-p: 1,
+Attention: Flash attention 2, Model: breeze-tts-2, Speaker 1: Ada, Speaker 1
+direction: calm and slow, Line gap: 150 ms, …` (`Sampling: greedy` when it did
+not sample). **Copy** puts it on the clipboard. It
 is also written into the file itself, so a render saved or downloaded says what
 made it wherever it goes: in the MP3's ID3 comment (with the whole record as
 JSON under `voicebox`), or in a WAV's `INFO` chunk. A render made before seeds
@@ -6148,7 +6250,10 @@ makes the same take again; clear the seed for a new one; its sampling,
 temperature and top-p, its solver, attention and batch too, and a render made
 before sampling existed turns sampling off), or a new unsaved configuration
 named after the render when that one is gone. A speaker whose
-sample has since been deleted is left empty, and the page says which.
+sample has since been deleted is left empty, and the page says which. A render
+made by the other engine than the one chosen puts back the prompt and the
+shared fields — model, card, seed, batch, speakers and their slots — and says
+which engine made it; the engine is never switched for you.
 
 A render is kept as an **MP3** — 160 kb/s, the most an MP3 at the model's own
 24 kHz can hold, made by LAME at its most careful setting straight from the
@@ -6178,15 +6283,16 @@ browser's own download of the same bytes, named `<name>.mp3` (or `.wav`).
 
 Press **Render** and the job appears in the status line. Everything that can be
 refused before a card is asked for is refused at the press, in a sentence:
-the prompt has no words, *Speaker 2 has no sample*, no card is chosen,
-VibeVoice is not installed. Then:
+the prompt has no words, *Speaker 2 has no sample*, no card is chosen, the
+engine is not installed, and with Breeze a sample with no transcript or a
+described voice not yet designed. Then:
 
 | Phase | What it means |
 |---|---|
 | **queued** | Behind another render on the same card. Renders on one card run in order; the two cards may each run one |
 | **waiting** | Asking for the card: the line says what the turn is waiting for — a generation finishing, WanGP's task, the image model being parked |
-| **loading** | The model is going onto the card (the first render after an eviction; a warm VibeVoice skips it) |
-| **rendering** | Section *n* of *m*, and how many seconds of speech so far |
+| **loading** | The model is going onto the card (the first render after an eviction; a warm engine skips it) |
+| **rendering** | Section *n* of *m*, and how many seconds of speech so far — with Breeze also the line and the take |
 | **done** | The output is in the list |
 | **failed** | With the reason. A request the card or the RAM cannot hold fails here, with the turn's own warning — nothing was loaded and nothing was paged |
 | **cancelled** | Withdrawn by you, or the WebUI closed |
@@ -6200,9 +6306,9 @@ is a count on the page, so queued renders go together rather than one by one.
 The time a render has been running is the server's count, carried on by the page
 between answers, so a page on another device's clock still counts right.
 Whatever the ending, the card is handed back — before the output's file is made,
-which is work for the processor that no image job waits for — and whether
-VibeVoice stays warm on it follows *Keep VibeVoice warm between requests* in
-Settings → Model Chain; Voice Box's own **Keep warm** switch, in the
+which is work for the processor that no image job waits for — and whether the
+engine stays warm on it follows *Keep the Voice Box's engine warm between
+requests* in Settings → Model Chain; Voice Box's own **Keep warm** switch, in the
 Configuration stage, can decline a warm stay but never force one against that
 setting. A render is named after its
 pipeline and its number in it (*Trailer 3*) unless you name it; two renders
@@ -6212,14 +6318,14 @@ is *Trailer 4* to *Trailer 7* — and one named while a batch is still rendering
 numbered after all of its takes. A batch lands as one lane a take, the first
 take chosen, and a cancelled batch keeps none of them.
 
-A render can be asked for from another tab. **Send to VibeVoice** on a message
+A render can be asked for from another tab. **Send to Voice Box** on a message
 in LLM Studio's conversation sends that message's words as the script, with the
-Voice Box page's own samples, speakers and configuration as they stand, and the
-job joins the card's queue like a press of Render; what the Voice Box would
-refuse at its own Render is refused there, in the message's row. Such a render
-carries an **origin** — who asked (`llm`), a key for the message and a label,
-three short strings and nothing else — on the job and in the output's record
-(`render.origin`), and is named *LLM Studio · <the first words>* in the
+Voice Box page's own engine, samples, speakers and configuration as they stand,
+and the job joins the card's queue like a press of Render; what the Voice Box
+would refuse at its own Render is refused there, in the message's row. Such a
+render carries an **origin** — who asked (`llm`), a key for the message and a
+label, three short strings, and the engine that answered — on the job and in the
+output's record (`render.origin`), and is named *LLM Studio · <the first words>* in the
 Outputs list, where it is a lane like any other. The origin is how the asking
 tab finds its render again after a reload. The page's script offers the bridge
 (`window.mcVoiceBox`: `canRender`, `renderText`, `jobById`, `outputsFor`,
@@ -6228,11 +6334,13 @@ tab finds its render again after a reload. The page's script offers the bridge
 ### Where it lives
 
 Under the voice data root, in `voice_box/`: `samples/<id>/` (the sound and its
-metadata), `prompts.json`, `configurations/<id>.json`, `pipelines/<id>.json`,
-`outputs/<id>/` and `settings.json`. A sample is always mono 16-bit WAV at
-24 kHz, VibeVoice's own rate; an output is `audio.mp3` at that rate, or
-`audio.wav` where no MP3 could be made and for every render made before, beside
-its `meta.json`. Nothing is written to Forge's settings store.
+metadata, its transcript included), `prompts.json`, `configurations/<id>.json`,
+`pipelines/<id>.json`, `outputs/<id>/` and `settings.json` (the engine among
+them). A sample is always mono 16-bit WAV at 24 kHz, both engines' own rate; an
+output is `audio.mp3` at that rate, or `audio.wav` where no MP3 could be made and
+for every render made before, beside its `meta.json`. Each engine keeps its
+runtime, model, settings and measurements in a tree of its own beside it —
+`vibevoice/` and `breeze/`. Nothing is written to Forge's settings store.
 
 ### Audio focus
 
@@ -6241,13 +6349,13 @@ carried by one event on the page (`mc:audio-focus`): when Voice Box plays or
 records, Voice Chat stops speaking and closes any microphone it had open — the
 composer's, the flyout's dictation and the clone recorder's — and when Voice Chat
 speaks or listens, Voice Box pauses. Neither side needs the other to exist.
-LLM Studio's **Play VibeVoice** is a third party to the same rule: playing a
+LLM Studio's **Play Voice Box** is a third party to the same rule: playing a
 render there pauses Voice Box and stops Voice Chat, and either of them pauses
 it. Voice Box and LLM Studio yield to any owner that is not themselves; Voice
 Chat yields to the two it knows, so an event nobody recognises cannot cut a
 reply off.
 
-### The worker
+### The workers
 
 VibeVoice runs in a process of its own, one per card it is used on, started with
 `CUDA_VISIBLE_DEVICES` set to that card's UUID and offline (`HF_HUB_OFFLINE`,
@@ -6296,6 +6404,36 @@ flag for that is never raised by the 7B (its loop ends one step before the check
 that would), so a render that used its whole budget without ending on
 end-of-speech is what counts as stopped at it.
 
+**Breeze** runs the same way — a process of its own per card, under that card's
+UUID, offline, out of its own runtime, its handshake proving the card, ended to
+evict it — and differs in what it does with a section. It imports Breeze's own
+streaming runtime (never its HTTP server), loads the model in bfloat16 with the
+decoders' attention, and renders each line as one call of Breeze's own: the
+line's words, the speaker's sample and its transcript, the line's direction or
+the slot's, at the configuration's CFG when there is a direction or a
+description and at 1 when there is not, seeded with the take's seed. Each
+speaker's sample is encoded to codec frames once per render, in memory — no
+file is written for a reference — and every call that needs it is handed those
+frames. A line longer than one call allows is split at its sentence ends, then
+its clauses, then its words, and nothing is dropped or reordered. The cancel
+flag is read at every chunk of audio the codec hands back, which is every 160
+ms of speech, and the progress frames say which line and take is rendering and
+how many seconds it has made. The answer is each take's 32-bit float samples,
+exactly as VibeVoice's is.
+
+Breeze's **fast path** is a setting of the engine's, off by default — the
+**Fast path** switch beside Keep warm while Breeze is chosen — not of a
+configuration: it replays CUDA graphs for the text encoder and the backbone's
+decode, captured on the first line that needs each shape after a load (a plain
+clone and a guided line are two), which makes that first line slower and every
+line after it faster, and it holds about seven gigabytes more of the card while
+warm, which the turn asks for. Upstream also compiles its depth decoder and codec with
+`torch.compile`, which needs Triton, and Windows has none: there the fast path
+is the two CUDA-graph stages, and the log says *CUDA graphs only*. A warm worker
+keeps the path it loaded with until it leaves the card. Breeze's figures are
+kept per path, so the fast path's measurement never inflates an eager render's
+request.
+
 ### Installing
 
 Everything is in `voice/managed-vibevoice-models.json`, read the way every other
@@ -6326,14 +6464,54 @@ points the processor at the tokenizer directory it installed — the community
 code picks its tokenizer class by the word *qwen* in that path, and would
 otherwise reach for the hub — and keeps the mirror's own copy beside it.
 
+**Breeze** is `voice/managed-breeze-models.json`, written by
+`tools/pin_breeze_models.py`, and installs in two parts the same way. The
+**runtime** is four things in one virtual environment of its own: the PyPI closure
+— `qwen-tts` 0.1.1 (Breeze's audio codec), the `transformers` 4.57.3 and
+`accelerate` 1.12.0 it pins, and everything they declare that the worker
+reaches, librosa, sox, onnxruntime and einops included because `qwen_tts` imports
+them, fifty wheels named, sized and hashed from pypi.org; **torch and torchaudio
+2.9.1** from the CUDA 12.8 index, matched by exact version and checked against
+the digests the index publishes; the community **Flash attention 2** wheel for
+CPython 3.13, torch 2.9.1 and CUDA 12.8 (Wildminder's AI-windows-whl), checked
+against the digest its host states; and **Breeze's own code**, which is not a
+wheel at all — its repository's files at one commit, each pinned with its
+SHA-256 and fetched from GitHub's raw host, put in `runtime/breeze-tts/` with a
+`COMMIT` file the worker reports. Demo-only and server-only packages (gradio,
+fastapi, uvicorn) are not shipped. Before anything is promoted the worker's
+self-test runs in the staged interpreter: it imports torch, transformers,
+`qwen_tts` and Breeze's code, and **imports Flash attention 2**, recording whether
+it loads. A runtime built by an earlier build of this extension — other wheels,
+another Flash attention wheel or another Breeze commit — is **stale**, and the
+page says so; Install rebuilds it. The **model** is `BreezeBlue/Breeze-TTS-2`,
+listed from the hub's own file tree at the commit `main` names: every file
+(except the model card's README and media) with its size and the digest the hub
+states — a weight's LFS SHA-256, a small file's git blob id — fetched at that
+commit and checked as it lands; a listing without `config.json`, the
+`audio_tokenizer/` folder Breeze's loader needs or a weight is refused before a
+byte. The first install records the commit and the files in the untracked
+overlay, and every later install on the machine is that same commit. If the
+publisher puts the model behind its terms, the hub token Voice Chat keeps
+(Settings → Voice Chat → Access token, or `HF_TOKEN`) is offered to
+huggingface.co only, and a refusal says to accept the terms. Installing from a
+folder works for both parts: wheels with a clone or an unpacked archive of
+Breeze's repository beside them, any file of Breeze's that is not the pinned
+bytes refused; or the model's files, checked against the listing when the hub
+can be reached and taken as they are, with their digests recorded, when it
+cannot. The install card names the commit of the code and of the model, and the
+licence: the weights are for research and non-commercial use only.
+
 ### The routes
 
 Under `/model-chain/voice-box`, on the same page token and origin check as Voice
-Chat's routes and with the same absence of a sign-in gate: status, install,
-settings and the folder dialog; samples (a raw WAV upload with its title in a
-header), prompts, configurations, pipelines; render (with an optional `origin`,
-kept with the job and the output), jobs and cancel; outputs,
-their audio, save and download; and one runtime action. Audio is fetched with
+Chat's routes and with the same absence of a sign-in gate: status (the active
+engine's, every engine's installation, and whether Whisper can transcribe),
+install, settings and the folder dialog; the engine switch (`/engine`, 409 while
+anything renders — `/settings` never switches it); samples (a raw WAV upload with
+its title in a header), a sample's transcript and its Whisper reading, prompts,
+configurations, pipelines; render (with an optional `origin`, kept with the job
+and the output), voice design, its take's audio and Keep, jobs and cancel;
+outputs, their audio, save and download; and one runtime action. Audio is fetched with
 the token and played from memory. A request that is refused says why with the
 status that fits — 400 for a bad value, 404 for something no longer there, 409
 for something that cannot happen right now, 413 for too large.
@@ -6540,8 +6718,8 @@ mc_styles.py          style library integration helpers
 mc_broker.py          cross-workload residency policy and the workload lock
 mc_turns.py           whose turn it is on each card: a speech guest's turns, the
                       image gate, parking and return, warm stays, WanGP's lease
-mc_turns_guests.py    VibeVoice registered as a guest of the cards, and the client
-                      the Voice Box asks for its card through (neither is a voice module)
+mc_turns_guests.py    each Voice Box engine registered as a guest of the cards, and the
+                      client the Voice Box asks for its card through (neither is a voice module)
 mc_gguf.py            GGUF metadata header reader
 mc_llm_context.py     context capacity estimation and its calibration
 mc_llm_runtime.py     the managed llama.cpp process and its placement
@@ -6625,13 +6803,26 @@ mc_voice_vibevoice.py the VibeVoice engine: manifest, installer, settings, the e
 mc_voice_vibevoice_runtime.py  one worker per card, the handshake that proves the card
 vibevoice_worker/worker.py  the VibeVoice sidecar, the one that runs on a card: the
                       solvers, the attentions, a batch's takes each at its own seed
-mc_voice_box.py       the Voice Box's files and its render service
+mc_voice_breeze.py    the Breeze TTS 2 engine: manifest, installer (runtime, Flash attention,
+                      Breeze's code at a commit, the model listed from the hub), settings,
+                      the estimates, its fields and capabilities
+mc_voice_breeze_runtime.py  one Breeze worker per card, the handshake that proves the card
+breeze_worker/worker.py  the Breeze sidecar: a section line by line in each line's voice,
+                      directions, designed voices, takes at seed + k, long lines split
+mc_voice_box_engines.py  the Voice Box's engines: which there are, which is active, the switch
+mc_voice_box_fields.py   an engine's configuration fields, validated generically
+mc_voice_box_render.py   the engine-neutral render job and result every runtime speaks
+mc_voice_box.py       the Voice Box's files and its render service (it names no engine)
 mc_voice_box_api.py   the Voice Box's routes
 mc_voice_box_ui.py    the Voice Box tab: one root, painted once
 javascript/voice_box.js  the page: four stages, the trimmer, the lanes, audio focus
 voice/managed-vibevoice-models.json  the VibeVoice closure (wheels pinned; model declared)
 tools/pin_vibevoice_models.py  resolves the closure, and pins the model on a machine
                       that reaches the hub (maintainers only)
+voice/managed-breeze-models.json  the Breeze closure and code (pinned; torch, torchaudio,
+                      the Flash attention wheel and the model declared)
+tools/pin_breeze_models.py  solves that closure, pins Breeze's code file by file, and
+                      records the rest on a machine that reaches them (maintainers only)
 tools/pin_pocket_models.py  resolves that closure from PyPI (maintainers only)
 mc_neutralize.py      Neutralize Prompt: one subtraction pass, and what it answers
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll

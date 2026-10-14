@@ -33,8 +33,12 @@ one of them made concrete (``docs/23-voice-box.md`` section 4.1):
 
 Guests
 ------
-VibeVoice is a *guest* here, not a caller: it is registered with this module by
-``scripts/model_chain.py`` and handed a :class:`Turn` for each request. The
+VibeVoice is a *guest* here, not a caller -- and since the Voice Box gained a
+second engine, so is Breeze TTS 2, one at a time: each is registered with this
+module by ``scripts/model_chain.py`` (through :mod:`mc_turns_guests`) and handed
+a :class:`Turn` for each request, and its sentences name it by its ``label``
+(:func:`_display`). The rules below say VibeVoice because it came first; they
+are every guest's. The
 dependency runs one way on purpose. Voice modules may not import the memory
 side at any depth (invariant I-3, ``tests/test_voice_independence.py``), and
 this module imports the broker, the memory side and ``mc_wangp`` -- so the
@@ -106,11 +110,11 @@ RETURN_MODES = (
     (RETURN_AUTOMATIC, "Automatic — in system RAM when it fits above the margin, "
                        "otherwise from its recipe"),
     (RETURN_RAM, "From system RAM — the same model moved back, LoRAs and all; "
-                 "VibeVoice is refused when RAM cannot hold it"),
+                 "a Voice Box render is refused when RAM cannot hold it"),
     (RETURN_RECIPE, "From its recipe — dropped, and reloaded from its own files "
-                    "afterwards; uses no RAM while VibeVoice runs"),
+                    "afterwards; uses no RAM while the Voice Box renders"),
 )
-"""How the image model makes room for a VibeVoice turn on its card, and comes back.
+"""How the image model makes room for a Voice Box turn on its card, and comes back.
 
 The stored constants are the machine's; the labels are the user's and may be
 reworded, which :func:`mc_broker.resolve` tolerates as long as the words before
@@ -124,11 +128,11 @@ WARM_NOT_IMAGE = "not-image"
 WARM_OFF = "off"
 
 WARM_MODES = (
-    (WARM_EVERY, "On every card — VibeVoice stays loaded until an image job, WanGP or "
-                 "the LLM needs the card"),
+    (WARM_EVERY, "On every card — the Voice Box's engine stays loaded until an image job, "
+                 "WanGP or the LLM needs the card"),
     (WARM_NOT_IMAGE, "Not on the image model's card — there the image model comes "
                      "straight back"),
-    (WARM_OFF, "Off — VibeVoice unloads after every request"),
+    (WARM_OFF, "Off — the Voice Box's engine unloads after every request"),
 )
 
 RAM_MARGIN_BYTES = 4 * _GB
@@ -172,7 +176,8 @@ the card is handed back anyway. WanGP sizes itself against what the card reports
 free and has no fallback, so it is not told the card is free while the guest is
 still on it -- but a guest that never answers must not hold WanGP for ever."""
 
-GATE_NOTICE = "Waiting for VibeVoice on {card} — this generation starts when it is done"
+GATE_NOTICE = "Waiting for {guest} on {card} — this generation starts when it is done"
+"""What an image job held at the gate says, naming the guest it waits for."""
 
 LEASE_OWNER = "ModelSwitchRefiner"
 """Who asks Mini Paint for WanGP's card. One owner, so a second request while a
@@ -184,13 +189,13 @@ def _option(name: str, default: str) -> str:
 
 
 def image_return_mode() -> str:
-    """The stored value of *Bring the image model back after VibeVoice*."""
+    """The stored value of *Bring the image model back after a Voice Box render*."""
     return mc_broker.resolve(_option(OPT_IMAGE_RETURN, RETURN_AUTOMATIC), RETURN_MODES,
                              RETURN_AUTOMATIC)
 
 
 def keep_warm_mode() -> str:
-    """The stored value of *Keep VibeVoice warm between requests*."""
+    """The stored value of *Keep the Voice Box's engine warm between requests*."""
     return mc_broker.resolve(_option(OPT_KEEP_WARM, WARM_EVERY), WARM_MODES, WARM_EVERY)
 
 
@@ -235,6 +240,17 @@ def register_guest(name: str, guest) -> None:
 def unregister_guest(name: str) -> None:
     with _lock:
         _guests.pop(str(name), None)
+
+
+def _display(name: str) -> str:
+    """A guest as a sentence names it: its own ``label`` when it has one, else its name.
+
+    The turn system never imports an engine, so the Voice Box's guests carry
+    their label (``Breeze TTS 2``) with them, and a guest that carries none is
+    called what it was registered as.
+    """
+    found = _guest(name) if name else None
+    return str(getattr(found, "label", "") or name or "the Voice Box")
 
 
 def _guest(name: str):
@@ -776,8 +792,9 @@ def _clear_wangp(target: _CardState, turn: Turn) -> tuple[str, str]:
         if record.get("bridge_hold") == "unsupported" and _wangp_running():
             _drop_lease(target)
             return "block", ("WanGP is running, and its bridge is too old to hold its own "
-                             "queue while VibeVoice renders. Install bridge 1.12.0 from "
-                             "Mini Paint's WanGP setup, or render on the other card")
+                             f"queue while {_display(turn.guest)} renders. Install bridge "
+                             "1.12.0 from Mini Paint's WanGP setup, or render on the other "
+                             "card")
         target.lease_held = True
         return "go", ""
     # Refused, expired or released before it was ever held.
@@ -816,7 +833,7 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
     if other:
         _evict(target, other, f"{turn.label}'s turn")
 
-    _stop_idle_llm(target)
+    _stop_idle_llm(target, turn.guest)
 
     # RAM before anything is moved for the turn. A refusal here has to leave the
     # card as it found it: checked after the parking, a request short of RAM had
@@ -864,14 +881,14 @@ def _make_room(target: _CardState, turn: Turn) -> tuple[str, str]:
     return "go", ""
 
 
-def _stop_idle_llm(target: _CardState) -> None:
+def _stop_idle_llm(target: _CardState, guest: str = "") -> None:
     """Stop our own idle llama-servers on this card. A running turn was waited for."""
     if target.card.index is None:
         return
     if mc_broker.held_bytes(mc_broker.FAMILY_LLM, card=target.card.index) <= 0:
         return
     mc_broker._release(mc_broker.FAMILY_LLM, 1 << 50,
-                       f"VibeVoice's turn on {target.card.describe()}",
+                       f"{_display(guest)}'s turn on {target.card.describe()}",
                        sweep=True, card=target.card.index)
 
 
@@ -1043,7 +1060,7 @@ def _conclude(target: _CardState, turn: Turn, phase: str, *, keep_warm,
         # model -- a warm-up started beside that load is two loads of one model.
         held_job = target.parked_job is not None
     turn._set(phase, "", warning)
-    _hand_back(target, return_image=not held_job)
+    _hand_back(target, return_image=not held_job, guest=turn.guest)
 
 
 def _refuse(target: _CardState, turn: Turn, warning: str) -> None:
@@ -1052,7 +1069,8 @@ def _refuse(target: _CardState, turn: Turn, warning: str) -> None:
     _conclude(target, turn, BLOCKED, keep_warm=None, warning=warning)
 
 
-def _hand_back(target: _CardState, *, return_image: bool, keep_parked: bool = False) -> None:
+def _hand_back(target: _CardState, *, return_image: bool, keep_parked: bool = False,
+               guest: str = "") -> None:
     """Release everything the card was holding for guests, and bring back what moved.
 
     Reachable from the card's driver and from any thread that ends a warm stay,
@@ -1071,9 +1089,9 @@ def _hand_back(target: _CardState, *, return_image: bool, keep_parked: bool = Fa
         if not keep_parked:
             target.parked = ""
     _release_queue_lock(target)
-    _drop_lease(target)
+    _drop_lease(target, guest)
     if parked and return_image:
-        _return_image_model("VibeVoice gave the card back")
+        _return_image_model(f"{_display(guest)} gave the card back")
 
 
 def _release_queue_lock(target: _CardState) -> None:
@@ -1086,7 +1104,7 @@ def _release_queue_lock(target: _CardState) -> None:
             logger.warning("Model Chain: could not give the WebUI's queue back", exc_info=True)
 
 
-def _drop_lease(target: _CardState) -> None:
+def _drop_lease(target: _CardState, guest: str = "") -> None:
     with _lock:
         lease, target.lease = target.lease, ""
         target.lease_held = False
@@ -1095,7 +1113,7 @@ def _drop_lease(target: _CardState) -> None:
         try:
             import mc_wangp
 
-            mc_wangp.lease_release(lease, reason="VibeVoice gave the card back")
+            mc_wangp.lease_release(lease, reason=f"{_display(guest)} gave the card back")
         except Exception:
             logger.warning("Model Chain: could not release WanGP's card", exc_info=True)
 
@@ -1199,7 +1217,7 @@ def end_warm(target: _CardState, reason: str, *, return_image: bool = True,
         target.warm = ""
     freed = _evict(target, guest, reason)
     if not target.busy:
-        _hand_back(target, return_image=return_image, keep_parked=keep_parked)
+        _hand_back(target, return_image=return_image, keep_parked=keep_parked, guest=guest)
     return freed
 
 
@@ -1217,7 +1235,7 @@ def _watch_warm(target: _CardState) -> None:
                 return
             target.warm = ""
         mc_broker.retire(_residency_key(name, target.card))
-        _hand_back(target, return_image=True)
+        _hand_back(target, return_image=True, guest=name)
         return
     if target.lease:
         record = _renew(target)
@@ -1239,8 +1257,8 @@ def _watch_warm(target: _CardState) -> None:
         free_ram = mc_memory.free_ram_bytes()
         if 0 < free_ram < RAM_MARGIN_BYTES:
             logger.warning("Model Chain: system RAM is down to %.1f GB with the image model "
-                           "parked in it — ending VibeVoice's warm stay so the model can go "
-                           "back to the card", free_ram / _GB)
+                           "parked in it — ending %s's warm stay so the model can go "
+                           "back to the card", free_ram / _GB, _display(target.warm))
             end_warm(target, "system RAM is running low")
 
 
@@ -1359,11 +1377,14 @@ def image_gate(p=None) -> bool:
             with _lock:
                 ahead = target.active or (target.queue[0] if target.queue else None)
             logger.info("Model Chain: holding an image generation — %s is next on %s",
-                        ahead.label if ahead is not None else "VibeVoice",
+                        ahead.label if ahead is not None else _display(target.warm),
                         target.card.describe())
-        text = GATE_NOTICE.format(card=target.card.describe())
+        with _lock:
+            ahead = target.active or (target.queue[0] if target.queue else None)
+            name = _display(ahead.guest if ahead is not None else target.warm)
+        text = GATE_NOTICE.format(guest=name, card=target.card.describe())
         if _interrupted():
-            text = "Interrupted — this generation ends as soon as VibeVoice is done"
+            text = f"Interrupted — this generation ends as soon as {name} is done"
         _set_textinfo(text)
         _sleep(TICK_SECONDS)
     if held:
@@ -1472,7 +1493,12 @@ class _VoiceReclaimer:
         return total
 
     def describe(self) -> str:
-        return "VibeVoice"
+        """The guests on the cards, by name, or the Voice Box when none is."""
+        with _lock:
+            names = sorted({_display(name) for target in _cards.values()
+                            for name in (target.warm, getattr(target.active, "guest", ""))
+                            if name})
+        return " and ".join(names) or "the Voice Box"
 
 
 def _states_on(card) -> list[_CardState]:

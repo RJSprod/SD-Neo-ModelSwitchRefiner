@@ -1,0 +1,928 @@
+{
+  "schema": 1,
+  "version": 1,
+  "pinned": false,
+  "notes": "PARTIALLY PINNED. The PyPI closure is resolved: every wheel is named, sized and hashed from pypi.org, solved from the packages' own declarations for CPython 3.13 on Windows x86-64 by tools/pin_breeze_models.py, which refuses a closure whose pins contradict one another. Breeze's own code is pinned file by file at 6eba901d1845353802652c708a4740fdfc5baa75 from raw.githubusercontent.com, each with its size and SHA-256. torch 2.9.1 and torchaudio 2.9.1 are NOT PyPI wheels here: the CUDA 12.8 builds live only on download.pytorch.org, so each is a versioned resolve the installer answers against the publisher's own index on the user's machine, taking the cp313 win_amd64 wheel of exactly that version and the SHA-256 the index states; the machine that wrote this could not reach download.pytorch.org, so `python tools/pin_breeze_models.py --torch` on one that can turns the index's word into committed constants. Flash attention 2 is installed with the runtime, from the community wheel flash_attn-2.8.3+cu128torch2.9.1cxx11abiTRUE-cp313-cp313-win_amd64.whl (Wildminder/AI-windows-whl (github.com/wildminder/AI-windows-whl, wheels.json)), checked at install time against the digest its host states and recorded in voice/managed-breeze-models.local.json; `--flash-attn` records it here. The model is DECLARED BUT NOT HASHED: its repository and revision are written down, the installer lists the files from the hub's own tree at install time and checks every one against the digest the hub states (the LFS SHA-256, or the git blob id of a small file), and records them in voice/managed-breeze-models.local.json; `--model` on a machine that can reach huggingface.co commits them. Not installed, on purpose: gradio (qwen-tts's demo) and Breeze's HTTP server and tests (fastapi, uvicorn, python-multipart, pytest, ruff); runtime.excluded records each reason.",
+  "runtime": {
+    "package": "breeze-tts",
+    "import_name": "breeze_infer",
+    "transformers_version": "4.57.3",
+    "accelerate_version": "1.12.0",
+    "qwen_tts_version": "0.1.1",
+    "provider": "cuda",
+    "python_requires": ">=3.10",
+    "license": "Apache-2.0 (Breeze TTS inference code, BreezeBlue; qwen-tts, Alibaba Qwen team; transformers, accelerate, huggingface-hub, tokenizers, safetensors, packaging, requests); BSD-3-Clause (PyTorch, torchaudio, NumPy, networkx, sympy, idna, psutil, mpmath, colorama, jinja2, MarkupSafe, soundfile); BSD-3-Clause (flash-attn, Tri Dao; the Windows wheel is a community build); MIT (tqdm, PyYAML, charset-normalizer, urllib3, fsspec, setuptools, cffi, einops); Unlicense/MIT (filelock); PSF-2.0 (typing-extensions); MPL-2.0 (certifi); Apache-2.0 with the Python-2.0 licence (regex). Each wheel's own METADATA is authoritative.",
+    "attribution": "Breeze TTS 2 by BreezeBlue (breezeblue.ai): inference code at github.com/breezeblue-ai/breeze-tts under Apache-2.0, pinned file by file at one commit; its audio tokenizer is qwen-tts (Qwen3-TTS) by the Alibaba Qwen team, Apache-2.0. The closure below is solved from pypi.org's own records for CPython 3.13 on Windows x86-64.",
+    "platforms": [
+      {
+        "id": "windows-x86_64-cp313-cu128",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.13",
+        "accelerator": "cuda",
+        "artifacts": [
+          {
+            "filename": "qwen_tts-0.1.1-py3-none-any.whl",
+            "local_name": "qwen_tts-0.1.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/31/01/95f3ae26f5b7eb2105f69ad2c15af5a28b9ebdd1258a0b27541f5ebd6225/qwen_tts-0.1.1-py3-none-any.whl",
+            "bytes": 113529,
+            "sha256": "11a290d8dabc7ef91a90c54478c8ab19b3edb1d85c0882313721892bdc4af15d"
+          },
+          {
+            "filename": "transformers-4.57.3-py3-none-any.whl",
+            "local_name": "transformers-4.57.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/6a/6b/2f416568b3c4c91c96e5a365d164f8a4a4a88030aa8ab4644181fdadce97/transformers-4.57.3-py3-none-any.whl",
+            "bytes": 11993463,
+            "sha256": "c77d353a4851b1880191603d36acb313411d3577f6e2897814f333841f7003f4"
+          },
+          {
+            "filename": "accelerate-1.12.0-py3-none-any.whl",
+            "local_name": "accelerate-1.12.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl",
+            "bytes": 380935,
+            "sha256": "3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11"
+          },
+          {
+            "filename": "huggingface_hub-0.36.2-py3-none-any.whl",
+            "local_name": "huggingface_hub-0.36.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a8/af/48ac8483240de756d2438c380746e7130d1c6f75802ef22f3c6d49982787/huggingface_hub-0.36.2-py3-none-any.whl",
+            "bytes": 566395,
+            "sha256": "48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270"
+          },
+          {
+            "filename": "numpy-2.5.4-cp313-cp313-win_amd64.whl",
+            "local_name": "numpy-2.5.4-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/90/8c/140a40398a66b4471211be1affdb6ed24c486d581bd28d07b7f2fcb69540/numpy-2.5.4-cp313-cp313-win_amd64.whl",
+            "bytes": 12566113,
+            "sha256": "8b4d2fd2d34e5f8c9235ee787de5631a37a28402b15cb80814df973d2be54129"
+          },
+          {
+            "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "bytes": 1021480,
+            "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+          },
+          {
+            "filename": "certifi-2026.7.22-py3-none-any.whl",
+            "local_name": "certifi-2026.7.22-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+            "bytes": 136983,
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+          },
+          {
+            "filename": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
+            "local_name": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/60/a6/8b149b2c3f2e11aaa1618ef64500b45f50f22c57a977a4dff1aff1f91042/cffi-2.1.1-cp313-cp313-win_amd64.whl",
+            "bytes": 185688,
+            "sha256": "1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d"
+          },
+          {
+            "filename": "charset_normalizer-3.5.2-cp313-cp313-win_amd64.whl",
+            "local_name": "charset_normalizer-3.5.2-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/9c/76/b8ec57f4e9ee3253541abf95e4a462c0175fe8032dcd070f1f2421240942/charset_normalizer-3.5.2-cp313-cp313-win_amd64.whl",
+            "bytes": 206489,
+            "sha256": "78456a747de8dc58360ffa581f30a002baf5aa28cb262536545e91f113ed7639"
+          },
+          {
+            "filename": "cloudpickle-3.1.2-py3-none-any.whl",
+            "local_name": "cloudpickle-3.1.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl",
+            "bytes": 22228,
+            "sha256": "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a"
+          },
+          {
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "bytes": 25335,
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          },
+          {
+            "filename": "decorator-5.3.1-py3-none-any.whl",
+            "local_name": "decorator-5.3.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl",
+            "bytes": 10365,
+            "sha256": "f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c"
+          },
+          {
+            "filename": "einops-0.8.2-py3-none-any.whl",
+            "local_name": "einops-0.8.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl",
+            "bytes": 65638,
+            "sha256": "54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193"
+          },
+          {
+            "filename": "filelock-4.1.2-py3-none-any.whl",
+            "local_name": "filelock-4.1.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/84/16cbc2a5a102edf4b745ca43d7b9aaa8e26d46686c8e54d70d3d1225659e/filelock-4.1.2-py3-none-any.whl",
+            "bytes": 132861,
+            "sha256": "4d5dc2a1d64d6b48a5f0540814000986fd62ebd3ac9ccbb1d07d669e075db9bb"
+          },
+          {
+            "filename": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+            "local_name": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl",
+            "bytes": 26661,
+            "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"
+          },
+          {
+            "filename": "fsspec-2026.9.0-py3-none-any.whl",
+            "local_name": "fsspec-2026.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
+            "bytes": 221738,
+            "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f"
+          },
+          {
+            "filename": "idna-3.20-py3-none-any.whl",
+            "local_name": "idna-3.20-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+            "bytes": 69583,
+            "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c"
+          },
+          {
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "local_name": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "bytes": 134899,
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          },
+          {
+            "filename": "joblib-1.6.0-py3-none-any.whl",
+            "local_name": "joblib-1.6.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl",
+            "bytes": 306115,
+            "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
+          },
+          {
+            "filename": "lazy_loader-0.6-py3-none-any.whl",
+            "local_name": "lazy_loader-0.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/23/93/4e45e37f26c820216704b36b8e67cc55c490a7abd287a78a26a2c0e21386/lazy_loader-0.6-py3-none-any.whl",
+            "bytes": 8791,
+            "sha256": "77253be3391b06124a0e16105bd663b6c54470af1a9ca8e1cf026f38d58ed056"
+          },
+          {
+            "filename": "librosa-1.0.0-py3-none-any.whl",
+            "local_name": "librosa-1.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/96/14/0b2e4cc8017796dc8f69de740708601832c1e8d5377166eedb4db0a92264/librosa-1.0.0-py3-none-any.whl",
+            "bytes": 294628,
+            "sha256": "5910a6c0e1b2e494b92758c1615a7acbd0515a2315e138927ba2982f2af88857"
+          },
+          {
+            "filename": "llvmlite-0.50.0-cp313-cp313-win_amd64.whl",
+            "local_name": "llvmlite-0.50.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/d5/17/894321d44cf94fa5cf921eff4e7ff24c7732c3d702236d40d6055b68a693/llvmlite-0.50.0-cp313-cp313-win_amd64.whl",
+            "bytes": 41865552,
+            "sha256": "266a6a29be71c3e3a22960ddcedf66b4e0388e5abb6cc4991cc093d6df402ad7"
+          },
+          {
+            "filename": "markupsafe-3.0.4-cp313-cp313-win_amd64.whl",
+            "local_name": "markupsafe-3.0.4-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/6f/36/163da64de88a13db79214ef75fa041be7fa13bdb42261cf5b7484de14bfb/markupsafe-3.0.4-cp313-cp313-win_amd64.whl",
+            "bytes": 14313,
+            "sha256": "1f1f9477e174582b0a1b583d60b66e1f2cf5d3fe12cee985e4aedf44766600e5"
+          },
+          {
+            "filename": "mpmath-1.3.0-py3-none-any.whl",
+            "local_name": "mpmath-1.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+            "bytes": 536198,
+            "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+          },
+          {
+            "filename": "msgpack-1.2.3-cp313-cp313-win_amd64.whl",
+            "local_name": "msgpack-1.2.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/51/06/c3def9bc4db283103c5901b302ee2a4305cb1e69729244f94d9bd8f8e8e7/msgpack-1.2.3-cp313-cp313-win_amd64.whl",
+            "bytes": 76569,
+            "sha256": "bb89b5dc30469c84bbf8684826eb851d82412ca95690e111b9ac5e8fb343961a"
+          },
+          {
+            "filename": "narwhals-2.27.1-py3-none-any.whl",
+            "local_name": "narwhals-2.27.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/89/5d4c86da1130d9059681e5b6cd7645df5c10279a6a079c5c37dcb2cc6f3f/narwhals-2.27.1-py3-none-any.whl",
+            "bytes": 483211,
+            "sha256": "d057df13f5852b8e157596e82eb5e955fad267425df5e420e0ee9863da483b31"
+          },
+          {
+            "filename": "networkx-3.7-py3-none-any.whl",
+            "local_name": "networkx-3.7-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl",
+            "bytes": 2142205,
+            "sha256": "e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0"
+          },
+          {
+            "filename": "numba-0.68.0-cp313-cp313-win_amd64.whl",
+            "local_name": "numba-0.68.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/8d/a5/06d1dd4553dcc71a3a18defe9e6e26e3c011b566bc9060d4f6e4bca0e0ed/numba-0.68.0-cp313-cp313-win_amd64.whl",
+            "bytes": 2830730,
+            "sha256": "bf7435c81912e271a28a19c348ada5b3986e2409f95a067533c5f4aab8709295"
+          },
+          {
+            "filename": "onnxruntime-1.31.0-cp313-cp313-win_amd64.whl",
+            "local_name": "onnxruntime-1.31.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/c4/86/05ed2056f43b27aaf12ebc592ebd9037a26bed315958cf882f43425fd469/onnxruntime-1.31.0-cp313-cp313-win_amd64.whl",
+            "bytes": 14888306,
+            "sha256": "73e0165d58ece068c2a8a1c477c90b38e5a8adbbd399fdfdfd4bd79cbc28ff8d"
+          },
+          {
+            "filename": "packaging-26.3-py3-none-any.whl",
+            "local_name": "packaging-26.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+            "bytes": 129956,
+            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+          },
+          {
+            "filename": "platformdirs-4.13.0-py3-none-any.whl",
+            "local_name": "platformdirs-4.13.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/8d/15/1633010b26e88e872c93b67c0b6c5e174fb74cb6fb5c1472b4d51d4a8f22/platformdirs-4.13.0-py3-none-any.whl",
+            "bytes": 32724,
+            "sha256": "3dbcf4cd708f21cf876c4eaa90e58412bc4f033d87143f41b1493ff77c25b7e1"
+          },
+          {
+            "filename": "pooch-1.9.0-py3-none-any.whl",
+            "local_name": "pooch-1.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/2a/2d/d4bf65e47cea8ff2c794a600c4fd1273a7902f268757c531e0ee9f18aa58/pooch-1.9.0-py3-none-any.whl",
+            "bytes": 67175,
+            "sha256": "f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b"
+          },
+          {
+            "filename": "protobuf-7.36.2-cp310-abi3-win_amd64.whl",
+            "local_name": "protobuf-7.36.2-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/8a/55/b77bda4e5e5f5971fb51b07663694690e9afdb9402136c16a522bd621cad/protobuf-7.36.2-cp310-abi3-win_amd64.whl",
+            "bytes": 456514,
+            "sha256": "a300819d441e078a5608c0d3c709796bb548136058fda017ae51d425b44fd353"
+          },
+          {
+            "filename": "psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "local_name": "psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "bytes": 137737,
+            "sha256": "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
+          },
+          {
+            "filename": "pycparser-3.11-py3-none-any.whl",
+            "local_name": "pycparser-3.11-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/90/11/0e6f11117525ff0eec40ebac3d313376f102df93ca44ad9e893ee85e4f89/pycparser-3.11-py3-none-any.whl",
+            "bytes": 51178,
+            "sha256": "51d5a8ba2be0bbe440b99d2112604c95bbbc3c2748a64260186c541e1729cd80"
+          },
+          {
+            "filename": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "local_name": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/97/c9/39d5b874e8b28845e4ec2202b5da735d0199dbe5b8fb85f91398814a9a46/pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "bytes": 154090,
+            "sha256": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c"
+          },
+          {
+            "filename": "regex-2026.9.29-cp313-cp313-win_amd64.whl",
+            "local_name": "regex-2026.9.29-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/80/a7/bf93a3a6afa5f7bc16b7afb94ae581b01cae620b8ad56bd8f9572a985959/regex-2026.9.29-cp313-cp313-win_amd64.whl",
+            "bytes": 280307,
+            "sha256": "61956f074ecd123f55adca68ee3eab46e6a07ad3f8e64e6db95dfacb444f55c4"
+          },
+          {
+            "filename": "requests-2.34.2-py3-none-any.whl",
+            "local_name": "requests-2.34.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+            "bytes": 73075,
+            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+          },
+          {
+            "filename": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "local_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "bytes": 355540,
+            "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+          },
+          {
+            "filename": "scikit_learn-1.9.1-cp313-cp313-win_amd64.whl",
+            "local_name": "scikit_learn-1.9.1-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/96/45/a10add34c08184d373be9384660c75758128ca881ed27b503b6f6a742478/scikit_learn-1.9.1-cp313-cp313-win_amd64.whl",
+            "bytes": 8237244,
+            "sha256": "2070f271e5375dc42c6bb93b461ab1c0aa5841d4009267e0cfd95a39dca94a43"
+          },
+          {
+            "filename": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
+            "local_name": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/93/0e/e0348fbc0dbab65c114cf78957e7dfeb49f8e8b556b4d930cc12ff195e18/scipy-1.18.1-cp313-cp313-win_amd64.whl",
+            "bytes": 36622841,
+            "sha256": "559ed65f60c1af5a03f3912605a1b5114f522c7c32fb23c3376ae8f03219fe28"
+          },
+          {
+            "filename": "setuptools-84.0.0-py3-none-any.whl",
+            "local_name": "setuptools-84.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
+            "bytes": 818216,
+            "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+          },
+          {
+            "filename": "sox-1.4.1-py2.py3-none-any.whl",
+            "local_name": "sox-1.4.1-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/3f/67/1810e9a69956eb236967b7174c11fd8d8c2cdab051509286f72e6c7e147e/sox-1.4.1-py2.py3-none-any.whl",
+            "bytes": 39686,
+            "sha256": "2458c8e71e229e7fb1a088874ad07906e0aedfb2874a6c4f0430efd6e7587129"
+          },
+          {
+            "filename": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+            "local_name": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/b0/4d/621e4150e4815246ad552d215a8a294a90143fedd19ee442cf82d3b3abc8/soxr-1.1.0-cp312-abi3-win_amd64.whl",
+            "bytes": 174357,
+            "sha256": "6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4"
+          },
+          {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
+            "filename": "threadpoolctl-3.7.0-py3-none-any.whl",
+            "local_name": "threadpoolctl-3.7.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/3f/f88a53f60a472b46f4023f56d204dd7de33d34c5d2acbfa0d70a674e639e/threadpoolctl-3.7.0-py3-none-any.whl",
+            "bytes": 26362,
+            "sha256": "cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be"
+          },
+          {
+            "filename": "tokenizers-0.22.2-cp39-abi3-win_amd64.whl",
+            "local_name": "tokenizers-0.22.2-cp39-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/65/71/0670843133a43d43070abeb1949abfdef12a86d490bea9cd9e18e37c5ff7/tokenizers-0.22.2-cp39-abi3-win_amd64.whl",
+            "bytes": 2747786,
+            "sha256": "c9ea31edff2968b44a88f97d784c2f16dc0729b8b143ed004699ebca91f05c48"
+          },
+          {
+            "filename": "tqdm-4.70.1-py3-none-any.whl",
+            "local_name": "tqdm-4.70.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl",
+            "bytes": 80199,
+            "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73"
+          },
+          {
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "bytes": 45571,
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+          },
+          {
+            "filename": "urllib3-2.8.0-py3-none-any.whl",
+            "local_name": "urllib3-2.8.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+            "bytes": 135717,
+            "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3"
+          },
+          {
+            "local_name": "torch",
+            "resolve": {
+              "index": "https://download.pytorch.org/whl/cu128/torch/",
+              "package": "torch",
+              "version": "2.9.1"
+            }
+          },
+          {
+            "local_name": "torchaudio",
+            "resolve": {
+              "index": "https://download.pytorch.org/whl/cu128/torchaudio/",
+              "package": "torchaudio",
+              "version": "2.9.1"
+            }
+          },
+          {
+            "filename": "flash_attn-2.8.3+cu128torch2.9.1cxx11abiTRUE-cp313-cp313-win_amd64.whl",
+            "local_name": "flash_attn-2.8.3+cu128torch2.9.1cxx11abiTRUE-cp313-cp313-win_amd64.whl",
+            "url": "https://huggingface.co/Wildminder/AI-windows-whl/resolve/main/flash_attn-2.8.3%2Bcu128torch2.9.1cxx11abiTRUE-cp313-cp313-win_amd64.whl",
+            "bytes": null,
+            "sha256": null,
+            "declared": true,
+            "version": "2.8.3",
+            "source": "Wildminder/AI-windows-whl (github.com/wildminder/AI-windows-whl, wheels.json)"
+          }
+        ]
+      }
+    ],
+    "closure": [
+      [
+        "qwen-tts",
+        "0.1.1",
+        "pure"
+      ],
+      [
+        "transformers",
+        "4.57.3",
+        "pure"
+      ],
+      [
+        "accelerate",
+        "1.12.0",
+        "pure"
+      ],
+      [
+        "huggingface-hub",
+        "0.36.2",
+        "pure"
+      ],
+      [
+        "numpy",
+        "2.5.4",
+        "binary"
+      ],
+      [
+        "soundfile",
+        "0.14.0",
+        "windows"
+      ],
+      [
+        "certifi",
+        "2026.7.22",
+        "pure"
+      ],
+      [
+        "cffi",
+        "2.1.1",
+        "binary"
+      ],
+      [
+        "charset-normalizer",
+        "3.5.2",
+        "binary"
+      ],
+      [
+        "cloudpickle",
+        "3.1.2",
+        "pure"
+      ],
+      [
+        "colorama",
+        "0.4.6",
+        "pure"
+      ],
+      [
+        "decorator",
+        "5.3.1",
+        "pure"
+      ],
+      [
+        "einops",
+        "0.8.2",
+        "pure"
+      ],
+      [
+        "filelock",
+        "4.1.2",
+        "pure"
+      ],
+      [
+        "flatbuffers",
+        "25.12.19",
+        "pure"
+      ],
+      [
+        "fsspec",
+        "2026.9.0",
+        "pure"
+      ],
+      [
+        "idna",
+        "3.20",
+        "pure"
+      ],
+      [
+        "Jinja2",
+        "3.1.6",
+        "pure"
+      ],
+      [
+        "joblib",
+        "1.6.0",
+        "pure"
+      ],
+      [
+        "lazy-loader",
+        "0.6",
+        "pure"
+      ],
+      [
+        "librosa",
+        "1.0.0",
+        "pure"
+      ],
+      [
+        "llvmlite",
+        "0.50.0",
+        "binary"
+      ],
+      [
+        "MarkupSafe",
+        "3.0.4",
+        "binary"
+      ],
+      [
+        "mpmath",
+        "1.3.0",
+        "pure"
+      ],
+      [
+        "msgpack",
+        "1.2.3",
+        "binary"
+      ],
+      [
+        "narwhals",
+        "2.27.1",
+        "pure"
+      ],
+      [
+        "networkx",
+        "3.7",
+        "pure"
+      ],
+      [
+        "numba",
+        "0.68.0",
+        "binary"
+      ],
+      [
+        "onnxruntime",
+        "1.31.0",
+        "binary"
+      ],
+      [
+        "packaging",
+        "26.3",
+        "pure"
+      ],
+      [
+        "platformdirs",
+        "4.13.0",
+        "pure"
+      ],
+      [
+        "pooch",
+        "1.9.0",
+        "pure"
+      ],
+      [
+        "protobuf",
+        "7.36.2",
+        "abi3"
+      ],
+      [
+        "psutil",
+        "7.2.2",
+        "abi3"
+      ],
+      [
+        "pycparser",
+        "3.11",
+        "pure"
+      ],
+      [
+        "PyYAML",
+        "6.0.3",
+        "binary"
+      ],
+      [
+        "regex",
+        "2026.9.29",
+        "binary"
+      ],
+      [
+        "requests",
+        "2.34.2",
+        "pure"
+      ],
+      [
+        "safetensors",
+        "0.8.0",
+        "abi3"
+      ],
+      [
+        "scikit-learn",
+        "1.9.1",
+        "binary"
+      ],
+      [
+        "scipy",
+        "1.18.1",
+        "binary"
+      ],
+      [
+        "setuptools",
+        "84.0.0",
+        "pure"
+      ],
+      [
+        "sox",
+        "1.4.1",
+        "pure"
+      ],
+      [
+        "soxr",
+        "1.1.0",
+        "abi3"
+      ],
+      [
+        "sympy",
+        "1.14.0",
+        "pure"
+      ],
+      [
+        "threadpoolctl",
+        "3.7.0",
+        "pure"
+      ],
+      [
+        "tokenizers",
+        "0.22.2",
+        "abi3"
+      ],
+      [
+        "tqdm",
+        "4.70.1",
+        "pure"
+      ],
+      [
+        "typing-extensions",
+        "4.16.0",
+        "pure"
+      ],
+      [
+        "urllib3",
+        "2.8.0",
+        "pure"
+      ]
+    ],
+    "excluded": {
+      "gradio": "declared by qwen-tts and imported only by its demo (qwen_tts/cli/demo.py), which nothing the worker imports reaches; read against the 0.1.1 wheel",
+      "torchaudio": "resolved from the publisher's cu128 index at install time, beside torch, because the PyPI build is built against another torch and qwen_tts imports torchaudio at module level",
+      "hf-xet": "huggingface-hub declares it behind a marker that spells the machine \"amd64\" in lower case while Windows reports \"AMD64\", so pip does not install it there either; it accelerates downloads the worker never makes"
+    },
+    "not_installed": {
+      "fastapi": "Breeze's HTTP server (breeze_infer.api), which is not run: the worker answers over a pipe",
+      "uvicorn": "the HTTP server's server",
+      "python-multipart": "the HTTP server's form parsing",
+      "pytest": "Breeze's tests",
+      "ruff": "Breeze's linter"
+    },
+    "torch": {
+      "index": "https://download.pytorch.org/whl/cu128/torch/",
+      "package": "torch",
+      "version": "2.9.1",
+      "about_bytes": 2900000000
+    },
+    "torchaudio": {
+      "index": "https://download.pytorch.org/whl/cu128/torchaudio/",
+      "package": "torchaudio",
+      "version": "2.9.1",
+      "about_bytes": 2000000
+    },
+    "flash_attn": {
+      "version": "2.8.3",
+      "source": "Wildminder/AI-windows-whl (github.com/wildminder/AI-windows-whl, wheels.json)",
+      "about_bytes": 260000000
+    },
+    "source": {
+      "repo": "breezeblue-ai/breeze-tts",
+      "commit": "6eba901d1845353802652c708a4740fdfc5baa75",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/LICENSE",
+          "bytes": 10141,
+          "sha256": "c8858a5a76440bbca484e134cf7df46385d090dd18b2c58e650f939258802e5b"
+        },
+        {
+          "path": "breeze_infer/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/breeze_infer/__init__.py",
+          "bytes": 44,
+          "sha256": "810141b5e6326542cced736e82763c37300f9de2b531f3ab97921a1aca32328d"
+        },
+        {
+          "path": "breeze_infer/audio.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/breeze_infer/audio.py",
+          "bytes": 707,
+          "sha256": "3dc7977d8b1f3097918d4164e5607c20d99491877f3c4723649a36724713cff4"
+        },
+        {
+          "path": "breeze_infer/runtime.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/breeze_infer/runtime.py",
+          "bytes": 3273,
+          "sha256": "a257d868b867009edddd8ba53b22d3b66394057801c62f198879b1c992637ab9"
+        },
+        {
+          "path": "breeze_infer/templates.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/breeze_infer/templates.py",
+          "bytes": 12634,
+          "sha256": "52057796b74b95e34adf7238cb07ed1484941a5f6c168760632ac54a0bd0ca06"
+        },
+        {
+          "path": "configs/fast.json",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/configs/fast.json",
+          "bytes": 5357,
+          "sha256": "879c719966e3cd560e47f7555faacd0073f42b36df5c60a5569d3b8558715900"
+        },
+        {
+          "path": "models/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/__init__.py",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "models/breeze.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/breeze.py",
+          "bytes": 82022,
+          "sha256": "9c408b2323f1fb57f7ddc4217cc72e4d9fce82cbf287a0d2ae4578e63f204cc2"
+        },
+        {
+          "path": "models/breeze_backbone_factory.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/breeze_backbone_factory.py",
+          "bytes": 11388,
+          "sha256": "8d8519dccb82f5363d4e4ff64f182906a0f93dd5853619547b54c89ff22f17ef"
+        },
+        {
+          "path": "models/breeze_base_config.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/breeze_base_config.py",
+          "bytes": 24119,
+          "sha256": "6b8aab8979fef27108176d654077e7f1d797a0ca2ed18e6e1460fdf8ab93b7a9"
+        },
+        {
+          "path": "models/breeze_config.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/breeze_config.py",
+          "bytes": 2043,
+          "sha256": "f37fc58792ea936d24925254dfbd75eafb47c2ca85db46b0c371b94550a3fb25"
+        },
+        {
+          "path": "models/cudagraph/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/cudagraph/__init__.py",
+          "bytes": 263,
+          "sha256": "ef0418048e1766dfd2efab2f000bcc15f3d75ccfc700e1e5f52d7c540f56bf62"
+        },
+        {
+          "path": "models/cudagraph/backbone_graph.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/cudagraph/backbone_graph.py",
+          "bytes": 15814,
+          "sha256": "942b07eb2c16a31f362e10ecc23e9d1c131fc8cc3116550650010d2ec83fd024"
+        },
+        {
+          "path": "models/cudagraph/backbone_prefill_graph.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/cudagraph/backbone_prefill_graph.py",
+          "bytes": 9498,
+          "sha256": "bd90e34eb8bc4e507af9e222b58db741e913e5c833cd9c5625f4168660d45d82"
+        },
+        {
+          "path": "models/cudagraph/depth_decoder_graph.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/cudagraph/depth_decoder_graph.py",
+          "bytes": 39241,
+          "sha256": "407bb07d0cd610f9c11748655450ad7708f8bab811d2129382925bf729b88acc"
+        },
+        {
+          "path": "models/cudagraph/sampling.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/cudagraph/sampling.py",
+          "bytes": 3657,
+          "sha256": "3dcaa35fd106c730bc630a998d3a6ed3329beb55e8df03d76d3f857346a86623"
+        },
+        {
+          "path": "models/fast_streaming.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/fast_streaming.py",
+          "bytes": 38699,
+          "sha256": "7748cc11fef2a5f54ae82fefc96325673d71b8cb9b1bdd7bb92275c4c100a825"
+        },
+        {
+          "path": "models/generation_breeze.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/generation_breeze.py",
+          "bytes": 64287,
+          "sha256": "ebc55c27b896423f7a3464cb6dcf1df0918c78bda6b0236235f0f0f4c4d04e84"
+        },
+        {
+          "path": "models/logits_process.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/logits_process.py",
+          "bytes": 2877,
+          "sha256": "43bbcc1c85da535aefc757e44716b0e69701c90db660cf14d77da73d31485b9f"
+        },
+        {
+          "path": "models/stream_runtime/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/__init__.py",
+          "bytes": 286,
+          "sha256": "f5f6ff5a5013666069d61bc7d6275fdb4b3feac9d569a1afec3cfacd59dec799"
+        },
+        {
+          "path": "models/stream_runtime/core/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/core/__init__.py",
+          "bytes": 629,
+          "sha256": "c3daf48ca2c409d255ba51bbbeb9f56a66a68e4934b33a77f0714541f0566670"
+        },
+        {
+          "path": "models/stream_runtime/core/compat.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/core/compat.py",
+          "bytes": 1093,
+          "sha256": "27354ec2e98991579b421f1d24af93786da066532a61ad66462ffcff6a978d97"
+        },
+        {
+          "path": "models/stream_runtime/inference/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/inference/__init__.py",
+          "bytes": 334,
+          "sha256": "01f6c318a7ac1be7df8f78a42d59bac4214126adbd900c649e5ec3a5367e62a3"
+        },
+        {
+          "path": "models/stream_runtime/stream/__init__.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/stream/__init__.py",
+          "bytes": 360,
+          "sha256": "c5cad715006f19bb5c097c2556a301252845b31facd4e402b90db2d727886187"
+        },
+        {
+          "path": "models/stream_runtime/stream/kv_cache.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/stream/kv_cache.py",
+          "bytes": 3655,
+          "sha256": "1162ba9bce3fbb2e64b6fcb2e95e20b9f6efb9dfce541be61ab8346f123c8f41"
+        },
+        {
+          "path": "models/stream_runtime/stream/lane.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/stream/lane.py",
+          "bytes": 16633,
+          "sha256": "074a88bd1c6ea367993f66b352df48be372a8236c66dbb7a7e151f50bd620486"
+        },
+        {
+          "path": "models/stream_runtime/stream/runtime.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/stream/runtime.py",
+          "bytes": 29399,
+          "sha256": "6b886844b7e317a4218a9f6f68735e502d8fd853ce41dd8c90648bf1de88c320"
+        },
+        {
+          "path": "models/stream_runtime/stream/state.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/stream/state.py",
+          "bytes": 5241,
+          "sha256": "05631403bae6b29538b1bba7710854d1fada84033f656e7302e43cf8c7f5eba7"
+        },
+        {
+          "path": "models/stream_runtime/stream/workspace.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/stream_runtime/stream/workspace.py",
+          "bytes": 1715,
+          "sha256": "1607e23cf928febd76efe57f075430a97f8311e1901c1ebe33dde144f3e1c584"
+        },
+        {
+          "path": "models/t5gemma2_compat.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/t5gemma2_compat.py",
+          "bytes": 30369,
+          "sha256": "5902c67fdd3ca28bb13508cb139d0ea96594f118763bc5cd4d940e78d1cf92bf"
+        },
+        {
+          "path": "models/text_encoder_graph.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/text_encoder_graph.py",
+          "bytes": 6753,
+          "sha256": "a8cb9c92b9b13124652e93c0f9a95fe8d70775fec105f3616435b08970cbbddb"
+        },
+        {
+          "path": "models/warmup_profile.py",
+          "url": "https://raw.githubusercontent.com/breezeblue-ai/breeze-tts/6eba901d1845353802652c708a4740fdfc5baa75/models/warmup_profile.py",
+          "bytes": 10169,
+          "sha256": "48faa9be17f740a808946eae5f2724e370b68b3e177e7871563f4ee45a0e85c6"
+        }
+      ]
+    }
+  },
+  "defaults": {
+    "model": "breeze-tts-2"
+  },
+  "models": {
+    "breeze-tts-2": {
+      "label": "Breeze TTS 2",
+      "repo": "BreezeBlue/Breeze-TTS-2",
+      "revision": "main",
+      "license": "BreezeBlue Research and Non-Commercial License (the weights; huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE): research and non-commercial use only, outputs included. The bundled audio tokenizer is based on Qwen3-TTS, Apache-2.0.",
+      "attribution": "Breeze TTS 2 by BreezeBlue (breezeblue.ai). The weights are governed by the BreezeBlue Research and Non-Commercial License, which does not permit commercial use of the model or of what it renders on your own machine; the inference code is Apache-2.0.",
+      "summary": "Expressive speech from a script: a voice cloned from a sample and its transcript, or designed from a description, with a direction per line. About 7.7 GB of bf16 weights on an NVIDIA card.",
+      "notes": "Downloaded once and then read from disk. The installer lists the files from the hub's own tree at install time and checks each against the digest the hub states (the LFS SHA-256 of a weight, the git blob id of a small file); `tools/pin_breeze_models.py --model` on a machine that can reach the hub commits that list here. The worker runs with HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE set; Breeze's loader needs the audio_tokenizer folder beside the weights, and the installer refuses a listing without one.",
+      "sample_rate": 24000,
+      "authorized": true,
+      "skip": [
+        ".gitattributes",
+        "README.md"
+      ],
+      "skip_suffixes": [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".svg",
+        ".wav",
+        ".mp3",
+        ".flac",
+        ".ogg",
+        ".m4a",
+        ".mp4"
+      ],
+      "files": [],
+      "estimates": {
+        "weights_bytes": 7700000000,
+        "working_bytes": 1073741824,
+        "fast_bytes": 7200000000,
+        "ram_bytes": 8589934592
+      }
+    }
+  }
+}

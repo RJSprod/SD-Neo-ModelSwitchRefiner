@@ -317,12 +317,38 @@ class TestNothingIsWrittenToDisk:
                      + [root / "voice_worker" / "worker.py",
                         root / "sopro_worker" / "worker.py",
                         root / "pocket_worker" / "worker.py",
-                        root / "pipeline_worker" / "worker.py"]):
+                        root / "pipeline_worker" / "worker.py",
+                        root / "vibevoice_worker" / "worker.py",
+                        root / "breeze_worker" / "worker.py"]):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
                     assert all(a.name != "tempfile" for a in node.names), path.name
                 elif isinstance(node, ast.ImportFrom):
                     assert node.module != "tempfile", path.name
+
+    def test_a_samples_transcript_is_written_where_its_sound_is_and_nowhere_else(
+            self, voice_root, captured, monkeypatch):
+        """Breeze clones from a sample's exact words, so the words are kept -- in
+        the sample's own record beside its recording, as private as it is, and
+        in no other file, no log line and no reading Whisper made of it."""
+        import mc_voice_box as box
+        import mc_voice_runtime
+        from conftest import _spoken_wav
+
+        found = box.add_sample(_spoken_wav(4.0, 24000), "Ada")
+        box.set_transcript(found["id"], f"{DICTATED} said once")
+        monkeypatch.setattr(mc_voice_runtime, "transcribe",
+                            lambda wav: {"text": f"{SPOKEN} heard once"})
+        monkeypatch.setattr("mc_voice_models.status",
+                            lambda: type("Ready", (), {"ready": True})())
+        assert box.transcribe(found["id"])["text"] == f"{SPOKEN} heard once"
+        holders = [path.relative_to(voice_root).as_posix() for path in voice_root.rglob("*")
+                   if path.is_file() and DICTATED.encode() in path.read_bytes()]
+        assert holders == [f"voice_box/samples/{found['id']}/meta.json"]
+        assert not [path for path in voice_root.rglob("*")
+                    if path.is_file() and SPOKEN.encode() in path.read_bytes()], \
+            "a reading is handed to the page and kept nowhere"
+        assert DICTATED not in captured.text and SPOKEN not in captured.text
 
     def test_the_speech_target_is_never_persisted(self, tmp_path, monkeypatch, voice_root):
         """It is a string in this process's RAM with a two-minute life. A target

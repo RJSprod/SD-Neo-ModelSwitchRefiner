@@ -1253,6 +1253,66 @@ def read_index_page(url: str, ceiling: int = 8 * 1024 * 1024) -> str:
         return response.read(int(ceiling)).decode("utf-8", "replace")
 
 
+def read_json(url: str, ceiling: int = 8 * 1024 * 1024, authorized: bool = False,
+              name: str = "") -> tuple:
+    """One JSON document from a publisher's API, and the address of its next page.
+
+    ``(document, next_url)``: ``next_url`` is the ``Link: <…>; rel="next"``
+    target when the publisher paginates and it stays on the same origin, else
+    ``""``. Here for the reason :func:`read_index_page` is: the Voice Box's
+    Breeze installer lists its model from the hub's own file tree, and only this
+    module may reach the network (I-4).
+
+    ``authorized`` attaches the user's hub credential exactly as a gated
+    download does -- to a credential host only, and dropped at any hop off it
+    (:class:`_DropCredentialOnHop`) -- and a 401 or 403 is then :class:`Gated`,
+    named by ``name``, rather than a failure to retry.
+    """
+    if not str(url or "").startswith("https://"):
+        raise VoiceError("A publisher's API must be asked over HTTPS.")
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json",
+               "Accept-Encoding": "identity"}
+    token = _credential(url) if authorized else ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    opener = (urllib.request.build_opener(_DropCredentialOnHop) if token
+              else urllib.request.build_opener())
+    try:
+        with contextlib.closing(opener.open(request, timeout=TIMEOUT)) as answer:
+            body = answer.read(int(ceiling) + 1)
+            link = str(answer.headers.get("Link") or "")
+    except urllib.error.HTTPError as answer:
+        status = int(getattr(answer, "code", 0) or 0)
+        with contextlib.closing(answer):
+            pass
+        if status in (401, 403) and authorized:
+            raise Gated(name or url.rsplit("/", 1)[-1], status) from None
+        raise VoiceError(f"{name or 'The publisher'} answered HTTP {status}.") from None
+    except Exception as exc:
+        # The class and the message, never the request: the URL is the
+        # publisher's, but a gated one is nobody's business in a log.
+        raise VoiceError(f"{name or 'The publisher'} could not be asked "
+                         f"({exc.__class__.__name__}: {exc}).") from None
+    if len(body) > int(ceiling):
+        raise VoiceError(f"{name or 'The publisher'} answered with far more than a file "
+                         f"list. Nothing was installed.")
+    try:
+        document = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        raise VoiceError(f"{name or 'The publisher'} did not answer with JSON.") from None
+    following = ""
+    for part in link.split(","):
+        pieces = [piece.strip() for piece in part.split(";")]
+        if len(pieces) >= 2 and pieces[0].startswith("<") and pieces[0].endswith(">") \
+                and any(piece.replace(" ", "") in ('rel="next"', "rel=next")
+                        for piece in pieces[1:]):
+            candidate = urllib.parse.urljoin(url, pieces[0][1:-1])
+            if _origin(candidate) == _origin(url):
+                following = candidate
+    return document, following
+
+
 def _published_digest(headers: dict) -> str | None:
     """A SHA-256 the publisher actually stated, or ``None`` if it stated none.
 

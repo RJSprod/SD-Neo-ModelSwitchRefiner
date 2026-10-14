@@ -431,7 +431,7 @@ class TestTheImageGate:
         assert turn.phase == mc_turns.DONE
         assert mc_turns.GRANTED in seen
         assert card_of(turn).queue_lock is None, "the held job already holds the lock"
-        assert notices[0] == mc_turns.GATE_NOTICE.format(card=NAMES[IMAGE_CARD])
+        assert notices[0] == mc_turns.GATE_NOTICE.format(guest=GUEST, card=NAMES[IMAGE_CARD])
         assert host.shared.state.textinfo is None
         assert machine.loadable == 1
 
@@ -691,7 +691,8 @@ class TestClearing:
         rather than stopping a llama-server under a reply."""
         speaker(machine)
         stopped = []
-        monkeypatch.setattr(mc_turns, "_stop_idle_llm", lambda target: stopped.append(1))
+        monkeypatch.setattr(mc_turns, "_stop_idle_llm",
+                            lambda target, guest="": stopped.append(1))
         turn = ask(WANGP_UUID)
         assert step(turn) == mc_turns.MAKING_ROOM
         with mc_broker.workload(mc_broker.FAMILY_LLM, "Krea's writer",
@@ -1742,7 +1743,7 @@ class TestTheBroker:
         assert mc_broker._victim_order(mc_broker.FAMILY_VOICE) == ()
 
     def test_the_family_is_named_in_a_sentence(self):
-        assert mc_broker._named(mc_broker.FAMILY_VOICE) == "VibeVoice"
+        assert mc_broker._named(mc_broker.FAMILY_VOICE) == "Voice Box"
         assert mc_broker._named(mc_broker.FAMILY_IMAGE) == "image"
         assert mc_broker._named(mc_broker.FAMILY_LLM) == "LLM"
 
@@ -1752,7 +1753,7 @@ class TestTheBroker:
 
         found = mc_broker.status()
         assert found.voice_bytes == guest.size
-        assert "VibeVoice" in found.owners
+        assert "Voice Box" in found.owners
 
     def test_a_guests_bytes_are_never_reported_as_stray(self, machine, monkeypatch):
         guest = speaker(machine)

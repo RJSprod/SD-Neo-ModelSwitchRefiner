@@ -23,6 +23,7 @@ import urllib.parse
 
 import mc_voice_api as voice_api
 import mc_voice_box as box
+import mc_voice_box_engines as engines
 
 try:  # pragma: no cover - the host always has FastAPI; the tests import it explicitly
     from fastapi import Request
@@ -68,6 +69,12 @@ OUTPUT_DELETE_ROUTE = f"{PREFIX}/outputs/delete"
 OUTPUT_SAVE_ROUTE = f"{PREFIX}/outputs/save"
 OUTPUT_AUDIO_ROUTE = f"{PREFIX}/outputs/audio"
 RUNTIME_ROUTE = f"{PREFIX}/runtime"
+ENGINE_ROUTE = f"{PREFIX}/engine"
+SAMPLE_TRANSCRIPT_ROUTE = f"{PREFIX}/samples/transcript"
+SAMPLE_TRANSCRIBE_ROUTE = f"{PREFIX}/samples/transcribe"
+DESIGN_ROUTE = f"{PREFIX}/design"
+DESIGN_AUDIO_ROUTE = f"{PREFIX}/design/audio"
+DESIGN_KEEP_ROUTE = f"{PREFIX}/design/keep"
 
 ROUTES = (STATUS_ROUTE, INSTALL_ROUTE, SETTINGS_ROUTE, FOLDER_ROUTE, SAMPLES_ROUTE,
           SAMPLE_UPLOAD_ROUTE, SAMPLE_RENAME_ROUTE, SAMPLE_DELETE_ROUTE, SAMPLE_AUDIO_ROUTE,
@@ -76,7 +83,12 @@ ROUTES = (STATUS_ROUTE, INSTALL_ROUTE, SETTINGS_ROUTE, FOLDER_ROUTE, SAMPLES_ROU
           PIPELINES_ROUTE, PIPELINE_NEW_ROUTE, PIPELINE_SAVE_ROUTE, PIPELINE_DELETE_ROUTE,
           RENDER_ROUTE, JOBS_ROUTE, JOB_CANCEL_ROUTE, JOBS_CLEAR_ROUTE, OUTPUTS_ROUTE,
           OUTPUT_RENAME_ROUTE, OUTPUT_LOOP_ROUTE, OUTPUT_DELETE_ROUTE, OUTPUT_SAVE_ROUTE,
-          OUTPUT_AUDIO_ROUTE, RUNTIME_ROUTE)
+          OUTPUT_AUDIO_ROUTE, RUNTIME_ROUTE, ENGINE_ROUTE, SAMPLE_TRANSCRIPT_ROUTE,
+          SAMPLE_TRANSCRIBE_ROUTE, DESIGN_ROUTE, DESIGN_AUDIO_ROUTE, DESIGN_KEEP_ROUTE)
+
+AUDIO_ROUTES = (SAMPLE_AUDIO_ROUTE, OUTPUT_AUDIO_ROUTE, DESIGN_AUDIO_ROUTE)
+"""The routes a page fetches with GET -- a sample, a render, a designed voice --
+because an ``<audio>`` element asks with GET. Every other route is a POST."""
 
 TITLE_HEADER = "x-mc-title"
 """A sample's title on an upload, percent-encoded UTF-8 (headers are Latin-1)."""
@@ -93,15 +105,13 @@ _installed = False
 
 
 def _engine():
-    import mc_voice_vibevoice
-
-    return mc_voice_vibevoice
+    """The active engine's adapter (:mod:`mc_voice_box_engines`), through the Voice Box's seam."""
+    return box._engine()
 
 
 def _runtime():
-    import mc_voice_vibevoice_runtime
-
-    return mc_voice_vibevoice_runtime
+    """The active engine's runtime, through the Voice Box's seam."""
+    return box._runtime()
 
 
 def _part(name: str, call, fallback):
@@ -117,12 +127,24 @@ def _part(name: str, call, fallback):
 
 
 def status_payload() -> dict:
-    """Everything the page draws from, in one answer it polls."""
+    """Everything the page draws from, in one answer it polls.
+
+    ``engine`` is the active engine's own status -- with its configuration
+    ``fields`` and ``capabilities``, which the page draws the Configuration
+    stage from -- and ``engines`` every engine the Voice Box has, for the
+    Engine select. ``stt`` says whether Whisper can fill a sample's transcript.
+    """
     client = box.turns()
     return {
         "ok": True,
         "engine": _part("the engine", lambda: _engine().public_status(),
-                        {"ready": False, "message": "VibeVoice's status could not be read"}),
+                        lambda: {"ready": False, "label": engines.label(),
+                                 "id": engines.active_id(),
+                                 "message": f"{engines.label()}'s status could not be read"}),
+        "engines": _part("the engines", engines.summary,
+                         lambda: {"active": engines.active_id(), "available": []}),
+        "stt": _part("speech recognition", box.stt_status,
+                     {"available": False, "message": ""}),
         "progress": _part("the install", lambda: _engine().progress(), {}),
         "engine_settings": _part("the engine's settings", lambda: _engine().settings(), {}),
         "settings": _part("the settings", box.settings, dict(box.SETTINGS_DEFAULTS)),
@@ -150,31 +172,78 @@ def install_payload(values: dict) -> dict:
                 engine.install(part)
         except Exception:
             # Logged with its reason where the page's progress reads it.
-            logger.debug("Model Chain: the VibeVoice install thread ended on an error",
+            logger.debug("Model Chain: the Voice Box install thread ended on an error",
                          exc_info=True)
 
-    threading.Thread(target=run, name="mc-vibevoice-install", daemon=True).start()
+    threading.Thread(target=run, name="mc-voice-box-install", daemon=True).start()
     return {"ok": True, "already": False}
 
 
 ENGINE_KEYS = ("steps", "cfg_scale", "seed", "max_new_tokens", "card_uuid", "model_id",
                "keep_warm")
-"""What the engine's own settings file holds. The card, the model and the warm
-stay are Voice Box's to decide (its render service reads its own file), and are
-mirrored into the engine's so that the two files never disagree about them."""
+"""What VibeVoice's own settings file holds, for an engine that does not say
+(``SETTINGS_KEYS``). The card, the model and the warm stay are Voice Box's to
+decide (its render service reads its own file), and are mirrored into the
+engine's so that the two files never disagree about them."""
 
 
 def settings_payload(values: dict) -> dict:
-    """Voice Box's own settings and the engine's, saved together, answered together.
+    """Voice Box's own settings and the active engine's, saved together, answered together.
 
     The engine validates first -- a model id it does not know, a step count out
-    of range -- so a refused value leaves both files as they were.
+    of range -- so a refused value leaves both files as they were. The engine
+    itself is not a setting this route changes: switching is ``/engine``'s,
+    which makes sure the other engine has let go of every card first.
     """
-    theirs = {key: values[key] for key in ENGINE_KEYS if key in values}
-    engine_settings = _engine().set_settings(theirs) if theirs else _engine().settings()
-    own = {key: values[key] for key in box.SETTINGS_DEFAULTS if key in values}
+    engine = _engine()
+    keys = tuple(getattr(engine, "SETTINGS_KEYS", ENGINE_KEYS))
+    theirs = {key: values[key] for key in keys if key in values}
+    if "model_id" in theirs:
+        # The model is shared by the Voice Box's settings and both engines'; a
+        # model of the other engine's (a page that has not caught up with a
+        # switch) is no refusal here, just nothing to tell this engine.
+        try:
+            listed = tuple(engine.model_ids())
+        except Exception:
+            listed = ()
+        if listed and str(theirs["model_id"] or "") not in listed + ("",):
+            theirs.pop("model_id")
+    engine_settings = engine.set_settings(theirs) if theirs else engine.settings()
+    own = {key: values[key] for key in box.SETTINGS_DEFAULTS
+           if key in values and key != "engine"}
     found = box.set_settings(own) if own else box.settings()
     return {"ok": True, "settings": found, "engine_settings": engine_settings}
+
+
+def engine_payload(values: dict) -> dict:
+    """Make another engine the Voice Box's. Refused while anything renders."""
+    try:
+        found = engines.select(str(values.get("engine") or ""), client=box.turns())
+    except engines.EngineError as exc:
+        raise Refused(int(getattr(exc, "status", 400)), str(exc)) from None
+    return {"ok": True, **found, "settings": box.settings(), "engines": engines.summary()}
+
+
+def transcript_payload(values: dict) -> dict:
+    return {"ok": True, "sample": box.set_transcript(values.get("id"),
+                                                     str(values.get("transcript") or ""))}
+
+
+def transcribe_payload(values: dict) -> dict:
+    return {"ok": True, **box.transcribe(values.get("id"))}
+
+
+def design_payload(values: dict) -> dict:
+    configuration = values.get("configuration")
+    found = box.design(str(values.get("description") or ""), str(values.get("text") or ""),
+                       values.get("seed"), str(values.get("configuration_id") or ""),
+                       inline=configuration if isinstance(configuration, dict) else None)
+    return {"ok": True, "job": found}
+
+
+def keep_design_payload(values: dict) -> dict:
+    return {"ok": True, "sample": box.keep_design(values.get("id"),
+                                                  str(values.get("title") or ""))}
 
 
 def folder_payload(_values: dict) -> dict:
@@ -330,6 +399,11 @@ def output_audio(identifier: str) -> tuple[bytes, str, str]:
     return audio, str(entry.get("name") or "render"), kind
 
 
+def design_audio(identifier: str) -> tuple[bytes, str, str]:
+    """A finished design's take: a WAV, until it is kept as a sample."""
+    return box.design_audio(identifier), "designed voice", "wav"
+
+
 # --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
@@ -432,7 +506,7 @@ def install(_demo=None, app=None) -> bool:
 
     posts = (
         (STATUS_ROUTE, lambda _p: status_payload(), "Voice Box's status could not be read."),
-        (INSTALL_ROUTE, install_payload, "VibeVoice could not be installed."),
+        (INSTALL_ROUTE, install_payload, "The engine could not be installed."),
         (SETTINGS_ROUTE, settings_payload, "The settings could not be saved."),
         (FOLDER_ROUTE, folder_payload, "The folder dialog could not be opened."),
         (SAMPLES_ROUTE, samples_payload, "The samples could not be listed."),
@@ -461,6 +535,11 @@ def install(_demo=None, app=None) -> bool:
         (OUTPUT_DELETE_ROUTE, delete_output_payload, "The render could not be deleted."),
         (OUTPUT_SAVE_ROUTE, save_output_payload, "The render could not be saved."),
         (RUNTIME_ROUTE, runtime_payload, "The runtime could not be changed."),
+        (ENGINE_ROUTE, engine_payload, "The engine could not be changed."),
+        (SAMPLE_TRANSCRIPT_ROUTE, transcript_payload, "The transcript could not be saved."),
+        (SAMPLE_TRANSCRIBE_ROUTE, transcribe_payload, "The sample could not be transcribed."),
+        (DESIGN_ROUTE, design_payload, "The voice could not be designed."),
+        (DESIGN_KEEP_ROUTE, keep_design_payload, "The designed voice could not be kept."),
     )
     for route, call, failure in posts:
         if route not in existing:
@@ -473,6 +552,9 @@ def install(_demo=None, app=None) -> bool:
     if OUTPUT_AUDIO_ROUTE not in existing:
         app.add_api_route(OUTPUT_AUDIO_ROUTE, _audio_route(OUTPUT_AUDIO_ROUTE, output_audio,
                                                            "render"), methods=["GET"])
+    if DESIGN_AUDIO_ROUTE not in existing:
+        app.add_api_route(DESIGN_AUDIO_ROUTE, _audio_route(DESIGN_AUDIO_ROUTE, design_audio,
+                                                           "design"), methods=["GET"])
     _installed = True
     logger.info("Model Chain: Voice Box routes registered under %s", PREFIX)
     return True

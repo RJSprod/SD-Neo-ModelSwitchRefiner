@@ -45,9 +45,11 @@ SOPRO_WORKER = ROOT / "sopro_worker" / "worker.py"
 POCKET_WORKER = ROOT / "pocket_worker" / "worker.py"
 PIPELINE_WORKER = ROOT / "pipeline_worker" / "worker.py"
 VIBEVOICE_WORKER = ROOT / "vibevoice_worker" / "worker.py"
+BREEZE_WORKER = ROOT / "breeze_worker" / "worker.py"
 
-WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER, PIPELINE_WORKER, VIBEVOICE_WORKER)
-"""All five sidecars. Each is run by path under a *different* interpreter out
+WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER, PIPELINE_WORKER, VIBEVOICE_WORKER,
+           BREEZE_WORKER)
+"""All six sidecars. Each is run by path under a *different* interpreter out
 of a *different* dependency closure, and none may import another's engine,
 another's file, or anything from this extension.
 
@@ -62,7 +64,12 @@ enhancement update cannot mutate the environment a working voice depends on.
 
 VibeVoice's is a fifth, and the first that runs on a graphics card: its closure
 carries a CUDA build of Torch that no CPU engine may inherit, and its worker is
-the one process the turn system evicts by ending it."""
+the one process the turn system evicts by ending it.
+
+Breeze's is a sixth, the Voice Box's second engine: another CUDA Torch (2.9.1
+where VibeVoice's is 2.8.0, with Flash attention 2 built against exactly it)
+and transformers 4.57 where VibeVoice's code breaks past 4.51, so the two GPU
+engines could not share a closure if they wanted to."""
 
 
 def imported_names(path: Path) -> set[str]:
@@ -184,6 +191,17 @@ class TestTheImportGraph:
         assert "pipeline_worker" not in kokoro
         for others in (kokoro, sopro, pocket):
             assert "pipeline_worker" not in others
+        # The Voice Box's two engines, each in its own CUDA closure, know
+        # nothing of each other's code or of any Voice Chat engine's.
+        vibevoice = imported_names(VIBEVOICE_WORKER)
+        breeze = imported_names(BREEZE_WORKER)
+        for name in ("breeze_worker", "breeze_infer", "models", "qwen_tts"):
+            assert name not in vibevoice, name
+        for name in ("vibevoice_worker", "vibevoice", "diffusers"):
+            assert name not in breeze, name
+        for name in ("voice_worker", "sopro_worker", "pocket_worker", "pipeline_worker",
+                     "sherpa_onnx", "sopro", "pocket_tts"):
+            assert name not in breeze and name not in vibevoice, name
 
     def test_only_the_model_manager_reaches_the_network(self):
         """One door out, and it is the one with the hashes behind it.

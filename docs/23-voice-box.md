@@ -10,6 +10,15 @@ differ this file wins.
 Behaviour people see is in `README.md`. The reasoning behind a particular line
 of code is in that module's docstring, which is where it stays true.
 
+**Since 2026-10-14 the Voice Box has a second engine, Breeze TTS 2**, chosen
+one at a time with VibeVoice. `docs/25-voice-box-engines.md` is its design --
+the engine seam, Breeze's rendering, runtime and install, transcripts, voice
+design and directions -- and wins over this file wherever they differ about
+engines. Below, VibeVoice is the engine this file was written for; the turn
+system, the page and the Voice Box's files treat both alike. LLM Studio's
+*Send to VibeVoice* and *Play VibeVoice* are now *Send to Voice Box* and *Play
+Voice Box*, and *Keep VibeVoice warm* is *Keep the Voice Box's engine warm*.
+
 ---
 
 ## 1. What Voice Box is
@@ -489,7 +498,7 @@ join the queue of their card.
 `{owner, kind}`: Voice Box playback stops Voice Chat's speech and closes any open
 microphone (the composer's, the flyout's dictation and the clone recorder's),
 and Voice Chat speaking or listening pauses Voice Box playback. Since 8 October
-2026 LLM Studio's *Play VibeVoice* claims it too (`llm-studio`): Voice Box and
+2026 LLM Studio's *Play VibeVoice* (since 14 October *Play Voice Box*) claims it too (`llm-studio`): Voice Box and
 LLM Studio yield to any owner that is not themselves, Voice Chat to the two it
 knows (`FOCUS_RIVALS`), so a stranger's event cannot cut a reply off.
 
@@ -506,7 +515,8 @@ origin=)`: `{kind, key, label}`, three strings of at most `ORIGIN_CHARS`
 (`_clean_origin`; anything else dropped), kept on the job (`Job.origin`,
 `to_dict`) and written into the output's record (`render.origin`), changing
 nothing about the render itself. It is how the asking tab finds its render after
-a reload. LLM Studio's *Send to VibeVoice* is the first caller (docs/07 §39):
+a reload. LLM Studio's *Send to VibeVoice* (since 14 October *Send to Voice Box*; its
+origin gains `engine`, the engine that answered) is the first caller (docs/07 §39):
 `kind: "llm"`, the message's key, the label *LLM Studio*; the lane is named
 *LLM Studio · <the first words>*. Nothing in the Voice Box depends on who calls.
 

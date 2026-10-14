@@ -225,6 +225,21 @@ both and is what either can be rebuilt from.
 """
 
 
+BREEZE_DIRNAME = "breeze"
+BREEZE_WORKER_DIRNAME = "breeze_worker"
+BREEZE_MANIFEST_FILENAME = "managed-breeze-models.json"
+BREEZE_LOCAL_PINS_FILENAME = "managed-breeze-models.local.json"
+"""Digests recorded at install time for the Breeze artifacts this repository
+could not hash -- torch and torchaudio on download.pytorch.org, the community
+flash-attn wheel and the model on huggingface.co. Untracked, and only ever
+filled in, like VibeVoice's."""
+BREEZE_SETTINGS_FILENAME = "settings.json"
+BREEZE_CALIBRATION_FILENAME = "calibration.json"
+BREEZE_SOURCE_DIRNAME = "breeze-tts"
+"""Where Breeze's own inference code (``breeze_infer``, ``models``) is put inside
+the runtime, at the pinned commit: it is not a wheel, and the worker puts this
+folder on its path (``MODEL_CHAIN_BREEZE_SOURCE``)."""
+
 VIBEVOICE_DIRNAME = "vibevoice"
 VIBEVOICE_WORKER_DIRNAME = "vibevoice_worker"
 VIBEVOICE_MANIFEST_FILENAME = "managed-vibevoice-models.json"
@@ -940,6 +955,82 @@ def vibevoice_inside(candidate) -> bool:
     """
     try:
         Path(candidate).resolve().relative_to(vibevoice_root())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+# A sixth tree, for the Voice Box's second engine, for the reason VibeVoice's is
+# separate: its own interpreter, its own CUDA build of Torch (2.9.1 where
+# VibeVoice's is 2.8.0), its own eight gigabytes of weights.
+
+
+def breeze_root() -> Path:
+    """Everything the Voice Box's Breeze engine owns. Nothing else writes here."""
+    return data_root() / BREEZE_DIRNAME
+
+
+def breeze_runtime_root() -> Path:
+    """The isolated CUDA Torch/transformers/qwen-tts closure, and Breeze's own code."""
+    return breeze_root() / RUNTIME_DIRNAME
+
+
+def breeze_runtime_manifest() -> Path:
+    return breeze_runtime_root() / INSTALLED_FILENAME
+
+
+def breeze_source_root() -> Path:
+    """Breeze's inference code, at the pinned commit, inside the installed runtime."""
+    return breeze_runtime_root() / BREEZE_SOURCE_DIRNAME
+
+
+def breeze_models_root() -> Path:
+    return breeze_root() / MODELS_DIRNAME
+
+
+def breeze_model_root(identifier: str) -> Path:
+    """One installed Breeze checkpoint. ``identifier`` is checked, not trusted."""
+    return _contained(breeze_models_root(), identifier)
+
+
+def breeze_staging_root() -> Path:
+    return breeze_root() / STAGING_DIRNAME
+
+
+def breeze_staging_for(identifier: str, nonce: str) -> Path:
+    """One install attempt's scratch directory, a sibling of what it will become."""
+    return _contained(breeze_staging_root(), f"{identifier}-{nonce}")
+
+
+def breeze_worker_script() -> Path:
+    """The Breeze sidecar entry point, inside the extension rather than the data root."""
+    return extension_root() / BREEZE_WORKER_DIRNAME / "worker.py"
+
+
+def breeze_manifest_path() -> Path:
+    """The checked-in trust root for every Breeze artifact this build may fetch."""
+    return extension_root() / MANIFEST_DIRNAME / BREEZE_MANIFEST_FILENAME
+
+
+def breeze_local_pins_path() -> Path:
+    """The untracked overlay of digests recorded at install time."""
+    return extension_root() / MANIFEST_DIRNAME / BREEZE_LOCAL_PINS_FILENAME
+
+
+def breeze_settings_path() -> Path:
+    """Breeze's engine settings, in a file of their own and not in Forge's options."""
+    return breeze_root() / BREEZE_SETTINGS_FILENAME
+
+
+def breeze_calibration_path() -> Path:
+    """What Breeze renders have actually cost on this machine, per model and path."""
+    return breeze_root() / BREEZE_CALIBRATION_FILENAME
+
+
+def breeze_inside(candidate) -> bool:
+    """Whether ``candidate`` is under the Breeze subtree. Read before every delete."""
+    try:
+        Path(candidate).resolve().relative_to(breeze_root())
     except (OSError, ValueError):
         return False
     return True

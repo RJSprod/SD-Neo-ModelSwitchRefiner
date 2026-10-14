@@ -53,6 +53,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import mc_voice_box_render as render_types
 import mc_voice_paths as paths
 from vibevoice_worker import worker as protocol
 
@@ -105,6 +106,10 @@ CRASH_LIMIT = 3
 """Three failed starts on one card in a minute stops the fourth. A worker that
 cannot load its model will not load it on the tenth attempt either."""
 
+STEPS_DEFAULT = 12
+"""The diffusion steps a job whose options name none renders at: the adapter's
+default, as the job's own field defaulted before jobs carried options."""
+
 
 @dataclass
 class Handshake:
@@ -128,65 +133,20 @@ class Handshake:
     """The attention implementations the worker's runtime can run."""
 
 
-@dataclass
-class RenderJob:
-    """One render as the render service hands it over.
+RenderJob = render_types.RenderJob
+Take = render_types.Take
+RenderResult = render_types.RenderResult
+Voice = render_types.Voice
+Line = render_types.Line
+"""The Voice Box's engine-neutral request and reply (:mod:`mc_voice_box_render`).
 
-    ``script`` is a list of ``(speaker, text)`` pairs, speakers numbered from
-    one as the user numbered them; ``voices`` maps each speaker to
-    ``(float32 little-endian mono PCM bytes, rate)``. ``temperature`` and
-    ``top_p`` are sent only with ``sampling``; without it the model makes its
-    own greedy choices, as upstream ships it. ``takes`` renders that many at
-    once, take k at ``seed + k``, which is why several need a seed.
-    """
-
-    id: str
-    script: list = field(default_factory=list)
-    voices: dict = field(default_factory=dict)
-    cfg_scale: float = 1.3
-    steps: int = 12
-    seed: "int | None" = None
-    max_new_tokens: "int | None" = None
-    sampling: bool = False
-    temperature: "float | None" = None
-    top_p: "float | None" = None
-    solver: str = protocol.SOLVER_DEFAULT
-    attention: str = protocol.ATTENTION_DEFAULT
-    takes: int = 1
-
-
-@dataclass
-class Take:
-    """One take's audio: ``pcm`` is its little-endian 32-bit float mono samples."""
-
-    pcm: bytes
-    seconds: float
-    tokens: int
-    capped: bool
-    seed: "int | None" = None
-
-
-@dataclass
-class RenderResult:
-    """What one render produced: its takes, in order, and what the render cost."""
-
-    takes: list
-    sample_rate: int
-    render_seconds: float
-    peak_bytes: int
-    cancelled: bool
-
-    @property
-    def seconds(self) -> float:
-        return self.takes[0].seconds if self.takes else 0.0
-
-    @property
-    def tokens(self) -> int:
-        return sum(take.tokens for take in self.takes)
-
-    @property
-    def capped(self) -> bool:
-        return any(take.capped for take in self.takes)
+A job is one section: its lines, each speaker's voice, the seed, the takes and
+VibeVoice's own options as its adapter cleaned them -- ``steps``, ``cfg_scale``,
+``solver``, ``attention``, ``max_new_tokens``, ``sampling``, ``temperature``,
+``top_p``. :func:`_render_frame` turns it into the header VibeVoice's worker has
+always read; a line's direction (``Speaker 2 (whispering):``) is not part of
+it, because VibeVoice has nothing to do with one.
+"""
 
 
 def card_key(card_uuid) -> str:
@@ -230,6 +190,8 @@ class _Process:
         self.loaded = False
         self.rendering = False
         self.job = ""
+        self.sent: "threading.Event | None" = None
+        """Set once the render's frame is on the pipe; a cancel waits for it."""
         self.resident_bytes = 0
         self.peak_bytes = 0
         self.refreshed_at = 0.0
@@ -615,13 +577,15 @@ def _handshake_with(record: _Process, key: str) -> Handshake:
 # --------------------------------------------------------------------------- #
 
 
-def load(card_uuid: str) -> dict:
+def load(card_uuid: str, options: "dict | None" = None) -> dict:
     """Start the card's worker if need be and have it load the model.
 
     The directory and the step count come from the installer's settings, the
     precision and attention from this build: bf16 and SDPA (design section 3).
     A render may ask for other attention, which the worker switches without a
-    second load. A worker that already holds the model answers at once.
+    second load, so the render's ``options`` -- which the Voice Box hands every
+    engine's ``load`` -- change nothing here. A worker that already holds the
+    model answers at once.
     """
     key = card_key(card_uuid)
     ensure_started(card_uuid)
@@ -678,10 +642,13 @@ def render(card_uuid: str, job: RenderJob, on_progress=None) -> RenderResult:
                 "VibeVoice is already rendering on that card; one render at a time.")
         record.rendering = True
         record.job = str(job.id or "")
+        sent = threading.Event()
+        record.sent = sent
     try:
         header, payload = _render_frame(job)
         try:
-            reply, body = _exchange(record, header, payload, RENDER_TIMEOUT, on_progress)
+            reply, body = _exchange(record, header, payload, RENDER_TIMEOUT, on_progress,
+                                    sent)
         except _WorkerGone as exc:
             if exc.timed_out:
                 _lost(record, "the VibeVoice worker did not finish a render in time")
@@ -704,20 +671,25 @@ def render(card_uuid: str, job: RenderJob, on_progress=None) -> RenderResult:
         vibevoice = _installer()
         _note_peak(vibevoice, str(_settings(vibevoice).get("model_id") or ""),
                    result.peak_bytes, len(result.takes))
+        solver, attention = header["solver"], header["attention"]
         logger.info("Model Chain: VibeVoice rendered %d take(s), %.1f s of audio, on %s in "
                     "%.1f s — %d token(s), peak %.1f GiB, %s, %s%s%s", len(result.takes),
                     sum(take.seconds for take in result.takes), record.label(),
                     result.render_seconds, result.tokens,
                     result.peak_bytes / float(1 << 30),
-                    protocol.SOLVERS.get(job.solver, {}).get("name", job.solver),
-                    protocol.ATTENTION.get(job.attention, job.attention),
+                    protocol.SOLVERS.get(solver, {}).get("name", solver),
+                    protocol.ATTENTION.get(attention, attention),
                     ", cancelled" if result.cancelled else "",
                     ", reached its token budget" if result.capped else "")
         return result
     finally:
+        # A frame that was never written never will be: a cancel waiting for
+        # it goes on, and finds nothing rendering.
+        sent.set()
         with record.lock:
             record.rendering = False
             record.job = ""
+            record.sent = None
 
 
 def _takes(reply: dict, body: bytes, job: RenderJob) -> list:
@@ -753,41 +725,44 @@ def _render_frame(job: RenderJob) -> "tuple[dict, bytes]":
     """The render request as the worker reads it: a header and one PCM payload.
 
     The voices' float32 PCM is concatenated in ascending speaker order and each
-    voice entry says where its samples begin and how many there are.
+    voice entry says where its samples begin and how many there are. The
+    options are VibeVoice's own (see :data:`RenderJob`); one the job does not
+    carry is the model's default, and the temperature and top-p are sent only
+    while sampling is on.
     """
-    script = []
-    for entry in job.script or ():
-        if isinstance(entry, dict):
-            speaker, text = entry.get("speaker"), entry.get("text")
-        else:
-            speaker, text = entry
-        script.append({"speaker": int(speaker), "text": str(text or "")})
+    options = dict(job.options or {})
+    script = [{"speaker": int(line.speaker), "text": str(line.text or "")}
+              for line in job.line_list()]
     voices = []
     chunks = []
     offset = 0
-    for speaker in sorted(job.voices or {}, key=lambda one: int(one)):
-        pcm, rate = job.voices[speaker]
-        data = bytes(pcm or b"")
+    found = job.voice_map()
+    for speaker in sorted(found):
+        data = bytes(found[speaker].pcm or b"")
         count = len(data) // 4
         data = data[:count * 4]
         voices.append({"speaker": int(speaker), "offset": offset, "count": count,
-                       "rate": int(rate or 0)})
+                       "rate": int(found[speaker].rate or 0)})
         chunks.append(data)
         offset += count
+    sampling = bool(options.get("sampling"))
+    temperature, top_p = options.get("temperature"), options.get("top_p")
+    cfg_scale = options.get("cfg_scale")
+    tokens = options.get("max_new_tokens")
     header = {
         "op": "render",
         "job": str(job.id or ""),
         "script": script,
         "voices": voices,
-        "cfg_scale": float(job.cfg_scale),
+        "cfg_scale": float(1.3 if cfg_scale is None else cfg_scale),
         "seed": None if job.seed is None else int(job.seed),
-        "max_new_tokens": None if not job.max_new_tokens else int(job.max_new_tokens),
-        "steps": int(job.steps or 0),
-        "sampling": bool(job.sampling),
-        "temperature": float(job.temperature) if job.sampling and job.temperature else None,
-        "top_p": float(job.top_p) if job.sampling and job.top_p else None,
-        "solver": str(job.solver or protocol.SOLVER_DEFAULT),
-        "attention": str(job.attention or protocol.ATTENTION_DEFAULT),
+        "max_new_tokens": None if not tokens else int(tokens),
+        "steps": int(options.get("steps", STEPS_DEFAULT) or 0),
+        "sampling": sampling,
+        "temperature": float(temperature) if sampling and temperature else None,
+        "top_p": float(top_p) if sampling and top_p else None,
+        "solver": str(options.get("solver") or protocol.SOLVER_DEFAULT),
+        "attention": str(options.get("attention") or protocol.ATTENTION_DEFAULT),
         "takes": max(1, int(job.takes or 1)),
     }
     return header, b"".join(chunks)
@@ -799,6 +774,13 @@ def cancel(card_uuid: str, job_id: str) -> bool:
     ``True`` when the worker set the flag its generation reads; ``False`` when
     nothing was rendering, the job had already finished, or the worker could
     not be asked.
+
+    Sent behind the render on the pipe, never ahead of it: the card is marked
+    rendering a moment before the render's frame is written, and a cancel
+    written in that moment reached a worker with nothing to stop, which said
+    no and then ran the whole render. So a cancel first waits, outside every
+    lock, for the frame to be written (found by Breeze's runtime, which shares
+    this shape).
     """
     record = _live(card_key(card_uuid))
     if record is None:
@@ -806,6 +788,10 @@ def cancel(card_uuid: str, job_id: str) -> bool:
     with record.lock:
         if not record.rendering:
             return False
+        sent = record.sent
+    if sent is not None and not sent.wait(CANCEL_TIMEOUT):
+        logger.debug("Model Chain: a VibeVoice render was not written in time to be cancelled")
+        return False
     try:
         reply, _body = _exchange(record, {"op": "cancel", "job": str(job_id or "")}, b"",
                                  CANCEL_TIMEOUT)
@@ -872,12 +858,13 @@ def evict(card_uuid: str, reason: str = "") -> int:
 
 
 def _exchange(record: _Process, header: dict, payload: bytes, timeout: float,
-              on_progress=None):
+              on_progress=None, sent: "threading.Event | None" = None):
     """Write one frame and wait for the reply that carries its id.
 
     The waiting is on a queue this call owns, so two callers cannot receive one
     another's answers even in principle. Progress frames for the same id are
     handed to ``on_progress`` and the wait goes on, against one deadline.
+    ``sent`` is set the moment the whole frame is on the pipe.
     """
     with record.lock:
         if record.closing:
@@ -890,6 +877,8 @@ def _exchange(record: _Process, header: dict, payload: bytes, timeout: float,
         message = dict(header)
         message["id"] = request_id
         _write(record, message, payload)
+        if sent is not None:
+            sent.set()
         deadline = time.monotonic() + float(timeout)
         while True:
             remaining = deadline - time.monotonic()
