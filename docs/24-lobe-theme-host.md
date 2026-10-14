@@ -53,7 +53,8 @@ What that file says, and what became of each line:
 | `enableExtraNetworkSidebar`, `extraNetworkSidebarExpand`, `extraNetworkSidebarWidth`, `extraNetworkCardSize` | true, false, 340, 86 | **The extra-network pages in a drawer** on the right, collapsed, 340 px, 86 px cards (`model_chain_theme_networks`, `_networks_width`, `_networks_card`). Built one round after the first import: a record from that round is read again for these (`IMPORT_VERSION`) |
 | `enableImageInfo` | true | **Generation info as a panel** (`model_chain_theme_image_info`): the prompt and the negative prompt in blocks with copy buttons, every setting a chip, Forge's paragraph kept out of view for what reads it |
 | `enableWebFont` | true | a **Typeface** setting of ours (`model_chain_theme_font`, a Google Fonts family; empty is the system's) |
-| `i18n`, `liteAnimation`, `promptEditor`, `enableHighlight`, `logoType`, `logoCustomUrl`, `sidebarFixedMode`, `extraNetworkFixedMode` | — | not built: translations, the background glow, Lobe's prompt editor and highlighter, its logo, floating panels |
+| `extraNetworkFixedMode` | fixed | **The extra networks as a column** beside the generation UI (`model_chain_theme_networks_mode`: *column*; *drawer* is Lobe's float). Built two rounds after the first import, read from the record's `raw` by the third version |
+| `i18n`, `liteAnimation`, `promptEditor`, `enableHighlight`, `logoType`, `logoCustomUrl`, `sidebarFixedMode` | — | not built: translations, the background glow, Lobe's prompt editor and highlighter, its logo, the quick settings as a fixed column |
 | `detail` | "Not Found" | a 404 body the theme once saved as a setting; ignored |
 
 **Applied quietly (2026-10-14).** `apply` runs on every after-update, and
@@ -64,6 +65,22 @@ as long as it was open -- a 50 ms stall under every drag of the Forge
 Assistant, in the user's own log. Every write is conditional now (`show`,
 `setClass`, `menuFor`), and `tests/test_theme_layout.py` holds that an apply
 to a settled page changes no child list. docs/22 §3.36 has the measurements.
+
+**The extra-network pages, in place (2026-10-14).** The user's second run of
+the drawer: the live search no longer filtered as they typed, the search box
+sat loose, Lobe's fixed-column layout was missing, and the drawer stayed open
+on tabs that have no pages. Forge Neo's `extraNetworks.js` filters a page's
+cards with `#<tab>_extra_tabs div.card` and shows a page's controls with
+`#<tab>_extra_tabs .extra-networks-controls-div > div`: the first build had
+moved the pages into an aside outside that element, so the search found no
+cards. The pages stay Forge's own tab panels now, the drawer's head (title,
+close, page strip, drag edge, and Forge's controls strip moved only within)
+is one more child of `#<tab>_extra_tabs`, and the stylesheet draws the shown
+page under the head -- fixed over the page's right edge, or sticky in the
+second column of a grid the host becomes (`data-mc-theme-networks="column"`).
+One drawer per generation tab, which goes with its tab; the edge drags to a
+width remembered per browser until the width setting changes; `tests/
+test_theme_layout.py` runs Forge's own filter over the drawer's search box.
 
 The pieces, and where they are:
 

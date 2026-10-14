@@ -98,7 +98,9 @@ textarea { width: 100%; min-height: 60px; }
 .extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; position: relative; }
 .extra-network-pane .card .actions { position: absolute; bottom: 0; left: 0; right: 0; padding: 0.5em; }
 .extra-network-pane .card .actions .name { font-size: 1.7em; font-weight: bold; }
-.extra-network-control .extra-network-control--search-text { width: 16em; }
+.extra-network-control .extra-network-control--search::before { content: "\\1F50E\\FE0E"; position: absolute; margin: 0.5rem; font-size: 1rem; color: #888; }
+.extra-network-control .extra-network-control--search { display: inline-flex; position: relative; }
+.extra-network-control .extra-network-control--search .extra-network-control--search-text { border: 1px solid #2b2b2b; border-radius: 0.5rem; background-color: transparent; width: 16em; padding-left: 2rem; line-height: 1rem; color: inherit; }
 .extra-network-control small { line-height: 2.2rem; margin: 0 0.5rem 0 0.75rem; }
 .extra-network-control .extra-network-control--sort, .extra-network-control .extra-network-control--sort-dir,
 .extra-network-control .extra-network-control--tree-view, .extra-network-control .extra-network-control--refresh { padding: 0.25rem; display: inline-flex; }
@@ -202,7 +204,8 @@ def pane_html(tabname: str, page: str, *, controls_built: bool) -> str:
     cards = "".join(
         f'<div class="card" style="width: 256px; height: 384px" data-name="{name}" '
         f'onclick="cardClicked(\'{tabname}\', \'{html_module.escape(added)}\')">'
-        f'<div class="actions"><span class="name">{name}</span></div></div>'
+        f'<div class="actions"><div class="additional"><span class="search_terms">{name}</span></div>'
+        f'<span class="name">{name}</span></div></div>'
         for name, added in CARDS[page])
     dirs = "".join(f'<button class="lg secondary gradio-button custom-button">{name}</button>'
                    for name in ("all", "krea2\\", "kreaCELEB\\", "kreat\\"))
@@ -485,39 +488,50 @@ MEASURE = """() => {
 
 NETWORKS = """() => {
     const q = (s) => document.querySelector(s);
-    const aside = q("#mc-theme-networks");
+    const host = q("#txt2img_extra_tabs");
+    const chrome = q("#mc-theme-networks-txt2img");
+    const other = q("#mc-theme-networks-img2img");
     const toggle = q(".mc-theme-networks-toggle");
     const nav = q("#txt2img_extra_tabs > .tab-nav");
-    const where = (el) => el.parentElement.className || el.parentElement.id;
+    const where = (el) => el.parentElement.id || el.parentElement.className;
+    const box = (el) => { const r = el.getBoundingClientRect();
+                          return {top: Math.round(r.top), right: Math.round(r.right),
+                                  width: Math.round(r.width), height: Math.round(r.height)}; };
     const page = (id) => {
         const el = document.getElementById(id);
-        return {parent: where(el), display: getComputedStyle(el).display,
-                shown: el.classList.contains("mc-theme-networks-shown")};
+        const style = getComputedStyle(el);
+        return {parent: where(el), display: style.display, position: style.position,
+                shown: el.classList.contains("mc-theme-networks-shown"),
+                marked: el.classList.contains("mc-theme-networks-page"), rect: box(el)};
     };
     const controls = (id) => { const el = document.getElementById(id); return {parent: where(el), display: el.style.display}; };
-    const rect = aside ? aside.getBoundingClientRect() : null;
     const strip = q(".extra-networks-controls-div");
     const card = q("#txt2img_lora_cards .card").getBoundingClientRect();
+    const drawn = (el) => !!el && el.getClientRects().length > 0;
     return {
-        aside: aside ? {hidden: aside.hidden, position: getComputedStyle(aside).position,
-                        rect: {top: rect.top, right: rect.right, width: rect.width},
-                        empty: aside.classList.contains("mc-theme-networks-empty"),
-                        note: getComputedStyle(q(".mc-theme-networks-body"), "::before").content} : null,
+        host: {open: host.classList.contains("mc-theme-networks-open"),
+               marked: host.classList.contains("mc-theme-networks-host"),
+               layout: host.getAttribute("data-mc-theme-networks"), display: getComputedStyle(host).display,
+               width: host.style.getPropertyValue("--mc-theme-networks-width"),
+               chrome: host.style.getPropertyValue("--mc-theme-networks-chrome")},
+        chrome: chrome ? {parent: chrome.parentElement.id, display: getComputedStyle(chrome).display,
+                          position: getComputedStyle(chrome).position, rect: box(chrome), drawn: drawn(chrome),
+                          handle: !!chrome.querySelector(".mc-theme-networks-handle")} : null,
+        other: other ? {parent: other.parentElement.id, drawn: drawn(other)} : null,
         toggle: toggle ? {hidden: toggle.hidden, expanded: toggle.getAttribute("aria-expanded"),
                           disabled: toggle.disabled} : null,
         navMarked: nav.classList.contains("mc-theme-networks-nav"),
         navDisplay: getComputedStyle(nav).display,
         generationDisplay: getComputedStyle(q("#txt2img_generation")).display,
         generationSelected: q("#txt2img_extra_tabs > .tab-nav > button.selected").textContent,
-        extraTabsChildren: [...q("#txt2img_extra_tabs").children].map((c) => c.id || c.className),
+        extraTabsChildren: [...host.children].map((c) => c.id || c.className),
         ti: page("txt2img_textual_inversion"), lora: page("txt2img_lora"), img2imgLora: page("img2img_lora"),
         tiControls: controls("txt2img_textual_inversion_controls"),
         loraControls: controls("txt2img_lora_controls"),
         stripParent: strip ? where(strip) : null,
         tabs: [...document.querySelectorAll(".mc-theme-networks-tab")].map((b) => ({
-            text: b.textContent, hidden: b.hidden, active: b.classList.contains("mc-theme-networks-active"),
+            text: b.textContent, tab: b.dataset.mcThemeTab, active: b.classList.contains("mc-theme-networks-active"),
             selected: b.getAttribute("aria-selected")})),
-        groups: [...document.querySelectorAll(".mc-theme-networks-group")].map((g) => ({tab: g.dataset.mcThemeTab, hidden: g.hidden})),
         card: {width: card.width, height: card.height},
         prompt: q("#txt2img_prompt textarea").value,
     };
@@ -525,16 +539,41 @@ NETWORKS = """() => {
 
 # What Forge's setupExtraNetworksForTab does to the page once the pages'
 # HTML has arrived: the controls strip in the tab bar, every page's controls
-# gathered into it.
+# gathered into it, and the page's live search wired as Forge wires it
+# (javascript/extraNetworks.js, applyFilter): on every input, the cards found
+# under the tab's own element -- `#<tab>_extra_tabs div.card` -- are hidden
+# unless every word typed is in their search terms or description. Run on a
+# page already wired by the markup, it only adds the search.
 FORGE_WIRES = """() => {
     ["txt2img", "img2img"].forEach((tabname) => {
-        const nav = document.querySelector("#" + tabname + "_extra_tabs > div.tab-nav");
-        const strip = document.createElement("DIV");
-        strip.classList.add("extra-networks-controls-div");
-        nav.appendChild(strip);
-        document.querySelectorAll("#" + tabname + "_extra_tabs > [id^='" + tabname + "_']").forEach((elem) => {
-            const controls = document.getElementById(elem.id + "_controls");
-            if (controls) strip.appendChild(controls);
+        const tabs = document.querySelector("#" + tabname + "_extra_tabs");
+        const nav = tabs.querySelector(":scope > div.tab-nav");
+        let strip = tabs.querySelector(".extra-networks-controls-div");
+        if (!strip) {
+            strip = document.createElement("DIV");
+            strip.classList.add("extra-networks-controls-div");
+            nav.appendChild(strip);
+        }
+        tabs.querySelectorAll(":scope > [id^='" + tabname + "_']").forEach((elem) => {
+            const full = elem.id;
+            const search = document.getElementById(full + "_extra_search");
+            if (!search) return;
+            if (!search.dataset.forgeWired) {
+                search.dataset.forgeWired = "1";
+                const applyFilter = () => {
+                    const term = search.value.toLowerCase();
+                    gradioApp().querySelectorAll("#" + tabname + "_extra_tabs div.card").forEach((card) => {
+                        const text = [...card.querySelectorAll(".search_terms, .description")]
+                            .map((t) => t.textContent.toLowerCase()).join(" ");
+                        let visible = true;
+                        term.split(" ").forEach((partial) => { if (text.indexOf(partial) == -1) visible = false; });
+                        card.classList.toggle("hidden", !visible);
+                    });
+                };
+                search.addEventListener("input", applyFilter);
+            }
+            const controls = document.getElementById(full + "_controls");
+            if (controls && controls.parentElement !== strip) strip.appendChild(controls);
         });
     });
 }"""
@@ -730,8 +769,9 @@ class TestTheSplitView:
 
         assert page.evaluate("document.querySelector('#txt2img_settings').childElementCount") == before
         # The split's two rows and two boxes and the quick settings, and the
-        # drawer's three pages and two controls strips: ten, however often.
-        assert page.evaluate("document.querySelectorAll('[data-mc-theme-moved]').length") == 10
+        # drawer's two controls strips (its pages are never moved): seven,
+        # however often.
+        assert page.evaluate("document.querySelectorAll('[data-mc-theme-moved]').length") == 7
         page.close()
 
     def test_the_tab_panels_lose_their_frame_and_generate_is_44_px(self, browser):
@@ -781,11 +821,13 @@ class TestTheDrawersPlace:
         next update, took it again -- the row showed and hid at the top of
         the page on every update. And the extra-network pages' cards and
         search boxes, which Forge's sort and card presses look up by id
-        through the same call, were out of Forge's reach."""
+        through the same call, were out of Forge's reach. (The pages are
+        Forge's own tab panels in place now, and the drawer's head is a
+        child of Forge's tabs element: inside twice over.)"""
         page = open_page(browser)
         where = """() => ({
             quick: !!document.getElementById("mc-theme-quick").closest("gradio-app"),
-            networks: !!document.getElementById("mc-theme-networks").closest("gradio-app"),
+            networks: !!document.getElementById("mc-theme-networks-txt2img").closest("gradio-app"),
             row: !!gradioApp().querySelector("#quicksettings"),
             cards: !!gradioApp().querySelector("#txt2img_lora_cards"),
             search: !!gradioApp().querySelector("#txt2img_lora_extra_search"),
@@ -871,38 +913,74 @@ CONTROLS_ROW = """() => {
 
 
 class TestTheExtraNetworksDrawer:
-    def test_the_pages_leave_forges_tabs_for_a_drawer_on_the_right_and_generation_stays(self, browser):
+    def test_the_pages_stay_forges_own_and_one_shows_in_a_drawer_with_generation_in_view(self, browser):
+        """The pages are Forge's tab panels, in place: the drawer's head goes
+        inside Forge's own tabs element as one more child, and a page is
+        drawn under it when shown. The first build moved the pages into an
+        aside outside that element, and Forge's search, which filters
+        `#<tab>_extra_tabs div.card`, found nothing from then on."""
         page = open_page(browser)
         found = page.evaluate(NETWORKS)
 
-        assert found["aside"]["hidden"] is True
+        assert found["host"]["open"] is False and found["host"]["marked"] is True
+        assert found["host"]["layout"] == "drawer" and found["host"]["width"] == "340px"
+        assert found["chrome"]["parent"] == "txt2img_extra_tabs" and found["chrome"]["display"] == "none"
+        assert found["chrome"]["handle"] is True
         assert found["toggle"] == {"hidden": False, "expanded": "false", "disabled": False}
         assert found["navMarked"] is True and found["navDisplay"] == "none"
         assert found["generationDisplay"] == "block" and found["generationSelected"] == "Generation"
-        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "txt2img_generation"]
-        assert found["ti"]["parent"] == "mc-theme-networks-group"
-        assert found["lora"]["parent"] == "mc-theme-networks-group"
-        assert found["img2imgLora"]["parent"] == "mc-theme-networks-group"
-        assert found["stripParent"] == "mc-theme-networks-group"
+        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "txt2img_generation",
+                                              "txt2img_textual_inversion", "txt2img_lora", "mc-theme-networks-txt2img"]
+        assert found["ti"]["parent"] == "txt2img_extra_tabs" and found["ti"]["marked"] is True
+        assert found["lora"]["parent"] == "txt2img_extra_tabs"
+        assert found["img2imgLora"]["parent"] == "img2img_extra_tabs"
+        assert found["stripParent"] == "mc-theme-networks-txt2img"
         assert [t["text"] for t in found["tabs"]] == ["Textual Inversion", "Lora", "Lora"]
-        assert [t["hidden"] for t in found["tabs"]] == [False, False, True]
-        assert found["groups"] == [{"tab": "txt2img", "hidden": False}, {"tab": "img2img", "hidden": True}]
-        # The first page is the one shown, with its controls and no other's.
+        assert [t["tab"] for t in found["tabs"]] == ["txt2img", "txt2img", "img2img"]
+        # The first page is the one shown, with its controls and no other's;
+        # closed, nothing of it is drawn.
         assert found["ti"]["shown"] is True and found["lora"]["shown"] is False
+        assert found["ti"]["display"] == "none"
         assert found["tiControls"] == {"parent": "extra-networks-controls-div", "display": ""}
         assert found["loraControls"] == {"parent": "extra-networks-controls-div", "display": "none"}
-        # Each tab's group keeps a page of its own: img2img's Lora is its one page.
         assert [t["active"] for t in found["tabs"]] == [True, False, True]
 
         page.click(".mc-theme-networks-toggle")
         settle(page)
         found = page.evaluate(NETWORKS)
-        assert found["aside"]["hidden"] is False
-        assert found["aside"]["position"] == "fixed"
-        assert found["aside"]["rect"] == {"top": 64, "right": 1600, "width": 340}
-        assert found["toggle"]["expanded"] == "true"
-        assert found["ti"]["display"] == "block" and found["lora"]["display"] == "none"
-        assert found["aside"]["empty"] is False
+        assert found["host"]["open"] is True and found["toggle"]["expanded"] == "true"
+        assert found["chrome"]["display"] == "flex" and found["chrome"]["position"] == "fixed"
+        assert found["chrome"]["rect"]["top"] == 64 and found["chrome"]["rect"]["right"] == 1600
+        assert found["chrome"]["rect"]["width"] == 340
+        head = int(found["host"]["chrome"][:-2])
+        assert head > 40 and abs(head - found["chrome"]["rect"]["height"]) <= 1, found
+        assert found["ti"]["display"] == "block" and found["ti"]["position"] == "fixed"
+        assert found["ti"]["rect"] == {"top": 64 + head, "right": 1600, "width": 340,
+                                       "height": 900 - 64 - head}
+        assert found["lora"]["display"] == "none"
+        assert found["other"]["parent"] == "img2img_extra_tabs" and found["other"]["drawn"] is False
+        page.close()
+
+    def test_typing_in_the_search_filters_the_cards_the_way_forge_wired_it(self, browser):
+        """The live search is Forge's own: an input event filters the cards
+        it finds under `#<tab>_extra_tabs`. Typed into the drawer's search
+        box, it hides the card that does not match and shows it again when
+        cleared -- which it did not while the pages lived outside that
+        element."""
+        page = open_page(browser)
+        page.evaluate(FORGE_WIRES)
+        page.click(".mc-theme-networks-toggle")
+        page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+        settle(page)
+        cards = "[...document.querySelectorAll('#txt2img_lora_cards .card')].map((c) => [c.dataset.name, c.classList.contains('hidden')])"
+        assert page.evaluate(cards) == [["detail", False], ["style", False]]
+
+        page.fill("#txt2img_lora_extra_search", "det")
+        settle(page)
+        assert page.evaluate(cards) == [["detail", False], ["style", True]]
+        page.fill("#txt2img_lora_extra_search", "")
+        settle(page)
+        assert page.evaluate(cards) == [["detail", False], ["style", False]]
         page.close()
 
     def test_a_strip_button_shows_that_page_and_its_controls_and_a_card_still_reaches_the_prompt(self, browser):
@@ -932,14 +1010,14 @@ class TestTheExtraNetworksDrawer:
         page.keyboard.press("Escape")
         settle(page)
 
-        assert page.evaluate(NETWORKS)["aside"]["hidden"] is True
+        assert page.evaluate(NETWORKS)["host"]["open"] is False
         assert page.evaluate("localStorage.getItem('mc-theme-networks')") == "closed"
         page.click(".mc-theme-networks-toggle")
         settle(page)
         assert page.evaluate("localStorage.getItem('mc-theme-networks')") == "open"
-        page.click(".mc-theme-networks-close")
+        page.click("#mc-theme-networks-txt2img .mc-theme-networks-close")
         settle(page)
-        assert page.evaluate(NETWORKS)["aside"]["hidden"] is True
+        assert page.evaluate(NETWORKS)["host"]["open"] is False
         assert page.evaluate("localStorage.getItem('mc-theme-networks')") == "closed"
         page.close()
 
@@ -951,52 +1029,64 @@ class TestTheExtraNetworksDrawer:
         settle(page)
         found = page.evaluate(NETWORKS)
 
-        assert found["aside"]["hidden"] is False
-        assert found["aside"]["rect"]["width"] == 400
+        assert found["host"]["open"] is True
+        assert found["chrome"]["rect"]["width"] == 400 and found["lora"]["rect"]["width"] == 400
         assert found["card"] == {"width": 100, "height": 150}
         page.close()
 
-    def test_the_drawer_follows_the_main_tab(self, browser):
+    def test_each_generation_tab_has_a_drawer_of_its_own_and_other_tabs_have_none(self, browser):
+        """"if user navigates away from text to image or image to image,
+        extra networks should close! Don't stay open on none relevant
+        pages": each drawer lives inside its tab and goes with it. Nothing
+        of it shows on Clipboard; back on Txt2Img it is as it was."""
         page = open_page(browser)
+        page.click(".mc-theme-networks-toggle")
+        settle(page)
         page.click("#tab_img2img-button")
         settle(page)
         found = page.evaluate(NETWORKS)
-
-        assert [t["hidden"] for t in found["tabs"]] == [True, True, False]
-        assert found["groups"] == [{"tab": "txt2img", "hidden": True}, {"tab": "img2img", "hidden": False}]
-        assert found["aside"]["empty"] is False and found["toggle"]["disabled"] is False
+        assert found["chrome"]["drawn"] is False and found["other"]["drawn"] is True
+        assert found["toggle"] == {"hidden": False, "expanded": "true", "disabled": False}
+        assert page.evaluate("getComputedStyle(document.getElementById('img2img_lora')).display") == "block"
 
         page.click("#tab_clipboard-button")
         settle(page)
         found = page.evaluate(NETWORKS)
-        assert [t["hidden"] for t in found["tabs"]] == [True, True, True]
-        assert found["groups"] == [{"tab": "txt2img", "hidden": True}, {"tab": "img2img", "hidden": True}]
-        assert found["aside"]["empty"] is True and found["toggle"]["disabled"] is True
-        assert "No extra networks" in found["aside"]["note"]
+        assert found["chrome"]["drawn"] is False and found["other"]["drawn"] is False
+        assert found["toggle"]["disabled"] is True
+        assert page.evaluate("document.querySelectorAll('.mc-theme-networks-page').length") == 3
+        assert page.evaluate("[...document.querySelectorAll('.mc-theme-networks-page')]"
+                             ".every((p) => p.getClientRects().length === 0)") is True
+
+        page.click("#tab_txt2img-button")
+        settle(page)
+        found = page.evaluate(NETWORKS)
+        assert found["chrome"]["drawn"] is True and found["host"]["open"] is True
+        assert found["ti"]["display"] == "block" and found["toggle"]["disabled"] is False
         page.close()
 
     def test_a_page_is_taken_only_once_forge_has_wired_it(self, browser):
         """Forge wires the search, sort and refresh of a page after its HTML
         has arrived, later than the host's loaded hook, and looks for the
-        pages as its own tabs' children: a page moved before that would
+        pages as its own tabs' children: a page taken before that would
         never be wired. The strip Forge builds for the controls is the sign."""
         page = open_page(browser, controls_built=False)
         found = page.evaluate(NETWORKS)
 
-        assert found["aside"] is not None
+        assert found["chrome"] is None and found["host"]["marked"] is False
         assert found["extraTabsChildren"] == ["tab-nav scroll-hide", "txt2img_generation",
                                               "txt2img_textual_inversion", "txt2img_lora"]
         assert found["navMarked"] is False and found["navDisplay"] == "flex"
-        assert found["tiControls"]["parent"] == "extra-network-pane"
-        assert found["tabs"] == [] and found["groups"] == []
-        assert found["aside"]["empty"] is True and found["toggle"]["disabled"] is True
+        assert found["tiControls"]["parent"] == "txt2img_textual_inversion_pane"
+        assert found["tabs"] == [] and found["toggle"]["disabled"] is True
 
         page.evaluate(FORGE_WIRES)
         page.evaluate("hooks.after.forEach((fn) => fn())")
         settle(page)
         found = page.evaluate(NETWORKS)
-        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "txt2img_generation"]
-        assert found["stripParent"] == "mc-theme-networks-group"
+        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "txt2img_generation",
+                                              "txt2img_textual_inversion", "txt2img_lora", "mc-theme-networks-txt2img"]
+        assert found["stripParent"] == "mc-theme-networks-txt2img"
         assert found["tiControls"] == {"parent": "extra-networks-controls-div", "display": ""}
         assert found["loraControls"] == {"parent": "extra-networks-controls-div", "display": "none"}
         assert [t["text"] for t in found["tabs"]] == ["Textual Inversion", "Lora", "Lora"]
@@ -1008,30 +1098,45 @@ class TestTheExtraNetworksDrawer:
         buttons in one row, a directory as a large button, a card's name at
         1.7 em in bold. At a third of that width the user saw a tangle, a
         wall of buttons and names over the pictures -- and "undefined" where
-        the drawer's close button should have been, a glyph the table lacked."""
+        the drawer's close button should have been, a glyph the table lacked.
+        Then the search box: its magnifier drawn low and loose beside the
+        words, and the sort row on its heels ("it needs better spacing").
+        The glyph sits in the box's left padding, centred on its line; the
+        box is as tall as a button and the row under it a row's space away."""
         page = open_page(browser)
         page.click(".mc-theme-networks-toggle")
         page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
         settle(page)
         found = page.evaluate("""() => {
             const q = (s) => document.querySelector(s);
-            const close = q(".mc-theme-networks-close");
+            const close = q("#mc-theme-networks-txt2img .mc-theme-networks-close");
             const controls = q("#txt2img_lora_controls");
             const search = q("#txt2img_lora_extra_search");
+            const wrap = search.parentElement;
+            const glyph = getComputedStyle(wrap, "::before");
             const sort = q("#txt2img_lora_extra_sort_dir");
             const dir = q("#txt2img_lora_dirs button");
             const name = q("#txt2img_lora_cards .card .actions .name");
             const px = (node, prop) => parseFloat(getComputedStyle(node)[prop]);
+            const searchBox = search.getBoundingClientRect();
             return {closeSvg: !!close.querySelector("svg"), closeText: close.textContent.trim(),
-                    searchWidth: search.getBoundingClientRect().width, controlsWidth: controls.getBoundingClientRect().width,
-                    sortBelowSearch: sort.getBoundingClientRect().top >= search.getBoundingClientRect().bottom - 1,
+                    searchWidth: searchBox.width, controlsWidth: controls.getBoundingClientRect().width,
+                    searchHeight: searchBox.height, searchPaddingLeft: px(search, "paddingLeft"),
+                    glyph: {position: glyph.position, top: parseFloat(glyph.top), left: parseFloat(glyph.left),
+                            margin: glyph.margin, transform: glyph.transform, wrapHeight: wrap.getBoundingClientRect().height},
+                    gapUnder: sort.getBoundingClientRect().top - searchBox.bottom,
                     dirFont: px(dir, "fontSize"), dirHeight: dir.getBoundingClientRect().height,
                     nameFont: px(name, "fontSize"), nameWeight: getComputedStyle(name).fontWeight};
         }""")
 
         assert found["closeSvg"] is True and found["closeText"] == "", found
         assert found["searchWidth"] >= 0.9 * found["controlsWidth"], found
-        assert found["sortBelowSearch"] is True, found
+        assert found["searchHeight"] >= 28 and found["searchPaddingLeft"] >= 24, found
+        glyph = found["glyph"]
+        assert glyph["position"] == "absolute" and glyph["margin"] == "0px", glyph
+        assert abs(glyph["top"] - glyph["wrapHeight"] / 2) <= 1 and glyph["transform"] != "none", glyph
+        assert 0 < glyph["left"] <= 12, glyph
+        assert found["gapUnder"] >= 6, found
         assert found["dirFont"] <= 12 and found["dirHeight"] <= 28, found
         assert found["nameFont"] <= 11.5 and found["nameWeight"] in ("600", "500"), found
         page.close()
@@ -1072,18 +1177,142 @@ class TestTheExtraNetworksDrawer:
         changed(page)
         found = page.evaluate(NETWORKS)
 
-        assert found["aside"] is None
-        assert found["toggle"]["hidden"] is True
+        assert found["chrome"] is None and found["other"] is None
+        assert found["host"] == {"open": False, "marked": False, "layout": None, "display": "block",
+                                 "width": "", "chrome": ""}
         assert found["extraTabsChildren"] == ["tab-nav scroll-hide", "txt2img_generation",
                                               "txt2img_textual_inversion", "txt2img_lora"]
         assert found["navMarked"] is False and found["navDisplay"] == "flex"
         assert found["stripParent"] == "tab-nav scroll-hide"
-        assert found["ti"]["shown"] is False and found["ti"]["display"] == "none"
-        assert found["tiControls"]["display"] == "none" and found["loraControls"]["display"] == "none"
-        assert page.evaluate("document.querySelector('#img2img_lora').parentElement.id") == "img2img_extra_tabs"
-        # And the rest of the theme is still on.
-        assert page.evaluate(MEASURE)["attribute"] == "on"
+        assert found["tiControls"] == {"parent": "extra-networks-controls-div", "display": "none"}
+        assert found["ti"]["marked"] is False and found["ti"]["shown"] is False
+        assert found["ti"]["display"] == "none", "Gradio's own inline display again"
+        assert found["tabs"] == [] and found["toggle"]["hidden"] is True
         page.close()
+
+    def test_the_column_layout_gives_the_pages_room_beside_the_generation_ui(self, browser):
+        """"in lobe I had an option to make this menu become a column and
+        push the other column": the column layout makes Forge's tabs element
+        two columns, Generation in the first and the drawer's head and page
+        in the second, so the results column gives up the drawer's width.
+        The head sticks under the header and the page under the head while
+        the page scrolls, and the page scrolls inside its own box."""
+        page = open_page(browser, {"model_chain_theme_networks": "open"})
+        drawer = page.evaluate(COLUMN)
+        page.evaluate("opts.model_chain_theme_networks_mode = 'column'")
+        changed(page)
+        settle(page, 4)
+        found = page.evaluate(COLUMN)
+
+        assert drawer["layout"] == "drawer" and drawer["hostDisplay"] != "grid"
+        assert found["layout"] == "column" and found["hostDisplay"] == "grid"
+        assert found["chrome"]["position"] == "sticky" and found["page"]["position"] == "sticky"
+        assert found["chrome"]["width"] == 340 and found["page"]["width"] == 340
+        assert found["generation"]["right"] <= found["chrome"]["left"] - 8, found
+        assert found["generation"]["width"] <= drawer["generation"]["width"] - 340, "the generation UI gave room"
+        assert found["results"]["right"] <= found["chrome"]["left"], found
+        assert found["page"]["top"] == found["chrome"]["bottom"], "the page starts under the head"
+        assert found["page"]["overflow"] == "auto" and found["page"]["height"] <= 900 - 64
+
+        page.evaluate("window.scrollTo(0, 400)")
+        settle(page, 4)
+        scrolled = page.evaluate(COLUMN)
+        assert scrolled["scrollY"] == 400
+        assert scrolled["chrome"]["top"] == 64, "the head sticks under the header"
+        assert scrolled["page"]["top"] == scrolled["chrome"]["bottom"], "and the page under the head"
+        page.close()
+
+    def test_the_edge_drags_the_width_and_remembers_it_until_the_setting_changes(self, browser):
+        """"another resizable column on the page": the drawer's edge drags to
+        a width within the setting's bounds, the arrow keys move it too, and
+        the width is remembered per browser -- until the width setting
+        changes, which then wins."""
+        context = browser.new_context(viewport={"width": 1600, "height": 900})
+        page = open_page(browser, {"model_chain_theme_networks": "open"}, context=context)
+        handle = page.evaluate("(() => { const r = document.querySelector('#mc-theme-networks-txt2img "
+                               ".mc-theme-networks-handle').getBoundingClientRect(); "
+                               "return [r.left + r.width / 2, r.top + 30]; })()")
+        assert abs(handle[0] - (1600 - 340)) <= 1, handle
+        page.mouse.move(*handle)
+        page.mouse.down()
+        page.mouse.move(handle[0] - 60, handle[1], steps=4)
+        page.mouse.move(handle[0] - 100, handle[1], steps=4)
+        during = page.evaluate(NETWORKS)
+        page.mouse.up()
+        settle(page)
+
+        assert during["chrome"]["rect"]["width"] == 440 and during["ti"]["rect"]["width"] == 440
+        assert page.evaluate("document.body.classList.contains('mc-theme-networks-resizing')") is False
+        assert json.loads(page.evaluate("localStorage.getItem('mc-theme-networks-width')")) == {"width": 440, "setting": 340}
+
+        page.focus("#mc-theme-networks-txt2img .mc-theme-networks-handle")
+        page.keyboard.press("ArrowLeft")
+        page.keyboard.press("ArrowLeft")
+        page.keyboard.press("ArrowRight")
+        settle(page)
+        assert page.evaluate(NETWORKS)["chrome"]["rect"]["width"] == 450
+        page.close()
+
+        # The same browser, a new page: the dragged width is what it opens at.
+        again = open_page(browser, {"model_chain_theme_networks": "open"}, context=context)
+        assert again.evaluate(NETWORKS)["chrome"]["rect"]["width"] == 450
+        again.close()
+        # The setting changed: the setting wins.
+        changed_page = open_page(browser, {"model_chain_theme_networks": "open",
+                                           "model_chain_theme_networks_width": 400}, context=context)
+        assert changed_page.evaluate(NETWORKS)["chrome"]["rect"]["width"] == 400
+        changed_page.close()
+        context.close()
+
+    def test_the_edge_keeps_the_width_within_the_settings_bounds(self, browser):
+        page = open_page(browser, {"model_chain_theme_networks": "open"})
+        handle = page.evaluate("(() => { const r = document.querySelector('#mc-theme-networks-txt2img "
+                               ".mc-theme-networks-handle').getBoundingClientRect(); "
+                               "return [r.left + r.width / 2, r.top + 30]; })()")
+        page.mouse.move(*handle)
+        page.mouse.down()
+        page.mouse.move(handle[0] + 300, handle[1], steps=4)
+        narrow = page.evaluate(NETWORKS)["chrome"]["rect"]["width"]
+        page.mouse.move(handle[0] - 900, handle[1], steps=4)
+        wide = page.evaluate(NETWORKS)["chrome"]["rect"]["width"]
+        page.mouse.up()
+        settle(page)
+
+        assert narrow == 240 and wide == 800
+        page.close()
+
+    def test_under_focus_mode_the_drawer_stays_out_of_the_workspace(self, browser):
+        """The drawer lives inside the workspace's tab now; focus mode is the
+        workspace alone, as it was when the drawer lived outside it."""
+        page = open_page(browser, {"model_chain_theme_networks": "open",
+                                   "model_chain_theme_networks_mode": "column"})
+        assert page.evaluate(COLUMN)["hostDisplay"] == "grid"
+        page.evaluate("document.body.classList.add('forge-assistant-focused')")
+        settle(page)
+        found = page.evaluate(COLUMN)
+
+        assert found["chrome"] is None and found["page"] is None, found
+        assert found["hostDisplay"] == "block"
+        page.evaluate("document.body.classList.remove('forge-assistant-focused')")
+        settle(page)
+        assert page.evaluate(COLUMN)["hostDisplay"] == "grid"
+        page.close()
+
+
+COLUMN = """() => {
+    const q = (s) => document.querySelector(s);
+    const host = q("#txt2img_extra_tabs");
+    const chrome = q("#mc-theme-networks-txt2img");
+    const shown = q("#txt2img_extra_tabs > .mc-theme-networks-shown");
+    const box = (el) => { if (!el || !el.getClientRects().length) return null;
+                          const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+                          return {top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left),
+                                  right: Math.round(r.right), width: Math.round(r.width), height: Math.round(r.height),
+                                  position: s.position, overflow: s.overflowY}; };
+    return {layout: host.getAttribute("data-mc-theme-networks"), hostDisplay: getComputedStyle(host).display,
+            chrome: box(chrome), page: box(shown), generation: box(q("#txt2img_generation")),
+            results: box(q("#txt2img_results")), scrollY: window.scrollY};
+}"""
 
 
 class TestTheGenerationInfo:
@@ -1604,7 +1833,7 @@ class TestStandingDownAndOff:
         assert found["quickParent"] == "gradio-container app"
         assert "<svg" not in found["clearHtml"]
         assert found["position"] != "sticky"
-        assert page.evaluate(NETWORKS)["aside"] is None
+        assert page.evaluate(NETWORKS)["chrome"] is None
         assert page.evaluate("document.querySelector('#txt2img_lora').parentElement.id") == "txt2img_extra_tabs"
         assert page.evaluate(INFO)["panels"] == 0
         page.close()
@@ -1626,7 +1855,7 @@ class TestStandingDownAndOff:
         assert found["position"] != "sticky"
         assert page.evaluate("document.querySelectorAll('[data-mc-theme-moved], [data-mc-theme-icon]').length") == 0
         networks = page.evaluate(NETWORKS)
-        assert networks["aside"] is None
+        assert networks["chrome"] is None and networks["host"]["marked"] is False
         assert networks["extraTabsChildren"] == ["tab-nav scroll-hide", "txt2img_generation",
                                                  "txt2img_textual_inversion", "txt2img_lora"]
         assert networks["navDisplay"] == "flex"

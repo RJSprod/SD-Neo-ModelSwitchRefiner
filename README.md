@@ -6408,22 +6408,38 @@ one second.
   opened from the header; *open* opens it at every load. The drawer remembers
   whether you left it open, per browser, Escape closes it, and its width is a
   setting.
-- **The extra-network pages in a drawer** on the right: Textual Inversion,
-  Checkpoints, LoRA and the rest leave Forge's tabs beside Generation for a
-  drawer opened from the header, so a page shows beside the generation UI
-  rather than in its place. *off* leaves them as Forge's tabs; *collapsed*
-  moves them into the drawer; *open* opens it at every load; it remembers
-  whether you left it open, Escape closes it, and its width and the cards'
-  size are settings. The drawer's strip shows one page at a time with that
-  page's own search, sort and refresh; a card's press writes into the prompt
-  as it always did, because the pages are Forge's own elements, moved. A page
-  is taken only once Forge's script has wired it (it does so after the page's
-  HTML arrives, later than the page's load), and the drawer follows the tab:
-  Txt2Img's pages on Txt2Img, Img2Img's on Img2Img, nothing elsewhere. A page
-  is drawn at the drawer's density: the search box on a row of its own with
-  the sort buttons, the direction, the tree view and refresh on one row under
-  it (Forge's spacers between the groups are gone and its icons are 20 px,
-  which is what had rolled the last two onto a third row; in a drawer
+- **The extra-network pages beside the generation UI**: Textual Inversion,
+  Checkpoints, LoRA and the rest, which Forge draws as tabs beside Generation
+  so that a page shows in its place, show beside it instead -- one page at a
+  time, under a head of the theme's own with the page's own search, sort and
+  refresh, opened from the header. Two layouts, a setting: a **drawer** over
+  the right edge of the page, or a **column** that puts the pages beside the
+  generation UI and takes its width from the results column (what the Lobe
+  theme's fixed sidebar did; its `extraNetworkFixedMode` is read on the next
+  import). Either way the head's left edge **drags to a width** between the
+  setting's bounds (the arrow keys move it too, with the edge focused), and
+  that width is remembered per browser until the width setting changes,
+  which then wins. *off* leaves the pages as Forge's tabs; *collapsed* and
+  *open* say how the drawer starts, and it remembers whether you left it
+  open; Escape and its close button close it; the cards' size is a setting.
+  **The pages are Forge's own, in place**: nothing is moved but the controls
+  strip Forge builds, and that only within Forge's own tabs element, which
+  the head joins as one more child -- because Forge's live search filters the
+  cards it finds under `#<tab>_extra_tabs`, and a page moved out of there
+  (the first build) was a page whose search filtered nothing. A card's press
+  writes into the prompt as it always did, and search, sort and refresh are
+  Forge's, untouched. Each generation tab has a drawer of its own, which
+  goes with the tab: Txt2Img's pages on Txt2Img, Img2Img's on Img2Img,
+  nothing on any other tab (the header's button is disabled there), and
+  back on a generation tab it is as it was; under focus mode it stays out of
+  the workspace. A page is taken only once Forge's script has wired it (it
+  does so after the page's HTML arrives, later than the page's load), and is
+  drawn at the drawer's density: the search box on a row of its own, as tall
+  as a button, its magnifier in its left padding and centred (Forge draws the
+  glyph loose beside the box on a line taller than its own), a row's space
+  under it, then the sort buttons, the direction, the tree view and refresh
+  on one row (Forge's spacers between the groups are gone and its icons are
+  20 px, which is what had rolled the last two onto a third row; in a drawer
   narrower than 300 px the *Sort:* label goes too, because the row has no
   room for it beside the seven buttons, which say what they do as tooltips),
   the directories as small buttons, a card's name at 11 px over its picture,

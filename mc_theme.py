@@ -64,6 +64,7 @@ OPT_CONFIRM_UNLOAD = "model_chain_theme_confirm_unload"
 OPT_NETWORKS = "model_chain_theme_networks"
 OPT_NETWORKS_WIDTH = "model_chain_theme_networks_width"
 OPT_NETWORKS_CARD = "model_chain_theme_networks_card"
+OPT_NETWORKS_MODE = "model_chain_theme_networks_mode"
 OPT_IMAGE_INFO = "model_chain_theme_image_info"
 OPT_IMPORT = "model_chain_theme_import"
 """The record of the one-time import of the user's Lobe settings: hidden, so
@@ -84,10 +85,12 @@ TITLE_DEFAULT = "Forge"
 NETWORKS_MODES = QUICK_MODES
 NETWORKS_DEFAULT = "collapsed"
 NETWORKS_WIDTH_DEFAULT = 340
+NETWORKS_LAYOUTS = ("drawer", "column")
+NETWORKS_LAYOUT_DEFAULT = "drawer"
 NETWORKS_WIDTH_MIN, NETWORKS_WIDTH_MAX = 240, 800
 NETWORKS_CARD_DEFAULT = 120
 NETWORKS_CARD_MIN, NETWORKS_CARD_MAX = 60, 320
-IMPORT_VERSION = 2
+IMPORT_VERSION = 3
 """The import record's version. A record from an earlier build is read again
 for the keys that build could not use yet (the extra-network drawer and the
 generation-info panel came one round after the first import)."""
@@ -550,6 +553,17 @@ def settings(shared) -> dict:
             "<b>open</b> the same drawer, open at every load. The drawer remembers "
             "whether you left it open, per browser"
         ),
+        OPT_NETWORKS_MODE: OptionInfo(
+            NETWORKS_LAYOUT_DEFAULT,
+            "Extra networks layout",
+            gr.Radio,
+            {"choices": list(NETWORKS_LAYOUTS)},
+        ).info(
+            "<b>drawer</b> lays the pages over the right edge of the page · "
+            "<b>column</b> puts them beside the generation UI, which makes room for "
+            "them. Either way the drawer's edge drags to a width, remembered per "
+            "browser until the width setting changes"
+        ),
         OPT_NETWORKS_WIDTH: OptionInfo(
             NETWORKS_WIDTH_DEFAULT,
             "Extra networks drawer width (px)",
@@ -592,9 +606,10 @@ LOBE_CONFIG_NAME = "lobe_theme_config.json"
 IGNORED_LOBE_KEYS = (
     # Features this theme does not build: Lobe's prompt editor, highlighter,
     # translations, animated background, web fonts from its CDN, its logo, and
-    # the floating (as against fixed) kind of panel.
+    # the quick settings as a fixed column (the extra networks can be one:
+    # `extraNetworkFixedMode` translates, since the third import).
     "i18n", "liteAnimation", "promptEditor", "enableHighlight", "neutralColor",
-    "enableWebFont", "logoType", "logoCustomUrl", "extraNetworkFixedMode", "sidebarFixedMode",
+    "enableWebFont", "logoType", "logoCustomUrl", "sidebarFixedMode",
 )
 
 
@@ -672,6 +687,12 @@ def translate(raw: dict) -> tuple:
     if isinstance(card, (int, float)) and not isinstance(card, bool):
         applied[OPT_NETWORKS_CARD] = int(min(NETWORKS_CARD_MAX, max(NETWORKS_CARD_MIN, card)))
         consumed.add("extraNetworkCardSize")
+    layout = raw.get("extraNetworkFixedMode")
+    if layout in ("fixed", "float"):
+        # Lobe's fixed sidebar is a column beside the generation UI; its
+        # floating one a drawer over the page.
+        applied[OPT_NETWORKS_MODE] = "column" if layout == "fixed" else "drawer"
+        consumed.add("extraNetworkFixedMode")
 
     kind = raw.get("promptTextareaType")
     if kind in ("resizable", "scroll"):

@@ -71,6 +71,7 @@ DEFAULTS = {
     mc_theme.OPT_NETWORKS: "collapsed",
     mc_theme.OPT_NETWORKS_WIDTH: 340,
     mc_theme.OPT_NETWORKS_CARD: 120,
+    mc_theme.OPT_NETWORKS_MODE: "drawer",
     mc_theme.OPT_IMAGE_INFO: True,
     mc_theme.OPT_HIDE_FOOTER: True,
 }
@@ -394,6 +395,7 @@ class TestImportingTheUsersLobeSettings:
             mc_theme.OPT_NETWORKS: "collapsed",
             mc_theme.OPT_NETWORKS_WIDTH: 340,
             mc_theme.OPT_NETWORKS_CARD: 86,
+            mc_theme.OPT_NETWORKS_MODE: "column",
             mc_theme.OPT_PROMPTS: True,
             mc_theme.OPT_ICONS: True,
             mc_theme.OPT_CONFIRM_UNLOAD: False,
@@ -423,11 +425,12 @@ class TestImportingTheUsersLobeSettings:
         lobe_folder(tmp_path)
         _, record = run_import(tmp_path)
 
-        for key in ("extraNetworkFixedMode", "sidebarFixedMode", "promptEditor", "enableHighlight",
+        for key in ("sidebarFixedMode", "promptEditor", "enableHighlight",
                     "i18n", "liteAnimation", "logoType", "enableWebFont"):
             assert key in record["ignored"], key
         for key in ("enableExtraNetworkSidebar", "extraNetworkSidebarExpand",
-                    "extraNetworkSidebarWidth", "extraNetworkCardSize", "enableImageInfo"):
+                    "extraNetworkSidebarWidth", "extraNetworkCardSize", "enableImageInfo",
+                    "extraNetworkFixedMode"):
             assert key not in record["ignored"], key
         assert record["raw"]["extraNetworkSidebarWidth"] == 340
         assert record["raw"]["enableImageInfo"] is True
@@ -459,6 +462,7 @@ class TestImportingTheUsersLobeSettings:
         assert opts.data[mc_theme.OPT_NETWORKS_CARD] == 86
         assert opts.data[mc_theme.OPT_IMAGE_INFO] is True
         assert opts.data[mc_theme.OPT_NETWORKS_WIDTH] == 500
+        assert opts.data[mc_theme.OPT_NETWORKS_MODE] == "column", "Lobe's fixed sidebar is the column"
         assert record["kept"] == [mc_theme.OPT_TITLE, mc_theme.OPT_NETWORKS_WIDTH]
         assert record["applied"][mc_theme.OPT_NETWORKS] == "open"
         assert record["applied"][mc_theme.OPT_QUICK] == "collapsed"
@@ -471,6 +475,35 @@ class TestImportingTheUsersLobeSettings:
         again = mc_theme.import_lobe_settings(opts, tmp_path / "extensions", defaults=DEFAULTS,
                                               save=opts.save)
         assert again is None
+        assert opts.saves == 1
+
+    def test_a_record_from_the_second_build_is_read_again_for_the_layout(self, tmp_path):
+        """The second build ignored Lobe's `extraNetworkFixedMode`; the third
+        reads it from the record for the column layout, writes nothing else
+        and moves the record on. The user's own file says fixed."""
+        second = {
+            "version": 2, "from": str(tmp_path / "gone" / mc_theme.LOBE_CONFIG_NAME),
+            "modified": 1.0, "when": "2026-10-13 10:00:00", "again": "2026-10-13 12:00:00",
+            "applied": {mc_theme.OPT_SPLIT: True, mc_theme.OPT_QUICK: "collapsed",
+                        mc_theme.OPT_QUICK_WIDTH: 280, mc_theme.OPT_PROMPTS: True,
+                        mc_theme.OPT_ICONS: True, mc_theme.OPT_CONFIRM_UNLOAD: False,
+                        mc_theme.OPT_HIDE_FOOTER: True, mc_theme.OPT_NETWORKS: "collapsed",
+                        mc_theme.OPT_NETWORKS_WIDTH: 340, mc_theme.OPT_NETWORKS_CARD: 86,
+                        mc_theme.OPT_IMAGE_INFO: True},
+            "kept": [],
+            "ignored": ["extraNetworkFixedMode", "sidebarFixedMode", "detail"],
+            "raw": dict(USER_CONFIG),
+        }
+        opts = Opts({mc_theme.OPT_IMPORT: json.dumps(second)})
+        opts, record = run_import(tmp_path, opts)
+
+        assert record is not None and record["version"] == mc_theme.IMPORT_VERSION
+        assert opts.data[mc_theme.OPT_NETWORKS_MODE] == "column"
+        assert set(opts.data) == {mc_theme.OPT_IMPORT, mc_theme.OPT_NETWORKS_MODE}
+        assert record["applied"][mc_theme.OPT_NETWORKS_MODE] == "column"
+        assert record["applied"][mc_theme.OPT_NETWORKS] == "collapsed"
+        assert "extraNetworkFixedMode" not in record["ignored"]
+        assert "sidebarFixedMode" in record["ignored"]
         assert opts.saves == 1
 
     def test_a_record_with_nothing_to_read_again_is_left_as_it_is(self, tmp_path):
@@ -585,6 +618,12 @@ class TestImportingTheUsersLobeSettings:
         applied, _ = mc_theme.translate({"extraNetworkSidebarWidth": 50, "extraNetworkCardSize": 9000})
         assert applied[mc_theme.OPT_NETWORKS_WIDTH] == mc_theme.NETWORKS_WIDTH_MIN
         assert applied[mc_theme.OPT_NETWORKS_CARD] == mc_theme.NETWORKS_CARD_MAX
+        applied, _ = mc_theme.translate({"extraNetworkFixedMode": "fixed"})
+        assert applied[mc_theme.OPT_NETWORKS_MODE] == "column"
+        applied, _ = mc_theme.translate({"extraNetworkFixedMode": "float"})
+        assert applied[mc_theme.OPT_NETWORKS_MODE] == "drawer"
+        applied, ignored = mc_theme.translate({"extraNetworkFixedMode": "sideways"})
+        assert mc_theme.OPT_NETWORKS_MODE not in applied and "extraNetworkFixedMode" in ignored
         applied, _ = mc_theme.translate({"enableImageInfo": False})
         assert applied[mc_theme.OPT_IMAGE_INFO] is False
         applied, ignored = mc_theme.translate({"extraNetworkSidebarWidth": True, "enableImageInfo": "yes"})
