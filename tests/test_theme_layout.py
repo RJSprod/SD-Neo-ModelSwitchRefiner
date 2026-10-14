@@ -63,7 +63,11 @@ TABS = [("tab_txt2img", "txt2img"), ("tab_img2img", "img2img"), ("tab_clipboard"
         ("tab_settings", "Settings"), ("tab_extensions", "Extensions")]
 
 # What Gradio 4.40 and Forge give the page, and no more: rows and columns,
-# the page's padding, Forge's own tool-button and quick-settings rules.
+# the page's padding, Forge's own tool-button and quick-settings rules. The
+# page's padding is Gradio 4.40's own, read from its built stylesheet: 16 px
+# above and below and 32 px at the sides (`.app { padding: var(--size-4)
+# var(--size-8) }`). A stand-in with 16 px all round passed a bar whose
+# ground stopped 16 px short of the user's window on each side.
 HOST_CSS = """
 *, ::before, ::after { box-sizing: border-box; }
 html, body { margin: 0; }
@@ -74,8 +78,9 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
        --block-border-color: #262626; --button-secondary-background-fill: #1a1a1a;
        --button-secondary-border-color: #2b2b2b; --button-secondary-text-color: #d9d9d9;
        --button-cancel-background-fill: #d93025; --button-cancel-text-color: #fff; --button-cancel-border-color: #d93025;
-       --color-accent: #fff; --primary-500: #fff; --font-mono: monospace; --size-4: 16px; --shadow-drop-lg: none; }
-.app { padding: var(--size-4); font-size: var(--body-text-size); }
+       --color-accent: #fff; --primary-500: #fff; --font-mono: monospace; --size-4: 16px; --size-8: 32px;
+       --shadow-drop-lg: none; }
+.app { padding: var(--size-4) var(--size-8); font-size: var(--body-text-size); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; }
 .unequal-height { align-items: flex-start; }
 .column { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
@@ -792,8 +797,57 @@ class TestTheSplitView:
         assert found["outer"] == {"padding": "0px", "border": "0px"}
         assert found["inner"] == {"padding": "0px", "border": "0px"}
         assert found["generate"] == 44
-        # The host's own 16 px page padding is the only margin left.
-        assert found["contentLeft"] - found["pageLeft"] == 16
+        # The page's own padding, focus mode's 8 px under the theme, is the
+        # only margin left.
+        assert found["contentLeft"] - found["pageLeft"] == 8
+        page.close()
+
+    def test_the_page_meets_the_window_as_focus_mode_does(self, browser):
+        """Gradio pads the page 16 px above and below and 32 px at the
+        sides, and the Forge Assistant's focus mode insets a workspace 8 px:
+        the user's screens showed the content 8 px from the display's edge
+        under focus and four times that outside it, and asked for the page
+        to match. Under the theme the page's padding is focus mode's inset
+        on every side, measured here against the window's edges in both
+        modes, and the bar's ground reaches those edges through it."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        edges = """() => {
+            const q = (s) => document.querySelector(s);
+            const width = document.documentElement.clientWidth;
+            const prompt = q("#txt2img_prompt").getBoundingClientRect();
+            const results = q("#txt2img_results").getBoundingClientRect();
+            const nav = q("#tabs > .tab-nav");
+            const rect = nav.getBoundingClientRect();
+            const ground = getComputedStyle(nav, "::before");
+            return {left: prompt.left, right: width - results.right,
+                    padding: getComputedStyle(q(".gradio-container")).padding,
+                    bar: {top: rect.top, display: getComputedStyle(nav).display,
+                          groundLeft: rect.left + parseFloat(ground.left),
+                          groundRight: width - (rect.right - parseFloat(ground.right))}};
+        }"""
+        at_rest = page.evaluate(edges)
+        assert at_rest["padding"] == "8px", at_rest
+        assert at_rest["left"] == 8 and at_rest["right"] == 8, at_rest
+        assert at_rest["bar"]["top"] == 8, at_rest
+        assert at_rest["bar"]["groundLeft"] == 0 and at_rest["bar"]["groundRight"] == 0, at_rest
+
+        entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', forgeAssistant.shell.host)")
+        assert entered["ok"] is True
+        settle(page, 8)
+        focused = page.evaluate(edges)
+        assert focused["bar"]["display"] == "none"
+        assert focused["left"] == 8 and focused["right"] == 8, focused
+        page.evaluate("forgeAssistant.focus.exit()")
+        settle(page, 4)
+        assert page.evaluate(edges)["left"] == 8
+
+        # Off, the page has Gradio's own padding back, as the stand-in models it.
+        page.evaluate("opts.model_chain_theme = false")
+        changed(page)
+        off = page.evaluate(edges)
+        assert off["padding"] == "16px 32px", off
+        assert off["left"] == 32 + 1 + 10, "Gradio's 32 px and the tab panel's own frame: a 1 px line, 10 px of padding"
         page.close()
 
     def test_the_switch_off_puts_both_back_where_forge_had_them(self, browser):
