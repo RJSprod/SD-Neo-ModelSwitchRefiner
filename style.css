@@ -9463,6 +9463,31 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     gap: 0.2em;
 }
 
+/* A sample's transcript, for an engine that clones a voice from its exact
+   words: a box under the sample's line, Transcribe and Save beside it. Save
+   shows only while the box holds words the server does not, and carries the
+   accent dot the configuration's Save has. Side by side the box keeps two
+   lines and scrolls inside itself; on a phone's card the script makes it as
+   tall as its words, so the card's body stays its one scroller. */
+#mc-voice-box .mc-voice-box-sample-transcript-row {
+    align-items: flex-start;
+    flex-wrap: nowrap;
+}
+
+#mc-voice-box .mc-voice-box-sample-transcript {
+    flex: 1 1 0;
+    font-size: var(--text-sm, 0.85em);
+    min-width: 0;
+    resize: vertical;
+}
+
+/* A sample an engine cannot clone from yet -- it has no transcript -- says so
+   in the error colour, in its own row and in a speaker slot that holds it. */
+#mc-voice-box .mc-voice-box-sample[data-transcript="missing"] .mc-voice-box-sample-meta,
+#mc-voice-box .mc-voice-box-speaker[data-transcript="missing"] .mc-voice-box-speaker-title {
+    color: var(--error-text-color, inherit);
+}
+
 #mc-voice-box .mc-voice-box-sample-speaker,
 #mc-voice-box .mc-voice-box-prompt-star,
 #mc-voice-box .mc-voice-box-prompt-delete,
@@ -9547,12 +9572,15 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     white-space: nowrap;
 }
 
-/* Unsaved changes: a dot of the accent in Save's corner, and its name says so. */
-#mc-voice-box .mc-voice-box-configuration-save {
+/* Unsaved changes: a dot of the accent in Save's corner, and its name says so
+   -- a configuration's Save, and a transcript's. */
+#mc-voice-box .mc-voice-box-configuration-save,
+#mc-voice-box .mc-voice-box-sample-transcript-save {
     position: relative;
 }
 
-#mc-voice-box .mc-voice-box-configuration-save[data-dirty="true"]::after {
+#mc-voice-box .mc-voice-box-configuration-save[data-dirty="true"]::after,
+#mc-voice-box .mc-voice-box-sample-transcript-save[data-dirty="true"]::after {
     background: var(--color-accent, currentColor);
     border-radius: 50%;
     content: "";
@@ -9673,6 +9701,56 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* An engine with directions and voice design gives each slot a direction box
+   on a line of its own, and a wand beside the slot's name that opens a design
+   panel under it: the voice described in words, the words it is to say,
+   Design, and once a take is back its transport, Redraw and Keep. */
+#mc-voice-box .mc-voice-box-speaker-direction {
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+/* At the fields' text size, so a one-line box is as tall as the Model select
+   above it -- the two selectors outrank the controls' own rule, which sets
+   `font: inherit`. */
+#mc-voice-box .mc-voice-box-speaker .mc-voice-box-speaker-direction {
+    font-size: var(--text-sm, 0.85em);
+}
+
+#mc-voice-box .mc-voice-box-design {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    flex: 1 1 100%;
+    flex-direction: column;
+    font-size: var(--text-sm, 0.85em);
+    gap: 0.4em;
+    min-width: 0;
+    padding: 0.5em;
+}
+
+#mc-voice-box .mc-voice-box-design-description,
+#mc-voice-box .mc-voice-box-design-text {
+    min-width: 0;
+    width: 100%;
+}
+
+#mc-voice-box .mc-voice-box-design-description {
+    resize: vertical;
+}
+
+#mc-voice-box .mc-voice-box-design-render {
+    font-weight: 600;
+}
+
+/* On a phone's card a text box is as tall as its words (the script writes
+   its height) rather than a scroller inside the card. */
+#mc-voice-box[data-layout="stack"] .mc-voice-box-sample-transcript,
+#mc-voice-box[data-layout="stack"] .mc-voice-box-design-description {
+    overflow: hidden;
+    resize: none;
 }
 
 /* The one status line: its words on one line, cut with an ellipsis (the whole

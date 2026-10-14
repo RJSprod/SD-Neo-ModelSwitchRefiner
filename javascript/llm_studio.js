@@ -13,7 +13,7 @@
 //   * Escape stops a run;
 //   * every message in the transcript gets a row of actions, shown by a tap
 //     on it: the version pager, Edit, Regenerate or Send again, Continue,
-//     Branch, Copy, Send to VibeVoice, Play, Delete and Delete from here;
+//     Branch, Copy, Send to Voice Box, Play, Delete and Delete from here;
 //   * the conversation workspace is measured against the window, so the layout
 //     can fit the space it actually has rather than a space guessed in a
 //     stylesheet;
@@ -56,9 +56,10 @@
 //
 // Three buttons in the row never reach Python at all, because what they do is
 // the browser's or the Voice Box's: Copy puts the message's words on the
-// clipboard; Send to VibeVoice hands them to the Voice Box tab on this same
+// clipboard; Send to Voice Box hands them to the Voice Box tab on this same
 // page (`window.mcVoiceBox`), which renders them with whatever it is set up
-// with; Play plays the render that came back. Which render belongs to which
+// with -- the engine in use there, VibeVoice or another; Play plays the render
+// that came back. Which render belongs to which
 // message is a key Python writes into the bubble, and the Voice Box files the
 // render under it, so a reload finds it again.
 //
@@ -359,8 +360,8 @@
         {action: "continue", glyph: "⇢", label: "Continue", role: "assistant"},
         {action: "branch", glyph: "⎇", label: "Branch from here"},
         {action: "copy", glyph: "⧉", label: "Copy message", local: true},
-        {action: "vibe", svg: WAVEFORM, label: "Send to VibeVoice", local: true},
-        {action: "play", glyph: "▶︎", label: "Play VibeVoice", local: true},
+        {action: "vibe", svg: WAVEFORM, label: "Send to Voice Box", local: true},
+        {action: "play", glyph: "▶︎", label: "Play Voice Box", local: true},
         {action: "delete", glyph: "✕", label: "Delete message", destructive: true},
         {action: "delete_from", glyph: "⤓", label: "Delete from here", destructive: true},
     ];
@@ -761,7 +762,7 @@
         return null;
     }
 
-    // -- Copy, Send to VibeVoice, Play --------------------------------------- //
+    // -- Copy, Send to Voice Box, Play --------------------------------------- //
 
     function local(action, holder, bubble, bar, key, button) {
         if (action === "copy") copyMessage(bubble, bar, button);
@@ -849,15 +850,15 @@
                 const playing = !!(audio && audio.mcLlmKey === key && !audio.paused);
                 const glyph = playing ? "‖" : "▶︎";
                 if (button.textContent !== glyph) button.textContent = glyph;
-                button.title = playing ? "Pause VibeVoice" : "Play VibeVoice";
+                button.title = playing ? "Pause Voice Box" : "Play Voice Box";
                 button.setAttribute("aria-label", button.title);
             } else if (action === "vibe") {
                 const box = voiceBox();
                 const why = box ? "" : "Voice Box is not on this page.";
                 if (button.disabled !== !!why) button.disabled = !!why;
-                const label = why ? "Send to VibeVoice — " + why
-                    : (record && record.pending ? "Rendering with VibeVoice…"
-                       : "Send to VibeVoice");
+                const label = why ? "Send to Voice Box — " + why
+                    : (record && record.pending ? "Rendering in the Voice Box…"
+                       : "Send to Voice Box");
                 if (button.title !== label) {
                     button.title = label;
                     button.setAttribute("aria-label", label);
@@ -881,7 +882,7 @@
         const record = {job: "", output: "", pending: true, played: false, looks: 0};
         records[key] = record;
         applyVibe(bubble, bar, key);
-        noteIn(bar, "Sent to VibeVoice…");
+        noteIn(bar, "Sent to the Voice Box…");
         const opening = text.replace(/\s+/g, " ").slice(0, 40);
         let asked;
         try {
@@ -1051,8 +1052,8 @@
     function playVibe(holder, bubble, bar, key, button) {
         const record = recordOf(key);
         if (!record || !record.output || record.pending) {
-            noteIn(bar, record && record.pending ? "VibeVoice is still rendering this message."
-                   : "Send this message to VibeVoice first.");
+            noteIn(bar, record && record.pending ? "The Voice Box is still rendering this message."
+                   : "Send this message to the Voice Box first.");
             return;
         }
         const box = voiceBox();

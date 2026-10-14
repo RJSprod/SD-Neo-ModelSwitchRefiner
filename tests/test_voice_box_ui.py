@@ -227,6 +227,48 @@ class TestTheStylesheetSection:
         assert "checkbox" not in self._rules()
         assert "mc-voice-box-field-check" not in self._rules()
 
+    @classmethod
+    def _declared(cls) -> dict:
+        """Every selector of the section, with the declarations it is given
+        (all of them, where several rules name it)."""
+        found = {}
+        for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", cls._rules()):
+            for selector in selectors.split(","):
+                found[selector.strip()] = found.get(selector.strip(), "") + body
+        return found
+
+    def test_a_phones_text_boxes_grow_with_their_words_rather_than_scroll(self):
+        """On a phone's card the script makes the script box, a sample's
+        transcript and a voice design's description as tall as their words; the
+        section takes their own scroll and their resize handle away there, or
+        the card would hold a scroller of its own inside its one scroller."""
+        declared = self._declared()
+
+        for name in ("mc-voice-box-prompt", "mc-voice-box-sample-transcript", "mc-voice-box-design-description"):
+            body = declared.get(f'#mc-voice-box[data-layout="stack"] .{name}', "")
+            assert re.search(r"overflow:\s*hidden", body), name
+            assert re.search(r"resize:\s*none", body), name
+
+    def test_a_transcripts_save_carries_the_configurations_unsaved_dot(self):
+        """Both are shown with the accent dot for words the server does not
+        hold: the same rule draws it, in the corner of a button set to hold it."""
+        declared = self._declared()
+
+        for name in ("mc-voice-box-configuration-save", "mc-voice-box-sample-transcript-save"):
+            dot = declared.get(f'#mc-voice-box .{name}[data-dirty="true"]::after', "")
+            assert 'content: ""' in dot and "var(--color-accent" in dot, name
+            assert re.search(r"position:\s*relative", declared.get(f"#mc-voice-box .{name}", "")), name
+
+    def test_a_sample_without_its_words_is_marked_in_the_error_colour(self):
+        """An engine that clones from exact words cannot use it: its row's
+        length and a speaker slot holding it say so in the theme's error colour."""
+        declared = self._declared()
+
+        for selector in ('#mc-voice-box .mc-voice-box-sample[data-transcript="missing"] .mc-voice-box-sample-meta',
+                         '#mc-voice-box .mc-voice-box-speaker[data-transcript="missing"] '
+                         '.mc-voice-box-speaker-title'):
+            assert re.search(r"color:\s*var\(--error-text-color", declared.get(selector, "")), selector
+
     def test_only_the_trimmer_and_a_range_input_keep_their_sideways_drags(self):
         """On a phone a sideways swipe changes the card everywhere except on a
         control whose drag is sideways: the trimmer's waveform (its handles)
