@@ -1782,12 +1782,24 @@ def moved_by(before, during):
 JOURNAL = ORIGIN + "/model-chain/conversation/v2/journal"
 
 
+def scripts_writing(written):
+    """A console listener that keeps what the page's scripts write. The
+    browser's own line for a request the stand-in server answers with a 404
+    is not the page writing anything."""
+    def heard(message):
+        if not message.text.startswith("Failed to load resource"):
+            written.append(message.text)
+    return heard
+
+
 def test_a_mouse_drag_by_the_header_moves_the_panel_and_selects_nothing(browser):
     page = open_page(browser)
-    accounts = []
-    page.on("console", lambda message: accounts.append(message.text)
-            if message.text.startswith("Forge Assistant drag: ") else None)
-    # The server's journal: what the page posts for the extension's log.
+    # What a drag used to write -- its account on the console, a post to the
+    # journal for model_chain.log, a warning on the status line when the page
+    # moved under it -- and must not now: "i should not see those drag events
+    # anymore".
+    written = []
+    page.on("console", scripts_writing(written))
     journalled = []
 
     def take(route):
@@ -1834,56 +1846,31 @@ def test_a_mouse_drag_by_the_header_moves_the_panel_and_selects_nothing(browser)
                                 "new Event('dragstart', {bubbles: true, cancelable: true})))")
         assert started == [False, False], started
 
-        # Each drag wrote its account to the console: the press cancelled and
-        # captured, the handle's rules, nothing else moved.
-        assert len(accounts) == 2, accounts
-        account = page.evaluate("forgeAssistant.shell.lastDrag")
-        assert account["handle"] == "panel" and account["pointer"] == "mouse", account
-        assert account["pressed"].startswith("div.forge-assistant-grip"), account
-        assert account["pressCancelled"] is True and account["captured"] is True, account
-        assert account["touchAction"] == "none" and account["userSelect"] == "none", account
-        assert account["ended"] == "pointerup" and account["moved"] is True, account
-        assert account["pageScrolled"] == [0, 0] and account["astray"] == [], account
-        assert account["locked"] == [], "a mouse never pans, so nothing is held"
-        assert page.evaluate("forgeAssistant.shell.told") is None
-
-        # A page that scrolls under a drag is in the account, and on the
-        # status line, where a phone can read it with the panel open.
+        # A third drag, with the page scrolled under it: the drag that used
+        # to put a warning on the status line.
         grip = page.evaluate(HANDLES)["grip"]
         mouse_drag(page, grip, (grip[0] - 100, grip[1] - 100))
         page.evaluate("window.scrollTo(0, 240)")
         page.mouse.up()
         settle(page)
-        account = page.evaluate("forgeAssistant.shell.lastDrag")
-        assert account["pageScrolled"] == [0, 240], account
-        assert account["astray"] == ["the page scrolled by 0, 240"], account
-        assert len(accounts) == 3 and '"pageScrolled":[0,240]' in accounts[-1], accounts
-        status = page.evaluate("document.querySelector('.forge-assistant-status').textContent")
-        assert "That drag moved more than the handle: the page scrolled by 0, 240" in status, status
-        assert status.endswith("The account is in model_chain.log."), status
+        assert moved_by(moved, page.evaluate(HANDLES)) == [-100, -100]
 
-        # And every account went to the server, for the log: the kind, the
-        # events as they came, the page it happened on.
-        page.wait_for_function("() => true")
-        assert len(journalled) == 3, journalled
-        posted = journalled[-1]
-        assert posted["kind"] == "drag" and posted["pointer"] == "mouse", posted
-        assert posted["pageScrolled"] == [0, 240] and posted["put"] is not None, posted
-        assert posted["trace"][0]["e"] == "pointerdown" and posted["trace"][0]["p"] is True, posted
-        assert posted["trace"][-1]["e"] == "pointerup", posted
-        assert all(entry["e"] == "pointermove" for entry in posted["trace"][1:-1]), posted
-        environment = posted["environment"]
-        assert "Chrome" in environment["userAgent"] or "HeadlessChrome" in environment["userAgent"]
-        assert environment["window"] == [1600, 1000] and environment["freeFloat"] is True
-        assert environment["panelOpen"] is True and environment["scroller"] == "html"
-        assert environment["document"][1] > environment["document"][3], "a page taller than the window"
+        # Three drags, and not a word about any of them anywhere.
+        page.wait_for_timeout(100)
+        assert written == [], "nothing on the console"
+        assert journalled == [], "nothing posted for model_chain.log"
+        assert page.evaluate("forgeAssistant.shell.told") is None, "nothing on the status line"
+        status = page.evaluate("document.querySelector('.forge-assistant-status').textContent")
+        assert "drag" not in status.lower(), status
+        assert page.evaluate("'lastDrag' in forgeAssistant.shell") is False, "and no account kept"
     finally:
         page.close()
 
 
-def finger_on_the_launcher(browser, host_rule: str = ""):
+def finger_on_the_launcher(browser, host_rule: str = "", written=None):
     """A phone, the panel closed, the page well taller than the window; a
-    finger takes the launcher 200 px up the screen."""
+    finger takes the launcher 200 px up the screen. With `written`, whatever
+    the drag writes to the console or posts to the journal is kept there."""
     context, page = open_phone(browser, free_float=True)
     page.evaluate("forgeAssistant.shell.close()")
     settle(page)
@@ -1893,23 +1880,28 @@ def finger_on_the_launcher(browser, host_rule: str = ""):
     before = page.evaluate(HANDLES)
     assert before["open"] is False and before["page"] > before["inner"] + 400, before
     centre = before["launcher"]["centre"]
+    if written is not None:
+        page.on("console", scripts_writing(written))
+
+        def take(route):
+            written.append("journal: " + (route.request.post_data or ""))
+            route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+        page.route(JOURNAL, take)
     touch_drag(page, centre, (centre[0], centre[1] - 200))
     settle(page)
     return context, page, before, page.evaluate(HANDLES)
 
 
 def test_a_finger_on_the_launcher_moves_it_and_pans_nothing(browser):
-    context, page, before, after = finger_on_the_launcher(browser)
+    written = []
+    context, page, before, after = finger_on_the_launcher(browser, written=written)
     try:
         assert before["touch"] == ["none", "none"], before
         assert abs(after["launcher"]["top"] - (before["launcher"]["top"] - 200)) <= 1, (before, after)
         assert after["at"] is not None, "the drag was the launcher's"
         assert after["scrollY"] == 0, after
-        account = page.evaluate("forgeAssistant.shell.lastDrag")
-        assert account["handle"] == "launcher" and account["pointer"] == "touch", account
-        assert account["pressCancelled"] is False and account["captured"] is True, account
-        assert account["touchMoves"] >= 4 and account["touchBlocked"] == account["touchCancelable"], account
-        assert account["pageScrolled"] == [0, 0] and account["astray"] == [], account
+        assert written == [], "a finger's drag writes nothing anywhere either"
+        assert page.evaluate("'lastDrag' in forgeAssistant.shell") is False
         # The page could have scrolled: a finger on its text does.
         touch_drag(page, (60, 500), (60, 300))
         settle(page)
@@ -1964,8 +1956,7 @@ def test_a_finger_on_a_handle_holds_the_pages_scroll_once_it_moves_and_until_it_
                      {"type": "touchMove", "touchPoints": [{"x": centre[0], "y": centre[1] - 30 * step}]})
         settle(page)
         assert page.evaluate(scroller)[0] != "hidden", "nothing held while the page stays still"
-        assert page.evaluate("forgeAssistant.shell.drag.watch.locked") == []
-        assert page.evaluate("forgeAssistant.shell.drag.watch.held") is None
+        assert page.evaluate("forgeAssistant.shell.scrollLock") is None
 
         # The page moves under the finger -- what that compositor does on
         # its own -- and the hold engages at the first scroll.
@@ -1974,30 +1965,32 @@ def test_a_finger_on_a_handle_holds_the_pages_scroll_once_it_moves_and_until_it_
         held = page.evaluate(scroller)
         assert held == ["hidden", "stable"], held
         assert page.evaluate("window.scrollY") == 0, "put back where the press found it"
-        assert page.evaluate("forgeAssistant.shell.drag.watch.locked") == ["html"]
-        assert page.evaluate("forgeAssistant.shell.drag.watch.held")["by"] == [0, 48]
+        assert page.evaluate("forgeAssistant.shell.scrollLock.map((was) => was.node.nodeName)") == ["HTML"]
         cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         cdp.detach()
         settle(page)
         assert page.evaluate(scroller)[0] != "hidden"
-        account = page.evaluate("forgeAssistant.shell.lastDrag")
-        assert account["locked"] == ["html"] and account["pointer"] == "touch", account
-        assert account["held"]["by"] == [0, 48] and account["held"]["t"] >= 0, account
-        assert any(entry.get("e") == "hold" and entry.get("sy") == 48 for entry in account["trace"]), account["trace"]
-        assert isinstance(account["delay"], int) and account["delay"] >= 0, account
-        assert any("sy" in entry for entry in account["trace"]), account["trace"][:3]
+        assert page.evaluate("forgeAssistant.shell.scrollLock") is None
 
         # The page scrolls again.
         touch_drag(page, (60, 500), (60, 300))
         settle(page)
         assert page.evaluate("window.scrollY") > 100
 
-        # A drag the page stayed still under held nothing, and says so.
+        # A drag the page stays still under holds nothing at any point: the
+        # root's inline style is watched through the whole of it.
+        page.evaluate("""() => {
+            window.styled = [];
+            new MutationObserver((records) => records.forEach((record) => window.styled.push(
+                [record.oldValue || "", document.documentElement.style.overflow])))
+                .observe(document.documentElement, {attributes: true, attributeFilter: ["style"],
+                                                    attributeOldValue: true});
+        }""")
         centre = page.evaluate(HANDLES)["launcher"]["centre"]
         touch_drag(page, centre, (centre[0], centre[1] - 100))
         settle(page)
-        quiet = page.evaluate("forgeAssistant.shell.lastDrag")
-        assert quiet["locked"] == [] and quiet["held"] is None, quiet
+        assert not any("hidden" in old or "hidden" in now for old, now in page.evaluate("window.styled")), (
+            page.evaluate("window.styled"))
     finally:
         context.close()
 

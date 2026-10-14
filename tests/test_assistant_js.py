@@ -2969,6 +2969,25 @@ class TestThePageThatNeverSettles:
         assert found["replying"] is None
         assert found["settled"] is True and found["posts"] == 1
 
+    def test_a_journal_the_server_refuses_costs_the_page_one_quiet_line(self):
+        """The watch writes through the journal. A server that refuses the
+        entry is one debug line on the console, and a shell with no server
+        posts nothing and throws nothing."""
+        found = run(self.WATCH + """
+            const noted = [];
+            console.debug = (line) => noted.push(line);
+            shell.store = {request: () => Promise.reject(new Error("The server answered 404"))};
+            const refused = shell.journal({kind: "churn", runs: 20});
+            shell.store = null;
+            const none = shell.journal({kind: "churn", runs: 20});
+            refused.then(() => {}, () => {}).then(() => Promise.resolve()).then(() => {
+                console.log(JSON.stringify({noted, none}));
+            });
+        """, sources=("shell",))
+
+        assert found["noted"] == ["Forge Assistant: the journal was not written: The server answered 404"]
+        assert found["none"] is None
+
     def test_a_page_without_forges_hooks_is_not_watched(self):
         found = run(PANEL + """
             const shell = panel({});
@@ -3079,121 +3098,51 @@ class TestADragTakesOnlyTheHandle:
 
         assert found == {"idle": False, "under": True, "taken": False, "after": False}
 
-    def test_every_drag_leaves_an_account_of_what_else_moved(self):
-        """Reported twice from the user's machine and not reproduced here:
-        the drag writes what it saw -- the press, the handle's rules, the
-        page's scroll before and after, the moves, how it ended -- to the
-        console, and keeps it as `lastDrag`. A page that scrolled under the
-        drag is said on the status line, where a phone can read it."""
+    def test_a_drag_writes_nothing_anywhere(self):
+        """"remove those flyout movement logs from all logs, i should not see
+        those drag events anymore". Every drag used to keep an account of
+        what else moved, write it to the console, post it to the journal for
+        model_chain.log and, when the page had moved under it, say so on the
+        status line (docs/22 §3.34). Now a drag -- a mouse's, a finger's with
+        its touch moves and the page scrolling under it, one the browser
+        ended -- writes to no console, posts nothing, tells the status line
+        nothing and keeps no account."""
         found = run(self.SHELL + """
-            const lines = [];
-            console.info = (line) => lines.push(line);
+            const real = console.log;
+            const written = [];
+            ["log", "info", "debug", "warn", "error"].forEach((name) => {
+                console[name] = (...args) => written.push(name + ": " + String(args[0]).slice(0, 60));
+            });
+            const posts = [];
+            shell.store = {request: (path) => { posts.push(path); return Promise.resolve({ok: true}); }};
             shell.told = null;
             shell.startDrag(press(), shell.nodes.panel);
             shell.moveDrag(press({clientX: 960, clientY: 540}));
             shell.moveDrag(press({clientX: 990, clientY: 560}));
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
-            const quiet = shell.lastDrag;
-            const quietTold = shell.told;
-            // The page scrolls while the next one is live.
-            shell.startDrag(press({pointerId: 2}), shell.nodes.panel);
-            shell.moveDrag(press({pointerId: 2, clientX: 900, clientY: 500}));
+            shell.startDrag(press({pointerId: 2, pointerType: "touch"}), shell.nodes.launcher);
+            shell.blockPan(move(true));
+            shell.moveDrag(press({pointerId: 2, pointerType: "touch", clientX: 900, clientY: 500}));
             globalThis.scrollY = 120;
-            shell.endDrag({pointerId: 2, type: "pointercancel"}, true);
-            globalThis.scrollY = 0;
-            console.log(JSON.stringify({quiet, quietTold, lines: lines.length,
-                                        first: lines[0].slice(0, 22),
-                                        astray: shell.lastDrag.astray,
-                                        scrolled: shell.lastDrag.pageScrolled,
-                                        ended: shell.lastDrag.ended,
-                                        told: shell.told}));
-        """, sources=("shell",))
-
-        quiet = found["quiet"]
-        assert quiet["handle"] == "panel" and quiet["pointer"] == "mouse"
-        assert quiet["moves"] == 2 and quiet["travel"] == 57 and quiet["moved"] is True
-        assert quiet["ended"] == "pointerup" and quiet["cancelled"] is False
-        assert quiet["pressCancelled"] is True and quiet["captured"] is True
-        assert quiet["pageScrolled"] == [0, 0] and quiet["astray"] == []
-        assert found["quietTold"] is None, "nothing to say about a drag that moved the handle alone"
-        assert found["lines"] == 2 and found["first"] == "Forge Assistant drag: "
-        assert found["scrolled"] == [0, 120] and found["ended"] == "pointercancel"
-        assert found["astray"] == ["the page scrolled by 0, 120", "the browser ended it (pointercancel)"]
-        assert found["told"]["kind"] == "warn" and "the page scrolled by 0, 120" in found["told"]["text"]
-
-    def test_the_account_goes_to_the_servers_log_with_the_events_and_the_page(self):
-        """"i meant our log file ... write it here, with other logging
-        content": each account is posted to the journal route, for one line
-        of model_chain.log, with the events as they came (the first and the
-        last, what the browser said of each) and the page it happened on."""
-        found = run(self.SHELL + """
-            console.info = () => {};
-            const posts = [];
-            shell.store = {request: (path, options) => { posts.push({path, options}); return Promise.resolve({ok: true}); }};
-            shell.startDrag(press(), shell.nodes.panel);
-            for (let i = 1; i <= 80; i += 1) {
-                shell.moveDrag(press({clientX: 950 + i, clientY: 520 + i}));
-                if (i === 3) shell.blockPan({cancelable: true, preventDefault() {}});
-            }
-            shell.endDrag({pointerId: 1, type: "pointerup", clientX: 1030, clientY: 600}, false);
-            const body = JSON.parse(posts[0].options.body);
-            console.log(JSON.stringify({count: posts.length, path: posts[0].path,
-                                        method: posts[0].options.method,
-                                        type: posts[0].options.headers["Content-Type"],
-                                        kind: body.kind, traceLength: body.trace.length,
-                                        first: body.trace[0], last: body.trace[body.trace.length - 1],
-                                        second: body.trace[1].e, secondSy: body.trace[1].sy,
-                                        delay: body.delay, locked: body.locked, dropped: body.dropped,
-                                        touch: body.trace.some((e) => e.e === "touchmove" && e.p === true),
-                                        environment: Object.keys(body.environment || {}).sort(),
-                                        from: body.from, put: body.put, lastDragPut: shell.lastDrag.put}));
-        """, sources=("shell",))
-
-        assert found["count"] == 1 and found["path"] == "/journal"
-        assert found["method"] == "POST" and found["type"] == "application/json"
-        assert found["kind"] == "drag"
-        assert found["first"]["e"] == "pointerdown" and found["first"]["p"] is True
-        assert found["first"]["x"] == 950 and found["first"]["t"] == 0
-        assert found["first"]["sy"] == 0, "the page's scroll, at the press"
-        assert found["secondSy"] == 0, "and at the first move"
-        assert found["delay"] is None, "no stamp on a stub's event"
-        assert found["locked"] == [], "a mouse's drag holds nothing"
-        assert found["second"] == "pointermove" and found["touch"] is True
-        assert found["last"]["e"] == "pointerup" and found["last"]["x"] == 1030
-        assert found["traceLength"] == 60 and found["dropped"] == 23, (
-            "sixty kept of eighty-three: the press, fifty-eight moves and the touch "
-            "move among them, the end; the rest counted")
-        assert found["environment"] == ["body", "coarse", "document", "focused", "freeFloat",
-                                        "fullscreen", "hover", "panelOpen", "pixelRatio", "root",
-                                        "screen", "scroller", "sheet", "theme", "touchPoints",
-                                        "userAgent", "visual", "window"]
-        assert found["from"] == [950, 520]
-        assert found["put"] == found["lastDragPut"] and found["put"] is not None
-
-    def test_a_server_that_is_not_there_costs_the_drag_nothing(self):
-        found = run(self.SHELL + """
-            console.info = () => {};
-            const noted = [];
-            console.debug = (line) => noted.push(line);
-            shell.store = {request: () => Promise.reject(new Error("The server answered 404"))};
-            shell.startDrag(press(), shell.nodes.panel);
-            shell.moveDrag(press({clientX: 990, clientY: 560}));
-            shell.endDrag({pointerId: 1, type: "pointerup"}, false);
-            const kept = shell.lastDrag.moved;
-            shell.store = null;
-            shell.startDrag(press({pointerId: 2}), shell.nodes.panel);
             shell.endDrag({pointerId: 2, type: "pointerup"}, false);
-            setTimeout = (fn) => fn();
+            shell.startDrag(press({pointerId: 3}), shell.nodes.panel);
+            shell.moveDrag(press({pointerId: 3, clientX: 900, clientY: 500}));
+            shell.endDrag({pointerId: 3, type: "pointercancel"}, true);
+            globalThis.scrollY = 0;
             Promise.resolve().then(() => Promise.resolve()).then(() => {
-                console.log(JSON.stringify({kept, noted, second: shell.lastDrag.ended}));
+                console.log = real;
+                console.log(JSON.stringify({written, posts, told: shell.told,
+                                            kept: "lastDrag" in shell,
+                                            accounts: typeof shell.accountForDrag}));
             });
         """, sources=("shell",))
 
-        assert found["kept"] is True and found["second"] == "pointerup"
-        assert found["noted"] == ["Forge Assistant: the journal was not written: The server answered 404"]
+        assert found["written"] == [], "nothing on the console"
+        assert found["posts"] == [], "nothing for model_chain.log"
+        assert found["told"] is None, "nothing on the status line"
+        assert found["kept"] is False and found["accounts"] == "undefined", "and no account kept"
 
     HELD = """
-        console.info = () => {};
         const scroller = {style: {overflow: "auto", scrollbarGutter: ""}, nodeType: 1,
                           nodeName: "HTML", classList: {length: 0}, id: ""};
         document.scrollingElement = scroller;
@@ -3217,28 +3166,25 @@ class TestADragTakesOnlyTheHandle:
         going. A mouse's drag watches nothing."""
         found = run(self.SHELL + self.HELD + """
             const out = {};
+            const locked = () => (shell.scrollLock || []).map((was) => was.node.nodeName.toLowerCase());
             shell.startDrag(press({pointerType: "touch"}), shell.nodes.launcher);
-            out.pressed = [scroller.style.overflow, shell.drag.watch.locked, !!shell.drag.pan,
-                           shell.drag.pan.held];
+            out.pressed = [scroller.style.overflow, locked(), !!shell.drag.pan, shell.drag.pan.held];
             // The page pans 48 px under the finger: a compositor that read
             // nothing the handle said.
             globalThis.scrollY = 48;
             out.held = [shell.holdPage(shell.drag), scroller.style.overflow, scroller.style.scrollbarGutter,
-                        shell.drag.watch.locked, shell.drag.watch.held.by, scrolledTo.slice(), scrollY];
+                        locked(), scrolledTo.slice(), scrollY];
             // Once: a pan the browser keeps making against the hold is not
             // fought frame by frame.
             globalThis.scrollY = 60;
             out.again = [shell.holdPage(shell.drag), scrolledTo.length];
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
-            out.released = [scroller.style.overflow, scroller.style.scrollbarGutter,
-                            shell.lastDrag.held.by, shell.lastDrag.locked,
-                            shell.lastDrag.trace.some((entry) => entry.e === "hold" && entry.sy === 48)];
+            out.released = [scroller.style.overflow, scroller.style.scrollbarGutter, locked()];
             globalThis.scrollY = 0;
             shell.startDrag(press({pointerType: "mouse"}), shell.nodes.launcher);
-            out.mouse = [scroller.style.overflow, shell.drag.watch.locked, shell.drag.pan === undefined,
+            out.mouse = [scroller.style.overflow, locked(), shell.drag.pan === undefined,
                          shell.holdPage(shell.drag)];
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
-            out.mouseAccount = [shell.lastDrag.locked, shell.lastDrag.held];
             shell.startDrag(press({pointerType: "pen"}), shell.nodes.panel);
             out.pen = [scroller.style.overflow, !!shell.drag.pan];
             shell.holdPage(shell.drag);
@@ -3253,8 +3199,7 @@ class TestADragTakesOnlyTheHandle:
             shell.startDrag(press({pointerType: "touch"}), shell.nodes.panel);
             focused.scrollTop = 130;
             shell.holdPage(shell.drag);
-            out.focus = [focused.style.overflow, scroller.style.overflow, shell.drag.watch.locked,
-                         focused.scrollTop, shell.drag.watch.held.by];
+            out.focus = [focused.style.overflow, scroller.style.overflow, locked(), focused.scrollTop];
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
             out.focusReleased = [focused.style.overflow, scroller.style.overflow];
             document.querySelector = () => null;
@@ -3269,14 +3214,13 @@ class TestADragTakesOnlyTheHandle:
         """, sources=("shell",))
 
         assert found["pressed"] == ["auto", [], True, False], "nothing is held at the press"
-        assert found["held"] == [True, "hidden", "stable", ["html"], [0, 48], [[0, 0]], 0]
+        assert found["held"] == [True, "hidden", "stable", ["html"], [[0, 0]], 0]
         assert found["again"] == [False, 1], "held once"
-        assert found["released"] == ["auto", "", [0, 48], ["html"], True], "put back as found"
+        assert found["released"] == ["auto", "", []], "put back as found"
         assert found["mouse"] == ["auto", [], True, False], "a mouse never pans"
-        assert found["mouseAccount"] == [[], None]
         assert found["pen"] == ["auto", True] and found["penHeld"] == "hidden"
         assert found["cancelled"] == "auto"
-        assert found["focus"] == ["hidden", "hidden", ["html", "div.forge-assistant-focus-root"], 10, [0, 120]]
+        assert found["focus"] == ["hidden", "hidden", ["html", "div"], 10]
         assert found["focusReleased"] == ["", "auto"]
         assert found["disposed"] == "auto"
 
@@ -3314,7 +3258,6 @@ class TestADragTakesOnlyTheHandle:
         handle is moved by a transform on a layer of its own, and where it
         is let go is written once, as a position, by the placement."""
         found = run(self.SHELL + """
-            console.info = () => {};
             const handle = shell.nodes.panel;
             let placements = 0;
             shell.placeNow = () => { placements += 1; };
@@ -3323,20 +3266,16 @@ class TestADragTakesOnlyTheHandle:
             const first = [handle.style.transform, handle.style.willChange,
                            handle.style.left || "", handle.style.top || ""];
             shell.moveDrag(press({clientX: 1000, clientY: 600}));
-            const second = [handle.style.transform, shell.drag.watch.put];
+            const second = handle.style.transform;
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
             console.log(JSON.stringify({first, second, placed: placements,
                                         after: [handle.style.transform, handle.style.willChange,
-                                                handle.style.left || "", handle.style.top || ""],
-                                        put: shell.lastDrag.put}));
+                                                handle.style.left || "", handle.style.top || ""]}));
         """, sources=("shell",))
 
         assert found["first"] == ["translate(10px, 21px)", "transform", "", ""]
-        # The box was at 900, 500 and pressed at 950, 520: the position the
-        # account reports is where the box is, not where the pointer is.
-        assert found["second"] == ["translate(50px, 80px)", [950, 580]]
+        assert found["second"] == "translate(50px, 80px)"
         assert found["after"] == ["", "", "", ""] and found["placed"] == 1
-        assert found["put"] == [950, 580]
 
     def test_a_dragged_panel_shifts_the_docked_column_and_places_it_where_it_is_let_go(self):
         """The docked settings column travels with the panel by the panel's
@@ -3345,7 +3284,6 @@ class TestADragTakesOnlyTheHandle:
         every text box in it each time. The launcher's drag carries no
         column."""
         found = run(self.SHELL + """
-            console.info = () => {};
             const shifts = [];
             let placements = 0;
             NS.dock = {shift(dx, dy) { shifts.push([dx, dy]); return true; },
@@ -3381,7 +3319,6 @@ class TestADragTakesOnlyTheHandle:
         only when that anchor changes. Four style writes a move on the ghost
         woke whatever watched the root, for the same box at the same corner."""
         found = run(self.SHELL + """
-            console.info = () => {};
             element("forge-assistant-root");
             let styled = 0;
             const realStyle = globalThis.getComputedStyle;

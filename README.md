@@ -3556,23 +3556,9 @@ and a mouse never pans, so a mouse drag leaves the page alone. While it is
 dragged, the handle moves by a transform on a layer of its own rather than by
 its position (and the docked settings column with the panel, by the same
 one), so nothing is laid out or painted again on the way; where it is let go
-is written once, as a position. Every drag writes an account of itself into the extension's own
-log, `<WebUI data directory>/model_chain_llm/logs/model_chain.log`, as one
-`Forge Assistant drag` line between whatever else was being logged: what was
-pressed and with what, how long the press waited for the page, the handle's
-rules, whether the press was cancelled and captured, what the drag held,
-whether the page, the viewport, the selection or the tabs moved under it,
-where the handle was put, the moves seen and the touch moves blocked, how it
-ended, the events as they came (the first sixty and the last, each with its
-time and what the browser said of it, the page's scroll sampled along them),
-and the page it happened on — the browser, the pointer the
-device has, the window and the viewport, the document's size against the
-window's, the scroller, what the root and the body say about overflow and
-transforms, the theme, focus mode, full screen and the panel's state. The same
-line goes to the browser's console, and `forgeAssistant.shell.lastDrag` keeps
-the last. A drag that moved more than the handle says so on the panel's status
-line as well, where a phone can read it with the panel open. To report a drag
-that went wrong, drag once and send that log file.
+is written once, as a position. A drag leaves nothing in any log: nothing on
+the browser's console, nothing in the extension's log and nothing on the
+panel's status line.
 
 **The page that never settles.** Forge runs every extension's after-update
 callbacks a quarter of a second after anything changes inside its app element,
@@ -3583,8 +3569,9 @@ that (the theme's header and the spatial compact canvas; both now write only
 what changed), and another extension's would be invisible from here. So the
 panel counts those runs and, when twenty come within ten seconds while nothing
 has been pressed for three and no generation or reply is running, writes one
-`Forge Assistant churn` line to the same log, once per page load, naming the
-nodes whose contents changed most: where to look.
+`Forge Assistant churn` line to the extension's own log,
+`<WebUI data directory>/model_chain_llm/logs/model_chain.log`, once per page
+load, naming the nodes whose contents changed most: where to look.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the panel
 anywhere in the window. Turning it on leaves it exactly where it is rather than

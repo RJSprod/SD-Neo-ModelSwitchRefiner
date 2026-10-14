@@ -53,9 +53,6 @@
     const NARROW_GAP = 16;
     const NARROW_VIEWPORT = 640;
     const DRAG_THRESHOLD = 6;
-    // How many events a drag's account keeps, in the order they came. The
-    // first ones and the last are what say whose the gesture was.
-    const TRACE_MAX = 60;
 
     // How often `recover` may run. A handler that fails on every pointermove
     // must not turn into a forced layout on every pointermove as well.
@@ -353,15 +350,15 @@
 
     // -- the shell --------------------------------------------------------- //
 
-    // A covering element, named well enough to find it in the inspector.
+    /** A node, named well enough to find it in the inspector: its tag, its
+     *  id and its first two classes, `div#txt2img_settings.column`. What lies
+     *  over the launcher, and what the quiet-page watch saw change, are named
+     *  this way. */
     function describe(node) {
-        if (!node || !node.tagName) return String(node);
-        let text = node.tagName.toLowerCase();
-        if (node.id) text += "#" + node.id;
-        if (node.className && typeof node.className === "string") {
-            text += "." + node.className.trim().split(/\s+/).join(".");
-        }
-        return text;
+        if (!node || node.nodeType !== 1) return String((node && node.nodeName) || "?");
+        const names = node.classList && node.classList.length
+            ? "." + Array.from(node.classList).slice(0, 2).join(".") : "";
+        return String(node.nodeName).toLowerCase() + (node.id ? "#" + node.id : "") + names;
     }
 
     function element(tag, className, text) {
@@ -1329,15 +1326,11 @@
             anchor: this.anchor(),
             committed: false,
         };
-        this.drag.watch = this.watchDrag(event, node, box);
-        this.drag.watch.locked = [];
-        this.drag.watch.held = null;
         // A mouse never pans the page; anything else can, and in one browser
         // does whatever the handle says. See `watchPan`.
         if (event.pointerType && event.pointerType !== "mouse") this.watchPan(this.drag);
         try {
             node.setPointerCapture(event.pointerId);
-            this.drag.watch.captured = true;
         } catch (error) { /* capture is an optimisation, not a requirement */ }
     };
 
@@ -1407,11 +1400,6 @@
         pan.held = true;
         this.lockScroll();
         const now = [window.scrollX || 0, window.scrollY || 0];
-        const by = [now[0] - pan.at[0], now[1] - pan.at[1]];
-        if (pan.focused && pan.focusedAt) {
-            by[0] += (pan.focused.scrollLeft || 0) - pan.focusedAt[0];
-            by[1] += (pan.focused.scrollTop || 0) - pan.focusedAt[1];
-        }
         if (typeof window.scrollTo === "function" && (now[0] !== pan.at[0] || now[1] !== pan.at[1])) {
             try {
                 window.scrollTo(pan.at[0], pan.at[1]);
@@ -1420,12 +1408,6 @@
         if (pan.focused && pan.focusedAt) {
             if (pan.focused.scrollLeft !== pan.focusedAt[0]) pan.focused.scrollLeft = pan.focusedAt[0];
             if (pan.focused.scrollTop !== pan.focusedAt[1]) pan.focused.scrollTop = pan.focusedAt[1];
-        }
-        const watch = drag.watch;
-        if (watch) {
-            watch.locked = (this.scrollLock || []).map((was) => describe(was.node));
-            watch.held = {t: Date.now() - watch.started, by};
-            traceEvent(watch, {e: "hold", sy: now[1], by});
         }
         return true;
     };
@@ -1459,24 +1441,6 @@
     Shell.prototype.moveDrag = function (event) {
         const drag = this.drag;
         if (!drag || event.pointerId !== drag.pointerId) return;
-        if (drag.watch) {
-            drag.watch.moves += 1;
-            drag.watch.travel = Math.max(drag.watch.travel,
-                                         Math.hypot(event.clientX - drag.startX,
-                                                    event.clientY - drag.startY));
-            const entry = {e: "pointermove", x: event.clientX, y: event.clientY,
-                           b: event.buttons};
-            // The page's scroll, sampled ten times a second along the moves:
-            // when it starts to move against the finger is the question the
-            // account exists to answer. Not on every move, because reading it
-            // flushes layout.
-            const since = Date.now() - drag.watch.started;
-            if (since - drag.watch.sampled >= 100 || drag.watch.moves === 1) {
-                drag.watch.sampled = since;
-                entry.sy = Math.round(window.scrollY || 0);
-            }
-            traceEvent(drag.watch, entry);
-        }
         // The button came up somewhere this page never heard about -- outside
         // the window, in another application, across a remote-desktop session
         // that changed hands. Without this the panel follows the cursor until
@@ -1507,7 +1471,6 @@
         // Moved by a transform. `endDrag` writes the position once, where
         // the handle is let go.
         drag.node.style.transform = "translate(" + Math.round(dx) + "px, " + Math.round(dy) + "px)";
-        if (drag.watch) drag.watch.put = [Math.round(left), Math.round(top)];
         // A docked settings column travels with the panel it is drawn in.
         if (drag.node === this.nodes.panel) this.shiftDock(dx, dy);
         const view = viewport();
@@ -1589,242 +1552,18 @@
             drag.node.releasePointerCapture(drag.pointerId);
         } catch (error) { /* never held, or already released */ }
         this.placeNow();
-        if (drag.watch) {
-            try {
-                this.accountForDrag(drag, event, cancelled);
-            } catch (error) { /* an account is never worth a drag */ }
-        }
     };
 
-    // -- the drag's account of itself -------------------------------------- //
-    //
-    // Reported from the user's machine, twice: "dragging the flyout button or
-    // menu still moves the whole page" -- on a page just loaded, nothing else
-    // touched -- and not reproduced here in Chromium by a mouse, a finger, a
-    // selection or a host rule on the handles. So every drag keeps an account
-    // of what else moved while it was live and, when it ends, writes it to the
-    // console, keeps it as `forgeAssistant.shell.lastDrag`, and sends it to
-    // the server, which writes it into the extension's own log
-    // (`mc_assistant_journal`: one line of model_chain.log per drag, between
-    // whatever else was being logged, which is the file the user shares); a
-    // drag that found something else moved says so on the status line too,
-    // where a phone can read it with the panel open. The account: the pointer
-    // and what it pressed, the handle's computed touch-action and user-select,
-    // whether the press was cancelled and captured, the page's scroll, the
-    // visual viewport, the document's height, the tabs' place in the document
-    // and the selection before and after, where the handle was put, the moves
-    // seen, the touch moves blocked, how the drag ended, the events as they
-    // came (`trace`, the first TRACE_MAX and the last), and the page's
-    // environment: the browser, the pointer the device has, the window, the
-    // viewport, the document's size against the window's, the scroller, what
-    // the root and the body say about overflow and transforms, the theme,
-    // focus mode, full screen, and the panel's state.
+    // -- the journal ---------------------------------------------------------- //
 
-    /** One event into a drag's trace: when, what, and what the browser said
-     * about it. The first TRACE_MAX - 1 are kept and the last always is;
-     * what is dropped between is counted. */
-    function traceEvent(watch, entry) {
-        entry.t = Date.now() - watch.started;
-        if (entry.last || watch.trace.length < TRACE_MAX - 1) {
-            watch.trace.push(entry);
-        } else {
-            watch.dropped += 1;
-        }
-    }
-
-    /** The page the drag happened on, for its account. */
-    function environment(shell) {
-        const nav = window.navigator || {};
-        const doc = document.documentElement;
-        const body = document.body;
-        const visual = window.visualViewport;
-        const style = (node) => {
-            try {
-                return node ? window.getComputedStyle(node) : null;
-            } catch (error) {
-                return null;
-            }
-        };
-        const media = (query) => {
-            try {
-                return !!(window.matchMedia && window.matchMedia(query).matches);
-            } catch (error) {
-                return null;
-            }
-        };
-        const root = style(doc);
-        const page = style(body);
-        const panel = shell.nodes && shell.nodes.panel;
-        return {
-            userAgent: String(nav.userAgent || ""),
-            touchPoints: Number(nav.maxTouchPoints) || 0,
-            coarse: media("(pointer: coarse)"),
-            hover: media("(hover: hover)"),
-            pixelRatio: Number(window.devicePixelRatio) || 1,
-            window: [window.innerWidth, window.innerHeight],
-            visual: visual ? [Math.round(visual.width || 0), Math.round(visual.height || 0),
-                              Math.round((Number(visual.scale) || 1) * 100) / 100] : null,
-            screen: window.screen ? [window.screen.width, window.screen.height] : null,
-            document: doc ? [doc.scrollWidth, doc.scrollHeight, doc.clientWidth, doc.clientHeight] : null,
-            scroller: document.scrollingElement ? describe(document.scrollingElement) : null,
-            root: root ? [root.overflowX, root.overflowY, root.transform] : null,
-            body: page ? [page.overflowX, page.overflowY, page.transform, page.position, page.zoom] : null,
-            theme: doc && typeof doc.getAttribute === "function" ? doc.getAttribute("data-mc-theme") : null,
-            focused: !!(body && body.classList && body.classList.contains("forge-assistant-focused")),
-            fullscreen: !!document.fullscreenElement,
-            freeFloat: !!(shell.state && shell.state.freeFloat),
-            panelOpen: !!(shell.state && shell.state.panelOpen),
-            sheet: !!(panel && panel.classList && panel.classList.contains("forge-assistant-sheet")),
-        };
-    }
-
-    /** A node, for the account: `button#forge-assistant-launcher.forge-assistant-launcher`. */
-    function describe(node) {
-        if (!node || node.nodeType !== 1) return String((node && node.nodeName) || "?");
-        const names = node.classList && node.classList.length
-            ? "." + Array.from(node.classList).slice(0, 2).join(".") : "";
-        return String(node.nodeName).toLowerCase() + (node.id ? "#" + node.id : "") + names;
-    }
-
-    /** What of the page might move under a drag, read before and after it. */
-    function pageState() {
-        const doc = document.documentElement;
-        const scroll = [Math.round(window.scrollX || 0), Math.round(window.scrollY || 0)];
-        const tabs = document.getElementById("tabs");
-        const box = tabs && tabs.getBoundingClientRect ? tabs.getBoundingClientRect() : null;
-        const visual = window.visualViewport;
-        let selection = 0;
-        try {
-            const found = window.getSelection && window.getSelection();
-            selection = found ? String(found).length : 0;
-        } catch (error) { /* a document without one */ }
-        return {
-            scroll,
-            visual: visual ? [Math.round(visual.offsetLeft || 0), Math.round(visual.offsetTop || 0),
-                              Math.round((Number(visual.scale) || 1) * 100) / 100] : null,
-            height: Number(doc && doc.scrollHeight) || 0,
-            // In the document's coordinates, so a scroll alone is not a move.
-            tabs: box ? [Math.round(box.left + scroll[0]), Math.round(box.top + scroll[1])] : null,
-            selection,
-        };
-    }
-
-    Shell.prototype.watchDrag = function (event, node, box) {
-        // The rules read are the pressed handle's -- the header's for a panel
-        // -- not the dragged node's.
-        const handle = event.currentTarget && event.currentTarget.nodeType === 1
-            ? event.currentTarget : node;
-        let style = null;
-        try {
-            style = window.getComputedStyle(handle);
-        } catch (error) { /* a stub for a node */ }
-        // How long the press waited for the page: the time between the
-        // browser's stamp on the event and this handler running. A browser
-        // that pans on its own after a few hundred milliseconds without an
-        // answer is read here.
-        let delay = null;
-        if (typeof event.timeStamp === "number" && typeof performance === "object"
-            && performance && typeof performance.now === "function") {
-            delay = Math.max(0, Math.round(performance.now() - event.timeStamp));
-        }
-        const watch = {
-            delay,
-            sampled: 0,
-            handle: node === this.nodes.panel ? "panel" : "launcher",
-            pointer: event.pointerType || "unknown",
-            pressed: describe(event.target && event.target.nodeType === 1 ? event.target : node),
-            touchAction: (style && style.touchAction) || "?",
-            userSelect: (style && style.userSelect) || "?",
-            pressCancelled: !!event.defaultPrevented,
-            captured: false,
-            before: pageState(),
-            from: [Math.round(event.clientX || 0), Math.round(event.clientY || 0)],
-            box: box ? [Math.round(box.left), Math.round(box.top), Math.round(box.width),
-                        Math.round(box.height)] : null,
-            put: null,
-            moves: 0,
-            travel: 0,
-            touchMoves: 0,
-            touchCancelable: 0,
-            touchBlocked: 0,
-            trace: [],
-            dropped: 0,
-            started: Date.now(),
-        };
-        traceEvent(watch, {e: "pointerdown", x: watch.from[0], y: watch.from[1],
-                           c: event.cancelable !== false, p: !!event.defaultPrevented,
-                           sy: watch.before.scroll[1]});
-        return watch;
-    };
-
-    Shell.prototype.accountForDrag = function (drag, event, cancelled) {
-        const watch = drag.watch;
-        traceEvent(watch, {e: event && event.type ? event.type : "reset", last: true,
-                           x: event && event.clientX !== undefined ? Math.round(event.clientX) : null,
-                           y: event && event.clientY !== undefined ? Math.round(event.clientY) : null});
-        const after = pageState();
-        const delta = (was, now) => (was && now ? was.map((value, i) => now[i] - value) : null);
-        const some = (values) => !!values && values.some((value) => value !== 0);
-        const report = {
-            handle: watch.handle,
-            pointer: watch.pointer,
-            pressed: watch.pressed,
-            ended: event && event.type ? event.type : "reset",
-            cancelled: !!cancelled,
-            moved: !!drag.moved,
-            moves: watch.moves,
-            travel: Math.round(watch.travel),
-            ms: Date.now() - watch.started,
-            pageScrolled: delta(watch.before.scroll, after.scroll),
-            viewportMoved: delta(watch.before.visual, after.visual),
-            heightChanged: after.height - watch.before.height,
-            tabsMoved: delta(watch.before.tabs, after.tabs),
-            selectionGrew: after.selection - watch.before.selection,
-            touchAction: watch.touchAction,
-            userSelect: watch.userSelect,
-            pressCancelled: watch.pressCancelled,
-            captured: watch.captured,
-            touchMoves: watch.touchMoves,
-            touchCancelable: watch.touchCancelable,
-            touchBlocked: watch.touchBlocked,
-            fullscreen: !!document.fullscreenElement,
-            from: watch.from,
-            box: watch.box,
-            put: watch.put,
-            delay: watch.delay,
-            locked: watch.locked,
-            held: watch.held,
-            astray: [],
-        };
-        if (some(report.pageScrolled)) report.astray.push("the page scrolled by " + report.pageScrolled.join(", "));
-        if (some(report.viewportMoved)) report.astray.push("the viewport moved by " + report.viewportMoved.join(", "));
-        if (some(report.tabsMoved)) report.astray.push("the tabs moved by " + report.tabsMoved.join(", "));
-        if (report.heightChanged) report.astray.push("the page's height changed by " + report.heightChanged);
-        if (report.selectionGrew > 0) report.astray.push("a selection grew by " + report.selectionGrew);
-        if (cancelled && event && event.type && event.type !== "pointerup") {
-            report.astray.push("the browser ended it (" + event.type + ")");
-        }
-        try {
-            report.environment = environment(this);
-        } catch (error) {
-            report.environment = null;
-        }
-        report.trace = watch.trace;
-        report.dropped = watch.dropped;
-        this.lastDrag = report;
-        try {
-            console.info("Forge Assistant drag: " + JSON.stringify(report));
-        } catch (error) { /* no console to write to */ }
-        this.journal(Object.assign({kind: "drag"}, report));
-        if (report.astray.length && drag.moved) {
-            this.tell("That drag moved more than the handle: " + report.astray.join("; ")
-                      + ". The account is in model_chain.log.", "warn");
-        }
-    };
-
-    /** An account, to the server, for the extension's log. Never in the
-     * way: a server that refuses it or is not there is a line on the
-     * console, no more. */
+    /** An entry, to the server, for the extension's own log
+     * (`mc_assistant_journal`: one line of model_chain.log). The quiet-page
+     * watch below is what writes one now. A drag writes nothing anywhere:
+     * every drag's account of itself went to the console, the status line
+     * and this journal until the user asked for it to go ("i should not see
+     * those drag events anymore"), the question it was built for answered
+     * (docs/22 §3.34). Never in the way: a server that refuses an entry or
+     * is not there is a line on the console, no more. */
     Shell.prototype.journal = function (entry) {
         const store = this.store;
         if (!store || typeof store.request !== "function") return null;
@@ -1959,21 +1698,8 @@
      * that is not cancelable).
      */
     Shell.prototype.blockPan = function (event) {
-        if (!this.drag || !event) return;
-        const watch = this.drag.watch;
-        if (watch) {
-            watch.touchMoves += 1;
-            if (event.cancelable !== false) watch.touchCancelable += 1;
-        }
-        if (event.cancelable === false) {
-            if (watch) traceEvent(watch, {e: "touchmove", c: false, p: false});
-            return;
-        }
+        if (!this.drag || !event || event.cancelable === false) return;
         if (typeof event.preventDefault === "function") event.preventDefault();
-        if (watch) {
-            watch.touchBlocked += 1;
-            traceEvent(watch, {e: "touchmove", c: true, p: true});
-        }
     };
 
     // -- wiring ------------------------------------------------------------- //
