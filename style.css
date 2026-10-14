@@ -668,6 +668,10 @@
     --mc-theme-header: 64px;
     --mc-theme-radius: 8px;
     --mc-theme-pad: 12px;
+    /* The page's own padding: focus mode's inset (`.forge-assistant-focus-root`
+       pads the workspace 8 px), so the page meets the window outside focus
+       mode as it does inside it. */
+    --mc-theme-page-pad: 8px;
     --mc-theme-quick-width: 280px;
 }
 
@@ -718,15 +722,17 @@
 }
 
 /* The bar's ground, reaching into the page's side padding so the content
-   scrolls under a bar that spans the window, not one 16 px short of it. */
+   scrolls under a bar that spans the window, not one short of it. The reach
+   is the padding the theme gives the page (below); a fixed 16 px once, which
+   on Gradio's 32 px sides stopped 16 px short of each edge. */
 :root[data-mc-theme="on"] #tabs > .tab-nav::before {
     content: "";
     position: absolute;
     z-index: -1;
     top: 0;
     bottom: -1px;
-    left: calc(-1 * var(--size-4, 16px));
-    right: calc(-1 * var(--size-4, 16px));
+    left: calc(-1 * var(--mc-theme-page-pad));
+    right: calc(-1 * var(--mc-theme-page-pad));
     background: var(--body-background-fill);
     border-bottom: 1px solid var(--border-color-primary);
 }
@@ -1466,6 +1472,16 @@
     padding: 0;
     border: 0;
     border-radius: 0;
+}
+
+/* Gradio pads the page 16 px above and below and 32 px at the sides (its
+   `.app`: `var(--size-4) var(--size-8)`), and the Forge Assistant's focus
+   mode insets a workspace 8 px from the window's edges; the user saw the
+   difference and asked for the page outside focus mode to meet the window
+   as it does inside it. The page's padding is focus mode's inset on every
+   side. */
+:root[data-mc-theme="on"] .gradio-container.app {
+    padding: var(--mc-theme-page-pad);
 }
 
 /* Interrupt and Skip, quietly. Forge draws both as light grey blocks over

@@ -6368,9 +6368,13 @@ one second.
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
   compact prompt-box styles both handled. The results column stays in view
   under the bar while the settings scroll. Generate is 44 px tall (Forge gives
-  it a 4.5 em floor), and the frames Gradio draws around every tab panel, one
-  inside the other around the generation UI, are gone: the content sits at
-  the page's own margin. Interrupt and Skip, which Forge draws as light grey
+  it a 4.5 em floor), the frames Gradio draws around every tab panel, one
+  inside the other around the generation UI, are gone, and the page's own
+  padding — Gradio's 16 px above and below and 32 px at the sides — is the
+  8 px the Forge Assistant's focus mode insets a workspace by, so the content
+  meets the window outside focus mode as it does inside it, and the bar's
+  ground reaches the window's edges through that padding. Interrupt and
+  Skip, which Forge draws as light grey
   blocks over Generate's place, are the secondary surface with a line,
   Interrupt's tinted with the cancel colour: no bright spots. The gallery
   fills its container, as the Lobe page drew it, so a `user.css` that sizes

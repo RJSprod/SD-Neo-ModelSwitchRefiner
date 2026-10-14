@@ -82,6 +82,21 @@ One drawer per generation tab, which goes with its tab; the edge drags to a
 width remembered per browser until the width setting changes; `tests/
 test_theme_layout.py` runs Forge's own filter over the drawer's search box.
 
+**The page's margins (2026-10-14).** From three of the user's screens: the
+content 8 px from the display's edge under the Forge Assistant's focus mode
+(its workspace root pads 8 px) and about four times that outside it, the tab
+bar inset with it. Gradio 4.40 pads its page 16 px above and below and 32 px
+at the sides (`.app { padding: var(--size-4) var(--size-8) }` in its built
+stylesheet), which the theme had left alone; and the bar's ground reached a
+fixed 16 px into that padding, 16 px short of each edge on the real page. The
+theme pads the page 8 px on every side now (`--mc-theme-page-pad`, the focus
+root's inset, on `.gradio-container.app`) and the ground reaches by the same
+variable. The layout test page had modelled Gradio's padding as 16 px all
+round, which is why the short ground passed; it carries Gradio's own numbers
+now, and `test_the_page_meets_the_window_as_focus_mode_does` measures the
+content's edges against the window's in both modes, the ground's reach, and
+Gradio's padding back when the switch is off.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own
