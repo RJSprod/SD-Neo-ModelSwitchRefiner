@@ -896,7 +896,8 @@ class TestLoading:
                  if "loaded its model" in record.getMessage()]
         assert len(found) == 1
         assert "Eager" in found[0] and "eager" not in found[0]
-        assert ", fast path (CUDA graphs only)" in found[0], "the fake runtime has no compiler"
+        assert ", fast path (CUDA graphs, no torch.compile)" in found[0], \
+            "the fake runtime has no compiler"
         assert str(stub.models) not in found[0]
 
     def test_load_is_refused_while_rendering(self, stub):

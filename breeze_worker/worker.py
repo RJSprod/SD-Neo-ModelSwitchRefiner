@@ -51,7 +51,25 @@ And two things it reaches into, said here because they are not public:
         twenty lines encodes each speaker's reference once and writes no
         temporary file (:meth:`Engine._references`);
     ``model.text_encoder``'s configurations' ``_attn_implementation``, which
-        the text encoder reads at every forward pass (:meth:`Engine._use_attention`).
+        the text encoder reads at every forward pass (:meth:`Engine._use_attention`);
+    ``models.fast_streaming.DepthDecoderGraph`` and the codec runtime's
+        ``_compile_snakes``, where Triton is missing
+        (:meth:`Upstream.graphs_without_compile`, below).
+
+The fast path where there is no Triton
+--------------------------------------
+Upstream ties two stages' CUDA graphs to ``torch.compile``: the depth decoder
+(``fast_depth_decoder`` compiles its layers, then captures its fifteen-step
+loop) and the codec (``fast_codec`` compiles its SnakeBeta activations, then
+captures its one-frame step). ``torch.compile`` needs Triton, which Windows does
+not have, and with both stages off every frame ran the depth loop and the codec
+as thousands of eagerly launched kernels: 424 ms a frame on an RTX 5090, five
+times slower than real time, with the card mostly idle. The graphs themselves
+need no compiler -- upstream's own batch path captures the depth decoder's
+graph uncompiled (``breeze_infer/batch.py``), and the codec's lane captures its
+step whatever its activations are -- so where Triton is missing both stages are
+captured uncompiled: the depth decoder is built with compiling off and still
+captured, and the codec's activations are left as they are.
 
 Why Flash attention 2 is the text encoder's alone
 -------------------------------------------------
@@ -70,9 +88,9 @@ own entry points (``infer.py`` and ``breeze_infer/api.py``) name.
 The fast path's text-encoder CUDA graph is upstream's
 ``TextEncoderGraphCache``, which sets the encoder to SDPA with a static mask
 when it is built, whatever was chosen. So that graph is captured only when SDPA
-is the choice; under Flash attention 2 or Eager the fast path is the backbone's
-decode graph (and the compiled stages where Triton exists), and the text encoder
-runs on what was chosen.
+is the choice; under Flash attention 2 or Eager the fast path is the graphs of
+the backbone's decode, the depth decoder and the codec, and the text encoder,
+which runs once a line, runs on what was chosen.
 
 CFG, and the clone that cannot take it
 --------------------------------------
@@ -333,6 +351,14 @@ def _note(text: str) -> None:
         sys.stderr.flush()
     except Exception:
         pass
+
+
+_PATHLIKE = re.compile(r"(?:(?<!\w)[A-Za-z]:[\\/]|(?<![\w\\/])[\\/])[^\s'\"()<>]*")
+
+
+def _without_paths(text: str) -> str:
+    """A library's message with anything shaped like a path taken out, for the log."""
+    return _PATHLIKE.sub("…", str(text or ""))
 
 
 def _safe(exc: BaseException) -> str:
@@ -704,6 +730,33 @@ class Upstream:
         self.FastBreezeStreamingRuntime = FastBreezeStreamingRuntime
         self.FastStreamingConfig = FastStreamingConfig
 
+    @staticmethod
+    def graphs_without_compile() -> None:
+        """Capture the depth decoder's and the codec's CUDA graphs uncompiled.
+
+        For a process with no Triton (see the module docstring). The depth
+        decoder graph upstream builds is built with ``fast=False`` -- no
+        ``torch.compile`` -- and the runtime still captures it, because the
+        stage is on; the codec runtime's ``_compile_snakes`` does nothing, and
+        its lane still captures its step. Idempotent.
+        """
+        from models import fast_streaming, stream_runtime
+
+        base = fast_streaming.DepthDecoderGraph
+        if not getattr(base, "model_chain_uncompiled", False):
+            class UncompiledDepthDecoderGraph(base):
+                model_chain_uncompiled = True
+
+                def __init__(self, *args, **kwargs):
+                    kwargs["fast"] = False
+                    super().__init__(*args, **kwargs)
+
+            fast_streaming.DepthDecoderGraph = UncompiledDepthDecoderGraph
+        codec = stream_runtime.MultiRequestStreamRuntime
+        if not getattr(codec, "model_chain_uncompiled", False):
+            codec._compile_snakes = lambda self: None
+            codec.model_chain_uncompiled = True
+
 
 class Engine:
     """Breeze TTS 2 on one card, one render at a time.
@@ -732,6 +785,7 @@ class Engine:
         self.weights_bytes = 0
         self.compiled = False
         self.text_graph = False
+        self.graphed = False
 
     # -- imports ----------------------------------------------------------- #
 
@@ -842,11 +896,13 @@ class Engine:
             up.Path(wanted), device=device, attn_implementation=backbone)
         up.update_generation_config_for_breeze(model)
         compiled = fast and compile_available()
+        if fast and not compiled:
+            up.graphs_without_compile()
         text_graph = fast and backbone == "sdpa"
         config = up.FastStreamingConfig(
             max_new_tokens=MAX_NEW_TOKENS, max_seq_len=MAX_SEQ_LEN, fast_all=None,
             fast_text_encoder=text_graph, fast_backbone_prefill=False,
-            fast_backbone_decode=fast, fast_depth_decoder=compiled, fast_codec=compiled,
+            fast_backbone_decode=fast, fast_depth_decoder=fast, fast_codec=fast,
             repetition_penalty=REPETITION_PENALTY)
         runtime = up.FastBreezeStreamingRuntime(model, audio_tokenizer, config,
                                                 tokenizer=tokenizer)
@@ -867,6 +923,7 @@ class Engine:
         self.fast_path = fast
         self.compiled = compiled
         self.text_graph = text_graph
+        self.graphed = False
         self.backbone = backbone
         self.attention = ""
         self.weights_bytes = weights
@@ -874,7 +931,7 @@ class Engine:
         elapsed = time.monotonic() - began
         stages = ""
         if fast:
-            stages = (", fast path" + ("" if compiled else " (CUDA graphs only)")
+            stages = (", fast path" + ("" if compiled else " (CUDA graphs, no torch.compile)")
                       + ("" if text_graph else ", the text encoder ungraphed"))
         _note(f"loaded in {elapsed:.1f} s — {weights / float(1 << 30):.1f} GiB of weights, "
               f"{ATTENTION[attention]}, decoders {backbone}{stages}")
@@ -920,6 +977,7 @@ class Engine:
         self.fast_path = False
         self.compiled = False
         self.text_graph = False
+        self.graphed = False
         self.backbone = ""
         self.attention = ""
         self.weights_bytes = 0
@@ -950,7 +1008,12 @@ class Engine:
         speaker, and between pieces, nothing.
 
         The cancel flag is read at every chunk the codec hands back, which is
-        two frames -- 160 ms of audio -- on the eager path.
+        two frames -- 160 ms of audio -- on the eager path, and one on the fast
+        path.
+
+        The fast path's graphs are captured inside the first line after a
+        load; a failure there is refused with what to do about it, and its
+        reason goes to the log (:meth:`_spoken`).
         """
         if self.model is None or self.runtime is None:
             raise Refusal("no model is loaded")
@@ -985,7 +1048,7 @@ class Engine:
                         for piece in self._pieces(request, speaker, text, direction, keys):
                             if cancelled.is_set():
                                 break
-                            audio, frames, reached = self._speak(
+                            audio, frames, reached = self._spoken(
                                 request, piece, seed, cancelled, progress,
                                 f"{request.job or 'render'}-{take + 1}-{index + 1}")
                             if audio is not None and audio.size:
@@ -1014,10 +1077,13 @@ class Engine:
         if any(answer["capped"] for answer in answers):
             _note("a line reached the room one call allows before it ended")
         longest = max(answer["seconds"] for answer in answers)
+        pace = (f", {1000.0 * render_seconds / sum(tokens):.0f} ms a frame"
+                if sum(tokens) else "")
         _note(f"rendered {len(answers)} take(s) of {len(request.lines)} line(s), the longest "
               f"{longest:.1f} s of audio, in {render_seconds:.1f} s — "
-              f"{sum(tokens)} frame(s), peak {peak / float(1 << 30):.1f} GiB, "
-              f"{ATTENTION[request.attention]}{', cancelled' if cancelled.is_set() else ''}")
+              f"{sum(tokens)} frame(s){pace}, peak {peak / float(1 << 30):.1f} GiB, "
+              f"{ATTENTION[request.attention]}{', fast path' if self.fast_path else ''}"
+              f"{', cancelled' if cancelled.is_set() else ''}")
         return {
             "format": "f32le",
             "sample_rate": SAMPLE_RATE,
@@ -1130,6 +1196,28 @@ class Engine:
             return len(self.tokenizer(text, add_special_tokens=False)["input_ids"])
         except Exception:  # noqa: BLE001 - a tokenizer without the keyword
             return len(str(text).split())
+
+    def _spoken(self, request: RenderRequest, piece, seed, cancelled: threading.Event,
+                progress: "_Progress", request_id: str):
+        """:meth:`_speak`, with the fast path's first capture answered for.
+
+        Until one call has run on a fresh load, an exception on the fast path is
+        the graphs' capture failing; it is refused with what to do, and its
+        reason is written to the log, which a reply never carries.
+        """
+        if not self.fast_path or self.graphed:
+            return self._speak(request, piece, seed, cancelled, progress, request_id)
+        try:
+            found = self._speak(request, piece, seed, cancelled, progress, request_id)
+        except Refusal:
+            raise
+        except Exception as exc:  # noqa: BLE001 - refused with what to do, and logged
+            _note(f"the fast path's CUDA graphs could not be set up — "
+                  f"{exc.__class__.__name__}: {_without_paths(str(exc))[:300]}")
+            raise Refusal("the fast path's CUDA graphs could not be set up on this card; turn "
+                          "Fast path off in the Voice Box and render again") from exc
+        self.graphed = True
+        return found
 
     def _speak(self, request: RenderRequest, piece, seed, cancelled: threading.Event,
                progress: "_Progress", request_id: str):

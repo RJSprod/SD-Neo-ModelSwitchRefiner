@@ -920,7 +920,7 @@
       "estimates": {
         "weights_bytes": 7700000000,
         "working_bytes": 1073741824,
-        "fast_bytes": 7200000000,
+        "fast_bytes": 1073741824,
         "ram_bytes": 8589934592
       }
     }

@@ -570,11 +570,12 @@ class TestInstallingTheModel:
         assert hub.listed == 0 and breeze.status().model_installed
 
     def test_the_weights_the_turn_asks_for_are_the_installed_files(self, hub):
-        before = breeze.need_vram_bytes(MODEL)
+        before = breeze.need_vram_bytes(MODEL, fast_path=False)
         breeze.install_model()
         weights = sum(len(data) for path, data in MODEL_FILES.items()
                       if path.endswith(".safetensors"))
-        assert breeze.need_vram_bytes(MODEL) == weights + breeze.WORKING_BYTES_DEFAULT
+        assert breeze.need_vram_bytes(MODEL, fast_path=False) == \
+            weights + breeze.WORKING_BYTES_DEFAULT
         assert before == breeze.WEIGHTS_BYTES_DEFAULT + breeze.WORKING_BYTES_DEFAULT
 
     def test_a_small_file_that_is_not_the_blob_the_hub_names_installs_nothing(self, hub):
@@ -692,7 +693,8 @@ class TestStatus:
 
 class TestSettings:
     def test_the_defaults(self, voice_root):
-        assert breeze.settings() == {"card_uuid": "", "model_id": MODEL, "fast_path": False,
+        """The fast path on: without its graphs a frame took 424 ms on an RTX 5090."""
+        assert breeze.settings() == {"card_uuid": "", "model_id": MODEL, "fast_path": True,
                                      "keep_warm": True}
 
     def test_values_are_validated_and_persisted(self, voice_root):
@@ -720,12 +722,22 @@ class TestSettings:
 
 class TestWhatARenderNeeds:
     def test_the_fast_path_asks_for_its_graphs_and_takes_ask_for_nothing_more(self, voice_root):
-        eager = breeze.need_vram_bytes(MODEL)
+        eager = breeze.need_vram_bytes(MODEL, fast_path=False)
         assert eager == breeze.WEIGHTS_BYTES_DEFAULT + breeze.WORKING_BYTES_DEFAULT
-        assert breeze.need_vram_bytes(MODEL, takes=4) == eager, "takes run one after another"
+        assert breeze.need_vram_bytes(MODEL, takes=4, fast_path=False) == eager, \
+            "takes run one after another"
         assert breeze.need_vram_bytes(MODEL, fast_path=True) == eager + breeze.FAST_BYTES_DEFAULT
-        breeze.set_settings({"fast_path": True})
-        assert breeze.need_vram_bytes(MODEL) == eager + breeze.FAST_BYTES_DEFAULT
+        assert breeze.need_vram_bytes(MODEL) == eager + breeze.FAST_BYTES_DEFAULT, "on by default"
+        breeze.set_settings({"fast_path": False})
+        assert breeze.need_vram_bytes(MODEL) == eager
+
+    def test_the_fast_path_asks_for_a_gigabyte_not_upstreams_fast_all(self, voice_root):
+        """Upstream's 14.4 GiB is every stage compiled and every prefill and
+        text-encoder bucket graphed; this worker's fast path peaked at 8.0 GiB
+        with 7.0 GiB of weights on an RTX 5090, so a turn that asked for seven
+        gigabytes more would park an image model for nothing."""
+        assert breeze.FAST_BYTES_DEFAULT == 1 << 30
+        assert breeze.bundle(MODEL).estimates["fast_bytes"] == breeze.FAST_BYTES_DEFAULT
 
     def test_each_path_keeps_its_own_measurement(self, voice_root):
         breeze.note_peak(MODEL, 30 * 1024 ** 3, takes=3, fast_path=True)

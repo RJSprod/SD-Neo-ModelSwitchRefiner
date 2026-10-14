@@ -692,7 +692,7 @@ def load(card_uuid: str, options: "dict | None" = None) -> dict:
             # Without Triton the worker compiles nothing, and its fast path is
             # the CUDA graphs alone: worth a word when the speed is asked about.
             fast = ", fast path" if reply.get("compiled") is not False \
-                else ", fast path (CUDA graphs only)"
+                else ", fast path (CUDA graphs, no torch.compile)"
         logger.info("Model Chain: Breeze TTS 2 loaded its model on %s in %.1f s — %.1f GiB of "
                     "weights, %.1f GiB held, %s%s", record.label(),
                     float(reply.get("load_seconds") or 0.0),

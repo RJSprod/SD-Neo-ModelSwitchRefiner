@@ -2824,8 +2824,8 @@
     // The engines this page knows by name, for a status that lists none.
     const ENGINE_LABELS = {vibevoice: "VibeVoice", breeze: "Breeze TTS 2"};
     // The Fast path switch's tooltip: what it buys, what it costs, and when.
-    const FAST_PATH_TITLE = "Breeze's CUDA-graph fast path: slower first line after a load, faster after; "
-        + "about 7 GB more of the card while warm. Takes effect on the next load.";
+    const FAST_PATH_TITLE = "Breeze's CUDA-graph fast path: a slower first line after a load, much faster after; "
+        + "about 1 GB more of the card while warm. Takes effect on the next load.";
 
     // -- which engine, and what it has -- //
 

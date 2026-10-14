@@ -5799,8 +5799,8 @@ class TestTheEnginesNameInItsWords:
         assert found["line"]["text"] == "Rendering “Trailer 3” · 2 takes · take 1 of 2 · line 3 of 5 · 0:42"
 
 
-FAST_PATH_TITLE = ("Breeze's CUDA-graph fast path: slower first line after a load, faster after; "
-                   "about 7 GB more of the card while warm. Takes effect on the next load.")
+FAST_PATH_TITLE = ("Breeze's CUDA-graph fast path: a slower first line after a load, much faster "
+                   "after; about 1 GB more of the card while warm. Takes effect on the next load.")
 
 
 class TestFastPath:

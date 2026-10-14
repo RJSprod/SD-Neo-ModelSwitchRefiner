@@ -31,6 +31,8 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import re
+import sys
 import threading
 import types
 
@@ -270,6 +272,8 @@ class Upstream:
         self.encoded = {}
         self.cancel_after = None
         self.codec_rate = 24000
+        self.uncompiled = 0
+        self.fail_streams = 0
         upstream = self
 
         def encode_prompt_audio(_audio_tokenizer, audio_path):
@@ -320,6 +324,10 @@ class Upstream:
 
             def iter_audio_chunks(self, inputs, *, request_id=None, seed=None,
                                   token_observer=None):
+                if upstream.fail_streams:
+                    upstream.fail_streams -= 1
+                    raise RuntimeError("operation not permitted when stream is capturing "
+                                       "(C:\\Roots\\Neo3\\breeze\\depth_decoder_graph.py)")
                 upstream.seeds.append(("stream", seed))
                 self.configs.append(self.config)
                 upstream.calls[-1]["request_id"] = request_id
@@ -333,6 +341,9 @@ class Upstream:
                                            dtype=numpy.float32))
 
         self.FastBreezeStreamingRuntime = Runtime
+
+    def graphs_without_compile(self):
+        self.uncompiled += 1
 
 
 class Tokenizer:
@@ -422,18 +433,28 @@ class TestLoading:
         with pytest.raises(worker.Refusal, match="flash-attn"):
             engine.load(model_dir, "flash_attention_2", False)
 
-    def test_the_fast_path_is_the_cuda_graph_stages_without_triton(self, model_dir,
-                                                                     monkeypatch):
+    def test_the_fast_path_graphs_every_stage_even_without_triton(self, model_dir,
+                                                                  monkeypatch):
+        """Upstream ties the depth decoder's and the codec's CUDA graphs to
+        torch.compile, which needs Triton; without it they were left eager and a
+        frame took 424 ms on an RTX 5090. They are captured uncompiled instead."""
         monkeypatch.setattr(worker, "compile_available", lambda: False)
-        engine, _upstream = loaded(model_dir, fast_path=True)
+        engine, upstream = loaded(model_dir, fast_path=True)
         config = engine.runtime.config
-        assert (config.fast_text_encoder, config.fast_backbone_decode) == (True, True)
-        assert (config.fast_backbone_prefill, config.fast_depth_decoder, config.fast_codec) \
-            == (False, False, False)
+        assert (config.fast_text_encoder, config.fast_backbone_decode,
+                config.fast_depth_decoder, config.fast_codec) == (True, True, True, True)
+        assert config.fast_backbone_prefill is False
+        assert upstream.uncompiled == 1, "graphed, not compiled"
         monkeypatch.setattr(worker, "compile_available", lambda: True)
-        engine, _upstream = loaded(model_dir, fast_path=True)
+        engine, upstream = loaded(model_dir, fast_path=True)
         assert (engine.runtime.config.fast_depth_decoder, engine.runtime.config.fast_codec) \
             == (True, True)
+        assert upstream.uncompiled == 0, "with Triton, upstream compiles as it means to"
+        engine, upstream = loaded(model_dir, fast_path=False)
+        assert not any((engine.runtime.config.fast_depth_decoder,
+                        engine.runtime.config.fast_codec,
+                        engine.runtime.config.fast_backbone_decode))
+        assert upstream.uncompiled == 0
 
     @pytest.mark.parametrize("attention", ["flash_attention_2", "eager"])
     def test_the_fast_path_graphs_the_text_encoder_only_under_sdpa(self, model_dir,
@@ -801,6 +822,76 @@ class _Held:
         if not found:
             self.release.wait(5.0)
         return found
+
+
+class TestTheFastPathWithoutTriton:
+    def test_upstreams_depth_graph_is_built_uncompiled_and_the_codec_compiles_nothing(
+            self, monkeypatch):
+        """Upstream's own batch path builds the depth decoder's graph with
+        fast=False and captures it; the codec's lane captures its step whatever
+        its activations are."""
+        made, compiled = [], []
+
+        class DepthDecoderGraph:
+            def __init__(self, depth_decoder=None, *, fast=False, batch_size=2):
+                made.append(fast)
+
+        class MultiRequestStreamRuntime:
+            def _compile_snakes(self):
+                compiled.append(True)
+
+        package = types.ModuleType("models")
+        fast_streaming = types.ModuleType("models.fast_streaming")
+        stream_runtime = types.ModuleType("models.stream_runtime")
+        fast_streaming.DepthDecoderGraph = DepthDecoderGraph
+        stream_runtime.MultiRequestStreamRuntime = MultiRequestStreamRuntime
+        package.fast_streaming, package.stream_runtime = fast_streaming, stream_runtime
+        for name, module in (("models", package), ("models.fast_streaming", fast_streaming),
+                             ("models.stream_runtime", stream_runtime)):
+            monkeypatch.setitem(sys.modules, name, module)
+        worker.Upstream.graphs_without_compile()
+        worker.Upstream.graphs_without_compile()
+        fast_streaming.DepthDecoderGraph("depth", fast=True, batch_size=2)
+        assert made == [False]
+        assert fast_streaming.DepthDecoderGraph.__mro__[1] is DepthDecoderGraph, "wrapped once"
+        MultiRequestStreamRuntime()._compile_snakes()
+        assert compiled == []
+
+    def test_a_capture_that_fails_is_refused_with_what_to_do(self, model_dir, capsys,
+                                                             monkeypatch):
+        """The graphs are captured inside the first line after a load; a reply
+        carries no library message, so the refusal says what to do and the log
+        says why, without the path."""
+        monkeypatch.setattr(worker, "compile_available", lambda: False)
+        upstream = Upstream()
+        upstream.fail_streams = 1
+        engine, _upstream = loaded(model_dir, upstream=upstream, fast_path=True)
+        line = ([{"speaker": 1, "text": "A."}], [sample_voice(1, 0, 1.0)], pcm(1.0))
+        with pytest.raises(worker.Refusal, match="turn Fast path off"):
+            run(engine, parse(*line))
+        said = capsys.readouterr().err
+        assert "could not be set up — RuntimeError: operation not permitted" in said
+        assert "Roots" not in said and "…" in said
+        _found, audio, _progress = run(engine, parse(*line))
+        assert audio.size and engine.graphed is True
+        upstream.fail_streams = 1
+        with pytest.raises(RuntimeError):
+            run(engine, parse(*line))
+
+    def test_off_the_fast_path_a_failure_is_the_renders_own(self, model_dir):
+        upstream = Upstream()
+        upstream.fail_streams = 1
+        engine, _upstream = loaded(model_dir, upstream=upstream, fast_path=False)
+        with pytest.raises(RuntimeError):
+            run(engine, parse([{"speaker": 1, "text": "A."}], [sample_voice(1, 0, 1.0)],
+                              pcm(1.0)))
+
+    def test_the_log_says_how_long_a_frame_took(self, model_dir, capsys):
+        engine, upstream = loaded(model_dir)
+        run(engine, parse([{"speaker": 1, "text": "A."}], [sample_voice(1, 0, 1.0)], pcm(1.0)))
+        said = capsys.readouterr().err
+        frames = upstream.frames_per_call
+        assert re.search(rf"— {frames} frame\(s\), \d+ ms a frame, peak", said), said
 
 
 class TestTheSelfTest:
