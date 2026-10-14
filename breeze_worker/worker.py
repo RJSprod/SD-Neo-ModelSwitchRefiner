@@ -61,10 +61,18 @@ cache and the depth decoder -- pass a four-dimensional additive mask, which
 under Flash attention 2 would be unpadded into nonsense. The text encoder
 (``T5Gemma2TextEncoder``) is different: with Flash attention 2 it builds a
 padding mask and runs its own varlen kernel, and Flash attention 2 is the text
-encoder's own preference in Breeze's code when nothing else is said. So
-"Flash attention 2" here is the text encoder on Flash attention 2 and the
-decoders on eager, exactly as both of upstream's entry points run them; "SDPA"
-is every part on SDPA; "Eager" is every part on eager.
+encoder's own preference in Breeze's code when no attention is named
+(``_resolve_text_encoder_attn_implementation``). So "Flash attention 2" here is
+the text encoder on Flash attention 2 and the decoders on eager; "SDPA" is
+every part on SDPA; "Eager" is every part on eager, which is what upstream's
+own entry points (``infer.py`` and ``breeze_infer/api.py``) name.
+
+The fast path's text-encoder CUDA graph is upstream's
+``TextEncoderGraphCache``, which sets the encoder to SDPA with a static mask
+when it is built, whatever was chosen. So that graph is captured only when SDPA
+is the choice; under Flash attention 2 or Eager the fast path is the backbone's
+decode graph (and the compiled stages where Triton exists), and the text encoder
+runs on what was chosen.
 
 CFG, and the clone that cannot take it
 --------------------------------------
@@ -723,6 +731,7 @@ class Engine:
         self.attention = ""
         self.weights_bytes = 0
         self.compiled = False
+        self.text_graph = False
 
     # -- imports ----------------------------------------------------------- #
 
@@ -794,7 +803,13 @@ class Engine:
         directory, a different fast path, or a different attention for the
         decoders replaces what is loaded: the decoders' attention is chosen
         when the model is built, and the fast path's graphs are captured
-        against it.
+        against it. The text encoder's own graph is captured only under SDPA
+        (see the module docstring), which is the decoders' choice too, so
+        Flash attention 2 and Eager stay an attribute apart on the fast path.
+
+        A model whose codec does not speak at :data:`SAMPLE_RATE` -- the rate
+        every voice sample is prepared at and every take is read at -- is let
+        go and refused here, the first point at which the codec is known.
         """
         wanted = str(model_dir or "")
         attention = str(attention or ATTENTION_DEFAULT)
@@ -806,11 +821,12 @@ class Engine:
         fast = bool(fast_path)
         backbone = self._backbone_of(attention)
         if self.model is not None and wanted == self.model_dir and fast == self.fast_path \
-                and backbone == self.backbone and (not fast or attention == self.attention):
+                and backbone == self.backbone:
             self._use_attention(attention)
             return {"resident_bytes": self.resident(), "weights_bytes": self.weights_bytes,
                     "load_seconds": 0.0, "already_loaded": True, "attention": self.attention,
-                    "fast_path": self.fast_path}
+                    "fast_path": self.fast_path, "text_graph": self.text_graph,
+                    "sample_rate": SAMPLE_RATE}
         if not wanted or not os.path.isdir(wanted):
             raise Refusal("the model directory does not exist")
         if not os.path.isdir(os.path.join(wanted, "audio_tokenizer")):
@@ -826,13 +842,19 @@ class Engine:
             up.Path(wanted), device=device, attn_implementation=backbone)
         up.update_generation_config_for_breeze(model)
         compiled = fast and compile_available()
+        text_graph = fast and backbone == "sdpa"
         config = up.FastStreamingConfig(
             max_new_tokens=MAX_NEW_TOKENS, max_seq_len=MAX_SEQ_LEN, fast_all=None,
-            fast_text_encoder=fast, fast_backbone_prefill=False, fast_backbone_decode=fast,
-            fast_depth_decoder=compiled, fast_codec=compiled,
+            fast_text_encoder=text_graph, fast_backbone_prefill=False,
+            fast_backbone_decode=fast, fast_depth_decoder=compiled, fast_codec=compiled,
             repetition_penalty=REPETITION_PENALTY)
         runtime = up.FastBreezeStreamingRuntime(model, audio_tokenizer, config,
                                                 tokenizer=tokenizer)
+        rate = int(getattr(runtime, "sample_rate", 0) or SAMPLE_RATE)
+        if rate != SAMPLE_RATE:
+            runtime = model = audio_tokenizer = tokenizer = None
+            self._release()
+            raise Refusal(f"the model's codec speaks at {rate} Hz rather than {SAMPLE_RATE}")
         weights = 0
         for owner in (model, getattr(audio_tokenizer, "model", None)):
             if owner is None:
@@ -844,17 +866,21 @@ class Engine:
         self.model_dir = wanted
         self.fast_path = fast
         self.compiled = compiled
+        self.text_graph = text_graph
         self.backbone = backbone
         self.attention = ""
         self.weights_bytes = weights
         self._use_attention(attention)
         elapsed = time.monotonic() - began
+        stages = ""
+        if fast:
+            stages = (", fast path" + ("" if compiled else " (CUDA graphs only)")
+                      + ("" if text_graph else ", the text encoder ungraphed"))
         _note(f"loaded in {elapsed:.1f} s — {weights / float(1 << 30):.1f} GiB of weights, "
-              f"{ATTENTION[attention]}, decoders {backbone}"
-              f"{', fast path' + ('' if compiled else ' (CUDA graphs only)') if fast else ''}")
+              f"{ATTENTION[attention]}, decoders {backbone}{stages}")
         return {"resident_bytes": self.resident(), "weights_bytes": weights,
                 "load_seconds": elapsed, "attention": attention, "fast_path": fast,
-                "compiled": compiled}
+                "compiled": compiled, "text_graph": text_graph, "sample_rate": rate}
 
     def _use_attention(self, attention: str) -> None:
         """Set the text encoder's attention: Flash attention 2, or the decoders' own.
@@ -893,16 +919,21 @@ class Engine:
         self.model_dir = ""
         self.fast_path = False
         self.compiled = False
+        self.text_graph = False
         self.backbone = ""
         self.attention = ""
         self.weights_bytes = 0
+        self._release()
+        return {"resident_bytes": self.resident()}
+
+    def _release(self) -> None:
+        """Give the card back what nothing holds any more."""
         gc.collect()
         if self.torch is not None and self._on_card():
             try:
                 self.torch.cuda.empty_cache()
             except Exception:  # noqa: BLE001 - nothing to empty
                 pass
-        return {"resident_bytes": self.resident()}
 
     # -- rendering --------------------------------------------------------- #
 
@@ -925,8 +956,7 @@ class Engine:
             raise Refusal("no model is loaded")
         torch, numpy = self._frameworks()
         if request.attention != self.attention:
-            if self._backbone_of(request.attention) != self.backbone \
-                    or (self.fast_path and request.attention != self.attention):
+            if self._backbone_of(request.attention) != self.backbone:
                 raise Refusal("the model is loaded with another attention; load it again")
             self._use_attention(request.attention)
         takes = max(1, int(request.takes or 1))
@@ -1471,11 +1501,17 @@ def selftest() -> int:
     """Prove the staged runtime imports Breeze. One JSON line out.
 
     Run by the installer against a *staged* interpreter before anything is
-    promoted, with no model: torch, transformers and ``qwen_tts`` are
-    imported, Breeze's own entry points are resolved from the source folder
-    the environment names, and the versions are printed. ``sox`` is reported
-    rather than required: its Python wrapper only warns when the program is
-    not installed, and nothing Breeze uses calls it.
+    promoted, with no model: torch, transformers and torchaudio are imported,
+    Breeze's own entry points are resolved from the source folder the
+    environment names, and then what a load imports and nothing above would
+    reach -- ``qwen_tts``, which upstream imports only inside ``load_runtime``,
+    with the native libraries its codec loads (onnxruntime, librosa's numba,
+    torchaudio's), and the fast streaming runtime's codec decoder
+    (``models.stream_runtime``), which upstream imports at the first render.
+    A library that will not load fails here, before the runtime is promoted,
+    rather than at the first load. The versions are printed. ``sox`` is
+    reported rather than required: its Python wrapper only warns when the
+    program is not installed, and nothing Breeze uses calls it.
 
     Flash attention 2 is *imported*, not just found: the community wheel is a
     compiled extension built against one torch, and a wheel that does not
@@ -1503,6 +1539,10 @@ def selftest() -> int:
                 report["flash_attn_error"] = f"{exc.__class__.__name__}: {exc}"[:400]
         report["source"] = bool(_bootstrap_source())
         Upstream()
+        import torchaudio  # noqa: F401 - the import is the check
+        import qwen_tts  # noqa: F401 - what load_runtime imports, natively linked
+
+        importlib.import_module("models.stream_runtime")
         report["breeze"] = _commit()
         report["cuda"] = bool(torch.cuda.is_available())
         report["attention"] = attention_available()

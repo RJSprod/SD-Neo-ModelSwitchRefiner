@@ -428,7 +428,9 @@ def stub(tmp_path, monkeypatch, voice_root):
     settings = {"model_id": "breeze-tts-2", "fast_path": False}
     peaks = []
     refusal = [""]
+    broken = []
     module = types.SimpleNamespace(
+        mark_runtime_broken=broken.append,
         LABEL="Breeze TTS 2",
         refusal=lambda: refusal[0],
         runtime_python=lambda: Path(sys.executable),
@@ -443,6 +445,7 @@ def stub(tmp_path, monkeypatch, voice_root):
     monkeypatch.setattr(runtime, "STOP_GRACE", 3.0)
     monkeypatch.setattr(runtime, "TERMINATE_GRACE", 1.5)
     found = Stub(tmp_path, script, models, plan, settings, peaks, refusal, module)
+    found.broken = broken
     yield found
     runtime.stop("", "test finished")
     with runtime._table_lock:
@@ -577,14 +580,31 @@ class TestTheHandshakeRefusesWhatThisBuildCannotAccept:
 
     def test_a_runtime_missing_a_part_says_to_reinstall_rather_than_a_class_name(self, stub):
         """Breeze's code sits in a folder beside the runtime, not in a wheel, so
-        an import that fails is a runtime missing a part."""
+        an import that fails is a runtime missing a part -- and the installer is
+        told, so that Install rebuilds it rather than say "already installed"."""
         stub.plan["init_error"] = "ModuleNotFoundError"
         with pytest.raises(runtime.BreezeRuntimeError) as raised:
             runtime.ensure_started(CARD)
-        assert str(raised.value) == ("Part of Breeze TTS 2's runtime is missing. Reinstall it "
-                                     "in the Voice Box tab.")
+        assert str(raised.value) == ("Part of Breeze TTS 2's runtime is missing. Install it "
+                                     "again in the Voice Box tab.")
+        assert stub.broken == ["ModuleNotFoundError"]
         assert not alive(stub.pids()[0])
         assert runtime.status()["cards"] == {}
+
+    def test_a_failure_that_is_not_an_import_marks_nothing(self, stub):
+        stub.plan["init_error"] = "OSError"
+        with pytest.raises(runtime.BreezeRuntimeError) as raised:
+            runtime.ensure_started(CARD)
+        assert str(raised.value) == "Breeze TTS 2 could not read one of its files."
+        assert stub.broken == []
+
+    def test_an_installer_that_cannot_record_it_still_gives_the_sentence(self, stub):
+        def refuse(_reason):
+            raise OSError("read-only")
+        stub.module.mark_runtime_broken = refuse
+        stub.plan["init_error"] = "ImportError"
+        with pytest.raises(runtime.BreezeRuntimeError, match="would not load"):
+            runtime.ensure_started(CARD)
 
     def test_no_runtime_installed_starts_nothing(self, stub):
         stub.module.runtime_python = lambda: None

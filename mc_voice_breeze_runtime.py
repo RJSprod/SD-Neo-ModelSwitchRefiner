@@ -38,8 +38,10 @@ worker whose UUID does not match the card by key, one that reports no UUID at
 all ("cannot prove which card it is on"), one that found no CUDA device, one
 speaking another protocol or claiming another name, one that -- off Windows,
 where the parent arranged the job object itself -- could not arrange its own
-death with this process, and one whose codec does not speak at the rate every
-voice sample was prepared at.
+death with this process, and one that speaks another rate than every voice
+sample is prepared at. The model's codec is not loaded at the handshake; the
+worker refuses a model whose codec speaks another rate at its load, the first
+point at which the codec is known.
 
 How a Breeze render differs from a VibeVoice one
 ------------------------------------------------
@@ -1002,7 +1004,10 @@ def _exchange(record: _Process, header: dict, payload: bytes, timeout: float,
                                      exc_info=True)
                 continue
             if not reply.get("ok", True):
-                raise BreezeRuntimeError(_readable(str(reply.get("error") or "")))
+                error = str(reply.get("error") or "")
+                if error in _MISSING_PART:
+                    _note_broken(error)
+                raise BreezeRuntimeError(_readable(error))
             return reply, body
     finally:
         with record.lock:
@@ -1018,6 +1023,21 @@ def _write(record: _Process, header: dict, payload: bytes) -> None:
             protocol.write_frame(started.stdin, header, payload)
     except Exception as exc:
         raise _WorkerGone(str(exc)) from None
+
+
+_MISSING_PART = ("ImportError", "ModuleNotFoundError")
+"""What a worker answers when a part of the runtime would not import: Breeze's
+code, ``qwen_tts`` and its native libraries are imported at a load or a first
+render, after the install's self-test had imported them all."""
+
+
+def _note_broken(error: str) -> None:
+    """Have the installer record the runtime as broken, so Install rebuilds it."""
+    try:
+        _installer().mark_runtime_broken(error)
+    except Exception:
+        logger.debug("Model Chain: could not record Breeze's runtime as broken",
+                     exc_info=True)
 
 
 def _readable(reason: str) -> str:
@@ -1038,10 +1058,10 @@ def _readable(reason: str) -> str:
         "OSError": "Breeze TTS 2 could not read one of its files.",
         "FileNotFoundError": "One of Breeze TTS 2's files is missing. Reinstall it in the "
                              "Voice Box tab.",
-        "ImportError": "Part of Breeze TTS 2's runtime is missing. Reinstall it in the "
-                       "Voice Box tab.",
-        "ModuleNotFoundError": "Part of Breeze TTS 2's runtime is missing. Reinstall it in "
-                               "the Voice Box tab.",
+        "ImportError": "Part of Breeze TTS 2's runtime would not load. Install it again "
+                       "in the Voice Box tab.",
+        "ModuleNotFoundError": "Part of Breeze TTS 2's runtime is missing. Install it again "
+                               "in the Voice Box tab.",
         "MemoryError": "There was not enough memory to run Breeze TTS 2.",
         "OutOfMemoryError": "The card ran out of memory during that Breeze TTS 2 request.",
         "KeyboardInterrupt": "Breeze TTS 2 was interrupted.",

@@ -199,13 +199,14 @@ SOURCE = {
     "models/__init__.py": b"",
     "models/fast_streaming.py": (b"class FastBreezeStreamingRuntime:\n    pass\n"
                                  b"class FastStreamingConfig:\n    pass\n"),
+    "models/stream_runtime/__init__.py": b"",
 }
 
 
 class World:
     """What the publishers serve, by URL, and what was asked for."""
 
-    def __init__(self, folder: Path, flash_loads: bool = True):
+    def __init__(self, folder: Path, flash_loads: bool = True, qwen_loads: bool = True):
         self.folder = folder
         folder.mkdir(parents=True, exist_ok=True)
         self.served: dict = {}
@@ -213,11 +214,14 @@ class World:
         self.wheels = {}
         flash = ("" if flash_loads else
                  "raise ImportError('DLL load failed while importing flash_attn_2_cuda')\n")
+        qwen = ("" if qwen_loads else
+                "raise ImportError('DLL load failed while importing "
+                "onnxruntime_pybind11_state')\n")
         for filename, distribution, version, files in (
                 ("transformers-4.57.3-py3-none-any.whl", "transformers", "4.57.3",
                  {"transformers/__init__.py": "__version__ = '4.57.3'\n"}),
                 ("qwen_tts-0.1.1-py3-none-any.whl", "qwen-tts", "0.1.1",
-                 {"qwen_tts/__init__.py": ""}),
+                 {"qwen_tts/__init__.py": qwen}),
                 ("torch-2.9.1+cu128-cp313-cp313-win_amd64.whl", "torch", "2.9.1+cu128",
                  {"torch/__init__.py": "__version__ = '2.9.1+cu128'\n"
                                        "class cuda:\n"
@@ -368,6 +372,42 @@ class TestInstallingTheRuntime:
                                                          "installed, but it would not load")
         assert "would not load" in breeze.refuse({"attention": "flash_attention_2"})
         assert breeze.refuse({"attention": "sdpa"}) == ""
+
+    def test_a_codec_library_that_will_not_load_installs_nothing(self, windows, tmp_path,
+                                                                 monkeypatch):
+        """qwen_tts is imported by upstream only inside load_runtime; the self-test
+        imports it first, so a native library that will not load fails here."""
+        found = World(tmp_path / "served", qwen_loads=False)
+        manifest_path = tmp_path / "managed-breeze-models.json"
+        manifest_path.write_text(json.dumps(found.manifest()), encoding="utf-8")
+        monkeypatch.setattr(paths, "breeze_manifest_path", lambda: manifest_path)
+        breeze._manifest_cache_clear()
+        monkeypatch.setattr(models, "read_index_page", found.page)
+        monkeypatch.setattr(models, "_download", found.download)
+        monkeypatch.setattr(models, "_resolve", found.resolve)
+        monkeypatch.setattr(models, "_declared_size", lambda url: len(found.served[url]))
+        with pytest.raises(breeze.BreezeError, match="onnxruntime_pybind11_state"):
+            breeze.install_runtime()
+        assert breeze.runtime_python() is None
+        assert not paths.breeze_runtime_manifest().exists()
+
+    def test_a_runtime_that_failed_an_import_is_rebuilt_by_install(self, world):
+        """A part removed or damaged after the self-test (a quarantined library)
+        is reported by the worker; Install then rebuilds instead of saying the
+        runtime is already there."""
+        assert breeze.mark_runtime_broken("ImportError") is False, "nothing installed yet"
+        breeze.install_runtime()
+        assert breeze.mark_runtime_broken("ImportError") is True
+        found = breeze.status()
+        assert found.stale and not found.runtime_installed and not found.ready
+        assert found.message == breeze.BROKEN_MESSAGE == breeze.refusal()
+        assert breeze.public_status()["stale"] is True
+        said = []
+        breeze.install_runtime(on_status=said.append)
+        assert "The Breeze runtime is already installed." not in said
+        record = json.loads(paths.breeze_runtime_manifest().read_text(encoding="utf-8"))
+        assert "broken" not in record
+        assert breeze.status().runtime_installed and not breeze.status().stale
 
     def test_a_source_file_that_is_not_the_pinned_one_installs_nothing(self, world):
         url = world.source["breeze_infer/runtime.py"]["url"]

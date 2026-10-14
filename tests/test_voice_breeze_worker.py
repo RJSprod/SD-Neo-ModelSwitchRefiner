@@ -269,6 +269,7 @@ class Upstream:
         self.loads = []
         self.encoded = {}
         self.cancel_after = None
+        self.codec_rate = 24000
         upstream = self
 
         def encode_prompt_audio(_audio_tokenizer, audio_path):
@@ -315,6 +316,7 @@ class Upstream:
             def __init__(self, model, audio_tokenizer, config, *, tokenizer=None):
                 self.config = config
                 self.configs = []
+                self.sample_rate = upstream.codec_rate
 
             def iter_audio_chunks(self, inputs, *, request_id=None, seed=None,
                                   token_observer=None):
@@ -432,6 +434,49 @@ class TestLoading:
         engine, _upstream = loaded(model_dir, fast_path=True)
         assert (engine.runtime.config.fast_depth_decoder, engine.runtime.config.fast_codec) \
             == (True, True)
+
+    @pytest.mark.parametrize("attention", ["flash_attention_2", "eager"])
+    def test_the_fast_path_graphs_the_text_encoder_only_under_sdpa(self, model_dir,
+                                                                   monkeypatch, attention):
+        """Upstream's text-encoder graph sets the encoder to SDPA when it is built,
+        whatever was chosen, so it is captured only when SDPA is the choice: under
+        Flash attention 2 or Eager the text encoder runs on what was chosen."""
+        monkeypatch.setattr(worker, "flash_attention_available", lambda: True)
+        monkeypatch.setattr(worker, "compile_available", lambda: False)
+        engine, upstream = loaded(model_dir, attention=attention, fast_path=True)
+        config = engine.runtime.config
+        assert (config.fast_text_encoder, config.fast_backbone_decode) == (False, True)
+        assert engine.model.text_encoder.config._attn_implementation == attention
+        found = engine.load(model_dir, "sdpa", True)
+        assert len(upstream.loads) == 2, "SDPA's decoders are another model"
+        assert engine.runtime.config.fast_text_encoder is True
+        assert (found["text_graph"], found["fast_path"]) == (True, True)
+
+    def test_on_the_fast_path_flash_attention_and_eager_are_an_attribute_apart(
+            self, model_dir, monkeypatch):
+        monkeypatch.setattr(worker, "flash_attention_available", lambda: True)
+        engine, upstream = loaded(model_dir, attention="eager", fast_path=True)
+        found = engine.load(model_dir, "flash_attention_2", True)
+        assert found["already_loaded"] is True and len(upstream.loads) == 1
+        assert engine.model.text_encoder.layer.config._attn_implementation == \
+            "flash_attention_2"
+        run(engine, parse([{"speaker": 1, "text": "A."}], [sample_voice(1, 0, 1.0)], pcm(1.0),
+                          attention="eager"))
+        assert len(upstream.loads) == 1
+        assert engine.model.text_encoder.config._attn_implementation == "eager"
+
+    def test_a_codec_at_another_rate_is_let_go_and_refused(self, model_dir):
+        """Every voice sample is prepared at 24 kHz and every take read at it; the
+        load is the first point at which the model's codec is known."""
+        upstream = Upstream()
+        upstream.codec_rate = 16000
+        engine = worker.Engine(device="cpu", upstream=upstream)
+        engine.torch, engine.numpy = Torch, numpy
+        with pytest.raises(worker.Refusal, match="16000 Hz rather than 24000"):
+            engine.load(model_dir, "sdpa", False)
+        assert (engine.model, engine.runtime, engine.model_dir) == (None, None, "")
+        upstream.codec_rate = 24000
+        assert engine.load(model_dir, "sdpa", False)["sample_rate"] == 24000
 
     def test_loading_what_is_loaded_is_a_no_op(self, model_dir):
         engine, upstream = loaded(model_dir)
@@ -764,3 +809,23 @@ class TestTheSelfTest:
         assert worker.selftest() == 1
         report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert report["ok"] is False and "torch" in report["error"]
+
+    @pytest.mark.parametrize("missing", ["torchaudio", "qwen_tts", "models.stream_runtime"])
+    def test_what_a_load_imports_is_imported_here_first(self, capsys, monkeypatch, missing):
+        """Upstream imports qwen_tts only inside load_runtime, and the streaming
+        codec at the first render: a native library that will not load has to
+        fail the install, not the first load."""
+        modules = __import__("sys").modules
+        fake = types.SimpleNamespace(__version__="2.9.1", cuda=types.SimpleNamespace(
+            is_available=lambda: False))
+        monkeypatch.setitem(modules, "torch", fake)
+        monkeypatch.setattr(worker, "Upstream", lambda: None)
+        monkeypatch.setattr(worker, "_bootstrap_source", lambda: "")
+        for name in ("torchaudio", "qwen_tts", "models", "models.stream_runtime"):
+            monkeypatch.setitem(modules, name, types.ModuleType(name))
+        monkeypatch.setitem(modules, missing, None)
+        assert worker.selftest() == 1
+        report = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert report["ok"] is False and missing in report["error"]
+        monkeypatch.setitem(modules, missing, types.ModuleType(missing))
+        assert worker.selftest() == 0

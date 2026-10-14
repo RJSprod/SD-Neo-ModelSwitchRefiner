@@ -175,7 +175,13 @@ choices are therefore:
 |---|---|---|
 | **Flash attention 2** (default) | Flash attention 2 | Eager |
 | **SDPA** | SDPA | SDPA |
-| **Eager** (upstream's) | Eager | Eager |
+| **Eager** (upstream's `infer.py` and API) | Eager | Eager |
+
+Flash attention 2 is the text encoder's own preference in Breeze's code only when
+no attention is named (`_resolve_text_encoder_attn_implementation`); upstream's
+entry points name eager, so the default here is a combination upstream's own
+command line never runs, which is why the first renders on the owner's machine
+are the measurement.
 
 Flash attention 2 and Eager build the same model, so switching between them is
 one attribute; SDPA builds the decoders differently and is a reload. The worker
@@ -191,9 +197,18 @@ Triton, so `torch.compile` has no backend there: the worker turns the compiled
 stages on only when Triton is importable, the prefill graphs off (they are
 frozen to a 256-token prefill by upstream's warm-up profile, and a cloned line's
 prompt is longer), and uses no frozen profile. On the owner's machine the fast
-path is therefore the two CUDA-graph stages, and the log says *fast path (CUDA
+path is therefore the CUDA-graph stages, and the log says *fast path (CUDA
 graphs only)*. A warm worker keeps the path it was loaded with until it leaves
 the card.
+
+Upstream's text-encoder graph (`TextEncoderGraphCache`) sets the encoder's
+`_attn_implementation` to SDPA, with a static mask, when it is built, whatever
+was chosen. So the worker captures it only when SDPA is the choice: under Flash
+attention 2 or Eager the fast path is the backbone's decode graph (and the
+compiled stages where Triton exists), the text encoder runs ungraphed on the
+choice, and the attention an output's infotext names is the one that ran. It
+also keeps Flash attention 2 and Eager an attribute apart on the fast path, as
+off it.
 
 **Memory.** Upstream states about 7.7 GiB for eager inference and 14.4 GiB with
 every fast stage. A turn asks for the weights (the installed files' sizes once
@@ -269,10 +284,22 @@ the larger of the estimate and the measurement is what the turn asks for.
   an unpacked archive and refuses any file that is not the pinned bytes.
 
 The runtime is a venv without pip, every wheel unpacked; the worker's
-`--selftest` runs in the staged interpreter before anything is promoted. An
-installed runtime whose closure — wheels, torch's and torchaudio's versions, the
-Flash attention wheel and Breeze's commit and files — differs from this build's
-is **stale**: Install rebuilds it.
+`--selftest` runs in the staged interpreter before anything is promoted. It
+imports what a load imports and nothing else would reach before one: upstream
+imports `qwen_tts` only inside `load_runtime`, and the streaming codec
+(`models.stream_runtime`) at the first render, and those carry the native
+libraries (onnxruntime, librosa's numba, torchaudio's) most likely to refuse to
+load on a given machine. An installed runtime whose closure — wheels, torch's
+and torchaudio's versions, the Flash attention wheel and Breeze's commit and
+files — differs from this build's is **stale**: Install rebuilds it. So is one
+whose worker has since answered with a failed import (`mark_runtime_broken`,
+`BROKEN_MESSAGE`): a part removed or damaged on disk after the self-test passed,
+which only a rebuild mends, and without the record Install would have said
+*already installed*.
+
+The model's codec is checked at its load, the first point at which it is known:
+a codec that does not speak at 24 kHz, the rate every voice sample is prepared
+at and every take is read at, is let go and refused.
 
 **The model**, `BreezeBlue/Breeze-TTS-2`, is listed rather than named: the hub's
 own tree at the commit `main` names, every file with its size and the digest the
@@ -302,6 +329,14 @@ model or of what it renders on your own machine. The install card says so.
   VibeVoice's too).
 * **Whisper's thirty seconds** (section 6), in Voice Chat's dictation as much as
   in the Voice Box.
+* **From a review against upstream's own code**, before anything ran: the fast
+  path's text-encoder graph forced SDPA under every choice while the infotext
+  named Flash attention 2 (section 5); the self-test read `qwen_tts`'s version
+  without importing it, so a native library that would not load passed the
+  install and failed the first load, whose advice — reinstall — met *already
+  installed* (section 7); the handshake's sample-rate check compared a constant
+  with itself; and a docstring credited upstream's entry points with the Flash
+  attention 2 default.
 
 ---
 
@@ -340,3 +375,12 @@ model or of what it renders on your own machine. The install card says so.
   could come near it.
 * **Two CUDA torches on one machine** — about 10 GB of wheels on disk between
   the two runtimes. That is the point of separate closures.
+* **Flash attention 2 is part of the runtime**, at the owner's word, from one
+  community host with no digest committed here. If that host stops serving the
+  wheel, or serves other bytes than the first install recorded, the runtime
+  install fails as a whole, though SDPA and Eager would render without it. The
+  way through is a folder install with that same wheel beside the others; a
+  different build of it is a decision for the pin tool (`--flash-attn`), not for
+  the installer. Whether the wheel carries
+  kernels for the 5090's architecture (sm_120) is not stated by its host: the
+  self-test proves it imports, and the first render with it proves the rest.

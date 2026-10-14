@@ -671,6 +671,15 @@ STALE_MESSAGE = ("Breeze's runtime was built by an earlier build of this extensi
                  "pinned different packages or a different Breeze — install the runtime again "
                  "to update it.")
 
+BROKEN_MESSAGE = ("Part of Breeze's runtime would not load the last time it started — install "
+                  "the runtime again to rebuild it.")
+"""Said once a worker has answered a load or a render with an import that failed
+(:func:`mark_runtime_broken`): the install's self-test imported everything a
+load does, so a part that fails afterwards was removed or damaged on disk --
+a quarantined library is the usual cause on Windows -- and only a rebuild
+mends it. The record makes Install rebuild rather than say "already
+installed"."""
+
 
 def _status() -> Status:
     chosen = platform()
@@ -701,6 +710,10 @@ def _status() -> Status:
         found.runtime_message = (STALE_MESSAGE if found.stale else
                                  "Installed, but its interpreter is missing — install the "
                                  "runtime again.")
+    elif installed.get("broken"):
+        found.stale = True
+        found.stale_message = BROKEN_MESSAGE
+        found.runtime_message = BROKEN_MESSAGE
     else:
         found.runtime_installed = True
         flash = installed.get("flash_attn") if isinstance(installed.get("flash_attn"),
@@ -1435,7 +1448,7 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
         raise BreezeError("The Breeze manifest has not pinned Breeze's own code.")
     installed = _read_json(paths.breeze_runtime_manifest())
     if installed and str(installed.get("closure") or "") == closure_id() \
-            and runtime_python() is not None:
+            and runtime_python() is not None and not installed.get("broken"):
         say("The Breeze runtime is already installed.")
         tick(1.0)
         return
@@ -2144,6 +2157,31 @@ def _run_staged(interpreter: Path, arguments: list, what: str, source_root: Path
         logger.warning("Model Chain: could not %s — %s: %s", what, exc.__class__.__name__, exc)
         raise BreezeError(f"The staged Breeze runtime could not be started "
                           f"({exc.__class__.__name__}). Nothing was installed.") from None
+
+
+def mark_runtime_broken(reason: str) -> bool:
+    """Record that the installed runtime failed an import, so Install rebuilds it.
+
+    Called by the runtime when a worker answers with an import that failed
+    (:data:`BROKEN_MESSAGE`). ``reason`` is the exception's class, never a
+    library's message, which can carry a path. Never raises; whether the
+    record was written.
+    """
+    try:
+        target = paths.breeze_runtime_manifest()
+        installed = _read_json(target)
+        if not isinstance(installed, dict) or not installed:
+            return False
+        if installed.get("broken"):
+            return True
+        installed["broken"] = str(reason or "ImportError")[:80]
+        _write_json(target, installed)
+    except Exception:
+        logger.debug("Model Chain: could not record Breeze's runtime as broken", exc_info=True)
+        return False
+    logger.warning("Model Chain: Breeze's runtime failed an import (%s); Install will rebuild "
+                   "it", str(reason or "ImportError")[:80])
+    return True
 
 
 def uninstall() -> Status:

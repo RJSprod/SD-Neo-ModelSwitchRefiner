@@ -6423,13 +6423,16 @@ exactly as VibeVoice's is.
 
 Breeze's **fast path** is a setting of the engine's, off by default — the
 **Fast path** switch beside Keep warm while Breeze is chosen — not of a
-configuration: it replays CUDA graphs for the text encoder and the backbone's
-decode, captured on the first line that needs each shape after a load (a plain
-clone and a guided line are two), which makes that first line slower and every
-line after it faster, and it holds about seven gigabytes more of the card while
-warm, which the turn asks for. Upstream also compiles its depth decoder and codec with
-`torch.compile`, which needs Triton, and Windows has none: there the fast path
-is the two CUDA-graph stages, and the log says *CUDA graphs only*. A warm worker
+configuration: it replays CUDA graphs for the backbone's decode, captured on
+the first line that needs each shape after a load (a plain clone and a guided
+line are two), which makes that first line slower and every line after it
+faster, and it holds about seven gigabytes more of the card while warm, which
+the turn asks for. Under **SDPA** it graphs the text encoder too; upstream's
+text-encoder graph runs the encoder on SDPA whatever was chosen, so under Flash
+attention 2 or Eager the encoder runs ungraphed on the choice, and the attention
+an output names is the one that ran. Upstream also compiles its depth decoder and
+codec with `torch.compile`, which needs Triton, and Windows has none: there the
+fast path is the CUDA-graph stages, and the log says *CUDA graphs only*. A warm worker
 keeps the path it loaded with until it leaves the card. Breeze's figures are
 kept per path, so the fast path's measurement never inflates an eager render's
 request.
@@ -6479,11 +6482,17 @@ wheel at all — its repository's files at one commit, each pinned with its
 SHA-256 and fetched from GitHub's raw host, put in `runtime/breeze-tts/` with a
 `COMMIT` file the worker reports. Demo-only and server-only packages (gradio,
 fastapi, uvicorn) are not shipped. Before anything is promoted the worker's
-self-test runs in the staged interpreter: it imports torch, transformers,
-`qwen_tts` and Breeze's code, and **imports Flash attention 2**, recording whether
-it loads. A runtime built by an earlier build of this extension — other wheels,
-another Flash attention wheel or another Breeze commit — is **stale**, and the
-page says so; Install rebuilds it. The **model** is `BreezeBlue/Breeze-TTS-2`,
+self-test runs in the staged interpreter: it imports torch, torchaudio,
+transformers and Breeze's code, then what a load imports — `qwen_tts` with the
+native libraries its codec loads (onnxruntime, librosa's numba) and the streaming
+codec — so a library that will not load fails the install rather than the first
+render; and it **imports Flash attention 2**, recording whether it loads. A
+runtime built by an earlier build of this extension — other wheels, another
+Flash attention wheel or another Breeze commit — is **stale**, and the page says
+so; Install rebuilds it. So is a runtime whose worker later fails an import —
+a part removed or damaged on disk, a quarantined library being the usual cause
+on Windows: the page says *install the runtime again*, and Install rebuilds it.
+A model whose codec does not speak at 24 kHz is refused at its load. The **model** is `BreezeBlue/Breeze-TTS-2`,
 listed from the hub's own file tree at the commit `main` names: every file
 (except the model card's README and media) with its size and the digest the hub
 states — a weight's LFS SHA-256, a small file's git blob id — fetched at that
