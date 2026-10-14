@@ -190,30 +190,51 @@ self-test *imports* it (a wheel built for another torch fails exactly there) and
 records whether it loads, and until it does the choice is listed greyed — *not
 installed*, or *installed, but it would not load* — and refused at Render.
 
-**The fast path** is an engine setting (`fast_path`, off), not a configuration
-field. Upstream's fast path is CUDA graphs for the text encoder and the backbone's
-decode, and `torch.compile` for the depth decoder and the codec. Windows has no
-Triton, so `torch.compile` has no backend there: the worker turns the compiled
-stages on only when Triton is importable, the prefill graphs off (they are
-frozen to a 256-token prefill by upstream's warm-up profile, and a cloned line's
-prompt is longer), and uses no frozen profile. On the owner's machine the fast
-path is therefore the CUDA-graph stages, and the log says *fast path (CUDA
-graphs only)*. A warm worker keeps the path it was loaded with until it leaves
-the card.
+**The fast path** is an engine setting (`fast_path`, on by default), not a
+configuration field. Upstream's fast path is CUDA graphs for the text encoder,
+the backbone's prefill and decode, the depth decoder and the codec, the last two
+compiled with `torch.compile` before they are captured. Windows has no Triton,
+so `torch.compile` has no backend there. The first build turned the depth
+decoder and the codec off with the compiler, because upstream ties each stage's
+graph to compiling it first — and the owner's first render on an RTX 5090 took
+134 s for 25.4 s of speech, 424 ms for each of its 317 frames, five times slower
+than real time: every frame ran the depth decoder's fifteen steps and the codec
+as thousands of eagerly launched kernels, with the card mostly idle. The graphs
+need no compiler. Upstream's own batch path builds the depth decoder's
+`DepthDecoderGraph` with `fast=False` and captures it (`breeze_infer/batch.py`),
+and the codec's lane captures its step whatever its SnakeBeta activations are.
+So where Triton is missing the worker turns both stages on and
+`Upstream.graphs_without_compile` takes the compiler out of them: the depth
+decoder graph upstream builds is built with `fast=False`, and the codec runtime's
+`_compile_snakes` does nothing. The prefill graphs stay off (they are frozen to a
+256-token prefill by upstream's warm-up profile, and a cloned line's prompt is
+longer), and no frozen profile is used. The log says *fast path (CUDA graphs, no
+torch.compile)*, and every render's line says how long a frame took; a frame is
+80 ms of speech. A warm worker keeps the path it was loaded with until it leaves
+the card. The graphs are captured inside the first line after a load, so a card
+that will not take them fails there: that render is refused with *turn Fast path
+off*, and the reason, without paths, goes to the log, since a reply carries no
+library message. Off, the fast path is upstream's own eager default, kept as
+that way out.
 
 Upstream's text-encoder graph (`TextEncoderGraphCache`) sets the encoder's
 `_attn_implementation` to SDPA, with a static mask, when it is built, whatever
 was chosen. So the worker captures it only when SDPA is the choice: under Flash
 attention 2 or Eager the fast path is the backbone's decode graph (and the
 compiled stages where Triton exists), the text encoder runs ungraphed on the
-choice, and the attention an output's infotext names is the one that ran. It
-also keeps Flash attention 2 and Eager an attribute apart on the fast path, as
-off it.
+choice, and the attention an output's infotext names is the one that ran. The
+text encoder runs once a line, so its graph matters far less than the per-frame
+stages'. It also keeps Flash attention 2 and Eager an attribute apart on the fast
+path, as off it.
 
 **Memory.** Upstream states about 7.7 GiB for eager inference and 14.4 GiB with
-every fast stage. A turn asks for the weights (the installed files' sizes once
-there are some) and a 1 GiB working set, with 7.2 GB more while the fast path is
-on; takes do not add, since they run one after another. Every render's peak is
+every fast stage, compiled and with prefill and text-encoder graphs for every
+length bucket. A turn asks for the weights (the installed files' sizes once
+there are some) and a 1 GiB working set, with 1 GiB more while the fast path is
+on — the first build asked for upstream's 7.2 GB more, and the owner's first
+render peaked at 8.0 GiB with 7.0 GiB of weights and the backbone graphed; the
+depth decoder's and the codec's graphs hold a few tens of megabytes — and takes
+do not add, since they run one after another. Every render's peak is
 kept per path (`<model>` and `<model>+fast` in Breeze's `calibration.json`), and
 the larger of the estimate and the measurement is what the turn asks for.
 
@@ -365,9 +386,15 @@ model or of what it renders on your own machine. The install card says so.
   tests on Linux. The first things to watch: the install's self-test (Flash
   attention's import above all), the handshake, a one-speaker clone's speed on
   each card, and the peak against the estimate.
-* **Speed is unmeasured.** Upstream's figures are an H100 with the fast path
-  warmed; eager on a 3090 may be near real time. The fast path is the lever, and
-  on Windows it is the CUDA-graph stages only.
+* **Speed, measured once.** The first build's first render on the owner's RTX
+  5090 ran at 424 ms a frame (five times slower than real time) with only the
+  backbone graphed; upstream states 0.32 of real time on an H100 with every
+  stage compiled and graphed. The uncompiled graphs of the depth decoder and the
+  codec have not run on the owner's machine yet: the *ms a frame* in the log is
+  the measurement to read, and 80 ms a frame is real time. If it is still short
+  of what the card should do, the next lever is a Triton for Windows
+  (`triton-windows`) in Breeze's runtime, which would let upstream compile the two
+  stages as it means to.
 * **Dialogue sounds cut together.** VibeVoice renders a conversation in one
   breath; Breeze renders each line alone and the Line gap joins them.
 * **A long monologue may show seams** where a line was split.

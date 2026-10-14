@@ -117,13 +117,18 @@ SEED_MAX = 2 ** 31 - 1
 
 WEIGHTS_BYTES_DEFAULT = 7_700_000_000
 WORKING_BYTES_DEFAULT = 1024 * 1024 * 1024
-FAST_BYTES_DEFAULT = 7_200_000_000
+FAST_BYTES_DEFAULT = 1024 * 1024 * 1024
 RAM_BYTES_DEFAULT = 8 * 1024 * 1024 * 1024
 """What a render needs when nothing has been measured yet. Upstream states about
 7.7 GiB for eager inference and 14.4 GiB with every fast stage on; the weights'
 real size replaces the first figure once the model is listed, the working set
 is generous on purpose until :func:`note_peak` has a number, and the fast path
-is asked for on top while it is on."""
+is asked for on top while it is on. Upstream's 14.4 GiB is ``--fast-all``:
+compiled stages and prefill and text-encoder graphs for every length bucket.
+This worker's fast path captures no prefill graphs, the text encoder's only
+under SDPA, and compiles nothing where Triton is missing; its first render on
+an RTX 5090 peaked at 8.0 GiB with 7.0 GiB of weights, so a gigabyte on top is
+the estimate, and the measured peak replaces it once it is larger."""
 
 UPSTREAM = {"eager": "upstream"}
 """Which attention upstream's own command line loads, said beside it in the list."""
@@ -131,13 +136,17 @@ UPSTREAM = {"eager": "upstream"}
 SETTINGS_DEFAULTS = {
     "card_uuid": "",
     "model_id": MODEL_DEFAULT,
-    "fast_path": False,
+    "fast_path": True,
     "keep_warm": True,
 }
 """Breeze's engine settings, and the shape :func:`settings` always answers in.
 
-``fast_path`` defaults off: it is quicker after a warm-up that costs time on
-every load, and it holds about seven more gigabytes of the card while warm.
+``fast_path`` defaults on: without its CUDA graphs every frame runs the depth
+decoder's fifteen steps and the codec as eagerly launched kernels, about five
+times slower than real time on an RTX 5090 under Windows; the graphs cost a few
+seconds on the first line after a load and about a gigabyte of the card while
+warm. Off is upstream's own eager default, kept as the way out if a card will
+not take the graphs.
 """
 
 SETTINGS_KEYS = tuple(SETTINGS_DEFAULTS)

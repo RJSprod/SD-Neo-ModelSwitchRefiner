@@ -5942,7 +5942,7 @@ engine — Install, Keep warm, Unload, the status line — names the one chosen.
 | Direction | — (accepted in the script and dropped) | A slot's standing direction, and a line's own: `Speaker 2 (whispering):` |
 | Vocal events | Read as words | `(laugh)`, `(sigh)`, `(cough)`, `(clears throat)`; `[笑]`, `[叹气]`, `[咳嗽]`, `[清嗓子]` |
 | Takes | A batch in one pass | One after another |
-| Memory | About 19 GB of weights | About 7.7 GB eager; 7 GB more on the fast path |
+| Memory | About 19 GB of weights | About 7.7 GB; about 1 GB more on the fast path |
 | Licence | MIT | **Research and non-commercial use only** (the BreezeBlue Research and Non-Commercial License; the inference code is Apache-2.0) |
 
 Breeze's runtime is its own closure — PyTorch 2.9.1 for CUDA 12.8, transformers
@@ -6403,26 +6403,34 @@ speaker's sample is encoded to codec frames once per render, in memory — no
 file is written for a reference — and every call that needs it is handed those
 frames. A line longer than one call allows is split at its sentence ends, then
 its clauses, then its words, and nothing is dropped or reordered. The cancel
-flag is read at every chunk of audio the codec hands back, which is every 160
-ms of speech, and the progress frames say which line and take is rendering and
-how many seconds it has made. The answer is each take's 32-bit float samples,
+flag is read at every chunk of audio the codec hands back, which is every 80 ms
+of speech on the fast path and 160 ms off it, and the progress frames say which
+line and take is rendering and how many seconds it has made. The answer is each take's 32-bit float samples,
 exactly as VibeVoice's is.
 
-Breeze's **fast path** is a setting of the engine's, off by default — the
+Breeze's **fast path** is a setting of the engine's, **on by default** — the
 **Fast path** switch beside Keep warm while Breeze is chosen — not of a
-configuration: it replays CUDA graphs for the backbone's decode, captured on
-the first line that needs each shape after a load (a plain clone and a guided
-line are two), which makes that first line slower and every line after it
-faster, and it holds about seven gigabytes more of the card while warm, which
-the turn asks for. Under **SDPA** it graphs the text encoder too; upstream's
-text-encoder graph runs the encoder on SDPA whatever was chosen, so under Flash
-attention 2 or Eager the encoder runs ungraphed on the choice, and the attention
-an output names is the one that ran. Upstream also compiles its depth decoder and
-codec with `torch.compile`, which needs Triton, and Windows has none: there the
-fast path is the CUDA-graph stages, and the log says *CUDA graphs only*. A warm worker
-keeps the path it loaded with until it leaves the card. Breeze's figures are
-kept per path, so the fast path's measurement never inflates an eager render's
-request.
+configuration. It replays CUDA graphs for the backbone's decode, the depth
+decoder's fifteen steps and the codec, each captured on the first line that
+needs its shape after a load (a plain clone and a guided line are two), which
+makes that first line slower and every line after it much faster, and it holds
+about a gigabyte more of the card while warm, which the turn asks for. Off,
+every frame runs the depth decoder and the codec as thousands of eagerly
+launched kernels: on an RTX 5090 under Windows a frame took 424 ms, five times
+slower than real time, with the card mostly idle. Upstream ties the depth
+decoder's and the codec's graphs to compiling them with `torch.compile`, which
+needs Triton, and Windows has none; there the worker captures both uncompiled,
+as upstream's own batch path does for the depth decoder, and the log says *fast
+path (CUDA graphs, no torch.compile)*. A card that will not take the graphs
+refuses the render with *turn Fast path off*, and `model_chain.log` says why.
+Under **SDPA** it graphs the text encoder too; upstream's text-encoder graph
+runs the encoder on SDPA whatever was chosen, so under Flash attention 2 or Eager
+the encoder, which runs once a line, runs ungraphed on the choice, and the
+attention an output names is the one that ran. A warm worker keeps the path it
+loaded with until it leaves the card. Breeze's figures are kept per path, so the
+fast path's measurement never inflates an eager render's request. Every
+render's line in the log says how long a frame took (*N ms a frame*): a frame is
+80 ms of speech, so under 80 ms a frame is faster than real time.
 
 ### Installing
 
