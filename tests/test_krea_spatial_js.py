@@ -3524,6 +3524,55 @@ class TestTheCompactCanvas:
 
         assert found["compactDrawn"] == ["r2", "r1", "r3"]
 
+    def test_wired_again_with_nothing_changed_it_redraws_nothing(self):
+        """`wire` runs on every after-update, and Forge raises the next one
+        250 ms after any change to a child list inside its app element --
+        which emptying and refilling the regions holder is. Drawn on every
+        run, this canvas kept the page updating for as long as the layout
+        held a region, on every tab, with every extension's callbacks
+        running each time. The same saved text in the same holder is drawn
+        once: wired again, the very same elements are still there."""
+        found = run("""
+            const before = body.querySelectorAll(".mc-krea-spatial-compact-region");
+            const note = el("mc-krea-spatial-compact-note").textContent;
+            ks.wire();
+            ks.wire();
+            const after = body.querySelectorAll(".mc-krea-spatial-compact-region");
+            report({same: before.length === after.length
+                        && before.every((node, i) => node === after[i]),
+                    noteBefore: note});
+        """, initial=document(regions=(FACE, SIGN)))
+
+        assert found["same"] is True
+        assert found["compactDrawn"] == ["r1", "r3"]
+        assert found["compactNote"] == found["noteBefore"]
+
+    def test_new_text_or_a_holder_gradio_rebuilt_is_drawn_again(self):
+        """The quiet wiring is not a frozen one: a layout the server rewrote
+        is drawn, and so is a holder Gradio replaced under the canvas."""
+        found = run("""
+            const first = body.querySelectorAll(".mc-krea-spatial-compact-region");
+            stateBox.value = %s;
+            ks.wire();
+            const second = body.querySelectorAll(".mc-krea-spatial-compact-region");
+            const holder = el("mc-krea-spatial-compact-regions");
+            const parent = holder.parentNode;
+            const fresh = new El("div");
+            fresh.id = holder.id;
+            parent.removeChild(holder);
+            parent.appendChild(fresh);
+            ks.wire();
+            const third = body.querySelectorAll(".mc-krea-spatial-compact-region");
+            report({redrawn: second.length === 3 && second.every((node) => !first.includes(node)),
+                    ids: second.map((node) => node.dataset.regionId),
+                    again: third.length,
+                    inFresh: third.every((node) => node.parentNode === fresh)});
+        """ % json.dumps(document(regions=(FACE, SIGN, BACKDROP))),
+                    initial=document(regions=(FACE,)))
+
+        assert found["redrawn"] is True and found["ids"] == ["r2", "r1", "r3"], "paint order"
+        assert found["again"] == 3 and found["inFresh"] is True
+
     def test_dragging_a_region_moves_it(self):
         found = run("""
             compactDrag([100, 100], [200, 250], compactRegion("r1"));

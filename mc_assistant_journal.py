@@ -38,11 +38,15 @@ MAX_ENTRY = 64 * 1024
 is not an account of a drag."""
 
 _KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-"""What an entry may call itself: ``drag`` today."""
+"""What an entry may call itself: ``drag``, and ``churn`` -- a page that
+kept updating while nobody was doing anything, with what kept changing
+(the Forge Assistant's quiet-page watch, ``watchChurn``)."""
 
 
 def summary(entry: dict) -> str:
     """One clause of an account, so the line reads before its JSON does."""
+    if entry.get("kind") == "churn":
+        return _churn_summary(entry)
     parts = [str(entry.get("pointer") or "?") + " on the " + str(entry.get("handle") or "?")]
     travel = entry.get("travel")
     if isinstance(travel, (int, float)):
@@ -56,6 +60,27 @@ def summary(entry: dict) -> str:
     else:
         parts.append("nothing else moved")
     return ", ".join(parts)
+
+
+def _churn_summary(entry: dict) -> str:
+    """``24 after-update runs in 7.3 s, nothing pressed for 12 s; most
+    changed: #txt2img_settings 40, div.progress 12``: the page's after-update
+    runs while it was idle, and the nodes whose child lists changed most --
+    where to look for the callback that keeps the page updating."""
+    runs = entry.get("runs")
+    seconds = entry.get("seconds")
+    quiet = entry.get("quiet")
+    head = f"{runs if isinstance(runs, (int, float)) else '?'} after-update runs"
+    if isinstance(seconds, (int, float)):
+        head += f" in {seconds:g} s"
+    if isinstance(quiet, (int, float)):
+        head += f", nothing pressed for {quiet:g} s"
+    targets = entry.get("targets")
+    if isinstance(targets, list) and targets:
+        named = [f"{item.get('node')} {item.get('count')}" for item in targets if isinstance(item, dict)]
+        if named:
+            head += "; most changed: " + ", ".join(named)
+    return head
 
 
 def line(entry: dict) -> str:

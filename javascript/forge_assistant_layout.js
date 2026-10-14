@@ -865,10 +865,44 @@
         if (before !== value) this.forget();
     };
 
+    /** Every shown box fitted at once: all of them set to measure, then all
+     *  measured, then all written. Fitted one by one, each box's measure
+     *  came after the box before it was written, and the column was laid
+     *  out again for every box -- 85 layouts for one move of the panel,
+     *  about 30 ms a frame on the user's Txt2Img. Three layouts now,
+     *  however many boxes. */
     Guard.prototype.fitAll = function () {
-        if (!this.column) return;
-        this.column.querySelectorAll("textarea").forEach((area) => this.fit(area));
+        const column = this.column;
+        if (!column) return;
+        const areas = Array.prototype.filter.call(column.querySelectorAll("textarea"),
+                                                   (area) => shows(area));
+        if (!areas.length) { this.forget(); return; }
+        const keep = column.scrollTop;
+        const befores = areas.map((area) => {
+            const style = area.style;
+            if (!this.saved.has(area)) {
+                this.saved.set(area, {value: style.getPropertyValue("height"),
+                                      priority: style.getPropertyPriority("height")});
+            }
+            const before = style.getPropertyValue("height");
+            style.setProperty("height", "auto", "important");
+            return before;
+        });
+        const values = areas.map((area) => {
+            const computed = window.getComputedStyle(area);
+            const px = (name) => parseFloat(computed.getPropertyValue(name)) || 0;
+            const wanted = computed.boxSizing === "border-box"
+                ? area.scrollHeight + px("border-top-width") + px("border-bottom-width")
+                : area.scrollHeight - px("padding-top") - px("padding-bottom");
+            return Math.ceil(wanted) + "px";
+        });
+        areas.forEach((area, i) => area.style.setProperty("height", values[i], "important"));
+        if (column.scrollTop !== keep) column.scrollTop = keep;
+        // Nothing of this is news to the observer, whether or not a height
+        // changed (`fit` forgets only a change; here every box was written
+        // twice).
         this.forget();
+        return values.some((value, i) => value !== befores[i]);
     };
 
     /** Our own writes are not news to the observer. */
@@ -1138,7 +1172,7 @@
     // gets no margin and stays what the script took it for.
     const DOCK_BESIDE = "forge-assistant-docked-beside";
     // The inline properties the dock writes, each put back as it was found.
-    const DOCK_PROPS = ["left", "top", "width", "height", "visibility"];
+    const DOCK_PROPS = ["left", "top", "width", "height", "visibility", "transform", "will-change"];
 
     function docked(node) {
         return !!(node && node.classList && node.classList.contains(DOCK_COLUMN));
@@ -1197,6 +1231,7 @@
             this.guard.attach(found.column);
             if (NS.fill) NS.fill.refresh();
         }
+        this.settle();
         const style = this.active.column.style;
         // A wider or narrower panel rewraps every box.
         if (rect && Math.round(rect.width) !== this.active.width) {
@@ -1210,6 +1245,7 @@
             // and the slot gives way first -- and letting go here closed the
             // keyboard under somebody typing.
             style.setProperty("visibility", "hidden", "important");
+            this.guard.forget();
             return true;
         }
         const write = (left, top) => {
@@ -1228,13 +1264,49 @@
         const dx = landed.left - rect.left;
         const dy = landed.top - rect.top;
         if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) write(rect.left - dx, rect.top - dy);
+        // The dock's own writes are not news to the guard. They were: its
+        // observer took every placement for Gradio restyling the column and
+        // measured every text box again -- 85 layouts for one move of the
+        // panel, about 30 ms a frame on the user's Txt2Img.
+        this.guard.forget();
         return true;
+    };
+
+    /** Carried through a drag of the panel: the column moved by the same
+     *  transform, on a layer of its own for the drag's duration, laid out
+     *  for nothing. `place` settles it where the drag ends. */
+    Dock.prototype.shift = function (dx, dy) {
+        if (!this.active) return false;
+        const style = this.active.column.style;
+        if (!this.shifted) {
+            this.shifted = true;
+            style.setProperty("will-change", "transform", "important");
+        }
+        style.setProperty("transform", "translate(" + Math.round(dx) + "px, " + Math.round(dy) + "px)",
+                          "important");
+        this.guard.forget();
+        return true;
+    };
+
+    /** The shift taken off again, as the column was found. */
+    Dock.prototype.settle = function () {
+        if (!this.shifted) return;
+        this.shifted = false;
+        if (!this.active) return;
+        const style = this.active.column.style;
+        ["transform", "will-change"].forEach((name) => {
+            const entry = this.active.saved.find((saved) => saved.name === name);
+            if (entry && entry.value) style.setProperty(name, entry.value, entry.priority || "");
+            else style.removeProperty(name);
+        });
+        this.guard.forget();
     };
 
     /** Back in the page, exactly as it was. */
     Dock.prototype.release = function () {
         const active = this.active;
         if (!active) return false;
+        this.shifted = false;
         this.active = null;
         this.guard.detach();
         const style = active.column.style;

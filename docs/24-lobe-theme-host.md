@@ -56,6 +56,15 @@ What that file says, and what became of each line:
 | `i18n`, `liteAnimation`, `promptEditor`, `enableHighlight`, `logoType`, `logoCustomUrl`, `sidebarFixedMode`, `extraNetworkFixedMode` | — | not built: translations, the background glow, Lobe's prompt editor and highlighter, its logo, floating panels |
 | `detail` | "Not Found" | a 404 body the theme once saved as a setting; ignored |
 
+**Applied quietly (2026-10-14).** `apply` runs on every after-update, and
+Forge raises the next after-update 250 ms after any change to a child list
+inside its app element: the first build wrote the title's text and rebuilt
+the ⋯ menu on every apply, so the page updated every 300 ms on every tab for
+as long as it was open -- a 50 ms stall under every drag of the Forge
+Assistant, in the user's own log. Every write is conditional now (`show`,
+`setClass`, `menuFor`), and `tests/test_theme_layout.py` holds that an apply
+to a settled page changes no child list. docs/22 §3.36 has the measurements.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own

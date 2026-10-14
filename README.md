@@ -2578,6 +2578,13 @@ same document; this is a shortcut into that document, not another copy of it.
 too — otherwise Undo would leave the screen and the generation disagreeing,
 which is the one thing Auto Save exists to prevent.
 
+The canvas is drawn again only when the saved layout, or the box it is drawn
+in, has changed. Drawn on every update of the page, as it first was, it kept
+the page updating forever whenever a layout held a region — Forge answers any
+change to the page's contents with another round of every extension's
+after-update callbacks — which the Forge Assistant's *page that never settles*
+line now reports.
+
 #### Named layouts, and the two kinds of save
 
 A **Layout** dropdown saves the current composition under a name and loads it
@@ -3532,13 +3539,19 @@ no drag of a selection that happens to hold the handle (which carried a ghost
 of the whole page under the cursor while the panel went nowhere); the
 launcher and the header are nothing the browser can select or drag at all;
 and a finger on either does not scroll the page under it, even where a
-stylesheet has given buttons a touch-action of their own — and, because one
-browser pans the page under a finger whatever the page says about the touch,
-while a finger or a pen drags a handle the page cannot scroll at all: the
-scrolling element (and, under focus mode, the focused workspace) is held
-`overflow: hidden` with its scrollbar's gutter kept so nothing shifts, and let
-go the moment the finger lifts. A mouse never pans, so a mouse drag leaves the
-page alone. Every drag writes an account of itself into the extension's own
+stylesheet has given buttons a touch-action of their own. One browser pans the
+page under a finger whatever the page says about the touch, so a finger's or
+a pen's drag watches for the page moving under it, and the moment it does the
+page is held where the press found it: the scrolling element (and, under focus
+mode, the focused workspace) is put back to where it was and held
+`overflow: hidden` with its scrollbar's gutter kept so nothing shifts, until
+the finger lifts. A page that stays still is never held — holding it costs the
+whole visible tab a layout, which is why it is no longer held at the press —
+and a mouse never pans, so a mouse drag leaves the page alone. While it is
+dragged, the handle moves by a transform on a layer of its own rather than by
+its position (and the docked settings column with the panel, by the same
+one), so nothing is laid out or painted again on the way; where it is let go
+is written once, as a position. Every drag writes an account of itself into the extension's own
 log, `<WebUI data directory>/model_chain_llm/logs/model_chain.log`, as one
 `Forge Assistant drag` line between whatever else was being logged: what was
 pressed and with what, how long the press waited for the page, the handle's
@@ -3555,6 +3568,18 @@ line goes to the browser's console, and `forgeAssistant.shell.lastDrag` keeps
 the last. A drag that moved more than the handle says so on the panel's status
 line as well, where a phone can read it with the panel open. To report a drag
 that went wrong, drag once and send that log file.
+
+**The page that never settles.** Forge runs every extension's after-update
+callbacks a quarter of a second after anything changes inside its app element,
+and a callback that itself changes something on every run keeps the page
+updating forever — on one machine about 50 ms out of every 300, felt as a
+stutter under every drag of the panel. Two of this extension's own did exactly
+that (the theme's header and the spatial compact canvas; both now write only
+what changed), and another extension's would be invisible from here. So the
+panel counts those runs and, when twenty come within ten seconds while nothing
+has been pressed for three and no generation or reply is running, writes one
+`Forge Assistant churn` line to the same log, once per page load, naming the
+nodes whose contents changed most: where to look.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the panel
 anywhere in the window. Turning it on leaves it exactly where it is rather than
@@ -3656,7 +3681,10 @@ as it is with the conversation at its fullest — the same height, not the
 window's — and the column scrolls inside that. Everything in the column works there as it did
 in the page: it is the same column, not a copy (Forge and every extension find
 the prompt boxes where they always were), drawn over the panel's body and
-moving with the panel when it is dragged or resized. **Chat** from there brings
+moving with the panel when it is dragged or resized — through a drag by the
+panel's own transform, laid out once more where the panel is let go, and its
+text boxes measured again only when the column's width changes or something of
+Gradio's changes them, never for a move. **Chat** from there brings
 the column back to the page and shows the conversation; **🎛** again brings it
 back and returns to whichever view the panel was in, the conversation or the
 tab bar. Those two are the only ways it comes back: while it is docked the
@@ -6433,6 +6461,18 @@ back where Forge had it, with nothing left behind; turn the whole theme off
 and the page is Forge's again without a reload. A page that was themed
 yesterday is themed before the host has said it is loaded, from what the
 browser remembered.
+
+### Applied again, quietly
+
+The theme applies itself again after every update of the page and writes only
+what changed: the same title is not written again, a class already on a button
+is not put on again, and the **⋯** menu is rebuilt only when the tabs it holds
+or their names change. That is not tidiness. Forge answers any change to the
+page's contents with another round of every extension's after-update callbacks
+a quarter of a second later, so a theme that rewrote its title on every apply
+kept the page updating for as long as it was open, on every tab (the first
+build did; the Forge Assistant's *page that never settles* line is how such a
+loop shows itself now).
 
 ### Moving over from the Lobe theme
 
