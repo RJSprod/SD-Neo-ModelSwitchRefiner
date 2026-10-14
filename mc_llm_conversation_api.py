@@ -590,13 +590,13 @@ def set_system_prompt(body: dict) -> tuple[dict, int]:
 
 
 def journal(body: dict) -> tuple[dict, int]:
-    """One entry of the page's account of itself, into the extension's log.
+    """One entry of what the page saw, into the extension's log.
 
-    The flyout's drag: what was pressed, the handle's rules, what else moved,
-    the events as they came, the browser and the page (``mc_assistant_journal``).
-    One line of ``model_chain.log`` through the ``model_chain`` logger, as the
-    user asked: with the other logging content. A body that is not an account
-    is refused.
+    The quiet-page watch's ``churn`` line (``mc_assistant_journal``): one line
+    of ``model_chain.log`` through the ``model_chain`` logger, with the other
+    logging content. A drag's account, from a page loaded before the drag's
+    logs were removed, is answered and not written (``file`` is None). A body
+    that is not an entry is refused.
     """
     import mc_assistant_journal
 

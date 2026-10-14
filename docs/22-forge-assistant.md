@@ -2715,6 +2715,45 @@ route unregistered, a bad kind accepted. Run on the user's machine twice:
 still moving the page the first time, and the second time with the log,
 which is where the hold comes from. The hold itself has not run there.
 
+### The account removed (2026-10-14)
+
+At the user's word: "remove those flyout movement logs from all logs, i
+should not see those drag events anymore". A drag now writes nothing
+anywhere and keeps nothing: `watchDrag`, `accountForDrag`, the trace, the
+page's state and environment, `forgeAssistant.shell.lastDrag`, the console
+line, the status line's warning and the post to the journal are gone, and
+with them the work the account did on every drag -- a trace entry per move
+and the page's scroll read ten times a second, which flushes layout; at the
+end the tabs' box, the selection, the document's size, two computed styles
+and two media queries read, and up to sixty events serialised and posted.
+What the account found stays built: the cancelled press, the handles' rules,
+`blockPan` and the hold (`watchPan`, `holdPage`, `lockScroll`). The two
+`describe` functions the script had declared at the same level -- the later,
+the account's, was the one every caller got -- are one, with that body, so
+the quiet-page watch names nodes as it did.
+
+The journal (`mc_assistant_journal`) keeps one kind, the quiet-page watch's
+`churn` (§3.36), and refuses an entry without a kind instead of taking it for
+a drag. A `drag` entry -- which a page loaded before the update still sends
+after every drag until it is reloaded -- is answered `{"ok": true, "file":
+null}` and never written: a refusal would put a line on that page's console
+after every drag instead.
+
+Tests: in node a mouse's drag, a finger's with a touch move and the page
+scrolled under it, and one the browser ended write to no console, post
+nothing, tell the status line nothing and keep no account; in Chromium three
+mouse drags (the last with the page scrolled under it) and a finger's drag on
+a phone do the same; the hold's tests read what the hold took off the lock
+itself (`scrollLock`) and, for a drag the page stays still under, watch the
+root's inline style through the whole drag; the journal's failure path is
+tested on the churn line. Nineteen mutations each fail a test: the console
+line, the post, the warning and a kept account each put back (in node, and in
+Chromium for a mouse and a finger), the hold never locking (node and
+Chromium), a quiet drag locking for a moment at its end, `blockPan` cancelling
+a move the browser took, the journal's refusal not noted, and on the server a
+drag written again, the retired kind refused instead of answered, any
+one-word kind kept, and the route refusing a stale page's drag.
+
 ## 3.35 Room for what a progress bar paints above itself
 
 Asked for, with a screenshot of a run under the Model Chain theme: "I cannot
@@ -2845,7 +2884,8 @@ the page is not the page -- and the first one holds the page (`holdPage`:
 the browser keeps making against the hold not fought frame by frame). A
 browser that honours the handle's word pays nothing. The account gains
 `held: {t, by}` and a `hold` trace entry; `locked` names what was held, `[]`
-when nothing was.
+when nothing was. (The account itself was removed later the same day, at the
+user's word: §3.34, "The account removed".)
 
 ### A move by transform, and once-a-drag housekeeping
 
