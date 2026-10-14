@@ -6053,8 +6053,8 @@ exact words spoken in it, which Breeze clones a voice from. A sample without one
 is marked *needs a transcript*, and a speaker that uses it refuses Render, naming
 the sample. Type the words, or press **Transcribe**: Voice Chat's Whisper reads
 the sample (once Voice Chat's models are installed — the button says so when they
-are not) and puts what it heard in the box for you to check and save; nothing is
-saved until you do. The words are kept in the sample's own record beside its
+are not) and puts what it heard in the box for you to check and save (**Save**, or
+Ctrl+Enter in the box); nothing is saved until you do. The words are kept in the sample's own record beside its
 sound and nowhere else. A sample kept from a voice design is born with the
 sentence it spoke.
 
@@ -6129,8 +6129,8 @@ load*, and refused at Render.
 (English, Chinese for a mostly Chinese description, or your own) in a voice made
 from it, with the configuration's card, attention, sampling, CFG and seed, played
 when it lands; **Redraw** makes another at the next seed. **Keep** makes the take
-a sample — its transcript the sentence it spoke, the description, seed and CFG
-kept with it — and puts it in the slot, so every line after that is a clone of
+a sample under a name you give it — its transcript the sentence it spoke, the
+description, seed and CFG kept with it — and puts it in the slot, so every line after that is a clone of
 the same voice across lines, sections and renders. A slot with a description and
 no voice yet refuses Render with *Design it and Keep it first*. A design makes
 nothing in any pipeline.
