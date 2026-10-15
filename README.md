@@ -6614,7 +6614,14 @@ one second.
   cards it finds under `#<tab>_extra_tabs`, and a page moved out of there
   (the first build) was a page whose search filtered nothing. A card's press
   writes into the prompt as it always did, and search, sort and refresh are
-  Forge's, untouched. Each generation tab has a drawer of its own, which
+  Forge's, untouched. The head sits before the pages in the document, where
+  Forge's own strip sat: Forge renders each page twice and keeps a hidden
+  copy of its controls inside it, and its sort reads the pressed sort button
+  as the first one in the document, so a head after the pages (the build
+  before) made every sort button do nothing. A page shown in the drawer is
+  sorted as Forge's settings say, once each time its cards are rendered:
+  Forge does that when its own tab is selected, which the drawer never
+  selects. Each generation tab has a drawer of its own, which
   goes with the tab: Txt2Img's pages on Txt2Img, Img2Img's on Img2Img,
   nothing on any other tab (the header's button is disabled there), and
   back on a generation tab it is as it was; under focus mode it stays out of
@@ -6631,6 +6638,17 @@ one second.
   the directories as small buttons, a card's name at 11 px over its picture,
   where Forge's page, laid out for the window's width, has them at a size
   that fills a drawer with buttons and names.
+- **Extra networks newest created first.** At the first start with this
+  build, Forge's own *Default sorting method* and *Default sorting order* for
+  Extra Networks cards (Settings, Extra Networks) are set to *Date Created*
+  and *Descending*, if both were still at Forge's defaults (*Path*,
+  *Ascending*): a choice made there before stands, one made there afterwards
+  is never undone, and a hidden record makes it happen once. It happens with
+  the theme on or off. *Date created* means the file's creation time
+  wherever the system keeps one (Windows, macOS): Forge, like A1111, filed a
+  file's modification time under it and the creation time under *date
+  modified*, so a LoRA copied in from another drive sorted among the oldest.
+  Where no creation time is kept (Linux), Forge's keys stand.
 - **A card's metadata editor as a dialog.** Forge's popup is the window: a
   backdrop with a 56 em box inside it, which on a window not much wider runs
   past the 90% it is capped to and sits off centre, with no scrolling of its

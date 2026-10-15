@@ -48,6 +48,7 @@ import mc_progress
 import mc_references
 import mc_styles
 import mc_theme
+import mc_extra_networks_sort
 import mc_turns
 import mc_turns_guests
 import mc_voice_api
@@ -1216,6 +1217,16 @@ try:
         shared.options_section(mc_theme.HIDDEN_SECTION, mc_theme.hidden_settings(shared)))
 except Exception:
     errors.report("Model Chain: could not register the theme settings section",
+                  exc_info=True)
+
+# The extra networks' default sort, newest created first: set once in Forge's
+# own two settings, and this hidden option is the record that makes it once.
+try:
+    shared.options_templates.update(
+        shared.options_section(mc_extra_networks_sort.HIDDEN_SECTION,
+                               mc_extra_networks_sort.hidden_settings(shared)))
+except Exception:
+    errors.report("Model Chain: could not register the extra networks' sort record",
                   exc_info=True)
 
 mc_progress.install()
@@ -4372,5 +4383,8 @@ try:
     # settings are imported there too, once, so the first page already has
     # their switches.
     script_callbacks.on_before_ui(mc_theme.on_before_ui)
+    # Forge renders the extra network pages while it builds the page: their
+    # creation times are corrected and the default sort set before that.
+    script_callbacks.on_before_ui(mc_extra_networks_sort.on_before_ui)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

@@ -97,6 +97,36 @@ now, and `test_the_page_meets_the_window_as_focus_mode_does` measures the
 content's edges against the window's in both modes, the ground's reach, and
 Gradio's padding back when the switch is off.
 
+**The sort buttons, and newest created first (2026-10-15).** "In the extra
+networks, the sort buttons don't work! ... Also, default sort to newest
+created to oldest." Forge renders each page twice -- empty when the UI is
+built (`create_html(empty=True)`, which already carries the page's controls),
+whole when the page loads (`interface.load`) -- and its script wires the
+first render's controls into its strip, so every page keeps a second, hidden
+copy of its controls under the same ids. Its sort reads the pressed sort
+button with `gradioApp().querySelector('#<page>_controls
+.extra-network-control--sort.extra-network-control--enabled')`, the first in
+the document; Forge's own strip sits in the tab bar, before the pages, and
+the drawer's head, holding that strip, had been appended after them, so the
+sort read the hidden copy's button -- the default, never pressed -- and only
+the direction, which Forge holds from when it wired the page, still turned
+the list round. Reproduced with Forge Neo's own `extraNetworks.js` on the
+layout test page: sorts with the theme off, does nothing in either layout
+once the page has been rendered twice. The head now goes right after Forge's
+tab strip (`placeHead`, moved only when out of place), a level above the
+shown page in the drawer layout so its edge still runs down the page's side.
+The default is Forge's own two settings, set once to Date Created and
+Descending while both are still at Forge's defaults
+(`mc_extra_networks_sort.default_newest`, a hidden record), and Forge's sort
+keys are corrected so that `date_created` is the file's creation time where
+the platform keeps one (Forge files the modification time there, and on
+Windows the creation time under `date_modified`). And since Forge sorts a page
+only when its own tab is selected, and its load renders the cards in the
+listing's order, the drawer asks Forge's `applyExtraNetworkFilter` for the
+page it shows once for each rendering of the page's cards (`sortShown`).
+`tests/test_theme_layout.py` carries Forge's sort re-expressed and the hidden
+second render; `tests/test_extra_networks_sort.py` the keys and the default.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own

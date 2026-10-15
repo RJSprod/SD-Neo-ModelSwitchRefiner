@@ -1586,10 +1586,14 @@ class TestSettingsRegistration:
         import mc_theme
 
         known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION, mc_theme.SECTION}
-        # The one deliberate use of the host's hidden idiom: the record of the
-        # one-time import of the user's Lobe settings, which is read back and
-        # never meant to be changed by hand. Not a setting, so not drawn.
-        records = {mc_theme.OPT_IMPORT}
+        # The two deliberate uses of the host's hidden idiom: the record of
+        # the one-time import of the user's Lobe settings, and the record of
+        # the one-time default sort of the extra networks (newest created
+        # first, set in Forge's own settings) -- each read back and never
+        # meant to be changed by hand. Not settings, so not drawn.
+        import mc_extra_networks_sort
+
+        records = {mc_theme.OPT_IMPORT, mc_extra_networks_sort.OPT_RECORD}
         for name, option in host.shared.options_templates.items():
             if name in records:
                 assert option.section[0] is None, f"{name} is a record and must not be drawn"

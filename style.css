@@ -905,13 +905,15 @@
    panels in place: Forge's search looks for a page's cards under that
    element and finds nothing elsewhere. Shown while the host is open, over
    the page's right edge under the header; the column layout below puts it
-   beside the generation UI instead. */
+   beside the generation UI instead. One level above the shown page: the head
+   comes before the pages in the document (where Forge's own controls strip
+   is), and its edge runs down the page's side. */
 :root[data-mc-theme="on"] .mc-theme-networks {
     display: none;
     position: fixed;
     top: var(--mc-theme-header);
     right: 0;
-    z-index: 930;
+    z-index: 931;
     box-sizing: border-box;
     width: var(--mc-theme-networks-width, 340px);
     max-width: 100vw;
