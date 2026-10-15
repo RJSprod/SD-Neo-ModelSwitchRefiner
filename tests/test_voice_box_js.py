@@ -2251,7 +2251,7 @@ class TestFittingTheWindow:
     stylesheet then fits the stages into that height is
     test_voice_box_layout.py's question, in a real browser."""
 
-    def test_the_layout_is_columns_from_900_px_and_a_stack_below(self):
+    def test_the_layout_is_a_pair_from_900_px_and_a_stack_below(self):
         found = run("""
             await flush();
             const root = find("#mc-voice-box");
@@ -2265,9 +2265,9 @@ class TestFittingTheWindow:
             report({seen});
         """)
 
-        assert found["seen"] == [[1440, "columns"], [900, "columns"], [899, "stack"],
-                                 [390, "stack"], [1200, "columns"]]
-        assert found["state"]["layout"]["mode"] == "columns"
+        assert found["seen"] == [[1440, "pair"], [900, "pair"], [899, "stack"],
+                                 [390, "stack"], [1200, "pair"]]
+        assert found["state"]["layout"]["mode"] == "pair"
 
     def test_the_root_takes_the_windows_height_less_what_is_above_and_below_it(self):
         """A 160 px header above the root and a 60 px footer after it: the root
@@ -2364,7 +2364,7 @@ class TestFittingTheWindow:
             const queued = rafs.length;
             const ran = runFrames();
             report({queued, ran, heights: heights(root)});
-        """)
+        """, root_width=1440)
 
         assert found["queued"] == 1
         assert found["ran"] == 1
@@ -2392,7 +2392,7 @@ class TestFittingTheWindow:
 
         assert found["hidden"] == {"layout": None, "heights": []}
         assert found["unseen"] == 0
-        assert found["layout"] == "columns"
+        assert found["layout"] == "pair"
         assert found["heights"] == ["720px"]
         assert found["observed"] == [["mc-voice-box"]]
         assert found["resized"] == 0
@@ -3427,9 +3427,147 @@ class TestTheStageBar:
             report({wide, narrow: marked(), layout: root.getAttribute("data-layout")});
         """, root_width=1440)
 
-        assert found["wide"] == ["Input"]
+        assert found["wide"] == ["Input", "Prompt"]
         assert found["layout"] == "stack"
         assert found["narrow"] == ["Prompt"]
+
+    PAIR = """
+        const container = find(".mc-voice-box-stages");
+        const cards = all(".mc-voice-box-stage");
+        // Two cards to the view: 716 px wide, 8 px apart.
+        const place = (scrolled) => {
+            container.scrollLeft = scrolled;
+            container.boxLeft = 0;
+            cards.forEach((card, index) => { card.boxLeft = index * 724 - scrolled; });
+        };
+        const marked = () => all(".mc-voice-box-stagebar button")
+            .filter((b) => b.getAttribute("aria-current") === "true").map((b) => b.textContent);
+    """
+
+    def test_two_to_the_view_the_bar_marks_both_and_the_last_two_at_the_end(self):
+        found = run(self.PAIR + """
+            await flush();
+            runFrames();
+            const first = marked();
+            place(724);
+            container.dispatchEvent({type: "scroll"});
+            runFrames();
+            const middle = marked();
+            place(1448);
+            container.dispatchEvent({type: "scroll"});
+            runFrames();
+            report({first, middle, end: marked(),
+                    current: all(".mc-voice-box-stagebar button").map((b) => b.getAttribute("aria-current"))});
+        """, root_width=1440)
+
+        assert found["first"] == ["Input", "Prompt"]
+        assert found["middle"] == ["Prompt", "Config"]
+        assert found["end"] == ["Config", "Outputs"]
+        assert found["current"] == [None, None, "true", "true"]
+        assert found["state"]["stage"] == "configuration"
+
+    def test_two_to_the_view_a_press_moves_the_row_as_little_as_it_can(self):
+        found = run(self.PAIR + """
+            await flush();
+            runFrames();
+            place(0);
+            press("Outputs");
+            const right = scrolls.splice(0);
+            const afterRight = marked();
+            place(1448);
+            press("Prompt");
+            const left = scrolls.splice(0);
+            const afterLeft = marked();
+            place(724);
+            press("Config");
+            const stay = scrolls.splice(0);
+            report({right, afterRight, left, afterLeft, stay, marked: marked()});
+        """, root_width=1440)
+
+        def to(left):
+            return [{"className": "mc-voice-box-stages", "options": {"left": left, "behavior": "smooth"}}]
+
+        # Right of the two in view: in as the right one, beside the one before it.
+        assert (found["right"], found["afterRight"]) == (to(1448), ["Config", "Outputs"])
+        # Left of them: in as the left one.
+        assert (found["left"], found["afterLeft"]) == (to(724), ["Prompt", "Config"])
+        # Already in view: the row is asked to stay where it is.
+        assert (found["stay"], found["marked"]) == (to(724), ["Prompt", "Config"])
+
+    def test_widened_from_the_last_card_the_bar_marks_the_last_two(self):
+        """The last card cannot be the left one of two: the row ends with it on
+        the right, so the bar marks the one before it too."""
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            place(1194);
+            container.dispatchEvent({type: "scroll"});
+            runFrames();
+            const narrow = marked();
+            const root = find("#mc-voice-box");
+            root.clientWidth = 1440;
+            fireWindow("resize");
+            runFrames();
+            report({narrow, wide: marked(), layout: root.getAttribute("data-layout")});
+        """, root_width=390)
+
+        assert found["narrow"] == ["Outputs"]
+        assert found["layout"] == "pair"
+        assert found["wide"] == ["Config", "Outputs"]
+
+
+# --------------------------------------------------------------------------- #
+# A swipe past the first card or the last
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSwipeHold:
+    """While the tab is on screen the page root takes no sideways overscroll,
+    so a swipe past either end of the row is not the browser's Back or Forward;
+    the root's own inline value comes back when the tab leaves the screen.
+    Whether Chromium then navigates is test_voice_box_layout.py's question."""
+
+    def test_the_tab_on_screen_holds_the_roots_sideways_overscroll_and_gives_it_back(self):
+        found = run("""
+            await flush();
+            runFrames();
+            const root = find("#mc-voice-box");
+            const page = document.documentElement;
+            const read = () => page.style.getPropertyValue("overscroll-behavior-x");
+            intersect(root, true);
+            const shown = read();
+            intersect(root, true);
+            const again = read();
+            intersect(root, false);
+            const gone = read();
+            page.style.setProperty("overscroll-behavior-x", "contain");
+            intersect(root, true);
+            const over = read();
+            intersect(root, false);
+            report({shown, again, gone, over, restored: read(),
+                    held: window.mcVoiceBox.state().swipeHeld});
+        """)
+
+        assert (found["shown"], found["again"]) == ("none", "none")
+        assert found["gone"] == ""
+        assert found["over"] == "none"
+        assert found["restored"] == "contain", "the page's own value, put back"
+        assert found["held"] is None
+
+    def test_a_root_whose_style_refuses_still_fits_the_tab(self):
+        found = run("""
+            await flush();
+            runFrames();
+            const root = find("#mc-voice-box");
+            document.documentElement.style.setProperty = () => { throw new Error("refused"); };
+            root.clientWidth = 1280;
+            globalThis.innerHeight = 720;
+            intersect(root, true);
+            runFrames();
+            report({heights: heights(root)});
+        """)
+
+        assert found["heights"][-1] == "720px"
 
 
 # --------------------------------------------------------------------------- #

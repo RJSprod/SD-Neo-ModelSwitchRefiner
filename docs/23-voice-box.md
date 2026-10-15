@@ -768,6 +768,39 @@ the model's sound allows, and for twelve steps by default.
 *"Exposed the Sampling setting 'Greedy' … Is it exposed already?"* It is: the
 Sampling switch, off by default, is greedy decoding, what upstream ships.
 
+**Two to the view (after handoff 44, at the user's request).** *"I thought having
+the voice box have 4 components on one view would be good, but i find it too
+cramped. Instead, lets make it more like mobile, but because its bigger screen, it
+should be two at a time. I should be able to swipe to see the other until left
+most or right most."* From 900 px of root width the layout is `pair`: the phone's
+horizontal scroll-snap row (x mandatory, `scroll-snap-align: start`,
+`scroll-snap-stop: always`), each card `calc((100% - gap) / 2)` wide, so a swipe
+moves one card and the view shows Input and Prompt, Prompt and Configuration, then
+Configuration and Outputs, where the row ends (the third card's start is the
+row's furthest scroll). The stage bar shows at every width and marks the stages in
+view, two here — the leftmost in view and the one after it, the last two at the
+end (`markStage`, `firstShown`) — and a press moves the row as little as it can: a
+stage right of the two comes in as the right one, a stage left of them as the
+left one, one in view moves nothing (`goToStage`). No scrollbar is drawn under the
+cards (`scrollbar-width: none`); the bar is the way along for a mouse, a sideways
+wheel or a touchpad's swipe the other. Inside a card, two to the view keeps the
+wide layout's lists that scroll in their stage; the phone's card that scrolls whole
+is unchanged. The connector arrows between stages are gone.
+
+Swiping past either end was the browser's own Back or Forward on a touch screen,
+found by driving fingers through the DevTools protocol in Chromium 141: a scroller
+at its end does not take the swipe, and Chromium's swipe-to-navigate then reads
+only the page root's `overscroll-behavior`, and only while the scroller leaves its
+own at `auto` — the row's `contain` (there since the phone's cards) handed the
+overscroll straight to navigation, the root's `none` notwithstanding; a cancelled
+first `touchmove` and `touch-action: pan-right pan-y` at the end stopped nothing.
+So the row has no overscroll-behavior of its own, and while the tab is on screen
+(the root's IntersectionObserver) the script holds the page root's
+`overscroll-behavior-x` at `none` inline, putting back whatever the root held
+when the tab leaves the screen (`holdHistorySwipe`, `state.swipeHeld`).
+`tests/test_voice_box_layout.py` swipes a finger past both ends at both widths,
+with a page to go Forward to, and expects to stay.
+
 ---
 
 ## 9. Voice Chat

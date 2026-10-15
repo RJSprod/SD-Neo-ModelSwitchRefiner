@@ -15,12 +15,17 @@ paints it -- with the real Voice Box section of ``style.css`` and the real
 samples, history entries and outputs, and measures:
 
     at 1440 x 900   the page does not scroll; the root is 900 - 160 - 60 px,
-                    written in pixels on itself; the four stages sit side by
-                    side inside the window and there is no stage bar; the
-                    sample library, the history and the output lanes each
+                    written in pixels on itself; the stages are cards two to
+                    the view, the other two beyond its right edge, in a row
+                    that snaps a card at a time and ends at the last two; a
+                    sideways wheel (a touchpad's swipe) moves one card and
+                    no further than either end; the stage bar marks the two
+                    in view and a press moves the row as little as it can;
+                    the sample library, the history and the output lanes each
                     scroll inside their stage; Render is in the Configuration
-                    stage's header, on screen, and nothing covers it; a
-                    selected lane's transport is square icon buttons;
+                    stage's header, on screen when that stage is, and nothing
+                    covers it; a selected lane's transport is square icon
+                    buttons;
     at 390 x 844    the stages are cards side by side, each exactly as wide
                     and as tall as the row they scroll in, which snaps to a
                     card's start; the stage bar marks the card in view and a
@@ -29,7 +34,11 @@ samples, history entries and outputs, and measures:
                     is a scroll area of its own; the Configuration card's
                     header (Render and the status line) stays in view while
                     the card scrolls;
-    resized         the height follows the window, and the layout its width.
+    resized         the height follows the window, and the layout its width;
+    swiped          a finger past the first card or the last, at either width,
+                    goes nowhere -- not Back, not Forward -- while the tab
+                    holds the page root's sideways overscroll, which it gives
+                    back when the tab leaves the screen.
 
 It needs the ``playwright`` package and a Chromium, and skips without either
 (the WebUI needs neither). Chromium is looked for where Playwright keeps it
@@ -394,7 +403,7 @@ MEASURE = """() => {
         container: {box: box(container), client: container.clientHeight, clientWidth: container.clientWidth,
                     scrollTop: container.scrollTop, scrollLeft: container.scrollLeft,
                     snap: rowStyle.scrollSnapType, overflowX: rowStyle.overflowX,
-                    overflowY: rowStyle.overflowY},
+                    overflowY: rowStyle.overflowY, scrollbar: rowStyle.scrollbarWidth},
         stagebar: {display: getComputedStyle(bar).display, box: box(bar),
                    buttons: [...bar.querySelectorAll("button")].map((b) => ({
                        text: b.textContent, current: b.getAttribute("aria-current"),
@@ -429,13 +438,39 @@ def _near(a: float, b: float, slack: float = 1.0) -> bool:
     return abs(a - b) <= slack
 
 
+ROW = """() => {
+    const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+    return {left: container.scrollLeft, max: container.scrollWidth - container.clientWidth, scrollX, scrollY,
+            starts: [...container.querySelectorAll(".mc-voice-box-stage")].map((stage) =>
+                stage.getBoundingClientRect().left - container.getBoundingClientRect().left + container.scrollLeft),
+            marked: [...document.querySelectorAll("#mc-voice-box .mc-voice-box-stagebar button")]
+                .filter((b) => b.getAttribute("aria-current") === "true").map((b) => b.textContent)};
+}"""
+
+
+def bring(page, label: str) -> None:
+    """Press a stage bar button and wait for the row to come to rest."""
+    page.evaluate("""async (label) => {
+        const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+        [...document.querySelectorAll("#mc-voice-box .mc-voice-box-stagebar button")]
+            .find((b) => b.textContent === label).click();
+        let last = -1;
+        for (let tries = 0; tries < 80; tries += 1) {
+            await new Promise((done) => setTimeout(done, 50));
+            if (Math.abs(container.scrollLeft - last) < 0.5) break;
+            last = container.scrollLeft;
+        }
+    }""", label)
+    settle(page)
+
+
 class TestDesktop:
     def test_the_tab_fits_the_window_and_the_page_does_not_scroll(self, browser):
         page = open_tab(browser, 1440, 900)
         found = measure(page)
         page.close()
 
-        assert found["layout"] == "columns"
+        assert found["layout"] == "pair"
         assert found["pageScroll"] <= found["innerHeight"] + 1, found
         assert found["scrollY"] == 0
         assert found["inlineHeight"] == f"{900 - HEADER - FOOTER}px"
@@ -443,23 +478,41 @@ class TestDesktop:
         assert _near(found["root"]["height"], 900 - HEADER - FOOTER)
         assert found["root"]["bottom"] <= found["innerHeight"] - FOOTER + 1
 
-    def test_the_four_stages_sit_side_by_side_inside_the_window(self, browser):
+    def test_two_stages_share_the_view_and_the_other_two_wait_beyond_its_right_edge(self, browser):
+        """The user's words: four stages in one view were too cramped; two at a
+        time, swiped like the phone's."""
         page = open_tab(browser, 1440, 900)
         found = measure(page)
         page.close()
 
+        container = found["container"]
+        assert container["snap"].startswith("x") and "mandatory" in container["snap"], container
+        assert (container["overflowX"], container["overflowY"]) == ("auto", "hidden"), container
         stages = found["stages"]
         assert [stage["key"] for stage in stages] == ["input", "prompt", "configuration", "outputs"]
-        assert all(_near(stage["top"], stages[0]["top"]) for stage in stages)
-        assert all(stages[index]["left"] >= stages[index - 1]["right"] for index in range(1, 4))
+        gap = stages[1]["left"] - stages[0]["right"]
+        assert 4 <= gap <= 12, gap
         for stage in stages:
-            assert stage["left"] >= 0 and stage["right"] <= found["innerWidth"], stage
-            assert stage["bottom"] <= found["root"]["bottom"] + 1, stage
-            assert stage["width"] > 200, stage
-        # The stage bar is a phone's; side by side it takes no room at all.
-        assert found["stagebar"]["display"] == "none"
-        assert found["stagebar"]["box"]["height"] == 0
-        assert set(found["connectors"]) != {"none"}
+            assert _near(stage["width"], (container["clientWidth"] - gap) / 2), (stage, container)
+            assert _near(stage["height"], container["client"]), (stage, container)
+            assert _near(stage["top"], stages[0]["top"]), stage
+            assert (stage["snapAlign"], stage["snapStop"]) == ("start", "always"), stage
+        assert _near(stages[0]["left"], container["box"]["left"])
+        assert _near(stages[1]["right"], container["box"]["right"])
+        assert all(stage["left"] >= container["box"]["right"] - 1 for stage in stages[2:])
+        # No scrollbar is drawn under the cards, so none takes room there (a
+        # headless Chromium's scrollbars overlay, so the declaration is the proof),
+        # and nothing is left between them.
+        assert container["scrollbar"] == "none", container
+        assert _near(container["client"], container["box"]["height"]), container
+        assert set(found["connectors"]) == {"none"}
+        assert found["pageWide"] <= found["innerWidth"] + 1, found
+        bar = found["stagebar"]
+        assert bar["display"] == "flex", bar
+        assert bar["box"]["top"] >= found["head"]["bottom"] - 1, (bar, found["head"])
+        assert bar["box"]["bottom"] <= container["box"]["top"] + 1, bar
+        assert [button["text"] for button in bar["buttons"]] == ["Input", "Prompt", "Config", "Outputs"]
+        assert [button["current"] for button in bar["buttons"]] == ["true", "true", None, None]
 
     def test_every_long_list_scrolls_inside_its_stage(self, browser):
         page = open_tab(browser, 1440, 900)
@@ -480,6 +533,7 @@ class TestDesktop:
 
     def test_the_render_header_is_on_screen_and_nothing_covers_it(self, browser):
         page = open_tab(browser, 1440, 900)
+        bring(page, "Config")
         found = measure(page)
         page.close()
 
@@ -495,6 +549,7 @@ class TestDesktop:
 
     def test_a_selected_lane_opens_inside_the_list_and_the_page_still_does_not_scroll(self, browser):
         page = open_tab(browser, 1440, 900)
+        bring(page, "Outputs")
         page.locator("#mc-voice-box .mc-voice-box-lane").nth(2).click()
         settle(page)
         found = page.evaluate("""() => {
@@ -515,6 +570,7 @@ class TestDesktop:
 
     def test_a_selected_lanes_transport_is_square_icon_buttons_as_tall_as_the_others(self, browser):
         page = open_tab(browser, 1440, 900)
+        bring(page, "Outputs")
         page.locator("#mc-voice-box .mc-voice-box-lane").nth(0).click()
         settle(page)
         found = page.evaluate("""() => {
@@ -570,6 +626,188 @@ class TestDesktop:
             assert segment["colour"] not in ("", "transparent", "rgba(0, 0, 0, 0)"), segment
         assert all(lightness(d["colour"]) < lightness(l["colour"]) - 0.15
                    for l, d in zip(light["segments"], dark["segments"]))
+
+
+class TestTwoToTheView:
+    """From 900 px the cards are two to the view, swiped a card at a time
+    from the leftmost pair to the rightmost and no further."""
+
+    def test_the_row_snaps_a_card_at_a_time_and_ends_with_the_last_two_in_view(self, browser):
+        page = open_tab(browser, 1440, 900)
+        found = page.evaluate("""async () => {
+            const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
+            const cards = [...container.querySelectorAll(".mc-voice-box-stage")];
+            const starts = cards.map((card) => card.getBoundingClientRect().left
+                - container.getBoundingClientRect().left + container.scrollLeft);
+            const settled = [];
+            for (const aim of [starts[1] + 40, 99999, starts[1] - 30, -500, starts[2] - 25]) {
+                container.scrollTo({left: aim});
+                await new Promise((done) => setTimeout(done, 300));
+                settled.push(container.scrollLeft);
+            }
+            const last = cards[3].getBoundingClientRect(), view = container.getBoundingClientRect();
+            return {starts, settled, max: container.scrollWidth - container.clientWidth,
+                    lastRight: last.right, viewRight: view.right, scrollX, scrollY};
+        }""")
+        page.close()
+
+        starts = found["starts"]
+        # The last pair is where the row ends: the third card's start is as far as it goes.
+        assert _near(found["max"], starts[2]), found
+        assert [round(value) for value in found["settled"]] == [round(starts[1]), round(starts[2]),
+                                                                round(starts[1]), 0, round(starts[2])], found
+        assert _near(found["lastRight"], found["viewRight"]), found
+        assert (found["scrollX"], found["scrollY"]) == (0, 0)
+
+    def test_a_sideways_wheel_moves_one_card_and_no_further_than_either_end(self, browser):
+        """A touchpad's two-finger swipe is a wheel turned sideways."""
+        page = open_tab(browser, 1440, 900)
+        seen = []
+        for delta in (500, 500, 500, -500, -500, -500):
+            page.mouse.move(700, 270)
+            page.mouse.wheel(delta, 0)
+            page.wait_for_timeout(700)
+            seen.append(page.evaluate(ROW))
+        page.close()
+
+        starts = seen[0]["starts"]
+        lefts = [round(found["left"]) for found in seen]
+        assert lefts == [round(starts[1]), round(starts[2]), round(starts[2]),
+                         round(starts[1]), 0, 0], seen
+        assert [found["marked"] for found in seen] == [["Prompt", "Config"], ["Config", "Outputs"],
+                                                       ["Config", "Outputs"], ["Prompt", "Config"],
+                                                       ["Input", "Prompt"], ["Input", "Prompt"]]
+        assert all((found["scrollX"], found["scrollY"]) == (0, 0) for found in seen)
+
+    def test_a_press_on_the_bar_moves_the_row_as_little_as_it_can(self, browser):
+        page = open_tab(browser, 1440, 900)
+        seen = {}
+        for label in ("Outputs", "Prompt", "Config", "Input"):
+            bring(page, label)
+            seen[label] = page.evaluate(ROW)
+        page.emulate_media(reduced_motion="reduce")
+        page.evaluate("""() => [...document.querySelectorAll("#mc-voice-box .mc-voice-box-stagebar button")]
+            .find((b) => b.textContent === "Outputs").click()""")
+        at_once = page.evaluate(ROW)
+        page.close()
+
+        starts = seen["Outputs"]["starts"]
+        # Right of the two in view: in as the right one; left of them: in as the left one;
+        # one already in view: the row stays where it was.
+        assert (round(seen["Outputs"]["left"]), seen["Outputs"]["marked"]) == (round(starts[2]), ["Config", "Outputs"])
+        assert (round(seen["Prompt"]["left"]), seen["Prompt"]["marked"]) == (round(starts[1]), ["Prompt", "Config"])
+        assert (round(seen["Config"]["left"]), seen["Config"]["marked"]) == (round(starts[1]), ["Prompt", "Config"])
+        assert (round(seen["Input"]["left"]), seen["Input"]["marked"]) == (0, ["Input", "Prompt"])
+        # Under reduced motion a press is a jump: there at once.
+        assert _near(at_once["left"], starts[2]) and at_once["marked"] == ["Config", "Outputs"], at_once
+
+    def test_up_and_down_in_a_card_scrolls_its_list_and_never_the_row(self, browser):
+        page = open_tab(browser, 1440, 900)
+        box = page.evaluate("""() => { const r = document.querySelector("#mc-voice-box .mc-voice-box-samples")
+            .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }""")
+        page.mouse.move(box["x"], box["y"])
+        page.mouse.wheel(0, 600)
+        page.wait_for_timeout(400)
+        found = page.evaluate("""() => ({
+            list: document.querySelector("#mc-voice-box .mc-voice-box-samples").scrollTop,
+            row: document.querySelector("#mc-voice-box .mc-voice-box-stages").scrollLeft, scrollX, scrollY})""")
+        page.close()
+
+        assert found["list"] > 100, found
+        assert (found["row"], found["scrollX"], found["scrollY"]) == (0, 0, 0), found
+
+
+def touch_page(browser, width: int, height: int, *, forward: bool = False):
+    """The tab on a page that takes touches, and a DevTools session to touch it
+    with; with ``forward``, a page to go Forward to from it."""
+    context = browser.new_context(viewport={"width": width, "height": height}, has_touch=True)
+    page = context.new_page()
+    page.goto("about:blank")
+    answers, html, script = fixtures("vibevoice"), page_html(()), SCRIPT.read_text(encoding="utf-8")
+
+    def answer(route):
+        if route.request.url.endswith("/elsewhere"):
+            return route.fulfill(body="<p>elsewhere</p>", content_type="text/html")
+        return _answer(route, answers, html, script)
+
+    page.route(ORIGIN + "/**", answer)
+    page.goto(ORIGIN + "/")
+    if forward:
+        page.goto(ORIGIN + "/elsewhere")
+        page.go_back()
+    page.wait_for_function("document.querySelectorAll('#mc-voice-box .mc-voice-box-lane').length === %d"
+                           % OUTPUTS)
+    settle(page)
+    return context, page, context.new_cdp_session(page)
+
+
+def swipe(page, client, start: float, end: float, y: float) -> None:
+    """A finger along the row from ``start`` to ``end``, then lifted."""
+    client.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": start, "y": y}]})
+    for index in range(1, 13):
+        client.send("Input.dispatchTouchEvent",
+                    {"type": "touchMove", "touchPoints": [{"x": start + (end - start) * index / 12, "y": y}]})
+        page.wait_for_timeout(16)
+    client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    page.wait_for_timeout(1000)
+
+
+class TestSwipingPastTheEnds:
+    """A finger swiped past the first card or the last would be the browser's
+    own Back or Forward -- out of the WebUI. Chromium reads only the page
+    root's overscroll-behavior for it, and only when the row leaves its own at
+    auto, so the tab holds the root's at none while it is on screen."""
+
+    @pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+    def test_a_finger_past_either_end_goes_nowhere_and_a_swipe_inside_still_moves_a_card(
+            self, browser, width, height):
+        context, page, client = touch_page(browser, width, height, forward=True)
+        navigations = []
+        page.on("framenavigated", lambda frame: navigations.append(frame.url))
+        held = page.evaluate("""() => ({
+            root: getComputedStyle(document.documentElement).overscrollBehaviorX,
+            row: getComputedStyle(document.querySelector("#mc-voice-box .mc-voice-box-stages")).overscrollBehaviorX})""")
+        # Along the stage heads, which are the card's own and no control's, and
+        # over three fifths of a card: further than half of one, as a swipe
+        # that means to go, and less than a whole one, as a finger travels.
+        head = page.evaluate("""() => { const r = document.querySelector("#mc-voice-box .mc-voice-box-stage-head")
+            .getBoundingClientRect(); return {y: r.top + r.height / 2, card: r.width}; }""")
+        middle, reach, y = width / 2, head["card"] * 0.3, head["y"]
+        swipe(page, client, middle - reach, middle + reach, y)
+        left_end = page.evaluate(ROW)
+        swipe(page, client, middle + reach, middle - reach, y)
+        moved = page.evaluate(ROW)
+        bring(page, "Outputs")
+        swipe(page, client, middle + reach, middle - reach, y)
+        right_end = page.evaluate(ROW)
+        context.close()
+
+        assert held == {"root": "none", "row": "auto"}, held
+        assert navigations == [], navigations
+        assert left_end["left"] == 0, left_end
+        assert _near(moved["left"], moved["starts"][1]), moved
+        assert _near(right_end["left"], right_end["max"]), right_end
+
+    def test_the_page_gets_its_own_overscroll_back_when_the_tab_leaves_the_screen(self, browser):
+        page = open_tab(browser, 1440, 900)
+        page.evaluate("() => { document.documentElement.style.setProperty('overscroll-behavior-x', 'contain'); }")
+        read = "() => getComputedStyle(document.documentElement).overscrollBehaviorX"
+        # The tab's hold took the root when it came on screen, before the page's own was set.
+        page.evaluate("() => { document.getElementById('mc-voice-box').style.display = 'none'; }")
+        page.wait_for_timeout(300)
+        hidden = page.evaluate(read)
+        page.evaluate("() => { document.documentElement.style.setProperty('overscroll-behavior-x', 'contain'); }")
+        page.evaluate("() => { document.getElementById('mc-voice-box').style.display = ''; }")
+        page.wait_for_timeout(300)
+        shown = page.evaluate(read)
+        page.evaluate("() => { document.getElementById('mc-voice-box').style.display = 'none'; }")
+        page.wait_for_timeout(300)
+        again = page.evaluate(read)
+        page.close()
+
+        assert hidden == "auto", hidden
+        assert shown == "none", shown
+        assert again == "contain", "the page's own value, put back"
 
 
 class TestPhone:
@@ -1410,9 +1648,9 @@ class TestResizing:
         floor = measure(page)
         page.close()
 
-        assert seen == [(1440, 700, "columns", "480px", True),
-                        (1000, 760, "columns", "540px", True),
+        assert seen == [(1440, 700, "pair", "480px", True),
+                        (1000, 760, "pair", "540px", True),
                         (899, 760, "stack", "540px", True),
                         (390, 844, "stack", "624px", True),
-                        (1440, 900, "columns", "680px", True)]
+                        (1440, 900, "pair", "680px", True)]
         assert floor["inlineHeight"] == "420px"

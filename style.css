@@ -8902,14 +8902,14 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 
    The page fits the window. The script writes the root's height in pixels --
    the room the window leaves it -- and the root is a column: the pipeline
-   bar, then the stages. Every stage is a head that stays and a body under it,
-   so the page itself never scrolls because of the Voice Box. `data-layout` on
-   the root, set by the script from the root's width, picks the arrangement:
-   "columns" (the four stages side by side, a connector glyph between them,
-   each stage's long list taking the room left and scrolling inside it) or,
-   below 900 px, "stack" (the stages as cards a screen wide, swiped left and
-   right with a stage bar over them; each card's body is its one vertical
-   scroller and nothing in it scrolls on its own). A stage's head stays at
+   bar, the stage bar, then the stages. Every stage is a head that stays and a
+   body under it, so the page itself never scrolls because of the Voice Box.
+   The stages are cards in a row, swiped left and right and snapped a card at
+   a time, from the leftmost to the rightmost; `data-layout` on the root, set
+   by the script from the root's width, says how many fit the view: "pair"
+   (two, each stage's long list taking the room left and scrolling inside it)
+   or, below 900 px, "stack" (one a screen wide; each card's body is its one
+   vertical scroller and nothing in it scrolls on its own). A stage's head stays at
    the top by being outside the body that scrolls rather than sticky inside
    it: the rows that scroll under a sticky head are positioned (their tint
    edge needs it), so they would be painted over it, and only a z-index could
@@ -9088,10 +9088,11 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 /* The stages take whatever height the root has left under the pipeline bar;
    side by side, each is as tall as that and no taller. */
 #mc-voice-box .mc-voice-box-stages {
+    --mc-voice-box-stage-gap: 0.5em;
     align-items: stretch;
     display: flex;
     flex: 1 1 0;
-    gap: 0.5em;
+    gap: var(--mc-voice-box-stage-gap);
     min-height: 0;
 }
 
@@ -9170,26 +9171,45 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     content: "\2192";
 }
 
-/* Below 900 px: the stages are cards side by side, each exactly as wide and
-   as tall as the row they sit in, swiped left and right and snapped a card at
-   a time. Up and down belongs to the card in view, whose body is its one
-   vertical scroller: the lists in it take the height they need (the rules
-   further down), so nothing scrolls inside anything. A sideways drag is the
-   cards' everywhere but on a control that says otherwise with touch-action. */
+/* The stages are cards side by side, each as tall as the row it sits in,
+   swiped left and right and snapped a card at a time; the row stops at its
+   first card and its last, and a swipe past either end goes nowhere --
+   neither the page nor the browser's history. The row keeps no
+   overscroll-behavior of its own: Chromium hands a scroller's contain or
+   none straight to its swipe-to-navigate, and reads only the page root's,
+   which the script sets to none while the tab is on screen. No scrollbar
+   takes room under the cards: the stage bar above them is the way along for
+   a mouse. A
+   sideways drag is the cards' everywhere but on a control that says
+   otherwise with touch-action. From 900 px two cards share the view, so a
+   swipe shows each stage beside its neighbour in turn; below it, a phone's,
+   one card fills it, and up and down belongs to the card in view, whose body
+   is its one vertical scroller: the lists in it take the height they need
+   (the rules further down), so nothing scrolls inside anything. */
+#mc-voice-box[data-layout="pair"] .mc-voice-box-stages,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stages {
     flex-direction: row;
     overflow-x: auto;
     overflow-y: hidden;
-    overscroll-behavior-x: contain;
     scroll-snap-type: x mandatory;
+    scrollbar-width: none;
 }
 
+#mc-voice-box[data-layout="pair"] .mc-voice-box-stage,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stage {
-    flex: 0 0 100%;
     scroll-snap-align: start;
     scroll-snap-stop: always;
 }
 
+#mc-voice-box[data-layout="pair"] .mc-voice-box-stage {
+    flex: 0 0 calc((100% - var(--mc-voice-box-stage-gap)) / 2);
+}
+
+#mc-voice-box[data-layout="stack"] .mc-voice-box-stage {
+    flex: 0 0 100%;
+}
+
+#mc-voice-box[data-layout="pair"] .mc-voice-box-connector,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-connector {
     display: none;
 }
@@ -9198,12 +9218,13 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     margin-left: 0;
 }
 
-/* The stage bar, between the pipeline bar and the cards, and only over the
-   cards: a press goes to a stage, and the stage in view is the one marked. */
+/* The stage bar, between the pipeline bar and the cards: a press brings a
+   stage into view, and the stages in view are the ones marked. */
 #mc-voice-box .mc-voice-box-stagebar {
     display: none;
 }
 
+#mc-voice-box[data-layout="pair"] .mc-voice-box-stagebar,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stagebar {
     display: flex;
     flex: 0 0 auto;
