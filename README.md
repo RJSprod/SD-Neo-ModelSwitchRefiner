@@ -5953,13 +5953,13 @@ with it.
 ### The page
 
 Four stages in a row, read left to right like a pipeline without wires —
-**INPUT → PROMPT → CONFIGURATION → OUTPUTS** — and above them a **pipeline
-bar**. A pipeline is one pass through the four stages kept the way a
+**INPUT → PROMPT → CONFIGURATION → OUTPUTS** — as cards you swipe through, and
+above them a **pipeline bar**. A pipeline is one pass through the four stages kept the way a
 conversation is kept: a file of its own holding its prompt, the configuration
 it points at and the outputs it made, so you can have several going and come
 back to any of them.
 
-The four stages fit the window: the tab takes the height the window has below
+The stages fit the window: the tab takes the height the window has below
 Forge's header, and nothing in it makes the page itself scroll. What grows —
 the sample library, the prompt history and favourites, the configuration form,
 the output lanes — scrolls inside its own stage, while the part of the stage you
@@ -5970,17 +5970,26 @@ percentage height inside Gradio's containers means nothing. It never goes below
 420 pixels: in a window smaller than that the page may scroll after all, and
 each stage then scrolls as a whole.
 
-On a narrow screen — the tab under 900 pixels wide, a phone — the stages are
-cards side by side, each as wide and as tall as the screen: **swipe left or
-right** to move a whole stage at a time, and **scroll up and down** inside a
-stage, its lists included. The two never fight, because the direction of the
-swipe decides. A bar above the cards — **Input · Prompt · Config · Outputs** —
-marks the stage in view, and a tap on it moves there. On the phone each card
-scrolls as one piece: the lists have no scroll areas of their own and the script
-box grows with its text, while the card's title (and, on Configuration, Render
-and the status line) stays put. Sideways drags that belong to something stay
-with it: the trimmer's waveform and handles, a slider, and the waveform that is
-playing; a sideways swipe over any other waveform turns the page.
+The stages are cards side by side, **two to the view** when the tab is 900
+pixels wide or more and one, as wide as the screen, below that — a phone. **Swipe
+left or right** — a finger, or two on a touchpad — to move one card at a time:
+two to the view you see Input beside Prompt, Prompt beside Configuration, then
+Configuration beside Outputs, and the row stops there and at the first pair; a
+swipe past either end goes nowhere — while the tab is on screen it holds the
+page's sideways overscroll, which would otherwise be the browser's Back or
+Forward and take you out of the WebUI. **Scroll up and down** inside a stage;
+the two never fight, because the direction of the swipe decides. A bar above
+the cards — **Input · Prompt · Config · Outputs** — marks the stages in view,
+and a press on it brings a stage into view, moving the row as little as it can
+(a stage to the right of the two comes in as the right one, a stage to the left
+as the left one) — the way along with a mouse, since no scrollbar is drawn under
+the cards. Two to the view, the lists scroll inside their own stage as above. On
+the phone each card scrolls as one piece: the lists have no scroll areas of their
+own and the script box grows with its text, while the card's title (and, on
+Configuration, Render and the status line) stays put. Sideways drags that belong
+to something stay with it: the trimmer's waveform and handles, a slider, and the
+waveform that is playing; a sideways swipe over any other waveform turns the
+page.
 
 **Render** is at the top of the Configuration stage (disabled with the reason
 when it cannot run — the engine not installed or its install failed, an empty

@@ -24,13 +24,15 @@
 //
 // The page fits the window rather than lengthening it. The root's height is
 // measured and written in pixels on the root itself (a percentage height
-// inside Gradio's containers resolves to auto -- Mini Paint NEO's lesson), each
-// long list scrolls inside its own stage, and below a root width of 900 px the
-// stages are cards side by side, one screen wide each, swiped left and right
-// with horizontal scroll-snap and a stage bar over them that marks the one in
-// view; there each stage's body is its one vertical scroller and nothing in
-// it scrolls on its own. `data-layout` ("columns" or "stack") on the root says
-// which, for the stylesheet. Nothing observes the root's size, because the
+// inside Gradio's containers resolves to auto -- Mini Paint NEO's lesson). The
+// stages are cards in a row, swiped left and right with horizontal
+// scroll-snap a card at a time, from the leftmost to the rightmost and no
+// further, with a stage bar over them that marks the cards in view and brings
+// a card into view when pressed: two to the view from a root width of 900 px,
+// each long list scrolling inside its own stage; one below it, a phone's, where
+// each stage's body is its one vertical scroller and nothing in it scrolls on
+// its own. `data-layout` ("pair" or "stack") on the root says which, for the
+// stylesheet. Nothing observes the root's size, because the
 // root is the box this file resizes: the height is worked out again on the
 // window's and the visual viewport's resize, an orientation change, the tab
 // coming into view (an IntersectionObserver, which watches visibility, not
@@ -86,8 +88,11 @@
     const LIVE_PHASES = {queued: true, waiting: true, loading: true, rendering: true};
     // A job holding its card, as opposed to one queued behind it.
     const ACTIVE_PHASES = {waiting: true, loading: true, rendering: true};
-    // Below this width of the root the stages are cards, one screen wide each.
+    // Below this width of the root the stages are cards one screen wide; from
+    // it, two cards to the screen.
     const STACK_BELOW = 900;
+    // How many cards a layout shows at once.
+    const PER_VIEW = {pair: 2, stack: 1};
     // The least height the root is given, whatever the window leaves it.
     const MIN_HEIGHT = 420;
     // How long a message holds the status line before the line goes back to
@@ -191,8 +196,12 @@
         // {kind: "sample" | "trimmer" | "output", id}, or null. Only its
         // waveform seeks, draws a playhead and takes sideways drags.
         activePlayer: null,
-        // The stage the phone's stage bar marks: the one in view.
+        // The leftmost stage in view, which the stage bar marks with the one
+        // beside it when two cards share the view.
         stage: "input",
+        // The page root's own inline overscroll-behavior-x while the tab holds
+        // it at none ({value, priority}), or null while it does not.
+        swipeHeld: null,
         // The engine a switch was asked for, while the request is on its way:
         // the Engine select shows it rather than a poll's answer from before.
         engineSwitch: "",
@@ -542,17 +551,49 @@
     // Gradio shows a tab by switching its panel from display:none, which moves
     // nothing a window event would report. An IntersectionObserver on the root
     // hears the tab come into view; it watches visibility, not size, so the
-    // height this file writes on the root cannot call it back.
+    // height this file writes on the root cannot call it back. It also hears
+    // the tab go, which gives the page's root its own sideways overscroll back.
     function watchRoot(root) {
         if (typeof IntersectionObserver !== "function" || !root) return;
         try {
             const observer = new IntersectionObserver(function (entries) {
                 const seen = (entries || []).some(function (entry) { return entry && entry.isIntersecting; });
+                holdHistorySwipe(seen);
                 if (seen) scheduleFit();
             });
             observer.observe(root);
             nodes.rootObserver = observer;
         } catch (error) { /* the window's events still fit it */ }
+    }
+
+    // While the tab is on screen the page's root takes no sideways overscroll,
+    // so a swipe past the first card or the last goes nowhere: it would
+    // otherwise be the browser's own Back or Forward, out of the WebUI, on a
+    // touch screen and on a touchpad. Chromium decides that from the root's
+    // overscroll-behavior alone, and only when the row of cards leaves its own
+    // at auto -- a scroller's contain or none hands the overscroll straight to
+    // navigation, the root's none notwithstanding -- so the stylesheet gives
+    // the row none of its own. Whatever the root held inline is put back when
+    // the tab leaves the screen.
+    function holdHistorySwipe(on) {
+        const page = document.documentElement;
+        const style = page && page.style;
+        if (!style || typeof style.setProperty !== "function") return;
+        const name = "overscroll-behavior-x";
+        const read = function (method) {
+            return typeof style[method] === "function" ? String(style[method](name) || "") : "";
+        };
+        try {
+            if (on && !state.swipeHeld) {
+                state.swipeHeld = {value: read("getPropertyValue"), priority: read("getPropertyPriority")};
+                style.setProperty(name, "none");
+            } else if (!on && state.swipeHeld) {
+                const held = state.swipeHeld;
+                state.swipeHeld = null;
+                if (held.value) style.setProperty(name, held.value, held.priority);
+                else if (typeof style.removeProperty === "function") style.removeProperty(name);
+            }
+        } catch (error) { /* the root's own style refused: the row still swipes */ }
     }
 
     // -- players --------------------------------------------------------------- //
@@ -1331,9 +1372,8 @@
         head.appendChild(bar);
         root.appendChild(head);
 
-        // The phone's stage bar (the stylesheet shows it only when the stages
-        // are cards swiped left and right): a press goes to a stage, and the
-        // stage in view is the one marked.
+        // The stage bar over the cards: a press brings a stage into view, and
+        // the stages in view are the ones marked.
         const stagebar = el("nav", "mc-voice-box-stagebar");
         stagebar.setAttribute("aria-label", "Stages");
         nodes.stagebar = {};
@@ -1348,7 +1388,7 @@
         root.appendChild(stagebar);
 
         // Each stage is a head that stays and a body under it, the stage's one
-        // vertical scroller. Side by side, the long list in a body takes what
+        // vertical scroller. Two to the view, the long list in a body takes what
         // room is left and scrolls inside it; as a phone's cards, the body
         // scrolls whole and nothing inside it scrolls on its own.
         const stages = el("div", "mc-voice-box-stages");
@@ -1381,9 +1421,26 @@
         markStage(state.stage);
     }
 
-    // -- the phone's stage bar ----------------------------------------------------- //
+    // -- the stage bar ----------------------------------------------------------- //
 
-    // The stage whose left edge is nearest the stages' own: the one in view.
+    function perView() {
+        return PER_VIEW[state.layout.mode] || 1;
+    }
+
+    function stageIndex(key) {
+        for (let index = 0; index < STAGES.length; index += 1) {
+            if (STAGES[index].key === key) return index;
+        }
+        return -1;
+    }
+
+    // The first of the cards a layout can show at once that keeps them all
+    // in the row: the last cards, when `index` is too near the end for more.
+    function firstShown(index) {
+        return Math.max(0, Math.min(index, STAGES.length - perView()));
+    }
+
+    // The stage whose left edge is nearest the stages' own: the leftmost in view.
     function stageInView() {
         const container = nodes.stages;
         if (!container) return "";
@@ -1411,13 +1468,20 @@
         return found;
     }
 
+    // `key` is the leftmost stage in view; it and, two to the view, the one
+    // after it are marked -- the last two, at the right end of the row.
     function markStage(key) {
         if (key) state.stage = key;
-        STAGES.forEach(function (stage) {
+        const first = firstShown(Math.max(0, stageIndex(state.stage)));
+        const count = perView();
+        STAGES.forEach(function (stage, index) {
             const node = nodes.stagebar && nodes.stagebar[stage.key];
             if (!node) return;
-            if (stage.key === state.stage) node.setAttribute("aria-current", "true");
-            else node.removeAttribute("aria-current");
+            if (index >= first && index < first + count) {
+                if (node.getAttribute("aria-current") !== "true") node.setAttribute("aria-current", "true");
+            } else if (node.hasAttribute("aria-current")) {
+                node.removeAttribute("aria-current");
+            }
         });
     }
 
@@ -1444,10 +1508,23 @@
         }
     }
 
+    // A press brings a stage into view, moving the row as little as it can:
+    // one card to the view, the stage becomes the card in view; two, a stage
+    // right of the two in view comes in as the right one, one left of them as
+    // the left one, and one in view moves nothing.
     function goToStage(key) {
         const container = nodes.stages;
-        const card = nodes["stageCard_" + key];
-        if (!container || !card) return;
+        const index = stageIndex(key);
+        if (!container || index < 0) return;
+        const count = perView();
+        let first = stageIndex(stageInView() || state.stage);
+        if (first < 0) first = 0;
+        if (index < first) first = index;
+        else if (index > first + count - 1) first = index - count + 1;
+        first = firstShown(first);
+        const shown = STAGES[first].key;
+        const card = nodes["stageCard_" + shown];
+        if (!card) return;
         let left = 0;
         try {
             left = (Number(card.getBoundingClientRect().left) || 0)
@@ -1459,7 +1536,7 @@
         const behavior = reducedMotion() ? "auto" : "smooth";
         if (typeof container.scrollTo === "function") container.scrollTo({left: left, behavior: behavior});
         else container.scrollLeft = left;
-        markStage(key);
+        markStage(shown);
     }
 
     // -- INPUT: a file or a recording, the trimmer, the sample library ----------- //
@@ -5737,13 +5814,16 @@
         }
         const width = box ? Math.round(Number(box.width) || 0) : 0;
         if (!width) return;
-        const mode = width < STACK_BELOW ? "stack" : "columns";
-        if (root.getAttribute("data-layout") !== mode) {
-            root.setAttribute("data-layout", mode);
-            // The stage bar marks the card in view once the cards are laid out.
-            if (mode === "stack") scheduleTrack();
-        }
+        const mode = width < STACK_BELOW ? "stack" : "pair";
+        const changed = root.getAttribute("data-layout") !== mode;
         state.layout.mode = mode;
+        if (changed) {
+            root.setAttribute("data-layout", mode);
+            // The bar marks as many stages as the view now holds, and the
+            // cards in view once they are laid out.
+            markStage(state.stage);
+            scheduleTrack();
+        }
         const top = (Number(box.top) || 0) + pageScroll();
         const raw = Math.floor(viewportHeight() - top - belowRoot(root));
         if (raw !== state.layout.raw) {
