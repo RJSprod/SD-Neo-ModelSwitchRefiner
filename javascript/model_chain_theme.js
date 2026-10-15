@@ -698,7 +698,15 @@
     // it). So everything this script adds -- the head, the strip, the edge --
     // is one more child of `#<tab>_extra_tabs`, the controls strip Forge
     // builds is moved only within it, and the pages stay Forge's own tab
-    // panels in place, drawn where the stylesheet says. Each tab has a drawer
+    // panels in place, drawn where the stylesheet says. The head goes where
+    // Forge's own strip was: before the pages. Forge renders a page twice --
+    // empty when the UI is built, whole when the page loads -- and wires the
+    // first render's controls into its strip, so every page keeps a second,
+    // hidden copy of its controls under the same ids; Forge's sort reads the
+    // pressed sort button with `gradioApp().querySelector`, the first match in
+    // the document, and a head appended after the pages handed it the hidden
+    // copy's button, which never changes: the sort buttons did nothing (the
+    // user's report). Each tab has a drawer
     // of its own, which goes with its tab: nothing of it shows on a tab that
     // has no pages, and it is as it was on return. A page is taken only once
     // Forge's script has wired it (the strip it builds is the sign), which it
@@ -814,6 +822,28 @@
                 setDisplay(child, child.id === pageId + "_controls" ? "" : "none");
             });
         }
+        sortShown(pageId);
+    }
+
+    // The cards containers this script has had Forge sort. A rendering of a
+    // page's cards is a new container (Forge's load and its Refresh replace
+    // the page's HTML), so a container is sorted once for each rendering.
+    const sortedCards = typeof WeakSet === "function" ? new WeakSet() : null;
+
+    /** Forge filters and sorts a page when its own tab is selected
+     *  (`applyExtraNetworkFilter`, from the tab's select event), and its
+     *  load renders the cards in the listing's order; the drawer shows a
+     *  page without selecting Forge's tab, so a page opened newest created
+     *  first showed the listing's order until a search or a press. Asked
+     *  once for each rendering of a page's cards: Forge's sort puts the
+     *  cards back into their container, and asked on every update that
+     *  would raise the next update itself. */
+    function sortShown(pageId) {
+        if (!sortedCards || typeof applyExtraNetworkFilter !== "function") return;
+        const cards = document.getElementById(pageId + "_cards");
+        if (!cards || sortedCards.has(cards)) return;
+        sortedCards.add(cards);
+        applyExtraNetworkFilter(pageId);
     }
 
     /** The header's button follows the tab: a tab with no pages has no
@@ -927,8 +957,9 @@
                 chrome.appendChild(head);
                 chrome.appendChild(strip);
                 chrome.appendChild(handle);
-                // Inside Forge's own element, where its selectors reach.
-                host.appendChild(chrome);
+                // Inside Forge's own element, where its selectors reach, and
+                // before the pages, where Forge's strip was (`placeHead`).
+                placeHead(host, nav, chrome);
                 entry = networks.hosts[tabname] = {host, nav, chrome, strip, controls: null, pages: [],
                                                    page: null, observer: null};
                 if (typeof ResizeObserver === "function") {
@@ -942,6 +973,9 @@
                     entry.observer.observe(chrome);
                 }
             }
+            // Put back before the pages if anything moved it after one --
+            // and left alone where it is, which is every apply but the first.
+            placeHead(host, nav, entry.chrome);
             setClass(host, NETWORKS_HOST_CLASS, true);
             setClass(host, NETWORKS_OPEN_CLASS, networks.open);
             setAttr(host, NETWORKS_LAYOUT_ATTRIBUTE, config.networksMode);
@@ -969,6 +1003,15 @@
         });
         if (state.header) setAttr(state.header.networksToggle, "aria-expanded", networks.open ? "true" : "false");
         syncNetworks();
+    }
+
+    /** The drawer's head right after Forge's tab strip, ahead of every page,
+     *  where Forge's own controls strip sits in document order. Moved only
+     *  when it is not there already: a move is a change to a child list, and
+     *  one on every apply would raise Forge's next after-update itself. */
+    function placeHead(host, nav, chrome) {
+        if (chrome.parentElement === host && chrome.previousElementSibling === nav) return;
+        host.insertBefore(chrome, nav.nextSibling);
     }
 
     /** The name Forge's tab button gives a page: by aria-controls where

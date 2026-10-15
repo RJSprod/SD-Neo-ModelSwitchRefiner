@@ -164,18 +164,32 @@ INFOTEXT_HTML = ('<p>a cat in a hat<br>\nNegative prompt: blurry<br>\n'
                  'Steps: 8, Sampler: Euler a, CFG scale: 1, Seed: 42, Size: 1024x1024</p>')
 
 
+# Each card's sort keys, as Forge's pages write them (`data-sort-*`, from
+# ExtraNetworksPage.get_sort_keys and the page's own `default`, its place in
+# the listing). Chosen so that every press of a sort control in the drawer's
+# test changes the order the previous press left.
+SORT_KEYS = {"bad_hands": {"default": 0, "name": "bad_hands", "date_created": 50, "date_modified": 50},
+             "detail": {"default": 0, "name": "detail", "date_created": 200, "date_modified": 400},
+             "style": {"default": 1, "name": "style", "date_created": 100, "date_modified": 300}}
+
+
 def controls_html(tabname: str, page: str) -> str:
     """html/extra-networks-pane.html: the page's own controls, hidden until
-    Forge's script gathers them into the tab strip and shows the page's."""
+    Forge's script gathers them into the tab strip and shows the page's.
+    Every sort control calls Forge's own handler, and the one Forge's
+    *Default sorting method* names (Path, its default) is drawn pressed."""
     full = f"{tabname}_{page}"
-    sorts = "".join(f'<div id="{full}_extra_sort_{key}" class="extra-network-control--sort" data-sortkey="{key}">'
+    sorts = "".join(f'<div id="{full}_extra_sort_{key}" class="extra-network-control--sort'
+                    f'{" extra-network-control--enabled" if key == "default" else ""}" data-sortkey="{key}" '
+                    f'onclick="extraNetworksControlSortOnClick(event, \'{tabname}\', \'{page}\');">'
                     f'<i class="extra-network-control--icon extra-network-control--sort-icon"></i></div>'
                     for key in ("default", "name", "date_created", "date_modified"))
     return (f'<div class="extra-network-control" id="{full}_controls" style="display:none">'
             f'<div class="extra-network-control--search"><input id="{full}_extra_search" '
             f'class="extra-network-control--search-text" type="search" placeholder="Search"></div>'
             f'<small>Sort: </small>{sorts}<small> </small>'
-            f'<div id="{full}_extra_sort_dir" class="extra-network-control--sort-dir" data-sortdir="Ascending">'
+            f'<div id="{full}_extra_sort_dir" class="extra-network-control--sort-dir" data-sortdir="Ascending" '
+            f'onclick="extraNetworksControlSortDirOnClick(event, \'{tabname}\', \'{page}\');">'
             f'<i class="extra-network-control--icon extra-network-control--sort-dir-icon"></i></div><small> </small>'
             f'<div id="{full}_extra_tree_view" class="extra-network-control--tree-view">'
             f'<i class="extra-network-control--icon extra-network-control--tree-view-icon"></i></div>'
@@ -205,17 +219,26 @@ POPUP_HTML = """<div class="global-popup"><div class="global-popup-close"></div>
 
 
 def pane_html(tabname: str, page: str, *, controls_built: bool) -> str:
+    """A page's pane. Forge renders a page twice -- empty when the UI is
+    built, whole when the page loads (modules/ui_extra_networks.py,
+    `create_html(empty=True)`, then `interface.load`) -- and its script wires
+    the first render's controls into the tab strip; the second render brings
+    its own controls, hidden, under the same ids. So a page Forge has wired
+    still holds a hidden copy of its controls, as the user's page does: the
+    copy Forge's sort found first once the drawer's head came after the
+    pages."""
     full = f"{tabname}_{page}"
     cards = "".join(
         f'<div class="card" style="width: 256px; height: 384px" data-name="{name}" '
-        f'onclick="cardClicked(\'{tabname}\', \'{html_module.escape(added)}\')">'
+        + "".join(f'data-sort-{key}="{value}" ' for key, value in SORT_KEYS[name].items())
+        + f'onclick="cardClicked(\'{tabname}\', \'{html_module.escape(added)}\')">'
         f'<div class="actions"><div class="additional"><span class="search_terms">{name}</span></div>'
         f'<span class="name">{name}</span></div></div>'
         for name, added in CARDS[page])
     dirs = "".join(f'<button class="lg secondary gradio-button custom-button">{name}</button>'
                    for name in ("all", "krea2\\", "kreaCELEB\\", "kreat\\"))
     return (f'<div id="{full}_pane" class="extra-network-pane">'
-            + ("" if controls_built else controls_html(tabname, page))
+            + controls_html(tabname, page)
             + f'<div class="extra-network-pane-content-dirs"><div id="{full}_dirs" class="extra-network-dirs">{dirs}</div>'
             f'<div id="{full}_cards" class="extra-network-cards">{cards}</div></div></div>')
 
@@ -543,13 +566,41 @@ NETWORKS = """() => {
 }"""
 
 # What Forge's setupExtraNetworksForTab does to the page once the pages'
-# HTML has arrived: the controls strip in the tab bar, every page's controls
-# gathered into it, and the page's live search wired as Forge wires it
-# (javascript/extraNetworks.js, applyFilter): on every input, the cards found
-# under the tab's own element -- `#<tab>_extra_tabs div.card` -- are hidden
-# unless every word typed is in their search terms or description. Run on a
-# page already wired by the markup, it only adds the search.
+# HTML has arrived (javascript/extraNetworks.js): the controls strip in the
+# tab bar, every page's controls gathered into it, and each page's live
+# search and sort wired as Forge wires them. The search (applyFilter): on
+# every input, the cards found under the tab's own element --
+# `#<tab>_extra_tabs div.card` -- are hidden unless every word typed is in
+# their search terms or description. The sort (applySort, and the onclick
+# handlers the pane's template names): a sort control marks itself pressed
+# among its siblings and asks for the page's sort a moment later, which
+# reads the pressed control with `gradioApp().querySelector('#<page>_controls
+# .extra-network-control--sort.extra-network-control--enabled')` -- the
+# first in the document -- and the direction from the control it found when
+# it wired the page, sorts the cards on their `data-sort-*` key (numbers as
+# numbers) and puts them back into `#<page>_cards`. And what a page's own
+# tab runs when it is selected (applyExtraNetworkFilter, a moment later): the
+# page's filter, then its sort, both forced. Run on a page already wired by
+# the markup, it only adds the search and the sort, finding the wired
+# controls in the strip as Forge did before anything else existed.
 FORGE_WIRES = """() => {
+    window.extraNetworksApplySort = window.extraNetworksApplySort || {};
+    window.extraNetworksApplyFilter = window.extraNetworksApplyFilter || {};
+    window.applyExtraNetworkFilter = function (full) {
+        setTimeout(() => { const apply = extraNetworksApplyFilter[full]; if (apply) apply(true); }, 1);
+    };
+    window.extraNetworksControlSortOnClick = function (event, tabname, page) {
+        const self = event.currentTarget;
+        self.parentElement.querySelectorAll(".extra-network-control--sort")
+            .forEach((x) => x.classList.remove("extra-network-control--enabled"));
+        self.classList.add("extra-network-control--enabled");
+        setTimeout(() => extraNetworksApplySort[tabname + "_" + page](true), 1);
+    };
+    window.extraNetworksControlSortDirOnClick = function (event, tabname, page) {
+        const dir = event.currentTarget;
+        dir.dataset.sortdir = dir.dataset.sortdir == "Ascending" ? "Descending" : "Ascending";
+        setTimeout(() => extraNetworksApplySort[tabname + "_" + page](true), 1);
+    };
     ["txt2img", "img2img"].forEach((tabname) => {
         const tabs = document.querySelector("#" + tabname + "_extra_tabs");
         const nav = tabs.querySelector(":scope > div.tab-nav");
@@ -561,8 +612,11 @@ FORGE_WIRES = """() => {
         }
         tabs.querySelectorAll(":scope > [id^='" + tabname + "_']").forEach((elem) => {
             const full = elem.id;
-            const search = document.getElementById(full + "_extra_search");
-            if (!search) return;
+            const controls = strip.querySelector("#" + full + "_controls")
+                || document.getElementById(full + "_controls");
+            if (!controls) return;
+            const search = controls.querySelector("#" + full + "_extra_search");
+            const sortDir = controls.querySelector("#" + full + "_extra_sort_dir");
             if (!search.dataset.forgeWired) {
                 search.dataset.forgeWired = "1";
                 const applyFilter = () => {
@@ -576,9 +630,26 @@ FORGE_WIRES = """() => {
                     });
                 };
                 search.addEventListener("input", applyFilter);
+                extraNetworksApplyFilter[full] = (force) => { applyFilter(); extraNetworksApplySort[full](force); };
+                extraNetworksApplySort[full] = () => {
+                    const cards = gradioApp().querySelectorAll("#" + full + " div.card");
+                    const parent = gradioApp().querySelector("#" + full + "_cards");
+                    const pressed = gradioApp().querySelector(
+                        "#" + full + "_controls .extra-network-control--sort.extra-network-control--enabled");
+                    const key = pressed ? pressed.dataset.sortkey : "default";
+                    const field = "sort" + key.charAt(0).toUpperCase() + key.slice(1);
+                    const sorted = Array.from(cards).sort((a, b) => {
+                        const x = a.dataset[field];
+                        const y = b.dataset[field];
+                        if (!isNaN(x) && !isNaN(y)) return parseInt(x) - parseInt(y);
+                        return x < y ? -1 : (x > y ? 1 : 0);
+                    });
+                    if (sortDir.dataset.sortdir == "Descending") sorted.reverse();
+                    parent.innerHTML = "";
+                    sorted.forEach((card) => parent.appendChild(card));
+                };
             }
-            const controls = document.getElementById(full + "_controls");
-            if (controls && controls.parentElement !== strip) strip.appendChild(controls);
+            if (controls.parentElement !== strip) strip.appendChild(controls);
         });
     });
 }"""
@@ -947,15 +1018,18 @@ class TestTheQuickSettingsDrawer:
         page.close()
 
 
+# The page's controls in the drawer's head -- not the hidden copy Forge's
+# second render leaves in the page under the same ids.
 CONTROLS_ROW = """() => {
-    const q = (s) => document.querySelector(s);
+    const head = document.querySelector(".mc-theme-networks .extra-networks-controls-div");
+    const q = (s) => head.querySelector(s) || document.querySelector(s);
     const ids = ["txt2img_lora_extra_sort_default", "txt2img_lora_extra_sort_name", "txt2img_lora_extra_sort_date_created",
                  "txt2img_lora_extra_sort_date_modified", "txt2img_lora_extra_sort_dir", "txt2img_lora_extra_tree_view",
                  "txt2img_lora_extra_refresh"];
-    const boxes = ids.map((id) => document.getElementById(id).getBoundingClientRect());
+    const boxes = ids.map((id) => head.querySelector("#" + id).getBoundingClientRect());
     const search = q("#txt2img_lora_extra_search").getBoundingClientRect();
     const label = q("#txt2img_lora_controls small");
-    const spacers = [...document.querySelectorAll("#txt2img_lora_controls small")].slice(1)
+    const spacers = [...head.querySelectorAll("#txt2img_lora_controls small")].slice(1)
         .map((s) => getComputedStyle(s).display);
     return {tops: boxes.map((b) => Math.round(b.top)), searchBottom: search.bottom,
             label: getComputedStyle(label).display, labelTop: label.getBoundingClientRect().top,
@@ -983,8 +1057,10 @@ class TestTheExtraNetworksDrawer:
         assert found["toggle"] == {"hidden": False, "expanded": "false", "disabled": False}
         assert found["navMarked"] is True and found["navDisplay"] == "none"
         assert found["generationDisplay"] == "block" and found["generationSelected"] == "Generation"
-        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "txt2img_generation",
-                                              "txt2img_textual_inversion", "txt2img_lora", "mc-theme-networks-txt2img"]
+        # The head right after Forge's tab strip and ahead of the pages,
+        # where Forge's own controls strip is in the document.
+        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "mc-theme-networks-txt2img",
+                                              "txt2img_generation", "txt2img_textual_inversion", "txt2img_lora"]
         assert found["ti"]["parent"] == "txt2img_extra_tabs" and found["ti"]["marked"] is True
         assert found["lora"]["parent"] == "txt2img_extra_tabs"
         assert found["img2imgLora"]["parent"] == "img2img_extra_tabs"
@@ -1035,6 +1111,112 @@ class TestTheExtraNetworksDrawer:
         page.fill("#txt2img_lora_extra_search", "")
         settle(page)
         assert page.evaluate(cards) == [["detail", False], ["style", False]]
+        page.close()
+
+    SORTED = """() => [...document.querySelectorAll('#txt2img_lora_cards .card')].map((c) => c.dataset.name)"""
+
+    @pytest.mark.parametrize("layout", ["drawer", "column"])
+    def test_the_sort_buttons_sort_the_page_forge_rendered_twice(self, browser, layout):
+        """"the sort buttons don't work!" Forge renders a page twice and
+        wires the first render's controls into its strip, so every page
+        keeps a hidden copy of its controls under the same ids, and Forge's
+        sort reads the pressed sort button with querySelector: the first in
+        the document. The drawer's head, holding the wired strip, came after
+        the pages, so the sort read the hidden copy's button -- the default,
+        never pressed -- and every sort button did nothing; only the
+        direction, which Forge holds from when it wired the page, still
+        turned the list round. The head goes before the pages, where Forge's
+        strip was: each press here changes the order the last one left."""
+        page = open_page(browser, {"model_chain_theme_networks": "open",
+                                   "model_chain_theme_networks_mode": layout})
+        page.evaluate(FORGE_WIRES)
+        page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+        settle(page)
+        assert page.evaluate("document.querySelectorAll('[id=\"txt2img_lora_controls\"]').length") == 2, (
+            "the page's hidden second render is there, as on the user's page")
+        assert page.evaluate(self.SORTED) == ["detail", "style"]
+
+        def press(control):
+            page.click(".mc-theme-networks .extra-networks-controls-div #txt2img_lora_extra_" + control)
+            page.wait_for_timeout(20)
+            settle(page)
+            return page.evaluate(self.SORTED)
+
+        assert press("sort_date_created") == ["style", "detail"], "date created, ascending"
+        assert press("sort_name") == ["detail", "style"], "name, ascending"
+        assert press("sort_dir") == ["style", "detail"], "name, descending"
+        assert press("sort_date_modified") == ["detail", "style"], "date modified, descending"
+        assert press("sort_default") == ["style", "detail"], "the listing's order, descending"
+        pressed = page.evaluate("[...document.querySelectorAll('.mc-theme-networks #txt2img_lora_controls "
+                                ".extra-network-control--sort.extra-network-control--enabled')]"
+                                ".map((b) => b.dataset.sortkey)")
+        assert pressed == ["default"]
+        page.close()
+
+    def test_a_page_rendered_again_is_shown_sorted_as_forges_settings_say(self, browser):
+        """"default sort to newest created to oldest": Forge's own settings
+        say so now, and Forge sorts a page when its own tab is selected --
+        but its load renders the cards in the listing's order, and the
+        drawer selects no tab of Forge's, so the page showed the listing's
+        order until a search or a press. The drawer asks Forge's own filter
+        and sort once for each rendering of the cards it shows, and not on
+        every update, where the sort's rewrite of the cards would raise the
+        next one."""
+        page = open_page(browser, {"model_chain_theme_networks": "open"})
+        page.evaluate(FORGE_WIRES)
+        page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+        settle(page)
+        # Forge's settings, as the user's read now: Date Created, Descending.
+        page.evaluate("""() => {
+            const controls = document.querySelector('.mc-theme-networks #txt2img_lora_controls');
+            controls.querySelectorAll('.extra-network-control--sort').forEach((b) =>
+                b.classList.toggle('extra-network-control--enabled', b.dataset.sortkey === 'date_created'));
+            controls.querySelector('#txt2img_lora_extra_sort_dir').dataset.sortdir = 'Descending';
+            window.asked = [];
+            const ask = window.applyExtraNetworkFilter;
+            window.applyExtraNetworkFilter = (full) => { window.asked.push(full); ask(full); };
+        }""")
+        # Forge's load renders the page again, its cards in the listing's order.
+        page.evaluate("""(pane) => {
+            document.getElementById('txt2img_lora_cards_html').innerHTML = pane;
+            const cards = document.getElementById('txt2img_lora_cards');
+            [...cards.children].reverse().forEach((card) => cards.appendChild(card));
+        }""", pane_html("txt2img", "lora", controls_built=True))
+        assert page.evaluate(self.SORTED) == ["style", "detail"], "the listing's order"
+
+        changed(page)
+        page.wait_for_timeout(20)
+        settle(page)
+        assert page.evaluate(self.SORTED) == ["detail", "style"], "newest created first"
+        # The page rendered again, and the other tab's drawer's page, seen
+        # for the first time since Forge's script could sort it.
+        assert page.evaluate("window.asked") == ["txt2img_lora", "img2img_lora"]
+        page.evaluate(HEARD)
+        changed(page)
+        changed(page)
+        page.wait_for_timeout(20)
+        assert page.evaluate("window.asked") == ["txt2img_lora", "img2img_lora"], "once a rendering"
+        assert page.evaluate("window.heard") == [], "and no update raised by it"
+        page.close()
+
+    def test_the_head_goes_back_before_the_pages_and_otherwise_stays_put(self, browser):
+        """Whatever moves the head after a page, the next update puts it
+        back after Forge's tab strip; an update that finds it there moves
+        nothing (a move is a change to a child list, and one on every update
+        would raise Forge's next update itself)."""
+        page = open_page(browser)
+        order = "[...document.querySelector('#txt2img_extra_tabs').children].map((c) => c.id || c.className)"
+        placed = page.evaluate(order)
+        assert placed.index("mc-theme-networks-txt2img") == 1
+        page.evaluate("document.querySelector('#txt2img_extra_tabs')"
+                      ".appendChild(document.getElementById('mc-theme-networks-txt2img'))")
+        assert page.evaluate(order)[-1] == "mc-theme-networks-txt2img"
+        changed(page)
+        assert page.evaluate(order) == placed
+        page.evaluate(HEARD)
+        changed(page)
+        changed(page)
+        assert page.evaluate("window.heard") == [], "nothing moved twice"
         page.close()
 
     def test_a_strip_button_shows_that_page_and_its_controls_and_a_card_still_reaches_the_prompt(self, browser):
@@ -1138,8 +1320,10 @@ class TestTheExtraNetworksDrawer:
         page.evaluate("hooks.after.forEach((fn) => fn())")
         settle(page)
         found = page.evaluate(NETWORKS)
-        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "txt2img_generation",
-                                              "txt2img_textual_inversion", "txt2img_lora", "mc-theme-networks-txt2img"]
+        # The head right after Forge's tab strip and ahead of the pages,
+        # where Forge's own controls strip is in the document.
+        assert found["extraTabsChildren"] == ["tab-nav scroll-hide mc-theme-networks-nav", "mc-theme-networks-txt2img",
+                                              "txt2img_generation", "txt2img_textual_inversion", "txt2img_lora"]
         assert found["stripParent"] == "mc-theme-networks-txt2img"
         assert found["tiControls"] == {"parent": "extra-networks-controls-div", "display": ""}
         assert found["loraControls"] == {"parent": "extra-networks-controls-div", "display": "none"}
@@ -1287,6 +1471,12 @@ class TestTheExtraNetworksDrawer:
                                ".mc-theme-networks-handle').getBoundingClientRect(); "
                                "return [r.left + r.width / 2, r.top + 30]; })()")
         assert abs(handle[0] - (1600 - 340)) <= 1, handle
+        # The edge runs down the shown page's side, above it: the head comes
+        # before the pages in the document, a level above the page.
+        over_page = page.evaluate("""(x) => { const shown = document.querySelector('.mc-theme-networks-shown')
+            .getBoundingClientRect(); const hit = document.elementFromPoint(x, shown.top + 100);
+            return hit && hit.className; }""", handle[0])
+        assert over_page == "mc-theme-networks-handle", over_page
         page.mouse.move(*handle)
         page.mouse.down()
         page.mouse.move(handle[0] - 60, handle[1], steps=4)
