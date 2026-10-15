@@ -8906,17 +8906,20 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
    body under it, so the page itself never scrolls because of the Voice Box.
    The stages are cards in a row, swiped left and right and snapped a card at
    a time, from the leftmost to the rightmost; `data-layout` on the root, set
-   by the script from the root's width, says how many fit the view: "pair"
-   (two, each stage's long list taking the room left and scrolling inside it)
-   or, below 900 px, "stack" (one a screen wide; each card's body is its one
-   vertical scroller and nothing in it scrolls on its own). A stage's head stays at
+   by the script from the root's width, says how many fit the view: "wide"
+   (as many as `data-view` says -- two, three or four, the choice in the
+   pipeline bar's More menu -- each stage's long list taking the room left and
+   scrolling inside it) or, below 900 px, "stack" (one a screen wide; each
+   card's body is its one vertical scroller and nothing in it scrolls on its
+   own). A stage's head stays at
    the top by being outside the body that scrolls rather than sticky inside
    it: the rows that scroll under a sticky head are positioned (their tint
    edge needs it), so they would be painted over it, and only a z-index could
    lift it. Waveforms are canvases that take their ink from `color`, which is
    why no rule below paints one. Nothing here draws above the host's dialogs:
    the section sets no z-index at all, so Mini Paint's dialog layer (2000) and
-   the assistant's panel (1200) stay above everything Voice Box shows. */
+   the assistant's panel (1200) stay above everything Voice Box shows -- a
+   menu included, which covers the stages only by coming after them. */
 
 #mc-voice-box {
     --mc-voice-box-tint-saturation: 40%;
@@ -9089,6 +9092,7 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
    side by side, each is as tall as that and no taller. */
 #mc-voice-box .mc-voice-box-stages {
     --mc-voice-box-stage-gap: 0.5em;
+    --mc-voice-box-per-view: 3;
     align-items: stretch;
     display: flex;
     flex: 1 1 0;
@@ -9181,12 +9185,13 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
    takes room under the cards: the stage bar above them is the way along for
    a mouse. A
    sideways drag is the cards' everywhere but on a control that says
-   otherwise with touch-action. From 900 px two cards share the view, so a
-   swipe shows each stage beside its neighbour in turn; below it, a phone's,
+   otherwise with touch-action. From 900 px two, three or four cards share
+   the view, so a swipe shows each stage beside its neighbours in turn --
+   with four, all of them, and nothing to swipe to; below it, a phone's,
    one card fills it, and up and down belongs to the card in view, whose body
    is its one vertical scroller: the lists in it take the height they need
    (the rules further down), so nothing scrolls inside anything. */
-#mc-voice-box[data-layout="pair"] .mc-voice-box-stages,
+#mc-voice-box[data-layout="wide"] .mc-voice-box-stages,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stages {
     flex-direction: row;
     overflow-x: auto;
@@ -9195,21 +9200,32 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     scrollbar-width: none;
 }
 
-#mc-voice-box[data-layout="pair"] .mc-voice-box-stage,
+#mc-voice-box[data-layout="wide"] .mc-voice-box-stage,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stage {
     scroll-snap-align: start;
     scroll-snap-stop: always;
 }
 
-#mc-voice-box[data-layout="pair"] .mc-voice-box-stage {
-    flex: 0 0 calc((100% - var(--mc-voice-box-stage-gap)) / 2);
+/* Stages in view: as many cards as it says across the view, with the gap
+   between each two. */
+#mc-voice-box[data-view="2"] .mc-voice-box-stages {
+    --mc-voice-box-per-view: 2;
+}
+
+#mc-voice-box[data-view="4"] .mc-voice-box-stages {
+    --mc-voice-box-per-view: 4;
+}
+
+#mc-voice-box[data-layout="wide"] .mc-voice-box-stage {
+    flex: 0 0 calc((100% - (var(--mc-voice-box-per-view) - 1) * var(--mc-voice-box-stage-gap))
+                   / var(--mc-voice-box-per-view));
 }
 
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stage {
     flex: 0 0 100%;
 }
 
-#mc-voice-box[data-layout="pair"] .mc-voice-box-connector,
+#mc-voice-box[data-layout="wide"] .mc-voice-box-connector,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-connector {
     display: none;
 }
@@ -9224,11 +9240,16 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     display: none;
 }
 
-#mc-voice-box[data-layout="pair"] .mc-voice-box-stagebar,
+#mc-voice-box[data-layout="wide"] .mc-voice-box-stagebar,
 #mc-voice-box[data-layout="stack"] .mc-voice-box-stagebar {
     display: flex;
     flex: 0 0 auto;
     gap: 0.3em;
+}
+
+/* With all four stages in view there is no stage to bring into it. */
+#mc-voice-box[data-layout="wide"][data-view="4"] .mc-voice-box-stagebar {
+    display: none;
 }
 
 #mc-voice-box .mc-voice-box-stagebar-button {
@@ -9860,6 +9881,32 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
     flex: 1 1 auto;
 }
 
+/* The waveform, and at its left the lane's Play/Pause, round, on every lane:
+   marked in the accent while its lane plays. */
+#mc-voice-box .mc-voice-box-lane-strip {
+    align-items: center;
+    display: flex;
+    gap: 0.5em;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-lane-strip .mc-voice-box-lane-wave {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+#mc-voice-box .mc-voice-box-lane-play {
+    border-radius: 999px;
+    height: 2.6em;
+    min-width: 2.6em;
+    width: 2.6em;
+}
+
+#mc-voice-box .mc-voice-box-lane-play[data-playing="true"] {
+    border-color: var(--color-accent, currentColor);
+    color: var(--color-accent, currentColor);
+}
+
 #mc-voice-box .mc-voice-box-lane-details {
     display: flex;
     flex-direction: column;
@@ -9894,4 +9941,138 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #mc-voice-box .mc-voice-box-rename {
     font: inherit;
     min-width: 8em;
+}
+
+/* -- menus: More, and an output lane's own --------------------------------- */
+
+/* Fixed to the window where the script puts it (its left and top, inline)
+   and kept inside it, as tall and as wide as the window allows and scrolling
+   inside where a short window cuts it. It is the root's last child, so it
+   covers the stages without a z-index of its own. */
+#mc-voice-box .mc-voice-box-menu {
+    background: var(--background-fill-primary, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    box-shadow: var(--shadow-drop-lg, none);
+    display: flex;
+    flex-direction: column;
+    gap: 0.1em;
+    max-height: calc(100vh - 16px);
+    max-width: calc(100vw - 16px);
+    min-width: 12em;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 0.3em;
+    position: fixed;
+}
+
+#mc-voice-box .mc-voice-box-menu-heading {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-xs, 0.8em);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding: 0.3em 0.5em 0.1em;
+}
+
+#mc-voice-box .mc-voice-box-menu-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1em;
+}
+
+#mc-voice-box .mc-voice-box-menu-separator {
+    border-top: 1px solid var(--border-color-primary, currentColor);
+    margin: 0.2em 0.1em;
+}
+
+#mc-voice-box .mc-voice-box-menu-item {
+    align-items: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm, 4px);
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    font: inherit;
+    gap: 0.6em;
+    min-height: 2.2em;
+    padding: 0.2em 0.7em 0.2em 0.5em;
+    text-align: left;
+    white-space: nowrap;
+    width: 100%;
+}
+
+#mc-voice-box .mc-voice-box-menu-item:hover,
+#mc-voice-box .mc-voice-box-menu-item:focus-visible {
+    background: var(--background-fill-secondary, transparent);
+}
+
+#mc-voice-box .mc-voice-box-menu-item:focus-visible {
+    border-color: var(--color-accent, currentColor);
+    outline: none;
+}
+
+#mc-voice-box .mc-voice-box-menu-item[disabled] {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+#mc-voice-box .mc-voice-box-menu-item[data-danger="true"] {
+    color: var(--error-text-color, inherit);
+}
+
+#mc-voice-box .mc-voice-box-menu-glyph,
+#mc-voice-box .mc-voice-box-menu-tick {
+    display: block;
+    flex: 0 0 16px;
+    height: 16px;
+    width: 16px;
+}
+
+#mc-voice-box .mc-voice-box-menu-tick {
+    margin-left: auto;
+}
+
+#mc-voice-box .mc-voice-box-menu-glyph svg,
+#mc-voice-box .mc-voice-box-menu-tick svg {
+    display: block;
+    height: 16px;
+    pointer-events: none;
+    width: 16px;
+}
+
+#mc-voice-box .mc-voice-box-menu-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* A row of the choices of one setting -- Stages in view's 2, 3 and 4 -- side
+   by side and as wide as each other, the chosen one filled with the accent
+   the way a pressed toggle is. */
+#mc-voice-box .mc-voice-box-menu-row {
+    flex-direction: row;
+    gap: 0.3em;
+    padding: 0.1em 0.3em 0.2em;
+}
+
+#mc-voice-box .mc-voice-box-menu-row .mc-voice-box-menu-item {
+    border-color: var(--border-color-primary, currentColor);
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 2.6em;
+    padding-inline: 0.4em;
+    text-align: center;
+    width: auto;
+}
+
+#mc-voice-box .mc-voice-box-menu-row .mc-voice-box-menu-item[aria-checked="true"] {
+    background: var(--color-accent, currentColor);
+    border-color: var(--color-accent, currentColor);
+    color: var(--button-primary-text-color, var(--background-fill-primary, inherit));
+    font-weight: 600;
+}
+
+#mc-voice-box .mc-voice-box-menu-row .mc-voice-box-menu-item:focus-visible {
+    outline: 2px solid var(--color-accent, currentColor);
+    outline-offset: 1px;
 }
