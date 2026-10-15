@@ -801,6 +801,74 @@ when the tab leaves the screen (`holdHistorySwipe`, `state.swipeHeld`).
 `tests/test_voice_box_layout.py` swipes a finger past both ends at both widths,
 with a page to go Forward to, and expects to stay.
 
+**Stages in view, a Play on every lane, a lane's menu (the round after).** *"I
+actually now find on one page to be too wide! Okay, let's go with three, and make
+it configurable. I should be able to set 2, 3, of 4 stages in view in voice box
+when on desktop. Put this setting in a "..." menu accessible by button next to
+the top of the page where is mentioned the pipeline (new rename delete ...)"* —
+and, of the output lanes, *"a button to the left of this component that is a play
+/ pause button … inline of each waveform … Playing a different waveform always
+starts from 0"* and *"a right click menu on the waveform so i can access other
+controls without expanding it, like the ability to delete or loop playback."*
+
+- **Stages in view.** From 900 px the layout is `wide` (the name `pair` is gone)
+  and `data-view` on the root is the choice: 2, 3 or 4 cards across the view,
+  three until it is changed (`VIEW`). One rule sizes the cards,
+  `calc((100% - (n - 1) × gap) / n)` with *n* a custom property that `data-view`
+  sets; with four in view nothing scrolls and the stage bar is not drawn. The
+  choice is the browser's (`localStorage["mc-voice-box:stages-in-view"]`, read
+  at boot, an unknown value read as three, a refusing storage costing only the
+  next visit), not the server's, because how many fit is the screen's question.
+  It is drawn at once and keeps the leftmost stage in view the leftmost, or ends
+  the row with the last stages where it cannot (`setView`, `showFrom`, which
+  `goToStage` now uses too); Chromium re-snaps a row to the same card by itself,
+  and the explicit scroll is for every browser that does not. Below 900 px
+  nothing changes: one card, and no ⋯, which is hidden there with the `hidden`
+  attribute so that a theme's `button { display: … !important }` cannot show it.
+- **More (⋯).** The last of the pipeline bar's buttons, drawn (three circles,
+  never the ellipsis character), `aria-haspopup="menu"` and `aria-expanded`. Its
+  menu is **Stages in view** as a row of three `menuitemradio` choices, the one
+  in use checked and focused when it opens.
+- **One menu at a time** (`openMenu`, `closeMenu`): a single node, the root's
+  last child, so it paints over the stages without a z-index (the section still
+  sets none) and stays inside `<gradio-app>`. `position: fixed`, placed in the
+  window (under More with their right edges in line, or above it where there is
+  no room; at a lane's press, flipped left or up to stay inside the window) and
+  moved again by what it measures, because a transformed box around the tab —
+  a theme's tab animation — makes `fixed` that box's rather than the window's.
+  A press outside, a scroll anywhere but in it, the window resizing or losing
+  the focus, the layout changing and the tab leaving the screen put it away; so
+  do a choice, Escape and Tab, which give the focus back to what opened it (a
+  choice only when it was made with the keyboard: a click has `detail` 1). The
+  arrows, Home and End move between its items, passing over disabled ones; its
+  keys are taken in the document's capture phase and go no further, so Escape
+  in a lane's menu leaves the open lane open. Its document and window listeners
+  exist only while it is open.
+- **A lane's Play/Pause** is a round button at the left of its waveform, on
+  every lane, open or compact (the waveform and it share a strip under the
+  lane's line); the open lane's details keep From the start, Stop and Loop, so
+  no lane has two Plays. It is the player's own toggle (`toggleLane`), whose
+  rule changed for every lane: the active player resumes where it was paused,
+  and any other lane — one played before another, one stopped — plays from 0.
+  It is marked (`data-playing`, the accent's border and ink) while its lane
+  plays. A press on it opens nothing, being a button (`fromControl`).
+- **A lane's menu** opens on `contextmenu` anywhere in the lane — a right click,
+  a long press, Shift+F10 or the ContextMenu key on a focused lane, where
+  Chromium gives the event a point inside the lane — except in a text box and
+  the infotext, which keep the browser's menu. Its items are the lane's own
+  functions: Play or Pause, Play from the start, Stop (disabled unless the lane
+  is the active player), Loop (`menuitemcheckbox` with a drawn tick), Rename
+  (the name's box in its place, `renameLane`, which the double click uses
+  too), Trim to sample, Save to the folder, Download, Copy infotext (where there
+  is one; a refused clipboard opens the lane to select it), Use seed (disabled,
+  with the reason, for a render made before seeds were recorded), Reuse
+  settings, and Delete apart, in the error colour. While it is open its Play
+  and Stop follow the lane's audio (`syncLaneMenu`), and a lane that goes takes
+  its menu with it. A choice in a menu is not a tap outside the selected lane
+  (`onPageClick` reads the click's path, captured before the item put its menu
+  away). On the active waveform a mouse's other buttons seek nothing, nor does a
+  finger held until the menu opens.
+
 ---
 
 ## 9. Voice Chat

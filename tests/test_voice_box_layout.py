@@ -15,17 +15,22 @@ paints it -- with the real Voice Box section of ``style.css`` and the real
 samples, history entries and outputs, and measures:
 
     at 1440 x 900   the page does not scroll; the root is 900 - 160 - 60 px,
-                    written in pixels on itself; the stages are cards two to
-                    the view, the other two beyond its right edge, in a row
-                    that snaps a card at a time and ends at the last two; a
-                    sideways wheel (a touchpad's swipe) moves one card and
-                    no further than either end; the stage bar marks the two
-                    in view and a press moves the row as little as it can;
+                    written in pixels on itself; the stages are cards three
+                    to the view until More's menu says two or four -- a
+                    choice the browser keeps -- the others beyond its right
+                    edge, in a row that snaps a card at a time and ends at
+                    the last ones; a sideways wheel (a touchpad's swipe)
+                    moves one card and no further than either end; the stage
+                    bar marks the cards in view and a press moves the row as
+                    little as it can, and with four in view there is no bar;
                     the sample library, the history and the output lanes each
                     scroll inside their stage; Render is in the Configuration
                     stage's header, on screen when that stage is, and nothing
-                    covers it; a selected lane's transport is square icon
-                    buttons;
+                    covers it; every lane has a round Play at the left of its
+                    waveform, and a selected lane's other transport buttons
+                    are square icons; More's menu hangs under its button and a
+                    lane's right click opens its menu at the pointer, both
+                    inside the window and over the stages;
     at 390 x 844    the stages are cards side by side, each exactly as wide
                     and as tall as the row they scroll in, which snaps to a
                     card's start; the stage bar marks the card in view and a
@@ -233,6 +238,8 @@ HOSTILE = {
     "display": ("button { display: inline-flex !important; }\n"
                 "div { display: inline-flex !important; }\n"
                 "span { display: inline-flex !important; }\n"),
+    # Buttons alone, which leaves the page's own boxes their layout.
+    "buttons": "button { display: inline-flex !important; }\n",
     "inputs": ("input { -webkit-appearance: none !important; appearance: none !important;"
                " width: 2px !important; }\n"),
 }
@@ -335,13 +342,25 @@ def _answer(route, answers: dict, html: str, script: str) -> None:
         route.fulfill(status=404, body="")
 
 
+VIEW_KEY = "mc-voice-box:stages-in-view"
+
+
+def keep_view(page, view) -> None:
+    """The browser holds ``view`` as its Stages in view before the page loads."""
+    if view is not None:
+        page.add_init_script("try { localStorage.setItem(%s, %s); } catch (error) {}"
+                             % (json.dumps(VIEW_KEY), json.dumps(str(view))))
+
+
 def open_tab(browser, width: int, height: int, *, dark: bool = False, hostile=(), configuration=None,
-             engine: str = "vibevoice"):
+             engine: str = "vibevoice", view=None):
     """A page at ``width`` x ``height`` with the tab booted, its lists drawn and fitted;
     ``hostile`` names the parts of HOSTILE the page's theme has, ``configuration``
     what the saved configuration holds besides the fixture's (VibeVoice's options in
-    its options and flat, as the server keeps them), and ``engine`` the engine in use."""
+    its options and flat, as the server keeps them), ``engine`` the engine in use and
+    ``view`` the Stages in view the browser kept from before."""
     page = browser.new_page(viewport={"width": width, "height": height})
+    keep_view(page, view)
     answers, html, script = fixtures(engine), page_html(hostile), SCRIPT.read_text(encoding="utf-8")
     saved = answers["/configurations"]["configurations"][0]
     for key, value in (configuration or {}).items():
@@ -397,6 +416,7 @@ MEASURE = """() => {
         pageClient: document.documentElement.clientHeight,
         pageWide: document.documentElement.scrollWidth,
         layout: root.getAttribute("data-layout"),
+        view: root.getAttribute("data-view"),
         inlineHeight: root.style.height,
         root: box(root),
         head: box(root.querySelector(".mc-voice-box-head")),
@@ -470,7 +490,7 @@ class TestDesktop:
         found = measure(page)
         page.close()
 
-        assert found["layout"] == "pair"
+        assert found["layout"] == "wide"
         assert found["pageScroll"] <= found["innerHeight"] + 1, found
         assert found["scrollY"] == 0
         assert found["inlineHeight"] == f"{900 - HEADER - FOOTER}px"
@@ -478,9 +498,9 @@ class TestDesktop:
         assert _near(found["root"]["height"], 900 - HEADER - FOOTER)
         assert found["root"]["bottom"] <= found["innerHeight"] - FOOTER + 1
 
-    def test_two_stages_share_the_view_and_the_other_two_wait_beyond_its_right_edge(self, browser):
-        """The user's words: four stages in one view were too cramped; two at a
-        time, swiped like the phone's."""
+    def test_three_stages_share_the_view_and_the_fourth_waits_beyond_its_right_edge(self, browser):
+        """The user's words: four stages in one view were too cramped, two
+        too wide; three until it is changed, swiped like the phone's."""
         page = open_tab(browser, 1440, 900)
         found = measure(page)
         page.close()
@@ -493,13 +513,13 @@ class TestDesktop:
         gap = stages[1]["left"] - stages[0]["right"]
         assert 4 <= gap <= 12, gap
         for stage in stages:
-            assert _near(stage["width"], (container["clientWidth"] - gap) / 2), (stage, container)
+            assert _near(stage["width"], (container["clientWidth"] - 2 * gap) / 3), (stage, container)
             assert _near(stage["height"], container["client"]), (stage, container)
             assert _near(stage["top"], stages[0]["top"]), stage
             assert (stage["snapAlign"], stage["snapStop"]) == ("start", "always"), stage
         assert _near(stages[0]["left"], container["box"]["left"])
-        assert _near(stages[1]["right"], container["box"]["right"])
-        assert all(stage["left"] >= container["box"]["right"] - 1 for stage in stages[2:])
+        assert _near(stages[2]["right"], container["box"]["right"])
+        assert stages[3]["left"] >= container["box"]["right"] - 1
         # No scrollbar is drawn under the cards, so none takes room there (a
         # headless Chromium's scrollbars overlay, so the declaration is the proof),
         # and nothing is left between them.
@@ -512,7 +532,7 @@ class TestDesktop:
         assert bar["box"]["top"] >= found["head"]["bottom"] - 1, (bar, found["head"])
         assert bar["box"]["bottom"] <= container["box"]["top"] + 1, bar
         assert [button["text"] for button in bar["buttons"]] == ["Input", "Prompt", "Config", "Outputs"]
-        assert [button["current"] for button in bar["buttons"]] == ["true", "true", None, None]
+        assert [button["current"] for button in bar["buttons"]] == ["true", "true", "true", None]
 
     def test_every_long_list_scrolls_inside_its_stage(self, browser):
         page = open_tab(browser, 1440, 900)
@@ -568,7 +588,10 @@ class TestDesktop:
         assert found["inView"] is True
         assert found["pageScroll"] <= found["innerHeight"] + 1
 
-    def test_a_selected_lanes_transport_is_square_icon_buttons_as_tall_as_the_others(self, browser):
+    def test_a_selected_lanes_transport_is_icon_buttons_its_play_round_beside_the_waveform(self, browser):
+        """Play/Pause, round and a little larger, at the waveform's left; From
+        the start, Stop and Loop square and as tall as the details' other
+        buttons; every picture 16 px in its button's own colour."""
         page = open_tab(browser, 1440, 900)
         bring(page, "Outputs")
         page.locator("#mc-voice-box .mc-voice-box-lane").nth(0).click()
@@ -580,15 +603,21 @@ class TestDesktop:
             return {icons: [...lane.querySelectorAll(".mc-voice-box-icon")].map((b) => Object.assign(size(b), {
                         label: b.getAttribute("aria-label"), svg: size(b.querySelector("svg")),
                         ink: getComputedStyle(b.querySelector("svg")).fill,
-                        colour: getComputedStyle(b).color})),
+                        colour: getComputedStyle(b).color, radius: getComputedStyle(b).borderTopLeftRadius,
+                        inStrip: !!b.closest(".mc-voice-box-lane-strip")})),
                     trim: size(lane.querySelector(".mc-voice-box-lane-trim"))};
         }""")
         page.close()
 
         assert [icon["label"] for icon in found["icons"]] == ["Play", "Play from the start", "Stop", "Loop"]
-        for icon in found["icons"]:
+        play, rest = found["icons"][0], found["icons"][1:]
+        assert play["inStrip"] is True and not any(icon["inStrip"] for icon in rest)
+        assert _near(play["width"], play["height"]) and play["height"] > found["trim"]["height"] + 2, play
+        assert float(play["radius"].rstrip("px")) >= play["height"] / 2, play
+        for icon in rest:
             assert _near(icon["width"], icon["height"]), icon
             assert _near(icon["height"], found["trim"]["height"]), (icon, found["trim"])
+        for icon in found["icons"]:
             assert (round(icon["svg"]["width"]), round(icon["svg"]["height"])) == (16, 16), icon
             # Drawn in the button's own colour.
             assert icon["ink"] == icon["colour"], icon
@@ -629,11 +658,12 @@ class TestDesktop:
 
 
 class TestTwoToTheView:
-    """From 900 px the cards are two to the view, swiped a card at a time
-    from the leftmost pair to the rightmost and no further."""
+    """With two stages in view -- More's menu's smallest choice -- the cards
+    are swiped a card at a time from the leftmost pair to the rightmost and
+    no further."""
 
     def test_the_row_snaps_a_card_at_a_time_and_ends_with_the_last_two_in_view(self, browser):
-        page = open_tab(browser, 1440, 900)
+        page = open_tab(browser, 1440, 900, view=2)
         found = page.evaluate("""async () => {
             const container = document.querySelector("#mc-voice-box .mc-voice-box-stages");
             const cards = [...container.querySelectorAll(".mc-voice-box-stage")];
@@ -661,7 +691,7 @@ class TestTwoToTheView:
 
     def test_a_sideways_wheel_moves_one_card_and_no_further_than_either_end(self, browser):
         """A touchpad's two-finger swipe is a wheel turned sideways."""
-        page = open_tab(browser, 1440, 900)
+        page = open_tab(browser, 1440, 900, view=2)
         seen = []
         for delta in (500, 500, 500, -500, -500, -500):
             page.mouse.move(700, 270)
@@ -680,7 +710,7 @@ class TestTwoToTheView:
         assert all((found["scrollX"], found["scrollY"]) == (0, 0) for found in seen)
 
     def test_a_press_on_the_bar_moves_the_row_as_little_as_it_can(self, browser):
-        page = open_tab(browser, 1440, 900)
+        page = open_tab(browser, 1440, 900, view=2)
         seen = {}
         for label in ("Outputs", "Prompt", "Config", "Input"):
             bring(page, label)
@@ -702,7 +732,7 @@ class TestTwoToTheView:
         assert _near(at_once["left"], starts[2]) and at_once["marked"] == ["Config", "Outputs"], at_once
 
     def test_up_and_down_in_a_card_scrolls_its_list_and_never_the_row(self, browser):
-        page = open_tab(browser, 1440, 900)
+        page = open_tab(browser, 1440, 900, view=2)
         box = page.evaluate("""() => { const r = document.querySelector("#mc-voice-box .mc-voice-box-samples")
             .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }""")
         page.mouse.move(box["x"], box["y"])
@@ -717,11 +747,310 @@ class TestTwoToTheView:
         assert (found["row"], found["scrollX"], found["scrollY"]) == (0, 0, 0), found
 
 
-def touch_page(browser, width: int, height: int, *, forward: bool = False):
+class TestStagesInView:
+    """Two, three or four cards to a wide view, as More's menu says: each
+    choice lays out that many across it, the browser keeps it for the next
+    visit, and with four there is nothing to swipe to and no stage bar."""
+
+    @pytest.mark.parametrize("view", [2, 3, 4])
+    def test_each_choice_lays_out_that_many_cards_across_the_view(self, browser, view):
+        page = open_tab(browser, 1440, 900, view=view)
+        found = measure(page)
+        row = page.evaluate(ROW)
+        page.close()
+
+        container, stages = found["container"], found["stages"]
+        assert (found["layout"], found["view"]) == ("wide", str(view))
+        gap = stages[1]["left"] - stages[0]["right"]
+        assert 4 <= gap <= 12, gap
+        for stage in stages:
+            assert _near(stage["width"], (container["clientWidth"] - (view - 1) * gap) / view), (view, stage)
+            assert _near(stage["height"], container["client"]), (view, stage)
+        assert _near(stages[0]["left"], container["box"]["left"])
+        assert _near(stages[view - 1]["right"], container["box"]["right"]), (view, stages)
+        assert all(stage["left"] >= container["box"]["right"] - 1 for stage in stages[view:])
+        if view < 4:
+            # The row ends with the last ones in view.
+            assert _near(row["max"], row["starts"][4 - view]), row
+            assert found["stagebar"]["display"] == "flex"
+            assert [b["current"] for b in found["stagebar"]["buttons"]] == ["true"] * view + [None] * (4 - view)
+        else:
+            assert row["max"] <= 1, row
+            assert found["stagebar"]["display"] == "none"
+            assert found["stagebar"]["box"]["height"] == 0
+        assert found["pageScroll"] <= found["innerHeight"] + 1, found
+        assert found["pageWide"] <= found["innerWidth"] + 1, found
+
+    def test_a_choice_is_drawn_at_once_and_kept_for_the_next_visit(self, browser):
+        page = open_tab(browser, 1440, 900)
+        bring(page, "Outputs")
+        page.click("#mc-voice-box .mc-voice-box-more")
+        page.locator("#mc-voice-box .mc-voice-box-menu [role=menuitemradio]", has_text="2").click()
+        settle(page)
+        page.wait_for_timeout(300)
+        two = measure(page)
+        two_row = page.evaluate(ROW)
+        page.click("#mc-voice-box .mc-voice-box-more")
+        page.locator("#mc-voice-box .mc-voice-box-menu [role=menuitemradio]", has_text="4").click()
+        settle(page)
+        four = measure(page)
+        kept = page.evaluate("(key) => localStorage.getItem(key)", VIEW_KEY)
+        page.reload()
+        page.wait_for_function("document.querySelectorAll('#mc-voice-box .mc-voice-box-lane').length === %d"
+                               % OUTPUTS)
+        settle(page)
+        again = measure(page)
+        page.close()
+
+        # Prompt, Config and Outputs were in view: with two, Prompt is still
+        # the leftmost, there at once.
+        assert two["view"] == "2" and two_row["marked"] == ["Prompt", "Config"], two_row
+        assert _near(two_row["left"], two_row["starts"][1]), two_row
+        assert four["view"] == "4" and four["stagebar"]["display"] == "none"
+        assert all(stage["right"] <= four["container"]["box"]["right"] + 1 for stage in four["stages"])
+        assert kept == "4"
+        assert again["view"] == "4"
+        assert all(stage["right"] <= again["container"]["box"]["right"] + 1 for stage in again["stages"])
+
+    def test_more_is_not_offered_on_a_phone_even_under_a_hostile_theme(self, browser):
+        page = open_tab(browser, 390, 844, hostile=("buttons",), view=2)
+        found = page.evaluate("""() => {
+            const more = document.querySelector("#mc-voice-box .mc-voice-box-more");
+            const r = more.getBoundingClientRect();
+            return {hidden: more.hidden, width: r.width, height: r.height,
+                    layout: document.getElementById("mc-voice-box").getAttribute("data-layout")};
+        }""")
+        found["stages"] = measure(page)["stages"]
+        page.close()
+
+        assert (found["layout"], found["hidden"], found["width"], found["height"]) == ("stack", True, 0, 0)
+        # A wide screen's choice does not reach a phone's one card to the view.
+        assert _near(found["stages"][0]["width"], 390, 30)
+
+
+class TestTheMenus:
+    """More's menu and a lane's: fixed to the window and inside it, over the
+    stages; a choice in one is not a tap outside the selected lane."""
+
+    MENU_BOX = """() => {
+        const menu = document.querySelector("#mc-voice-box .mc-voice-box-menu");
+        const r = menu.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const style = getComputedStyle(menu);
+        return {shown: !menu.hidden && r.width > 0 && r.height > 0,
+                box: {left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height},
+                over: !!hit && menu.contains(hit), position: style.position, zIndex: style.zIndex,
+                label: menu.getAttribute("aria-label"),
+                items: [...menu.querySelectorAll("[role^=menuitem]")].map((b) => b.textContent),
+                focus: menu.contains(document.activeElement) ? document.activeElement.textContent : null,
+                innerWidth, innerHeight};
+    }"""
+
+    def test_more_hangs_its_menu_under_its_button_over_the_stages(self, browser):
+        """Its right edge in line with More's: on a tab narrower than the
+        window, where nothing else would put it there."""
+        page = open_tab(browser, 1440, 900)
+        page.evaluate("() => { document.getElementById('tab').style.width = '1100px'; }")
+        settle(page)
+        page.click("#mc-voice-box .mc-voice-box-more")
+        settle(page)
+        found = page.evaluate(self.MENU_BOX)
+        more = page.evaluate("""() => { const node = document.querySelector("#mc-voice-box .mc-voice-box-more");
+            const r = node.getBoundingClientRect();
+            return {right: r.right, bottom: r.bottom, expanded: node.getAttribute("aria-expanded")}; }""")
+        page.keyboard.press("ArrowRight")
+        moved = page.evaluate("() => document.activeElement.textContent")
+        page.keyboard.press("Escape")
+        settle(page)
+        closed = page.evaluate(self.MENU_BOX)
+        focus = page.evaluate("() => document.activeElement.className")
+        # A second press on More puts its menu away, as Escape does.
+        page.click("#mc-voice-box .mc-voice-box-more")
+        settle(page)
+        reopened = page.evaluate(self.MENU_BOX)["shown"]
+        page.click("#mc-voice-box .mc-voice-box-more")
+        settle(page)
+        toggled = page.evaluate(self.MENU_BOX)["shown"]
+        page.close()
+
+        assert found["shown"] and found["over"], found
+        assert (found["position"], found["zIndex"]) == ("fixed", "auto"), found
+        assert found["items"] == ["2", "3", "4"] and found["focus"] == "3", found
+        assert more["right"] < found["innerWidth"] - 200, more
+        assert _near(found["box"]["right"], more["right"]), (found, more)
+        assert _near(found["box"]["top"], more["bottom"] + 4), (found, more)
+        assert found["box"]["left"] >= 8 and found["box"]["bottom"] <= found["innerHeight"] - 8
+        assert more["expanded"] == "true"
+        assert moved == "4"
+        assert closed["shown"] is False
+        assert "mc-voice-box-more" in focus
+        assert (reopened, toggled) == (True, False)
+
+    def test_a_container_that_holds_what_is_fixed_moves_no_menu(self, browser):
+        """A transform on a box around the tab -- a theme's tab animation --
+        makes `fixed` that box's rather than the window's; the menu measures
+        where it went and still hangs under More."""
+        page = open_tab(browser, 1440, 900)
+        page.evaluate("() => { document.getElementById('tab').style.transform = 'translateX(0)'; }")
+        settle(page)
+        page.click("#mc-voice-box .mc-voice-box-more")
+        settle(page)
+        found = page.evaluate(self.MENU_BOX)
+        more = page.evaluate("""() => { const r = document.querySelector("#mc-voice-box .mc-voice-box-more")
+            .getBoundingClientRect(); return {right: r.right, bottom: r.bottom}; }""")
+        page.close()
+
+        assert found["shown"] and found["over"], found
+        assert _near(found["box"]["right"], min(more["right"], found["innerWidth"] - 8)), (found, more)
+        assert _near(found["box"]["top"], more["bottom"] + 4), (found, more)
+
+    def test_a_lanes_right_click_opens_its_menu_at_the_pointer_inside_the_window(self, browser):
+        """Near the window's right edge it opens to the pointer's left; near
+        its foot, above the pointer; and the browser's own menu is kept away."""
+        page = open_tab(browser, 1440, 900)
+        bring(page, "Outputs")
+        page.evaluate("""() => { window.__kept = [];
+            document.addEventListener("contextmenu", (event) => window.__kept.push(event.defaultPrevented)); }""")
+        lanes = page.locator("#mc-voice-box .mc-voice-box-lane")
+        seen = []
+        for index, corner in ((1, "right"), (4, "foot")):
+            wave = lanes.nth(index).locator(".mc-voice-box-lane-wave").bounding_box()
+            x = wave["x"] + (wave["width"] - 10 if corner == "right" else 40)
+            y = wave["y"] + wave["height"] / 2
+            page.mouse.click(x, y, button="right")
+            settle(page)
+            seen.append((x, y, page.evaluate(self.MENU_BOX),
+                         page.evaluate("(i) => document.querySelectorAll('#mc-voice-box .mc-voice-box-lane')[i]"
+                                       ".getAttribute('aria-expanded')", index)))
+            page.keyboard.press("Escape")
+            settle(page)
+        kept = page.evaluate("() => window.__kept")
+        page.close()
+
+        names = ["Play", "Play from the start", "Stop", "Loop", "Rename", "Trim to sample",
+                 "Save to the folder", "Download", "Copy infotext", "Use seed", "Reuse settings", "Delete"]
+        (rx, ry, right, right_open), (fx, fy, foot, foot_open) = seen
+        for found in (right, foot):
+            assert found["shown"] and found["over"], found
+            assert found["items"] == names and found["focus"] == "Play", found
+            assert found["box"]["left"] >= 8 and found["box"]["top"] >= 8, found
+            assert found["box"]["right"] <= found["innerWidth"] - 8, found
+            assert found["box"]["bottom"] <= found["innerHeight"] - 8, found
+        assert right["label"] == "Trailer %d" % (OUTPUTS - 1)
+        assert _near(right["box"]["right"], rx) and _near(right["box"]["top"], ry), (rx, ry, right)
+        assert _near(foot["box"]["left"], fx) and _near(foot["box"]["bottom"], fy), (fx, fy, foot)
+        assert (right_open, foot_open) == ("false", "false"), "a menu opens no lane"
+        assert kept == [True, True]
+
+    def test_the_keyboards_menu_key_opens_a_focused_lanes_menu_and_escape_gives_the_focus_back(self, browser):
+        page = open_tab(browser, 1440, 900)
+        bring(page, "Outputs")
+        seen = []
+        for combo in ("Shift+F10", "ContextMenu"):
+            page.evaluate("() => document.querySelectorAll('#mc-voice-box .mc-voice-box-lane')[1].focus()")
+            page.keyboard.press(combo)
+            settle(page)
+            opened = page.evaluate(self.MENU_BOX)
+            page.keyboard.press("ArrowDown")
+            moved = page.evaluate("() => document.activeElement.textContent")
+            page.keyboard.press("Escape")
+            settle(page)
+            seen.append((opened["shown"], opened["label"], opened["focus"], moved,
+                         page.evaluate("() => document.activeElement.getAttribute('data-id') !== null"),
+                         page.evaluate(self.MENU_BOX)["shown"]))
+        page.close()
+
+        assert seen == [(True, "Trailer %d" % (OUTPUTS - 1), "Play", "Play from the start", True, False)] * 2
+
+    def test_a_choice_in_a_lanes_menu_is_not_a_tap_outside_the_selected_lane(self, browser):
+        page = open_tab(browser, 1440, 900)
+        bring(page, "Outputs")
+        lanes = page.locator("#mc-voice-box .mc-voice-box-lane")
+        lanes.nth(0).locator(".mc-voice-box-lane-head").click()
+        settle(page)
+        lanes.nth(2).locator(".mc-voice-box-lane-wave").click(button="right", position={"x": 60, "y": 20})
+        settle(page)
+        page.locator("#mc-voice-box .mc-voice-box-menu [role=menuitemcheckbox]").click()
+        settle(page)
+        found = page.evaluate("""() => {
+            const lanes = [...document.querySelectorAll("#mc-voice-box .mc-voice-box-lane")];
+            return {expanded: lanes.slice(0, 3).map((lane) => lane.getAttribute("aria-expanded")),
+                    loop: lanes[2].querySelector("audio").loop,
+                    pressed: lanes[2].querySelector(".mc-voice-box-lane-loop").getAttribute("aria-pressed"),
+                    menu: !document.querySelector("#mc-voice-box .mc-voice-box-menu").hidden};
+        }""")
+        page.close()
+
+        assert found == {"expanded": ["true", "false", "false"], "loop": True, "pressed": "true", "menu": False}
+
+    def test_under_a_hostile_theme_the_menu_is_whole_and_lobes_swap_takes_nothing_from_it(self, browser):
+        page = open_tab(browser, 1440, 900, hostile=("display",))
+        bring(page, "Outputs")
+        page.locator("#mc-voice-box .mc-voice-box-lane-wave").nth(0).click(button="right", position={"x": 40, "y": 20})
+        settle(page)
+        found = page.evaluate(self.MENU_BOX)
+        rows = page.evaluate("""() => [...document.querySelectorAll("#mc-voice-box .mc-voice-box-menu [role^=menuitem]")]
+            .map((item) => Math.round(item.getBoundingClientRect().top))""")
+        before = page.evaluate("() => document.querySelector('#mc-voice-box .mc-voice-box-menu').innerHTML")
+        swapped = page.evaluate(LOBE_ICON_SWAP)
+        after = page.evaluate("""() => ({html: document.querySelector("#mc-voice-box .mc-voice-box-menu").innerHTML,
+                                         lobe: document.querySelectorAll("#mc-voice-box .lobe-x").length})""")
+        page.close()
+
+        assert found["shown"] and found["over"] and found["position"] == "fixed", found
+        assert len(found["items"]) == 12
+        # One item to a row, top to bottom.
+        assert rows == sorted(rows) and len(set(rows)) == 12, rows
+        assert found["box"]["right"] <= found["innerWidth"] - 8 and found["box"]["bottom"] <= found["innerHeight"] - 8
+        assert swapped == 1
+        assert after == {"html": before, "lobe": 0}
+
+
+class TestTheLanesPlay:
+    @pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+    def test_every_lane_has_its_play_at_the_left_of_its_waveform_and_a_press_opens_nothing(
+            self, browser, width, height):
+        page = open_tab(browser, width, height)
+        bring(page, "Outputs")
+        found = page.evaluate("""() => [...document.querySelectorAll("#mc-voice-box .mc-voice-box-lane")]
+            .slice(0, 6).map((lane) => {
+                const play = lane.querySelector(".mc-voice-box-lane-play").getBoundingClientRect();
+                const wave = lane.querySelector(".mc-voice-box-lane-wave").getBoundingClientRect();
+                const row = lane.getBoundingClientRect();
+                return {play: {left: play.left, right: play.right, width: play.width, height: play.height,
+                               middle: play.top + play.height / 2},
+                        wave: {left: wave.left, right: wave.right, width: wave.width,
+                               middle: wave.top + wave.height / 2},
+                        row: {left: row.left, right: row.right}};
+            })""")
+        target = page.locator("#mc-voice-box .mc-voice-box-lane").nth(2)
+        target.locator(".mc-voice-box-lane-play").click()
+        settle(page)
+        after = page.evaluate("""() => ({
+            expanded: [...document.querySelectorAll("#mc-voice-box .mc-voice-box-lane")]
+                .map((lane) => lane.getAttribute("aria-expanded")).indexOf("true"),
+            active: window.mcVoiceBox.state().activePlayer})""")
+        pressed = target.get_attribute("data-id")
+        page.close()
+
+        for lane in found:
+            assert lane["play"]["width"] >= 32 and _near(lane["play"]["width"], lane["play"]["height"]), lane
+            assert lane["play"]["left"] >= lane["row"]["left"], lane
+            assert lane["play"]["right"] <= lane["wave"]["left"] - 4, lane
+            assert _near(lane["play"]["middle"], lane["wave"]["middle"]), lane
+            assert lane["wave"]["right"] <= lane["row"]["right"], lane
+            assert lane["wave"]["width"] > 150, lane
+        assert after["expanded"] == -1
+        assert after["active"] == {"kind": "output", "id": pressed}
+
+
+def touch_page(browser, width: int, height: int, *, forward: bool = False, view=None):
     """The tab on a page that takes touches, and a DevTools session to touch it
-    with; with ``forward``, a page to go Forward to from it."""
+    with; with ``forward``, a page to go Forward to from it; ``view`` the Stages
+    in view the browser kept."""
     context = browser.new_context(viewport={"width": width, "height": height}, has_touch=True)
     page = context.new_page()
+    keep_view(page, view)
     page.goto("about:blank")
     answers, html, script = fixtures("vibevoice"), page_html(()), SCRIPT.read_text(encoding="utf-8")
 
@@ -787,6 +1116,24 @@ class TestSwipingPastTheEnds:
         assert left_end["left"] == 0, left_end
         assert _near(moved["left"], moved["starts"][1]), moved
         assert _near(right_end["left"], right_end["max"]), right_end
+
+    def test_with_all_four_in_view_a_finger_either_way_goes_nowhere(self, browser):
+        """Nothing to swipe to at all: the row cannot take the swipe, so it is
+        the root's overscroll -- held at none -- that keeps it from history."""
+        context, page, client = touch_page(browser, 1440, 900, forward=True, view=4)
+        navigations = []
+        page.on("framenavigated", lambda frame: navigations.append(frame.url))
+        y = page.evaluate("""() => { const r = document.querySelector("#mc-voice-box .mc-voice-box-stage-head")
+            .getBoundingClientRect(); return r.top + r.height / 2; }""")
+        swipe(page, client, 400, 900, y)
+        back = page.evaluate(ROW)
+        swipe(page, client, 900, 400, y)
+        forward = page.evaluate(ROW)
+        context.close()
+
+        assert navigations == [], navigations
+        assert back["max"] <= 1 and back["left"] <= 1, back
+        assert forward["left"] <= 1, forward
 
     def test_the_page_gets_its_own_overscroll_back_when_the_tab_leaves_the_screen(self, browser):
         page = open_tab(browser, 1440, 900)
@@ -1220,7 +1567,7 @@ class TestUnderAHostileTheme:
     HIDDEN = [".mc-voice-box-status-dismiss", ".mc-voice-box-status-cancel", ".mc-voice-box-status-clear",
               ".mc-voice-box-status-unloads", ".mc-voice-box-install", ".mc-voice-box-trimmer",
               ".mc-voice-box-lane-details", ".mc-voice-box-stage-outputs .mc-voice-box-empty",
-              ".mc-voice-box-fast-path"]
+              ".mc-voice-box-fast-path", ".mc-voice-box-menu"]
 
     def test_nothing_hidden_shows_when_a_theme_gives_everything_a_display(self, browser):
         page = open_tab(browser, 1440, 900, hostile=("display",))
@@ -1648,9 +1995,9 @@ class TestResizing:
         floor = measure(page)
         page.close()
 
-        assert seen == [(1440, 700, "pair", "480px", True),
-                        (1000, 760, "pair", "540px", True),
+        assert seen == [(1440, 700, "wide", "480px", True),
+                        (1000, 760, "wide", "540px", True),
                         (899, 760, "stack", "540px", True),
                         (390, 844, "stack", "624px", True),
-                        (1440, 900, "pair", "680px", True)]
+                        (1440, 900, "wide", "680px", True)]
         assert floor["inlineHeight"] == "420px"

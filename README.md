@@ -5970,20 +5970,28 @@ percentage height inside Gradio's containers means nothing. It never goes below
 420 pixels: in a window smaller than that the page may scroll after all, and
 each stage then scrolls as a whole.
 
-The stages are cards side by side, **two to the view** when the tab is 900
-pixels wide or more and one, as wide as the screen, below that — a phone. **Swipe
-left or right** — a finger, or two on a touchpad — to move one card at a time:
-two to the view you see Input beside Prompt, Prompt beside Configuration, then
-Configuration beside Outputs, and the row stops there and at the first pair; a
-swipe past either end goes nowhere — while the tab is on screen it holds the
-page's sideways overscroll, which would otherwise be the browser's Back or
-Forward and take you out of the WebUI. **Scroll up and down** inside a stage;
-the two never fight, because the direction of the swipe decides. A bar above
-the cards — **Input · Prompt · Config · Outputs** — marks the stages in view,
-and a press on it brings a stage into view, moving the row as little as it can
-(a stage to the right of the two comes in as the right one, a stage to the left
-as the left one) — the way along with a mouse, since no scrollbar is drawn under
-the cards. Two to the view, the lists scroll inside their own stage as above. On
+The stages are cards side by side, **three to the view** when the tab is 900
+pixels wide or more and one, as wide as the screen, below that — a phone. How
+many share a wide view is yours to choose: **⋯** (More), at the end of the
+pipeline bar after New, Rename and Delete, opens a menu whose **Stages in view**
+is **2**, **3** or **4**. The choice is drawn at once — the stage at the left
+stays at the left, unless the row would then end before the last stage — and
+this browser remembers it, because how many fit is a question of the screen; a
+phone has no ⋯, since one card fills it whatever the choice. **Swipe left or
+right** — a finger, or two on a touchpad — to move one card at a time: three to
+the view you see Input, Prompt and Configuration, then Prompt, Configuration
+and Outputs, and the row stops there and at the first three; a swipe past
+either end goes nowhere — while the tab is on screen it holds the page's
+sideways overscroll, which would otherwise be the browser's Back or Forward and
+take you out of the WebUI. **Scroll up and down** inside a stage; the two never
+fight, because the direction of the swipe decides. A bar above the cards —
+**Input · Prompt · Config · Outputs** — marks the stages in view, and a press on
+it brings a stage into view, moving the row as little as it can (a stage to the
+right of the ones in view comes in as the rightmost, a stage to the left as the
+leftmost) — the way along with a mouse, since no scrollbar is drawn under the
+cards. With four in view every stage is on the screen, nothing swipes and there
+is no bar. However many share the view, the lists scroll inside their own stage
+as above. On
 the phone each card scrolls as one piece: the lists have no scroll areas of their
 own and the script box grows with its text, while the card's title (and, on
 Configuration, Render and the status line) stays put. Sideways drags that belong
@@ -6189,25 +6197,31 @@ cannot honour are not on the page.
 ### Players
 
 Every sound on the page — each sample in the library, the trimmer's selection,
-the chosen output — has the same icon buttons: **Play/Pause**, **Play from the
+each output — has the same icon buttons: **Play/Pause**, **Play from the
 start** and **Stop**, which pauses and goes back to the beginning (for the
-trimmer, the selection's start), and **Loop** where a player loops. Only one
+trimmer, the selection's start), and **Loop** where a player loops. An output's
+Play/Pause is a round button at the left of its waveform, on every lane, chosen
+or not. Only one
 sound plays at a time, and only the one you last started and have not stopped —
 playing, or paused with its own Pause — shows a playhead and can be scrubbed by
 pressing or dragging along its waveform. Every other waveform ignores presses and
 drags, so scrolling or swiping over a list never moves a sound you did not
 start. On a touch screen a press on a waveform waits until the finger moves
 along it or lifts, so a scroll that begins there scrolls. Play resumes where a
-sound was paused; Play from the start starts over.
+sound was paused; Play from the start starts over. An output other than the
+one you last played always plays from its beginning, wherever you left it, so
+pressing Play down the list compares takes from the top. A right button or a
+long press on a waveform never moves its playhead.
 
 ### Outputs
 
-Every render is a lane. Until you choose it, a lane is its waveform and one
-compact line — when it was made, in your own time, and its name (rename on a
-double click) — with its samples' tint along its edge. Tap or click a lane to
-choose it (one at a time; Enter or Space does it from the keyboard) and it
-opens: the player's buttons (Play/Pause, Play from the start, Stop, **Loop**,
-remembered per output), **Trim to sample** — the same
+Every render is a lane. Until you choose it, a lane is one compact line —
+when it was made, in your own time, and its name (rename on a double click) —
+and its waveform with **Play/Pause** at its left, its samples' tint along its
+edge: press Play to hear it without opening anything, press it again to pause.
+Tap or click a lane to choose it (one at a time; Enter or Space does it from the
+keyboard) and it opens: the rest of the player's buttons (Play from the start,
+Stop, **Loop**, remembered per output), **Trim to sample** — the same
 trimmer as the input stage, on the render, so a phrase you like becomes a voice
 sample without leaving the page — **Save**, **Download**, **Delete**, a line of
 metadata (model, seed, steps, CFG, the speakers' samples, the length, how long it
@@ -6221,6 +6235,18 @@ not, and neither does a press anywhere inside the lane — its waveform, its
 buttons, its metadata or its infotext. Closing a lane never touches what it is
 playing: the sound plays on, the compact waveform keeps its playhead, and the
 lane's buttons act on it as before when you open it again.
+
+**Right-click a lane** — chosen or not; a long press on a touch screen, or the
+keyboard's menu key (Shift+F10) on a lane with the focus — for its menu:
+**Play** or **Pause**, **Play from the start**, **Stop** (while it is the one
+playing or paused), **Loop** with a tick while it loops, then **Rename**,
+**Trim to sample**, **Save to the folder** and **Download**, then **Copy
+infotext**, **Use seed** and **Reuse settings**, and **Delete** last, apart.
+Each does what the open lane's button of the same name does, and nothing opens
+the lane. The menu opens where you pressed, kept inside the window, and goes
+away on a choice, a press outside it, a scroll, Escape or Tab; the arrow keys,
+Home and End move through it. In the infotext and in a name being renamed the
+browser's own menu stays, for its Copy and Paste.
 
 The **infotext** is the render's fingerprint, written the way a WebUI writes an
 image's: the prompt as it was, then one line — `Steps: 12, Solver: DPM++ 2M,

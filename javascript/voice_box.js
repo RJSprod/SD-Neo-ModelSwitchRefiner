@@ -28,12 +28,15 @@
 // stages are cards in a row, swiped left and right with horizontal
 // scroll-snap a card at a time, from the leftmost to the rightmost and no
 // further, with a stage bar over them that marks the cards in view and brings
-// a card into view when pressed: two to the view from a root width of 900 px,
-// each long list scrolling inside its own stage; one below it, a phone's, where
+// a card into view when pressed. From a root width of 900 px the view holds
+// two, three or four cards -- Stages in view, in the pipeline bar's More menu,
+// three until it is changed and kept by this browser -- each long list
+// scrolling inside its own stage, and with all four in view there is nothing
+// to swipe to and no stage bar; below 900 px it holds one, a phone's, where
 // each stage's body is its one vertical scroller and nothing in it scrolls on
-// its own. `data-layout` ("pair" or "stack") on the root says which, for the
-// stylesheet. Nothing observes the root's size, because the
-// root is the box this file resizes: the height is worked out again on the
+// its own. `data-layout` ("wide" or "stack") and `data-view` (the choice) on
+// the root say which, for the stylesheet. Nothing observes the root's size,
+// because the root is the box this file resizes: the height is worked out again on the
 // window's and the visual viewport's resize, an orientation change, the tab
 // coming into view (an IntersectionObserver, which watches visibility, not
 // size), the fonts arriving and the first data paint -- once per animation
@@ -55,10 +58,14 @@
 // is its label from the status. A configuration keeps every engine's options
 // side by side (`options`), so switching engines and back loses nothing.
 //
-// Every player -- a sample row, the trimmer, the selected output lane -- has
-// the same transport: Play/Pause, From the start and Stop, as icons. One
-// player at a time is the active one (the one last started and not stopped),
-// and only its waveform seeks and draws a playhead.
+// Every player -- a sample row, the trimmer, an output lane -- has the same
+// transport: Play/Pause, From the start and Stop, as icons. An output lane
+// shows its Play/Pause at the left of its waveform whether it is selected or
+// not, and keeps the rest for when it is; a lane that is not the active player
+// plays from its start. One player at a time is the active one (the one last
+// started and not stopped), and only its waveform seeks and draws a playhead.
+// A right click on a lane -- or a long press, or the keyboard's menu key --
+// opens a menu of what the lane can do, selected or not.
 //
 // The file is loaded by Forge on every page, like every extension script, so
 // nothing here touches the DOM until the root exists.
@@ -89,10 +96,14 @@
     // A job holding its card, as opposed to one queued behind it.
     const ACTIVE_PHASES = {waiting: true, loading: true, rendering: true};
     // Below this width of the root the stages are cards one screen wide; from
-    // it, two cards to the screen.
+    // it, as many to the screen as Stages in view says.
     const STACK_BELOW = 900;
-    // How many cards a layout shows at once.
-    const PER_VIEW = {pair: 2, stack: 1};
+    // Stages in view from STACK_BELOW up: the choices, the one a browser starts
+    // with, and where it keeps the one made -- in the browser, not on the
+    // server, because how many fit is the screen's question.
+    const VIEW = {choices: [2, 3, 4], fallback: 3, key: "mc-voice-box:stages-in-view"};
+    // A menu keeps this far inside the window's edges.
+    const MENU_EDGE = 8;
     // The least height the root is given, whatever the window leaves it.
     const MIN_HEIGHT = 420;
     // How long a message holds the status line before the line goes back to
@@ -196,9 +207,13 @@
         // {kind: "sample" | "trimmer" | "output", id}, or null. Only its
         // waveform seeks, draws a playhead and takes sideways drags.
         activePlayer: null,
-        // The leftmost stage in view, which the stage bar marks with the one
-        // beside it when two cards share the view.
+        // The leftmost stage in view, which the stage bar marks with the ones
+        // beside it when several cards share the view.
         stage: "input",
+        // Stages in view on a wide screen: 2, 3 or 4 (VIEW).
+        view: VIEW.fallback,
+        // The menu open, if one is: {kind: "more"} or {kind: "lane", id}.
+        menu: null,
         // The page root's own inline overscroll-behavior-x while the tab holds
         // it at none ({value, priority}), or null while it does not.
         swipeHeld: null,
@@ -560,6 +575,7 @@
                 const seen = (entries || []).some(function (entry) { return entry && entry.isIntersecting; });
                 holdHistorySwipe(seen);
                 if (seen) scheduleFit();
+                else closeMenu(false);
             });
             observer.observe(root);
             nodes.rootObserver = observer;
@@ -712,12 +728,13 @@
 
     // A press or a drag along a waveform seeks -- on the active player's only;
     // anywhere else the press is left to whatever else it does (on a lane, to
-    // select it).
+    // select it). A mouse's other buttons seek nothing (the right one opens a
+    // lane's menu), and nor does a finger held until it opens one.
     function wireScrub(canvas, active, seekTo) {
         let held = false;
         let waiting = false;
         canvas.addEventListener("pointerdown", function (event) {
-            if (!active()) return;
+            if (!active() || Number(event && event.button) > 0) return;
             held = true;
             try {
                 if (typeof canvas.setPointerCapture === "function" && event.pointerId !== undefined) {
@@ -738,6 +755,10 @@
             waiting = false;
         });
         canvas.addEventListener("pointercancel", function () {
+            held = false;
+            waiting = false;
+        });
+        canvas.addEventListener("contextmenu", function () {
             held = false;
             waiting = false;
         });
@@ -773,6 +794,13 @@
                ["path", {d: "M13.8 1.8v4.6H9.2z"}]],
         close: [["path", {d: "M4 4l8 8M12 4l-8 8", fill: "none", stroke: "currentColor",
                           "stroke-width": "1.8", "stroke-linecap": "round"}]],
+        // Three dots in a row: the pipeline bar's More menu. Drawn, never the
+        // ellipsis character, which a theme's icon swap could take.
+        more: [["circle", {cx: "3", cy: "8", r: "1.6"}], ["circle", {cx: "8", cy: "8", r: "1.6"}],
+               ["circle", {cx: "13", cy: "8", r: "1.6"}]],
+        // A tick: a menu's setting that is on.
+        check: [["path", {d: "M3 8.5l3.2 3.2L13 4.8", fill: "none", stroke: "currentColor",
+                          "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round"}]],
         // A disk: its body with a cut corner, the shutter at the top and the
         // label at the bottom.
         save: [["path", {d: "M2.5 2.5h8.2l2.8 2.8v8.2h-11z", fill: "none", stroke: "currentColor",
@@ -1303,6 +1331,7 @@
         state.prefix = root.getAttribute("data-mc-voice-box-prefix") || DEFAULT_PREFIX;
         nodes.root = root;
         state.layout = {mode: "", width: 0, height: 0, raw: 0, correction: 0, writes: 0};
+        state.view = rememberedView();
         build(root);
         listen();
         watchRoot(root);
@@ -1343,6 +1372,22 @@
         } catch (error) { /* private mode, or storage denied: the page still works */ }
     }
 
+    // Stages in view as this browser last chose it; three where it has not,
+    // or where what it kept is not a choice.
+    function rememberedView() {
+        let value = NaN;
+        try {
+            value = Number(window.localStorage.getItem(VIEW.key));
+        } catch (error) { /* private mode, or storage denied */ }
+        return VIEW.choices.indexOf(value) === -1 ? VIEW.fallback : value;
+    }
+
+    function rememberView(count) {
+        try {
+            window.localStorage.setItem(VIEW.key, String(count));
+        } catch (error) { /* the choice holds until the page is reloaded */ }
+    }
+
     // -- building the page ----------------------------------------------------- //
 
     function build(root) {
@@ -1366,11 +1411,17 @@
                                       "mc-voice-box-pipeline-rename");
         nodes.pipelineDelete = button("Delete", "Delete this pipeline", deletePipeline,
                                       "mc-voice-box-pipeline-delete");
+        // More: a menu of the page's own settings -- Stages in view, so far.
+        nodes.more = iconButton("more", "More", function () { toggleMoreMenu(); }, "mc-voice-box-more");
+        nodes.more.setAttribute("aria-haspopup", "menu");
+        nodes.more.setAttribute("aria-expanded", "false");
         bar.appendChild(nodes.pipelineNew);
         bar.appendChild(nodes.pipelineRename);
         bar.appendChild(nodes.pipelineDelete);
+        bar.appendChild(nodes.more);
         head.appendChild(bar);
         root.appendChild(head);
+        applyView();
 
         // The stage bar over the cards: a press brings a stage into view, and
         // the stages in view are the ones marked.
@@ -1419,12 +1470,43 @@
         buildConfiguration(nodes.stage_configuration, nodes.stageHead_configuration);
         buildOutputs(nodes.stage_outputs);
         markStage(state.stage);
+
+        // The one menu, last in the root: after everything it covers, so it is
+        // painted over the stages without a z-index, and inside <gradio-app>.
+        nodes.menu = el("div", "mc-voice-box-menu");
+        nodes.menu.setAttribute("role", "menu");
+        nodes.menu.addEventListener("contextmenu", function (event) {
+            if (event && typeof event.preventDefault === "function") event.preventDefault();
+        });
+        show(nodes.menu, false);
+        root.appendChild(nodes.menu);
     }
 
     // -- the stage bar ----------------------------------------------------------- //
 
+    // How many cards the view holds: the choice on a wide screen, one on a phone.
     function perView() {
-        return PER_VIEW[state.layout.mode] || 1;
+        return state.layout.mode === "wide" ? state.view : 1;
+    }
+
+    function applyView() {
+        const root = nodes.root;
+        const value = String(state.view);
+        if (root && root.getAttribute("data-view") !== value) root.setAttribute("data-view", value);
+    }
+
+    // Stages in view, chosen in the More menu: kept by this browser and drawn
+    // at once, the leftmost stage in view staying the leftmost -- or, where
+    // that would leave room after the last, the row ending with the last.
+    function setView(count) {
+        const value = Number(count);
+        if (VIEW.choices.indexOf(value) === -1) return;
+        rememberView(value);
+        if (value === state.view) return;
+        state.view = value;
+        applyView();
+        markStage(state.stage);
+        if (state.layout.mode === "wide") showFrom(state.stage, "auto");
     }
 
     function stageIndex(key) {
@@ -1468,8 +1550,8 @@
         return found;
     }
 
-    // `key` is the leftmost stage in view; it and, two to the view, the one
-    // after it are marked -- the last two, at the right end of the row.
+    // `key` is the leftmost stage in view; it and the ones after it that share
+    // the view are marked -- the last ones, at the right end of the row.
     function markStage(key) {
         if (key) state.stage = key;
         const first = firstShown(Math.max(0, stageIndex(state.stage)));
@@ -1509,20 +1591,27 @@
     }
 
     // A press brings a stage into view, moving the row as little as it can:
-    // one card to the view, the stage becomes the card in view; two, a stage
-    // right of the two in view comes in as the right one, one left of them as
-    // the left one, and one in view moves nothing.
+    // one card to the view, the stage becomes the card in view; more, a stage
+    // right of the ones in view comes in as the rightmost, one left of them as
+    // the leftmost, and one in view moves nothing.
     function goToStage(key) {
-        const container = nodes.stages;
         const index = stageIndex(key);
-        if (!container || index < 0) return;
+        if (!nodes.stages || index < 0) return;
         const count = perView();
         let first = stageIndex(stageInView() || state.stage);
         if (first < 0) first = 0;
         if (index < first) first = index;
         else if (index > first + count - 1) first = index - count + 1;
-        first = firstShown(first);
-        const shown = STAGES[first].key;
+        showFrom(STAGES[firstShown(first)].key, reducedMotion() ? "auto" : "smooth");
+    }
+
+    // Scrolls the row so that `key`'s card is the leftmost in view, or the
+    // row ends with the last cards where it is too near the end for that.
+    function showFrom(key, behavior) {
+        const container = nodes.stages;
+        const index = stageIndex(key);
+        if (!container || index < 0) return;
+        const shown = STAGES[firstShown(index)].key;
         const card = nodes["stageCard_" + shown];
         if (!card) return;
         let left = 0;
@@ -1533,7 +1622,6 @@
         } catch (error) {
             return;
         }
-        const behavior = reducedMotion() ? "auto" : "smooth";
         if (typeof container.scrollTo === "function") container.scrollTo({left: left, behavior: behavior});
         else container.scrollLeft = left;
         markStage(shown);
@@ -4252,7 +4340,9 @@
     }
 
     // The playhead is the active player's, selected or compact: it shows
-    // where that lane plays or was paused, and on no other lane.
+    // where that lane plays or was paused, and on no other lane. The Play/
+    // Pause beside the waveform says which it would do, and is marked while
+    // its lane plays.
     function drawLane(lane) {
         const audio = lane.audio;
         const active = isActivePlayer("output", lane.output.id);
@@ -4260,16 +4350,20 @@
         const head = active && total ? Math.min(1, (Number(audio.currentTime) || 0) / total) : -1;
         draw(lane.wave, lane.output.peaks || [], {head: head});
         setTouch(lane.wave, active);
-        showPlaying(lane.controls, playing(audio));
+        const on = playing(audio);
+        showPlaying(lane.controls, on);
+        setFlag(lane.controls.play, "data-playing", on ? "true" : null);
+        if (state.menu && state.menu.kind === "lane" && state.menu.id === lane.output.id) syncLaneMenu(lane);
     }
 
     // A lane that is not the selected one shows the tint of its speakers'
-    // samples, its waveform at full size and one line: when it was made and
-    // its name (a double click renames it). Everything else -- the transport
-    // and the other buttons, the metadata, the infotext with Copy, Use seed
-    // and Reuse settings -- is in `details`, shown while the lane is
-    // selected. Lanes are kept rather than rebuilt (renderOutputs), so a
-    // playing one plays on.
+    // samples, one line -- when it was made and its name (a double click
+    // renames it) -- and its waveform at full size with Play/Pause at its
+    // left. Everything else -- From the start, Stop and the other buttons,
+    // the metadata, the infotext with Copy, Use seed and Reuse settings -- is
+    // in `details`, shown while the lane is selected, and in the menu a right
+    // click opens on any lane. Lanes are kept rather than rebuilt
+    // (renderOutputs), so a playing one plays on.
     function laneNode(output) {
         const row = el("li", "mc-voice-box-lane");
         row.setAttribute("data-id", output.id);
@@ -4284,17 +4378,17 @@
         head.appendChild(date);
         const name = el("span", "mc-voice-box-lane-name", output.name || "Untitled");
         name.setAttribute("title", "Double-click to rename");
-        name.addEventListener("dblclick", function () {
-            renameInline(name, lane.output.name || "", function (text) {
-                return request("outputs/rename", ROUTES.outputRename,
-                               {body: {id: lane.output.id, name: text}, queue: true})
-                    .then(refreshOutputs);
-            });
-        });
+        name.addEventListener("dblclick", function () { renameLane(lane); });
         head.appendChild(name);
         row.appendChild(head);
+        // The waveform, and at its left the lane's Play/Pause, on every lane.
+        const strip = el("div", "mc-voice-box-lane-strip");
+        const play = iconButton("play", "Play", function () { return toggleLane(lane); },
+                                "mc-voice-box-lane-play");
+        strip.appendChild(play);
         const wave = canvasOf("mc-voice-box-lane-wave");
-        row.appendChild(wave);
+        strip.appendChild(wave);
+        row.appendChild(strip);
         const audio = player("mc-voice-box-lane-audio");
         audio.loop = !!output.loop;
         row.appendChild(audio);
@@ -4303,11 +4397,14 @@
         const meta = el("div", "mc-voice-box-lane-meta", metadata(output));
         details.appendChild(meta);
         const actions = el("div", "mc-voice-box-row mc-voice-box-lane-actions");
-        const controls = transport("mc-voice-box-lane", {
-            play: function () { return toggleLane(lane); },
-            start: function () { return playLaneFromStart(lane); },
-            stop: function () { stopLane(lane); },
-        });
+        // The rest of the transport: Play/Pause is the one beside the waveform.
+        const box = el("span", "mc-voice-box-transport");
+        const start = iconButton("start", "Play from the start", function () { return playLaneFromStart(lane); },
+                                 "mc-voice-box-lane-start");
+        const stop = iconButton("stop", "Stop", function () { stopLane(lane); }, "mc-voice-box-lane-stop");
+        box.appendChild(start);
+        box.appendChild(stop);
+        const controls = {box: box, play: play, start: start, stop: stop};
         const loop = iconButton("loop", "Loop", function () { return toggleLoop(lane); },
                                 "mc-voice-box-lane-loop");
         pressed(loop, !!output.loop);
@@ -4394,11 +4491,31 @@
             if (typeof event.preventDefault === "function") event.preventDefault();
             selectOutput(lane.output.id);
         });
+        // A right click -- a long press, the keyboard's menu key -- opens the
+        // lane's menu, selected or not. In a text box or the infotext the
+        // browser's own menu stays, for its Copy and Paste.
+        row.addEventListener("contextmenu", function (event) {
+            if (!event || keepsBrowserMenu(event.target, row)) return;
+            if (typeof event.preventDefault === "function") event.preventDefault();
+            openLaneMenu(lane, event);
+        });
         wireScrub(lane.wave, function () { return isActivePlayer("output", lane.output.id); },
                   function (fraction) {
                       seekAudio(lane.audio, fraction, lane.output.seconds);
                       drawLane(lane);
                   });
+    }
+
+    function keepsBrowserMenu(target, row) {
+        for (let at = target; at && at !== row; at = at.parentNode) {
+            const tag = String(at.tagName || "").toUpperCase();
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+            if (at.classList && typeof at.classList.contains === "function"
+                && at.classList.contains("mc-voice-box-infotext")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // A button, a field -- the rename box above all -- or a link inside the
@@ -4480,11 +4597,16 @@
         const row = nodes.lanes[state.selectedOutput];
         if (!row) return;
         // The path the click took, as it was when it happened: a handler on
-        // the way may have rebuilt what was pressed.
+        // the way may have rebuilt what was pressed -- a menu's item, which
+        // has put its menu away by now, is one.
         const path = typeof event.composedPath === "function" ? event.composedPath() : null;
-        const inside = path && path.length ? path.indexOf(row) !== -1
-            : !!event.target && typeof row.contains === "function" && row.contains(event.target);
-        if (!inside) deselectOutput();
+        const within = function (node) {
+            return !!node && (path && path.length ? path.indexOf(node) !== -1
+                : !!event.target && typeof node.contains === "function" && node.contains(event.target));
+        };
+        // A choice in a menu is not a tap outside the lane, whichever lane's
+        // menu it was.
+        if (!within(row) && !within(nodes.menu)) deselectOutput();
     }
 
     // Escape puts the selected lane away too, unless it is being said to a
@@ -4551,6 +4673,7 @@
             const row = nodes.lanes[id];
             try { row.mcVoiceBoxLane.audio.pause(); } catch (error) { /* ignore */ }
             if (isActivePlayer("output", id)) state.activePlayer = null;
+            closeLaneMenu(id);
             forget("output:" + id);
             if (row.parentNode) row.parentNode.removeChild(row);
             delete nodes.lanes[id];
@@ -4596,6 +4719,7 @@
             const row = nodes.lanes[id];
             try { row.mcVoiceBoxLane.audio.pause(); } catch (error) { /* ignore */ }
             if (isActivePlayer("output", id)) state.activePlayer = null;
+            closeLaneMenu(id);
             forget("output:" + id);
             if (row.parentNode) row.parentNode.removeChild(row);
         });
@@ -4607,17 +4731,20 @@
                         ROUTES.outputAudio + "?id=" + encodeURIComponent(lane.output.id));
     }
 
-    // Play pauses the lane while it plays; otherwise it plays on from where
-    // it was paused (from the start once it has run to its end).
+    // Play pauses the lane while it plays. Otherwise the active player plays
+    // on from where it was paused (from the start once it has run to its
+    // end), and any other lane plays from its start: a lane played after
+    // another always begins at the beginning, wherever it was left.
     function toggleLane(lane) {
         if (playing(lane.audio)) {
             lane.audio.pause();
             return Promise.resolve();
         }
+        const resume = isActivePlayer("output", lane.output.id);
         return laneAddress(lane)
             .then(function (address) {
                 setActivePlayer("output", lane.output.id);
-                return startPlayback(lane.audio, address);
+                return resume ? startPlayback(lane.audio, address) : startPlayback(lane.audio, address, 0);
             })
             .then(function () { drawLane(lane); });
     }
@@ -4734,6 +4861,16 @@
             .then(refreshOutputs);
     }
 
+    // The name, as a box in its place: Enter or leaving the box keeps the new
+    // one, Escape gives it up.
+    function renameLane(lane) {
+        renameInline(lane.name, lane.output.name || "", function (text) {
+            return request("outputs/rename", ROUTES.outputRename,
+                           {body: {id: lane.output.id, name: text}, queue: true})
+                .then(refreshOutputs);
+        });
+    }
+
     // -- a render's fingerprint: its infotext, its seed, its settings ---------- //
 
     // The clipboard can refuse (a page that is not a secure context, a denied
@@ -4742,6 +4879,9 @@
         const text = String(lane.output.infotext || "");
         if (!text) return Promise.resolve();
         const fallback = function () {
+            // From the menu of a lane that is not open: it opens, so the
+            // text it selects is on the screen.
+            if (!selected(lane)) selectOutput(lane.output.id);
             selectText(lane.infotext);
             say("The browser would not copy it, so the infotext is selected: copy it from there.",
                 "warn");
@@ -4959,6 +5099,371 @@
         else say("Loaded the prompt and settings of " + name
                  + (state.dirty.configuration ? "; save the configuration to keep them." : "."), "info");
         return chosen;
+    }
+
+    // -- menus: More, and an output lane's own -------------------------------- //
+    //
+    // One menu at a time, in the one node the build put last in the root: it
+    // is painted over the stages because it comes after them (the section
+    // sets no z-index), and it stays inside <gradio-app>. It is fixed to the
+    // window -- under More, or where the lane was pressed -- inside the
+    // window's edges, and moved again by what it measures where a container
+    // above it makes `fixed` that container's rather than the window's. A
+    // press outside it, a scroll anywhere but in it, the window resizing or
+    // losing the focus, the layout changing, the tab leaving the screen and a
+    // choice in it all put it away; Escape and Tab do too, and give the focus
+    // back to what opened it, as a choice made with the keyboard does. Up and
+    // down, and left and right, move between its items, Home and End to the
+    // first and the last; an item that cannot be used is passed over.
+
+    const menus = {opener: null, items: [], listening: false};
+
+    // `sections` are [{label, row, items}], with a line between each two; an
+    // item is {key, label, icon, role, checked, disabled, title, danger, run}.
+    // A section with a label is a group read out by it, its label shown over
+    // it; a row's items sit side by side, as choices of one setting.
+    function openMenu(open, label, sections, place, opener) {
+        const node = nodes.menu;
+        if (!node) return;
+        closeMenu(false);
+        clear(node);
+        node.setAttribute("aria-label", label);
+        sections.forEach(function (section, index) {
+            if (index) {
+                const line = el("div", "mc-voice-box-menu-separator");
+                line.setAttribute("role", "separator");
+                node.appendChild(line);
+            }
+            if (section.label) {
+                const heading = el("div", "mc-voice-box-menu-heading", section.label);
+                heading.setAttribute("aria-hidden", "true");
+                node.appendChild(heading);
+            }
+            const group = el("div", "mc-voice-box-menu-group" + (section.row ? " mc-voice-box-menu-row" : ""));
+            group.setAttribute("role", "group");
+            if (section.label) group.setAttribute("aria-label", section.label);
+            section.items.forEach(function (item) {
+                const made = menuItem(item, !!section.row);
+                menus.items.push(made);
+                group.appendChild(made);
+            });
+            node.appendChild(group);
+        });
+        state.menu = open;
+        menus.opener = opener || null;
+        show(node, true);
+        placeMenu(node, place);
+        listenMenu(true);
+        const usable = menuItems();
+        const checked = usable.filter(function (item) {
+            return item.getAttribute("role") === "menuitemradio" && item.getAttribute("aria-checked") === "true";
+        })[0];
+        focusQuietly(checked || usable[0]);
+    }
+
+    function menuItem(item, inRow) {
+        const node = el("button", "mc-voice-box-menu-item");
+        const role = item.role || "menuitem";
+        node.setAttribute("type", "button");
+        node.setAttribute("role", role);
+        node.setAttribute("tabindex", "-1");
+        if (item.key) node.setAttribute("data-item", item.key);
+        if (role !== "menuitem") node.setAttribute("aria-checked", item.checked ? "true" : "false");
+        if (item.title) node.setAttribute("title", item.title);
+        if (item.danger) node.setAttribute("data-danger", "true");
+        if (item.disabled) {
+            node.disabled = true;
+            node.setAttribute("aria-disabled", "true");
+        }
+        if (!inRow) {
+            const glyph = el("span", "mc-voice-box-menu-glyph");
+            glyph.setAttribute("aria-hidden", "true");
+            setGlyph(glyph, item.icon || "");
+            node.appendChild(glyph);
+        }
+        node.appendChild(el("span", "mc-voice-box-menu-label", item.label));
+        if (role === "menuitemcheckbox") {
+            const tick = el("span", "mc-voice-box-menu-tick");
+            tick.setAttribute("aria-hidden", "true");
+            if (item.checked) tick.appendChild(icon("check"));
+            node.appendChild(tick);
+        }
+        node.addEventListener("click", function (event) {
+            if (event && typeof event.preventDefault === "function") event.preventDefault();
+            if (node.disabled) return;
+            // Enter and Space are a click with no presses counted.
+            closeMenu(!!event && event.detail === 0);
+            try {
+                const result = item.run();
+                if (result && typeof result.catch === "function") result.catch(report);
+            } catch (error) {
+                report(error);
+            }
+        });
+        return node;
+    }
+
+    function setGlyph(glyph, name) {
+        if ((glyph.getAttribute("data-icon") || "") === name) return;
+        clear(glyph);
+        if (name) glyph.appendChild(icon(name));
+        glyph.setAttribute("data-icon", name);
+    }
+
+    function menuItems() {
+        return menus.items.filter(function (item) { return !item.disabled; });
+    }
+
+    function focusQuietly(node) {
+        if (!node || typeof node.focus !== "function") return;
+        try {
+            node.focus({preventScroll: true});
+        } catch (error) {
+            try { node.focus(); } catch (ignored) { /* nothing takes the focus */ }
+        }
+    }
+
+    function moveInMenu(step) {
+        const usable = menuItems();
+        if (!usable.length) return;
+        const at = usable.indexOf(document.activeElement);
+        let next;
+        if (step === "first") next = 0;
+        else if (step === "last") next = usable.length - 1;
+        else if (at === -1) next = step > 0 ? 0 : usable.length - 1;
+        else next = (at + step + usable.length) % usable.length;
+        focusQuietly(usable[next]);
+    }
+
+    // The window's own box, which a fixed element is placed in.
+    function windowBox() {
+        const page = document.documentElement;
+        return {width: Number(page && page.clientWidth) || Number(window.innerWidth) || 0,
+                height: Number(page && page.clientHeight) || Number(window.innerHeight) || 0};
+    }
+
+    // `place` is {x, y}, a point the menu's corner goes to -- its top left,
+    // or whichever corner keeps it in the window -- or {anchor}, a button the
+    // menu hangs under, their right edges in line, or sits over where there
+    // is no room under it.
+    function placeMenu(node, place) {
+        const style = node.style;
+        const put = function (left, top) {
+            style.left = Math.round(left) + "px";
+            style.top = Math.round(top) + "px";
+        };
+        put(0, 0);
+        let box = null;
+        try {
+            box = node.getBoundingClientRect();
+        } catch (error) {
+            return;
+        }
+        const view = windowBox();
+        const width = Number(box.width) || 0;
+        const height = Number(box.height) || 0;
+        let left = 0;
+        let top = 0;
+        if (place && place.anchor) {
+            let anchor = null;
+            try {
+                anchor = place.anchor.getBoundingClientRect();
+            } catch (error) {
+                anchor = null;
+            }
+            if (anchor) {
+                left = (Number(anchor.right) || 0) - width;
+                top = (Number(anchor.bottom) || 0) + 4;
+                const above = (Number(anchor.top) || 0) - 4 - height;
+                if (top + height > view.height - MENU_EDGE && above >= MENU_EDGE) top = above;
+            }
+        } else if (place) {
+            left = Number(place.x) || 0;
+            top = Number(place.y) || 0;
+            if (left + width > view.width - MENU_EDGE) left -= width;
+            if (top + height > view.height - MENU_EDGE) top -= height;
+        }
+        left = Math.max(MENU_EDGE, Math.min(left, view.width - MENU_EDGE - width));
+        top = Math.max(MENU_EDGE, Math.min(top, view.height - MENU_EDGE - height));
+        // Where the corner went at (0, 0) is the window's corner, unless a
+        // container above the menu holds what is fixed in it.
+        put(left - (Number(box.left) || 0), top - (Number(box.top) || 0));
+    }
+
+    function closeMenu(refocus) {
+        if (!state.menu) return;
+        state.menu = null;
+        listenMenu(false);
+        const opener = menus.opener;
+        menus.opener = null;
+        menus.items = [];
+        if (nodes.menu) {
+            show(nodes.menu, false);
+            clear(nodes.menu);
+        }
+        if (nodes.more && nodes.more.getAttribute("aria-expanded") !== "false") {
+            nodes.more.setAttribute("aria-expanded", "false");
+        }
+        if (refocus && opener) focusQuietly(opener);
+    }
+
+    function closeLaneMenu(id) {
+        if (state.menu && state.menu.kind === "lane" && state.menu.id === id) closeMenu(false);
+    }
+
+    function listenMenu(on) {
+        if (menus.listening === on) return;
+        menus.listening = on;
+        const method = on ? "addEventListener" : "removeEventListener";
+        if (typeof document[method] === "function") {
+            document[method]("pointerdown", onMenuPress, true);
+            document[method]("keydown", onMenuKey, true);
+            document[method]("scroll", onMenuScroll, true);
+        }
+        if (typeof window[method] === "function") {
+            window[method]("resize", onMenuAway);
+            window[method]("blur", onMenuAway);
+        }
+    }
+
+    function inMenu(target) {
+        const node = nodes.menu;
+        return !!node && !!target && target !== document && typeof node.contains === "function"
+            && node.contains(target);
+    }
+
+    // A press outside the menu puts it away -- except on More, whose own
+    // click does that.
+    function onMenuPress(event) {
+        const target = event && event.target;
+        if (inMenu(target)) return;
+        if (nodes.more && state.menu && state.menu.kind === "more" && target
+            && typeof nodes.more.contains === "function" && nodes.more.contains(target)) {
+            return;
+        }
+        closeMenu(false);
+    }
+
+    // The menu's keys, taken before anything else on the page hears them.
+    function onMenuKey(event) {
+        if (!event || !state.menu) return;
+        const moves = {ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1, Home: "first", End: "last"};
+        const key = event.key;
+        const known = key === "Escape" || key === "Esc" || key === "Tab"
+            || Object.prototype.hasOwnProperty.call(moves, key);
+        if (!known) return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        if (typeof event.stopPropagation === "function") event.stopPropagation();
+        if (key === "Escape" || key === "Esc" || key === "Tab") closeMenu(true);
+        else moveInMenu(moves[key]);
+    }
+
+    function onMenuScroll(event) {
+        if (!inMenu(event && event.target)) closeMenu(false);
+    }
+
+    function onMenuAway() {
+        closeMenu(false);
+    }
+
+    // More: the page's own settings. Stages in view is the one there is.
+    function toggleMoreMenu() {
+        if (state.menu && state.menu.kind === "more") {
+            closeMenu(true);
+            return;
+        }
+        const choices = VIEW.choices.map(function (count) {
+            return {key: "view-" + count, label: String(count), role: "menuitemradio",
+                    checked: count === state.view, title: count + " stages in view",
+                    run: function () { setView(count); }};
+        });
+        openMenu({kind: "more"}, "More", [{label: "Stages in view", row: true, items: choices}],
+                 {anchor: nodes.more}, nodes.more);
+        if (state.menu) nodes.more.setAttribute("aria-expanded", "true");
+    }
+
+    // A lane's menu: its player, then what the selected lane's buttons do.
+    function laneMenu(lane) {
+        const output = lane.output;
+        const on = playing(lane.audio);
+        const seed = seedOf(output);
+        const sections = [
+            {items: [
+                {key: "play", label: on ? "Pause" : "Play", icon: on ? "pause" : "play",
+                 run: function () { return toggleLane(lane); }},
+                {key: "start", label: "Play from the start", icon: "start",
+                 run: function () { return playLaneFromStart(lane); }},
+                {key: "stop", label: "Stop", icon: "stop", disabled: !isActivePlayer("output", output.id),
+                 run: function () { stopLane(lane); }},
+                {key: "loop", label: "Loop", icon: "loop", role: "menuitemcheckbox", checked: !!output.loop,
+                 run: function () { return toggleLoop(lane); }},
+            ]},
+            {items: [
+                {key: "rename", label: "Rename", run: function () { renameLane(lane); }},
+                {key: "trim", label: "Trim to sample", run: function () { return trimOutput(lane); }},
+                {key: "save", label: "Save to the folder", icon: "save",
+                 run: function () { return saveOutput(lane); }},
+                {key: "download", label: "Download", run: function () { return downloadOutput(lane); }},
+            ]},
+            {items: []},
+            {items: [
+                {key: "delete", label: "Delete", icon: "delete", danger: true,
+                 run: function () { return deleteOutput(lane); }},
+            ]},
+        ];
+        const render = sections[2].items;
+        if (String(output.infotext || "")) {
+            render.push({key: "copy", label: "Copy infotext", run: function () { return copyInfotext(lane); }});
+        }
+        render.push({key: "seed", label: "Use seed", disabled: seed === null,
+                     title: seed === null ? "This render was made before seeds were recorded." : "",
+                     run: function () { return useSeed(output); }});
+        render.push({key: "reuse", label: "Reuse settings", run: function () { return reuseSettings(output); }});
+        return sections;
+    }
+
+    // At the press, where it was on the lane; from the keyboard, at the
+    // waveform's foot.
+    function openLaneMenu(lane, event) {
+        let at = {x: MENU_EDGE, y: MENU_EDGE};
+        try {
+            const box = lane.row.getBoundingClientRect();
+            const x = Number(event && event.clientX);
+            const y = Number(event && event.clientY);
+            const pressed = isFinite(x) && isFinite(y) && (x !== 0 || y !== 0)
+                && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+            if (pressed) {
+                at = {x: x, y: y};
+            } else {
+                const wave = lane.wave.getBoundingClientRect();
+                at = {x: Number(wave.left) || 0, y: Number(wave.bottom) || 0};
+            }
+        } catch (error) { /* the corner it is */ }
+        openMenu({kind: "lane", id: lane.output.id}, lane.output.name || "Untitled", laneMenu(lane), at,
+                 lane.row);
+    }
+
+    // The open menu of a lane that started, paused or stopped: its Play/Pause
+    // says what it would do now, and Stop is there only for the active player.
+    function syncLaneMenu(lane) {
+        const on = playing(lane.audio);
+        menus.items.forEach(function (item) {
+            const key = item.getAttribute("data-item");
+            if (key === "play") {
+                const label = on ? "Pause" : "Play";
+                const text = item.querySelector(".mc-voice-box-menu-label");
+                if (text && text.textContent !== label) text.textContent = label;
+                const glyph = item.querySelector(".mc-voice-box-menu-glyph");
+                if (glyph) setGlyph(glyph, on ? "pause" : "play");
+            } else if (key === "stop") {
+                const off = !isActivePlayer("output", lane.output.id);
+                if (item.disabled !== off) {
+                    item.disabled = off;
+                    if (off) item.setAttribute("aria-disabled", "true");
+                    else item.removeAttribute("aria-disabled");
+                }
+            }
+        });
     }
 
     // -- pipelines ------------------------------------------------------------- //
@@ -5814,15 +6319,19 @@
         }
         const width = box ? Math.round(Number(box.width) || 0) : 0;
         if (!width) return;
-        const mode = width < STACK_BELOW ? "stack" : "pair";
+        const mode = width < STACK_BELOW ? "stack" : "wide";
         const changed = root.getAttribute("data-layout") !== mode;
         state.layout.mode = mode;
         if (changed) {
             root.setAttribute("data-layout", mode);
             // The bar marks as many stages as the view now holds, and the
-            // cards in view once they are laid out.
+            // cards in view once they are laid out; a menu placed for the
+            // layout before is put away, and More, whose one setting is a
+            // wide screen's, shows only on one.
             markStage(state.stage);
             scheduleTrack();
+            closeMenu(false);
+            reveal(nodes.more, mode === "wide");
         }
         const top = (Number(box.top) || 0) + pageScroll();
         const raw = Math.floor(viewportHeight() - top - belowRoot(root));

@@ -216,16 +216,29 @@ class El {
         if (name === "hidden") this.hidden = false;
     }
     hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
-    addEventListener(type, fn) {
+    // A listener added for the capture phase hears an event before the ones
+    // added for the bubble phase on the same node, and one that stops the
+    // event's propagation (stopPropagation, which a scenario's event object
+    // records as `stopped`) keeps it from those and from the nodes above:
+    // the only two orders a scenario here can tell apart.
+    addEventListener(type, fn, options) {
         (this._listeners[type] = this._listeners[type] || []).push(fn);
+        if (options === true || (options && options.capture)) {
+            (this._captures = this._captures || new Set()).add(fn);
+        }
     }
     removeEventListener(type, fn) {
         this._listeners[type] = (this._listeners[type] || []).filter((f) => f !== fn);
+        if (this._captures) this._captures.delete(fn);
     }
     dispatchEvent(event) {
         try { if (!event.target) event.target = this; } catch (error) { /* a native event */ }
-        (this._listeners[event.type] || []).slice().forEach((fn) => fn.call(this, event));
-        if (event.bubbles && this.parentNode) this.parentNode.dispatchEvent(event);
+        const captures = this._captures || new Set();
+        const listeners = (this._listeners[event.type] || []).slice();
+        const stopped = () => !!(event.stopped || event.cancelBubble);
+        listeners.filter((fn) => captures.has(fn)).forEach((fn) => fn.call(this, event));
+        if (!stopped()) listeners.filter((fn) => !captures.has(fn)).forEach((fn) => fn.call(this, event));
+        if (event.bubbles && this.parentNode && !stopped()) this.parentNode.dispatchEvent(event);
         return true;
     }
     click() {
@@ -576,8 +589,9 @@ const objectUrls = [];
 URL.createObjectURL = (blob) => { objectUrls.push(blob && blob.size); return "blob:test-" + objectUrls.length; };
 URL.revokeObjectURL = () => {};
 
-// localStorage: a store, or one that refuses.
-const storage = {};
+// localStorage: a store, or one that refuses; what it holds when the page
+// loads is the scenario's.
+const storage = STORED_ITEMS;
 const storageLog = [];
 Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
@@ -1021,6 +1035,9 @@ ANSWERS = {
 }
 
 BOOT_ROUTES = {"/status", "/samples", "/prompts", "/configurations", "/pipelines", "/outputs"}
+VIEW_KEY = "mc-voice-box:stages-in-view"
+"""Where a browser keeps how many stages a wide screen shows."""
+TWO_IN_VIEW = {VIEW_KEY: "2"}
 
 
 def status_with(**changes) -> dict:
@@ -1056,8 +1073,10 @@ def _node(harness: str) -> dict:
 
 def run(scenario: str, *, answers: dict | None = None, held=(), root: bool = True,
         decode_seconds: float = 10, decode_works: bool = True, offline: bool = False,
-        storage_throws: bool = False, microphone: bool = True, root_width: int = 240) -> dict:
-    """One scenario, in a real JavaScript engine, against the real page script.
+        storage_throws: bool = False, microphone: bool = True, root_width: int = 240,
+        stored: dict | None = None) -> dict:
+    """One scenario, in a real JavaScript engine, against the real page script;
+    ``stored`` is what the browser's storage holds when the page loads.
 
     Written to a file rather than passed as an argument: the page script alone
     is past the size at which a single argument fails on Linux.
@@ -1076,6 +1095,7 @@ def run(scenario: str, *, answers: dict | None = None, held=(), root: bool = Tru
                .replace("DECODE_WORKS", "true" if decode_works else "false")
                .replace("OFFLINE", "true" if offline else "false")
                .replace("STORAGE_THROWS", "true" if storage_throws else "false")
+               .replace("STORED_ITEMS", json.dumps({key: str(value) for key, value in (stored or {}).items()}))
                .replace("MICROPHONE", "true" if microphone else "false"))
     return _node(harness)
 
@@ -1087,7 +1107,7 @@ def test_the_files_under_test_avoid_the_placeholders():
         source = path.read_text(encoding="utf-8")
         for word in ("@@SOURCE@@", "@@SCENARIO@@", "ANSWERS_TABLE", "HELD_ROUTES", "PREFIX_TEXT",
                      "ROOT_PRESENT", "ROOT_WIDTH", "DECODE_SECONDS", "DECODE_WORKS",
-                     "STORAGE_THROWS", "MICROPHONE_FLAG"):
+                     "STORAGE_THROWS", "STORED_ITEMS", "MICROPHONE_FLAG"):
             assert word not in source, (path.name, word)
 
 
@@ -1101,8 +1121,8 @@ class TestBoot:
         """Render and the status line are the Configuration stage's header's
         (round one had them in the Outputs stage's, and a footer before that);
         the Outputs stage keeps its title alone in its header. A stage bar sits
-        between the pipeline bar and the stages; the stylesheet shows it only
-        on a phone."""
+        between the pipeline bar and the stages; More ends the pipeline bar, and
+        its menu's one node is the root's last child."""
         found = run("""
             await flush();
             const stages = find(".mc-voice-box-stages");
@@ -1110,7 +1130,9 @@ class TestBoot:
             const outputs = find(".mc-voice-box-stage-outputs .mc-voice-box-stage-head");
             report({
                 title: find(".mc-voice-box-title").textContent,
-                bar: texts(".mc-voice-box-pipeline-bar button"),
+                bar: all(".mc-voice-box-pipeline-bar button").map(nameOf),
+                more: ["aria-haspopup", "aria-expanded", "data-icon"].map((name) =>
+                    find(".mc-voice-box-more").getAttribute(name)),
                 pipelines: find(".mc-voice-box-pipeline-select").options.map((o) => o.textContent),
                 stages: texts(".mc-voice-box-stage-title"),
                 row: stages.children.map((child) => child.className.split(" ")[0]),
@@ -1139,7 +1161,8 @@ class TestBoot:
                                 "mc-voice-box-stage", "mc-voice-box-connector",
                                 "mc-voice-box-stage", "mc-voice-box-connector",
                                 "mc-voice-box-stage"]
-        assert found["bar"] == ["New", "Rename", "Delete"]
+        assert found["bar"] == ["New", "Rename", "Delete", "More"]
+        assert found["more"] == ["menu", "false", "more"]
         assert found["pipelines"] == ["Pipeline 1"]
         assert found["title"] == "Voice Box · Pipeline 1"
         assert found["render"] is True
@@ -1153,7 +1176,7 @@ class TestBoot:
         assert (found["renders"], found["lines"]) == (1, 1)
         assert found["footer"] is False
         assert found["rootChildren"] == ["mc-voice-box-head", "mc-voice-box-stagebar",
-                                         "mc-voice-box-stages"]
+                                         "mc-voice-box-stages", "mc-voice-box-menu"]
         assert found["stagebar"] == ["Input", "Prompt", "Config", "Outputs"]
         assert found["stagebarNames"] == ["Input", "Prompt", "Configuration", "Outputs"]
         assert found["status"] == "Ready"
@@ -2251,7 +2274,9 @@ class TestFittingTheWindow:
     stylesheet then fits the stages into that height is
     test_voice_box_layout.py's question, in a real browser."""
 
-    def test_the_layout_is_a_pair_from_900_px_and_a_stack_below(self):
+    def test_the_layout_is_wide_from_900_px_and_a_stack_below(self):
+        """More, whose one setting is a wide screen's, shows only there; the
+        number of stages in view is on the root whatever the layout."""
         found = run("""
             await flush();
             const root = find("#mc-voice-box");
@@ -2260,14 +2285,16 @@ class TestFittingTheWindow:
                 root.clientWidth = width;
                 fireWindow("resize");
                 runFrames();
-                seen.push([width, root.getAttribute("data-layout")]);
+                seen.push([width, root.getAttribute("data-layout"), root.getAttribute("data-view"),
+                           shown(find(".mc-voice-box-more"))]);
             }
             report({seen});
         """)
 
-        assert found["seen"] == [[1440, "pair"], [900, "pair"], [899, "stack"],
-                                 [390, "stack"], [1200, "pair"]]
-        assert found["state"]["layout"]["mode"] == "pair"
+        assert found["seen"] == [[1440, "wide", "3", True], [900, "wide", "3", True],
+                                 [899, "stack", "3", False], [390, "stack", "3", False],
+                                 [1200, "wide", "3", True]]
+        assert found["state"]["layout"]["mode"] == "wide"
 
     def test_the_root_takes_the_windows_height_less_what_is_above_and_below_it(self):
         """A 160 px header above the root and a 60 px footer after it: the root
@@ -2392,7 +2419,7 @@ class TestFittingTheWindow:
 
         assert found["hidden"] == {"layout": None, "heights": []}
         assert found["unseen"] == 0
-        assert found["layout"] == "pair"
+        assert found["layout"] == "wide"
         assert found["heights"] == ["720px"]
         assert found["observed"] == [["mc-voice-box"]]
         assert found["resized"] == 0
@@ -2574,7 +2601,7 @@ TWO_OUTPUTS = {"/outputs": {"json": {"ok": True, "outputs": [
 
 
 class TestTheLanes:
-    def test_a_lane_is_its_waveform_and_one_line_until_it_is_selected(self):
+    def test_a_lane_is_its_waveform_with_play_beside_it_and_one_line_until_it_is_selected(self):
         found = run("""
             await flush();
             const lane = find(".mc-voice-box-lane");
@@ -2585,6 +2612,7 @@ class TestTheLanes:
                 line: lane.querySelector(".mc-voice-box-lane-head").children.map((n) => n.textContent),
                 datetime: date.getAttribute("datetime"),
                 wave: shown(lane.querySelector(".mc-voice-box-lane-wave")),
+                strip: lane.querySelector(".mc-voice-box-lane-strip").children.map((n) => n.className),
                 buttons: labels(lane),
                 meta: shown(lane.querySelector(".mc-voice-box-lane-meta")),
                 infotext: shown(lane.querySelector(".mc-voice-box-infotext")),
@@ -2603,7 +2631,9 @@ class TestTheLanes:
         assert found["compact"] == {"expanded": "false", "tabindex": "0",
                                     "line": ["21 Sep 2020 13:33", "Take 1"],
                                     "datetime": "2020-09-21T13:33:20.000Z", "wave": True,
-                                    "buttons": [], "meta": False, "infotext": False}
+                                    "strip": ["mc-voice-box-button mc-voice-box-icon mc-voice-box-lane-play",
+                                              "mc-voice-box-wave mc-voice-box-lane-wave"],
+                                    "buttons": ["Play"], "meta": False, "infotext": False}
         assert found["open"] == {"expanded": "true",
                                  "buttons": ["Play", "Play from the start", "Stop", "Loop",
                                              "Trim to sample", "Save", "Download", "Delete", "Copy",
@@ -3307,10 +3337,11 @@ class TestTheTransport:
                                    .map((b) => b.getAttribute("data-icon"))});
         """)
 
-        # The trimmer's four (hidden until a file is open), a sample row's
-        # three, the status line's Dismiss, the configuration's Save, Save as
-        # and Delete, and the lane's four.
-        assert found["icons"] == ["play", "start", "stop", "loop", "play", "start", "stop", "close",
+        # More, the trimmer's four (hidden until a file is open), a sample
+        # row's three, the status line's Dismiss, the configuration's Save,
+        # Save as and Delete, and the lane's four: its Play/Pause beside the
+        # waveform, then From the start, Stop and Loop in its details.
+        assert found["icons"] == ["more", "play", "start", "stop", "loop", "play", "start", "stop", "close",
                                   "save", "saveAs", "delete", "play", "start", "stop", "loop"]
         for picture in found["pictures"]:
             assert (picture["count"], picture["tag"], picture["viewBox"]) == (1, "SVG", "0 0 16 16"), picture
@@ -3427,7 +3458,7 @@ class TestTheStageBar:
             report({wide, narrow: marked(), layout: root.getAttribute("data-layout")});
         """, root_width=1440)
 
-        assert found["wide"] == ["Input", "Prompt"]
+        assert found["wide"] == ["Input", "Prompt", "Config"]
         assert found["layout"] == "stack"
         assert found["narrow"] == ["Prompt"]
 
@@ -3458,7 +3489,7 @@ class TestTheStageBar:
             runFrames();
             report({first, middle, end: marked(),
                     current: all(".mc-voice-box-stagebar button").map((b) => b.getAttribute("aria-current"))});
-        """, root_width=1440)
+        """, root_width=1440, stored=TWO_IN_VIEW)
 
         assert found["first"] == ["Input", "Prompt"]
         assert found["middle"] == ["Prompt", "Config"]
@@ -3482,7 +3513,7 @@ class TestTheStageBar:
             press("Config");
             const stay = scrolls.splice(0);
             report({right, afterRight, left, afterLeft, stay, marked: marked()});
-        """, root_width=1440)
+        """, root_width=1440, stored=TWO_IN_VIEW)
 
         def to(left):
             return [{"className": "mc-voice-box-stages", "options": {"left": left, "behavior": "smooth"}}]
@@ -3494,9 +3525,13 @@ class TestTheStageBar:
         # Already in view: the row is asked to stay where it is.
         assert (found["stay"], found["marked"]) == (to(724), ["Prompt", "Config"])
 
-    def test_widened_from_the_last_card_the_bar_marks_the_last_two(self):
-        """The last card cannot be the left one of two: the row ends with it on
-        the right, so the bar marks the one before it too."""
+    @pytest.mark.parametrize("view,marks", [
+        (2, ["Config", "Outputs"]),
+        (3, ["Prompt", "Config", "Outputs"]),
+        (4, ["Input", "Prompt", "Config", "Outputs"])])
+    def test_widened_from_the_last_card_the_bar_marks_the_last_ones(self, view, marks):
+        """The last card cannot be the leftmost of several: the row ends with it
+        on the right, so the bar marks the ones before it too."""
         found = run(self.PLACE + """
             await flush();
             runFrames();
@@ -3509,11 +3544,670 @@ class TestTheStageBar:
             fireWindow("resize");
             runFrames();
             report({narrow, wide: marked(), layout: root.getAttribute("data-layout")});
-        """, root_width=390)
+        """, root_width=390, stored={VIEW_KEY: view})
 
         assert found["narrow"] == ["Outputs"]
-        assert found["layout"] == "pair"
-        assert found["wide"] == ["Config", "Outputs"]
+        assert found["layout"] == "wide"
+        assert found["wide"] == marks
+
+
+# --------------------------------------------------------------------------- #
+# Stages in view, and the More menu
+# --------------------------------------------------------------------------- #
+
+MENU = """
+    const menu = () => find(".mc-voice-box-menu");
+    const items = () => menu().querySelectorAll("button").map((b) => ({
+        name: nameOf(b), role: b.getAttribute("role"), checked: b.getAttribute("aria-checked"),
+        disabled: !!b.disabled}));
+    const focusName = () => document.activeElement ? (nameOf(document.activeElement)
+        || document.activeElement.className) : null;
+    const key = (name, extra) => {
+        const event = Object.assign({type: "keydown", key: name, target: document.activeElement || document.body,
+                                     prevented: false, stopped: false,
+                                     preventDefault() { this.prevented = true; },
+                                     stopPropagation() { this.stopped = true; }}, extra || {});
+        document.dispatchEvent(event);
+        return event;
+    };
+    // A press in the menu, as a pointer makes one (`detail` 1) or as Enter
+    // or Space does (0).
+    const choose = (name, detail) => {
+        const item = menu().querySelectorAll("button").filter((b) => nameOf(b) === name)[0];
+        if (!item) throw new Error("no menu item " + name);
+        item.dispatchEvent({type: "click", detail: detail === undefined ? 1 : detail, preventDefault() {}});
+        return item;
+    };
+"""
+
+
+class TestStagesInView:
+    """From 900 px the view holds two, three or four cards: three until More's
+    menu says otherwise, and from then on what this browser was told last."""
+
+    # Cards `step` apart, the row scrolled by `scrolled`, as a browser lays
+    # them out: 474 px wide for three to the 1440 px view, 8 px apart.
+    PLACE = MENU + """
+        const container = find(".mc-voice-box-stages");
+        const cards = all(".mc-voice-box-stage");
+        const place = (scrolled, step) => {
+            container.scrollLeft = scrolled;
+            container.boxLeft = 0;
+            cards.forEach((card, index) => { card.boxLeft = index * step - scrolled; });
+        };
+        const marked = () => all(".mc-voice-box-stagebar button")
+            .filter((b) => b.getAttribute("aria-current") === "true").map((b) => b.textContent);
+    """
+
+    @pytest.mark.parametrize("stored,view,marks", [
+        (None, "3", ["Input", "Prompt", "Config"]),
+        ("2", "2", ["Input", "Prompt"]),
+        ("4", "4", ["Input", "Prompt", "Config", "Outputs"]),
+        ("7", "3", ["Input", "Prompt", "Config"]),
+        ("three", "3", ["Input", "Prompt", "Config"])])
+    def test_three_share_the_view_until_the_browser_kept_another_choice(self, stored, view, marks):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            report({view: find("#mc-voice-box").getAttribute("data-view"), marked: marked()});
+        """, root_width=1440, stored={VIEW_KEY: stored} if stored is not None else None)
+
+        assert found["view"] == view
+        assert found["marked"] == marks
+        assert found["state"]["view"] == int(view)
+        assert [entry for entry in found["storageLog"] if entry[0] == VIEW_KEY] == [], "reading writes nothing"
+
+    def test_more_opens_a_menu_of_the_choices_with_the_one_in_use_checked_and_focused(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            const more = find(".mc-voice-box-more");
+            press("More");
+            const open = {shown: shown(menu()), role: menu().getAttribute("role"),
+                          label: menu().getAttribute("aria-label"), items: items(),
+                          heading: menu().querySelector(".mc-voice-box-menu-heading").textContent,
+                          group: menu().querySelector("[role=group]").getAttribute("aria-label"),
+                          expanded: more.getAttribute("aria-expanded"), focus: focusName(),
+                          menuState: globalThis.mcVoiceBox.state().menu,
+                          last: find("#mc-voice-box").children.slice(-1)[0] === menu()};
+            press("More");
+            report({open, closed: {shown: shown(menu()), expanded: more.getAttribute("aria-expanded"),
+                                   focus: document.activeElement === more,
+                                   menuState: globalThis.mcVoiceBox.state().menu}});
+        """, root_width=1440)
+
+        assert found["open"] == {
+            "shown": True, "role": "menu", "label": "More",
+            "items": [{"name": "2", "role": "menuitemradio", "checked": "false", "disabled": False},
+                      {"name": "3", "role": "menuitemradio", "checked": "true", "disabled": False},
+                      {"name": "4", "role": "menuitemradio", "checked": "false", "disabled": False}],
+            "heading": "Stages in view", "group": "Stages in view", "expanded": "true", "focus": "3",
+            "menuState": {"kind": "more"}, "last": True}
+        assert found["closed"] == {"shown": False, "expanded": "false", "focus": True, "menuState": None}
+
+    def test_a_choice_is_drawn_at_once_kept_by_the_browser_and_keeps_the_leftmost_stage(self):
+        """Two from Prompt, Config and Outputs in view: Prompt stays the
+        leftmost. Four: all of them, the row at its start. Each puts the menu
+        away, and is in the browser's storage for the next visit."""
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            place(483, 483);
+            container.dispatchEvent({type: "scroll"});
+            runFrames();
+            const before = marked();
+            press("More");
+            choose("2");
+            const two = {view: find("#mc-voice-box").getAttribute("data-view"), marked: marked(),
+                         scrolls: scrolls.splice(0), shown: shown(menu()),
+                         expanded: find(".mc-voice-box-more").getAttribute("aria-expanded")};
+            press("More");
+            choose("4");
+            const four = {view: find("#mc-voice-box").getAttribute("data-view"), marked: marked(),
+                          scrolls: scrolls.splice(0)};
+            report({before, two, four});
+        """, root_width=1440)
+
+        assert found["before"] == ["Prompt", "Config", "Outputs"]
+        assert found["two"] == {"view": "2", "marked": ["Prompt", "Config"],
+                                "scrolls": [{"className": "mc-voice-box-stages",
+                                             "options": {"left": 483, "behavior": "auto"}}],
+                                "shown": False, "expanded": "false"}
+        assert found["four"] == {"view": "4", "marked": ["Input", "Prompt", "Config", "Outputs"],
+                                 "scrolls": [{"className": "mc-voice-box-stages",
+                                              "options": {"left": 0, "behavior": "auto"}}]}
+        assert [entry for entry in found["storageLog"] if entry[0] == VIEW_KEY] == [[VIEW_KEY, "2"], [VIEW_KEY, "4"]]
+        assert found["state"]["view"] == 4
+
+    def test_three_from_the_last_two_ends_the_row_with_the_last_three(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            // Two to the view, 716 px wide: Config and Outputs in view.
+            place(1448, 724);
+            container.dispatchEvent({type: "scroll"});
+            runFrames();
+            const before = marked();
+            press("More");
+            choose("3");
+            report({before, marked: marked(), scrolls});
+        """, root_width=1440, stored=TWO_IN_VIEW)
+
+        assert found["before"] == ["Config", "Outputs"]
+        # Prompt's card is where the row ends with three in view.
+        assert found["marked"] == ["Prompt", "Config", "Outputs"]
+        assert found["scrolls"] == [{"className": "mc-voice-box-stages",
+                                     "options": {"left": 724, "behavior": "auto"}}]
+        assert found["state"]["stage"] == "prompt"
+
+    def test_storage_that_refuses_keeps_the_choice_until_the_page_is_reloaded(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            press("More");
+            choose("4");
+            report({view: find("#mc-voice-box").getAttribute("data-view"), marked: marked()});
+        """, root_width=1440, storage_throws=True)
+
+        assert found["view"] == "4"
+        assert found["marked"] == ["Input", "Prompt", "Config", "Outputs"]
+        assert found["warnings"] == []
+
+    def test_the_same_choice_again_moves_nothing(self):
+        found = run(self.PLACE + """
+            await flush();
+            runFrames();
+            press("More");
+            choose("3");
+            report({scrolls, shown: shown(menu())});
+        """, root_width=1440)
+
+        assert found["scrolls"] == []
+        assert found["shown"] is False
+
+
+class TestTheMenu:
+    """One menu at a time -- More's or a lane's -- put away by anything that
+    leaves it behind: Escape and Tab (the focus going back to what opened it),
+    a press outside it, a scroll anywhere but in it, the window resizing or
+    losing the focus, the layout changing, the tab leaving the screen."""
+
+    def test_escape_and_tab_put_it_away_and_give_the_focus_back_to_more(self):
+        found = run(MENU + """
+            await flush();
+            runFrames();
+            const more = find(".mc-voice-box-more");
+            const seen = [];
+            for (const name of ["Escape", "Tab"]) {
+                press("More");
+                const event = key(name);
+                seen.push({key: name, shown: shown(menu()), prevented: event.prevented, stopped: event.stopped,
+                           focus: document.activeElement === more});
+            }
+            report({seen});
+        """, root_width=1440)
+
+        assert found["seen"] == [
+            {"key": "Escape", "shown": False, "prevented": True, "stopped": True, "focus": True},
+            {"key": "Tab", "shown": False, "prevented": True, "stopped": True, "focus": True}]
+
+    def test_the_arrows_home_and_end_move_between_the_items_and_other_keys_pass(self):
+        found = run(MENU + """
+            await flush();
+            runFrames();
+            press("More");
+            const seen = [focusName()];
+            for (const name of ["ArrowRight", "ArrowRight", "ArrowLeft", "Home", "End", "ArrowDown", "ArrowUp"]) {
+                const event = key(name);
+                seen.push([name, focusName(), event.prevented, event.stopped]);
+            }
+            const letter = key("a");
+            report({seen, letter: [letter.prevented, letter.stopped], shown: shown(menu())});
+        """, root_width=1440)
+
+        assert found["seen"] == ["3", ["ArrowRight", "4", True, True], ["ArrowRight", "2", True, True],
+                                 ["ArrowLeft", "4", True, True], ["Home", "2", True, True],
+                                 ["End", "4", True, True], ["ArrowDown", "2", True, True],
+                                 ["ArrowUp", "4", True, True]]
+        assert found["letter"] == [False, False]
+        assert found["shown"] is True
+
+    def test_a_choice_by_keyboard_gives_the_focus_back_and_one_by_pointer_does_not(self):
+        found = run(MENU + """
+            await flush();
+            runFrames();
+            const more = find(".mc-voice-box-more");
+            press("More");
+            choose("2", 0);
+            const keyboard = document.activeElement === more;
+            press("More");
+            const item = choose("4", 1);
+            report({keyboard, pointer: document.activeElement === more,
+                    view: find("#mc-voice-box").getAttribute("data-view")});
+        """, root_width=1440)
+
+        assert found["keyboard"] is True
+        assert found["pointer"] is False
+        assert found["view"] == "4"
+
+    def test_a_press_outside_a_scroll_elsewhere_a_resize_a_blur_and_the_tab_leaving_put_it_away(self):
+        found = run(MENU + """
+            await flush();
+            runFrames();
+            const root = find("#mc-voice-box");
+            const outcome = {};
+            const open = () => { press("More"); return shown(menu()); };
+            open();
+            document.dispatchEvent({type: "pointerdown", target: menu().querySelector("button")});
+            outcome.pressInside = shown(menu());
+            document.dispatchEvent({type: "scroll", target: menu()});
+            outcome.scrollInside = shown(menu());
+            document.dispatchEvent({type: "pointerdown", target: find(".mc-voice-box-prompt")});
+            outcome.pressOutside = shown(menu());
+            open();
+            document.dispatchEvent({type: "scroll", target: find(".mc-voice-box-lanes")});
+            outcome.scrollElsewhere = shown(menu());
+            open();
+            document.dispatchEvent({type: "scroll", target: document});
+            outcome.pageScroll = shown(menu());
+            open();
+            fireWindow("resize");
+            outcome.resize = shown(menu());
+            open();
+            fireWindow("blur");
+            outcome.blur = shown(menu());
+            open();
+            intersect(root, false);
+            outcome.tabLeft = shown(menu());
+            intersect(root, true);
+            open();
+            // The layout changing under it: here the visual viewport's resize,
+            // which is not the window's.
+            root.clientWidth = 600;
+            fireViewport("resize");
+            runFrames();
+            outcome.narrowed = {shown: shown(menu()), more: shown(find(".mc-voice-box-more"))};
+            report({outcome, menuState: globalThis.mcVoiceBox.state().menu});
+        """, root_width=1440)
+
+        assert found["outcome"] == {"pressInside": True, "scrollInside": True, "pressOutside": False,
+                                    "scrollElsewhere": False, "pageScroll": False, "resize": False,
+                                    "blur": False, "tabLeft": False,
+                                    "narrowed": {"shown": False, "more": False}}
+        assert found["menuState"] is None
+
+    def test_a_closed_menu_listens_to_nothing(self):
+        """Its document and window listeners go with it: a page with no menu
+        open is not slowed by a key, a press or a scroll."""
+        found = run(MENU + """
+            await flush();
+            runFrames();
+            const count = () => ({
+                document: ["pointerdown", "keydown", "scroll"].map((type) => (document._listeners[type] || []).length),
+                window: ["resize", "blur"].map((type) => (windowListeners[type] || []).length)});
+            const before = count();
+            press("More");
+            const open = count();
+            key("Escape");
+            report({before, open, after: count()});
+        """, root_width=1440)
+
+        assert found["after"] == found["before"]
+        assert [a - b for a, b in zip(found["open"]["document"], found["before"]["document"])] == [1, 1, 1]
+        assert [a - b for a, b in zip(found["open"]["window"], found["before"]["window"])] == [1, 1]
+
+
+# --------------------------------------------------------------------------- #
+# A lane's Play beside its waveform
+# --------------------------------------------------------------------------- #
+
+
+class TestTheLanesPlay:
+    """Every lane, open or not, has its Play/Pause at the left of its waveform.
+    A press plays or pauses that lane and opens nothing; the active player
+    plays on from where it was paused, and any other lane from its start."""
+
+    LANES = """
+        await flush();
+        const lanes = all(".mc-voice-box-lane");
+        const audios = lanes.map((lane) => lane.querySelector("audio"));
+        audios.forEach((audio) => { audio.duration = 4.5; });
+        const play = (lane) => lane.querySelector(".mc-voice-box-lane-play");
+        const look = (index) => ({playing: !audios[index].paused, at: audios[index].currentTime,
+                                  label: play(lanes[index]).getAttribute("aria-label"),
+                                  marked: play(lanes[index]).getAttribute("data-playing"),
+                                  expanded: lanes[index].getAttribute("aria-expanded")});
+    """
+
+    def test_a_press_plays_the_lane_without_opening_it_and_a_second_pauses_it(self):
+        found = run(self.LANES + """
+            play(lanes[1]).click();
+            await flush();
+            const playing = look(1);
+            audios[1].currentTime = 2;
+            play(lanes[1]).click();
+            const paused = Object.assign(look(1), {active: globalThis.mcVoiceBox.state().activePlayer});
+            play(lanes[1]).click();
+            await flush();
+            report({playing, paused, resumed: look(1), other: look(0),
+                    selected: globalThis.mcVoiceBox.state().selectedOutput});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["playing"] == {"playing": True, "at": 0, "label": "Pause", "marked": "true",
+                                    "expanded": "false"}
+        assert found["paused"] == {"playing": False, "at": 2, "label": "Play", "marked": None,
+                                   "expanded": "false", "active": {"kind": "output", "id": "o1"}}
+        # Paused by its own Pause, it is still the active player: it plays on.
+        assert found["resumed"] == {"playing": True, "at": 2, "label": "Pause", "marked": "true",
+                                    "expanded": "false"}
+        assert found["other"] == {"playing": False, "at": 0, "label": "Play", "marked": None,
+                                  "expanded": "false"}
+        assert found["selected"] == ""
+
+    def test_another_lane_always_starts_from_its_beginning(self):
+        """Wherever it was left: the one playing is paused where it is, and is
+        itself played from its start when it is pressed again."""
+        found = run(self.LANES + """
+            play(lanes[1]).click();
+            await flush();
+            audios[1].currentTime = 2;
+            audios[0].currentTime = 3;
+            play(lanes[0]).click();
+            await flush();
+            const second = {first: look(1), second: look(0),
+                            active: globalThis.mcVoiceBox.state().activePlayer};
+            play(lanes[1]).click();
+            await flush();
+            report({second, again: {first: look(1), second: look(0),
+                                    active: globalThis.mcVoiceBox.state().activePlayer}});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["second"]["first"] == {"playing": False, "at": 2, "label": "Play", "marked": None,
+                                            "expanded": "false"}
+        assert found["second"]["second"]["playing"] is True and found["second"]["second"]["at"] == 0
+        assert found["second"]["active"] == {"kind": "output", "id": "o2"}
+        assert found["again"]["first"]["playing"] is True and found["again"]["first"]["at"] == 0
+        assert found["again"]["second"]["playing"] is False and found["again"]["second"]["at"] == 0
+        assert found["again"]["active"] == {"kind": "output", "id": "o1"}
+
+    def test_a_stopped_lane_is_not_the_active_player_and_plays_from_its_start(self):
+        found = run(self.LANES + """
+            play(lanes[1]).click();
+            await flush();
+            audios[1].currentTime = 2;
+            lanes[1].click();
+            press("Stop", lanes[1]);
+            audios[1].currentTime = 1.5;
+            play(lanes[1]).click();
+            await flush();
+            report({after: look(1)});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["after"]["playing"] is True and found["after"]["at"] == 0
+
+    def test_the_mouses_other_buttons_seek_nothing_on_the_active_waveform(self):
+        """The right one opens the lane's menu; a finger held until the menu
+        opens does not seek when it lifts either."""
+        found = run(self.LANES + """
+            play(lanes[0]).click();
+            await flush();
+            const wave = lanes[0].querySelector(".mc-voice-box-lane-wave");
+            const down = (button, x) => wave.dispatchEvent({type: "pointerdown", clientX: x, pointerId: 1, button,
+                                                            preventDefault() {}});
+            down(2, 120);
+            const right = audios[0].currentTime;
+            down(1, 60);
+            const middle = audios[0].currentTime;
+            wave.dispatchEvent({type: "pointerup", pointerId: 1});
+            const finger = (type, x) => wave.dispatchEvent({type, clientX: x, pointerId: 7, pointerType: "touch",
+                                                            button: 0, preventDefault() {}});
+            finger("pointerdown", 180);
+            wave.dispatchEvent({type: "contextmenu", clientX: 180, clientY: 5, preventDefault() {}});
+            finger("pointerup", 180);
+            const held = audios[0].currentTime;
+            down(0, 60);
+            report({right, middle, held, left: audios[0].currentTime});
+        """, answers=TWO_OUTPUTS)
+
+        assert (found["right"], found["middle"], found["held"]) == (0, 0, 0)
+        assert found["left"] == 1.125
+
+
+# --------------------------------------------------------------------------- #
+# A lane's menu
+# --------------------------------------------------------------------------- #
+
+LANE_MENU = MENU + """
+    const lanes = () => all(".mc-voice-box-lane");
+    // A right click on what is given, travelling up to the lane as a real one
+    // does: whether the browser's own menu was kept from it.
+    const rightClick = (node, x, y) => {
+        const event = {type: "contextmenu", bubbles: true, clientX: x === undefined ? 30 : x,
+                       clientY: y === undefined ? 10 : y, prevented: false,
+                       preventDefault() { this.prevented = true; }};
+        node.dispatchEvent(event);
+        return event.prevented;
+    };
+    const names = () => items().map((item) => item.name);
+"""
+
+
+class TestTheLanesMenu:
+    """A right click on a lane -- open or not -- opens a menu of what it can
+    do: its player, then what the selected lane's buttons do."""
+
+    def test_a_right_click_opens_the_lanes_menu_instead_of_the_browsers(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            const prevented = rightClick(lane.querySelector(".mc-voice-box-lane-wave"));
+            report({prevented, shown: shown(menu()), label: menu().getAttribute("aria-label"), items: items(),
+                    separators: menu().querySelectorAll("[role=separator]").length, focus: focusName(),
+                    loop: menu().querySelectorAll("[role=menuitemcheckbox]").map((b) => b.getAttribute("aria-checked")),
+                    danger: menu().querySelectorAll("[data-danger=true]").map(nameOf),
+                    expanded: lane.getAttribute("aria-expanded"),
+                    menuState: globalThis.mcVoiceBox.state().menu});
+        """)
+
+        assert found["prevented"] is True
+        assert found["shown"] is True
+        assert found["label"] == "Take 1"
+        assert [item["name"] for item in found["items"]] == [
+            "Play", "Play from the start", "Stop", "Loop", "Rename", "Trim to sample", "Save to the folder",
+            "Download", "Copy infotext", "Use seed", "Reuse settings", "Delete"]
+        # Stop is for the active player only, and this lane is not it yet.
+        assert [item["name"] for item in found["items"] if item["disabled"]] == ["Stop"]
+        assert found["separators"] == 3
+        assert found["loop"] == ["false"]
+        assert found["danger"] == ["Delete"]
+        assert found["focus"] == "Play"
+        assert found["expanded"] == "false", "the menu opens nothing"
+        assert found["menuState"] == {"kind": "lane", "id": "o1"}
+
+    def test_in_a_text_box_or_the_infotext_the_browsers_own_menu_stays(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            lane.click();
+            const infotext = rightClick(lane.querySelector(".mc-voice-box-infotext"));
+            lane.querySelector(".mc-voice-box-lane-name").dispatchEvent({type: "dblclick"});
+            const box = rightClick(find(".mc-voice-box-rename"));
+            report({infotext, box, shown: shown(menu())});
+        """)
+
+        assert found["infotext"] is False
+        assert found["box"] is False
+        assert found["shown"] is False
+
+    def test_its_player_items_play_pause_and_stop_the_lane_and_follow_it(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            const audio = lane.querySelector("audio");
+            audio.duration = 4.5;
+            audio.currentTime = 2;
+            rightClick(lane);
+            choose("Play");
+            await flush();
+            const played = {playing: !audio.paused, at: audio.currentTime,
+                            active: globalThis.mcVoiceBox.state().activePlayer};
+            rightClick(lane);
+            const open = {names: names(), stop: items()[2].disabled};
+            // Playing on while its menu is open: the menu says what it would do now.
+            audio.pause();
+            const paused = names()[0];
+            audio.play();
+            const resumed = names()[0];
+            choose("Stop");
+            report({played, open, paused, resumed,
+                    stopped: {playing: !audio.paused, at: audio.currentTime,
+                              active: globalThis.mcVoiceBox.state().activePlayer}});
+        """)
+
+        assert found["played"] == {"playing": True, "at": 0, "active": {"kind": "output", "id": "o1"}}
+        assert found["open"]["names"][0] == "Pause" and found["open"]["stop"] is False
+        assert (found["paused"], found["resumed"]) == ("Play", "Pause")
+        assert found["stopped"] == {"playing": False, "at": 0, "active": None}
+
+    def test_loop_is_a_checked_item_that_says_what_the_lanes_loop_says(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            rightClick(lane);
+            choose("Loop");
+            await flush();
+            const looped = {audio: lane.querySelector("audio").loop,
+                            button: lane.querySelector(".mc-voice-box-lane-loop").getAttribute("aria-pressed")};
+            rightClick(lane);
+            const checked = menu().querySelector("[role=menuitemcheckbox]").getAttribute("aria-checked");
+            const tick = menu().querySelectorAll(".mc-voice-box-menu-tick svg").length;
+            report({looped, checked, tick, bodies: requestsTo("/outputs/loop").map((r) => r.body)});
+        """)
+
+        assert found["looped"] == {"audio": True, "button": "true"}
+        assert found["checked"] == "true"
+        assert found["tick"] == 1
+        assert found["bodies"] == [{"id": "o1", "on": True, "loop": True}]
+
+    def test_rename_puts_the_name_in_a_box_in_its_place(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            rightClick(lane);
+            choose("Rename");
+            const box = find(".mc-voice-box-rename");
+            const opened = {value: box.value, focused: document.activeElement === box,
+                            inLane: lane.contains(box), expanded: lane.getAttribute("aria-expanded")};
+            box.value = "Intro";
+            box.dispatchEvent({type: "keydown", key: "Enter"});
+            await flush();
+            report({opened, rename: requestsTo("/outputs/rename").map((r) => r.body)});
+        """)
+
+        assert found["opened"] == {"value": "Take 1", "focused": True, "inLane": True, "expanded": "false"}
+        assert found["rename"] == [{"id": "o1", "name": "Intro"}]
+
+    def test_the_rest_do_what_the_selected_lanes_buttons_do(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const copied = [];
+            navigator.clipboard = {writeText(text) { copied.push(text); return Promise.resolve(); }};
+            const lane = lanes()[0];
+            const pick = async (name) => { rightClick(lane); choose(name); await flush(); };
+            await pick("Use seed");
+            const seed = globalThis.mcVoiceBox.state().working.seed;
+            await pick("Copy infotext");
+            await pick("Save to the folder");
+            await pick("Download");
+            await pick("Trim to sample");
+            const trimming = globalThis.mcVoiceBox.state().trimming;
+            find(".mc-voice-box-prompt").value = "";
+            await pick("Reuse settings");
+            const prompt = find(".mc-voice-box-prompt").value;
+            answers["/outputs"] = {json: {ok: true, outputs: []}};
+            await pick("Delete");
+            report({seed, copied, trimming: trimming && trimming.from, prompt,
+                    saves: requestsTo("/outputs/save").map((r) => r.body),
+                    downloads: requestsTo("/outputs/audio").filter((r) => /download=1/.test(r.url)).length,
+                    deletes: requestsTo("/outputs/delete").map((r) => r.body),
+                    lanes: lanes().length, shown: shown(menu())});
+        """)
+
+        assert found["seed"] == 42
+        assert found["copied"] == [INFOTEXT]
+        assert found["saves"] == [{"id": "o1"}]
+        assert found["downloads"] == 1
+        assert found["linkClicks"][0]["download"] == "Take 1.mp3"
+        assert found["trimming"] == "output:o1"
+        assert found["prompt"] == "Speaker 1: Hello there."
+        assert found["deletes"] == [{"id": "o1"}]
+        assert found["lanes"] == 0
+        assert found["shown"] is False
+
+    def test_a_render_without_a_seed_or_an_infotext_says_so_in_its_menu(self):
+        found = run(LANE_MENU + """
+            await flush();
+            rightClick(lanes()[0]);
+            report({items: items(), titles: menu().querySelectorAll("button")
+                .filter((b) => b.getAttribute("title")).map((b) => [nameOf(b), b.getAttribute("title")])});
+        """, answers={"/outputs": {"json": {"ok": True, "outputs": [dict(OLD_OUTPUT, infotext="")]}}})
+
+        names = [item["name"] for item in found["items"]]
+        assert "Copy infotext" not in names
+        assert [item["name"] for item in found["items"] if item["disabled"]] == ["Stop", "Use seed"]
+        assert found["titles"] == [["Use seed", "This render was made before seeds were recorded."]]
+
+    def test_escape_puts_the_menu_away_and_leaves_the_selected_lane_open(self):
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            lane.click();
+            rightClick(lane);
+            const event = key("Escape");
+            report({shown: shown(menu()), stopped: event.stopped, focus: document.activeElement === lane,
+                    selected: globalThis.mcVoiceBox.state().selectedOutput});
+        """)
+
+        assert found["shown"] is False
+        assert found["stopped"] is True
+        assert found["focus"] is True
+        assert found["selected"] == "o1"
+
+    def test_another_lanes_right_click_moves_the_menu_to_it(self):
+        found = run(LANE_MENU + """
+            await flush();
+            rightClick(lanes()[0]);
+            const first = menu().getAttribute("aria-label");
+            document.dispatchEvent({type: "pointerdown", target: lanes()[1], button: 2});
+            rightClick(lanes()[1]);
+            report({first, second: menu().getAttribute("aria-label"),
+                    menuState: globalThis.mcVoiceBox.state().menu});
+        """, answers=TWO_OUTPUTS)
+
+        assert found["first"] == "Take 2"
+        assert found["second"] == "Take 1"
+        assert found["menuState"] == {"kind": "lane", "id": "o1"}
+
+    def test_a_lane_that_goes_away_takes_its_menu_with_it(self):
+        """Deleted while its menu is open -- from its own buttons here, from
+        another browser in life, which a poll brings."""
+        found = run(LANE_MENU + """
+            await flush();
+            const lane = lanes()[0];
+            lane.click();
+            rightClick(lane);
+            const open = shown(menu());
+            answers["/outputs"] = {json: {ok: true, outputs: [FIRST]}};
+            press("Delete", lane);
+            await flush();
+            report({open, shown: shown(menu()), menuState: globalThis.mcVoiceBox.state().menu,
+                    names: texts(".mc-voice-box-lane-name")});
+        """.replace("FIRST", json.dumps(OUTPUT)), answers=TWO_OUTPUTS)
+
+        assert found["open"] is True
+        assert found["names"] == ["Take 1"]
+        assert found["shown"] is False
+        assert found["menuState"] is None
 
 
 # --------------------------------------------------------------------------- #
