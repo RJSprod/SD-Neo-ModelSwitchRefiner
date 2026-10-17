@@ -518,7 +518,15 @@
             const view = NS.viewport ? NS.viewport()
                 : {top: 0, height: window.innerHeight};
             const top = view.top || 0;
-            viewBottom = top + (view.height || window.innerHeight);
+            // The visible viewport, and never more of it than the window
+            // holds at rest. Zoomed out -- a phone's browser lets a page
+            // wider than the window go below 1 -- the visible viewport is
+            // taller than the window in CSS pixels, and a gallery filled to
+            // it was taller than the screen once the zoom came back, with
+            // the theme's row grown to match.
+            const window_ = (document.documentElement && document.documentElement.clientHeight) || 0;
+            const visible = view.height || window.innerHeight || 0;
+            viewBottom = top + (window_ > 0 ? Math.min(visible, window_) : visible);
             viewTop = coveredTop(results, top);
             scrolled = window.scrollY || window.pageYOffset || 0;
         }

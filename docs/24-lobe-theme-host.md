@@ -228,6 +228,61 @@ container says `overflow: hidden`, under which nothing sticky in it could
 hold against the page; Forge's stylesheet puts `overflow: visible
 !important` back on it, which is why the theme's header sticks at all.
 
+**The user's second run (2026-10-17, the phone).** Three screenshots from a
+phone (a browser 720 px wide): "It doesn't do this initially, but after
+returning back or going into focus and out of focus, it looks like the
+layout does not stay constrained. I'm able to zoom out too far and scroll
+far to the right and scroll all the way down." The zoomed-out screenshot had
+the page at about a third of the layout's width with the gallery grown to
+the whole of it; the others had the settings column cut off at the left
+edge and a row running far past both columns. Reproduced in Chromium's
+mobile viewport (Playwright's `is_mobile`, the viewports read through
+`Page.getLayoutMetrics`) on the Forge-shaped Gradio page: a page wider than
+the window widens the browser's **layout viewport** -- what `position:
+fixed` and `position: sticky` are held against, what `innerWidth` and
+`innerHeight` report -- to the page's width, and the height to match, and
+lets the page be zoomed out to it; `documentElement.clientHeight` stays the
+window's (a sticky `bottom: 0` probe sat at 1472 px on an 870 px window).
+So the one scroller's hold, computed from `clientHeight`, held the settings
+against a view half the scrollport's height, and the Forge Assistant's fill,
+which measures the *visible* viewport, grew the gallery to the zoomed-out
+glass, the row growing with it -- "scroll all the way down". What was wide
+was the generation-info panel's own doing: Forge's `html_info_*` paragraph
+is kept in the page for what reads it, as a box one pixel wide with
+`overflow: hidden`, `clip` and `white-space: nowrap`, and Gradio 4.40
+writes every block's `overflow` **inline** (`Block.svelte`'s
+`allow_overflow`, visible for an HTML component), which outranks the
+stylesheet: the paragraph's overflow showed, and a one-pixel box under
+`nowrap` is as wide as the whole infotext on one line, a page's width or
+two. "Initially" there is no infotext; after the first generation there is,
+and the desktop had had a horizontal scrollbar since #272 that nobody had
+reported. Every test had passed because the test page's block carried no
+inline style; Chromium's cascade, read through CDP
+(`CSS.getMatchedStylesForNode`), showed the three rules and the inline
+style. Not focus mode's doing: its root is `position: fixed`, whose overflow
+widens nothing, so the page was its width under focus and wide again on the
+way out -- "going into focus and out of focus". Fixed: the paragraph clips
+its line `!important`; Gradio's container is clipped sideways under the
+theme (`overflow-x: clip !important` on `div.gradio-container.app`, over
+Forge's `overflow: visible !important`; `clip` makes no scroll container,
+so the sticky columns still hold against the page, and the vertical
+overflow stays visible for the dropdown lists), so a stray wide box of
+anyone's widens neither the page nor the layout viewport -- measured with a
+1500 px box in the page: content size and layout viewport at the window's
+width, a zoom-out refused, the columns held; the fill measures the visible
+viewport but never more of it than the window holds at rest; the measure
+is taken again on the visible viewport's `resize` (a pinch), `pageshow`,
+`visibilitychange` and `fullscreenchange`; and a view with no room -- a
+scroller with no height for the moment, a window shorter than the bar's
+margin -- holds nothing and writes nothing until there is room again, where
+the first build wrote a row of the two columns' heights added up. The test
+page's infotext blocks carry Gradio's inline style now, with an infotext a
+few windows wide for the width tests, and `TestOnAPhonesBrowser` runs the
+mobile viewport. `html { overflow-x: hidden }` was tried first and holds
+nothing on a phone: Chromium takes the minimum scale from the document's
+layout overflow, which the root's clip does not shrink; a clip on a box
+inside the page does.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own

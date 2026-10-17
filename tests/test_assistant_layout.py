@@ -1436,6 +1436,41 @@ VISIBLE = """() => {
 }"""
 
 
+def test_zoomed_out_the_fill_is_no_taller_than_the_window(browser):
+    """A phone's browser lets a page wider than the window be zoomed out to
+    the page, and the visible viewport is then taller than the window in CSS
+    pixels. The fill followed it: a gallery filled to the zoomed-out glass
+    was taller than the screen once the zoom came back, and the Model Chain
+    theme's one scroller grew its row to match (the user's phone, 2026-10-17).
+    The visible viewport is what the fill measures -- a keyboard shrinks it
+    -- but never more of it than the window holds at rest."""
+    context = browser.new_context(viewport={"width": 720, "height": 870}, is_mobile=True,
+                                  has_touch=True, device_scale_factor=2)
+    page = context.new_page()
+    html = page_html()
+    page.route(ORIGIN + "/**", lambda route: _answer(route, html))
+    page.goto(ORIGIN + "/")
+    page.wait_for_function("!!(window.forgeAssistant && window.forgeAssistant.shell)")
+    settle(page, 8)
+    # A stray wide box of somebody's widens the page, and with it the layout
+    # viewport: the page can be zoomed out to it.
+    page.evaluate("() => { const stray = document.createElement('div'); "
+                  "stray.style.cssText = 'position: absolute; left: 0; top: 0; width: 1500px; height: 1px'; "
+                  "document.body.appendChild(stray); }")
+    settle(page, 8)
+    rest = page.evaluate("forgeAssistant.fill.explain()[0]")
+    assert rest["reason"] == "" and rest["height"] > 0, rest
+    cdp = context.new_cdp_session(page)
+    cdp.send("Emulation.setPageScaleFactor", {"pageScaleFactor": 0.5})
+    cdp.detach()
+    settle(page, 8)
+    assert page.evaluate("window.visualViewport.height") > 870, "the zoomed-out glass, taller than the window"
+    zoomed = page.evaluate("forgeAssistant.fill.explain()[0]")
+    assert zoomed["height"] == rest["height"], (rest, zoomed)
+    page.close()
+    context.close()
+
+
 def test_on_a_phone_a_floating_panel_fits_what_shows(browser):
     """The keyboard coming up leaves less of the window showing; a floating
     panel taller than that ran under the keyboard, composer and all."""

@@ -50,6 +50,7 @@ globalThis.document = {
 globalThis.window = globalThis;
 globalThis.location = {href: "https://forge.test/?x=1"};
 globalThis.addEventListener = (type) => listeners.push("window:" + type);
+globalThis.visualViewport = {addEventListener(type) { listeners.push("visualViewport:" + type); }};
 globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
 globalThis.setTimeout = (fn) => { fn(); return 1; };
 const store = __STORE__;
@@ -402,6 +403,12 @@ class TestTheFirstPaint:
         assert found["hooks"] == {"loaded": 1, "changed": 1, "after": 1, "tab": 1}
         assert "window:resize" in found["listeners"]
         assert "document:keydown" in found["listeners"]
+        # What changes what the columns are held against without a resize
+        # of the window: a pinch, the page shown again, the browser's full
+        # screen coming or going under focus mode.
+        for kind in ("visualViewport:resize", "window:pageshow", "document:visibilitychange",
+                     "document:fullscreenchange", "document:webkitfullscreenchange"):
+            assert kind in found["listeners"], kind
 
     def test_off_in_the_settings_takes_the_mark_off_again(self):
         found = run("""
@@ -476,11 +483,16 @@ class TestTheStylesheetSection:
         # first; a drawer's own rule needs none.
         # Forge's `.edit-user-metadata` says `padding` and `background`
         # !important itself, so the dialog's own padding and surface must too.
+        # Gradio writes every block's `overflow` inline, so the paragraph
+        # kept out of view clips its line !important; and Forge's own
+        # `div.gradio-container { overflow: visible !important }` is why the
+        # container's sideways clip is.
         allowed = ("[hidden]", "mc-theme-overflow", ".gradio-button.tool", "token-counter",
                    "#quicksettings", "gradio-accordion", "_toprow", ".mc-theme-action",
                    ".mc-theme-networks-nav", ".mc-theme-networks-page",
                    ".mc-theme-networks-page .extra-network-pane .card", ".mc-theme-info-copy",
-                   ".edit-user-metadata", "forge-assistant-focused")
+                   ".edit-user-metadata", "forge-assistant-focused", ".mc-theme-info-source",
+                   "div.gradio-container.app")
         for selector, body in rules(section()):
             if "!important" not in body:
                 continue

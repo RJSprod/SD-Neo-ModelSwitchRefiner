@@ -6672,7 +6672,17 @@ one second.
   page that rule had been holding the column under the header, Generate cut
   off, all along; and the row's least height goes on its grid track too, so
   Forge's divider between the columns, as tall as the track, runs to the
-  row's end through the second phase.
+  row's end through the second phase. The page never widens past the window
+  under the theme: Gradio's container is clipped sideways (Forge makes its
+  overflow visible for the sticky columns and the dropdown lists; the clip
+  on one axis keeps both), because a phone's browser widens its layout
+  viewport -- what sticky and fixed boxes are held against, and what the
+  page can be zoomed out to -- to a page wider than the window, and the
+  columns were then held against that instead of the screen, with the
+  gallery filled to the zoomed-out glass. The measure is taken again on a
+  pinch, when the page is shown again and when the browser's full screen
+  comes or goes, and a view with no room -- a scroller with no height for
+  the moment -- holds nothing until there is room.
 - **A generation without the Interrupt and Skip row.** While Forge's progress
   bar runs, the row is not drawn: the bar is the results panel's first thing,
   14 px tall with its line of text at 11 px, and the Forge Assistant's fitted
@@ -6765,7 +6775,10 @@ one second.
   gallery, drawn as the prompt and the negative prompt in blocks with a copy
   button each, and every setting as a chip, with a button that copies the
   whole text. Forge's own paragraph stays in the page, out of view, for the
-  buttons that read it. Off leaves Forge's text.
+  buttons that read it -- its one line clipped `!important`, because Gradio
+  writes every block's overflow inline and the paragraph had been widening
+  the page by the infotext's length (a scrollbar on a desktop; on a phone
+  the page zoomed out to it). Off leaves Forge's text.
 - **Resizable prompt boxes**, in the monospace face, with the token counter as
   a pill on the corner.
 - **Drawn icons** on the tool buttons — paste, clear, styles, refresh, the
