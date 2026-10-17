@@ -28,12 +28,16 @@ class TestArchitectureTable:
         assert arch.edit_on_value is True
         assert arch.edit_needs_lora is True
 
-    def test_klein_opts_out_instead_of_in(self):
-        """Klein is reference-conditioned by default; its option disables it."""
+    def test_klein_opts_in_under_the_name_forge_gave_its_toggle(self):
+        """Klein is reference-conditioned by default. Its option enables it and
+        is on by default: Forge Neo renamed the opt-out ``klein_no_reference``
+        to ``klein_do_reference`` on 2026-09-01, and the table carries the
+        current name."""
         arch = mc_arch.by_key("flux2_9b")
-        assert arch.edit_option == "klein_no_reference"
-        assert arch.edit_on_value is False
+        assert arch.edit_option == "klein_do_reference"
+        assert arch.edit_on_value is True
         assert arch.edit_needs_lora is False
+        assert arch.edit_is_default is True
 
     def test_plain_architectures_have_no_edit_mode(self):
         for key in ("sdxl", "sd15", "flux", "qwen", "chroma"):
@@ -62,14 +66,13 @@ class TestEditOverride:
         override = mc_arch.edit_override(mc_arch.by_key("krea2"), mc_arch.EDIT_DISABLE)
         assert override == {"krea2_do_reference": False}
 
-    def test_enable_clears_the_opt_out_toggle(self):
-        """Enabling Klein references means setting klein_no_reference to False."""
+    def test_enable_turns_kleins_toggle_on(self, host):
         override = mc_arch.edit_override(mc_arch.by_key("flux2_9b"), mc_arch.EDIT_ENABLE)
-        assert override == {"klein_no_reference": False}
+        assert override == {"klein_do_reference": True}
 
-    def test_disable_sets_the_opt_out_toggle(self):
+    def test_disable_turns_kleins_toggle_off(self, host):
         override = mc_arch.edit_override(mc_arch.by_key("flux2_9b"), mc_arch.EDIT_DISABLE)
-        assert override == {"klein_no_reference": True}
+        assert override == {"klein_do_reference": False}
 
     def test_unsupported_architecture_produces_no_override(self):
         assert mc_arch.edit_override(mc_arch.by_key("sdxl"), mc_arch.EDIT_ENABLE) == {}
@@ -93,16 +96,75 @@ class TestEditIsActive:
         host.shared.opts.krea2_do_reference = False
         assert mc_arch.edit_is_active(arch, mc_arch.EDIT_AUTO) is False
 
-    def test_auto_respects_the_inverted_klein_polarity(self, host):
+    def test_auto_follows_kleins_toggle(self, host):
         arch = mc_arch.by_key("flux2_9b")
-        host.shared.opts.klein_no_reference = False
+        host.shared.opts.klein_do_reference = True
         assert mc_arch.edit_is_active(arch, mc_arch.EDIT_AUTO) is True
 
-        host.shared.opts.klein_no_reference = True
+        host.shared.opts.klein_do_reference = False
         assert mc_arch.edit_is_active(arch, mc_arch.EDIT_AUTO) is False
 
     def test_unsupported_architecture_is_never_active(self, host):
         assert mc_arch.edit_is_active(mc_arch.by_key("sdxl"), mc_arch.EDIT_ENABLE) is False
+
+
+class TestTheRenamedKleinToggle:
+    """Forge Neo's "streamline" commit of 2026-09-01 renamed Klein's toggle from
+    ``klein_no_reference`` (True disabled references) to ``klein_do_reference``
+    (True enables them). A stale name is not harmless: the host applies a Stage 2
+    override through ``Options.set``, which raises ``KeyError`` on a key it does
+    not register, so a Klein Stage 2 with Enable or Disable, or with reference
+    images, never started. The table names the current option, and the host
+    that registers only the old one is answered in the old name and polarity."""
+
+    def older_host(self, host):
+        del host.shared.opts.klein_do_reference
+        host.shared.opts.klein_no_reference = False
+
+    def test_the_current_host_is_overridden_by_its_current_name(self, host):
+        assert mc_arch.edit_toggle(mc_arch.by_key("flux2_9b")) == ("klein_do_reference", True)
+        assert mc_arch.edit_override(mc_arch.by_key("flux2_4b"), mc_arch.EDIT_ENABLE) == {
+            "klein_do_reference": True}
+
+    def test_an_older_host_is_overridden_by_the_name_it_registers(self, host):
+        self.older_host(host)
+        klein = mc_arch.by_key("flux2_9b")
+
+        assert mc_arch.edit_toggle(klein) == ("klein_no_reference", False)
+        assert mc_arch.edit_override(klein, mc_arch.EDIT_ENABLE) == {"klein_no_reference": False}
+        assert mc_arch.edit_override(klein, mc_arch.EDIT_DISABLE) == {"klein_no_reference": True}
+
+    def test_auto_reads_the_older_hosts_toggle_with_its_polarity(self, host):
+        self.older_host(host)
+        klein = mc_arch.by_key("flux2_9b")
+
+        host.shared.opts.klein_no_reference = False
+        assert mc_arch.edit_is_active(klein, mc_arch.EDIT_AUTO) is True
+        host.shared.opts.klein_no_reference = True
+        assert mc_arch.edit_is_active(klein, mc_arch.EDIT_AUTO) is False
+
+    def test_the_hosts_registry_decides_not_a_stray_attribute(self, host):
+        """The real host answers ``Options.set`` from ``data_labels``; an
+        attribute written on the object is not a registered option."""
+        host.shared.opts.data_labels = {"klein_no_reference": object()}
+
+        assert mc_arch.edit_toggle(mc_arch.by_key("flux2_9b")) == ("klein_no_reference", False)
+
+        host.shared.opts.data_labels = {"klein_do_reference": object()}
+        assert mc_arch.edit_toggle(mc_arch.by_key("flux2_9b")) == ("klein_do_reference", True)
+
+    def test_a_host_with_neither_name_gets_the_current_one(self, host):
+        """So the error it raises, if it raises, names the option that exists
+        on every Forge Neo from the rename on."""
+        del host.shared.opts.klein_do_reference
+
+        assert mc_arch.edit_toggle(mc_arch.by_key("flux2_9b")) == ("klein_do_reference", True)
+
+    def test_an_option_that_was_never_renamed_is_left_alone(self, host):
+        del host.shared.opts.krea2_do_reference
+
+        assert mc_arch.edit_toggle(mc_arch.by_key("krea2")) == ("krea2_do_reference", True)
+        assert mc_arch.edit_toggle(mc_arch.by_key("sdxl")) == (None, True)
 
 
 class TestInfotext:

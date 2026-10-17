@@ -4086,7 +4086,7 @@ class ScriptModelChain(scripts.Script):
         logger.info(
             "Model Chain: %s reference conditioning active%s",
             arch.label,
-            f" ({arch.edit_option} overridden for Stage 2)" if edit_override else "",
+            f" ({', '.join(edit_override)} overridden for Stage 2)" if edit_override else "",
         )
 
         if not arch.edit_is_deliberate(mode):

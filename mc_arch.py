@@ -75,11 +75,17 @@ class Architecture:
     # Some architectures can take the input image as an *edit reference* --
     # vision-conditioning the text encoder and concatenating reference latents
     # in the DiT -- instead of using it as an img2img init latent. Forge Neo
-    # gates this per architecture behind a global Settings toggle, and the
-    # polarity is not consistent: Krea 2 and Anima opt *in*, while Flux.2 Klein
-    # uses references by default and opts *out*.
+    # gates this per architecture behind a global Settings toggle. Since Forge
+    # Neo renamed Klein's on 2026-09-01 all three opt *in* through a
+    # ``*_do_reference`` option; before that Klein opted *out* through
+    # ``klein_no_reference``, and :func:`edit_toggle` still answers that name
+    # and polarity on a host that registers only it.
     edit_option: str | None = None
-    """``shared.opts`` key gating reference conditioning, if the architecture has one."""
+    """``shared.opts`` key gating reference conditioning, if the architecture has one.
+
+    The *current* host's name. Read it through :func:`edit_toggle`, which knows
+    the names a host used before a rename.
+    """
     edit_on_value: bool = True
     """Value of ``edit_option`` that turns reference conditioning ON."""
     edit_needs_lora: bool = False
@@ -146,16 +152,18 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
         reference_support=REF_EXPERIMENTAL, reference_flag="kontext",
     ),
     Architecture("flux_schnell", "Flux.1 Schnell", 16, 1.0),
-    # Klein is reference-conditioned by default; the option disables it.
+    # Klein is reference-conditioned by default: its option is on until the
+    # user turns it off. Forge Neo's name for it since 2026-09-01; the opt-out
+    # name it had before is in _FORMER_EDIT_OPTIONS.
     Architecture(
         "flux2_4b", "Flux.2 Klein 4B", 16, 1.0,
-        edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
+        edit_option="klein_do_reference", edit_on_value=True, edit_needs_lora=False,
         edit_is_default=True,
         reference_support=REF_VALIDATED, reference_flag="klein",
     ),
     Architecture(
         "flux2_9b", "Flux.2 Klein 9B", 16, 1.0,
-        edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
+        edit_option="klein_do_reference", edit_on_value=True, edit_needs_lora=False,
         edit_is_default=True,
         reference_support=REF_VALIDATED, reference_flag="klein",
     ),
@@ -252,6 +260,60 @@ def by_key(key: str) -> Architecture:
 # Edit / reference mode
 # --------------------------------------------------------------------------- #
 
+_FORMER_EDIT_OPTIONS: dict[str, tuple[str, bool]] = {
+    # Forge Neo's "streamline" commit of 2026-09-01 renamed Klein's toggle and
+    # turned it round: klein_no_reference (True disabled references) became
+    # klein_do_reference (True enables them, and it is on by default).
+    "klein_do_reference": ("klein_no_reference", False),
+}
+"""An architecture's current option -> the name and on-value an older host used."""
+
+
+def _host_has_option(opts, name: str) -> bool:
+    """Whether the host registers ``name`` as a setting.
+
+    The host's ``Options`` keeps its registry in ``data_labels``, and that is
+    the authority: ``Options.set`` -- which is what applies a Stage 2 override
+    -- looks the key up there and raises ``KeyError`` on one it does not know,
+    whatever attribute may have been set on the object meanwhile. A host
+    without the registry (the test host) is read by attribute instead.
+    """
+    labels = getattr(opts, "data_labels", None)
+    if isinstance(labels, dict):
+        return name in labels
+    try:
+        getattr(opts, name)
+    except AttributeError:
+        return False
+    return True
+
+
+def edit_toggle(arch: Architecture) -> tuple[str | None, bool]:
+    """The option gating ``arch``'s reference conditioning *on this host*, and its on-value.
+
+    The table carries the current Forge Neo name. When the host does not
+    register it but does register the name it used before a rename, that name
+    and its polarity are answered instead, so an installation that has not
+    updated keeps working; a host with neither gets the table's name, which is
+    the one its error will mention. A stale name is not harmless: the host
+    applies a Stage 2 override through ``Options.set``, which raises
+    ``KeyError`` on a key it does not register, and the pass never starts.
+    """
+    option, on_value = arch.edit_option, arch.edit_on_value
+    former = _FORMER_EDIT_OPTIONS.get(option or "")
+    if option is None or former is None:
+        return option, on_value
+    try:
+        from modules import shared
+
+        opts = shared.opts
+    except Exception:
+        return option, on_value
+    if _host_has_option(opts, option) or not _host_has_option(opts, former[0]):
+        return option, on_value
+    return former
+
+
 def edit_override(arch: Architecture, mode: str) -> dict:
     """Settings override that forces reference conditioning on or off for Stage 2.
 
@@ -266,9 +328,11 @@ def edit_override(arch: Architecture, mode: str) -> dict:
         return {}
 
     want_on = mode == EDIT_ENABLE
-    # edit_on_value encodes the polarity, so this handles both the opt-in
-    # (krea2/anima) and opt-out (klein) options without special-casing.
-    return {arch.edit_option: arch.edit_on_value if want_on else not arch.edit_on_value}
+    # The toggle as this host names it, with the value that means "on" for
+    # that name: the polarity travels with the name, so an opt-out name on an
+    # older host needs no special-casing here.
+    option, on_value = edit_toggle(arch)
+    return {option: on_value if want_on else not on_value}
 
 
 def edit_is_active(arch: Architecture, mode: str) -> bool:
@@ -287,7 +351,8 @@ def edit_is_active(arch: Architecture, mode: str) -> bool:
     try:
         from modules import shared
 
-        return bool(getattr(shared.opts, arch.edit_option, None)) == arch.edit_on_value
+        option, on_value = edit_toggle(arch)
+        return bool(getattr(shared.opts, option, None)) == on_value
     except Exception:
         return False
 
