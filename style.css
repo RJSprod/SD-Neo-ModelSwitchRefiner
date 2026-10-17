@@ -1327,7 +1327,15 @@
 
 /* -- the generation info ----------------------------------------------------- */
 
-/* Forge's own paragraph, kept for what reads it, drawn as the panel instead. */
+/* Forge's own paragraph, kept for what reads it, drawn as the panel instead.
+   `overflow` is !important because Gradio writes every block's overflow
+   inline (Block.svelte's `allow_overflow`, visible for an HTML component),
+   and a box one pixel wide whose overflow shows is as wide as its longest
+   line -- under `white-space: nowrap`, the whole infotext on one line. That
+   made the page that much wider than the window: a scrollbar on a desktop,
+   and on a phone a layout viewport the page's width, which the page could
+   be zoomed out to and which the sticky columns were held against instead
+   of the screen (the user's second run of the one scroller). */
 :root[data-mc-theme="on"] .mc-theme-info-source {
     position: absolute;
     width: 1px;
@@ -1335,7 +1343,7 @@
     min-height: 0;
     margin: 0;
     padding: 0;
-    overflow: hidden;
+    overflow: hidden !important;
     clip: rect(0 0 0 0);
     white-space: nowrap;
 }
@@ -1484,6 +1492,21 @@
    side. */
 :root[data-mc-theme="on"] .gradio-container.app {
     padding: var(--mc-theme-page-pad);
+}
+
+/* Nothing widens the page. Gradio's container clips its own overflow and
+   Forge makes it visible again (`div.gradio-container { overflow: visible
+   !important }`, so that sticky columns hold against the page and dropdown
+   lists reach past a block); `clip` on the one axis keeps both -- it makes
+   no scroll container, and the vertical overflow stays visible -- and keeps
+   a stray wide box, an unbroken line of text or another extension's, from
+   widening the page. On a phone the browser's layout viewport follows the
+   page's width: the page can be zoomed out to it, and fixed and sticky
+   boxes are held against it rather than the screen, which is what the one
+   scroller's hold and the Forge Assistant's fill measure. Forge's rule is
+   !important, so this one is. */
+:root[data-mc-theme="on"] div.gradio-container.app {
+    overflow-x: clip !important;
 }
 
 /* Interrupt and Skip, quietly. Forge draws both as light grey blocks over

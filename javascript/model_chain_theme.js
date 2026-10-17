@@ -836,12 +836,21 @@
         const heldAt = expected + (entry.shift || 0);
         const settingsHeight = columnBox.height + px(columnStyle.marginTop) + px(columnStyle.marginBottom);
         const resultsHeight = resultsBox.height + px(resultsStyle.marginTop) + px(resultsStyle.marginBottom);
-        const plan = scrollPlan(settingsHeight, resultsHeight, view.bottom - heldAt, hold);
+        // No room under where the results are held -- a scroller with no
+        // height for the moment (a phone's browser between full screen and
+        // not, a tab in the middle of showing), a window shorter than the
+        // bar's margin -- holds nothing and writes nothing: a plan for a
+        // view below zero is a row of both columns' heights added up, and
+        // the last plan was for a view that is gone. The next resize
+        // measures again.
+        const room = view.bottom - heldAt;
+        if (!(room > 0)) { clearScroll(entry); return {reason: "the view has no room"}; }
+        const plan = scrollPlan(settingsHeight, resultsHeight, room, hold);
         setClass(column, SCROLL_SETTINGS_CLASS, true);
         setVariable(row, SCROLL_HOLD, plan.top + "px");
         setVariable(row, SCROLL_ROW, plan.minHeight + "px");
         return {reason: "", scroller: view.scroller ? "workspace" : "page", hold, heldAt, shift: entry.shift || 0,
-                settings: settingsHeight, results: resultsHeight, view: view.bottom - heldAt,
+                settings: settingsHeight, results: resultsHeight, view: room,
                 top: plan.top, minHeight: plan.minHeight};
     }
 
@@ -1815,6 +1824,21 @@
         });
         window.addEventListener("resize", scheduleFit);
         window.addEventListener("resize", scheduleScroll);
+        // What else changes what the columns are held against, with no
+        // resize of the window to say so: a pinch, which changes the
+        // visible viewport; the page shown again, from the browser's cache
+        // or from behind another tab, with whatever the browser did to it
+        // meanwhile; the browser's full screen coming or going, which focus
+        // mode asks for on a phone. Each is measured again, once, on the
+        // next frame -- a page that is hidden draws no frame until shown.
+        if (window.visualViewport && typeof window.visualViewport.addEventListener === "function") {
+            window.visualViewport.addEventListener("resize", scheduleScroll);
+        }
+        window.addEventListener("pageshow", scheduleScroll);
+        document.addEventListener("visibilitychange", scheduleScroll);
+        ["fullscreenchange", "webkitfullscreenchange"].forEach(function (type) {
+            document.addEventListener(type, scheduleScroll);
+        });
         // Scroll events do not bubble; captured at the document they are the
         // page's and any workspace's alike.
         document.addEventListener("scroll", scheduleJumpSync, true);

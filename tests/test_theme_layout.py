@@ -171,6 +171,12 @@ CARDS = {"textual_inversion": [("bad_hands", "bad_hands")],
 INFOTEXT_HTML = ('<p>a cat in a hat<br>\nNegative prompt: blurry<br>\n'
                  'Steps: 8, Sampler: Euler a, CFG scale: 1, Seed: 42, Size: 1024x1024</p>')
 
+# The same with one unbroken run a few windows long, as an infotext has
+# (a hashes record, a path, a prompt without a space): what the paragraph
+# kept out of view is as wide as, if its overflow shows.
+WIDE_INFOTEXT = INFOTEXT_HTML.replace("Size: 1024x1024</p>",
+                                      'Size: 1024x1024, Hashes: {"model":"' + "0123456789abcdef" * 24 + '"}</p>')
+
 
 # Each card's sort keys, as Forge's pages write them (`data-sort-*`, from
 # ExtraNetworksPage.get_sort_keys and the page's own `default`, its place in
@@ -274,7 +280,7 @@ def extra_pages(tabname: str, *, controls_built: bool) -> str:
 
 def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
               controls_built: bool = True, assistant: str = "", popup: bool = False,
-              progress: bool = False, grid_row: bool = False) -> str:
+              progress: bool = False, grid_row: bool = False, infotext: str = INFOTEXT_HTML) -> str:
     """`assistant` is a user.css to put on a page that also runs the Forge
     Assistant's scripts, in Forge's order (its folder's scripts load before
     this one's), with Gradio's gallery markup for its fill to measure.
@@ -282,7 +288,9 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
     progress-bar appearance script, for a page that runs a generation.
     `grid_row` draws Txt2Img's row as Forge's resize-handle script leaves it:
     a grid of the two columns and the handle between them, its template
-    written inline."""
+    written inline. `infotext` is Forge's generation-info paragraph; its
+    block carries the inline style Gradio 4.40's Block writes on every block
+    (`overflow` from `allow_overflow`, visible for an HTML component)."""
     buttons = "".join(
         f'<button role="tab" id="{tab}-button" aria-controls="{tab}" '
         f'aria-selected="{"true" if i == 0 else "false"}" class="{"selected" if i == 0 else ""}">{label}</button>'
@@ -340,7 +348,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
                 <button id="txt2img_open_folder" class="gradio-button tool" title="Open images output directory">📂</button>
                 <button id="save_txt2img" class="gradio-button tool" title="Save the image">💾</button>
               </div>
-              <div id="html_info_txt2img" class="block infotext"><div class="prose">{INFOTEXT_HTML}</div></div>
+              <div id="html_info_txt2img" class="block infotext" style="border-style: solid; overflow: visible; min-width: min(0px, 100%);"><div class="prose">{infotext}</div></div>
             </div>
           </div>
         </div>
@@ -354,7 +362,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
       {extra_tabs_nav("img2img", controls_built=controls_built)}
       <div id="img2img_generation" class="tabitem" role="tabpanel" style="display: block">
         <div id="img2img_settings" class="column"><div class="block">Resize</div></div>
-        <div id="img2img_results" class="column"><div id="img2img_generate_box" class="row"><button id="img2img_generate">Generate</button></div><div id="img2img_results_panel" class="column panel"><div id="img2img_gallery_container" class="gr-group"><div id="img2img_gallery" class="block"></div></div><div id="html_info_img2img" class="block infotext"><div class="prose"></div></div></div></div>
+        <div id="img2img_results" class="column"><div id="img2img_generate_box" class="row"><button id="img2img_generate">Generate</button></div><div id="img2img_results_panel" class="column panel"><div id="img2img_gallery_container" class="gr-group"><div id="img2img_gallery" class="block"></div></div><div id="html_info_img2img" class="block infotext" style="border-style: solid; overflow: visible; min-width: min(0px, 100%);"><div class="prose"></div></div></div></div>
       </div>
       {extra_pages("img2img", controls_built=controls_built)}
     </div>
@@ -448,14 +456,14 @@ ON = {"model_chain_theme": True}
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
               controls_built=True, assistant="", popup=False, progress=False, grid_row=False,
-              settings_blocks=40):
+              settings_blocks=40, infotext=INFOTEXT_HTML):
     """A page of its own context, or one in a context given -- two pages of
     one context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height})
     page = owner.new_page()
     html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
                      assistant=assistant, popup=popup, progress=progress, grid_row=grid_row,
-                     settings_blocks=settings_blocks)
+                     settings_blocks=settings_blocks, infotext=infotext)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcTheme" + (" && !!(window.forgeAssistant && window.forgeAssistant.fill)"
@@ -1576,6 +1584,23 @@ COLUMN = """() => {
 }"""
 
 
+WIDTH = """() => {
+    const d = document.documentElement;
+    const source = document.querySelector("#html_info_txt2img");
+    let widest = 0;
+    let name = "";
+    document.querySelectorAll("body *").forEach((node) => {
+        // The paragraph's own line is clipped, not laid out narrower; a fixed
+        // box is held to the window and widens nothing.
+        if (node.closest(".mc-theme-info-source") || getComputedStyle(node).position === "fixed") return;
+        const box = node.getBoundingClientRect();
+        if (box.width > 0 && box.right > widest) { widest = box.right; name = node.tagName.toLowerCase() + (node.id ? "#" + node.id : ""); }
+    });
+    return {scrollWidth: d.scrollWidth, clientWidth: d.clientWidth, innerWidth: window.innerWidth,
+            sourceOverflow: getComputedStyle(source).overflow, widest, name};
+}"""
+
+
 class TestTheGenerationInfo:
     def test_forges_paragraph_is_drawn_as_blocks_and_chips_and_kept_for_what_reads_it(self, browser):
         page = open_page(browser)
@@ -1595,6 +1620,22 @@ class TestTheGenerationInfo:
         assert found["sourceText"].startswith("a cat in a hat Negative prompt: blurry Steps: 8")
         # An empty one draws nothing.
         assert found["img2imgPanels"] == 0 and found["img2imgMarked"] is False
+        page.close()
+
+    def test_forges_paragraph_out_of_view_widens_nothing(self, browser):
+        """Gradio writes every block's `overflow` inline (visible, for an HTML
+        component), and that beat the paragraph's own `overflow: hidden`: a
+        box one pixel wide whose overflow shows is as wide as its longest
+        line -- under `white-space: nowrap`, the whole infotext on one line.
+        The page was that much wider than the window: a scrollbar on a
+        desktop, and on a phone a layout viewport the page's width (see
+        TestOnAPhonesBrowser). The user's second run of the one scroller."""
+        page = open_page(browser, infotext=WIDE_INFOTEXT)
+        found = page.evaluate(WIDTH)
+
+        assert found["sourceOverflow"] == "hidden", found
+        assert found["scrollWidth"] <= found["clientWidth"], found
+        assert found["widest"] <= found["clientWidth"] + 1, found
         page.close()
 
     def test_the_copy_buttons_copy_the_prompt_and_the_whole_text(self, browser):
@@ -2003,6 +2044,27 @@ class TestOneScrollerForThePage:
         assert abs(moved["generate"]["top"] - (rest["generate"]["top"] - second // 2)) <= 1, moved
         page.close()
 
+    def test_a_view_with_no_room_holds_nothing_until_there_is_room_again(self, browser):
+        """A scroller with no height for the moment -- a phone's browser
+        between full screen and not, a window shorter than the bar's margin
+        -- gets no plan: one for a view below zero was a row of the two
+        columns' heights added up, scrolled a long way past both."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        page.set_viewport_size({"width": 1600, "height": 40})
+        settle(page, 8)
+        found = page.evaluate(SCROLLED)
+        assert found["rowMin"] == "" and found["hold"] == "" and found["settingsHeld"] is False, found
+        assert page.evaluate("mcTheme.explainScroll()[0].reason") == "the view has no room"
+        page.set_viewport_size({"width": 1600, "height": 900})
+        settle(page, 8)
+        back = scroll_to(page, 0)
+        assert back["settingsHeld"] is True and back["rowMin"] != "", back
+        first, _ = phases(back)
+        half = scroll_to(page, first // 2)
+        assert abs(half["generate"]["top"] - back["generate"]["top"]) <= 0.5, (half["generate"], back["generate"])
+        page.close()
+
     def test_stacked_under_the_settings_as_on_a_phone_nothing_is_held(self, browser):
         page = open_page(browser, assistant=USER_CSS_WHOLE)
         settle(page, 8)
@@ -2097,6 +2159,49 @@ class TestOneScrollerForThePage:
         assert found["resultsPosition"] == "sticky" and found["resultsTop"] == "80px", "the split view's own hold"
         assert found["buttons"] == ["txt2img_open_folder", "save_txt2img"], found["buttons"]
         page.close()
+
+
+class TestOnAPhonesBrowser:
+    """Chromium's mobile viewport, as a phone's browser lays the page out. A
+    page wider than the window widens the *layout* viewport -- what fixed
+    and sticky boxes are held against, what `innerWidth` and `innerHeight`
+    report -- to the page's width, and lets the page be zoomed out to it; a
+    desktop window only grows a scrollbar. The user's second run of the one
+    scroller was that, on a phone: the infotext's paragraph a page's width
+    (TestTheGenerationInfo), the page zoomed out to it, the gallery filled
+    to the zoomed-out glass, the columns held against a viewport taller
+    than the screen. `Page.getLayoutMetrics` reads the viewports."""
+
+    def test_nothing_in_the_page_widens_the_layout_viewport_or_lets_it_zoom_out(self, browser):
+        context = browser.new_context(viewport={"width": 720, "height": 870}, device_scale_factor=2,
+                                      is_mobile=True, has_touch=True)
+        page = open_page(browser, assistant=USER_CSS_WHOLE, grid_row=True, context=context,
+                         infotext=WIDE_INFOTEXT)
+        settle(page, 8)
+        # A stray wide box of somebody's, in the page.
+        page.evaluate("() => { const stray = document.createElement('div'); stray.id = 'stray'; "
+                      "stray.style.cssText = 'width: 1500px; height: 4px'; "
+                      "document.querySelector('.gradio-container').appendChild(stray); }")
+        settle(page, 8)
+        cdp = context.new_cdp_session(page)
+        metrics = cdp.send("Page.getLayoutMetrics")
+        assert metrics["cssLayoutViewport"]["clientWidth"] == 720, metrics["cssLayoutViewport"]
+        assert metrics["cssContentSize"]["width"] == 720, metrics["cssContentSize"]
+        assert page.evaluate("[window.innerWidth, window.innerHeight]") == [720, 870]
+        cdp.send("Emulation.setPageScaleFactor", {"pageScaleFactor": 0.3})
+        settle(page, 8)
+        assert page.evaluate("window.visualViewport.scale") == 1, "nothing to zoom out to"
+        cdp.detach()
+        # And the columns are held as on a desktop: the sideways clip makes
+        # no scroll container of Gradio's container.
+        rest = scroll_to(page, 0)
+        assert rest["attribute"] == "settings-first" and rest["settingsHeld"] is True, rest
+        first, second = phases(rest)
+        assert first > 100 and second > 0, (first, second)
+        half = scroll_to(page, first // 2)
+        assert abs(half["generate"]["top"] - rest["generate"]["top"]) <= 0.5, (half["generate"], rest["generate"])
+        page.close()
+        context.close()
 
 
 class TestForgesPopup:
@@ -2457,7 +2562,9 @@ class TestStandingDownAndOff:
 
 class TestAtPhoneWidth:
     def test_nothing_scrolls_sideways_and_the_bar_is_shorter(self, browser):
-        page = open_page(browser, width=400, height=800)
+        # With an infotext whose longest run is a few windows wide: the
+        # paragraph kept out of view must not be that wide (TestTheGenerationInfo).
+        page = open_page(browser, width=400, height=800, infotext=WIDE_INFOTEXT)
         found = page.evaluate(MEASURE)
 
         assert found["scrollWidth"] <= found["innerWidth"]

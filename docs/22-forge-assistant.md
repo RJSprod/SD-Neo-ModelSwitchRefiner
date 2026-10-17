@@ -2534,6 +2534,21 @@ the lift, the pair spacing, the ceiling, the bare read, the grid's pixels, the
 row height, the snap and the refresh on a picture's load. Not run on the user's
 machine or in Firefox.
 
+### The fill and a zoomed-out page (2026-10-17)
+
+The fill measures the visible viewport (`viewport()`, the glass: a phone's
+keyboard shrinks it, and the gallery stays above the keyboard's edge).
+Zoomed out -- a phone's browser lets a page wider than the window go below
+1, and the Model Chain theme's hidden infotext paragraph had made the page
+that wide (docs/24 §0, "The user's second run") -- the visible viewport is
+taller than the window in CSS pixels, and the fill grew the gallery to the
+zoomed-out glass, which was a gallery taller than the screen once the zoom
+came back, with the theme's row grown to match. It takes the visible
+viewport's height, and never more than the window's
+(`documentElement.clientHeight`);
+`test_zoomed_out_the_fill_is_no_taller_than_the_window` zooms a wide page
+out through CDP in the mobile viewport and expects the same gallery.
+
 ## 3.34 A drag takes only the handle
 
 Reported from the user's machine: "Sometimes when I drag it, it drags the
