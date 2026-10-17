@@ -866,6 +866,52 @@ class TestTheCombinations:
         assert mc_infotext.SPATIAL_MODE not in p.extra_generation_params
         assert "not Krea 2" in said_on_the_result(script, p)
 
+    def test_a_refused_checkpoint_says_nothing_about_a_layout_that_was_never_on(
+            self, script, client, monkeypatch):
+        """The guard is asked only for the stages it is about. Asked for a
+        Neutralize-only generation, it put a Spatial note on a result that
+        had no layout in it."""
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        client.answers = [NEUTRAL]
+        p = generate(script, neutralize=True)
+
+        assert p.prompt == NEUTRAL
+        assert "Spatial Layout" not in said_on_the_result(script, p)
+
+    def test_the_plan_of_a_refused_checkpoint_names_the_neutralizer_alone(
+            self, script, client, monkeypatch):
+        """Published after the guard, not before it: a plan naming a writer
+        and a merge that were never going to run reserved VRAM from the
+        language model for nothing. What the script hands the plan is the
+        pipeline that will run, and the plan says the same."""
+        import mc_plan
+
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        client.answers = [NEUTRAL]
+        handed, seen = [], []
+        real = mc_plan.build_for
+
+        def spy(p, **kwargs):
+            handed.append(kwargs)
+            return real(p, **kwargs)
+
+        monkeypatch.setattr(mc_plan, "build_for", spy)
+        monkeypatch.setattr(mc_plan, "publish", lambda plan: seen.append(plan))
+        p = generate(script, enabled=True, neutralize=True, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert p.prompt == NEUTRAL
+        assert len(client.calls) == 1
+        assert handed[-1]["creative"] is False
+        assert handed[-1]["spatial_compose"] == ""
+        assert handed[-1]["neutralize"] is True
+        names = [phase.name for phase in seen[-1].phases]
+        assert mc_plan.PROMPT_NEUTRALIZER in names
+        assert mc_plan.CREATIVE_WRITER not in names
+        assert mc_plan.DIRECT_MERGE not in names
+
 
 class TestFailureAndStop:
     def test_a_refused_reply_falls_back_to_the_source_and_records_nothing(self, script,

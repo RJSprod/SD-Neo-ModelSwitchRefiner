@@ -909,6 +909,23 @@ def neutralize_from(p) -> bool:
     return isinstance(found, bool) and found
 
 
+def krea_objection() -> str:
+    """Why the selected checkpoint cannot take a Krea 2 structured prompt, or "".
+
+    :func:`mc_krea_pipeline.objection`, reached lazily and never allowed to
+    raise: a plan that cannot ask the question is built as the controls say,
+    which is what every plan was before the question was asked here.
+    """
+    try:
+        import mc_krea_pipeline
+
+        return str(mc_krea_pipeline.objection() or "")
+    except Exception:
+        logger.debug("Model Chain: could not ask the Krea 2 checkpoint guard for the plan",
+                     exc_info=True)
+        return ""
+
+
 def build_for(p, *, creative: bool | None = None,
               spatial_compose: str | None = None,
               neutralize: bool | None = None) -> Plan:
@@ -929,7 +946,10 @@ def build_for(p, *, creative: bool | None = None,
     plan. The Creative script passes them explicitly because it alone knows
     whether the layout it just parsed actually has boxes in it -- Spatial Layout
     switched on over an empty canvas runs no Composer, and a plan that said
-    otherwise would name a phase the user never sees.
+    otherwise would name a phase the user never sees. Either way they are then
+    held to the Krea 2 checkpoint guard (:func:`krea_objection`): a checkpoint
+    that cannot read a Krea 2 prompt gets neither phase in its plan, however
+    the controls are set.
     """
     if creative is None or spatial_compose is None:
         found, mode = creative_from(p)
@@ -937,6 +957,22 @@ def build_for(p, *, creative: bool | None = None,
         spatial_compose = mode if spatial_compose is None else spatial_compose
     if neutralize is None:
         neutralize = neutralize_from(p)
+
+    if creative or spatial_compose:
+        objection = krea_objection()
+        if objection:
+            # The guard that refuses these two phases when the generation
+            # reaches them -- the Krea script asks it first thing -- asked here
+            # so that no plan names them. Model Chain publishes its plan from
+            # the panel's controls before that script runs, and a writer
+            # reserved for a checkpoint that will never be sent its prompt is
+            # VRAM taken from the language model for nothing: the mirror of
+            # the Spatial-only generation that used to be hidden from its own
+            # plan. Neutralize is left alone, because the guard is about what
+            # the image model can read and a neutralized prompt is plain text.
+            logger.debug("Model Chain: the plan names no Creative Writer or Spatial "
+                         "phase — %s", objection)
+            creative, spatial_compose = False, ""
 
     width = height = 0
     try:

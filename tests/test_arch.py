@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
+import types
 
 import pytest
 
@@ -91,6 +93,66 @@ class TestArchitectureTable:
 
     def test_by_key_never_raises_on_an_unknown_key(self):
         assert mc_arch.by_key("no-such-arch") is mc_arch.UNKNOWN
+
+
+class TestAModelAnExtensionTeachesTheHost:
+    """MOSS-Image comes from the moss-image-forge-neo extension, not from Forge
+    Neo. That extension registers a guess class with the host's detector and an
+    engine with its loader, and this table knows the model by those two class
+    names and by nothing else: no import, no file of its own read."""
+
+    def test_moss_image_has_a_row_with_upstreams_geometry_and_cfg(self):
+        moss = mc_arch.by_key("moss")
+
+        assert moss is not mc_arch.UNKNOWN
+        assert moss.label == "MOSS-Image"
+        # The FLUX.2 autoencoder: 16 pixels per latent, and the DiT does not
+        # patchify on top of it.
+        assert moss.alignment == 16
+        # Upstream samples the SFT and the Base model alike at 3.
+        assert moss.cfg == pytest.approx(3.0)
+
+    def test_moss_image_has_no_edit_toggle_and_no_reference_path(self):
+        """A picture goes in as an img2img init latent, and that is all the
+        model does with one."""
+        moss = mc_arch.by_key("moss")
+
+        assert not moss.supports_edit
+        assert not moss.supports_references
+
+    def test_the_extensions_guess_class_reaches_the_row_through_the_hosts_detector(
+            self, monkeypatch):
+        """``_detect_from_stub`` runs the host's own detector, and the MOSS
+        extension hooks that detector to answer with its class. The class's
+        *name* is what the table reads, so a bare class of that name stands in
+        for it here."""
+        moss_image = type("MossImage", (), {})
+        package = types.ModuleType("huggingface_guess")
+        package.detection = types.SimpleNamespace(
+            unet_prefix_from_state_dict=lambda stub: "model.diffusion_model.",
+            model_config_from_unet=lambda stub, prefix: moss_image(),
+        )
+        monkeypatch.setitem(sys.modules, "huggingface_guess", package)
+
+        # By key, not by identity with by_key("moss"): without the row both
+        # sides would be UNKNOWN and the assertion would hold for nothing.
+        assert mc_arch._detect_from_stub({}).key == "moss"
+
+    def test_the_loaded_engine_reports_moss_image_by_its_config_class(self, host):
+        """Forge hands every engine the config class its detector settled on,
+        the extension's included, so a loaded MOSS model answers for itself."""
+        moss_image = type("MossImage", (), {})
+        host.shared.sd_model = types.SimpleNamespace(model_config=moss_image())
+
+        assert mc_arch.detect_loaded_engine().key == "moss"
+
+    def test_the_loaded_engine_reports_moss_image_by_its_engine_class_as_a_last_resort(
+            self, host):
+        engine = type("MossImageEngine", (), {})()
+        engine.model_config = object()
+        host.shared.sd_model = engine
+
+        assert mc_arch.detect_loaded_engine().key == "moss"
 
 
 # --------------------------------------------------------------------------- #

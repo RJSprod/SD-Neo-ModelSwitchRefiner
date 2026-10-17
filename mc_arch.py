@@ -9,6 +9,12 @@ hand-rolled key heuristics, so the architecture reported in the UI is the same
 one the loader will decide on. To keep it cheap enough for a dropdown we read
 only the safetensors *header* (tensor names + shapes, no tensor data) and feed
 the detector a dict of lightweight stubs.
+
+An extension that teaches the host a model of its own registers a guess class
+with that same detector and an engine with the same loader, so it is known here
+by those two class names and by nothing else: nothing of it is imported, and no
+file of its own is read. MOSS-Image is the first (``moss``); the row says where
+the names come from.
 """
 
 from __future__ import annotations
@@ -179,6 +185,17 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
     ),
     Architecture("ernie", "ERNIE-Image", 16, 1.0),
     Architecture("pid", "PiD", 8, 7.0),
+    # MOSS-Image, from the moss-image-forge-neo extension rather than from
+    # Forge Neo itself: the FLUX.2 autoencoder (16x, patch size 1) under a
+    # single-stream DiT -> 16, and upstream samples the SFT and the Base model
+    # alike at CFG 3. The extension registers its guess class and its engine
+    # with the host, which is how the two names in the maps below reach this
+    # table without anything here importing it; without the extension a MOSS
+    # file is unknown here exactly as it is to the loader. No edit toggle and
+    # no reference path: a picture goes in as an img2img init latent, and that
+    # is all it does with one. Creative Mode, Spatial Layout and the literal
+    # prompts are Krea 2's and stand down for it (mc_krea_pipeline.objection).
+    Architecture("moss", "MOSS-Image", 16, 3.0),
 )
 
 UNKNOWN = Architecture("unknown", "unknown", _UNKNOWN_ALIGNMENT, _UNKNOWN_CFG)
@@ -205,6 +222,8 @@ _GUESS_CLASS_TO_KEY = {
     "Krea2": "krea2",
     "ErnieImage": "ernie",
     "PiD": "pid",
+    # The MOSS-Image extension's huggingface_guess class (forge_moss.native.model).
+    "MossImage": "moss",
 }
 
 
@@ -214,6 +233,8 @@ _ENGINE_CLASS_TO_KEY = {
     "Anima": "anima",
     "QwenImage": "qwen",
     "Wan": "wan",
+    # The MOSS-Image extension's engine (forge_moss.native.engine).
+    "MossImageEngine": "moss",
 }
 """Forge Neo diffusion-engine class -> our table.
 

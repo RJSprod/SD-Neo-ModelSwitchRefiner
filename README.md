@@ -473,10 +473,19 @@ overrides the whole batch with one seed.
 
 The size multiplier scales both axes by the same factor, preserving aspect
 ratio, then snaps each to the target architecture's required pixel grid — 8 for
-SD 1.5 and SDXL, 16 for the Flux, Wan, Qwen and Lumina families. The panel shows
-the resulting resolution live as you move the slider. Unrecognised
+SD 1.5 and SDXL, 16 for the Flux, Wan, Qwen, Lumina and MOSS-Image families. The
+panel shows the resulting resolution live as you move the slider. Unrecognised
 architectures fall back to 16, which is a multiple of 8 and therefore valid for
 an 8-aligned model too.
+
+MOSS-Image is recognised although it is not Forge Neo's own model: the
+[MOSS-Image extension](https://github.com/eduardoabreu81/moss-image-forge-neo)
+teaches the host the model, and this extension knows it by the two class names
+that extension registers with the host and by nothing else — nothing of it is
+imported. Without that extension a MOSS checkpoint is unknown here, as it is to
+the loader. Its row carries upstream's CFG of 3 for the Stage 2 default, no edit
+toggle and no reference path; the memory residency, parking, turns and Warm /
+Cold LoRA machinery are architecture-agnostic and apply to it unchanged.
 
 The multiplier scales **the image Stage 2 was handed**, not the width and height
 sliders. Those two are usually the same number, but not always: hires fix
@@ -2496,7 +2505,9 @@ Creative Mode decides how a picture looks. **Spatial Layout** is where you say
 what goes where — you draw boxes on a canvas the shape of your image, type a
 prompt into each one, and those boxes reach Krea 2 as part of a structured
 prompt. It is off until you turn it on, and it changes nothing at all while it
-is off.
+is off. It is Krea 2's: with any other recognised checkpoint selected — SDXL,
+Flux, MOSS-Image — the layout is not applied, the result says so, and your
+regions are left exactly as you drew them.
 
 ```
 Spatial                                               [ON]
@@ -2945,10 +2956,17 @@ reproduction away from what you asked to reproduce.
   model request per image. LLM Studio → Krea 2 has the reference slots.
 - **The negative prompt.** Unchanged, and not sent to the writer.
 - **A non-Krea checkpoint.** Creative Mode skips the expansion in txt2img and
-  says which architecture is selected in the console; the generation goes ahead
-  with the prompt you typed, which is what that checkpoint wanted anyway. LLM
-  Studio does not consult this — writing a prompt settles nothing about what
-  draws it.
+  says which architecture is selected in the console and on the result; the
+  generation goes ahead with the prompt you typed, which is what that
+  checkpoint wanted anyway. The question is asked once, first, for the whole
+  pipeline: Spatial Layout is refused with it, whether or not Creative Mode is
+  on, so a checkpoint that cannot read Krea 2's structured prompt is never
+  handed one by a layout composed around a refused roll, and the plan reserves
+  for neither stage. Neutralize Prompt still runs, because its answer is plain
+  text any checkpoint can read. MOSS-Image is such a checkpoint — recognised,
+  and refused by name — since it reads captions and JSON layouts of its own.
+  LLM Studio does not consult this — writing a prompt settles nothing about
+  what draws it.
 - **Duplicate a Forge control.** Steps, size, sampler, CFG and the image seed
   stay where they are. A duplicate would put a number in the PNG metadata that
   never happened.

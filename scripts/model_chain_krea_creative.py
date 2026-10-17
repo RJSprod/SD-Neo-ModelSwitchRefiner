@@ -3058,32 +3058,46 @@ class ScriptKreaCreative(scripts.Script):
         from prompt_master.krea import spatial as spatial_module
 
         settings = _settings_for(args)
-        self._publish_plan(p, layout, creative, neutralize)
 
         # The Krea 2 checkpoint guard, asked once for the whole pipeline rather
-        # than by whichever feature happened to own it. Creative Mode's roll
-        # asks the same question again for itself; what changed is that a
-        # Spatial-only generation asks it too, because Direct BBOX Merge hands
-        # Krea's structured JSON to the loaded checkpoint without ever calling a
-        # language model, and that prompt is no more readable by SD 1.5 for
-        # having been built deterministically.
-        objection = mc_krea_pipeline.objection() if not creative else ""
+        # than by whichever feature happened to own it, and asked before the
+        # plan is published. Creative Mode's roll asks the same question again
+        # for itself, as defence in depth; it is not *left* to it, because a
+        # roll its own guard refused left the scene as typed and Spatial
+        # carried on from it -- the right rule for a writer that is down
+        # (docs/08 §16.4), and the wrong one here, where it handed Krea's
+        # structured prompt to the very checkpoint the guard had just said
+        # cannot read one. And a plan published before the question named a
+        # writer and a merge that were never going to run, which is VRAM
+        # reserved from the language model for nothing. A Spatial-only
+        # generation asks too, because Direct BBOX Merge hands Krea's JSON to
+        # the loaded checkpoint without ever calling a language model, and
+        # that prompt is no more readable by SD 1.5 for having been built
+        # deterministically. Neutralize alone asks nothing: its answer is a
+        # subset of the prompt as typed, plain text any checkpoint can read.
+        regions = bool(getattr(layout, "regions", ()))
+        objection = mc_krea_pipeline.objection() if creative or regions else ""
         if objection:
-            logger.warning("Model Chain: Spatial Layout was not applied — %s", objection)
-            self._spatial_note = objection
+            if creative:
+                logger.warning("Model Chain: Creative Mode did not run — %s", objection)
+                self._complaint = objection
+                creative = False
+            if regions:
+                logger.warning("Model Chain: Spatial Layout was not applied — %s", objection)
+                self._spatial_note = objection
+                layout = spatial_module.Layout()
             if not neutralize:
-                # The layout is refused and the literals are not. They are
+                # The stages are refused and the literals are not. They are
                 # ordinary Forge prompt syntax that the user typed into a
                 # prompt box, and a checkpoint this feature will not build a
                 # structured prompt for is still a checkpoint that can be sent
                 # a LoRA tag.
                 self._literals_only(p, parsed)
                 return
-            # The layout is refused and the Neutralizer is not. Its answer is
-            # a subset of the prompt as typed -- plain text any checkpoint can
-            # read, with nothing structured about it -- so the stage runs on,
-            # with no boxes to compose after it.
-            layout = spatial_module.Layout()
+            # The Neutralizer runs on, with no writer before it and no boxes
+            # to compose after it.
+
+        self._publish_plan(p, layout, creative, neutralize)
 
         request = mc_krea_pipeline.Request(
             source=parsed.clean_text.strip(),
@@ -3544,8 +3558,14 @@ class ScriptKreaCreative(scripts.Script):
         """One creative roll for this generation, or ``None`` to leave it alone.
 
         :func:`_write`, with its reason for not rolling kept for postprocess.
+        The Krea 2 checkpoint guard is not asked again here: ``before_process``
+        asked it once, first, for the whole pipeline, and a generation that
+        reaches this roll is one it let through. Asked a second time it would
+        read whatever the host is loading at that instant, which is the
+        mid-run mistake the later batches already avoid.
         """
-        roll, complaint = _write(source, settings, layout, raw_source)
+        roll, complaint = _write(source, settings, layout, raw_source,
+                                 check_checkpoint=False)
         if complaint:
             self._complaint = complaint
         return roll

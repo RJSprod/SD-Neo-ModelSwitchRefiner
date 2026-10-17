@@ -633,6 +633,60 @@ class TestReadingTheOtherScript:
 
         assert not plan.has(mc_plan.SPATIAL_COMPOSER)
 
+    def test_a_checkpoint_the_guard_refuses_gets_neither_krea_phase(self, card, host,
+                                                                   monkeypatch):
+        """Model Chain publishes from the panel's controls before the Krea
+        script runs. A writer reserved for a checkpoint that will never be
+        sent its prompt is VRAM taken from the language model for nothing."""
+        import mc_krea_pipeline
+
+        card.sizes["moss"] = 10.0
+        host.shared.opts.sd_model_checkpoint = "moss"
+        monkeypatch.setattr(mc_krea_pipeline, "objection",
+                            lambda: "the selected checkpoint is MOSS-Image")
+        p = processing(creative_args=[True, 5, "a", "b", True, "direct", "{}"])
+
+        plan = mc_plan.build_for(p)
+
+        assert not plan.has(mc_plan.CREATIVE_WRITER)
+        assert not plan.has(mc_plan.DIRECT_MERGE)
+        assert plan.has(mc_plan.STAGE_1)
+
+    def test_the_guard_leaves_the_neutralizer_in_the_plan(self, card, host, monkeypatch):
+        """The guard is about what the image model can read, and a neutralized
+        prompt is plain text. It holds for what a caller passes explicitly as
+        much as for what is read off the controls."""
+        import mc_krea_pipeline
+
+        card.sizes["moss"] = 10.0
+        host.shared.opts.sd_model_checkpoint = "moss"
+        monkeypatch.setattr(mc_krea_pipeline, "objection",
+                            lambda: "the selected checkpoint is MOSS-Image")
+
+        plan = mc_plan.build_for(processing(creative_args=[True]), creative=True,
+                                 spatial_compose="smart", neutralize=True)
+
+        assert plan.has(mc_plan.PROMPT_NEUTRALIZER)
+        assert not plan.has(mc_plan.CREATIVE_WRITER)
+        assert not plan.has(mc_plan.SPATIAL_COMPOSER)
+
+    def test_a_guard_that_cannot_be_asked_leaves_the_plan_as_the_controls_say(
+            self, card, host, monkeypatch):
+        import mc_krea_pipeline
+
+        def explode():
+            raise RuntimeError("no host to ask")
+
+        card.sizes["krea2"] = 10.0
+        host.shared.opts.sd_model_checkpoint = "krea2"
+        monkeypatch.setattr(mc_krea_pipeline, "objection", explode)
+        p = processing(creative_args=[True, 5, "a", "b", True, "direct", "{}"])
+
+        plan = mc_plan.build_for(p)
+
+        assert plan.has(mc_plan.CREATIVE_WRITER)
+        assert plan.has(mc_plan.DIRECT_MERGE)
+
 
 class TestTheArgumentIndicesAreRight:
     """The one place positional arguments are read, held in place by a test.

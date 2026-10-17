@@ -1583,6 +1583,15 @@ class TestTheCheckpointGuard:
         monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.by_key("sdxl"))
         assert "SDXL" in mc_creative_krea.checkpoint_objection()
 
+    def test_a_moss_image_checkpoint_is_refused_by_name(self, monkeypatch, host):
+        """MOSS-Image reads captions and JSON layouts of its own, not Krea 2's
+        structured prompt. It is recognised, so it is refused like SDXL rather
+        than let through like a checkpoint nobody can identify."""
+        import mc_arch
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.by_key("moss"))
+        assert "MOSS-Image" in mc_creative_krea.checkpoint_objection()
+
     def test_a_checkpoint_nobody_can_identify_is_not_refused(self, monkeypatch, host):
         """Detection reads a header and cannot see inside every GGUF or repacked
         build. A guard that blocked real Krea 2 checkpoints would be worse than
