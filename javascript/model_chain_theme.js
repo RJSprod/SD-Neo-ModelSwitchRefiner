@@ -804,6 +804,7 @@
         }
         if (reason) { clearScroll(entry); return {reason}; }
         const view = viewOf(results);
+        if (entry.scroller !== view.scroller) { entry.scroller = view.scroller; entry.shift = 0; }
         const rowStyle = window.getComputedStyle(row);
         const resultsStyle = window.getComputedStyle(results);
         // The results column's place in the row, in the viewport's pixels.
@@ -818,22 +819,28 @@
         }
         const hold = parseFloat(window.getComputedStyle(results).top);
         if (!Number.isFinite(hold)) { clearScroll(entry); return {reason: "the results column is not held"}; }
-        // Where it is held, in the viewport's pixels: read off the layout while
-        // it is held (drawn lower than its place), else the offset from the
-        // scroller's edge. Chromium measures a sticky offset from inside a
-        // scroller's padding and Firefox from its edge; reading the held
-        // column puts the settings column's offset in the same convention.
+        // Where it is held, in the viewport's pixels: the offset from the
+        // scroller's edge, plus whatever the browser adds to it -- Chromium
+        // measures a sticky offset from inside a scroller's padding, Firefox
+        // from its edge -- read off the layout while the column is drawn
+        // held, at that offset or below it, and remembered for a measure
+        // taken while it is not: at rest (its place in the row lower than
+        // the offset), or pushed up by the row's end in the second phase,
+        // where the first build read the pushed position as the hold and
+        // shrank the row at every measure the scroll met.
         const resultsBox = results.getBoundingClientRect();
         const columnBox = column.getBoundingClientRect();
-        const held = resultsBox.top > natural + 0.5;
-        const heldAt = held ? resultsBox.top : view.top + hold;
+        const expected = view.top + hold;
+        const shifted = resultsBox.top > natural + 0.5;
+        if (shifted && resultsBox.top >= expected - 0.5) entry.shift = resultsBox.top - expected;
+        const heldAt = expected + (entry.shift || 0);
         const settingsHeight = columnBox.height + px(columnStyle.marginTop) + px(columnStyle.marginBottom);
         const resultsHeight = resultsBox.height + px(resultsStyle.marginTop) + px(resultsStyle.marginBottom);
         const plan = scrollPlan(settingsHeight, resultsHeight, view.bottom - heldAt, hold);
         setClass(column, SCROLL_SETTINGS_CLASS, true);
         setVariable(row, SCROLL_HOLD, plan.top + "px");
         setVariable(row, SCROLL_ROW, plan.minHeight + "px");
-        return {reason: "", scroller: view.scroller ? "workspace" : "page", hold, heldAt,
+        return {reason: "", scroller: view.scroller ? "workspace" : "page", hold, heldAt, shift: entry.shift || 0,
                 settings: settingsHeight, results: resultsHeight, view: view.bottom - heldAt,
                 top: plan.top, minHeight: plan.minHeight};
     }

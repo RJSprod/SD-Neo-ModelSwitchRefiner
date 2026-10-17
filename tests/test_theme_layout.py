@@ -98,7 +98,14 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
 textarea { width: 100%; min-height: 60px; }
 .extra-networks > div.tab-nav { min-height: 2.7rem; }
 .extra-networks-controls-div { align-self: center; margin-left: auto; }
-.resize-handle { grid-column: 2 / 3; min-width: 16px; max-width: 16px; }
+.resize-handle { position: relative; cursor: col-resize; grid-column: 2 / 3; min-width: 16px !important; max-width: 16px !important; height: 100%; }
+/* Forge Neo's own (style.css): the results columns sticky by id, half an em
+   from the top, which outranks any attribute selector; and its rows'
+   align-content, which keeps a grid's row track at its content height. The
+   first build of the one scroller passed without these and held the column
+   under the header on the user's page. */
+#img2img_results, #txt2img_results, #extras_results { position: sticky; top: 0.5em; }
+.unequal-height { align-content: flex-start; }
 .extra-network-control { display: flex; width: 100%; }
 .extra-network-pane { display: flex; height: calc(100vh - 24rem); min-height: 52rem; flex-direction: column; overflow: hidden; }
 .extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; position: relative; }
@@ -1878,6 +1885,14 @@ class TestOneScrollerForThePage:
         first, second = phases(rest)
         assert first > 600 and second > 100, (first, second)
         assert abs(rest["row"]["height"] - (rest["settings"]["height"] + second)) <= 1, rest
+        if grid_row:
+            # Forge's divider is as tall as the grid's row track, and the track
+            # is the row's height: the rule puts the least height on the track
+            # too, since Forge's `.unequal-height` keeps the track at its
+            # content height (both engines hold the column inside the
+            # container's content box regardless, measured).
+            handle = page.evaluate("document.querySelector('.resize-handle').getBoundingClientRect().height")
+            assert abs(handle - rest["row"]["height"]) <= 1, (handle, rest["row"])
 
         # The first phase: the settings move by the scroll, Generate not at all --
         # not even the margin it used to creep up to the bar by.
@@ -2027,6 +2042,29 @@ class TestOneScrollerForThePage:
         settle(page, 2)
         home = page.evaluate(SCROLLED)
         assert home["jump"]["back"] is False and home["jump"]["label"] == "Generation details", home["jump"]
+        page.close()
+
+    def test_a_measure_taken_in_the_second_phase_writes_the_same_numbers(self, browser):
+        """Any update of the page measures again, at whatever scroll the page
+        is at. In the second phase the results column is drawn pushed up by
+        the row's end, lower than its hold; the first build read that
+        position as the hold and shrank the row at every such measure,
+        which Gecko showed on the layout page. The hold is the offset from
+        the scroller's edge, and the browser's own addition to it is read
+        only while the column is drawn held."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        before = scroll_to(page, first + second // 2)
+        page.evaluate("hooks.after.forEach((fn) => fn()); hooks.after.forEach((fn) => fn())")
+        settle(page, 6)
+        after = page.evaluate(SCROLLED)
+        assert (after["rowMin"], after["hold"], after["resultsHold"]) == (rest["rowMin"], rest["hold"], rest["resultsHold"]), (after, rest)
+        assert abs(after["generate"]["top"] - before["generate"]["top"]) <= 0.5, (after, before)
+        assert abs(after["settings"]["bottom"] - rest["viewBottom"]) <= 1, after
+        explained = page.evaluate("mcTheme.explainScroll()[0]")
+        assert explained["minHeight"] == int(rest["rowMin"][:-2]) and explained["heldAt"] == rest["results"]["top"], explained
         page.close()
 
     def test_applied_again_the_button_and_the_numbers_are_written_once(self, browser):
