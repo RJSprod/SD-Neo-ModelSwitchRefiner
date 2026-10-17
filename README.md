@@ -6583,8 +6583,9 @@ one second.
   whole).
 - **Generate above the gallery, the prompt boxes at the top of the settings
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
-  compact prompt-box styles both handled. The results column stays in view
-  under the bar while the settings scroll. Generate is 44 px tall (Forge gives
+  compact prompt-box styles both handled. The results column stays where it
+  rests while the settings scroll, a margin under the bar at least (the one
+  scroller, below, says how). Generate is 44 px tall (Forge gives
   it a 4.5 em floor), the frames Gradio draws around every tab panel, one
   inside the other around the generation UI, are gone, and the page's own
   padding — Gradio's 16 px above and below and 32 px at the sides — is the
@@ -6601,10 +6602,44 @@ one second.
   gap. With the assistant on the page, then, Generate, the progress bar, the
   gallery and its buttons fit the view under the bar without a scroll, the
   gallery as tall as that leaves, and what follows the buttons scrolls; the
-  results column is held a margin under the bar while the settings scroll,
-  and under the assistant's focus mode, where the bar is hidden and the
-  workspace is the whole window, it is held at the workspace's padding
-  instead, so the fitted gallery stays whole there too.
+  results column is held where it rests while the settings scroll, and under
+  the assistant's focus mode, where the bar is hidden and the workspace is
+  the whole window, it is held at the workspace's padding instead, so the
+  fitted gallery stays whole there too.
+- **One scroller for the page: the settings first, then the results** (a
+  setting, on). Asked for: "the entire page takes one scroll action ... first
+  move the left column until I reach bottom, then the right column until I
+  reach bottom ... both columns should never move at the same time ... the
+  generation button stays locked in position as I scroll through the left
+  column". The page's own scroller is the one control -- a wheel, a finger,
+  the scrollbar and the keyboard all drive it -- and it spends the movement
+  on the settings column first, down to its end, with Generate, the gallery
+  and its buttons locked where they rest; then on the results column, down
+  to the generation details, with the settings held at their end. Never
+  both at once, and no stretch where nothing moves. Nothing listens to the
+  scroll: both columns are held by sticky positioning from two measured
+  numbers -- the settings column is held once its bottom edge meets the
+  view's (a sticky offset of the view's height less its own), and the row is
+  given the least height the two phases need (the settings column's plus
+  the results' part under the view), so the results column, which a sticky
+  rule never lets out of its row, is released exactly when the settings
+  end. Before this the row was as tall as the taller column: the results
+  held only while the settings were the taller, both moved together over
+  the infotext's height at the end, with few settings open or a long
+  infotext Generate scrolled off with the page, and a column resting lower
+  than the bar's margin crept up to it first. The same two phases under the
+  Forge Assistant's focus mode, where the workspace is the scroller. With
+  the settings column docked in the assistant's panel the column is out of
+  the row and scrolls inside the panel, which contains its own scrolling,
+  and the page scrolls the results alone; stacked on a phone, the page
+  scrolls as it does. A gesture that starts inside something with a
+  scroller of its own -- the gallery's grid view, a prompt box, a list --
+  stays on that thing until its end, as browsers do. The one price of the
+  order is that the generation details of the picture in view are a whole
+  settings column away: a **Details** button at the end of the gallery's
+  button row takes the scroller to the results' end, and back to the top
+  from there. Off, the split view's hold alone: the results column held a
+  margin under the bar while the row is taller than it.
 - **A generation without the Interrupt and Skip row.** While Forge's progress
   bar runs, the row is not drawn: the bar is the results panel's first thing,
   14 px tall with its line of text at 11 px, and the Forge Assistant's fitted
@@ -6721,8 +6756,10 @@ browser remembered.
 
 The theme applies itself again after every update of the page and writes only
 what changed: the same title is not written again, a class already on a button
-is not put on again, and the **⋯** menu is rebuilt only when the tabs it holds
-or their names change. That is not tidiness. Forge answers any change to the
+is not put on again, the **⋯** menu is rebuilt only when the tabs it holds
+or their names change, the one scroller's numbers are written only when they
+change and its Details button is appended once, its glyph redrawn only when
+the page's end comes or goes. That is not tidiness. Forge answers any change to the
 page's contents with another round of every extension's after-update callbacks
 a quarter of a second later, so a theme that rewrote its title on every apply
 kept the page updating for as long as it was open, on every tab (the first

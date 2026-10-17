@@ -52,6 +52,7 @@
     const OPTION = {
         enabled: "model_chain_theme",
         split: "model_chain_theme_split",
+        scroll: "model_chain_theme_scroll",
         quick: "model_chain_theme_quick",
         quickWidth: "model_chain_theme_quick_width",
         prompts: "model_chain_theme_prompts",
@@ -67,7 +68,7 @@
         info: "model_chain_theme_image_info",
     };
     const DEFAULTS = {
-        enabled: false, split: true, quick: "collapsed", quickWidth: 280, prompts: true,
+        enabled: false, split: true, scroll: true, quick: "collapsed", quickWidth: 280, prompts: true,
         icons: true, title: "Forge", labels: "as_forge", confirm: false, font: "",
         networks: "collapsed", networksWidth: 340, networksCard: 120, networksMode: "drawer",
         info: true,
@@ -134,6 +135,8 @@
         "settings": icon('<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>'),
         "sliders-horizontal": icon('<path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/>'),
         "ellipsis": icon('<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>'),
+        "chevrons-down": icon('<path d="m7 6 5 5 5-5"/><path d="m7 13 5 5 5-5"/>'),
+        "chevrons-up": icon('<path d="m17 11-5-5-5 5"/><path d="m17 18-5-5-5 5"/>'),
     };
 
     // Forge's tool-button emoji (modules/ui.py, ui_prompt_styles.py,
@@ -187,6 +190,7 @@
         const out = Object.assign({}, DEFAULTS);
         out.enabled = !!raw.enabled;
         out.split = raw.split === undefined ? DEFAULTS.split : !!raw.split;
+        out.scroll = raw.scroll === undefined ? DEFAULTS.scroll : !!raw.scroll;
         out.quick = QUICK_MODES.indexOf(raw.quick) === -1 ? DEFAULTS.quick : raw.quick;
         const width = Number(raw.quickWidth);
         out.quickWidth = Number.isFinite(width)
@@ -323,6 +327,7 @@
         quick: null,        // the drawer
         networks: null,     // {hosts: {tabname: {host, nav, chrome, strip, controls, pages, page, observer}}, open, width, setting, mode}
         infoPanels: new Map(), // Forge's infotext element -> {panel, html}
+        scroll: null,       // {entries: {tabname: {row, column, results}}, jumps, observer, observed, body, frame, jumpFrame}
         unload: null,       // the beforeunload handler while asked for
         wired: false,
         fitPending: false,
@@ -622,6 +627,403 @@
             const box = query("#" + name + "_generate_box");
             const container = query("#" + name + "_gallery_container");
             if (box && container) prepend(box, container, "split");
+        });
+    }
+
+    // -- one scroller for the page --------------------------------------------- //
+    //
+    // Asked for: "the entire page takes one scroll action when dragging or
+    // scroll. It should first move the left column until I reach bottom, then
+    // the right column until I reach bottom. So both columns should never move
+    // at the same time ... the generation button stays locked in position as I
+    // scroll through the left column ... scrolling needs to now become a single
+    // master control that controls the two columns from one master scroller."
+    //
+    // The master is the page's own scroller (the workspace's, under the Forge
+    // Assistant's focus mode): a wheel, a finger, the scrollbar and the
+    // keyboard all drive it, and the browser's compositor moves the columns.
+    // Nothing here listens to the scroll. The columns are held by `position:
+    // sticky`, as the results column was held under the bar before, from
+    // three numbers this measures and writes as custom properties:
+    //
+    //  - The results column is held where it rests: a margin under the bar at
+    //    least, but never above its place in the row, so Generate does not
+    //    move at all (held at the bar's margin alone it moved up to it first).
+    //  - The settings column is held once its bottom edge meets the view's: a
+    //    sticky `top` of the view's height less the column's own, negative for
+    //    a column taller than the view; a shorter one is held where the
+    //    results are.
+    //  - The row is given the least height the two phases need: the settings
+    //    column's plus the results' part under the view. A sticky element
+    //    never leaves its containing block, so the results column, held, is
+    //    released exactly when the row's room below it is spent -- now the
+    //    moment the settings reach their end -- and scrolls on to its own end
+    //    with the settings held.
+    //
+    // Before this the row was as tall as the taller column: the results held
+    // only while the settings were the taller, both moved together over the
+    // last stretch (the infotext's height), and beside a short settings
+    // column or a long infotext Generate scrolled off with the page.
+    //
+    // With the settings column docked in the Forge Assistant's panel the
+    // column is out of the row (`position: fixed`, by its rule) and scrolls
+    // inside the panel, which contains its own scrolling; nothing is written
+    // for it, the row is the results' height, nothing holds, and the page
+    // scrolls the results alone. Stacked on a phone, the results under the
+    // settings, nothing is written either and the page scrolls as it does.
+    //
+    // The one price of the order: the generation details of the picture in
+    // view are a whole settings column away. A Details button at the end of
+    // the gallery's button row takes the scroller to the results' end, and
+    // back to the top from there.
+
+    const SCROLL_ATTRIBUTE = "data-mc-theme-scroll";           // on the row: "settings-first"
+    const SCROLL_SETTINGS_CLASS = "mc-theme-scroll-settings";   // the row's child that holds the settings
+    const RESULTS_HOLD = "--mc-theme-results-hold";           // on the results column: its sticky top
+    const SCROLL_HOLD = "--mc-theme-scroll-hold";             // on the row: the settings column's sticky top
+    const SCROLL_ROW = "--mc-theme-scroll-row";               // on the row: its least height
+    const SCROLL_TABS = ["txt2img", "img2img"];
+    const DOCKED_CLASS = "forge-assistant-docked-column";     // the Forge Assistant's, on a column in its panel
+    const JUMP_CLASS = "mc-theme-jump";
+    const JUMP_BACK_CLASS = "mc-theme-jump-back";             // while the scroller is at the results' end
+    const JUMP_ID = "mc-theme-jump";                          // + "-" + the tab's name
+    const JUMP_END_SLACK_PX = 2;
+
+    function px(value) {
+        const found = parseFloat(value);
+        return Number.isFinite(found) ? found : 0;
+    }
+
+    function laidOut(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        const box = node.getBoundingClientRect();
+        return box.width > 0 && box.height > 0;
+    }
+
+    /** The nearest ancestor that scrolls up and down, or null for the page. */
+    function scrollerOf(node) {
+        let walk = node && node.parentElement;
+        while (walk && walk !== document.body && walk !== document.documentElement) {
+            const overflow = window.getComputedStyle(walk).overflowY || "visible";
+            if (overflow === "auto" || overflow === "scroll" || overflow === "overlay") return walk;
+            walk = walk.parentElement;
+        }
+        return null;
+    }
+
+    /** The child of `row` that holds `node`, or null if `row` does not. */
+    function childOf(row, node) {
+        let walk = node;
+        while (walk && walk.parentElement !== row) walk = walk.parentElement;
+        return walk || null;
+    }
+
+    /** The two numbers the stylesheet holds the columns by, in the scroller's
+     *  own pixels. `settings` and `results` are the columns' heights, `view`
+     *  the height from where the results column is held to the view's bottom
+     *  edge, `hold` the sticky offset that holds it there. The settings
+     *  column's offset holds it once its bottom edge meets the view's (a
+     *  negative offset for a column taller than the view; a shorter one is
+     *  held where the results are), and the row's least height is the
+     *  settings column plus the results' part under the view: the room the
+     *  results column has to stay held, spent exactly when the settings end.
+     *  Pure, so the node tests hold it. */
+    function scrollPlan(settings, results, view, hold) {
+        const below = Math.max(0, results - view);
+        return {top: Math.round(Math.min(hold, hold + view - settings)),
+                minHeight: Math.round(settings + below)};
+    }
+
+    /** A tab's row, the row's child that holds the settings (the column, or
+     *  the accordion Forge wraps it in) and the results column; null without
+     *  all three. */
+    function findScrollRow(tabname) {
+        const settings = query("#" + tabname + "_settings");
+        const results = query("#" + tabname + "_results");
+        if (!settings || !results || !results.parentElement) return null;
+        const row = results.parentElement;
+        const column = childOf(row, settings);
+        if (!column || column === results) return null;
+        return {row, column, results};
+    }
+
+    /** What scrolls the results column -- the page, or an ancestor that
+     *  scrolls (the focus root) -- with its top edge and the view's bottom
+     *  edge in the viewport's pixels, and how far it is scrolled. The bottom
+     *  is inside the scroller's bottom padding, the page's own, so the
+     *  settings rest at the page's end as the page's end does. */
+    function viewOf(results) {
+        const scroller = scrollerOf(results);
+        if (scroller) {
+            const box = scroller.getBoundingClientRect();
+            const top = box.top + (scroller.clientTop || 0);
+            return {scroller, top, scrolled: scroller.scrollTop || 0,
+                    bottom: top + scroller.clientHeight - px(window.getComputedStyle(scroller).paddingBottom)};
+        }
+        const page = query(".gradio-container");
+        const pad = page ? px(window.getComputedStyle(page).paddingBottom) : 0;
+        return {scroller: null, top: 0, scrolled: window.scrollY || window.pageYOffset || 0,
+                bottom: document.documentElement.clientHeight - pad};
+    }
+
+    /** The results column's sticky offset without this script's hold on it:
+     *  the theme's margin under the bar. Read bare and put back in the same
+     *  turn, with nothing painted in between. */
+    function baseHold(results) {
+        const mine = results.style.getPropertyValue(RESULTS_HOLD);
+        if (mine) results.style.removeProperty(RESULTS_HOLD);
+        const base = parseFloat(window.getComputedStyle(results).top);
+        if (mine) results.style.setProperty(RESULTS_HOLD, mine);
+        return base;
+    }
+
+    function clearScroll(entry) {
+        const {row, column, results} = entry;
+        [SCROLL_HOLD, SCROLL_ROW].forEach((name) => {
+            if (row.style.getPropertyValue(name)) row.style.removeProperty(name);
+        });
+        if (results.style.getPropertyValue(RESULTS_HOLD)) results.style.removeProperty(RESULTS_HOLD);
+        setClass(column, SCROLL_SETTINGS_CLASS, false);
+    }
+
+    /** Measure one tab's row and write the numbers, or take them off; what
+     *  was found, for `explainScroll`. Null for a tab that is not laid out,
+     *  which keeps what it has: it is measured again when it is shown,
+     *  because showing it resizes it. */
+    function measureScroll(entry) {
+        const {row, column, results} = entry;
+        if (!laidOut(row) || !laidOut(results)) return null;
+        const columnStyle = window.getComputedStyle(column);
+        const docked = column.classList.contains(DOCKED_CLASS)
+            || columnStyle.position === "fixed" || columnStyle.position === "absolute";
+        const stacked = !docked
+            && column.getBoundingClientRect().right > results.getBoundingClientRect().left + 1;
+        let reason = docked ? "docked in the Forge Assistant's panel" : stacked ? "stacked under the settings" : "";
+        if (!reason && window.getComputedStyle(results).position !== "sticky") {
+            reason = "the results column is not held";
+        }
+        if (reason) { clearScroll(entry); return {reason}; }
+        const view = viewOf(results);
+        const rowStyle = window.getComputedStyle(row);
+        const resultsStyle = window.getComputedStyle(results);
+        // The results column's place in the row, in the viewport's pixels.
+        const natural = row.getBoundingClientRect().top + px(rowStyle.paddingTop)
+            + px(rowStyle.borderTopWidth) + px(resultsStyle.marginTop);
+        // Held where it rests -- its place with the page at its start -- when
+        // that is lower than the bar's margin, so that it never moves. Under
+        // focus mode the assistant's script holds it at the workspace's inset
+        // with an inline offset of its own, and this writes nothing.
+        if (!view.scroller) {
+            setVariable(results, RESULTS_HOLD, Math.round(Math.max(baseHold(results), natural + view.scrolled)) + "px");
+        }
+        const hold = parseFloat(window.getComputedStyle(results).top);
+        if (!Number.isFinite(hold)) { clearScroll(entry); return {reason: "the results column is not held"}; }
+        // Where it is held, in the viewport's pixels: read off the layout while
+        // it is held (drawn lower than its place), else the offset from the
+        // scroller's edge. Chromium measures a sticky offset from inside a
+        // scroller's padding and Firefox from its edge; reading the held
+        // column puts the settings column's offset in the same convention.
+        const resultsBox = results.getBoundingClientRect();
+        const columnBox = column.getBoundingClientRect();
+        const held = resultsBox.top > natural + 0.5;
+        const heldAt = held ? resultsBox.top : view.top + hold;
+        const settingsHeight = columnBox.height + px(columnStyle.marginTop) + px(columnStyle.marginBottom);
+        const resultsHeight = resultsBox.height + px(resultsStyle.marginTop) + px(resultsStyle.marginBottom);
+        const plan = scrollPlan(settingsHeight, resultsHeight, view.bottom - heldAt, hold);
+        setClass(column, SCROLL_SETTINGS_CLASS, true);
+        setVariable(row, SCROLL_HOLD, plan.top + "px");
+        setVariable(row, SCROLL_ROW, plan.minHeight + "px");
+        return {reason: "", scroller: view.scroller ? "workspace" : "page", hold, heldAt,
+                settings: settingsHeight, results: resultsHeight, view: view.bottom - heldAt,
+                top: plan.top, minHeight: plan.minHeight};
+    }
+
+    function measureScrollAll() {
+        const scroll = state.scroll;
+        if (!scroll) return;
+        Object.keys(scroll.entries).forEach((tabname) => {
+            measureScroll(scroll.entries[tabname]);
+            syncJump(tabname);
+        });
+    }
+
+    /** Measure again on the next frame -- once, however many asked. */
+    function scheduleScroll() {
+        const scroll = state.scroll;
+        if (!scroll || scroll.frame) return;
+        scroll.frame = 1;
+        const run = function () {
+            scroll.frame = 0;
+            attempt("order the page's scrolling", measureScrollAll);
+        };
+        if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
+    }
+
+    function watchScroll(scroll, node) {
+        if (!scroll.observer || scroll.observed.has(node)) return;
+        scroll.observed.add(node);
+        scroll.observer.observe(node);
+    }
+
+    function installScroll(config) {
+        if (!config.scroll) { removeScroll(); return; }
+        let scroll = state.scroll;
+        if (!scroll) {
+            scroll = state.scroll = {entries: {}, jumps: {}, observer: null, observed: null, body: null,
+                                     frame: 0, jumpFrame: 0};
+            // Measured again when a column changes size -- the settings growing
+            // (an accordion), the results (an infotext, the assistant's fill),
+            // the row (its width: the dock, Forge's divider) -- and when the
+            // body's classes change: focus mode coming and going changes what
+            // scrolls the columns without resizing them.
+            if (typeof ResizeObserver === "function") {
+                scroll.observer = new ResizeObserver(function () { scheduleScroll(); });
+                scroll.observed = new Set();
+            }
+            if (typeof MutationObserver === "function" && document.body) {
+                scroll.body = new MutationObserver(function () { scheduleScroll(); });
+                scroll.body.observe(document.body, {attributes: true, attributeFilter: ["class"]});
+            }
+        }
+        SCROLL_TABS.forEach((tabname) => {
+            const found = findScrollRow(tabname);
+            if (!found) return;
+            const known = scroll.entries[tabname];
+            if (known && (known.row !== found.row || known.column !== found.column
+                          || known.results !== found.results)) {
+                clearScroll(known);
+                if (known.row.hasAttribute(SCROLL_ATTRIBUTE)) known.row.removeAttribute(SCROLL_ATTRIBUTE);
+            }
+            scroll.entries[tabname] = found;
+            [found.row, found.column, found.results].forEach((node) => watchScroll(scroll, node));
+            setAttr(found.row, SCROLL_ATTRIBUTE, "settings-first");
+            installJump(tabname);
+        });
+        scheduleScroll();
+    }
+
+    function removeScroll() {
+        const scroll = state.scroll;
+        if (!scroll) return;
+        if (scroll.observer) scroll.observer.disconnect();
+        if (scroll.body) scroll.body.disconnect();
+        if (scroll.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scroll.frame);
+        if (scroll.jumpFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scroll.jumpFrame);
+        Object.keys(scroll.entries).forEach((tabname) => {
+            const entry = scroll.entries[tabname];
+            clearScroll(entry);
+            if (entry.row.hasAttribute(SCROLL_ATTRIBUTE)) entry.row.removeAttribute(SCROLL_ATTRIBUTE);
+        });
+        Object.keys(scroll.jumps).forEach((tabname) => {
+            const button = scroll.jumps[tabname];
+            if (button.parentElement) button.parentElement.removeChild(button);
+        });
+        state.scroll = null;
+    }
+
+    // -- the Details button ------------------------------------------------------- //
+
+    function installJump(tabname) {
+        const scroll = state.scroll;
+        const buttons = query("#image_buttons_" + tabname);
+        if (!scroll || !buttons) return;
+        let button = scroll.jumps[tabname];
+        if (!button) {
+            button = make("button", "gradio-button tool " + JUMP_CLASS,
+                          {type: "button", id: JUMP_ID + "-" + tabname, "data-mc-theme-tab": tabname});
+            labelJump(button, false);
+            button.addEventListener("click", function () {
+                attempt("jump to the results' end", function () { jump(tabname); });
+            });
+            scroll.jumps[tabname] = button;
+        }
+        // At the end of the gallery's button row, once: a later apply finds it
+        // there, and an append on every apply would be a change to a child
+        // list that raises Forge's next after-update itself.
+        if (button.parentElement !== buttons) buttons.appendChild(button);
+    }
+
+    /** The button's glyph and label, written only when they change: the
+     *  glyph is a child list, and the page is asked about this on every scroll. */
+    function labelJump(button, back) {
+        const wanted = back ? "back" : "details";
+        if (button.dataset.mcThemeJump === wanted) return;
+        button.dataset.mcThemeJump = wanted;
+        const label = back ? "Back to the top" : "Generation details";
+        button.setAttribute("title", label);
+        button.setAttribute("aria-label", label);
+        button.innerHTML = GLYPH[back ? "chevrons-up" : "chevrons-down"];
+        setClass(button, JUMP_BACK_CLASS, back);
+    }
+
+    /** The scroller, where it is, and where it would be with the row's bottom
+     *  edge at the view's bottom: the results' end, and the settings' with it. */
+    function scrollEnd(entry) {
+        const view = viewOf(entry.results);
+        const scroller = view.scroller;
+        const max = scroller ? scroller.scrollHeight - scroller.clientHeight
+            : document.documentElement.scrollHeight - document.documentElement.clientHeight;
+        const end = view.scrolled + entry.row.getBoundingClientRect().bottom - view.bottom;
+        return {scroller, current: view.scrolled, end: Math.max(0, Math.min(max, Math.round(end)))};
+    }
+
+    function reducedMotion() {
+        try {
+            return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /** To the results' end, or back to the top from there. */
+    function jump(tabname) {
+        const entry = state.scroll && state.scroll.entries[tabname];
+        if (!entry || !laidOut(entry.row)) return false;
+        const where = scrollEnd(entry);
+        const target = atScrollEnd(where) ? 0 : where.end;
+        const behavior = reducedMotion() ? "auto" : "smooth";
+        const scroller = where.scroller || window;
+        try {
+            scroller.scrollTo({top: target, left: 0, behavior});
+        } catch (error) {
+            if (where.scroller) where.scroller.scrollTop = target; else window.scrollTo(0, target);
+        }
+        return true;
+    }
+
+    function syncJump(tabname) {
+        const scroll = state.scroll;
+        const button = scroll && scroll.jumps[tabname];
+        const entry = scroll && scroll.entries[tabname];
+        if (!button || !entry || !laidOut(entry.row)) return;
+        labelJump(button, atScrollEnd(scrollEnd(entry)));
+    }
+
+    /** At the results' end, or past it: a footer under the row scrolls a
+     *  little further, and that is still the end. */
+    function atScrollEnd(where) {
+        return where.end > 0 && where.current >= where.end - JUMP_END_SLACK_PX;
+    }
+
+    function scheduleJumpSync() {
+        const scroll = state.scroll;
+        if (!scroll || scroll.jumpFrame) return;
+        scroll.jumpFrame = 1;
+        const run = function () {
+            scroll.jumpFrame = 0;
+            SCROLL_TABS.forEach((tabname) => {
+                attempt("mark the Details button", function () { syncJump(tabname); });
+            });
+        };
+        if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
+    }
+
+    /** What `measureScroll` sees, for the console: `mcTheme.explainScroll()`. */
+    function explainScroll() {
+        return SCROLL_TABS.map((tabname) => {
+            const entry = state.scroll && state.scroll.entries[tabname];
+            if (!entry) return {tab: tabname, reason: "no row"};
+            return Object.assign({tab: tabname}, measureScroll(entry) || {reason: "not laid out"});
         });
     }
 
@@ -1292,6 +1694,7 @@
     // -- putting it together -------------------------------------------------------------- //
 
     function teardown() {
+        removeScroll();
         removeNetworks();
         removeInfo();
         restoreMoves();
@@ -1331,6 +1734,7 @@
             attempt("name the tabs", function () { installLabels(strip, config); });
         }
         attempt("lay out the split view", function () { installSplit(config); });
+        attempt("order the page's scrolling", function () { installScroll(config); });
         attempt("install the quick settings drawer", function () { installQuick(config); });
         attempt("install the extra networks drawer", function () { installNetworks(config); });
         attempt("draw the generation info", function () { installInfo(config); });
@@ -1403,6 +1807,10 @@
             if (state.networks && state.networks.open) { setNetworks(false); rememberNetworks(false); }
         });
         window.addEventListener("resize", scheduleFit);
+        window.addEventListener("resize", scheduleScroll);
+        // Scroll events do not bubble; captured at the document they are the
+        // page's and any workspace's alike.
+        document.addEventListener("scroll", scheduleJumpSync, true);
     }
 
     // The first paint: the last known configuration marks the root at once,
@@ -1419,13 +1827,15 @@
     if (typeof onUiLoaded === "function") onUiLoaded(apply);
     if (typeof onOptionsChanged === "function") onOptionsChanged(apply);
     if (typeof onAfterUiUpdate === "function") onAfterUiUpdate(apply);
-    if (typeof onUiTabChange === "function") onUiTabChange(function () { scheduleFit(); attempt("follow the tab", syncNetworks); });
+    if (typeof onUiTabChange === "function") onUiTabChange(function () { scheduleFit(); scheduleScroll(); attempt("follow the tab", syncNetworks); });
 
     window.mcTheme = {
         OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS,
+        scrollPlan, explainScroll, jump, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS, RESULTS_HOLD, SCROLL_HOLD,
+        SCROLL_ROW, JUMP_CLASS, JUMP_BACK_CLASS,
         icons: Object.keys(ICONS),
         glyphs: Object.keys(GLYPH),
     };

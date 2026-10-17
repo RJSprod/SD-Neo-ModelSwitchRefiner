@@ -56,6 +56,7 @@ OPT_FONT = "model_chain_theme_font"
 OPT_TITLE = "model_chain_theme_title"
 OPT_TAB_LABELS = "model_chain_theme_tab_labels"
 OPT_SPLIT = "model_chain_theme_split"
+OPT_SCROLL = "model_chain_theme_scroll"
 OPT_QUICK = "model_chain_theme_quick"
 OPT_QUICK_WIDTH = "model_chain_theme_quick_width"
 OPT_PROMPTS = "model_chain_theme_prompts"
@@ -508,6 +509,19 @@ def settings(shared) -> dict:
         ).info(
             "the split view: the prompt boxes, the tool row and the styles row lead "
             "the settings column, and Generate heads the gallery's panel on the right"
+        ),
+        OPT_SCROLL: OptionInfo(
+            True,
+            "One scroller for the page: the settings first, then the results",
+        ).info(
+            "a wheel, a finger, the scrollbar and the keyboard all move the page, "
+            "and the page spends the movement on the settings column first, down to "
+            "its end, with Generate, the gallery and its buttons locked where they "
+            "rest; then on the results column, down to the generation details, with "
+            "the settings held at their end. Never both at once. A Details button at "
+            "the end of the gallery's button row jumps to the results' end and back. "
+            "With the settings column in the Forge Assistant's panel the page scrolls "
+            "the results alone and the column scrolls in the panel"
         ),
         OPT_QUICK: OptionInfo(
             QUICK_DEFAULT,
