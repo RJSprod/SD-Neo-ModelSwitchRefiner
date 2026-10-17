@@ -177,9 +177,15 @@ workspace is the scroller and the phases are the same. A settings column
 shorter than the view is held where it rests while the results scroll.
 Stacked under the results on a phone, nothing is written. A **Details**
 button at the end of the gallery's button row (`mc-theme-jump`, appended
-once, its glyph rewritten only when the page's end comes or goes) takes the
+once, its glyph rewritten only when the page's end comes or goes) took the
 scroller to the results' end and back to the top from there: the one price
-of the order, one press instead of the flicks. `tests/test_theme_layout.py`
+of the order, one press instead of the flicks -- built without the user's
+choosing, called out as droppable, and **removed at their word once they
+had it on screen** (2026-10-17, after #292: "I don't want it. Remove this
+button, I don't need this scroll jump button"). The gallery's button row is
+Forge's own again, nothing listens to the scroll, and
+`test_the_gallerys_button_row_is_left_as_forge_drew_it` holds the absence.
+`tests/test_theme_layout.py`
 holds all of it in Chromium with the assistant's scripts on the page, on the
 flex row and on Forge's resize-handle grid row, sampled every 97 px so that
 each step's movement is one column's and adds up to the step; sixteen

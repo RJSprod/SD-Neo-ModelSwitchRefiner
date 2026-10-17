@@ -1837,7 +1837,6 @@ SCROLLED = """() => {
     const row = results.parentElement;
     const root = q(".forge-assistant-focus-root");
     const page = q(".gradio-container");
-    const jump = q("#mc-theme-jump-txt2img");
     const viewBottom = root
         ? root.getBoundingClientRect().top + root.clientTop + root.clientHeight - parseFloat(getComputedStyle(root).paddingBottom)
         : document.documentElement.clientHeight - parseFloat(getComputedStyle(page).paddingBottom);
@@ -1854,9 +1853,7 @@ SCROLLED = """() => {
         settingsOverscroll: getComputedStyle(settings).overscrollBehaviorY,
         resultsPosition: getComputedStyle(results).position, resultsTop: getComputedStyle(results).top,
         buttons: [...q("#image_buttons_txt2img").children].map((b) => b.id),
-        jump: jump ? {label: jump.getAttribute("aria-label"), back: jump.classList.contains("mc-theme-jump-back"),
-                      parent: jump.parentElement.id, svg: !!jump.querySelector("svg"),
-                      last: jump.parentElement.lastElementChild === jump} : null,
+        appended: document.querySelectorAll("#image_buttons_txt2img > :not([id^='txt2img_']):not([id^='save_'])").length,
     };
 }"""
 
@@ -1951,7 +1948,6 @@ class TestOneScrollerForThePage:
         end = scroll_to(page, first + second)
         assert abs(end["results"]["bottom"] - rest["viewBottom"]) <= 1, end
         assert abs(end["settings"]["bottom"] - rest["viewBottom"]) <= 1, end
-        assert end["jump"]["back"] is True and end["jump"]["label"] == "Back to the top", end["jump"]
         one_column_at_a_time(page, rest)
         page.close()
 
@@ -2012,15 +2008,6 @@ class TestOneScrollerForThePage:
         assert abs(end["results"]["bottom"] - rest["viewBottom"]) <= 1, end
         assert abs(end["settings"]["bottom"] - rest["viewBottom"]) <= 1, end
         one_column_at_a_time(page, rest, root=True)
-        # The Details button scrolls the workspace, not the page under it.
-        page.emulate_media(reduced_motion="reduce")
-        scroll_to(page, 0, root=True)
-        page.click("#mc-theme-jump-txt2img")
-        page.wait_for_function("(y) => Math.abs(document.querySelector('.forge-assistant-focus-root').scrollTop - y) <= 1",
-                               arg=first + second)
-        settle(page, 2)
-        there = page.evaluate(SCROLLED)
-        assert abs(there["results"]["bottom"] - rest["viewBottom"]) <= 1 and there["jump"]["back"] is True, there
         assert page.evaluate("window.scrollY") == 0, "the page under the workspace did not move"
 
         page.evaluate("forgeAssistant.focus.exit()")
@@ -2079,31 +2066,21 @@ class TestOneScrollerForThePage:
         assert abs(moved["results"]["top"] - (rest["results"]["top"] - 300)) <= 0.5, moved
         page.close()
 
-    def test_the_details_button_jumps_to_the_results_end_and_back(self, browser):
-        """At the end of the gallery's button row, drawn as its other tool
-        buttons: the generation details are a whole settings column away,
-        and one press is the price asked for instead of the flicks."""
+    def test_the_gallerys_button_row_is_left_as_forge_drew_it(self, browser):
+        """A Details button at the end of the row jumped to the results' end
+        and back, the one scroller's answer to the details being a settings
+        column away; the user did not want it ("I don't need this scroll jump
+        button"), so the row holds Forge's own buttons and nothing of the
+        theme's, scrolled or not."""
         page = open_page(browser, assistant=USER_CSS_WHOLE)
-        page.emulate_media(reduced_motion="reduce")
         settle(page, 8)
         rest = scroll_to(page, 0)
         first, second = phases(rest)
-        assert rest["jump"] == {"label": "Generation details", "back": False, "parent": "image_buttons_txt2img",
-                                "svg": True, "last": True}, rest["jump"]
-        assert rest["buttons"][:-1] == ["txt2img_open_folder", "save_txt2img"], rest["buttons"]
-
-        page.click("#mc-theme-jump-txt2img")
-        page.wait_for_function("(y) => Math.abs(window.scrollY - y) <= 1", arg=first + second)
-        settle(page, 2)
-        there = page.evaluate(SCROLLED)
-        assert abs(there["results"]["bottom"] - rest["viewBottom"]) <= 1, there
-        assert there["jump"]["back"] is True and there["jump"]["label"] == "Back to the top", there["jump"]
-
-        page.click("#mc-theme-jump-txt2img")
-        page.wait_for_function("window.scrollY === 0")
-        settle(page, 2)
-        home = page.evaluate(SCROLLED)
-        assert home["jump"]["back"] is False and home["jump"]["label"] == "Generation details", home["jump"]
+        assert rest["buttons"] == ["txt2img_open_folder", "save_txt2img"], rest["buttons"]
+        assert rest["appended"] == 0
+        end = scroll_to(page, first + second)
+        assert end["buttons"] == ["txt2img_open_folder", "save_txt2img"] and end["appended"] == 0, end["buttons"]
+        assert page.evaluate("document.querySelector('[id^=\"mc-theme-jump\"], .mc-theme-jump')") is None
         page.close()
 
     def test_a_measure_taken_in_the_second_phase_writes_the_same_numbers(self, browser):
@@ -2153,7 +2130,7 @@ class TestOneScrollerForThePage:
         changed(page)
         settle(page, 6)
         found = scroll_to(page, 0)
-        assert found["attribute"] is None and found["jump"] is None, found
+        assert found["attribute"] is None and found["appended"] == 0, found
         assert found["settingsPosition"] == "static" and found["settingsHeld"] is False, found
         assert found["rowMin"] == "" and found["hold"] == "" and found["resultsHold"] == "", found
         assert found["resultsPosition"] == "sticky" and found["resultsTop"] == "80px", "the split view's own hold"
@@ -2533,7 +2510,7 @@ class TestStandingDownAndOff:
         assert found["clearHtml"] == "🗑️"
         assert found["position"] != "sticky"
         assert page.evaluate("document.querySelectorAll('[data-mc-theme-moved], [data-mc-theme-icon]').length") == 0
-        assert page.evaluate("document.querySelectorAll('[data-mc-theme-scroll], .mc-theme-scroll-settings, .mc-theme-jump').length") == 0
+        assert page.evaluate("document.querySelectorAll('[data-mc-theme-scroll], .mc-theme-scroll-settings').length") == 0
         assert page.evaluate("getComputedStyle(document.querySelector('#txt2img_settings')).position") == "static"
         networks = page.evaluate(NETWORKS)
         assert networks["chrome"] is None and networks["host"]["marked"] is False

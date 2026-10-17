@@ -290,10 +290,14 @@ class TestOneScrollerForThePage:
 
         assert found["plan"] == {"top": -1315, "minHeight": 2438}
 
-    def test_it_listens_for_the_scroll_at_the_document_for_the_details_button(self):
+    def test_nothing_listens_to_the_scroll(self):
+        """The columns are held by sticky positioning from measured numbers;
+        the one thing that listened to the scroll, the Details button's
+        marking, went with the button at the user's word."""
         found = run("out.listeners = listeners;")
 
-        assert "document:scroll" in found["listeners"]
+        assert "document:scroll" not in found["listeners"]
+        assert "window:scroll" not in found["listeners"]
 
 
 def T_DEFAULTS():
@@ -539,7 +543,6 @@ class TestTheStylesheetSection:
                                       ("--mc-theme-results-hold", "--mc-theme-results-hold"),
                                       ("--mc-theme-scroll-hold", "--mc-theme-scroll-hold"),
                                       ("--mc-theme-scroll-row", "--mc-theme-scroll-row"),
-                                      ("mc-theme-jump", "mc-theme-jump"),
                                       ("data-mc-theme-icon", "mcThemeIcon")):
             assert script_name in script, script_name
             assert css_name in css, css_name

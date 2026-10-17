@@ -1714,13 +1714,6 @@
     z-index: 1;
 }
 
-/* The Details button at the end of the gallery's button row: the results'
-   end is a whole settings column away, so one press goes there and the next
-   comes back. Drawn as the row's other tool buttons are. */
-:root[data-mc-theme="on"] .mc-theme-jump {
-    flex: 0 0 auto;
-}
-
 /* -- a generation in the results column ---------------------------------------- */
 
 /* Asked for: "when there is a progress bar, there should be no button row for

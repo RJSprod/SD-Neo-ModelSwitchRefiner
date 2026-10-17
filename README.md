@@ -6660,11 +6660,12 @@ one second.
   and the page scrolls the results alone; stacked on a phone, the page
   scrolls as it does. A gesture that starts inside something with a
   scroller of its own -- the gallery's grid view, a prompt box, a list --
-  stays on that thing until its end, as browsers do. The one price of the
-  order is that the generation details of the picture in view are a whole
-  settings column away: a **Details** button at the end of the gallery's
-  button row takes the scroller to the results' end, and back to the top
-  from there. Off, the split view's hold alone: the results column held a
+  stays on that thing until its end, as browsers do. The generation details
+  of the picture in view are a whole settings column away; a **Details**
+  button at the end of the gallery's button row that jumped there and back
+  was built with the one scroller and removed at the user's word ("I don't
+  need this scroll jump button"), so the gallery's button row is Forge's
+  own. Off, the split view's hold alone: the results column held a
   margin under the bar while the row is taller than it. The hold is written
   by id as well as by attribute: Forge Neo's own stylesheet makes
   `#txt2img_results` and `#img2img_results` sticky half an em from the
@@ -6804,8 +6805,7 @@ The theme applies itself again after every update of the page and writes only
 what changed: the same title is not written again, a class already on a button
 is not put on again, the **⋯** menu is rebuilt only when the tabs it holds
 or their names change, the one scroller's numbers are written only when they
-change and its Details button is appended once, its glyph redrawn only when
-the page's end comes or goes. That is not tidiness. Forge answers any change to the
+change. That is not tidiness. Forge answers any change to the
 page's contents with another round of every extension's after-update callbacks
 a quarter of a second later, so a theme that rewrote its title on every apply
 kept the page updating for as long as it was open, on every tab (the first
