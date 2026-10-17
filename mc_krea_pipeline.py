@@ -327,6 +327,16 @@ def objection() -> str:
     The implementation still lives in :mod:`mc_creative_krea` because that is
     where it was written and moving it would be churn; what changes here is who
     is understood to own the rule.
+
+    Asked by the Krea script once, first, for the whole pipeline -- with
+    Creative Mode on as much as off, and before the plan is published -- and by
+    :func:`mc_plan.build_for` for a plan built from the panel's controls. A
+    checkpoint it objects to gets no writer, no layout and no phase for either;
+    Neutralize is not its business, because a neutralized prompt is plain text.
+    MOSS-Image is the case that made the Creative-on half matter: recognised
+    rather than unknown, it reads captions and JSON layouts of its own and must
+    not be handed Krea 2's structured prompt by a Spatial stage carrying on
+    after a refused roll.
     """
     import mc_creative_krea
 

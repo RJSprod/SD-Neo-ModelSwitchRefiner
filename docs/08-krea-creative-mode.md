@@ -2421,3 +2421,48 @@ on a browser that stretches the item anyway. The stylesheet test asks for both
 by name now, because neither is visible in a fake DOM and the failure is a rail
 that pushes the canvas off the screen — which is the one thing §12.1 exists to
 prevent.
+
+## 22. The guard is asked once, first, and with Creative Mode on (17 October 2026)
+
+§16.9 gave the checkpoint guard to the pipeline so that a Spatial-only
+generation would ask it. A Creative-on generation did not: the hook asked only
+`if not creative`, on the reasoning that the roll asks for itself. It does — and
+a roll refused by its own guard then followed §16.4, the rule for a writer that
+is *down*: the scene stayed as typed and Spatial carried on from it. So with
+Creative on, a checkpoint the guard had just refused was handed Krea 2's
+structured prompt by the layout anyway. Nobody saw it, because every
+recognisable non-Krea checkpoint was something a user would not be running
+Creative Mode on, and an unrecognisable one is let through on purpose.
+
+MOSS-Image made it matter. It is recognised now (`mc_arch`'s `moss` row, from
+the moss-image-forge-neo extension's two class names), it reads captions and
+JSON layouts of its own, and a user running it with these switches left on
+would have got a Krea layout document as a prompt.
+
+Three changes, all in the hook and the plan:
+
+- The guard is asked once, first, whenever Creative Mode is on or the layout
+  has regions — before the plan is published and before anything runs. When
+  it objects, the writer is not called (its complaint goes where a failed
+  roll's does, so the result says why), the layout is emptied, and the
+  generation goes on with the Neutralizer if that is on or leaves with its
+  literals restored if not. The roll the hook starts no longer asks for
+  itself (`check_checkpoint=False`): the hook's answer stands for the run, and
+  asked again from mid-run it would read whatever the host is loading.
+- Neutralize alone asks nothing. It used to: a Neutralize-only generation on a
+  refused checkpoint carried a Spatial note about a layout that was never on.
+- The plan is published after the question, with what will actually run.
+  `mc_plan.build_for` applies the same guard to the Creative and Spatial
+  phases it reads off the panel's controls, because Model Chain publishes its
+  own plan from those controls before this hook runs, and a writer reserved
+  for a checkpoint that will never be sent its prompt is VRAM taken from the
+  language model for nothing — the mirror of §16.8's Spatial-only phase that
+  was invisible to its own plan. A guard that cannot be asked leaves the plan
+  as the controls say.
+
+Tests: the row and its two mappings in `tests/test_arch.py`, asserted by key so
+a missing row cannot satisfy them; the objection naming MOSS-Image; Creative on
+with a refused checkpoint composing nothing and calling no model, both stages
+named on the result, no plan handed anything before the question; the plan
+tests for the guard, the Neutralizer kept, and a guard that raises. Each fails
+with its change reverted.

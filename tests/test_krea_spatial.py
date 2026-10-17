@@ -1197,6 +1197,59 @@ class TestTheCheckpointGuardCoversSpatialToo:
 
         assert p_said(result, "not Krea 2")
 
+    def test_a_wrong_checkpoint_stops_the_layout_with_creative_on_too(
+            self, script, client, store, monkeypatch):
+        """A roll refused by its own guard left the scene as typed and Spatial
+        carried on from it: the right rule for a writer that is down, and the
+        wrong one for a checkpoint that cannot read what Spatial builds. The
+        guard is asked once, first, for both stages, and the writer is not
+        even called."""
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        p = generate(script, "a quiet street", enabled=True, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert p.prompt == "a quiet street"
+        assert p.extra_generation_params == {}
+        assert client.calls == []
+
+    def test_the_result_names_both_refused_stages(self, script, client, store,
+                                                  monkeypatch):
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        p = generate(script, "a quiet street", enabled=True, spatial_on=True,
+                     compose="direct", layout=document())
+        result = Result()
+        script.postprocess(p, result)
+
+        assert p_said(result, "Creative Mode did not write this prompt — the selected "
+                              "checkpoint is not Krea 2")
+        assert p_said(result, "Spatial Layout — the selected checkpoint is not Krea 2")
+
+    def test_the_guard_is_asked_before_the_plan_is_published(self, script, client, store,
+                                                             monkeypatch):
+        """A plan published before the question named a writer and a merge
+        that were never going to run, and the VRAM arithmetic reserved room
+        for them. The script publishes only once it knows, and what it hands
+        the plan is the pipeline that will run: nothing. (With no Neutralizer
+        the refused generation leaves before publishing at all.)"""
+        import mc_plan
+
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        handed = []
+        real = mc_plan.build_for
+
+        def spy(p, **kwargs):
+            handed.append(kwargs)
+            return real(p, **kwargs)
+
+        monkeypatch.setattr(mc_plan, "build_for", spy)
+        generate(script, "a quiet street", enabled=True, spatial_on=True,
+                 compose="direct", layout=document())
+
+        assert handed == []
+
 
 class TestThePlanNamesTheRealPipeline:
     """§12, and the phase lists §23's matrix M asks for."""
