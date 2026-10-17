@@ -341,17 +341,25 @@ To refine with Krea 2 Edit:
    it, ticking Enable raises it back.
 
 The underlying toggles (`krea2_do_reference`, `anima_do_reference`,
-`klein_no_reference`) are **global** settings. Enable and Disable are applied
+`klein_do_reference`) are **global** settings. Enable and Disable are applied
 through the host's per-generation `override_settings`, so they are scoped to the
 Stage 2 pass and your global value is restored afterwards — the extension never
 leaves a global toggle flipped behind your back. Auto touches nothing.
 
 Two details worth knowing:
 
-- **The polarity differs between architectures.** Krea 2 and Anima opt *in*
-  (`*_do_reference = True` enables edit mode); Flux.2 Klein opts *out*
-  (`klein_no_reference = True` disables it). The control normalises this — Enable
-  means "references on" regardless of which way the underlying option runs.
+- **The polarity used to differ between architectures.** Krea 2 and Anima opt
+  *in* (`*_do_reference = True` enables edit mode), and since Forge Neo renamed
+  Klein's toggle on 1 September 2026 so does Klein: `klein_do_reference`, on by
+  default. Before the rename Klein opted *out* through `klein_no_reference`
+  (`True` disabled it). The control normalises either way — Enable means
+  "references on" regardless of which way the underlying option runs — and it
+  names the option the host actually registers, so a Forge Neo from before the
+  rename is overridden through the old name and polarity. A stale name is not
+  harmless: the host applies the override through its settings and raises a
+  `KeyError` on one it does not know, which is how a Klein Stage 2 with Enable
+  or Disable, or with reference images, failed on a renamed host until this was
+  fixed.
 - **Klein is reference-conditioned by default**, and still uses the image as an
   img2img init as well, so an ordinary low-denoise Klein refine is perfectly
   valid and is not warned about. Krea 2 and Anima edit mode is a deliberate mode

@@ -319,7 +319,9 @@ def conditioning_enabled(override: dict):
 
     ``encode_first_stage`` only stashes a reference when the model's *global*
     toggle says references are wanted -- ``opts.krea2_do_reference`` for Krea 2,
-    ``not opts.klein_no_reference`` for Klein. Stage 2 gets that toggle through
+    ``opts.klein_do_reference`` for Klein (``not opts.klein_no_reference`` on a
+    Forge Neo from before 2026-09-01; ``mc_arch.edit_toggle`` picks the name the
+    host registers). Stage 2 gets that toggle through
     ``p.override_settings``, which the host does not apply until
     ``process_images`` starts the pass, and the references have to exist before
     then. So the same override is applied here for the length of the encode and

@@ -269,11 +269,13 @@ class FakeOptions:
         self.forge_additional_modules = []
         self.forge_unet_storage_dtype = "Automatic"
         self.sd_model_checkpoint = "modelA.safetensors"
-        # Per-architecture reference/edit toggles. Note the inverted polarity of
-        # the Klein one, which mirrors the host.
+        # Per-architecture reference/edit toggles, as the host registers them
+        # since 2026-09-01: Klein's opts in like the others and is on by
+        # default. It opted out as klein_no_reference before, a name
+        # mc_arch.edit_toggle still honours on a host that registers only it.
         self.krea2_do_reference = False
         self.anima_do_reference = False
-        self.klein_no_reference = False
+        self.klein_do_reference = True
         self.img2img_background_color = "#ffffff"
         self.data = {}
 

@@ -445,7 +445,7 @@ class TestEditModeInteraction:
             edit_mode=mc_arch.EDIT_AUTO,
         )
 
-        assert refs.refine_calls[0].override_settings == {"klein_no_reference": False}
+        assert refs.refine_calls[0].override_settings == {"klein_do_reference": True}
 
     def test_the_opt_in_polarity_is_implied_the_other_way(
         self, chain, host, image_factory, monkeypatch
@@ -478,7 +478,7 @@ class TestEditModeInteraction:
 
         assert refs.seen == [[]]
         assert "the explicit setting wins" in processed.comments
-        assert refs.refine_calls[0].override_settings == {"klein_no_reference": True}
+        assert refs.refine_calls[0].override_settings == {"klein_do_reference": False}
 
     def test_disable_still_vetoes_an_architecture_with_no_edit_toggle(
         self, chain, host, image_factory, monkeypatch
@@ -517,7 +517,7 @@ class TestEditModeInteraction:
 
     def test_the_global_toggle_is_restored_after_encoding(self, refs, host, image_factory):
         """The encode borrows the toggle; it must not keep it."""
-        host.shared.opts.klein_no_reference = True
+        host.shared.opts.klein_do_reference = False
 
         run(
             refs,
@@ -527,17 +527,17 @@ class TestEditModeInteraction:
             reference_images=[(image_factory(512, 512), None)],
         )
 
-        assert host.shared.opts.klein_no_reference is True
+        assert host.shared.opts.klein_do_reference is False
 
     def test_the_toggle_is_open_while_the_references_encode(
         self, refs, host, image_factory, monkeypatch
     ):
-        host.shared.opts.klein_no_reference = True
+        host.shared.opts.klein_do_reference = False
         observed = []
         monkeypatch.setattr(
             mc_references,
             "_to_tensor",
-            lambda image: observed.append(host.shared.opts.klein_no_reference) or image,
+            lambda image: observed.append(host.shared.opts.klein_do_reference) or image,
         )
 
         run(
@@ -548,7 +548,7 @@ class TestEditModeInteraction:
             reference_images=[(image_factory(512, 512), None)],
         )
 
-        assert observed == [False]
+        assert observed == [True]
 
 
 # --------------------------------------------------------------------------- #

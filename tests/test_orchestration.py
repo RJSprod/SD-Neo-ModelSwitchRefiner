@@ -1002,14 +1002,17 @@ class TestEditModeOrchestration:
 
         assert chain.refine_calls[0].override_settings == {}
 
-    def test_klein_polarity_is_inverted_end_to_end(self, chain, host, image_factory, monkeypatch):
+    def test_klein_is_overridden_by_the_hosts_own_toggle_end_to_end(self, chain, host, image_factory, monkeypatch):
+        """``klein_do_reference`` since Forge Neo's rename of 2026-09-01; the
+        stale ``klein_no_reference`` raised a KeyError in the host's
+        ``Options.set`` before the pass started."""
         monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("flux2_9b"))
         p = make_p(host, batch_size=1)
         processed = make_processed(host, p, image_factory)
 
         run_chain(chain, host, p, processed, edit_mode="Enable", denoise=1.0)
 
-        assert chain.refine_calls[0].override_settings == {"klein_no_reference": False}
+        assert chain.refine_calls[0].override_settings == {"klein_do_reference": True}
 
     def test_stale_references_are_cleared_before_refining(self, krea2_target, host, image_factory, monkeypatch):
         """A cached model keeps its engine -- and its reference list -- around."""
