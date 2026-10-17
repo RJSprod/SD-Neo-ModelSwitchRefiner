@@ -23,6 +23,7 @@ import mc_arch
 import mc_arm
 import mc_assistant_settings
 import mc_broker
+import mc_gallery_quadrant
 import mc_hint
 import mc_infotext
 import mc_literal_report
@@ -1227,6 +1228,15 @@ try:
                                mc_extra_networks_sort.hidden_settings(shared)))
 except Exception:
     errors.report("Model Chain: could not register the extra networks' sort record",
+                  exc_info=True)
+
+# Gallery Quadrant: the five tap zones over the gallery's preview, carried in
+# from the user's standalone extension, with the top-left zone's destination.
+try:
+    shared.options_templates.update(
+        shared.options_section(mc_gallery_quadrant.SECTION, mc_gallery_quadrant.settings(shared)))
+except Exception:
+    errors.report("Model Chain: could not register the Gallery Quadrant settings section",
                   exc_info=True)
 
 mc_progress.install()
@@ -4363,6 +4373,8 @@ try:
     script_callbacks.on_app_started(mc_arm.on_app_started)
     script_callbacks.on_app_started(mc_logfile.attach)
     script_callbacks.on_app_started(mc_literal_report.install)
+    # The Gallery Quadrant's save route: the top-left zone's copy into a folder.
+    script_callbacks.on_app_started(mc_gallery_quadrant.install)
     # The Voice Chat browser routes. Registered here rather than at import for
     # the reason every other route in this file is: there is no FastAPI app to
     # add anything to until the host has one.

@@ -6835,11 +6835,60 @@ The reasoning, the review of the Lobe repository it came from and the
 licence question that decided the approach are in
 [`docs/24-lobe-theme-host.md`](docs/24-lobe-theme-host.md).
 
+## Gallery Quadrant
+
+Five tap zones over the gallery's preview, carried in from the user's own
+`sd-gallery-quadrant` extension (2026-10-17) so that one extension is installed
+instead of two. **On by default**, under **Settings → Model Chain: Gallery
+Quadrant**; it needs the lightbox off (Settings → Gallery → the full-page image
+viewer, `js_modal_lightbox`), as the standalone did. The zones:
+
+```
+┌───────────┬───────────┬───────────┐
+│⬇ Download │  ✕ Unfocus│  💾 Save  │
+├─────────────────┬─────────────────┤
+│     ◀ Prev      │      Next ▶     │
+└─────────────────┴─────────────────┘
+```
+
+- **Top-left** saves the picture: to the browser's downloads, as before, or to
+  **a folder on this machine**. The second setting chooses between the two and
+  the third names the folder (an absolute path, or one relative to the WebUI's
+  data directory; made if it is missing). The WebUI itself writes the copy,
+  under the picture's own name and never over another file: the same picture
+  saved twice is one file, a different picture of the same name gets a number.
+  The zone says `⬇ Folder` while the folder is chosen, and shows what happened
+  for a moment: `Saved 00001-42.png`, or the reason it was not (no folder set,
+  a picture outside Forge's output folders, a folder that cannot be made).
+- **Top-middle** leaves the preview (Gradio's own Clear).
+- **Top-right** is Forge's own Save, the one under the gallery (a copy into
+  `outdir_save`).
+- **Bottom-left** and **bottom-right** are previous and next.
+
+The titles flash for half a second when the pointer enters the preview, the
+zone under the pointer darkens for a quarter of one, and Gradio's own download
+and clear icons over the picture are hidden. The overlay covers the whole
+preview, thumbnail strip included, as the standalone drew it; the clicks are
+read against the picture itself.
+
+The script, the stylesheet section and the markers it leaves are the
+standalone's own, so a page with that extension still enabled draws one overlay
+and takes one action: whichever script reaches a gallery first marks it and the
+other skips it. Disable the standalone once this is on; its own setting (under
+Settings → Gallery) is not read here.
+
+The copy is made by `POST /model-chain/gallery-quadrant/save` with the preview's
+`src`, a Gradio file URL. The route takes only an existing file under one of
+Forge's output folders (every `outdir_*` setting) or Gradio's temporary folder,
+and only a request from this WebUI's own page.
+
 ## Layout
 
 ```
 mc_arch.py            architecture detection + per-architecture geometry
 mc_theme.py           the theme: palette as a Gradio theme object, settings, the Lobe import
+mc_gallery_quadrant.py the Gallery Quadrant's settings, the picture a gallery URL names,
+                      the copy into the folder and the route that makes it
 mc_pipeline_panel.py  the Image Pipeline shell: four stage rows, the drawer
                       every disclosure is made with, and the slots they offer
 mc_literal_prompts.py the two Literal Prompt boxes, and the out-of-sight note

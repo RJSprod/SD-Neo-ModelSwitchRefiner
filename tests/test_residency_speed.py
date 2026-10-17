@@ -1578,14 +1578,18 @@ class TestSettingsRegistration:
             if name.startswith("model_chain_")
         ]
         assert ours, "no Model Chain settings were registered at all"
-        # Three sections, deliberately. Voice Chat is an install-level capability
+        # Four sections, deliberately. Voice Chat is an install-level capability
         # with two downloads behind it, and burying it under a heading about
         # image model chaining would make it findable only by somebody who
         # already knew it was there; the theme is a page-wide choice with a
-        # dozen switches of its own, and the same argument holds.
+        # dozen switches of its own, and the same argument holds; the Gallery
+        # Quadrant's settings live in a section of their own at the user's
+        # word, as the standalone extension's did.
+        import mc_gallery_quadrant
         import mc_theme
 
-        known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION, mc_theme.SECTION}
+        known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION, mc_theme.SECTION,
+                 mc_gallery_quadrant.SECTION}
         # The two deliberate uses of the host's hidden idiom: the record of
         # the one-time import of the user's Lobe settings, and the record of
         # the one-time default sort of the extra networks (newest created
