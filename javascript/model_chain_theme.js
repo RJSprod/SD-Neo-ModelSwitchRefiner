@@ -135,8 +135,6 @@
         "settings": icon('<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>'),
         "sliders-horizontal": icon('<path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/>'),
         "ellipsis": icon('<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>'),
-        "chevrons-down": icon('<path d="m7 6 5 5 5-5"/><path d="m7 13 5 5 5-5"/>'),
-        "chevrons-up": icon('<path d="m17 11-5-5-5 5"/><path d="m17 18-5-5-5 5"/>'),
     };
 
     // Forge's tool-button emoji (modules/ui.py, ui_prompt_styles.py,
@@ -327,7 +325,7 @@
         quick: null,        // the drawer
         networks: null,     // {hosts: {tabname: {host, nav, chrome, strip, controls, pages, page, observer}}, open, width, setting, mode}
         infoPanels: new Map(), // Forge's infotext element -> {panel, html}
-        scroll: null,       // {entries: {tabname: {row, column, results}}, jumps, observer, observed, body, frame, jumpFrame}
+        scroll: null,       // {entries: {tabname: {row, column, results}}, observer, observed, body, frame}
         unload: null,       // the beforeunload handler while asked for
         wired: false,
         fitPending: false,
@@ -674,8 +672,9 @@
     //
     // The one price of the order: the generation details of the picture in
     // view are a whole settings column away. A Details button at the end of
-    // the gallery's button row takes the scroller to the results' end, and
-    // back to the top from there.
+    // the gallery's button row took the scroller there and back; the user
+    // did not want it ("I don't need this scroll jump button"), so the row
+    // is Forge's own and nothing here listens to the scroll.
 
     const SCROLL_ATTRIBUTE = "data-mc-theme-scroll";           // on the row: "settings-first"
     const SCROLL_SETTINGS_CLASS = "mc-theme-scroll-settings";   // the row's child that holds the settings
@@ -684,10 +683,6 @@
     const SCROLL_ROW = "--mc-theme-scroll-row";               // on the row: its least height
     const SCROLL_TABS = ["txt2img", "img2img"];
     const DOCKED_CLASS = "forge-assistant-docked-column";     // the Forge Assistant's, on a column in its panel
-    const JUMP_CLASS = "mc-theme-jump";
-    const JUMP_BACK_CLASS = "mc-theme-jump-back";             // while the scroller is at the results' end
-    const JUMP_ID = "mc-theme-jump";                          // + "-" + the tab's name
-    const JUMP_END_SLACK_PX = 2;
 
     function px(value) {
         const found = parseFloat(value);
@@ -859,7 +854,6 @@
         if (!scroll) return;
         Object.keys(scroll.entries).forEach((tabname) => {
             measureScroll(scroll.entries[tabname]);
-            syncJump(tabname);
         });
     }
 
@@ -885,8 +879,7 @@
         if (!config.scroll) { removeScroll(); return; }
         let scroll = state.scroll;
         if (!scroll) {
-            scroll = state.scroll = {entries: {}, jumps: {}, observer: null, observed: null, body: null,
-                                     frame: 0, jumpFrame: 0};
+            scroll = state.scroll = {entries: {}, observer: null, observed: null, body: null, frame: 0};
             // Measured again when a column changes size -- the settings growing
             // (an accordion), the results (an infotext, the assistant's fill),
             // the row (its width: the dock, Forge's divider) -- and when the
@@ -913,7 +906,6 @@
             scroll.entries[tabname] = found;
             [found.row, found.column, found.results].forEach((node) => watchScroll(scroll, node));
             setAttr(found.row, SCROLL_ATTRIBUTE, "settings-first");
-            installJump(tabname);
         });
         scheduleScroll();
     }
@@ -924,114 +916,12 @@
         if (scroll.observer) scroll.observer.disconnect();
         if (scroll.body) scroll.body.disconnect();
         if (scroll.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scroll.frame);
-        if (scroll.jumpFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scroll.jumpFrame);
         Object.keys(scroll.entries).forEach((tabname) => {
             const entry = scroll.entries[tabname];
             clearScroll(entry);
             if (entry.row.hasAttribute(SCROLL_ATTRIBUTE)) entry.row.removeAttribute(SCROLL_ATTRIBUTE);
         });
-        Object.keys(scroll.jumps).forEach((tabname) => {
-            const button = scroll.jumps[tabname];
-            if (button.parentElement) button.parentElement.removeChild(button);
-        });
         state.scroll = null;
-    }
-
-    // -- the Details button ------------------------------------------------------- //
-
-    function installJump(tabname) {
-        const scroll = state.scroll;
-        const buttons = query("#image_buttons_" + tabname);
-        if (!scroll || !buttons) return;
-        let button = scroll.jumps[tabname];
-        if (!button) {
-            button = make("button", "gradio-button tool " + JUMP_CLASS,
-                          {type: "button", id: JUMP_ID + "-" + tabname, "data-mc-theme-tab": tabname});
-            labelJump(button, false);
-            button.addEventListener("click", function () {
-                attempt("jump to the results' end", function () { jump(tabname); });
-            });
-            scroll.jumps[tabname] = button;
-        }
-        // At the end of the gallery's button row, once: a later apply finds it
-        // there, and an append on every apply would be a change to a child
-        // list that raises Forge's next after-update itself.
-        if (button.parentElement !== buttons) buttons.appendChild(button);
-    }
-
-    /** The button's glyph and label, written only when they change: the
-     *  glyph is a child list, and the page is asked about this on every scroll. */
-    function labelJump(button, back) {
-        const wanted = back ? "back" : "details";
-        if (button.dataset.mcThemeJump === wanted) return;
-        button.dataset.mcThemeJump = wanted;
-        const label = back ? "Back to the top" : "Generation details";
-        button.setAttribute("title", label);
-        button.setAttribute("aria-label", label);
-        button.innerHTML = GLYPH[back ? "chevrons-up" : "chevrons-down"];
-        setClass(button, JUMP_BACK_CLASS, back);
-    }
-
-    /** The scroller, where it is, and where it would be with the row's bottom
-     *  edge at the view's bottom: the results' end, and the settings' with it. */
-    function scrollEnd(entry) {
-        const view = viewOf(entry.results);
-        const scroller = view.scroller;
-        const max = scroller ? scroller.scrollHeight - scroller.clientHeight
-            : document.documentElement.scrollHeight - document.documentElement.clientHeight;
-        const end = view.scrolled + entry.row.getBoundingClientRect().bottom - view.bottom;
-        return {scroller, current: view.scrolled, end: Math.max(0, Math.min(max, Math.round(end)))};
-    }
-
-    function reducedMotion() {
-        try {
-            return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-        } catch (error) {
-            return false;
-        }
-    }
-
-    /** To the results' end, or back to the top from there. */
-    function jump(tabname) {
-        const entry = state.scroll && state.scroll.entries[tabname];
-        if (!entry || !laidOut(entry.row)) return false;
-        const where = scrollEnd(entry);
-        const target = atScrollEnd(where) ? 0 : where.end;
-        const behavior = reducedMotion() ? "auto" : "smooth";
-        const scroller = where.scroller || window;
-        try {
-            scroller.scrollTo({top: target, left: 0, behavior});
-        } catch (error) {
-            if (where.scroller) where.scroller.scrollTop = target; else window.scrollTo(0, target);
-        }
-        return true;
-    }
-
-    function syncJump(tabname) {
-        const scroll = state.scroll;
-        const button = scroll && scroll.jumps[tabname];
-        const entry = scroll && scroll.entries[tabname];
-        if (!button || !entry || !laidOut(entry.row)) return;
-        labelJump(button, atScrollEnd(scrollEnd(entry)));
-    }
-
-    /** At the results' end, or past it: a footer under the row scrolls a
-     *  little further, and that is still the end. */
-    function atScrollEnd(where) {
-        return where.end > 0 && where.current >= where.end - JUMP_END_SLACK_PX;
-    }
-
-    function scheduleJumpSync() {
-        const scroll = state.scroll;
-        if (!scroll || scroll.jumpFrame) return;
-        scroll.jumpFrame = 1;
-        const run = function () {
-            scroll.jumpFrame = 0;
-            SCROLL_TABS.forEach((tabname) => {
-                attempt("mark the Details button", function () { syncJump(tabname); });
-            });
-        };
-        if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
     }
 
     /** What `measureScroll` sees, for the console: `mcTheme.explainScroll()`. */
@@ -1839,9 +1729,6 @@
         ["fullscreenchange", "webkitfullscreenchange"].forEach(function (type) {
             document.addEventListener(type, scheduleScroll);
         });
-        // Scroll events do not bubble; captured at the document they are the
-        // page's and any workspace's alike.
-        document.addEventListener("scroll", scheduleJumpSync, true);
     }
 
     // The first paint: the last known configuration marks the root at once,
@@ -1865,8 +1752,8 @@
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS,
-        scrollPlan, explainScroll, jump, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS, RESULTS_HOLD, SCROLL_HOLD,
-        SCROLL_ROW, JUMP_CLASS, JUMP_BACK_CLASS,
+        scrollPlan, explainScroll, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS, RESULTS_HOLD, SCROLL_HOLD,
+        SCROLL_ROW,
         icons: Object.keys(ICONS),
         glyphs: Object.keys(GLYPH),
     };
