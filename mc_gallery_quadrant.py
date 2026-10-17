@@ -55,6 +55,20 @@ from typing import Iterable, Mapping
 
 logger = logging.getLogger("model_chain")
 
+# FastAPI reads the route handler's annotations by name from the handler's
+# module globals, and under ``from __future__ import annotations`` every
+# annotation is a string. ``Request`` therefore has to be a *module* global:
+# imported inside :func:`install`, the string "Request" resolved to nothing,
+# FastAPI read ``request`` as a required query parameter, and every save from
+# a browser answered HTTP 422 (found by the user from a phone). Guarded, so a
+# host without FastAPI (the tests' stand-in) still imports this module.
+try:
+    from fastapi import Request  # type: ignore
+    from fastapi.responses import JSONResponse  # type: ignore
+except Exception:  # pragma: no cover - a host without FastAPI
+    Request = None  # type: ignore
+    JSONResponse = None  # type: ignore
+
 SECTION = ("model_chain_gallery_quadrant", "Model Chain: Gallery Quadrant")
 
 OPT_ENABLED = "model_chain_gallery_quadrant"
@@ -343,14 +357,11 @@ def install(_demo=None, app=None) -> bool:
     for existing in getattr(app, "routes", []):
         if getattr(existing, "path", None) == ROUTE:
             return True
-    try:
-        from fastapi import Request  # type: ignore
-        from fastapi.responses import JSONResponse  # type: ignore
-    except Exception:
+    if Request is None or JSONResponse is None:
         logger.debug("Model Chain: Gallery Quadrant has no FastAPI to register its route on")
         return False
 
-    async def gallery_quadrant_save(request: Request):
+    async def gallery_quadrant_save(request: Request):  # type: ignore[valid-type]
         try:
             payload = await request.json()
         except Exception:

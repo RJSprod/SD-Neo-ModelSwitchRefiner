@@ -6880,7 +6880,13 @@ Settings → Gallery) is not read here.
 The copy is made by `POST /model-chain/gallery-quadrant/save` with the preview's
 `src`, a Gradio file URL. The route takes only an existing file under one of
 Forge's output folders (every `outdir_*` setting) or Gradio's temporary folder,
-and only a request from this WebUI's own page.
+and only a request from this WebUI's own page. The copy is a byte copy
+(`shutil.copy2`), so the picture's PNG info travels with it. FastAPI reads the
+handler's `request: Request` annotation as a string (the module uses postponed
+annotations) and resolves it against the module's globals, so `Request` is
+imported at the top of `mc_gallery_quadrant.py`: imported inside `install()`,
+it resolved to nothing, FastAPI read `request` as a required query parameter,
+and every save answered HTTP 422.
 
 ## Layout
 
