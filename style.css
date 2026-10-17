@@ -1539,14 +1539,55 @@
     flex: 1 1 auto;
 }
 
-/* The results column stays in view while the settings scroll under the
-   header, held a margin below it. Under the Forge Assistant's focus mode
-   the header is hidden and the workspace is the whole window: its focus
-   script closes this offset to the workspace's own inset (an inline `top`,
-   put back on leaving), and the theme's layout test holds it to that. */
+/* The results column stays where it rests while the settings scroll under
+   the header: a margin below the bar at least, and never above its place in
+   the row, so that Generate does not move at all (the theme script's hold,
+   `--mc-theme-results-hold`; held at the margin alone, a column resting
+   lower moved up to it first). Under the Forge Assistant's focus mode the
+   header is hidden and the workspace is the whole window: its focus script
+   closes this offset to the workspace's own inset (an inline `top`, put
+   back on leaving), and the theme's layout test holds it to that. */
 :root[data-mc-theme="on"] [id$="_results"] {
     position: sticky;
-    top: calc(var(--mc-theme-header) + 16px);
+    top: var(--mc-theme-results-hold, calc(var(--mc-theme-header) + 16px));
+}
+
+/* -- one scroller for the page ----------------------------------------------- */
+
+/* Asked for: "the entire page takes one scroll action ... first move the
+   left column until I reach bottom, then the right column until I reach
+   bottom ... both columns should never move at the same time ... the
+   generation button stays locked in position as I scroll through the left
+   column". The page's own scroller is the one control; the theme script
+   measures two numbers (model_chain_theme.js, "one scroller for the page")
+   and these rules hold the columns by them. The row is given the least
+   height the two phases need -- the settings column's plus the results'
+   part under the view -- so the results column, held by the rule above and
+   never let out of its row, is released exactly when the settings reach
+   their end; and the settings column is held once its bottom edge meets the
+   view's, by a sticky offset of the view's height less its own. Nothing
+   listens to the scroll: the compositor moves the columns. A column docked
+   in the Forge Assistant's panel is out of the row (its rule says `position:
+   fixed` with priority) and stacked under the results on a phone it is a
+   phone's page: the script writes nothing for either, and with nothing
+   written both rules fall back to `auto`. The held column is a stacking
+   context, as the results column is already; a step above it, so what the
+   settings open over the results -- a hint, a list -- is drawn over them. */
+:root[data-mc-theme="on"] [data-mc-theme-scroll="settings-first"] {
+    min-height: var(--mc-theme-scroll-row, auto);
+}
+
+:root[data-mc-theme="on"] [data-mc-theme-scroll="settings-first"] > .mc-theme-scroll-settings {
+    position: sticky;
+    top: var(--mc-theme-scroll-hold, auto);
+    z-index: 1;
+}
+
+/* The Details button at the end of the gallery's button row: the results'
+   end is a whole settings column away, so one press goes there and the next
+   comes back. Drawn as the row's other tool buttons are. */
+:root[data-mc-theme="on"] .mc-theme-jump {
+    flex: 0 0 auto;
 }
 
 /* -- a generation in the results column ---------------------------------------- */

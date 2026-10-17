@@ -98,6 +98,7 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
 textarea { width: 100%; min-height: 60px; }
 .extra-networks > div.tab-nav { min-height: 2.7rem; }
 .extra-networks-controls-div { align-self: center; margin-left: auto; }
+.resize-handle { grid-column: 2 / 3; min-width: 16px; max-width: 16px; }
 .extra-network-control { display: flex; width: 100%; }
 .extra-network-pane { display: flex; height: calc(100vh - 24rem); min-height: 52rem; flex-direction: column; overflow: hidden; }
 .extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; position: relative; }
@@ -266,12 +267,15 @@ def extra_pages(tabname: str, *, controls_built: bool) -> str:
 
 def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
               controls_built: bool = True, assistant: str = "", popup: bool = False,
-              progress: bool = False) -> str:
+              progress: bool = False, grid_row: bool = False) -> str:
     """`assistant` is a user.css to put on a page that also runs the Forge
     Assistant's scripts, in Forge's order (its folder's scripts load before
     this one's), with Gradio's gallery markup for its fill to measure.
     `progress` adds Forge's own progress bar rules and this extension's
-    progress-bar appearance script, for a page that runs a generation."""
+    progress-bar appearance script, for a page that runs a generation.
+    `grid_row` draws Txt2Img's row as Forge's resize-handle script leaves it:
+    a grid of the two columns and the handle between them, its template
+    written inline."""
     buttons = "".join(
         f'<button role="tab" id="{tab}-button" aria-controls="{tab}" '
         f'aria-selected="{"true" if i == 0 else "false"}" class="{"selected" if i == 0 else ""}">{label}</button>'
@@ -280,6 +284,9 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
         f'<div id="{tab}" class="tabitem" role="tabpanel" style="display: none"></div>'
         for tab, _ in TABS[2:] if tab != "tab_settings")
     blocks = "".join(f'<div class="block" id="setting_{n}">Setting {n}</div>' for n in range(settings_blocks))
+    row_open = ('<div class="row resize-handle-row unequal-height" style="display: grid; gap: 0; grid-template-columns: 1fr 16px 1fr">'
+                if grid_row else '<div class="row unequal-height">')
+    handle = '<div class="resize-handle"></div>' if grid_row else ""
     lobe_root = ('<div id="root"><header id="lobe-header"><div role="tablist" class="ant-tabs-nav">'
                  '<div role="tab">Txt 2 Img</div></div></header></div>' if lobe else "")
     return f"""<!doctype html><html><head><meta charset="utf-8">
@@ -314,8 +321,9 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
     <div id="txt2img_extra_tabs" class="tabs extra-networks">
       {extra_tabs_nav("txt2img", controls_built=controls_built)}
       <div id="txt2img_generation" class="tabitem" role="tabpanel" style="display: block">
-        <div class="row unequal-height">
+        {row_open}
           <div id="txt2img_settings" class="column">{blocks}</div>
+          {handle}
           <div id="txt2img_results" class="column">
             <div id="txt2img_results_panel" class="column panel">
               <div id="txt2img_gallery_container" class="gr-group">
@@ -432,13 +440,15 @@ ON = {"model_chain_theme": True}
 
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
-              controls_built=True, assistant="", popup=False, progress=False):
+              controls_built=True, assistant="", popup=False, progress=False, grid_row=False,
+              settings_blocks=40):
     """A page of its own context, or one in a context given -- two pages of
     one context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height})
     page = owner.new_page()
     html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
-                     assistant=assistant, popup=popup, progress=progress)
+                     assistant=assistant, popup=popup, progress=progress, grid_row=grid_row,
+                     settings_blocks=settings_blocks)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcTheme" + (" && !!(window.forgeAssistant && window.forgeAssistant.fill)"
@@ -1684,10 +1694,12 @@ class TestWithTheForgeAssistant:
         page.close()
 
     def test_scrolling_keeps_the_column_in_view_under_the_bar_and_focus_mode_takes_the_whole_window(self, browser):
-        """Normal mode: the settings scroll, the results column is held a
-        margin under the bar, never under it. Focus mode: the bar is hidden,
-        the workspace is the window, the column is held at its padding, where
-        the fill measured it, scrolled or not; leaving focus puts it back."""
+        """Normal mode: the settings scroll, the results column is held where
+        it rests, a margin under the bar and never under it (it used to creep
+        up to that margin first; the one-scroller rule locks it). Focus mode:
+        the bar is hidden, the workspace is the window, the column is held at
+        its padding, where the fill measured it, scrolled or not; leaving
+        focus puts it back."""
         page = open_page(browser, assistant=USER_CSS_WHOLE)
         settle(page, 8)
         at_rest = page.evaluate(FILLED)
@@ -1696,7 +1708,7 @@ class TestWithTheForgeAssistant:
         scrolled = page.evaluate(FILLED)
         assert page.evaluate("window.scrollY") == 600
         assert scrolled["generate"]["top"] >= scrolled["header"]["bottom"] + 4, scrolled
-        assert scrolled["generate"]["top"] < at_rest["generate"]["top"], "held under the bar, not scrolled away"
+        assert abs(scrolled["generate"]["top"] - at_rest["generate"]["top"]) <= 0.5, "locked where it rests"
         assert scrolled["buttons"]["bottom"] <= scrolled["inner"], scrolled
         page.evaluate("window.scrollTo(0, 0)")
         settle(page, 4)
@@ -1766,6 +1778,286 @@ class TestWithTheForgeAssistant:
         assert luminance(found["interrupt"]) < 0.3, found["interrupt"]
         assert found["interrupt"] != found["skip"]
         assert found["interruptBorder"] != found["interrupt"]
+        page.close()
+
+
+SCROLLED = """() => {
+    const q = (s) => document.querySelector(s);
+    const box = (node) => { const r = node.getBoundingClientRect(); return {top: r.top, bottom: r.bottom, height: r.height}; };
+    const results = q("#txt2img_results");
+    const settings = q("#txt2img_settings");
+    const row = results.parentElement;
+    const root = q(".forge-assistant-focus-root");
+    const page = q(".gradio-container");
+    const jump = q("#mc-theme-jump-txt2img");
+    const viewBottom = root
+        ? root.getBoundingClientRect().top + root.clientTop + root.clientHeight - parseFloat(getComputedStyle(root).paddingBottom)
+        : document.documentElement.clientHeight - parseFloat(getComputedStyle(page).paddingBottom);
+    return {
+        scrolled: root ? root.scrollTop : window.scrollY, viewBottom,
+        settings: box(settings), results: box(results), generate: box(q("#txt2img_generate_box")), row: box(row),
+        attribute: row.getAttribute("data-mc-theme-scroll"),
+        rowMin: row.style.getPropertyValue("--mc-theme-scroll-row"),
+        hold: row.style.getPropertyValue("--mc-theme-scroll-hold"),
+        resultsHold: results.style.getPropertyValue("--mc-theme-results-hold"),
+        settingsPosition: getComputedStyle(settings).position,
+        settingsHeld: settings.classList.contains("mc-theme-scroll-settings"),
+        settingsZ: getComputedStyle(settings).zIndex,
+        settingsOverscroll: getComputedStyle(settings).overscrollBehaviorY,
+        resultsPosition: getComputedStyle(results).position, resultsTop: getComputedStyle(results).top,
+        buttons: [...q("#image_buttons_txt2img").children].map((b) => b.id),
+        jump: jump ? {label: jump.getAttribute("aria-label"), back: jump.classList.contains("mc-theme-jump-back"),
+                      parent: jump.parentElement.id, svg: !!jump.querySelector("svg"),
+                      last: jump.parentElement.lastElementChild === jump} : null,
+    };
+}"""
+
+
+def scroll_to(page, y: float, *, root: bool = False) -> dict:
+    """Scroll the page (or focus mode's workspace) to `y`, instantly, and read
+    the columns where the browser has drawn them."""
+    if root:
+        page.evaluate("(y) => { document.querySelector('.forge-assistant-focus-root').scrollTop = y; }", y)
+    else:
+        page.evaluate("(y) => window.scrollTo(0, y)", y)
+    settle(page, 2)
+    return page.evaluate(SCROLLED)
+
+
+def phases(rest: dict) -> tuple:
+    """From the columns at rest: the scroll at which the settings' bottom edge
+    meets the view's bottom, and the results' part under the view -- the
+    length of each phase."""
+    first = rest["settings"]["bottom"] - rest["viewBottom"]
+    second = rest["results"]["bottom"] - rest["viewBottom"]
+    return first, second
+
+
+def one_column_at_a_time(page, rest: dict, *, root: bool = False, step: int = 97) -> None:
+    """Sampled every `step` pixels from the start to the results' end, each
+    step's movement is one column's or the other's and adds up to the step:
+    neither both at once (a sum of two steps) nor a dead stretch where nothing
+    moves (a sum short of the step)."""
+    first, second = phases(rest)
+    before = scroll_to(page, 0, root=root)
+    y = 0
+    while y < first + second:
+        y = min(y + step, first + second)
+        after = scroll_to(page, y, root=root)
+        moved_settings = before["settings"]["top"] - after["settings"]["top"]
+        moved_results = before["generate"]["top"] - after["generate"]["top"]
+        actual = after["scrolled"] - before["scrolled"]
+        assert moved_settings >= -0.5 and moved_results >= -0.5, (y, before, after)
+        assert abs(moved_settings + moved_results - actual) <= 1, (y, moved_settings, moved_results, actual)
+        before = after
+
+
+class TestOneScrollerForThePage:
+    """Asked for: "the entire page takes one scroll action ... first move the
+    left column until I reach bottom, then the right column until I reach
+    bottom ... both columns should never move at the same time ... the
+    generation button stays locked in position as I scroll through the left
+    column ... a single master control that controls the two columns from one
+    master scroller". The page's own scroller is that control, and the
+    columns are held by sticky positioning from two measured numbers
+    (model_chain_theme.js, "one scroller for the page"). Before this, the
+    results column held only while the settings were the taller, both moved
+    together over the infotext's height at the end, and Generate crept up to
+    the bar's margin before holding. Run with the Forge Assistant's scripts
+    on the page, as on Forge: its fill is what puts the generation details
+    under the view."""
+
+    @pytest.mark.parametrize("grid_row", [False, True], ids=["flex-row", "forges-grid-row"])
+    def test_the_settings_scroll_first_with_generate_locked_then_the_results_with_the_settings_held(self, browser, grid_row):
+        page = open_page(browser, assistant=USER_CSS_WHOLE, grid_row=grid_row)
+        settle(page, 8)
+        rest = scroll_to(page, 0)
+        assert rest["attribute"] == "settings-first", rest
+        assert rest["settingsPosition"] == "sticky" and rest["settingsHeld"] is True, rest
+        assert rest["settingsZ"] == "1", "a step above the results column's stacking context"
+        first, second = phases(rest)
+        assert first > 600 and second > 100, (first, second)
+        assert abs(rest["row"]["height"] - (rest["settings"]["height"] + second)) <= 1, rest
+
+        # The first phase: the settings move by the scroll, Generate not at all --
+        # not even the margin it used to creep up to the bar by.
+        half = scroll_to(page, first // 2)
+        assert abs(half["generate"]["top"] - rest["generate"]["top"]) <= 0.5, (half["generate"], rest["generate"])
+        assert abs(half["settings"]["top"] - (rest["settings"]["top"] - first // 2)) <= 0.5, half
+        # The boundary: the settings' bottom edge at the view's bottom, Generate still.
+        edge = scroll_to(page, first)
+        assert abs(edge["settings"]["bottom"] - rest["viewBottom"]) <= 1, edge
+        assert abs(edge["generate"]["top"] - rest["generate"]["top"]) <= 0.5, edge
+        # The second phase: the settings held at their end, the results moving by the scroll.
+        mid = scroll_to(page, first + second // 2)
+        assert abs(mid["settings"]["bottom"] - rest["viewBottom"]) <= 1, mid
+        assert abs(mid["generate"]["top"] - (rest["generate"]["top"] - second // 2)) <= 1, mid
+        end = scroll_to(page, first + second)
+        assert abs(end["results"]["bottom"] - rest["viewBottom"]) <= 1, end
+        assert abs(end["settings"]["bottom"] - rest["viewBottom"]) <= 1, end
+        assert end["jump"]["back"] is True and end["jump"]["label"] == "Back to the top", end["jump"]
+        one_column_at_a_time(page, rest)
+        page.close()
+
+    def test_with_the_settings_docked_in_the_assistants_panel_the_page_scrolls_the_results_alone(self, browser):
+        """The Forge Assistant draws the settings column in its panel
+        (`position: fixed`, out of the row, scrolling inside itself and
+        containing its own scrolling): the row is then the results' height,
+        nothing is held, and the page scrolls the results from the first
+        pixel. Released, the two phases are back."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE, grid_row=True)
+        settle(page, 8)
+        rest = scroll_to(page, 0)
+        assert rest["rowMin"] and rest["hold"], rest
+
+        page.evaluate("forgeAssistant.dock.place({left: 100, top: 100, width: 340, height: 600})")
+        settle(page, 8)
+        docked = scroll_to(page, 0)
+        assert docked["settingsPosition"] == "fixed" and docked["settingsHeld"] is False, docked
+        assert docked["rowMin"] == "" and docked["hold"] == "" and docked["resultsHold"] == "", docked
+        assert docked["settingsOverscroll"] == "contain", "a wheel at the column's end moves no page"
+        assert abs(docked["row"]["height"] - docked["results"]["height"]) <= 1, docked
+        moved = scroll_to(page, 150)
+        assert abs(moved["generate"]["top"] - (docked["generate"]["top"] - 150)) <= 0.5, "the results from the start"
+        assert abs(moved["settings"]["top"] - docked["settings"]["top"]) <= 0.5, "the docked column where the panel put it"
+        # The column's own scrolling, in the panel, moves no page.
+        page.evaluate("document.querySelector('#txt2img_settings').scrollTop = 300")
+        settle(page, 2)
+        inner = page.evaluate(SCROLLED)
+        assert page.evaluate("document.querySelector('#txt2img_settings').scrollTop") == 300
+        assert inner["scrolled"] == 150, inner["scrolled"]
+
+        page.evaluate("forgeAssistant.dock.release()")
+        settle(page, 8)
+        back = scroll_to(page, 0)
+        assert back["settingsPosition"] == "sticky" and back["settingsHeld"] is True, back
+        assert back["rowMin"] == rest["rowMin"] and back["hold"] == rest["hold"], (back, rest)
+        first, _ = phases(back)
+        again = scroll_to(page, first // 2)
+        assert abs(again["generate"]["top"] - back["generate"]["top"]) <= 0.5, again
+        page.close()
+
+    def test_under_focus_mode_the_workspace_is_the_scroller_and_the_phases_are_the_same(self, browser):
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', forgeAssistant.shell.host)")
+        assert entered["ok"] is True
+        settle(page, 8)
+        rest = scroll_to(page, 0, root=True)
+        assert rest["attribute"] == "settings-first" and rest["settingsHeld"] is True, rest
+        first, second = phases(rest)
+        assert first > 600 and second > 100, (first, second)
+        half = scroll_to(page, first // 2, root=True)
+        assert abs(half["generate"]["top"] - rest["generate"]["top"]) <= 0.5, (half["generate"], rest["generate"])
+        edge = scroll_to(page, first, root=True)
+        assert abs(edge["settings"]["bottom"] - rest["viewBottom"]) <= 1, edge
+        assert abs(edge["generate"]["top"] - rest["generate"]["top"]) <= 0.5, edge
+        end = scroll_to(page, first + second, root=True)
+        assert abs(end["results"]["bottom"] - rest["viewBottom"]) <= 1, end
+        assert abs(end["settings"]["bottom"] - rest["viewBottom"]) <= 1, end
+        one_column_at_a_time(page, rest, root=True)
+        # The Details button scrolls the workspace, not the page under it.
+        page.emulate_media(reduced_motion="reduce")
+        scroll_to(page, 0, root=True)
+        page.click("#mc-theme-jump-txt2img")
+        page.wait_for_function("(y) => Math.abs(document.querySelector('.forge-assistant-focus-root').scrollTop - y) <= 1",
+                               arg=first + second)
+        settle(page, 2)
+        there = page.evaluate(SCROLLED)
+        assert abs(there["results"]["bottom"] - rest["viewBottom"]) <= 1 and there["jump"]["back"] is True, there
+        assert page.evaluate("window.scrollY") == 0, "the page under the workspace did not move"
+
+        page.evaluate("forgeAssistant.focus.exit()")
+        settle(page, 8)
+        back = scroll_to(page, 0)
+        first_back, _ = phases(back)
+        again = scroll_to(page, first_back // 2)
+        assert abs(again["generate"]["top"] - back["generate"]["top"]) <= 0.5, again
+        page.close()
+
+    def test_a_settings_column_shorter_than_the_view_is_held_where_it_rests_while_the_results_scroll(self, browser):
+        page = open_page(browser, assistant=USER_CSS_WHOLE, settings_blocks=3)
+        settle(page, 8)
+        rest = scroll_to(page, 0)
+        assert rest["settings"]["bottom"] < rest["viewBottom"], rest
+        assert rest["settingsHeld"] is True and rest["hold"] == rest["resultsHold"], rest
+        _, second = phases(rest)
+        assert second > 100, second
+        moved = scroll_to(page, second // 2)
+        assert abs(moved["settings"]["top"] - rest["settings"]["top"]) <= 0.5, "the settings where they rest"
+        assert abs(moved["generate"]["top"] - (rest["generate"]["top"] - second // 2)) <= 1, moved
+        page.close()
+
+    def test_stacked_under_the_settings_as_on_a_phone_nothing_is_held(self, browser):
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        page.evaluate("document.querySelector('#txt2img_results').parentElement.style.display = 'block'")
+        page.evaluate("window.dispatchEvent(new Event('resize'))")
+        settle(page, 8)
+        rest = scroll_to(page, 0)
+        assert rest["results"]["top"] >= rest["settings"]["bottom"] - 1, "the results under the settings"
+        assert rest["rowMin"] == "" and rest["hold"] == "" and rest["settingsHeld"] is False, rest
+        moved = scroll_to(page, 300)
+        assert abs(moved["settings"]["top"] - (rest["settings"]["top"] - 300)) <= 0.5, moved
+        assert abs(moved["results"]["top"] - (rest["results"]["top"] - 300)) <= 0.5, moved
+        page.close()
+
+    def test_the_details_button_jumps_to_the_results_end_and_back(self, browser):
+        """At the end of the gallery's button row, drawn as its other tool
+        buttons: the generation details are a whole settings column away,
+        and one press is the price asked for instead of the flicks."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        page.emulate_media(reduced_motion="reduce")
+        settle(page, 8)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        assert rest["jump"] == {"label": "Generation details", "back": False, "parent": "image_buttons_txt2img",
+                                "svg": True, "last": True}, rest["jump"]
+        assert rest["buttons"][:-1] == ["txt2img_open_folder", "save_txt2img"], rest["buttons"]
+
+        page.click("#mc-theme-jump-txt2img")
+        page.wait_for_function("(y) => Math.abs(window.scrollY - y) <= 1", arg=first + second)
+        settle(page, 2)
+        there = page.evaluate(SCROLLED)
+        assert abs(there["results"]["bottom"] - rest["viewBottom"]) <= 1, there
+        assert there["jump"]["back"] is True and there["jump"]["label"] == "Back to the top", there["jump"]
+
+        page.click("#mc-theme-jump-txt2img")
+        page.wait_for_function("window.scrollY === 0")
+        settle(page, 2)
+        home = page.evaluate(SCROLLED)
+        assert home["jump"]["back"] is False and home["jump"]["label"] == "Generation details", home["jump"]
+        page.close()
+
+    def test_applied_again_the_button_and_the_numbers_are_written_once(self, browser):
+        """The button is appended once and its glyph rewritten only when the
+        page's end comes or goes: an append or a glyph on every apply, or on
+        every scroll, would be a child-list change that raises Forge's next
+        after-update itself."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        page.evaluate(HEARD)
+        for _ in range(3):
+            page.evaluate("hooks.after.forEach((fn) => fn())")
+            settle(page, 6)
+        scroll_to(page, 200)
+        scroll_to(page, 400)
+        scroll_to(page, 0)
+        assert page.evaluate("window.heard") == []
+        page.close()
+
+    def test_off_leaves_the_columns_as_the_split_view_had_them(self, browser):
+        page = open_page(browser, assistant=USER_CSS_WHOLE)
+        settle(page, 8)
+        page.evaluate("opts.model_chain_theme_scroll = false")
+        changed(page)
+        settle(page, 6)
+        found = scroll_to(page, 0)
+        assert found["attribute"] is None and found["jump"] is None, found
+        assert found["settingsPosition"] == "static" and found["settingsHeld"] is False, found
+        assert found["rowMin"] == "" and found["hold"] == "" and found["resultsHold"] == "", found
+        assert found["resultsPosition"] == "sticky" and found["resultsTop"] == "80px", "the split view's own hold"
+        assert found["buttons"] == ["txt2img_open_folder", "save_txt2img"], found["buttons"]
         page.close()
 
 
@@ -2098,6 +2390,8 @@ class TestStandingDownAndOff:
         assert found["clearHtml"] == "🗑️"
         assert found["position"] != "sticky"
         assert page.evaluate("document.querySelectorAll('[data-mc-theme-moved], [data-mc-theme-icon]').length") == 0
+        assert page.evaluate("document.querySelectorAll('[data-mc-theme-scroll], .mc-theme-scroll-settings, .mc-theme-jump').length") == 0
+        assert page.evaluate("getComputedStyle(document.querySelector('#txt2img_settings')).position") == "static"
         networks = page.evaluate(NETWORKS)
         assert networks["chrome"] is None and networks["host"]["marked"] is False
         assert networks["extraTabsChildren"] == ["tab-nav scroll-hide", "txt2img_generation",

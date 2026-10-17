@@ -229,7 +229,8 @@ class TestTheSettingsAsRead:
                      mc_theme.OPT_QUICK_WIDTH, mc_theme.OPT_PROMPTS, mc_theme.OPT_ICONS,
                      mc_theme.OPT_TITLE, mc_theme.OPT_TAB_LABELS, mc_theme.OPT_CONFIRM_UNLOAD,
                      mc_theme.OPT_FONT, mc_theme.OPT_NETWORKS, mc_theme.OPT_NETWORKS_WIDTH,
-                     mc_theme.OPT_NETWORKS_CARD, mc_theme.OPT_NETWORKS_MODE, mc_theme.OPT_IMAGE_INFO):
+                     mc_theme.OPT_NETWORKS_CARD, mc_theme.OPT_NETWORKS_MODE, mc_theme.OPT_IMAGE_INFO,
+                     mc_theme.OPT_SCROLL):
             assert f'"{name}"' in script, name
 
     def test_the_defaults_here_match_pythons(self):
@@ -245,10 +246,57 @@ class TestTheSettingsAsRead:
         assert found["defaults"]["networksCard"] == mc_theme.NETWORKS_CARD_DEFAULT
         assert found["defaults"]["networksMode"] == mc_theme.NETWORKS_LAYOUT_DEFAULT
         assert found["defaults"]["info"] is True
+        assert found["defaults"]["scroll"] is True
+
+    def test_the_one_scroller_switch_reads_as_a_boolean_and_is_on_unset(self):
+        found = run("""
+            out.off = T.normalise({scroll: false}).scroll;
+            out.on = T.normalise({scroll: 1}).scroll;
+            out.unset = T.normalise({}).scroll;
+        """)
+
+        assert found == {"off": False, "on": True, "unset": True}
+
+
+class TestOneScrollerForThePage:
+    """The plan behind the two phases (model_chain_theme.js, `scrollPlan`):
+    the settings column's sticky offset and the row's least height, from the
+    columns' heights, the view's height under where the results are held,
+    and the offset that holds them. Chromium holds the layout that follows
+    (tests/test_theme_layout.py); node holds the arithmetic."""
+
+    def test_a_tall_settings_column_is_held_once_its_bottom_meets_the_views(self):
+        # The user's page: 2206 px of settings, 1035 of results, the results
+        # held 88 px down with 804 px of view under that. The settings' top
+        # is held at 88 + 804 - 2206, their bottom at the view's bottom; the
+        # row is the settings plus the 231 px of results under the view.
+        found = run("out.plan = T.scrollPlan(2206, 1035, 804, 88);")
+
+        assert found["plan"] == {"top": -1314, "minHeight": 2437}
+
+    def test_a_short_settings_column_is_held_where_the_results_are(self):
+        found = run("out.plan = T.scrollPlan(256, 1035, 804, 88);")
+
+        assert found["plan"] == {"top": 88, "minHeight": 487}
+
+    def test_results_that_fit_the_view_leave_the_row_the_settings_height(self):
+        found = run("out.plan = T.scrollPlan(2206, 700, 804, 88);")
+
+        assert found["plan"] == {"top": -1314, "minHeight": 2206}
+
+    def test_the_numbers_are_whole_pixels(self):
+        found = run("out.plan = T.scrollPlan(2206.4, 1035.3, 803.6, 88);")
+
+        assert found["plan"] == {"top": -1315, "minHeight": 2438}
+
+    def test_it_listens_for_the_scroll_at_the_document_for_the_details_button(self):
+        found = run("out.listeners = listeners;")
+
+        assert "document:scroll" in found["listeners"]
 
 
 def T_DEFAULTS():
-    return {"enabled": False, "split": True, "quick": "collapsed", "quickWidth": 280,
+    return {"enabled": False, "split": True, "scroll": True, "quick": "collapsed", "quickWidth": 280,
             "prompts": True, "icons": True, "title": "Forge", "labels": "as_forge",
             "confirm": False, "font": "", "networks": "collapsed", "networksWidth": 340,
             "networksCard": 120, "networksMode": "drawer", "info": True}
@@ -474,6 +522,12 @@ class TestTheStylesheetSection:
                                       ("mc-theme-info-copy", "mc-theme-info-copy"),
                                       ("mc-theme-info-copied", "mc-theme-info-copied"),
                                       ("data-mc-theme-prompts", "data-mc-theme-prompts"),
+                                      ("data-mc-theme-scroll", "data-mc-theme-scroll"),
+                                      ("mc-theme-scroll-settings", "mc-theme-scroll-settings"),
+                                      ("--mc-theme-results-hold", "--mc-theme-results-hold"),
+                                      ("--mc-theme-scroll-hold", "--mc-theme-scroll-hold"),
+                                      ("--mc-theme-scroll-row", "--mc-theme-scroll-row"),
+                                      ("mc-theme-jump", "mc-theme-jump"),
                                       ("data-mc-theme-icon", "mcThemeIcon")):
             assert script_name in script, script_name
             assert css_name in css, css_name

@@ -127,6 +127,64 @@ page it shows once for each rendering of the page's cards (`sortShown`).
 `tests/test_theme_layout.py` carries Forge's sort re-expressed and the hidden
 second render; `tests/test_extra_networks_sort.py` the keys and the default.
 
+**One scroller for the page (2026-10-17).** "When I scroll on text to image
+or image to image view, the entire page scrolls, and in a weird way. The
+generation button seems to scroll with the left side column. The two columns
+scrolling independently seems to impact each other's positioning." Then the
+rule asked for: the page takes one scroll action; the left column moves first,
+down to its bottom, then the right column; the two never move at once;
+Generate stays locked while the left column scrolls; and "scrolling needs to
+now become a single master control that controls the two columns from one
+master scroller" -- with the Forge Assistant's flyout still able to take the
+left column, "so we will need handling to be completely independent for
+gallery column and the configuration column." What the page had: the split
+view's results column was `position: sticky` under the bar, and a sticky
+element never leaves its containing block, the row, which was as tall as the
+taller column. So the results held only while the settings were the taller;
+both moved together over the last stretch, the infotext's height; with few
+settings open or a long infotext the results never held and Generate
+scrolled off with the page; and resting 88 px down with the hold at 80 the
+column crept 8 px up to the bar's margin before holding (measured on the
+layout test page, which has the user's shape). Built (`model_chain_theme.js`,
+"one scroller for the page"; `model_chain_theme_scroll`, on): the master is
+the page's own scroller -- the workspace's under focus mode -- and nothing
+listens to it; the script measures three numbers and the stylesheet holds
+the columns by them with sticky positioning, so the compositor moves them
+(a script moving columns on scroll events would lag the finger on the user's
+Gecko browser). The results column is held where it rests, never above its
+place in the row (`--mc-theme-results-hold`, the greater of the bar's margin
+and its place). The settings column is held once its bottom edge meets the
+view's, by a sticky offset of the view's height less its own -- negative for
+a column taller than the view; a shorter one is held where the results are
+(`--mc-theme-scroll-hold`, `.mc-theme-scroll-settings`, a stacking context a
+step above the results' so what the settings open over them is drawn over
+them). And the row is given the least height the two phases need: the
+settings column's plus the results' part under the view
+(`--mc-theme-scroll-row`), so the results column is released exactly when
+the settings end (`scrollPlan`, pure). Where the results are held is read off
+the layout while they are held, because Chromium measures a sticky offset
+from inside a scroller's padding and Firefox from its edge, and the settings
+column's offset goes in the same convention. Measured again on every size
+change of the row and the columns, every change of the body's classes (focus
+coming and going changes the scroller without resizing anything), every
+window resize and every apply, written only when changed. The scenarios: the
+settings column docked in the assistant's panel is `position: fixed` by the
+dock's rule, out of the row, scrolling inside the panel with its own
+`overscroll-behavior: contain`; the script writes nothing for it, the row is
+the results' height, nothing holds, and the page scrolls the results from
+the first pixel; released, the two phases are back. Under focus mode the
+workspace is the scroller and the phases are the same. A settings column
+shorter than the view is held where it rests while the results scroll.
+Stacked under the results on a phone, nothing is written. A **Details**
+button at the end of the gallery's button row (`mc-theme-jump`, appended
+once, its glyph rewritten only when the page's end comes or goes) takes the
+scroller to the results' end and back to the top from there: the one price
+of the order, one press instead of the flicks. `tests/test_theme_layout.py`
+holds all of it in Chromium with the assistant's scripts on the page, on the
+flex row and on Forge's resize-handle grid row, sampled every 97 px so that
+each step's movement is one column's and adds up to the step; sixteen
+mutations each fail a test. Not run on the user's machine or in Firefox.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own

@@ -2278,6 +2278,21 @@ resize already asks for a measure) and the `!important` on the gallery's height
 (a two-id rule outranks the user.css without it). Neither has run on the
 user's machine or in Firefox.
 
+### The theme's one scroller, and the dock (2026-10-17)
+
+The Model Chain theme orders the page's scrolling (docs/24 §0, "One scroller
+for the page"): the settings column first, the results column held where it
+rests, then the results with the settings held, by sticky positioning from
+two measured numbers on the row. The dock is its first stand-down: a docked
+column is `position: fixed` by the rule above, out of the row, and the theme
+writes nothing for it, so the row is the results' height, nothing holds, and
+the page scrolls the results alone while the column scrolls in the panel --
+whose `overscroll-behavior: contain` keeps a wheel at the column's end from
+moving the page. `release()` puts the column back and the theme measures
+again (it watches the row and both columns for their size). The fill is
+untouched: it reads where the results column is held off the layout, as
+before, and the theme reads the same thing the same way.
+
 ## 3.30 Free Float on a phone
 
 Reported against the build above: "on mobile the fly out menu will be forced to

@@ -59,6 +59,7 @@ USER_CONFIG = {
 DEFAULTS = {
     mc_theme.OPT_ENABLED: False,
     mc_theme.OPT_SPLIT: True,
+    mc_theme.OPT_SCROLL: True,
     mc_theme.OPT_QUICK: "collapsed",
     mc_theme.OPT_QUICK_WIDTH: 280,
     mc_theme.OPT_PROMPTS: True,
