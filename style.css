@@ -1546,8 +1546,18 @@
    lower moved up to it first). Under the Forge Assistant's focus mode the
    header is hidden and the workspace is the whole window: its focus script
    closes this offset to the workspace's own inset (an inline `top`, put
-   back on leaving), and the theme's layout test holds it to that. */
-:root[data-mc-theme="on"] [id$="_results"] {
+   back on leaving), and the theme's layout test holds it to that.
+
+   By id as well as by the attribute: Forge Neo's own stylesheet makes
+   `#txt2img_results` and `#img2img_results` sticky at `top: 0.5em`, and an
+   id outranks any number of attributes, so on the user's page the column
+   was held half an em from the window's top, under the 64 px header, with
+   Generate cut off -- "the generation button scroll off page" in their first
+   report -- while the layout test page, which carried no such rule, held it
+   under the bar. The same ids, under the theme's attribute, outrank it. */
+:root[data-mc-theme="on"] [id$="_results"],
+:root[data-mc-theme="on"] #txt2img_results,
+:root[data-mc-theme="on"] #img2img_results {
     position: sticky;
     top: var(--mc-theme-results-hold, calc(var(--mc-theme-header) + 16px));
 }
@@ -1572,9 +1582,22 @@
    phone's page: the script writes nothing for either, and with nothing
    written both rules fall back to `auto`. The held column is a stacking
    context, as the results column is already; a step above it, so what the
-   settings open over the results -- a hint, a list -- is drawn over them. */
+   settings open over the results -- a hint, a list -- is drawn over them.
+
+   The row is Forge's resize-handle grid on a wide window (its script writes
+   `display: grid` inline), and Forge's `.unequal-height` says
+   `align-content: flex-start`, so the grid's one row track keeps its
+   content height and the room a `min-height` adds lies under the track.
+   Chromium and Firefox both hold a sticky grid item inside the grid
+   container's content box, so the hold is whole either way (measured in
+   both); but Forge's divider, `.resize-handle { height: 100% }`, is as tall
+   as the track, and stopped the settings column's height short of the
+   row's end through the second phase. The least height goes on the track
+   as well, `grid-auto-rows`, which the one implicit row takes, so the
+   divider runs to the row's end; a flex row has no tracks. */
 :root[data-mc-theme="on"] [data-mc-theme-scroll="settings-first"] {
     min-height: var(--mc-theme-scroll-row, auto);
+    grid-auto-rows: minmax(var(--mc-theme-scroll-row, auto), auto);
 }
 
 :root[data-mc-theme="on"] [data-mc-theme-scroll="settings-first"] > .mc-theme-scroll-settings {

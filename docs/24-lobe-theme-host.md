@@ -185,6 +185,49 @@ flex row and on Forge's resize-handle grid row, sampled every 97 px so that
 each step's movement is one column's and adds up to the step; sixteen
 mutations each fail a test. Not run on the user's machine or in Firefox.
 
+**The user's first run (2026-10-17, the same day).** "This didnt work ... im
+able to partially scroll the page, and instead of the left column moving
+only, i see the right column move down and the generation button gets cut
+off a bit." The screenshot showed the results column moving with the page
+over its first fifty pixels, Generate going under the header. Not Gecko's
+doing: a Gecko build (Zen, Firefox 158, driven through geckodriver; Mozilla's
+own hosts are refused from this container) held the layout test page exactly
+as Chromium does, with and without LibreWolf's fingerprinting defence and
+letterboxing. The difference was the page, found by building Txt2Img in
+Forge's shape on stock Gradio 4.40.0 with **Forge Neo's own `style.css`**,
+read from its repository and served as Forge serves it, as `<link>` tags
+(Gradio's `css=` prefixes every selector with its container class and
+breaks a `:root` selector on a second line of a list): Forge makes
+`#img2img_results, #txt2img_results, #extras_results { position: sticky;
+top: 0.5em }` itself, and an id outranks the theme's
+`:root[data-mc-theme="on"] [id$="_results"]`, so on the user's page the
+column had been held half an em from the window's top, under the 64 px
+header, since the theme was built -- "the generation button scroll off
+page" in their first report was this rule, not the row's height -- while
+the layout test page, which carried no such rule, held it under the bar.
+The hold is written on the same two ids under the theme's attribute now
+(1,2,0 against 1,0,0), and the test page carries Forge's rule, under which
+the first build fails. Found beside it: Forge's `.unequal-height {
+align-content: flex-start }` keeps a grid's one row track at its content
+height, so the room `min-height` adds lies under the track; both engines
+still hold a sticky grid item inside the grid container's content box
+(measured with the rule reverted), but Forge's divider, `.resize-handle {
+height: 100% }`, is as tall as the track and stopped at the settings
+column's end through the second phase, so the least height goes on the
+track as well (`grid-auto-rows: minmax(..., auto)`; the test page carries
+Forge's divider rule and holds the divider to the row's height). And a
+flaw of the first build that Gecko's run showed before the page did: a
+measure taken in the second phase read the column's pushed position as its
+hold and shrank the row -- the hold is the offset from the scroller's edge
+now, with the browser's own addition to it read only while the column is
+drawn held and kept per scroller (`entry.shift`), and a test measures in
+the second phase and expects the same numbers. Checked on the Forge-shaped
+Gradio page in Chromium and in the Gecko build: the column locked at its
+resting place through the first phase, the two phases exact. Gradio's
+container says `overflow: hidden`, under which nothing sticky in it could
+hold against the page; Forge's stylesheet puts `overflow: visible
+!important` back on it, which is why the theme's header sticks at all.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own
