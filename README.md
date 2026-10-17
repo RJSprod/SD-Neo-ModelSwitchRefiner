@@ -6665,7 +6665,14 @@ one second.
   settings column away: a **Details** button at the end of the gallery's
   button row takes the scroller to the results' end, and back to the top
   from there. Off, the split view's hold alone: the results column held a
-  margin under the bar while the row is taller than it.
+  margin under the bar while the row is taller than it. The hold is written
+  by id as well as by attribute: Forge Neo's own stylesheet makes
+  `#txt2img_results` and `#img2img_results` sticky half an em from the
+  window's top, an id outranks any attribute selector, and on the user's
+  page that rule had been holding the column under the header, Generate cut
+  off, all along; and the row's least height goes on its grid track too, so
+  Forge's divider between the columns, as tall as the track, runs to the
+  row's end through the second phase.
 - **A generation without the Interrupt and Skip row.** While Forge's progress
   bar runs, the row is not drawn: the bar is the results panel's first thing,
   14 px tall with its line of text at 11 px, and the Forge Assistant's fitted
