@@ -7,9 +7,11 @@ folder destination makes -- is tests/test_gallery_quadrant_js.py, in Chromium.
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import types
+import typing
 from pathlib import Path
 
 import pytest
@@ -318,3 +320,72 @@ class TestTheRoute:
         else:
             assert installed is True and app.added == [(quadrant.ROUTE, ["POST"])]
             assert quadrant.install(None, app) is True and len(app.added) == 1
+
+    def test_the_handlers_request_annotation_resolves_where_fastapi_looks(self):
+        """FastAPI reads a postponed annotation as a string and evaluates it
+        against the handler's module globals. With ``Request`` imported inside
+        ``install()`` the string resolved to nothing, FastAPI took ``request``
+        for a required query parameter, and every save answered HTTP 422 --
+        the user's report from a phone. Where this container has no FastAPI, a
+        stand-in with the two names stands for it."""
+
+        class App:
+            def __init__(self):
+                self.routes, self.handlers = [], []
+
+            def add_api_route(self, path, handler, methods):
+                self.handlers.append(handler)
+                self.routes.append(types.SimpleNamespace(path=path))
+
+        stubbed = []
+        try:
+            import fastapi  # noqa: F401
+        except Exception:
+            fastapi = types.ModuleType("fastapi")
+            fastapi.Request = type("Request", (), {})
+            responses = types.ModuleType("fastapi.responses")
+            responses.JSONResponse = type("JSONResponse", (), {})
+            fastapi.responses = responses
+            for name, module in (("fastapi", fastapi), ("fastapi.responses", responses)):
+                stubbed.append(name)
+                sys.modules[name] = module
+            importlib.reload(quadrant)
+        try:
+            app = App()
+            assert quadrant.install(None, app) is True
+            (handler,) = app.handlers
+            # typing.get_type_hints evaluates the strings against handler.__globals__,
+            # exactly as FastAPI's get_typed_signature does.
+            hints = typing.get_type_hints(handler)
+            assert hints["request"] is sys.modules["fastapi"].Request
+            assert quadrant.Request is sys.modules["fastapi"].Request
+        finally:
+            if stubbed:
+                for name in stubbed:
+                    sys.modules.pop(name, None)
+                importlib.reload(quadrant)
+                assert quadrant.Request is None
+
+    def test_a_browsers_post_reaches_the_handler_on_a_real_fastapi_app(self, tmp_path, monkeypatch):
+        """The whole route under FastAPI's own request parsing, where it is
+        installed: the body is read, the picture is copied byte for byte (its
+        PNG info with it), never a 422 about a missing ``request`` query
+        parameter."""
+        fastapi = pytest.importorskip("fastapi")
+        testclient = pytest.importorskip("fastapi.testclient")
+        data = tmp_path / "data"
+        source = picture(data / "outputs" / "txt2img-images" / "2026-10-17")
+        folder = tmp_path / "saved"
+        monkeypatch.setattr(quadrant, "data_directory", lambda: data)
+        host_shared().opts = folder_opts(tmp_path, folder=str(folder))
+        try:
+            app = fastapi.FastAPI()
+            assert quadrant.install(None, app) is True
+            client = testclient.TestClient(app)
+            answer = client.post(quadrant.ROUTE, json={"src": file_url(source, "http://testserver")},
+                                 headers={"Origin": "http://testserver"})
+        finally:
+            del host_shared().opts
+        assert answer.status_code == 200, answer.text
+        assert answer.json()["ok"] is True
+        assert (folder / source.name).read_bytes() == source.read_bytes()
