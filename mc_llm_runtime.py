@@ -5214,7 +5214,8 @@ class Runtime:
         # answer lives when a placement and a reply speed disagree, and a log
         # nobody can find is a log nobody reads. It is one line per start, and
         # starts are rare.
-        logger.info("Model Chain: llama-server log — %s", log_path)
+        logger.info("Model Chain: llama-server log — llama-server.log in the logs folder of "
+                    "the LLM data directory")
         if configuration.uses_sycl_compute:
             # Before the wait rather than after it. See
             # ``mc_llm_sycl.FIRST_START_SLOW``: the minutes this can take are
@@ -5816,8 +5817,8 @@ class Runtime:
             # Not silence. The line above this one said where the model was
             # sent; with nothing after it there is no way to tell a report that
             # said everything was fine from a report that was never read.
-            logger.info("Model Chain: llama.cpp wrote no load report this run — see %s",
-                        mc_llm_paths.app_paths().logs / "llama-server.log")
+            logger.info("Model Chain: llama.cpp wrote no load report this run — see "
+                        "llama-server.log in the logs folder of the LLM data directory")
             return
         logger.info("Model Chain: llama.cpp reports %s", offload.describe())
         if (offload.spilled and negotiated.placement.on_gpu

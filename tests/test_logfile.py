@@ -85,7 +85,10 @@ class TestAttaching:
         mc_logfile.attach()
 
         written = (root / "logs" / mc_logfile.FILENAME).read_text(encoding="utf-8")
-        assert str(root / "logs" / mc_logfile.FILENAME) in written
+        assert f"also being written to {mc_logfile.FILENAME} in the logs folder" in written
+        # By name, never by path: a log never carries a path on this machine
+        # (mc_log_privacy), the folder of the log file included.
+        assert str(root) not in written
 
     def test_attaching_twice_leaves_one_handler(self, root, detached):
         """`on_app_started` can fire more than once across a UI reload, and a

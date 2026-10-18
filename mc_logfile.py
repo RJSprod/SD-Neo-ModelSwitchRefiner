@@ -108,5 +108,6 @@ def attach(_demo=None, _app=None) -> bool:
         logger.debug("Model Chain: could not open the log file", exc_info=True)
         return False
 
-    logger.info("Model Chain: this log is also being written to %s", target)
+    logger.info("Model Chain: this log is also being written to %s in the logs folder of "
+                "the LLM data directory", FILENAME)
     return True

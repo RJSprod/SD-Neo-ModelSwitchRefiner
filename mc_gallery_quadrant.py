@@ -331,7 +331,8 @@ def save(payload: Mapping, *, opts, roots: Iterable[Path] | None = None,
     folder = resolve_folder(getattr(opts, OPT_FOLDER, ""), data_dir)
     source = resolve_source(str(payload.get("src") or ""), roots if roots is not None else output_roots(opts, data_dir))
     written = save_copy(source, folder)
-    logger.info("Model Chain: Gallery Quadrant saved %s to %s", source.name, written)
+    # Nothing is logged: the file's name and the folder are the user's own
+    # (mc_log_privacy). The answer below reaches only the page that asked.
     return {"ok": True, "path": str(written), "name": written.name, "folder": str(folder)}
 
 

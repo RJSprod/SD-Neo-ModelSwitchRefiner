@@ -81,7 +81,7 @@ import threading
 import time
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("model_chain")
 
 SLOT_SAVE_FLAG = "--slot-save-path"
 """llama-server's directory for slot files. It must exist when the server starts:

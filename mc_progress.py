@@ -304,9 +304,8 @@ def _load() -> dict[str, float]:
             data = json.load(handle)
     except Exception:
         logger.warning(
-            "Model Chain: could not read measured timings from %s; starting from the "
+            "Model Chain: could not read the measured timings file; starting from the "
             "built-in estimates instead",
-            file,
             exc_info=True,
         )
         return _rates

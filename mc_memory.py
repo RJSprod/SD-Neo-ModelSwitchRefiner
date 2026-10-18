@@ -54,6 +54,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import mc_log_privacy
 import mc_lora
 
 
@@ -135,6 +136,10 @@ def _make_logger() -> logging.Logger:
         setup_logger(log)
     except Exception:
         log.setLevel(logging.INFO)
+    # No path on this machine reaches a handler, whatever a line says: the
+    # user's rule, held by mc_log_privacy. Before the clock, so the stamped
+    # message is the redacted one.
+    mc_log_privacy.install(log)
     if not any(isinstance(existing, _Timestamped) for existing in log.filters):
         log.addFilter(_Timestamped())
     return log
@@ -156,6 +161,23 @@ OPT_PRELOAD = "model_chain_preload_stage1"
 OPT_PRESERVE_LORA = "model_chain_preserve_lora"
 OPT_VRAM_RESERVE = "model_chain_vram_reserve_gb"
 OPT_WARM_STAGE_2 = "model_chain_warm_stage_2"
+
+OPT_RESTORE_ENCODERS = "model_chain_restore_encoders"
+"""Whether a warm-up moves Stage 1's text encoder and VAE back onto the card.
+
+Off, a warm-up moves the diffusion model and leaves the text encoder and the
+VAE wherever the host put them -- in system RAM once the host's sampler has
+pushed them off to make room for a batch's activations -- and the host loads
+them again when a new prompt has to be encoded or a latent decoded. On, the
+warm-up moves everything back, which is what it did before this setting
+existed: a pass at a batch size above one then pushes the encoder off again
+before its first step, and every generation pays the move twice.
+"""
+
+RESTORE_ENCODERS_DEFAULT = False
+
+WARM_EVERYTHING = ("unet", "clip", "vae")
+WARM_DIFFUSION = ("unet",)
 
 PRELOAD_DEFAULT = False
 """Off by default: the preload is the one mechanism here that leaves the
@@ -432,6 +454,12 @@ def observe_activation_peak(width: int, height: int, stage: str = "", batch: int
     only as a *floor* on the reserve and only when it exceeds the static
     estimate, so an under-reading changes nothing and an over-reading is capped.
 
+    The window opens with :func:`begin_pass_observation` before the generation,
+    and for a Stage 1 pass is opened again at its first sampling step by
+    :mod:`mc_working_vram`, so weights that left the card before sampling no
+    longer count as activations there; what the sampling and the decode
+    allocate still does.
+
     Returns the bytes-per-megapixel figure now in force, or 0 if nothing could
     be measured.
     """
@@ -686,10 +714,11 @@ class ModelChainError(RuntimeError):
 #
 # with nothing protected. A request larger than what is free beside the
 # resident weights evicts the text encoder, and the VAE with it, before the
-# first step -- and the warm-up after the generation moves them straight back.
-# Every generation then pays the same move twice, once out and once in, and
-# the console shows only ``Moving model(s) has taken 4.55 seconds`` with no
-# word on why. This is that word.
+# first step -- and the warm-up after the generation moved them straight back,
+# until OPT_RESTORE_ENCODERS (off by default) left them where the host put
+# them. With it on, every generation pays the same move twice, once out and
+# once in, and the console shows only ``Moving model(s) has taken 4.55
+# seconds`` with no word on why. This is that word.
 #
 # Nothing here changes what the host does. It is a reading, taken from the
 # fields ``sampling_prepare`` reads at the moment it reads them, so the figure
@@ -740,6 +769,9 @@ class SamplerDemand:
     stale_tag: bool
     spilled: int = 0
     """PyTorch allocations already outside dedicated VRAM going into this pass."""
+    counted_once: bool = False
+    """Whether the host counted each image once rather than twice -- the
+    batch-count override at CFG 1 (mc_batch_once)."""
 
     @property
     def request(self) -> int:
@@ -830,7 +862,8 @@ def sampler_demand(unet, noise_shape) -> SamplerDemand | None:
         shape = [int(dim) for dim in noise_shape]
         if unet is None or len(shape) < 2:
             return None
-        activations = max(int(unet.memory_required([2 * shape[0]] + shape[1:])), 0)
+        twice = _host_counts_the_batch_twice()
+        activations = max(int(unet.memory_required([(2 if twice else 1) * shape[0]] + shape[1:])), 0)
 
         preserved = max(int(getattr(unet, "extra_preserved_memory_during_sampling", 0) or 0), 0)
         linked = getattr(unet, "controlnet_linked_list", None)
@@ -861,10 +894,25 @@ def sampler_demand(unet, noise_shape) -> SamplerDemand | None:
             latent="x".join(str(dim) for dim in shape),
             stale_tag=(not on_card) and size > 0 and resident >= size,
             spilled=spilled_vram_bytes(),
+            counted_once=not twice,
         )
     except Exception:
         logger.debug("Model Chain: could not read what the sampler will ask for", exc_info=True)
         return None
+
+
+def _host_counts_the_batch_twice() -> bool:
+    """``shared.batch_cond_uncond`` as the host's ``sampling_prepare`` reads it.
+
+    True on a host without the flag, which is what the host's own expression
+    would read; False only while the batch-count override has flipped it.
+    """
+    try:
+        from modules import shared
+
+        return bool(getattr(shared, "batch_cond_uncond", True))
+    except Exception:
+        return True
 
 
 def describe_sampler_demand(demand: SamplerDemand) -> str:
@@ -880,7 +928,9 @@ def describe_sampler_demand(demand: SamplerDemand) -> str:
     else:
         leaving = "and there is nothing else on the card to evict, so the pass starts short"
 
-    made_of = [f"{demand.activations / _GB:.1f} GB for this pass's activations (a {demand.latent} latent)"]
+    counted = ", each image counted once" if demand.counted_once else ""
+    made_of = [f"{demand.activations / _GB:.1f} GB for this pass's activations "
+               f"(a {demand.latent} latent{counted})"]
     if demand.preserved > 0:
         made_of.append(
             f"{demand.preserved / _GB:.1f} GB reserved during sampling on the model by another "
@@ -1610,6 +1660,58 @@ def file_size_bytes(name: str, modules=None) -> int:
             pass
 
     return total
+
+
+def restore_encoders() -> bool:
+    """The stored value of *Move the text encoder and VAE back to VRAM after a generation*."""
+    return bool(option(OPT_RESTORE_ENCODERS, RESTORE_ENCODERS_DEFAULT))
+
+
+def warm_attrs() -> tuple:
+    """Which of a checkpoint's patchers a warm-up moves back onto the card.
+
+    The diffusion model alone unless the setting asks for the text encoder and
+    the VAE too. Sampling needs the diffusion model on the card every time; the
+    encoder is needed only when a prompt has to be read, which a repeated
+    prompt never is (the host caches the conditioning), and the VAE only at the
+    decode, and the host loads either on demand.
+    """
+    return WARM_EVERYTHING if restore_encoders() else WARM_DIFFUSION
+
+
+def warm_patchers(sd_model=None) -> list:
+    """The patchers a warm-up is responsible for. See :func:`warm_attrs`.
+
+    Empty for a host that cannot be read: a warm-up then behaves exactly as it
+    did before the setting existed, which is what every other reader of the
+    host does here.
+    """
+    try:
+        model = model_data_sd_model() if sd_model is None else sd_model
+        return model_patchers(model, warm_attrs())
+    except Exception:
+        return []
+
+
+def encoders_off_card() -> tuple[int, int]:
+    """Bytes of the loaded checkpoint's text encoder and VAE not on the card, and their total."""
+    resident, total = _residency_of(model_patchers(model_data_sd_model(), attrs=("clip", "vae")))
+    return max(total - resident, 0), total
+
+
+def describe_encoders_left() -> str:
+    """Where the text encoder and VAE are when a warm-up leaves them, or "".
+
+    Empty when the setting moves them back (nothing is left behind) and when
+    nothing of them is off the card (nothing to say).
+    """
+    if restore_encoders():
+        return ""
+    off, _total = encoders_off_card()
+    if off <= 0:
+        return ""
+    return (f"its text encoder and VAE stay in system RAM ({off / _GB:.1f} GB) until a "
+            "prompt or a decode needs them")
 
 
 def model_patchers(sd_model, attrs=("unet", "clip", "vae")) -> list:
@@ -2872,6 +2974,9 @@ class PreloadResult:
     host_ram: str = ""
     """What system RAM looked like when the move finished. See
     :func:`mc_broker.describe_host_ram`."""
+    kept_off: str = ""
+    """What the warm-up left in system RAM on purpose -- the text encoder and
+    VAE, under the setting that leaves them. See :func:`describe_encoders_left`."""
 
     @property
     def megabytes_per_second(self) -> float:
@@ -3261,7 +3366,8 @@ def _preload_worker(width: int, height: int, task: str = RESTORE,
             # warm-up is not a generation, and the generation that does arrive
             # asks this same question for itself.
             make_vram_room(name, current_modules(), width, height, stage=STAGE_1,
-                           reclaim_foreign=False)
+                           reclaim_foreign=False,
+                           moving=None if restore_encoders() else (warm_patchers() or None))
             # Timed on its own, so the rate on the line below is a rate for the
             # move rather than for the whole warm-up. The host-RAM reading that
             # goes beside it is taken *after* this block releases _model_lock --
@@ -3289,6 +3395,7 @@ def _preload_worker(width: int, height: int, task: str = RESTORE,
                 seconds=time.perf_counter() - started,
                 detail=mc_lora.describe(mc_lora.state_of(model_data_sd_model())),
                 moved_seconds=moved_seconds,
+                kept_off=describe_encoders_left(),
             )
 
             # Whatever is left over after Stage 1 is safely warm belongs to
@@ -3478,13 +3585,14 @@ def _log_preload_result(result: PreloadResult | None) -> None:
         logger.info(
             "Model Chain: %s is in VRAM — %.1f GB resident after %.1fs (%.1f GB moved%s, %s). "
             "It stays there until something needs the room, so the next generation starts "
-            "sampling immediately",
+            "sampling immediately%s",
             result.checkpoint,
             result.resident_bytes / _GB,
             result.seconds,
             result.moved_bytes / _GB,
             _moved_at(result),
             result.detail,
+            f"; {result.kept_off}" if result.kept_off else "",
         )
         if result.host_ram:
             logger.info("Model Chain: system RAM as Stage 1 finished warming — %s",
@@ -3538,15 +3646,19 @@ def _load_current_to_gpu(width: int = 0, height: int = 0) -> int:
     from backend import memory_management
     from modules.sd_models import model_data
 
-    patchers = model_patchers(model_data.sd_model)
+    every = model_patchers(model_data.sd_model)
+    patchers = warm_patchers(model_data.sd_model)
     if not patchers:
         return 0
 
     before = free_vram_bytes()
     try:
+        # The reserve is trimmed against the whole checkpoint, not against the
+        # part being moved: it is the pass's headroom, and a pass runs with the
+        # encoder on the card whenever a prompt had to be read first.
         memory_management.load_models_gpu(
             patchers,
-            memory_required=_attainable_headroom(_patcher_bytes(patchers), width, height),
+            memory_required=_attainable_headroom(_patcher_bytes(every), width, height),
         )
     except TypeError:
         memory_management.load_models_gpu(patchers)
@@ -3689,15 +3801,18 @@ def _residency_of(patchers: list) -> tuple[int, int]:
 
 
 def _loaded_residency() -> tuple[int, int]:
-    """The same, for whatever checkpoint is loaded right now.
+    """The same, for what a warm-up moves of the checkpoint loaded right now.
 
     This is the measurement that lets "preloaded" mean generation-ready. The
     host reports partially loaded models honestly -- ``model_loaded_memory()``
     is the share actually on the card -- so comparing it against the patchers'
     full size distinguishes a model that is ready to sample from one that will
     still be moving weights when the first step runs.
+
+    Measured over :func:`warm_patchers`, so a text encoder the warm-up leaves
+    in system RAM on purpose is neither counted against readiness nor moved.
     """
-    return _residency_of(model_patchers(model_data_sd_model()))
+    return _residency_of(warm_patchers())
 
 
 def _loaded_target_patchers(target_name: str) -> list:
@@ -3902,8 +4017,15 @@ plausible rounding difference and far smaller than anything worth evicting for.
 
 def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0,
                    stage: str = STAGE_2, batch: int = 1, *,
-                   reclaim_foreign: bool = True) -> int:
+                   reclaim_foreign: bool = True, moving: list | None = None) -> int:
     """Evict other models from VRAM if the Stage 2 pass will not otherwise fit.
+
+    ``moving`` names the patchers a warm-up is about to move when that is not
+    the whole checkpoint -- the diffusion model alone, under the setting that
+    leaves the text encoder and VAE in system RAM. Room is then made for that
+    part and for the pass's headroom, and none for weights being left where
+    they are: budgeting the encoder's room for a warm-up that will not move it
+    evicted things for nothing and reported the model short of warm.
 
     ``reclaim_foreign=False`` keeps the eviction inside the image family: this
     call may move image weights around, and may not take VRAM from a language
@@ -3954,21 +4076,41 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         # the requirement is computed, so this pass is budgeted with what the
         # last one taught rather than one generation later.
         _observe_reclaim(target_name, resident)
-    required = _pass_requirement(target_name, modules, width, height, own, batch)
-    needed = max(required - resident, 0)
+    if moving is None:
+        required = _pass_requirement(target_name, modules, width, height, own, batch)
+        needed = max(required - resident, 0)
+        headroom = 0
+    else:
+        size = _weights_bytes(target_name, modules, own)
+        headroom = _attainable_headroom(size, width, height, batch)
+        required = size + headroom
+        needed = _pending_bytes(moving) + headroom
     free = free_vram_bytes()
 
     if free <= 0:
         return 0  # cannot query VRAM; leave the host's own management alone
 
     if free + FIT_TOLERANCE_BYTES >= needed:
-        logger.info(
-            "Model Chain: %s needs %.1f GB, has %.1f GB free%s — no eviction needed",
-            stage,
-            required / _GB,
-            free / _GB,
-            f" and {resident / _GB:.1f} GB already resident" if resident else "",
-        )
+        if moving is None:
+            logger.info(
+                "Model Chain: %s needs %.1f GB, has %.1f GB free%s — no eviction needed",
+                stage,
+                required / _GB,
+                free / _GB,
+                f" and {resident / _GB:.1f} GB already resident" if resident else "",
+            )
+        else:
+            moving_resident, moving_total = _residency_of(moving)
+            logger.info(
+                "Model Chain: %s needs %.1f GB for its diffusion model plus %.1f GB of "
+                "headroom, has %.1f GB free%s — no eviction needed",
+                stage,
+                moving_total / _GB,
+                headroom / _GB,
+                free / _GB,
+                f" and {moving_resident / _GB:.1f} GB of it already resident"
+                if moving_resident else "",
+            )
         return 0
 
     pinned_keep, pinned = _pinned_keep(required, stage)
@@ -4361,9 +4503,10 @@ def stage_1_readiness() -> tuple[str, str]:
         return COLD, f"Model Chain: Stage 1 residency is unknown{because}."
 
     if resident >= total * READY_FRACTION:
+        left = describe_encoders_left()
         return WARM, (
             f"Model Chain: Stage 1 is warm — {total / _GB:.1f} GB already in VRAM"
-            f"{because}."
+            f"{because}{'; ' + left if left else ''}."
         )
 
     if resident > 0:

@@ -2554,8 +2554,7 @@ def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> Non
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     say(f"{entry['label']} is installed from your own files.")
-    logger.info("Model Chain: %s is installed from files supplied at %s",
-                entry["label"], source)
+    logger.info("Model Chain: %s is installed from files you supplied", entry["label"])
 
 
 def _copy_supplied(entry: dict, source: Path, staging: Path, say, tick) -> dict:

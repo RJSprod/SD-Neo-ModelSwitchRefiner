@@ -1224,8 +1224,8 @@ def _load(who: str, identifier: str):
         committed = guarded.maintain(store, key,
                                      lambda copy: mc_llm_attachments.adopt(copy, who))
         if committed.written:
-            logger.info("Model Chain: moved this thread's attachments into %s",
-                        mc_llm_attachments.folder(who))
+            logger.info("Model Chain: moved this thread's attachments onto disk, beside the "
+                        "conversation")
             return committed.conversation
     except Exception:
         logger.warning("Model Chain: could not move this thread's attachments onto disk; "

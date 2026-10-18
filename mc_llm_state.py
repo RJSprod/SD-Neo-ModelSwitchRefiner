@@ -671,7 +671,7 @@ def _write(filename: str, document: dict) -> None:
                     raise
                 time.sleep(REPLACE_BACKOFF_SECONDS * (attempt + 1))
     except OSError:
-        logger.warning("Model Chain: could not write %s", filename, exc_info=True)
+        logger.warning("Model Chain: could not write the LLM Studio state file", exc_info=True)
     finally:
         # A replace that never happened leaves the temporary file behind, and
         # the directory is one the user opens to read their settings.

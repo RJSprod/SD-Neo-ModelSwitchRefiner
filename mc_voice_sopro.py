@@ -958,8 +958,8 @@ def _adopt(artifacts, folder: Path, destination: Path, say, what: str) -> dict:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         digests[item.filename] = digest
-    logger.info("Model Chain: Sopro adopted %d file(s) for the %s from %s",
-                len(digests), what, folder)
+    logger.info("Model Chain: Sopro adopted %d file(s) for the %s from the folder you "
+                "supplied", len(digests), what)
     return digests
 
 
@@ -1480,7 +1480,7 @@ def delete(voice_id: str) -> dict:
                          "nothing was deleted.")
     shutil.rmtree(root, ignore_errors=True)
     if root.exists():
-        logger.warning("Model Chain: a deleted Sopro voice left files at %s", root)
+        logger.warning("Model Chain: a deleted Sopro voice left files behind in its folder")
     logger.info("Model Chain: a Sopro voice was deleted")
     return entry
 
@@ -1924,8 +1924,7 @@ def save_preview(token: str) -> dict:
         stored = _read()
         stored["default"] = f"{ENGINE}:clone:{identifier}"
         _write(stored)
-    logger.info("Model Chain: a Sopro voice was saved — %s, %.1f s reference",
-                pending["name"], pending["seconds"])
+    logger.info("Model Chain: a Sopro voice was saved — %.1f s reference", pending["seconds"])
     return {"voice": lookup(f"{ENGINE}:clone:{identifier}")}
 
 

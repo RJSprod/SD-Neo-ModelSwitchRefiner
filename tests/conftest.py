@@ -346,8 +346,12 @@ class FakeOptionInfo:
         # label-valued setting is read back against (mc_broker.resolve).
         self.component_args = component_args
         self.section = None
+        # Kept as the host keeps it (``OptionInfo.info`` appends a span to
+        # ``comment_after``), so a test can read what a setting says of itself.
+        self.comment_after = ""
 
     def info(self, text):
+        self.comment_after += f"<span class='info'>({text})</span>"
         return self
 
     def needs_restart(self):
@@ -676,6 +680,9 @@ def _install_modules() -> None:
         script_callbacks.registered["app_started"].append(cb))
     script_callbacks.on_before_ui = lambda cb, **k: (
         script_callbacks.registered["before_ui"].append(cb))
+    script_callbacks.registered["cfg_denoiser"] = []
+    script_callbacks.on_cfg_denoiser = lambda cb, **k: (
+        script_callbacks.registered["cfg_denoiser"].append(cb))
 
     modules.errors = errors
     modules.images = images

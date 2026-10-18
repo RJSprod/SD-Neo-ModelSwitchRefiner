@@ -666,9 +666,10 @@ def current_platform() -> tuple[str, str, str]:
 def describe_host() -> str:
     """Everything a failed install would otherwise have to be asked for.
 
-    One line, no paths from anybody's home directory beyond the voice root this
-    feature owns, and no content of any kind. It is here so that "share your
-    log" is the whole of the next question rather than the first of five.
+    One line, no paths at all -- not even the voice root, which is a folder on
+    the user's machine (mc_log_privacy) -- and no content of any kind. It is
+    here so that "share your log" is the whole of the next question rather
+    than the first of five.
     """
     system, machine, python_version = current_platform()
     try:
@@ -688,7 +689,6 @@ def describe_host() -> str:
             f"closure {chosen.closure_id if chosen else 'none'}, "
             f"pinned sherpa-onnx {wanted}, runtime build {build}, "
             f"isolated interpreter {'present' if interpreter else 'absent'}, "
-            f"voice root {paths.data_root()}, "
             f"local pins {'present' if local_pins_path().exists() else 'absent'}")
 
 
@@ -1508,9 +1508,8 @@ def install(kind: str, on_status=None, on_progress=None, identifier: str = "") -
         _install_model(entry, say, lambda f: tick(0.5 + f * 0.5))
         tick(1.0)
         say(f"{entry.label} installed.")
-        logger.info("Model Chain: Voice Chat installed the %s bundle %s at %s",
-                    kind.upper(), entry.identifier,
-                    paths.bundle_root(entry.kind, entry.identifier))
+        logger.info("Model Chain: Voice Chat installed the %s bundle %s",
+                    kind.upper(), entry.identifier)
         return status()
 
 
@@ -1782,8 +1781,8 @@ def _adopt_wheels(chosen: RuntimePlatform, folder: Path, wheels: Path, say) -> N
                 f"{found.name} is not the file this extension's manifest describes — its "
                 f"contents do not match the committed SHA-256. Nothing was installed.")
         shutil.copy2(found, wheels / item.local_name)
-        logger.info("Model Chain: Voice Chat adopted %s from %s; digest matched this "
-                    "extension's manifest", item.filename, folder)
+        logger.info("Model Chain: Voice Chat adopted %s from the folder you supplied; digest "
+                    "matched this extension's manifest", item.filename)
 
 
 def install_runtime(on_status=None, on_progress=None, folder=None) -> None:

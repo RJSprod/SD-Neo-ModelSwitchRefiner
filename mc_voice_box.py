@@ -582,8 +582,7 @@ def add_sample(wav: bytes, title: str = "", source: str = "file", transcript: st
     with _lock:
         _write_bytes(_sample_audio(identifier), wav_bytes(pcm16, rate))
         _write_json(_sample_meta(identifier), entry)
-    logger.info("Model Chain: Voice Box kept sample “%s” (%.1f s)", entry["title"],
-                entry["seconds"])
+    logger.info("Model Chain: Voice Box kept a sample (%.1f s)", entry["seconds"])
     return entry
 
 
@@ -1363,7 +1362,7 @@ def save_output(identifier: str) -> str:
     shutil.copyfile(audio, candidate)
     sidecar = {key: value for key, value in entry.items() if key != "peaks"}
     _write_json(candidate.with_suffix(".json"), sidecar)
-    logger.info("Model Chain: Voice Box saved “%s” to %s", entry["name"], candidate)
+    logger.info("Model Chain: Voice Box saved an output to the folder")
     return str(candidate)
 
 
@@ -1948,8 +1947,8 @@ def render(pipeline_id: str, prompt: str, configuration_id: str = "", name: str 
     # it, it could already say the job had started, depending on who ran first.
     queued = job.to_dict()
     _service.submit(job)
-    logger.info("Model Chain: Voice Box queued “%s” with %s (%d section%s, %d speaker%s)",
-                job.name, label, len(sections), "" if len(sections) == 1 else "s", len(wanted),
+    logger.info("Model Chain: Voice Box queued a render with %s (%d section%s, %d speaker%s)",
+                label, len(sections), "" if len(sections) == 1 else "s", len(wanted),
                 "" if len(wanted) == 1 else "s")
     return queued
 
@@ -2225,8 +2224,8 @@ def _keep(job: Job, made: list) -> None:
     job.progress = {"section": sections, "sections": sections,
                     "seconds": max(entry["seconds"] for entry in entries)}
     _end(job, DONE)
-    logger.info("Model Chain: Voice Box rendered “%s” — %s of speech in %.0f s (%s)",
-                job.name, ", ".join(f"{entry['seconds']:.1f} s" for entry in entries),
+    logger.info("Model Chain: Voice Box rendered — %s of speech in %.0f s (%s)",
+                ", ".join(f"{entry['seconds']:.1f} s" for entry in entries),
                 float(made[0][2].get("render_seconds") or 0.0), entries[0]["format"].upper())
 
 

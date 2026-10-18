@@ -232,9 +232,8 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         found.base_chars = len(str(opening or ""))
         found.start()
         _last_run["turn"] = found.id
-        logger.info("Model Chain: Voice will read this reply aloud — %s on %s, %s, turn %s",
-                    voice_id, engines.label(active), profiles.describe(delivery),
-                    found.id[:8])
+        logger.info("Model Chain: Voice will read this reply aloud — %s, %s, turn %s",
+                    engines.label(active), profiles.describe(delivery), found.id[:8])
         return found
     except Exception:
         # Warning rather than debug, and this is the correction that matters:

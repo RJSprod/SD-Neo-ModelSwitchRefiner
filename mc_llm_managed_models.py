@@ -1344,8 +1344,8 @@ def _adopt_local_copy(model: ManagedModel, artifact: Artifact, destination: Path
         from prompt_master.provisioning.verifier import digest_of
 
         if digest_of(source).casefold() != artifact.sha256:
-            logger.info("Model Chain: %s in %s no longer matches its recorded hash, so it is "
-                        "being downloaded rather than reused", artifact.filename, source.parent)
+            logger.info("Model Chain: the copy of %s on disk no longer matches its recorded "
+                        "hash, so it is being downloaded rather than reused", artifact.filename)
             return False
     except Exception:
         logger.debug("Model Chain: could not verify a reusable copy of %s",
@@ -1368,8 +1368,8 @@ def _adopt_local_copy(model: ManagedModel, artifact: Artifact, destination: Path
         return False
 
     say(f"{artifact.filename}: reused the verified copy already on disk.")
-    logger.info("Model Chain: %s %s from %s into %s — identical hash, nothing downloaded",
-                how, artifact.filename, source.parent.name, model.identifier)
+    logger.info("Model Chain: %s %s into %s — identical hash, nothing downloaded",
+                how, artifact.filename, model.identifier)
     return True
 
 

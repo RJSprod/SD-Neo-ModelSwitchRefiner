@@ -791,8 +791,8 @@ def import_lobe_settings(opts, extensions_dir, *, defaults: dict, save=None, now
             save()
         except Exception:
             logger.warning("Model Chain theme: the import could not be saved", exc_info=True)
-    logger.info("Model Chain theme: imported %d setting(s) from %s (%s kept as you set them)",
-                len(written), found, len(kept))
+    logger.info("Model Chain theme: imported %d setting(s) from the Lobe theme's configuration "
+                "file (%s kept as you set them)", len(written), len(kept))
     return record
 
 

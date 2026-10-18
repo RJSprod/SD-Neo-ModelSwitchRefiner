@@ -2020,8 +2020,8 @@ def _adopt(artifacts, folder: Path, destination: Path, say, what: str) -> dict:
                               f"extension expects {item.size}. Nothing was installed.")
         shutil.copyfile(found, destination / item.local_name)
         digests[item.local_name] = digest
-    logger.info("Model Chain: Breeze adopted %d file(s) for the %s from %s",
-                len(digests), what, folder)
+    logger.info("Model Chain: Breeze adopted %d file(s) for the %s from the folder you "
+                "supplied", len(digests), what)
     return digests
 
 

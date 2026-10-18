@@ -578,7 +578,7 @@ def _rescan_models():
     """
     found = _library()
     if not found.models:
-        logger.info("Model Chain: LLM Studio — no .gguf files found under %s", found.folder)
+        logger.info("Model Chain: LLM Studio — no .gguf files found in the models folder")
         return (gr.update(choices=_model_choices(), value=_current_model()),
                 ui.state("No models", "warn",
                          f"No .gguf files under {found.folder}. Set the Model Chain LLM "
@@ -586,8 +586,7 @@ def _rescan_models():
     counted = f"{len(found.models)} model{'s' if len(found.models) != 1 else ''}"
     limited = (f" — the scan stopped at {mc_llm_files.MAX_LIBRARY_ENTRIES}"
                if found.truncated else "")
-    logger.info("Model Chain: LLM Studio — %s found under %s%s", counted, found.folder,
-                limited)
+    logger.info("Model Chain: LLM Studio — %s found in the models folder%s", counted, limited)
     return (gr.update(choices=_model_choices(), value=_current_model()), _runtime_line())
 
 

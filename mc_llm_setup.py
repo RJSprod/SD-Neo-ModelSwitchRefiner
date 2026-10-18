@@ -230,7 +230,7 @@ def recorded_runtime() -> Path | None:
         # rather than repaired: it is the one path here that would start a
         # program from somewhere this extension does not own.
         logger.warning("Model Chain: the recorded llama.cpp runtime is outside the LLM data "
-                       "directory and will not be used: %s", recorded)
+                       "directory and will not be used")
         return None
     return candidate if candidate.is_file() else None
 
@@ -1108,8 +1108,8 @@ def _runtime_for_device(paths, path: Path, chosen) -> Path:
             f"switching between them costs nothing after that."
         )
     found = Path(server).resolve()
-    logger.info("Model Chain: %s needs %s, so the runtime recorded for it is %s rather "
-                "than the %s build in %s", chosen.name, wanted, found, holds, path.parent)
+    logger.info("Model Chain: %s needs %s, so the runtime recorded for it is that build "
+                "rather than the %s build the installation holds", chosen.name, wanted, holds)
     return found
 
 

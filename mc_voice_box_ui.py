@@ -27,7 +27,7 @@ import gradio as gr
 
 import mc_voice_api as api
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("model_chain")
 
 TAB_LABEL = "Voice Box"
 TAB_ID = "mc_voice_box"
