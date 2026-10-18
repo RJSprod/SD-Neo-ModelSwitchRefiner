@@ -696,17 +696,22 @@
     line-height: 1.3;
 }
 
-/* Titles visible for 0.5 s on gallery entry; a save's result for 1.4 s */
-.gqa-overlay.gqa-titles-visible .gqa-cell,
-.gqa-cell.gqa-result-visible {
+/* Titles visible for 0.5 s on gallery entry */
+.gqa-overlay.gqa-titles-visible .gqa-cell {
     color: rgba(255, 255, 255, 0.9);
     text-shadow: 0 1px 4px rgba(0, 0, 0, 1);
 }
 
 /* 50% black highlight visible for 0.25 s on zone entry */
-.gqa-cell.gqa-highlight-visible,
-.gqa-cell.gqa-result-visible {
+.gqa-cell.gqa-highlight-visible {
     background: rgba(0, 0, 0, 0.5);
+}
+
+/* A save to the folder the WebUI refused: a red tint for 0.6 s, no words
+   (the reason is on the console). A save that worked shows only the tap's
+   own highlight, as the top-right zone's Save does. */
+.gqa-cell.gqa-refused-visible {
+    background: rgba(170, 30, 30, 0.55);
 }
 
 /* Dividers — only shown when content is visible */

@@ -45,7 +45,7 @@ globalThis.document = {
     getElementById: () => null,
     createElement: () => ({setAttribute() {}, appendChild() {}, addEventListener() {},
                            classList: {add() {}, remove() {}}, style: {setProperty() {}}}),
-    addEventListener(type) { listeners.push("document:" + type); },
+    addEventListener(type, handler, options) { listeners.push("document:" + type + (options && options.passive ? ":passive" : "")); },
 };
 globalThis.window = globalThis;
 globalThis.location = {href: "https://forge.test/?x=1"};
@@ -290,14 +290,34 @@ class TestOneScrollerForThePage:
 
         assert found["plan"] == {"top": -1315, "minHeight": 2438}
 
-    def test_nothing_listens_to_the_scroll(self):
+    def test_only_the_momentum_break_listens_to_the_scroll_and_passively(self):
         """The columns are held by sticky positioning from measured numbers;
-        the one thing that listened to the scroll, the Details button's
-        marking, went with the button at the user's word."""
-        found = run("out.listeners = listeners;")
+        the Details button's marking, which listened to the scroll, went with
+        the button at the user's word. The momentum break reads the scroll
+        from a passive listener in the capture phase and writes nothing
+        unless a fling crosses the boundary (Chromium holds that); nothing
+        else listens."""
+        found = run("hooks.loaded.forEach((fn) => fn()); out.listeners = listeners;", opts={"model_chain_theme": True})
 
-        assert "document:scroll" not in found["listeners"]
+        assert "document:scroll:passive" in found["listeners"]
+        assert "document:scrollend:passive" in found["listeners"]
+        assert "document:scroll" not in found["listeners"], "no listener that could block the scroll"
         assert "window:scroll" not in found["listeners"]
+        assert found["listeners"].count("document:scroll:passive") == 1
+
+    def test_the_boundary_is_where_the_settings_bottom_edge_meets_the_views(self):
+        """The scroll at which the first phase ends (`scrollBoundary`): the
+        settings column's natural top in the scroller's coordinates plus its
+        height (margins in), less the view's bottom edge. The user's page: the
+        row's content edge 110 px down, 2206 px of settings, the view's
+        bottom at 892."""
+        found = run("out.boundary = T.scrollBoundary(110, 2206, 892); out.fits = T.scrollBoundary(110, 700, 892);"
+                    " out.whole = T.scrollBoundary(110.4, 2206.3, 891.6); out.zero = T.scrollBoundary(0, 892, 892);")
+
+        assert found["boundary"] == 1424
+        assert found["fits"] is None, "settings that fit the view have no first phase"
+        assert found["whole"] == 1425
+        assert found["zero"] is None
 
 
 def T_DEFAULTS():

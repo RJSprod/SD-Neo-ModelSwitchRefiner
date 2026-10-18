@@ -191,6 +191,62 @@ flex row and on Forge's resize-handle grid row, sampled every 97 px so that
 each step's movement is one column's and adds up to the step; sixteen
 mutations each fail a test. Not run on the user's machine or in Firefox.
 
+**The momentum break between the two phases (2026-10-18).** "If I flick
+scroll to reach the bottom of column one, I do not want it to continue
+momentum into column two. Instead it should stop at the bottom like it hit an
+edge. From that bottom position, I should be able to scroll to see what's
+above, or scroll to see what's below." A fling is the browser's: once the
+finger lifts, Chromium's browser process synthesizes inertial scroll updates
+from the finger's last movements and the compositor applies them until the
+curve ends or an update cannot be applied; a page's scroll listener runs
+after the frame that crossed has been drawn, and a position written back
+from it is a frame or two late while the fling keeps pushing. CSS scroll snap
+was tried first and is not the tool: a snap area larger than the snapport
+leaves the scroll alone only when the intended position is more than a
+snapport away from the area's aligned edge, so every position within a view
+of the boundary snapped to it (proximity's third of a view, mandatory's whole
+one), and `scroll-snap-stop: always` on the area stopped no fling (Chromium
+141, flings driven through `Input.dispatchTouchEvent` with timestamps). What
+the browser does stop at is its own edge, so the page gives it one for the
+fling's time (`model_chain_theme.js`, "the momentum break between the two
+phases"): when the finger lifts with the scroll in the first phase, the
+row's ancestor just inside the scroller -- Gradio's container on the page,
+the element under the workspace under focus mode -- is given `max-height`
+and `overflow-y: clip` (inline, important, against Forge's `overflow:
+visible !important`) by the difference between the scroll height and the
+boundary plus the view, so the range ends exactly at the boundary while the
+row and its sticky columns are untouched and nothing on screen changes (the
+clip edge is the view's bottom at the boundary); the fling meets the edge
+and the browser ends it (Android draws its edge glow). A fling read crossing
+the boundary upward is put back to it and the scrolling element held
+unscrollable (`overflow: hidden`, as the Forge Assistant holds a page under a
+drag), which the browser reads as the fling's end; the settings move for the
+frame the reading took and come back. The clip comes off at `scrollend` (one
+that follows a scroll of the fling: a script's scroll finished just before
+the lift has a `scrollend` of its own a frame later), the hold after fifteen
+animation frames without a scroll event (the scroll back to the boundary
+has its own `scrollend` too; frames rather than a timer, because a frame's
+scroll events are dispatched before its animation callbacks, and under four
+workers a starved main thread handed the fling's movements over after a
+quarter-second timer had already let go), and either at the next input of
+any kind or the page going hidden, so the page is whole again for the next
+gesture, whichever way it goes. A crossing upward is read as "at or past the
+boundary a frame ago, below it now": a fling can land on the boundary exactly
+in one frame, and "above, then below" missed four runs of six. A finger
+still down is a drag and crosses as it likes; the wheel and the keyboard are
+never stopped. The boundary (`scrollBoundary`, pure: the row's content edge
+plus the settings column's margin box less the view's bottom) is measured
+beside the plan; `explainScroll()` shows it and `explainBrake()` the state.
+Tests: `TestTheMomentumBreak` in Chromium, with flings synthesized through
+the DevTools protocol in a touch context -- down, up, a drag that crosses, a
+drag that stops short and is not pulled, the wheel passing, a scroll past the
+boundary without a fling writing nothing, focus mode -- and the node test of
+the boundary; five mutations each fail a test (no clip, no hold, never
+released, a `scrollend` trusted before the fling scrolled, a fling braked
+with a finger still down); the whole class six times over for the upward
+flick's timing. Not run on a Gecko build: Gecko's APZ should meet
+the same edge once the painted scroll range reaches it.
+
 **The user's first run (2026-10-17, the same day).** "This didnt work ... im
 able to partially scroll the page, and instead of the left column moving
 only, i see the right column move down and the generation button gets cut
