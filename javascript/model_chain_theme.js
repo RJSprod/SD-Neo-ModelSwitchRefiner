@@ -640,9 +640,11 @@
     // The master is the page's own scroller (the workspace's, under the Forge
     // Assistant's focus mode): a wheel, a finger, the scrollbar and the
     // keyboard all drive it, and the browser's compositor moves the columns.
-    // Nothing here listens to the scroll. The columns are held by `position:
-    // sticky`, as the results column was held under the bar before, from
-    // three numbers this measures and writes as custom properties:
+    // Nothing here moves the page by the scroll (the momentum break below
+    // only reads it, and acts once a fling crosses the boundary). The columns
+    // are held by `position: sticky`, as the results column was held under
+    // the bar before, from three numbers this measures and writes as custom
+    // properties:
     //
     //  - The results column is held where it rests: a margin under the bar at
     //    least, but never above its place in the row, so Generate does not
@@ -729,6 +731,19 @@
                 minHeight: Math.round(settings + below)};
     }
 
+    /** The scroll at which the first phase ends and the second begins: where
+     *  the settings column's bottom edge (its margin box, as the sticky offset
+     *  holds it) meets the view's bottom edge. `top` is the settings column's
+     *  natural top in the scroller's own coordinates (the row's content edge,
+     *  with the scroll added), `settings` its height with margins, `viewBottom`
+     *  the view's bottom edge in the viewport's pixels. Null when the settings
+     *  fit the view: then there is no first phase and nothing to break at.
+     *  Pure, so the node tests hold it. */
+    function scrollBoundary(top, settings, viewBottom) {
+        const boundary = Math.round(top + settings - viewBottom);
+        return boundary > 0 ? boundary : null;
+    }
+
     /** A tab's row, the row's child that holds the settings (the column, or
      *  the accordion Forge wraps it in) and the results column; null without
      *  all three. */
@@ -779,6 +794,7 @@
         });
         if (results.style.getPropertyValue(RESULTS_HOLD)) results.style.removeProperty(RESULTS_HOLD);
         setClass(column, SCROLL_SETTINGS_CLASS, false);
+        entry.boundary = null;
     }
 
     /** Measure one tab's row and write the numbers, or take them off; what
@@ -844,9 +860,12 @@
         setClass(column, SCROLL_SETTINGS_CLASS, true);
         setVariable(row, SCROLL_HOLD, plan.top + "px");
         setVariable(row, SCROLL_ROW, plan.minHeight + "px");
+        // The scroll at which the first phase ends, for the momentum break.
+        const rowTop = row.getBoundingClientRect().top + px(rowStyle.paddingTop) + px(rowStyle.borderTopWidth);
+        entry.boundary = scrollBoundary(rowTop + view.scrolled, settingsHeight, view.bottom);
         return {reason: "", scroller: view.scroller ? "workspace" : "page", hold, heldAt, shift: entry.shift || 0,
                 settings: settingsHeight, results: resultsHeight, view: room,
-                top: plan.top, minHeight: plan.minHeight};
+                top: plan.top, minHeight: plan.minHeight, boundary: entry.boundary};
     }
 
     function measureScrollAll() {
@@ -894,6 +913,7 @@
                 scroll.body.observe(document.body, {attributes: true, attributeFilter: ["class"]});
             }
         }
+        installBrake(scroll);
         SCROLL_TABS.forEach((tabname) => {
             const found = findScrollRow(tabname);
             if (!found) return;
@@ -913,6 +933,7 @@
     function removeScroll() {
         const scroll = state.scroll;
         if (!scroll) return;
+        removeBrake(scroll);
         if (scroll.observer) scroll.observer.disconnect();
         if (scroll.body) scroll.body.disconnect();
         if (scroll.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scroll.frame);
@@ -931,6 +952,253 @@
             if (!entry) return {tab: tabname, reason: "no row"};
             return Object.assign({tab: tabname}, measureScroll(entry) || {reason: "not laid out"});
         });
+    }
+
+    // -- the momentum break between the two phases -------------------------------- //
+    //
+    // Asked for: "If I flick scroll to reach the bottom of column one, I do
+    // not want it to continue momentum into column two. Instead it should
+    // stop at the bottom like it hit an edge. From that bottom position, I
+    // should be able to scroll to see what's above, or scroll to see what's
+    // below." A finger's fling is the browser's: once the finger has lifted,
+    // the compositor scrolls on by itself, and nothing a page says in a
+    // listener reaches it in time -- a position written back from a scroll
+    // event is one or two drawn frames late, and the fling keeps pushing.
+    // What the browser does stop at is its own edge, so for the time of a
+    // fling the page is given an edge at the boundary:
+    //
+    //  - Downward (the settings' phase into the results'): when the finger
+    //    lifts with the scroll in the first phase, the scroller's range is
+    //    cut to end exactly at the boundary -- `max-height` and
+    //    `overflow-y: clip` on the row's ancestor just inside the scroller
+    //    (Gradio's container on the page; under focus mode the element under
+    //    the workspace), by the difference between the scroll height and
+    //    the boundary plus the view. The row keeps its height, so the sticky
+    //    columns are held exactly as before; only what lies below the view
+    //    at the boundary is clipped, and nothing on screen changes. The
+    //    fling meets the edge, the browser ends it there (Android draws its
+    //    edge glow), and the clip comes off at the scroll's end.
+    //  - Upward (the results' phase back into the settings'): a scroller's
+    //    range cannot start above zero, so a fling read crossing the
+    //    boundary upward is put back to it and the scroller is held
+    //    unscrollable for the moment (`overflow: hidden`, as the Forge
+    //    Assistant holds a page under a drag), which the browser reads as
+    //    the end of the fling. The settings move for the frame or two the
+    //    reading took and come back.
+    //
+    // The clip comes off at `scrollend`, the hold after fifteen frames without
+    // a scroll event (the scroll back to the boundary has a `scrollend` of
+    // its own, a frame later), and either at the next input of any kind (a
+    // finger, a mouse, the wheel, a key) or the page going hidden, so the page
+    // is whole again for the next gesture, whichever way it goes. A finger still on the screen is a drag, not a fling, and is
+    // left alone; the wheel and the keyboard are not momentum and are never
+    // stopped. Chromium synthesizes a fling from the finger's last movements
+    // and stops it on the first scroll it cannot apply; measured in Chromium
+    // (tests/test_theme_layout.py), not on a Gecko build.
+
+    const BRAKE_QUIET_FRAMES = 15;   // about a quarter second at 60 Hz
+    const BRAKE_CLIP_ATTRIBUTE = "data-mc-theme-scroll-clip";  // on the clipped ancestor while the clip is on
+    const BRAKE_LOCK_ATTRIBUTE = "data-mc-theme-scroll-lock";  // on the scrolling element while it is held
+
+    /** The entry whose row is on screen and has a boundary, or null. */
+    function brakeEntry(scroll) {
+        const names = Object.keys(scroll.entries);
+        for (let i = 0; i < names.length; i += 1) {
+            const entry = scroll.entries[names[i]];
+            if (entry.boundary != null && laidOut(entry.row)) return entry;
+        }
+        return null;
+    }
+
+    /** The element that scrolls for an entry: the workspace, or the page's. */
+    function scrollingElementOf(entry) {
+        return entry.scroller || document.scrollingElement || document.documentElement;
+    }
+
+    /** The row's ancestor just inside the scroller, whose height ends the
+     *  scroller's range: Gradio's container on the page (the app element
+     *  above it is inline), the element under the workspace under focus
+     *  mode; null where the row is the scroller's own child. */
+    function clipTargetOf(entry) {
+        if (!entry.scroller) {
+            const container = query(".gradio-container");
+            return container && container.contains(entry.row) ? container : null;
+        }
+        let walk = entry.row;
+        while (walk && walk.parentElement && walk.parentElement !== entry.scroller) walk = walk.parentElement;
+        return walk && walk !== entry.row && walk.parentElement === entry.scroller ? walk : null;
+    }
+
+    function saveInline(node, names) {
+        const saved = {};
+        names.forEach((name) => {
+            saved[name] = {value: node.style.getPropertyValue(name), priority: node.style.getPropertyPriority(name)};
+        });
+        return saved;
+    }
+
+    function restoreInline(node, saved) {
+        Object.keys(saved).forEach((name) => {
+            if (saved[name].value) node.style.setProperty(name, saved[name].value, saved[name].priority);
+            else node.style.removeProperty(name);
+        });
+    }
+
+    /** Cut the scroller's range to end at the boundary, for a fling that
+     *  starts in the first phase. Undone unless the range ends there. */
+    function limitScroll(brake, entry) {
+        const target = clipTargetOf(entry);
+        if (!target || brake.clip) return false;
+        const scroller = scrollingElementOf(entry);
+        const excess = scroller.scrollHeight - (entry.boundary + scroller.clientHeight);
+        if (!(excess > 0.5)) return false;
+        const style = window.getComputedStyle(target);
+        let height = target.getBoundingClientRect().height;
+        if (style.boxSizing !== "border-box") {
+            height -= px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth);
+        }
+        const saved = saveInline(target, ["max-height", "overflow-y"]);
+        target.style.setProperty("max-height", Math.max(0, height - excess) + "px", "important");
+        target.style.setProperty("overflow-y", "clip", "important");
+        if (Math.abs(scroller.scrollHeight - (entry.boundary + scroller.clientHeight)) > 1) {
+            restoreInline(target, saved);
+            return false;
+        }
+        setAttr(target, BRAKE_CLIP_ATTRIBUTE, "");
+        brake.clip = {target, saved};
+        return true;
+    }
+
+    /** Put a fling that crossed the boundary upward back to it and hold the
+     *  scroller unscrollable for the moment, which ends the fling. */
+    function lockScroll(brake, entry) {
+        const scroller = scrollingElementOf(entry);
+        if (entry.scroller) entry.scroller.scrollTop = entry.boundary;
+        else window.scrollTo(window.scrollX || 0, entry.boundary);
+        if (brake.lock) return true;
+        const saved = saveInline(scroller, ["overflow", "scrollbar-gutter"]);
+        scroller.style.setProperty("overflow", "hidden", "important");
+        scroller.style.setProperty("scrollbar-gutter", "stable", "important");
+        setAttr(scroller, BRAKE_LOCK_ATTRIBUTE, "");
+        brake.lock = {target: scroller, saved};
+        return true;
+    }
+
+    /** The page whole again: the clip and the hold off, the fling forgotten. */
+    function releaseBrake(brake) {
+        if (brake.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(brake.frame);
+        brake.frame = 0;
+        brake.still = 0;
+        brake.flinging = false;
+        if (brake.clip) {
+            restoreInline(brake.clip.target, brake.clip.saved);
+            brake.clip.target.removeAttribute(BRAKE_CLIP_ATTRIBUTE);
+            brake.clip = null;
+        }
+        if (brake.lock) {
+            restoreInline(brake.lock.target, brake.lock.saved);
+            brake.lock.target.removeAttribute(BRAKE_LOCK_ATTRIBUTE);
+            brake.lock = null;
+        }
+    }
+
+    function scrollOf(entry) {
+        return entry.scroller ? entry.scroller.scrollTop : (window.scrollY || window.pageYOffset || 0);
+    }
+
+    function installBrake(scroll) {
+        if (scroll.brake) return;
+        const brake = scroll.brake = {fingers: 0, flinging: false, scrolled: false, clip: null, lock: null,
+                                      frame: 0, still: 0, listeners: []};
+        const listen = function (type, handler) {
+            document.addEventListener(type, handler, {capture: true, passive: true});
+            brake.listeners.push([type, handler]);
+        };
+        // Quiet is counted in animation frames, not on the clock: a frame's
+        // scroll events are dispatched before its animation callbacks, so a
+        // main thread starved for a while (four browsers on four cores in the
+        // tests; a busy Gradio page) hands the fling's movements over before
+        // the count can grow, where a timer could fire first and let the
+        // break go before the crossing it was waiting for had been read.
+        const quiet = function () {
+            brake.still = 0;
+            if (brake.frame) return;
+            const tick = function () {
+                brake.frame = 0;
+                if (!brake.flinging) return;
+                brake.still += 1;
+                if (brake.still >= BRAKE_QUIET_FRAMES) { releaseBrake(brake); return; }
+                brake.frame = requestAnimationFrame(tick);
+            };
+            brake.frame = requestAnimationFrame(tick);
+        };
+        listen("touchstart", function (event) {
+            brake.fingers = event.touches ? event.touches.length : 1;
+            releaseBrake(brake);
+        });
+        const lifted = function (event) {
+            brake.fingers = event.touches ? event.touches.length : 0;
+            if (brake.fingers) return;
+            const entry = brakeEntry(scroll);
+            if (!entry) return;
+            brake.flinging = true;
+            brake.scrolled = false;
+            Object.keys(scroll.entries).forEach((name) => { scroll.entries[name].last = scrollOf(scroll.entries[name]); });
+            if (scrollOf(entry) < entry.boundary - 1) limitScroll(brake, entry);
+            quiet();
+        };
+        listen("touchend", lifted);
+        listen("touchcancel", lifted);
+        const input = function (event) {
+            if (event.type === "pointerdown" && event.pointerType === "touch") return;
+            releaseBrake(brake);
+        };
+        listen("pointerdown", input);
+        listen("wheel", input);
+        listen("keydown", input);
+        listen("visibilitychange", input);
+        listen("scroll", function (event) {
+            const page = event.target === document || event.target === document.documentElement
+                || event.target === document.body;
+            Object.keys(scroll.entries).forEach((name) => {
+                const entry = scroll.entries[name];
+                if (page ? entry.scroller : entry.scroller !== event.target) return;
+                const now = scrollOf(entry);
+                const was = entry.last;
+                entry.last = now;
+                if (!brake.flinging || entry.boundary == null || was == null) return;
+                if (now !== was) brake.scrolled = true;
+                // Crossed upward: at or past the boundary a frame ago (a fling
+                // can land on it exactly), below it now.
+                if (was >= entry.boundary - 0.5 && now < entry.boundary - 0.5) lockScroll(brake, entry);
+            });
+            if (brake.flinging) quiet();
+        });
+        // A `scrollend` is the fling's end only once the fling has scrolled:
+        // one from a scroll finished just before the finger lifted (a script's)
+        // arrives a frame later, before the fling's first movement. And the
+        // hold is let go on quiet alone: putting the scroll back to the
+        // boundary is itself a scroll, whose own `scrollend` arrives a frame
+        // later, while the fling is still alive and the hold not yet seen.
+        listen("scrollend", function () {
+            if (brake.flinging && brake.scrolled && !brake.lock) releaseBrake(brake);
+        });
+    }
+
+    function removeBrake(scroll) {
+        const brake = scroll.brake;
+        if (!brake) return;
+        releaseBrake(brake);
+        brake.listeners.forEach(([type, handler]) => document.removeEventListener(type, handler, {capture: true}));
+        scroll.brake = null;
+    }
+
+    /** The break's state, for the console and the tests: `mcTheme.explainBrake()`. */
+    function explainBrake() {
+        const brake = state.scroll && state.scroll.brake;
+        if (!brake) return {installed: false};
+        return {installed: true, fingers: brake.fingers, flinging: brake.flinging,
+                clipped: !!brake.clip, locked: !!brake.lock};
     }
 
     // -- the quick settings drawer ------------------------------------------------ //
@@ -1752,8 +2020,8 @@
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS,
-        scrollPlan, explainScroll, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS, RESULTS_HOLD, SCROLL_HOLD,
-        SCROLL_ROW,
+        scrollPlan, scrollBoundary, explainScroll, explainBrake, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS,
+        RESULTS_HOLD, SCROLL_HOLD, SCROLL_ROW, BRAKE_CLIP_ATTRIBUTE, BRAKE_LOCK_ATTRIBUTE, BRAKE_QUIET_FRAMES,
         icons: Object.keys(ICONS),
         glyphs: Object.keys(GLYPH),
     };

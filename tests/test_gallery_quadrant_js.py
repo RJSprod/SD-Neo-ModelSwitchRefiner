@@ -328,32 +328,48 @@ class TestTheZones:
 class TestTheFolderDestination:
     FOLDER = {quadrant.OPT_DESTINATION: quadrant.DESTINATION_FOLDER, quadrant.OPT_FOLDER: "keep"}
 
-    def test_the_top_left_zone_posts_the_picture_and_shows_the_answer(self, browser):
+    def test_the_top_left_zone_posts_the_picture_and_shows_only_the_taps_flash(self, browser):
+        """"I don't want there to be any dialogue when I tap, I just want the
+        transparent tap indication": the save shows nothing but the zone's own
+        highlight, like the top-right zone's Save; the title never changes."""
         page, served = open_page(browser, self.FOLDER)
         assert page.evaluate(STATE)["cells"][0]["text"] == "⬇ Folder", "the zone says where it saves"
+        page.evaluate("""() => {
+            window.texts = new Set();
+            const cell = document.querySelector('.gqa-tl');
+            new MutationObserver(() => window.texts.add(cell.textContent)).observe(cell, {childList: true, characterData: true, subtree: true});
+        }""")
 
         click_image(page, 100, 100)
-        page.wait_for_function("document.querySelector('.gqa-tl').classList.contains('gqa-result-visible')")
-        shown = page.evaluate("document.querySelector('.gqa-tl').textContent")
+        for _ in range(50):
+            if served.posted:
+                break
+            page.wait_for_timeout(100)
+        page.wait_for_timeout(1600)
 
         assert served.posted and served.posted[0]["method"] == "POST"
         assert json.loads(served.posted[0]["body"]) == {"src": ORIGIN + IMAGE}
         assert served.posted[0]["type"].startswith("application/json")
-        assert shown == "Saved 00001-42.png"
+        assert page.evaluate("document.querySelector('.gqa-tl').textContent") == "⬇ Folder"
+        assert page.evaluate("[...window.texts]") == [], "no words were ever written into the zone"
+        assert page.evaluate("document.querySelector('.gqa-tl').className") == "gqa-cell gqa-tl", "no result class lingers"
         assert page.evaluate("window.downloads") == [], "no browser download"
-        # The result gives way to the title again.
-        page.wait_for_function("document.querySelector('.gqa-tl').textContent === '⬇ Folder'", timeout=4000)
-        assert page.evaluate("document.querySelector('.gqa-tl').classList.contains('gqa-result-visible')") is False
         page.close()
 
-    def test_a_refusal_is_shown_in_the_zone_in_the_servers_words(self, browser):
+    def test_a_refusal_tints_the_zone_for_a_moment_and_says_why_on_the_console(self, browser):
         page, served = open_page(browser, self.FOLDER)
         served.answer = {"status": 400, "body": {"ok": False, "error": "No folder is set."}}
+        errors = []
+        page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
 
         click_image(page, 100, 100)
-        page.wait_for_function("document.querySelector('.gqa-tl').classList.contains('gqa-result-visible')")
+        page.wait_for_function("document.querySelector('.gqa-tl').classList.contains('gqa-refused-visible')")
 
-        assert page.evaluate("document.querySelector('.gqa-tl').textContent") == "No folder is set."
+        assert page.evaluate("document.querySelector('.gqa-tl').textContent") == "⬇ Folder", "no words in the zone"
+        page.wait_for_timeout(250)  # the cell's 0.12 s background transition
+        assert page.evaluate("getComputedStyle(document.querySelector('.gqa-tl')).backgroundColor") == "rgba(170, 30, 30, 0.55)"
+        page.wait_for_function("!document.querySelector('.gqa-tl').classList.contains('gqa-refused-visible')", timeout=3000)
+        assert any("No folder is set." in text for text in errors), errors
         page.close()
 
     def test_the_title_follows_the_setting_without_a_reload(self, browser):
@@ -403,6 +419,7 @@ class TestTheContract:
         start = css.index("Model Chain -- Gallery Quadrant")
         section = css[start:]
         for cls in (".gqa-overlay", ".gqa-tl", ".gqa-tm", ".gqa-tr", ".gqa-bl", ".gqa-br", ".gqa-cell",
-                    ".gqa-titles-visible", ".gqa-highlight-visible", ".gqa-result-visible"):
+                    ".gqa-titles-visible", ".gqa-highlight-visible", ".gqa-refused-visible"):
             assert cls in section, cls
+        assert ".gqa-result-visible" not in section, "a save's result is no longer written into the zone"
         assert ".gradio-gallery > button.preview .icon-buttons" in section

@@ -6642,8 +6642,8 @@ one second.
   on the settings column first, down to its end, with Generate, the gallery
   and its buttons locked where they rest; then on the results column, down
   to the generation details, with the settings held at their end. Never
-  both at once, and no stretch where nothing moves. Nothing listens to the
-  scroll: both columns are held by sticky positioning from two measured
+  both at once, and no stretch where nothing moves. Nothing moves the page
+  by the scroll: both columns are held by sticky positioning from two measured
   numbers -- the settings column is held once its bottom edge meets the
   view's (a sticky offset of the view's height less its own), and the row is
   given the least height the two phases need (the settings column's plus
@@ -6660,7 +6660,23 @@ one second.
   and the page scrolls the results alone; stacked on a phone, the page
   scrolls as it does. A gesture that starts inside something with a
   scroller of its own -- the gallery's grid view, a prompt box, a list --
-  stays on that thing until its end, as browsers do. The generation details
+  stays on that thing until its end, as browsers do. **A flick's momentum
+  stops at the boundary between the two phases, like an edge** ("if I flick
+  scroll to reach the bottom of column one, I do not want it to continue
+  momentum into column two"): a fling that would carry from the settings
+  into the results ends where the settings end, and one that would carry
+  from the results back into the settings ends there too; from that
+  position the next gesture goes either way. A finger still on the screen
+  is a drag and crosses as it likes; the wheel and the keyboard are not
+  momentum and are never stopped. A fling is the browser's own scrolling
+  after the finger has lifted, so for the fling's time the page is given an
+  edge there -- downward the scroller's range is cut to end at the boundary
+  (Gradio's container clipped by the difference; under focus mode the
+  element under the workspace), upward a fling read crossing it is put back
+  and the scroller held for the moment, which ends the fling -- and the
+  page is whole again the moment the scroll ends. Measured in Chromium with
+  flings synthesized from a finger's movements; not run on a Gecko build.
+  The generation details
   of the picture in view are a whole settings column away; a **Details**
   button at the end of the gallery's button row that jumped there and back
   was built with the one scroller and removed at the user's word ("I don't
@@ -6857,9 +6873,11 @@ viewer, `js_modal_lightbox`), as the standalone did. The zones:
   data directory; made if it is missing). The WebUI itself writes the copy,
   under the picture's own name and never over another file: the same picture
   saved twice is one file, a different picture of the same name gets a number.
-  The zone says `⬇ Folder` while the folder is chosen, and shows what happened
-  for a moment: `Saved 00001-42.png`, or the reason it was not (no folder set,
-  a picture outside Forge's output folders, a folder that cannot be made).
+  The zone says `⬇ Folder` while the folder is chosen. A tap shows nothing
+  but the zone's own flash, as the top-right zone's Save does; a save the
+  WebUI refused (no folder set, a picture outside Forge's output folders, a
+  folder that cannot be made) tints the zone red for a moment, with the
+  reason on the browser's console.
 - **Top-middle** leaves the preview (Gradio's own Clear).
 - **Top-right** is Forge's own Save, the one under the gallery (a copy into
   `outdir_save`).

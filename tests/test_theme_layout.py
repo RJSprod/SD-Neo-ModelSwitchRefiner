@@ -43,6 +43,7 @@ import glob
 import html as html_module
 import json
 import os
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -1895,6 +1896,234 @@ def one_column_at_a_time(page, rest: dict, *, root: bool = False, step: int = 97
         assert moved_settings >= -0.5 and moved_results >= -0.5, (y, before, after)
         assert abs(moved_settings + moved_results - actual) <= 1, (y, moved_settings, moved_results, actual)
         before = after
+
+
+def finger(cdp, kind, x, y, t):
+    """One touch event through the DevTools protocol, with its timestamp: the
+    browser reads a fling off the last movements' speed."""
+    points = [] if kind == "touchEnd" else [{"x": x, "y": y, "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}]
+    cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": points, "timestamp": t})
+
+
+def flick(page, cdp, x, y, travel, *, steps=6, dt=0.016):
+    """A finger put down at (x, y), moved `travel` pixels up the screen (down
+    the page; negative for the other way) in `steps` quick moves, and lifted:
+    a fling, which Chromium's browser process then scrolls on by itself."""
+    t = time.time()
+    finger(cdp, "touchStart", x, y, t)
+    for i in range(1, steps + 1):
+        t += dt
+        finger(cdp, "touchMove", x, y - travel * i / steps, t)
+    t += dt
+    finger(cdp, "touchEnd", x, 0, t)
+
+
+def drag(page, cdp, x, y, travel, *, steps=20, dt=0.04, rest=0.4):
+    """A slow finger, held still before it lifts: a drag, no fling."""
+    t = time.time()
+    finger(cdp, "touchStart", x, y, t)
+    for i in range(1, steps + 1):
+        t += dt
+        finger(cdp, "touchMove", x, y - travel * i / steps, t)
+        page.wait_for_timeout(int(dt * 1000))
+    page.wait_for_timeout(int(rest * 1000))
+    finger(cdp, "touchEnd", x, 0, t + rest)
+
+
+def settled_fling(page):
+    """Wait for the break to let the page go again (the fling's end), then
+    read the columns."""
+    page.wait_for_function("() => !mcTheme.explainBrake().flinging", timeout=5000)
+    settle(page, 3)
+    return page.evaluate(SCROLLED)
+
+
+BRAKE = """() => ({
+    brake: mcTheme.explainBrake(),
+    clipped: document.querySelectorAll("[data-mc-theme-scroll-clip]").length,
+    locked: document.querySelectorAll("[data-mc-theme-scroll-lock]").length,
+    scrollHeight: document.documentElement.scrollHeight,
+    htmlOverflow: document.documentElement.style.overflow,
+    containerMaxHeight: document.querySelector(".gradio-container").style.maxHeight,
+})"""
+
+
+class TestTheMomentumBreak:
+    """Asked for: "If I flick scroll to reach the bottom of column one, I do
+    not want it to continue momentum into column two. Instead it should stop
+    at the bottom like it hit an edge. From that bottom position, I should be
+    able to scroll to see what's above, or scroll to see what's below." A
+    fling is the browser's own scrolling after the finger has lifted; the
+    page gives it an edge at the boundary for the fling's time (the theme
+    script, "the momentum break between the two phases"): downward the
+    scroller's range is cut to end at the boundary, upward a fling read
+    crossing it is put back and the scroller held, and the page is whole
+    again when the scroll ends. Fingers are driven through the DevTools
+    protocol with timestamps, from which Chromium's browser process
+    synthesizes the fling, exactly as a touch screen's would be."""
+
+    def open(self, browser, **kwargs):
+        context = browser.new_context(viewport={"width": 1600, "height": 900}, has_touch=True)
+        page = open_page(browser, assistant=USER_CSS_WHOLE, context=context, **kwargs)
+        settle(page, 8)
+        cdp = context.new_cdp_session(page)
+        x = page.evaluate("document.querySelector('#txt2img_settings').getBoundingClientRect().left + 100")
+        return page, cdp, x
+
+    def test_the_boundary_is_measured_where_the_settings_phase_ends(self, browser):
+        page, cdp, x = self.open(browser)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        explained = page.evaluate("mcTheme.explainScroll()[0]")
+        assert abs(explained["boundary"] - first) <= 1, (explained, first)
+        whole = page.evaluate(BRAKE)
+        assert whole["brake"] == {"installed": True, "fingers": 0, "flinging": False, "clipped": False, "locked": False}
+        assert whole["clipped"] == 0 and whole["locked"] == 0
+        page.close()
+
+    def test_a_flick_down_the_settings_stops_at_the_boundary_like_an_edge(self, browser):
+        page, cdp, x = self.open(browser)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        whole = page.evaluate(BRAKE)["scrollHeight"]
+
+        # A flick strong enough to carry well into the results' phase: on a
+        # page without the break the same flick ends hundreds of pixels past
+        # the boundary (the probe that settled the design: 2818 from 0 for a
+        # 400 px flick, against a boundary of 1402).
+        flick(page, cdp, x, 800, 700)
+        edge = settled_fling(page)
+        assert abs(edge["scrolled"] - first) <= 1, (edge["scrolled"], first)
+        assert abs(edge["settings"]["bottom"] - rest["viewBottom"]) <= 1, edge
+        assert abs(edge["generate"]["top"] - rest["generate"]["top"]) <= 0.5, "Generate never moved"
+        # The page is whole again: the clip is gone, the range is the page's own.
+        after = page.evaluate(BRAKE)
+        assert after["clipped"] == 0 and after["locked"] == 0 and after["containerMaxHeight"] == "", after
+        assert after["scrollHeight"] == whole, after
+        assert after["brake"]["flinging"] is False
+
+        # From the edge a second flick goes on into the results' phase (as far
+        # as the page's end, which stretches the last 16 px of bottom padding).
+        flick(page, cdp, x, 800, 500)
+        on = settled_fling(page)
+        assert on["scrolled"] > first + 100, on["scrolled"]
+        assert on["generate"]["top"] < rest["generate"]["top"] - 100, "the results scroll in the second phase"
+        assert rest["viewBottom"] - 20 <= on["settings"]["bottom"] <= rest["viewBottom"] + 1, "with the settings held"
+        assert page.evaluate(BRAKE)["scrollHeight"] == whole
+        page.close()
+
+    def test_a_flick_up_the_results_stops_at_the_boundary_too(self, browser):
+        page, cdp, x = self.open(browser)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        whole = page.evaluate(BRAKE)["scrollHeight"]
+        scroll_to(page, first + second - 20)
+        page.evaluate("""() => { window.lowest = Infinity; addEventListener('scroll', () => {
+            window.lowest = Math.min(window.lowest, Math.round(scrollY)); }, true); }""")
+
+        # A short, fast flick in the results' phase, whose fling crosses the
+        # boundary upward (a probe: 1608 to 1213 without the break).
+        flick(page, cdp, x, 300, -120)
+        edge = settled_fling(page)
+        assert abs(edge["scrolled"] - first) <= 1, (edge["scrolled"], first)
+        assert abs(edge["settings"]["bottom"] - rest["viewBottom"]) <= 1, edge
+        # The results column is where its hold puts it, not pushed by the row's
+        # end as it is in the second phase. (Generate's place inside it is the
+        # Forge Assistant's fill, which lays the column out again whenever
+        # the page changes and reads the sticky bar 8 px higher once the page
+        # is scrolled past its padding: not the break's.)
+        assert abs(edge["results"]["top"] - float(edge["resultsTop"].replace("px", ""))) <= 1, edge
+        # Read crossing, put back within the frame or two the reading took.
+        lowest = page.evaluate("window.lowest")
+        assert first - 60 <= lowest <= first, lowest
+        after = page.evaluate(BRAKE)
+        assert after["locked"] == 0 and after["htmlOverflow"] == "" and after["clipped"] == 0, after
+        assert after["scrollHeight"] == whole
+
+        # From the edge a flick on goes up into the settings' phase.
+        flick(page, cdp, x, 300, -300)
+        on = settled_fling(page)
+        assert on["scrolled"] < first - 100, on["scrolled"]
+        assert abs(on["results"]["top"] - float(on["resultsTop"].replace("px", ""))) <= 1, "the results held in the first phase"
+        page.close()
+
+    def test_a_finger_on_the_screen_is_a_drag_and_crosses_as_it_likes(self, browser):
+        page, cdp, x = self.open(browser)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        whole = page.evaluate(BRAKE)["scrollHeight"]
+
+        # A slow drag from before the boundary to after it: the finger decides.
+        scroll_to(page, first - 100)
+        drag(page, cdp, x, 700, 200)
+        page.wait_for_timeout(600)
+        crossed = page.evaluate(SCROLLED)
+        assert crossed["scrolled"] > first + 50, crossed["scrolled"]
+        # A slow drag that stops short of the boundary stays where it stopped:
+        # nothing pulls it to the edge, and the page stays whole.
+        scroll_to(page, first - 400)
+        drag(page, cdp, x, 700, 250)
+        page.wait_for_timeout(600)
+        short = page.evaluate(SCROLLED)
+        assert first - 200 <= short["scrolled"] <= first - 100, short["scrolled"]
+        after = page.evaluate(BRAKE)
+        assert after["clipped"] == 0 and after["locked"] == 0 and after["scrollHeight"] == whole, after
+        page.close()
+
+    def test_the_wheel_is_not_momentum_and_is_never_stopped(self, browser):
+        page, cdp, x = self.open(browser)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        scroll_to(page, first - 50)
+        page.mouse.move(x, 500)
+        page.mouse.wheel(0, 200)
+        page.wait_for_timeout(800)
+        on = page.evaluate(SCROLLED)
+        assert on["scrolled"] > first + 100, on["scrolled"]
+        after = page.evaluate(BRAKE)
+        assert after["clipped"] == 0 and after["locked"] == 0 and after["brake"]["flinging"] is False, after
+        page.close()
+
+    def test_a_scroll_past_the_boundary_without_a_fling_writes_nothing(self, browser):
+        page, cdp, x = self.open(browser)
+        rest = scroll_to(page, 0)
+        first, second = phases(rest)
+        page.evaluate(HEARD)
+        scroll_to(page, first + 100)
+        scroll_to(page, first - 100)
+        settle(page, 4)
+        after = page.evaluate(BRAKE)
+        assert after["clipped"] == 0 and after["locked"] == 0, after
+        assert after["containerMaxHeight"] == "" and after["htmlOverflow"] == ""
+        assert page.evaluate("window.heard") == []
+        page.close()
+
+    def test_under_focus_mode_the_workspace_gets_the_edge(self, browser):
+        page, cdp, x = self.open(browser)
+        entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', forgeAssistant.shell.host)")
+        assert entered["ok"] is True
+        settle(page, 8)
+        rest = scroll_to(page, 0, root=True)
+        first, second = phases(rest)
+        assert first > 600, first
+        x = page.evaluate("document.querySelector('#txt2img_settings').getBoundingClientRect().left + 100")
+        whole = page.evaluate("document.querySelector('.forge-assistant-focus-root').scrollHeight")
+
+        flick(page, cdp, x, 800, 700)
+        edge = settled_fling(page)
+        assert abs(edge["scrolled"] - first) <= 1, (edge["scrolled"], first)
+        assert abs(edge["generate"]["top"] - rest["generate"]["top"]) <= 0.5, edge
+        assert page.evaluate("window.scrollY") == 0, "the page under the workspace did not move"
+        after = page.evaluate(BRAKE)
+        assert after["clipped"] == 0 and after["locked"] == 0, after
+        assert page.evaluate("document.querySelector('.forge-assistant-focus-root').scrollHeight") == whole
+        assert page.evaluate("document.querySelector('#txt2img_extra_tabs').style.maxHeight") == ""
+
+        flick(page, cdp, x, 800, 500)
+        on = settled_fling(page)
+        assert on["scrolled"] > first + 100, on["scrolled"]
+        page.evaluate("forgeAssistant.focus.exit()")
+        page.close()
 
 
 class TestOneScrollerForThePage:

@@ -26,7 +26,7 @@
 
     var HINT_DURATION_MS      = 500;
     var HIGHLIGHT_DURATION_MS = 250;
-    var RESULT_DURATION_MS    = 1400;
+    var REFUSED_DURATION_MS   = 600;
 
     // The options Python registers (mc_gallery_quadrant.py).
     var OPT_ENABLED     = "model_chain_gallery_quadrant";
@@ -85,8 +85,11 @@
     //  Save to the folder (top-left, a folder on this machine)
     //  The page posts the preview's src -- a Gradio file URL -- and the server
     //  finds the file it names under Forge's output folders and copies it into
-    //  the folder the settings name. The answer, or the refusal's sentence, is
-    //  shown in the zone for a moment.
+    //  the folder the settings name. The tap shows nothing but the zone's own
+    //  flash, as Forge's Save in the top-right zone does ("I don't want there
+    //  to be any dialogue when I tap, I just want the transparent tap
+    //  indication"); a refusal tints the zone red for a moment and its reason
+    //  goes to the console.
     // ------------------------------------------------------------------ //
     function gallerySaveToFolder(imgSrc, galleryEl) {
         var cell = galleryEl.querySelector(".gqa-overlay .gqa-tl");
@@ -97,32 +100,25 @@
             body: JSON.stringify({src: imgSrc}),
         }).then(function (r) {
             return r.json().catch(function () { return {}; }).then(function (body) {
-                if (r.ok && body && body.ok) {
-                    showResult(cell, "Saved " + (body.name || ""));
-                } else {
-                    var reason = (body && body.error) || ("HTTP " + r.status);
-                    console.error("[GQA] save to folder refused:", reason);
-                    showResult(cell, reason);
-                }
+                if (r.ok && body && body.ok) return;
+                var reason = (body && body.error) || ("HTTP " + r.status);
+                console.error("[GQA] save to folder refused:", reason);
+                showRefused(cell);
             });
         }).catch(function (e) {
             console.error("[GQA] save to folder failed:", e);
-            showResult(cell, "The save did not reach the WebUI.");
+            showRefused(cell);
         });
     }
 
-    function showResult(cell, text) {
+    function showRefused(cell) {
         if (!cell) return;
-        var overlay = cell.parentElement;
-        cell.textContent = text;
-        cell.classList.add("gqa-result-visible");
-        if (cell.gqaResultTimer) clearTimeout(cell.gqaResultTimer);
-        cell.gqaResultTimer = setTimeout(function () {
-            cell.gqaResultTimer = null;
-            cell.classList.remove("gqa-result-visible");
-            cell.textContent = savesToFolder() ? TITLE_FOLDER : TITLE_DOWNLOAD;
-            if (overlay) overlay.classList.remove("gqa-titles-visible");
-        }, RESULT_DURATION_MS);
+        cell.classList.add("gqa-refused-visible");
+        if (cell.gqaRefusedTimer) clearTimeout(cell.gqaRefusedTimer);
+        cell.gqaRefusedTimer = setTimeout(function () {
+            cell.gqaRefusedTimer = null;
+            cell.classList.remove("gqa-refused-visible");
+        }, REFUSED_DURATION_MS);
     }
 
     // ------------------------------------------------------------------ //
