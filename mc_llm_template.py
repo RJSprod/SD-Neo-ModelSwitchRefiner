@@ -43,7 +43,7 @@ import hashlib
 import logging
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("model_chain")
 
 TEMPLATE_FILE_FLAG = "--chat-template-file"
 """llama-server's template override. Taken with Jinja, which the server uses

@@ -1924,8 +1924,8 @@ def _adopt(artifacts, folder: Path, destination: Path, say, what: str) -> dict:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         digests[item.local_name] = digest
-    logger.info("Model Chain: VibeVoice adopted %d file(s) for the %s from %s",
-                len(digests), what, folder)
+    logger.info("Model Chain: VibeVoice adopted %d file(s) for the %s from the folder you "
+                "supplied", len(digests), what)
     return digests
 
 

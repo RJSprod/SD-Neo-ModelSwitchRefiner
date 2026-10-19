@@ -1315,7 +1315,11 @@ class TestReadiness:
 
         assert "off for this session" in mc_memory.stage_1_readiness()[1]
 
-    def test_it_says_when_no_warm_up_is_enabled_at_all(self, memory):
+    def test_it_says_when_no_warm_up_is_enabled_at_all(self, memory, monkeypatch):
+        # No preload has run either: a result left behind by a file that ran a
+        # generation with the preload on would otherwise explain the readiness
+        # instead of the absent warm-up.
+        monkeypatch.setattr(mc_memory, "_preload_result", None)
         assert "no warm-up is enabled" in mc_memory.stage_1_readiness()[1]
 
     def test_it_says_nothing_on_a_generation_that_has_nothing_to_do_with_us(
@@ -1366,7 +1370,10 @@ class TestReadiness:
 
 
 class TestLoadCurrentToGpu:
-    def test_every_patcher_is_handed_to_the_host(self, memory):
+    def test_every_patcher_is_handed_to_the_host(self, memory, host):
+        # Under the setting that moves the text encoder and VAE back; the
+        # default hands the diffusion model alone (tests/test_encoders_in_ram.py).
+        host.shared.opts.model_chain_restore_encoders = True
         mc_memory._load_current_to_gpu()
 
         handed = {p.label for p in memory.mm.loaded_to_gpu[0]}
@@ -1578,26 +1585,30 @@ class TestSettingsRegistration:
             if name.startswith("model_chain_")
         ]
         assert ours, "no Model Chain settings were registered at all"
-        # Four sections, deliberately. Voice Chat is an install-level capability
-        # with two downloads behind it, and burying it under a heading about
-        # image model chaining would make it findable only by somebody who
-        # already knew it was there; the theme is a page-wide choice with a
-        # dozen switches of its own, and the same argument holds; the Gallery
-        # Quadrant's settings live in a section of their own at the user's
-        # word, as the standalone extension's did.
+        # Several sections, deliberately. Voice Chat is an install-level
+        # capability with two downloads behind it, and burying it under a
+        # heading about image model chaining would make it findable only by
+        # somebody who already knew it was there; the theme is a page-wide
+        # choice with a dozen switches of its own, and the same argument holds;
+        # the Gallery Quadrant's settings live in a section of their own at the
+        # user's word, as the standalone extension's did; and the main script's
+        # own settings are split by what they are about (model_chain.SECTIONS),
+        # at the user's word, because one section of sixty was unreadable.
         import mc_gallery_quadrant
         import mc_theme
 
-        known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION, mc_theme.SECTION,
+        known = {*model_chain.SECTIONS, model_chain.VOICE_SECTION, mc_theme.SECTION,
                  mc_gallery_quadrant.SECTION}
         # The two deliberate uses of the host's hidden idiom: the record of
         # the one-time import of the user's Lobe settings, and the record of
         # the one-time default sort of the extra networks (newest created
         # first, set in Forge's own settings) -- each read back and never
         # meant to be changed by hand. Not settings, so not drawn.
+        import mc_batch_once
         import mc_extra_networks_sort
 
-        records = {mc_theme.OPT_IMPORT, mc_extra_networks_sort.OPT_RECORD}
+        records = {mc_theme.OPT_IMPORT, mc_extra_networks_sort.OPT_RECORD,
+                   mc_batch_once.OPT_RECORD}
         for name, option in host.shared.options_templates.items():
             if name in records:
                 assert option.section[0] is None, f"{name} is a record and must not be drawn"

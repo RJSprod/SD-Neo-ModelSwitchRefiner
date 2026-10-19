@@ -513,72 +513,65 @@ comments rather than shipped silently — the extension chooses what to
 
 ### Settings
 
-Under **Settings → Model Chain**:
+Six sections under **Settings**, one per area, each setting with a sentence or
+two under it. Nothing here changes what a setting does; where it is drawn and
+what it says of itself were rewritten for readability.
 
-- **Save Stage 1 intermediate images to disk** (default off) — writes the
-  unrefined Stage 1 images to a `model-chain-stage1/` subfolder of your output
-  directory. They never appear in the gallery.
-- **Max system RAM for model cache (GB)** (default 0 = 60% of detected system
-  RAM) — the ceiling on RAM held by the residency cache. This is a ceiling, not
-  a reservation: the live free-RAM check is the real guard. Raise it if the
-  console reports a model being refused.
+**Model Chain** — the image model and its memory:
+
+- **Save Stage 1 intermediate images to disk** (default off) — the unrefined
+  Stage 1 images, to a `model-chain-stage1/` subfolder of the output directory,
+  never in the gallery.
+- **Max system RAM for model cache (GB)** (default 0 = 60% of system RAM) — a
+  ceiling on the cache of parked checkpoints, not a reservation.
 - **Keep the image model in VRAM between generations** (experimental, default
   **off**) — see
   [Keeping the image model in VRAM](#keeping-the-image-model-in-vram-experimental-off-by-default).
+- **Move the text encoder and VAE back to VRAM after a generation** (default
+  **off**) — see [The text encoder after a generation](#the-text-encoder-after-a-generation).
+- **Count each image once in Forge's VRAM request at CFG 1** (default **on**,
+  pinned to the Forge build it was turned on with) — see
+  [Counting each image once at CFG 1](#counting-each-image-once-at-cfg-1).
 - **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
   see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
 - **Use leftover VRAM to keep Stage 2 warm between generations** (default on,
-  but only takes effect when something will start a warm-up — either the
-  setting above or **Warm up before generating**) — see
-  [Spending what is left](#spending-what-is-left).
-- **Minimum VRAM reserve (GB)** (default 0 = automatic) — a floor under the
-  automatically sized reserve. Model Chain never warms anything into it, and
-  never undercuts VRAM Forge itself has set aside. See
-  [The reserve](#the-reserve).
+  only with a warm-up to run on) — see [Spending what is left](#spending-what-is-left).
+- **Minimum VRAM reserve (GB)** (default 0 = automatic) — see [The reserve](#the-reserve).
 - **Reuse a prepared LoRA state when a cached model comes back** (default on) —
-  see [Prepared LoRA state](#prepared-lora-state). Turn it off if a LoRA
-  misbehaves after a switch; every restored model then rebuilds its LoRA state
-  from scratch, which is slower but leaves nothing to be wrong about.
+  see [Prepared LoRA state](#prepared-lora-state).
 - **LoRA originals in system RAM** (default Warm) — see
-  [Warm LoRA, Cold LoRA](#warm-lora-cold-lora). Also the **Warm LoRA / Cold
-  LoRA** switch in the Forge Assistant's ⋯ menu, which is the same setting.
-  Cold frees the un-merged weights Forge keeps after a LoRA merge, about 12 GB
-  for a Krea-sized model, at the price of a reload from disk whenever the LoRA
-  set changes.
-- **Predict progress and ETA for the whole chained job** (default on) — see
-  [Progress and ETA](#progress-and-eta).
-- **Bring the image model back after a Voice Box render** (default Automatic) and
-  **Keep the Voice Box's engine warm between requests** (default on every card) —
-  see [Whose turn it is on each card](#whose-turn-it-is-on-each-card). Neither
-  does anything until one of the Voice Box's engines is installed.
-- **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
-  colour** and the toggles below them — see
-  [Progress-bar appearance](#progress-bar-appearance).
-- **Quieter night mode: dim the primary buttons in the dark theme** (default
-  on) — Generate and every other primary button drawn as a dim surface tinted
-  with the theme's accent instead of a solid block of it. See
-  [A quieter night mode](#a-quieter-night-mode).
-- **Show the Forge Assistant** (default on), **Forge Assistant label**,
-  **launcher** and **position** — the floating panel, what it is called, whether
-  it draws its name, an icon or both, and which of the six resting places it
-  starts at. See [The Forge Assistant](#the-forge-assistant). Turning it off
-  removes the panel and nothing else: the conversation, the guarding and the
-  server-owned replies are not a panel and do not go with one.
-- **Message bubble width (%)** (default 75) — how much of the transcript's width
-  one message may take, in both views. A bubble is as wide as its text up to
-  that limit, so a short message is a short bubble and a line wraps when the
-  bubble is full rather than before it. Yours end on one edge and the
-  character's on the other, each on the same edge as every other. Below 480
-  pixels wide at least 90% is used whatever this says.
-- **Conversation column width** (default medium) — how wide the transcript and
-  the composer are allowed to become in the Conversation tab. On a wide monitor
-  a transcript stretched across the whole screen is one nobody can follow from
-  one line to the next, and this is what makes focus mode an improvement there
-  rather than a regression. The page never scrolls sideways at any setting, and
-  the floating panel ignores it.
-- **Conversation text size (px)** (default 0 = inherit the theme),
-  **Conversation density** and **Show avatars in the conversation** — appearance
-  only, and none of them touches a chat, a model or a voice.
+  [Warm LoRA, Cold LoRA](#warm-lora-cold-lora); also the switch in the Forge
+  Assistant's ⋯ menu.
+- **Warm up before generating** (default off) — see
+  [its relationship with the warm-up](#its-relationship-with-warm-up-before-generating).
+
+**Model Chain: Progress bar** — **Predict progress and ETA for the whole
+chained job** (default on, [Progress and ETA](#progress-and-eta)), **Advance
+the progress bar smoothly** ([Smooth advance](#smooth-advance)), and the
+appearance settings ([Progress-bar appearance](#progress-bar-appearance)).
+
+**Model Chain: Page** — **Hide the WebUI footer** (default on) and **Quieter
+night mode** (default on, [A quieter night mode](#a-quieter-night-mode)).
+
+**Model Chain: LLM Studio** — the tab, the vision projector, the prompt caches,
+VRAM residency and the persistent LLM budget, WanGP's card, the roles, the
+data directory and the context: see [LLM Studio](#llm-studio),
+[Generation Memory & Persistent LLM](#generation-memory--persistent-llm),
+[Sharing the card](#sharing-the-card) and [WanGP on the other card](#wangp-on-the-other-card).
+
+**Model Chain: Voice Box** — **Bring the image model back after a Voice Box
+render** (default Automatic) and **Keep the Voice Box's engine warm between
+requests** (default on every card): see
+[Whose turn it is on each card](#whose-turn-it-is-on-each-card). Neither does
+anything until one of the Voice Box's engines is installed.
+
+**Model Chain: Forge Assistant** — whether the panel shows, its label, launcher
+and position, and the conversation's bubble width, column width, text size,
+density and avatars: see [The Forge Assistant](#the-forge-assistant). Turning
+the panel off removes the panel and nothing else.
+
+**Model Chain: Theme**, **Model Chain: Gallery Quadrant** and **Voice Chat**
+are sections of their own, described in their chapters.
 
 ### Progress and ETA
 
@@ -1175,7 +1168,7 @@ There are three shapes of work, and it picks whichever applies:
 | It finds | It does |
 | --- | --- |
 | a checkpoint Model Chain swapped out for Stage 2 | swaps it back in from the RAM cache, then moves its weights |
-| the selected checkpoint loaded but only partly on the card | moves the rest of its weights |
+| the selected checkpoint loaded but only partly on the card | moves the rest of its diffusion model's weights — and of its text encoder and VAE only under [the setting that asks for them](#the-text-encoder-after-a-generation) |
 | nothing usable loaded | asks the host's own loader for it — **only** when an explicit warm-up asked, never on the background pass, because reading a checkpoint off disk is expensive whether or not anybody is waiting |
 
 The second row is the ordinary case and it is the one a single-stage plan lives
@@ -1468,11 +1461,136 @@ that made it. A fourth term appears when the host counts weights as still to
 load although they are resident: a clone of a patcher that was never itself
 loaded carries a stale device tag, and the host asks for room to load all of it.
 
-The warm-up still moves the text encoder back afterwards, on purpose: encoding
-the next prompt needs it on the card, and moving it in the idle gap is cheaper
-than moving it while somebody waits. What it cannot do is keep it there. That
-takes the request shrinking — in the extension that made the reservation, or in
-the host's own figure — and the line above is what says which.
+The warm-up used to move the text encoder back afterwards on purpose, and the
+next batch above one pushed it off again before its first step: the generation
+paid the move twice, and the log said so. Three things answer that now, each
+below: the warm-up leaves the encoder where the host put it unless a setting
+asks otherwise; a pass at CFG 1 is charged for each image once rather than
+twice; and every pass says what it really allocated beside what the host asked
+for, so the request's size is a measurement rather than a mystery.
+
+##### The text encoder after a generation
+
+**Move the text encoder and VAE back to VRAM after a generation**, under
+Settings → Model Chain, default **off**.
+
+Off, a warm-up moves the diffusion model and nothing else. The text encoder and
+the VAE stay wherever Forge put them — on the card after a pass that had room
+for them, in system RAM after one that pushed them off — and Forge loads them
+again when something needs them: the encoder when a new prompt has to be read,
+the VAE at the decode. A repeated prompt never needs the encoder at all,
+because Forge caches a prompt's conditioning across generations, so
+back-to-back generations with nothing changed move nothing. A new prompt at a
+batch above one pays the encoder's load once, at the press, and the sampler
+pushes it off again before the first step; at batch 1 nothing is pushed off and
+the encoder simply stays. With the encoder in system RAM the card has its room
+free beside the diffusion model, which is what lets a batch of two or three
+sample without any eviction on a 24 GB card holding an 18 GB checkpoint.
+
+On, the warm-up moves everything back after every generation, which is what it
+did before the setting existed: the next generation's prompt is encoded without
+a wait, and a batch above one pushes the encoder off again before its first
+step.
+
+What the log says of it, off, after a pass that pushed the encoder off:
+
+```
+Model Chain: Stage 1 needs 12.6 GB for its diffusion model plus 1.5 GB of headroom,
+             has 9.9 GB free and 12.6 GB of it already resident — no eviction needed
+Model Chain: Stage 1 is warm — 12.6 GB already in VRAM (preloaded in 0.9s); its text
+             encoder and VAE stay in system RAM (5.6 GB) until a prompt or a decode
+             needs them.
+```
+
+The warm-up's own budget is for what it moves — the diffusion model's missing
+part and the pass's headroom — never for weights it is leaving in system RAM,
+so it evicts nothing to make room for an encoder it will not move, and never
+reports the model short of warm over one. The headroom handed to the host is
+still trimmed against the whole checkpoint, because a pass runs with the
+encoder on the card whenever a prompt had to be read first.
+
+##### Counting each image once at CFG 1
+
+Forge sizes the room it asks for before a pass from a latent with the batch
+**doubled**: `sampling_prepare` reads `(2 if shared.batch_cond_uncond else 1)
+* batch`, because a pass at a CFG above one runs the positive and the negative
+prompt through the model together. At CFG 1 it runs the positive alone — the
+negative is dropped outright — so half of the request is for a pass that never
+happens. On the user's card that half was the difference between a batch of two
+fitting beside the weights (3.5 GB asked against 4.3 GB free) and not (6.3 GB).
+
+`shared.batch_cond_uncond` is a module constant in Forge Neo, not the Settings
+page's *Batch Cond/Uncond* (that is `opts.batch_cond_uncond`, which neither the
+request nor the sampler reads), so no setting of Forge's own shrinks the
+request. **Count each image once in Forge's VRAM request at CFG 1**, under
+Settings → Model Chain, default **on**, sets the constant to False for the
+moment the host reads it and puts it back at the first sampling step — only
+when all of this holds:
+
+- the pass runs at CFG 1 (the hires pass has a CFG of its own) and the host's
+  CFG-1 optimisation is on, so no negative pass will run;
+- every image's conditioning is one part (no `AND` composition), so the flag's
+  other reading, whether two conditioning entries may share a forward pass,
+  changes nothing;
+- the host still reads the constant where this expects it — the source of its
+  `sampling_prepare` names it; and
+- **the Forge build is the one the setting was turned on with.** The first start
+  with the setting on records the installed build (its version and commit) in a
+  hidden option. After a Forge update the override stands down with a warning
+  in the log, until the setting is turned off and on again on the new build,
+  which records that one. An override of a host internal is tied to the host it
+  was verified on, at the user's word.
+
+The log says which:
+
+```
+Model Chain: Forge's VRAM request counts each image once at CFG 1 — pinned to Forge
+             neo 2.30 @ 1a2b3c4d5e, the build it was turned on with
+Model Chain: counting each image once in Forge's VRAM request for this CFG 1 pass
+             (Forge neo 2.30 @ 1a2b3c4d5e); the request would otherwise count every
+             image twice, for a negative pass that does not run at CFG 1
+Model Chain: Forge is neo 2.31 @ ffffffffff now, not the neo 2.30 @ 1a2b3c4d5e the
+             setting was turned on with — counting each image once is off until the
+             setting is turned off and on again on this build
+```
+
+and the sampler's own line reads `(a 2x16x1x128x128 latent, each image counted
+once)` while it is in force. The extension's reading of the request follows the
+host's flag either way, so it always says what the host will actually ask.
+
+##### What the pass really used
+
+Whether Forge's allowance is a good bet is a question only a measurement
+answers, so every Stage 1 pass is measured and said beside the request:
+
+```
+Model Chain: the Stage 1 pass used 3.2 GB of working VRAM at its peak — a batch of 4
+             at 1024x1024 (0.80 GB per image); Forge's sampler had asked for 11.9 GB
+             free beside the weights, 11.2 GB of it for activations (2.80 GB per
+             image) — 3.5x what the pass used. Against the batch of 1 at this size:
+             +0.80 GB used per extra image against 2.80 GB charged for each.
+             PyTorch's own allocations only, so a floor on what the driver had to find
+```
+
+The window is the sampling itself: it opens at the first sampling step, after
+the host has made its room and loaded what it loads, by resetting PyTorch's
+peak counter and reading what is allocated then — the weights on the card, the
+latents, the conditioning — and it closes when the sampler returns (or when the
+hires pass is armed, which follows the first pass without a boundary of its
+own). Peak less baseline is the working VRAM the pass needed beyond what was
+already there: exactly what the host's allowance is meant to cover. The
+increment is said whenever the same size has been measured at another batch
+size this session, so a run of batch 1, 2, 3 and 4 at one size answers the
+question per extra image. PyTorch's counter sees its own allocator and nothing
+else — not cuBLAS workspaces, not the CUDA context, not fragmentation — so the
+figure is a floor on what the driver had to find, and the line says so. Stage 2
+runs without the host's per-pass hooks and is not measured.
+
+The automatic reserve's own observation (see [The reserve](#the-reserve)) reads
+the same counter, so for a Stage 1 pass its window now opens at the first
+sampling step too: weights the sampler pushed off before sampling no longer
+count as activations there; what the sampling and the decode allocate still
+does, and the bounds on it are unchanged.
 
 ##### What happens when it goes wrong
 
@@ -1593,7 +1711,11 @@ Forge's own reservation is never cancelled or reduced by this extension.
 **Automatic mode learns, within bounds.** The static estimate cannot know your
 sampler, your batch size, or what else is hooked into the UNet, so after each
 pass the peak allocation is compared against the weights resident at the time
-and the difference is folded in as bytes-per-megapixel. The figure only ever
+and the difference is folded in as bytes-per-megapixel. For a Stage 1 pass the
+window opens at the first sampling step (see
+[What the pass really used](#what-the-pass-really-used)), so what left the
+card before sampling no longer counts; a Stage 2 pass's window opens before it,
+as before. The figure only ever
 moves upward: a pass that happened to be cheap is not evidence that the next one
 will be, and an under-reserve is the failure with no error message attached.
 
@@ -4236,6 +4358,25 @@ models. The LLM data directory is the **LLM data directory** setting, or
 extension folder, which an update overwrites. The full path is printed to the
 console on every llama-server start and shown in Setup's residency panel, so
 finding it should never involve guessing.
+
+### What the log never contains
+
+Nothing this extension writes to `model_chain.log` or the console names a path
+on this machine, a file or folder you made or chose, or anything you typed.
+That covers the install and data directories, the log file's own folder, the
+pictures the Gallery Quadrant copies and where it copies them, the Voice Box's
+samples, renders and outputs, LLM Studio's attachments and conversations, and
+every prompt and message. A line that needs a location says which folder in
+words (*the logs folder of the LLM data directory*); a line about something you
+saved says what happened without naming it. Models and LoRAs are still named
+as Forge names them, because a log that cannot say which model was loaded
+explains nothing; presets, profiles, layouts and characters are named, being
+choices from a list.
+
+A filter on the extension's logger holds the rule for anything a future line
+might carry anyway: an absolute path that reaches a line, its arguments or a
+traceback is replaced by `<path>` before it is written anywhere. A `<path>`
+in your log is a line that should not have carried one, and is worth reporting.
 
 ### Is it really on the GPU?
 

@@ -1037,10 +1037,12 @@ class TestAnInstallRefusalIsReadInPublic:
                     "hf://kyutai/pocket-tts/languages/english/model.safetensors"):
             assert pocket._without_paths(one) == one
 
-    def test_the_whole_message_still_reaches_the_log(self, host, voice_root, monkeypatch,
-                                                     caplog, tmp_path):
-        """The full path is what a maintainer diagnoses from. It is not being
-        thrown away -- it is being kept out of the browser."""
+    def test_the_reason_still_reaches_the_log_and_the_path_does_not(self, host, voice_root,
+                                                                  monkeypatch, caplog, tmp_path):
+        """The reason reaches the log and the panel alike; the install directory
+        reaches neither. A log never carries a path on this machine
+        (mc_log_privacy), so the filter on the logger takes it out of the line
+        the self-test writes, and what is left still says what went wrong."""
         import logging
 
         class Result:
@@ -1059,8 +1061,11 @@ class TestAnInstallRefusalIsReadInPublic:
 
         assert "Roots" not in str(raised.value)
         assert "Sentinel" in str(raised.value), "the panel lost the reason too"
-        assert any("Roots" in record.getMessage() for record in caplog.records), \
-            "the log lost the path as well"
+        said = [record.getMessage() for record in caplog.records
+                if "Sentinel" in record.getMessage()]
+        assert said, "the log lost the reason"
+        assert not any("Roots" in line or "C:" in line for line in said), \
+            "the log carried the install directory"
 
 
 class TestTheInstallButtonSaysWhatIsLeftToDo:

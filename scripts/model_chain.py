@@ -22,6 +22,7 @@ import gradio as gr
 import mc_arch
 import mc_arm
 import mc_assistant_settings
+import mc_batch_once
 import mc_broker
 import mc_gallery_quadrant
 import mc_hint
@@ -59,6 +60,7 @@ import mc_voice_box_engines
 import mc_voice_box_ui
 import mc_voice_clone
 import mc_voice_device
+import mc_working_vram
 import mc_voice_engines
 import mc_voice_models
 import mc_voice_paths
@@ -259,7 +261,7 @@ def _kv_types() -> list[tuple[str, str]]:
 
 
 SETTINGS_SECTION = ("model_chain", "Model Chain")
-"""Identifier and title of the Settings page section.
+"""Identifier and title of the Settings page section the image model's settings are in.
 
 The first element must not be None. ``ui_settings`` skips any option whose
 section id is None -- that is the host's own idiom for settings it stores but
@@ -269,6 +271,26 @@ these options exist and can be read and saved, but no control is ever built for
 them, so there is nothing to tick.
 """
 
+LLM_SECTION = ("model_chain_llm", "Model Chain: LLM Studio")
+ASSISTANT_SECTION = ("model_chain_assistant", "Model Chain: Forge Assistant")
+PROGRESS_SECTION = ("model_chain_progress", "Model Chain: Progress bar")
+PAGE_SECTION = ("model_chain_page", "Model Chain: Page")
+VOICE_BOX_SECTION = ("model_chain_voice_box", "Model Chain: Voice Box")
+
+SECTIONS = (SETTINGS_SECTION, LLM_SECTION, ASSISTANT_SECTION, PROGRESS_SECTION, PAGE_SECTION,
+            VOICE_BOX_SECTION)
+"""Every section this file registers, in the order the page lists them under
+*Extensions* (alphabetical by title). One section each for the image model,
+LLM Studio, the Forge Assistant, the progress bar, the page and the Voice Box,
+at the user's word: one section of sixty settings was unreadable. A setting's
+section is where the page draws it and nothing else; the keys, defaults and
+choices are what they were, so a saved value is read as before.
+"""
+
+# Short descriptions, by the user's rule: what the setting does and when it
+# matters, in a sentence or two. The reasoning behind each lives in README.md,
+# which the Settings link at the top of the page reaches.
+
 shared.options_templates.update(
     shared.options_section(
         SETTINGS_SECTION,
@@ -277,71 +299,68 @@ shared.options_templates.update(
                 False,
                 "Save Stage 1 intermediate images to disk",
             ).info(
-                f'written to a "{STAGE1_SUBFOLDER}" subfolder of the output directory; '
-                "they never appear in the gallery"
+                f'Writes the unrefined Stage 1 images to a "{STAGE1_SUBFOLDER}" subfolder of '
+                "the output directory. They never appear in the gallery"
             ),
             "model_chain_ram_budget_gb": shared.OptionInfo(
                 0.0,
                 "Max system RAM for model cache (GB)",
                 gr.Number,
             ).info(
-                "0 uses a default of 60% of detected system RAM. The live free-RAM "
-                "check is the real guard, so this is a ceiling rather than a reservation"
+                "A ceiling on the RAM parked checkpoints may hold, not a reservation; the "
+                "live free-RAM check is the real guard. 0 means 60% of this machine's RAM"
             ),
-            # The two below describe the machine rather than the image, which is
-            # why they live here and not in the accordion: an accordion control
-            # would also travel in presets and in every infotext, where a VRAM
-            # strategy says nothing useful about the hardware that reads it.
             mc_memory.OPT_PRELOAD: shared.OptionInfo(
                 mc_memory.PRELOAD_DEFAULT,
                 "Keep the image model in VRAM between generations (experimental)",
             ).info(
-                "moves the image model's weights back into VRAM in the background while "
-                "you look at the result, so the next Generate starts sampling immediately "
-                "— and so a LoRA is applied to weights already on the card rather than "
-                "walked across the bus first. Off by default: it is the only part of this "
-                "extension that touches models off the generation thread, and on some "
-                "setups — on-the-fly LoRA patching in particular — that has broken the "
-                "following generation outright. \"Warm up before generating\" does the same "
-                "work at the moments it names, so turning that on turns this on for those "
-                "moments too"
+                "After a generation, moves the image model's weights back into VRAM in the "
+                "background, so the next Generate starts sampling at once. Off by default: "
+                "it moves weights off the generation thread, which has broken the following "
+                "generation on some setups. Warm up before generating does the same work "
+                "at the moments it names"
             ),
+            mc_memory.OPT_RESTORE_ENCODERS: shared.OptionInfo(
+                mc_memory.RESTORE_ENCODERS_DEFAULT,
+                "Move the text encoder and VAE back to VRAM after a generation",
+            ).info(
+                "Off leaves them where Forge put them — in system RAM once a batch above one "
+                "pushed them off — and Forge loads them when a new prompt or a decode needs "
+                "them. On moves them back after every generation, which a batch above one "
+                "undoes before its first step"
+            ),
+            **mc_batch_once.settings(shared),
             mc_memory.OPT_PIN_ENCODERS: shared.OptionInfo(
                 True,
                 "Keep Stage 1's text encoder and VAE in VRAM during Stage 2",
             ).info(
-                "so switching back only has to move the UNet. Applied only when Stage 2 "
-                "still fits alongside them; otherwise it is skipped automatically and logged"
+                "So switching back to Stage 1 moves only its UNet. Skipped, and logged, when "
+                "Stage 2 would not fit beside them"
             ),
             mc_memory.OPT_WARM_STAGE_2: shared.OptionInfo(
                 True,
                 "Use leftover VRAM to keep Stage 2 warm between generations",
             ).info(
-                "after Stage 1 is back and the reserve below is honoured, anything still "
-                "spare is spent on Stage 2's components so the next refine starts sooner. "
-                "Never at Stage 1's expense, and the first thing released under pressure. "
-                "Requires a warm-up — the setting above, or \"Warm up before generating\": "
-                "filling VRAM is only safe on that thread, so with neither asked for this "
-                "does nothing"
+                "Spends VRAM left after Stage 1 and the reserve on Stage 2's components, so "
+                "the next refine starts sooner. Needs a warm-up to run on: the setting "
+                "above, or Warm up before generating"
             ),
             mc_memory.OPT_VRAM_RESERVE: shared.OptionInfo(
                 0.0,
                 "Minimum VRAM reserve (GB)",
                 gr.Number,
             ).info(
-                "0 sizes the reserve automatically from the pass and from the activation "
-                "peaks actually observed this session. Set a number to put a floor under "
-                "that estimate — Model Chain never warms anything into the reserve, and "
-                "never undercuts VRAM Forge has already set aside for itself"
+                "0 sizes the reserve from the pass and from the activation peaks seen this "
+                "session. A number is a floor under that. Nothing is ever warmed into the "
+                "reserve, and Forge's own reservation is never undercut"
             ),
             mc_memory.OPT_PRESERVE_LORA: shared.OptionInfo(
                 True,
                 "Reuse a prepared LoRA state when a cached model comes back",
             ).info(
-                "a warm swap keeps the model object, so an unchanged LoRA does not have to "
-                "be reapplied. Turn this off to make every restored model rebuild its LoRA "
-                "state from scratch — slower, and worth trying if a LoRA misbehaves after "
-                "a switch"
+                "A warm swap keeps the model object, so an unchanged LoRA is not reapplied. "
+                "Off rebuilds the LoRA state on every restore: slower, and worth trying if a "
+                "LoRA misbehaves after a switch"
             ),
             mc_lora_ram.OPT_LORA_RAM: shared.OptionInfo(
                 mc_lora_ram.WARM,
@@ -349,265 +368,10 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": list(mc_lora_ram.MODES)},
             ).info(
-                "Forge merges a LoRA into the weights and keeps the un-merged originals in "
-                "system RAM so a LoRA change is a round trip through RAM rather than a read "
-                "of the checkpoint — about 12 GB for a Krea-sized model, for as long as the "
-                "LoRA is merged. Warm keeps them. Cold frees them at once and after every "
-                "merge; the model then keeps its LoRA baked in, and a change of LoRA — or "
-                "removing it — reloads the checkpoint from disk, so nothing is ever merged "
-                "on top. Also the Warm LoRA / Cold LoRA switch in the Forge Assistant's ⋯ "
-                "menu. Turning Warm back on restores nothing: the next merge is the one "
-                "that stays warm"
-            ),
-            mc_progress.OPT_PROGRESS: shared.OptionInfo(
-                mc_progress.PROGRESS_DEFAULT,
-                "Predict progress and ETA for the whole chained job",
-            ).info(
-                "the host counts sampling steps, which makes the bar finish at the end of "
-                "Stage 1 and then jump backwards. This models the job as timed phases "
-                "instead — including the model switch — and reports how much of the "
-                "predicted wall time has passed. Timings are measured on your machine and "
-                "improve after a few generations"
-            ),
-            OPT_SMOOTH: shared.OptionInfo(
-                True,
-                "Advance the progress bar smoothly",
-            ).info(
-                "the WebUI writes the bar's width once per progress poll, so it arrives in "
-                "steps — one jump every <em>Progress bar update period</em> milliseconds. "
-                "This fills in the movement between those writes. It changes nothing about "
-                "the numbers, applies to every generation whether or not Model Chain is "
-                "involved, and is independent of the appearance settings below"
-            ),
-            OPT_HIDE_FOOTER: shared.OptionInfo(
-                True,
-                "Hide the WebUI footer",
-            ).info(
-                "the footer sits below the fold and takes real space, so a page that "
-                "otherwise fits the window still scrolls by the height of a row of links. "
-                "LLM Studio's conversation workspace is built to fit the window exactly, "
-                "and this is the one strip under it that no layout here can reach. Applies "
-                "to every tab, because the footer is one element on the page; turning it "
-                "off puts it straight back"
-            ),
-            OPT_QUIET_NIGHT: shared.OptionInfo(
-                True,
-                "Quieter night mode: dim the primary buttons in the dark theme",
-            ).info(
-                "in the dark theme, Generate and every other primary button is a solid "
-                "block of the theme's accent — white, under the Lobe theme — and the "
-                "brightest thing on the page. This draws them as a dim surface tinted "
-                "with that accent, with the accent as a line around them and the page's "
-                "ordinary text on them; hovering strengthens the tint. Only the dark "
-                "theme, only the colours (nothing changes size), and the colours are "
-                "still the theme's own. Applies to every tab, under any WebUI theme; "
-                "turning it off puts the solid buttons straight back"
-            ),
-            # -- appearance, deliberately independent of everything above --- #
-            # These change how the host's bar looks and never what it reports,
-            # so they apply to ordinary Forge generations too and stay useful
-            # with Model Chain switched off entirely.
-            OPT_STYLE_ENABLE: shared.OptionInfo(
-                False,
-                "Custom progress-bar appearance",
-            ).info(
-                "restyles the WebUI's own progress bar for every generation, chained or "
-                "not. Purely cosmetic: it never changes the numbers on the bar"
-            ),
-            OPT_STYLE_THEME: shared.OptionInfo(
-                STYLE_THEME_DEFAULT,
-                "Progress-bar theme",
-                gr.Dropdown,
-                {"choices": list(STYLE_THEMES)},
-            ).info(
-                "<b>Flat</b> plain fill · <b>Gradient</b> lightens towards the leading edge · "
-                "<b>Sheen</b> adds a travelling highlight · <b>Pulse</b> a breathing halo · "
-                "<b>Neon</b> all of it, turned up · <b>Ooze</b> glowing sludge that fills "
-                "from the left and bubbles, with bubbles escaping above the bar · "
-                "<b>Custom</b> uses the three toggles below. Each one takes its colours from "
-                "the setting underneath, so picking a colour recolours whichever theme you "
-                "chose — <code>#39ff5e</code> makes Ooze toxic slime"
-            ),
-            OPT_STYLE_COLOR: shared.OptionInfo(
-                "",
-                "Progress-bar colour",
-            ).info(
-                "any CSS colour — <code>#38bdf8</code>, <code>rgba(56, 189, 248, 0.85)</code>, "
-                "<code>hsl(199 89% 60%)</code>. Leave it empty to follow the active theme's "
-                "accent colour, which is what keeps it looking right in light and dark and "
-                "under third-party themes"
-            ),
-            OPT_STYLE_GRADIENT: shared.OptionInfo(
-                False,
-                "Custom theme: fade the fill towards its leading edge",
-            ).info(f'ignored unless the theme above is "{STYLE_CUSTOM}"'),
-            OPT_STYLE_SHEEN: shared.OptionInfo(
-                False,
-                "Custom theme: send a highlight travelling along the bar",
-            ).info(
-                f'ignored unless the theme above is "{STYLE_CUSTOM}". Stands down by itself '
-                "when the active WebUI theme already animates the bar, so the two do not "
-                "move over each other"
-            ),
-            OPT_STYLE_GLOW: shared.OptionInfo(
-                False,
-                "Custom theme: glow and pulse while generating",
-            ).info(
-                f'ignored unless the theme above is "{STYLE_CUSTOM}". Drawn outside the bar '
-                "so it cannot make the percentage or ETA harder to read"
-            ),
-            OPT_STYLE_COMPLETE: shared.OptionInfo(
-                False,
-                "Flash the bar when a job finishes",
-            ).info(
-                "once, when the whole job is done — in a chained generation that is after "
-                "Stage 2, never at the end of Stage 1. Applies to every theme"
-            ),
-            # -- LLM Studio and cross-workload residency ------------------- #
-            #
-            # These describe the machine and the policy for sharing it, not
-            # the image being made, so they belong here rather than in the
-            # accordion for the same reason the VRAM settings above do: a
-            # residency strategy says nothing useful in an infotext.
-            mc_llm_studio.OPT_ENABLE: shared.OptionInfo(
-                True,
-                "Show the LLM Studio tab",
-            ).info(
-                "the local-LLM workspace: LTX prompt generation, conversation and the "
-                "MiniMax H3 enhancer. Turn it off to keep this extension to its image "
-                "features — nothing about ordinary generation changes either way"
-            ),
-            mc_llm_vision.OPT_PROJECTOR: shared.OptionInfo(
-                mc_llm_vision.PROJECTOR_ALWAYS,
-                "When the vision projector is loaded",
-                gr.Radio,
-                {"choices": [label for _, label in mc_llm_vision.PROJECTOR_MODES]},
-            ).info(
-                "an unused projector costs no tokens per second — llama.cpp runs it only over "
-                "the pictures in a prompt, and a text prompt never touches it — so a backbone "
-                "that has one starts with it loaded and a picture never restarts the server. "
-                "It does cost its VRAM (about a gigabyte and a third for a 26B backbone's) "
-                "and a few seconds at every start; on a card with no gigabyte to spare "
-                "beside the weights, the second choice loads it only once a picture is "
-                "attached, at the price of one restart and a cold prompt cache then"
-            ),
-            mc_llm_vision.OPT_EVERY_PICTURE: shared.OptionInfo(
-                False,
-                "Show the model every picture in the conversation",
-            ).info(
-                "off, the model is shown the newest picture and told the names of the older "
-                "ones, which stay in the thread for you; on, every picture in the window goes "
-                "to the model as before, each costing about 300 tokens of context, so a thread "
-                "full of pictures keeps fewer turns. Either way no picture reaches the model "
-                "larger than 768 pixels on its longer side"
-            ),
-            mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(
-                mc_llm_runtime.FULL_WINDOW_AUTO,
-                "Key/value cache on a sliding-window model (Gemma)",
-                gr.Radio,
-                {"choices": [label for _, label in mc_llm_runtime.FULL_WINDOW_MODES]},
-            ).info(
-                "a sliding-window model keeps a 1,024-token window of its cache for most of "
-                "its blocks. The full cache lets llama.cpp resume any cached prompt exactly "
-                "and costs the whole context on every block — 5.6 GB against 1.5 GB for the "
-                "26B backbone at 8,192 tokens with six warm caches. The window relies on "
-                "llama.cpp's context checkpoints instead, and to take them llama.cpp reads "
-                "each turn in separate batches — on the Intel GPU about a second and a half "
-                "each before a token is read — and a saved prompt cache cannot be resumed. "
-                "Automatic is the full cache on every device"
-            ),
-            mc_llm_slot_cache.OPT_SAVE: shared.OptionInfo(
-                True,
-                "Save each conversation's prompt cache to disk and read it back after a "
-                "restart",
-            ).info(
-                "llama-server keeps what it has read of a conversation only while it runs, so "
-                "the first reply after a WebUI restart, Unload or a model change reads the "
-                "whole conversation again — minutes, on a slow device. With this on, the "
-                "cache is saved after every reply and read back before that first reply, "
-                "which then reads only what is new, as it would have before the restart. It "
-                "costs disk, not memory. A sliding-window model such as Gemma is saved only "
-                "with the full cache above, and read back only when the new prompt continues "
-                "the saved one exactly, because llama.cpp keeps just the window in a saved "
-                "slot; Gemma also needs its thought marker kept, below"
-            ),
-            mc_llm_template.OPT_KEEP_MARKER: shared.OptionInfo(
-                True,
-                "Keep Gemma's empty thought marker on its past replies",
-            ).info(
-                "Gemma 4's template ends every new prompt with an empty thought marker, which "
-                "the reply is written after, and deletes that marker from every reply in the "
-                "history — so llama.cpp finds the history different from its cache just "
-                "before the last reply and reads that reply again every turn. With this on, "
-                "llama-server is given a copy of the model's own template that keeps the "
-                "marker, and a turn reads only what is new. Takes effect at the next start "
-                "of llama-server; a model whose template is not Gemma 4's is not affected"
-            ),
-            mc_llm_slot_cache.OPT_BUDGET_GB: shared.OptionInfo(
-                mc_llm_slot_cache.DEFAULT_BUDGET_GB,
-                "Disk space for saved prompt caches (GB)",
-                gr.Number,
-            ).info(
-                "the least recently used conversations' caches are removed beyond this. "
-                "0 saves nothing"
-            ),
-            mc_broker.OPT_MODE: shared.OptionInfo(
-                mc_broker.MODE_HYBRID,
-                "VRAM residency mode",
-                gr.Radio,
-                {"choices": [label for _, label in mc_broker.MODES]},
-            ).info(
-                "The image model always keeps its VRAM: the LLM is placed in what is left "
-                "over and shrinks itself — shorter context, then experts and blocks in "
-                "system RAM — rather than moving a checkpoint. That is not a setting. "
-                "This is: whether a warm llama-server sitting in that spare room is left "
-                "alone when a generation starts, or stopped so the pass has every last "
-                "byte. Keeping it costs the generation nothing measurable and saves a "
-                "model load — which on a slow placement is twenty seconds before the "
-                "first word of the next prompt. Neither setting ever starts one: "
-                "llama-server comes up on the first request that needs it, and this "
-                "decides only what happens to one that is already up"
-            ),
-            mc_plan.OPT_CAP_MODE: shared.OptionInfo(
-                mc_plan.CAP_AUTO,
-                "Persistent LLM VRAM",
-                gr.Radio,
-                {"choices": [label for _, label in mc_plan.CAP_MODES]},
-            ).info(
-                "Auto sizes llama-server from what the generation's own plan leaves over — "
-                "the largest single phase of it, not the sum of the phases, because Stage 1 "
-                "and Stage 2 take over one another's VRAM rather than sharing the card. "
-                "Custom puts a lower ceiling on that, which buys image headroom back at the "
-                "cost of LLM tokens per second. Off keeps no persistent residency at all"
-            ),
-            mc_plan.OPT_CAP_GB: shared.OptionInfo(
-                0.0,
-                "Custom persistent LLM cap (GB)",
-                gr.Number,
-            ).info(
-                "only read when the setting above is Custom. A figure above the calculated "
-                "allowance does not raise it — this control is a way to be more "
-                "conservative than the arithmetic, never less"
-            ),
-            mc_plan.OPT_SAFETY_GB: shared.OptionInfo(
-                0.0,
-                "Extra image safety headroom (GB)",
-                gr.Number,
-            ).info(
-                "added on top of the automatic reserve when the plan's budget is worked "
-                "out, and therefore taken off what the LLM may hold. Raise it if a "
-                "generation has ever had to evict llama-server to finish"
-            ),
-            mc_llm_runtime.OPT_RELEASE: shared.OptionInfo(
-                mc_llm_runtime.RELEASE_STOP,
-                "When the image side needs the LLM's VRAM back",
-                gr.Radio,
-                {"choices": [label for _, label in mc_llm_runtime.RELEASE_MODES]},
-            ).info(
-                "stopping llama-server releases every byte of it and leaves the weights in "
-                "the system page cache, so restarting reads from RAM rather than disk. "
-                "Keeping it running moves the model to system RAM instead: no reload, much "
-                "slower generation, and the RAM stays spent"
+                "Forge keeps the un-merged originals of a merged LoRA in RAM, about 12 GB "
+                "for a Krea-sized model. Warm keeps them. Cold frees them, and a change of "
+                "LoRA then reloads the checkpoint from disk. Also the Warm LoRA / Cold LoRA "
+                "switch in the Forge Assistant's ⋯ menu"
             ),
             mc_arm.OPT_WARM_UP: shared.OptionInfo(
                 mc_arm.WARM_OFF,
@@ -615,16 +379,222 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_arm.WARM_MODES]},
             ).info(
-                "a cold run and a warm one are the same work in a different order: the "
-                "model load, the placement and the prompt cache all happen once and then "
-                "stop happening. From one log, five identical jobs ran in 82s, 27s, 3.6s, "
-                "4.1s and 5.1s. This decides when that is paid for — halfway through a "
-                "generation somebody is watching, or before it starts. This warms the "
-                "image model and nothing else: llama-server starts on the first request "
-                "that needs it, because a warm-up is not a request and a language model "
-                "started on spec takes VRAM the image plan may be about to want. It loads "
-                "off the generation thread, which is the caveat on the experimental "
-                "setting above"
+                "When the image model is loaded: by the first Generate, before a generation "
+                "starts, or also in the background when the WebUI comes up. The image model "
+                "only; llama-server starts on the first request that needs it"
+            ),
+        },
+    )
+)
+
+shared.options_templates.update(
+    shared.options_section(
+        PROGRESS_SECTION,
+        {
+            mc_progress.OPT_PROGRESS: shared.OptionInfo(
+                mc_progress.PROGRESS_DEFAULT,
+                "Predict progress and ETA for the whole chained job",
+            ).info(
+                "Models the chained job as timed phases, the model switch included, instead "
+                "of counting Stage 1's steps and jumping back. Timings are measured on this "
+                "machine and improve after a few generations"
+            ),
+            OPT_SMOOTH: shared.OptionInfo(
+                True,
+                "Advance the progress bar smoothly",
+            ).info(
+                "Fills in the bar's movement between the WebUI's progress polls. Changes "
+                "nothing about the numbers, and applies to every generation"
+            ),
+            # -- appearance, independent of everything above ---------------- #
+            # These change how the host's bar looks and never what it reports.
+            OPT_STYLE_ENABLE: shared.OptionInfo(
+                False,
+                "Custom progress-bar appearance",
+            ).info(
+                "Restyles the WebUI's progress bar for every generation, chained or not. "
+                "Cosmetic only"
+            ),
+            OPT_STYLE_THEME: shared.OptionInfo(
+                STYLE_THEME_DEFAULT,
+                "Progress-bar theme",
+                gr.Dropdown,
+                {"choices": list(STYLE_THEMES)},
+            ).info(
+                "<b>Flat</b> plain fill · <b>Gradient</b> lighter towards the leading edge · "
+                "<b>Sheen</b> a travelling highlight · <b>Pulse</b> a breathing halo · "
+                "<b>Neon</b> all of it · <b>Ooze</b> glowing sludge that bubbles · "
+                "<b>Custom</b> the three toggles below. Every theme takes the colour below"
+            ),
+            OPT_STYLE_COLOR: shared.OptionInfo(
+                "",
+                "Progress-bar colour",
+            ).info(
+                "Any CSS colour, such as <code>#38bdf8</code>. Empty follows the theme's "
+                "accent, which looks right in light and dark"
+            ),
+            OPT_STYLE_GRADIENT: shared.OptionInfo(
+                False,
+                "Custom theme: fade the fill towards its leading edge",
+            ).info(f'Only with the "{STYLE_CUSTOM}" theme'),
+            OPT_STYLE_SHEEN: shared.OptionInfo(
+                False,
+                "Custom theme: send a highlight travelling along the bar",
+            ).info(
+                f'Only with the "{STYLE_CUSTOM}" theme. Stands down when the WebUI theme '
+                "already animates the bar"
+            ),
+            OPT_STYLE_GLOW: shared.OptionInfo(
+                False,
+                "Custom theme: glow and pulse while generating",
+            ).info(
+                f'Only with the "{STYLE_CUSTOM}" theme. Drawn outside the bar, so the '
+                "percentage and ETA stay readable"
+            ),
+            OPT_STYLE_COMPLETE: shared.OptionInfo(
+                False,
+                "Flash the bar when a job finishes",
+            ).info(
+                "Once, when the whole job is done — after Stage 2 in a chained generation. "
+                "Any theme"
+            ),
+        },
+    )
+)
+
+shared.options_templates.update(
+    shared.options_section(
+        PAGE_SECTION,
+        {
+            OPT_HIDE_FOOTER: shared.OptionInfo(
+                True,
+                "Hide the WebUI footer",
+            ).info(
+                "Removes the row of links under every tab, so a page that fits the window "
+                "stops scrolling by its height"
+            ),
+            OPT_QUIET_NIGHT: shared.OptionInfo(
+                True,
+                "Quieter night mode: dim the primary buttons in the dark theme",
+            ).info(
+                "In the dark theme, draws Generate and every other primary button as a dim "
+                "surface tinted with the theme's accent instead of a solid block of it. "
+                "Colours only, under any WebUI theme"
+            ),
+        },
+    )
+)
+
+shared.options_templates.update(
+    shared.options_section(
+        LLM_SECTION,
+        {
+            mc_llm_studio.OPT_ENABLE: shared.OptionInfo(
+                True,
+                "Show the LLM Studio tab",
+            ).info(
+                "The local-LLM workspace: conversation, prompt writing and the MiniMax H3 "
+                "enhancer. Off keeps the extension to its image features"
+            ),
+            mc_llm_vision.OPT_PROJECTOR: shared.OptionInfo(
+                mc_llm_vision.PROJECTOR_ALWAYS,
+                "When the vision projector is loaded",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_vision.PROJECTOR_MODES]},
+            ).info(
+                "From the start costs the projector's VRAM (about 1.3 GB for a 26B backbone) "
+                "and a few seconds at each start, and a picture never restarts the server. "
+                "When a picture is attached saves that VRAM at the price of one restart and "
+                "a cold prompt cache then"
+            ),
+            mc_llm_vision.OPT_EVERY_PICTURE: shared.OptionInfo(
+                False,
+                "Show the model every picture in the conversation",
+            ).info(
+                "Off shows the model the newest picture and names the older ones. On sends "
+                "every picture in the window, about 300 tokens each, so fewer turns fit. "
+                "No picture reaches the model larger than 768 pixels on its longer side"
+            ),
+            mc_llm_runtime.OPT_FULL_WINDOW: shared.OptionInfo(
+                mc_llm_runtime.FULL_WINDOW_AUTO,
+                "Key/value cache on a sliding-window model (Gemma)",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.FULL_WINDOW_MODES]},
+            ).info(
+                "The full cache resumes any cached prompt exactly and costs the whole "
+                "context on every block. The window costs less VRAM but reads each turn in "
+                "several batches and cannot resume a saved prompt cache. Automatic is the "
+                "full cache on every device"
+            ),
+            mc_llm_slot_cache.OPT_SAVE: shared.OptionInfo(
+                True,
+                "Save each conversation's prompt cache to disk and read it back after a "
+                "restart",
+            ).info(
+                "After a restart, an Unload or a model change, the first reply then reads "
+                "only what is new instead of the whole conversation. Costs disk, not memory. "
+                "A sliding-window model is saved only with the full cache, and read back "
+                "only when the new prompt continues the saved one exactly"
+            ),
+            mc_llm_template.OPT_KEEP_MARKER: shared.OptionInfo(
+                True,
+                "Keep Gemma's empty thought marker on its past replies",
+            ).info(
+                "Gemma 4's template strips the marker from past replies, so every turn "
+                "re-reads the last reply. On, llama-server is given a template that keeps "
+                "it and a turn reads only what is new. Takes effect at the next start; other "
+                "templates are not affected"
+            ),
+            mc_llm_slot_cache.OPT_BUDGET_GB: shared.OptionInfo(
+                mc_llm_slot_cache.DEFAULT_BUDGET_GB,
+                "Disk space for saved prompt caches (GB)",
+                gr.Number,
+            ).info("The least recently used caches are removed beyond this. 0 saves nothing"),
+            mc_broker.OPT_MODE: shared.OptionInfo(
+                mc_broker.MODE_HYBRID,
+                "VRAM residency mode",
+                gr.Radio,
+                {"choices": [label for _, label in mc_broker.MODES]},
+            ).info(
+                "Whether a warm llama-server in the VRAM left beside the image model stays "
+                "up when a generation starts, or is stopped so the pass has every byte. The "
+                "image model always keeps its VRAM, and neither choice starts a server"
+            ),
+            mc_plan.OPT_CAP_MODE: shared.OptionInfo(
+                mc_plan.CAP_AUTO,
+                "Persistent LLM VRAM",
+                gr.Radio,
+                {"choices": [label for _, label in mc_plan.CAP_MODES]},
+            ).info(
+                "Auto sizes llama-server from what the generation's largest phase leaves "
+                "over. Custom lowers that ceiling, trading tokens per second for image "
+                "headroom. Off keeps no persistent residency"
+            ),
+            mc_plan.OPT_CAP_GB: shared.OptionInfo(
+                0.0,
+                "Custom persistent LLM cap (GB)",
+                gr.Number,
+            ).info(
+                "Read only when the setting above is Custom. Can lower the calculated "
+                "allowance, never raise it"
+            ),
+            mc_plan.OPT_SAFETY_GB: shared.OptionInfo(
+                0.0,
+                "Extra image safety headroom (GB)",
+                gr.Number,
+            ).info(
+                "Added to the automatic reserve and taken off what the LLM may hold. Raise "
+                "it if a generation has ever had to evict llama-server to finish"
+            ),
+            mc_llm_runtime.OPT_RELEASE: shared.OptionInfo(
+                mc_llm_runtime.RELEASE_STOP,
+                "When the image side needs the LLM's VRAM back",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.RELEASE_MODES]},
+            ).info(
+                "Stopping llama-server releases all of its VRAM and leaves the weights in "
+                "the page cache, so a restart reads from RAM. Keeping it running moves the "
+                "model to system RAM instead: no reload, much slower, and the RAM stays spent"
             ),
             mc_wangp.OPT_MODE: shared.OptionInfo(
                 mc_wangp.MODE_SHARE,
@@ -632,65 +602,26 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_wangp.MODES]},
             ).info(
-                "Mini Paint NEO's WanGP tab runs a video generator on a card of its own, and "
-                "its VRAM there is priority one: never taken for the LLM, never squeezed by "
-                "it. On the card WanGP is running on, llama-server is sized to what WanGP "
-                "has not needed — the most it has been seen holding this session, plus the "
-                "reserve below — and is stopped the moment WanGP grows into that reserve, "
-                "the moment WanGP's known peak leaves no room for it, or the moment WanGP "
-                "starts generating on a card whose needs have not been measured yet. A card "
-                "WanGP is not running on is the LLM's to use in full, and an LLM on any "
-                "other card costs WanGP nothing. Needs Mini Paint NEO; without it this "
-                "changes nothing"
+                "On the card WanGP runs on, llama-server is sized to what WanGP has not "
+                "needed and stopped the moment WanGP grows into the reserve below. Any other "
+                "card is the LLM's in full. Needs Mini Paint NEO"
             ),
             mc_wangp.OPT_RESERVE_GB: shared.OptionInfo(
                 mc_wangp.DEFAULT_RESERVE_GB,
                 "VRAM kept free for WanGP on its card (GB)",
                 gr.Number,
             ).info(
-                "left free above the most WanGP has been seen holding, as room for its next "
-                "allocation: a generation grows in steps and the card is read every couple "
-                "of seconds, so this is the time between WanGP starting to grow and "
-                "llama-server being gone. Raise it if WanGP has ever run out of memory with "
-                "llama-server beside it"
+                "Left free above the most WanGP has been seen holding, as room for its next "
+                "allocation. Raise it if WanGP has run out of memory beside llama-server"
             ),
             mc_wangp.OPT_THREADS: shared.OptionInfo(
                 0,
                 "Processor threads for llama-server while WanGP is running",
                 gr.Number,
             ).info(
-                "a placement with weights in system RAM runs its arithmetic on the "
-                "processor, and llama.cpp takes every core for it by default — which "
-                "starved a WanGP generation for seven minutes in one log. While WanGP is "
-                "up, a start that touches the processor is held to this many threads; "
-                "0 means half the physical cores. A full offload is not affected"
-            ),
-            mc_turns.OPT_IMAGE_RETURN: shared.OptionInfo(
-                mc_turns.RETURN_AUTOMATIC,
-                "Bring the image model back after a Voice Box render",
-                gr.Radio,
-                {"choices": [label for _, label in mc_turns.RETURN_MODES]},
-            ).info(
-                "when the Voice Box's engine (VibeVoice or Breeze) takes its turn on the card "
-                "the image model lives on, the image model makes room and comes back "
-                "afterwards. From system RAM keeps the very same model — LoRAs included — "
-                "and moves it back in about twenty seconds, but holds its size in RAM while "
-                "the Voice Box renders; From its recipe "
-                "frees the RAM too and reloads it from its own files. Nothing is ever "
-                "written to disk, and a request that would push system RAM into the "
-                "pagefile is refused with a warning instead"
-            ),
-            mc_turns.OPT_KEEP_WARM: shared.OptionInfo(
-                mc_turns.WARM_EVERY,
-                "Keep the Voice Box's engine warm between requests",
-                gr.Radio,
-                {"choices": [label for _, label in mc_turns.WARM_MODES]},
-            ).info(
-                "a warm engine starts the next request in seconds instead of loading its "
-                "model again — eighteen gigabytes for VibeVoice, eight for Breeze. It never "
-                "keeps a card from anything else: an "
-                "image generation, WanGP or the LLM that needs the card unloads it first, "
-                "and a request already running is never cut off"
+                "A start that uses the processor is held to this many threads while WanGP "
+                "is up, so it does not starve a video generation. 0 means half the physical "
+                "cores"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,
@@ -698,14 +629,9 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_llm_runtime.SLOT_MODES]},
             ).info(
-                "every mode opens with a different system prompt — Conversation, Prompt "
-                "Studio, MiniMax, the Krea writer, the Spatial Composer — and with one cache "
-                "between them each switch re-reads the prefix the last one had just cached. "
-                "A cache each costs a key/value cache each and llama.cpp routes every prompt "
-                "to the cache that matches it best. Automatic buys them only out of VRAM "
-                "left over once the model already fits, so it can never be the reason a "
-                "context shrank or a layer left the card; under pressure they are the first "
-                "thing given back"
+                "A cache per mode keeps each system prompt warm, at a key/value cache each. "
+                "Automatic buys them only from VRAM left once the model fits, and gives them "
+                "back first under pressure"
             ),
             mc_llm_runtime.OPT_ROLE_PROCESSES: shared.OptionInfo(
                 mc_llm_runtime.PROCESSES_SHARED,
@@ -713,12 +639,9 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_llm_runtime.PROCESS_MODES]},
             ).info(
-                "identical roles resolve to one llama-server by default: one process and one "
-                "copy of the weights, and each pass's system prompt stays warm in a prompt "
-                "cache of its own on it (see Warm prompt caches) — only with a single cache "
-                "does a switch re-read a prefix another pass just cached. One each gives every "
-                "role a server of its own, and on a card or the Intel GPU each server holds a "
-                "copy of the model of its own: servers share one copy only on the processor"
+                "One server shares one process and one copy of the weights between them, "
+                "each role's prompt warm in a cache of its own. One each gives every role "
+                "its own server, and on a GPU its own copy of the model"
             ),
             mc_llm_runtime.OPT_ROLE_SHARING: shared.OptionInfo(
                 mc_llm_runtime.SHARE_AUTO,
@@ -726,84 +649,54 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_llm_runtime.SHARING_MODES]},
             ).info(
-                "only reached when two of our servers land in the same memory — roles "
-                "configured differently, or identically with One each above. Configure them "
-                "identically with One server and they share one llama-server whatever this "
-                "says; put them on different devices and they never meet. Taking turns means "
-                "stopping one before starting another, in either direction and never in the "
-                "middle of a reply — a model load per switch, in exchange for never "
-                "competing. Coexisting leaves every server up, which on one card means "
-                "loading and unloading as they fight for what is left, and in system RAM a "
-                "start that does not fit. Automatic takes turns on one card, and in system RAM "
-                "(the processor and the Intel GPU) coexists until a start would not fit"
+                "Take turns stops one server before starting another, never mid-reply. "
+                "Coexist leaves every server up to compete. Automatic takes turns on a card "
+                "and coexists in system RAM until a start would not fit"
             ),
             mc_llm_paths.OPT_ROOT: shared.OptionInfo(
                 "",
                 "LLM data directory",
                 gr.Textbox,
             ).info(
-                "where LLM Studio keeps the runtime, the model, characters and chats. Empty "
-                "uses a folder in your WebUI data directory. Point it at an existing Prompt "
-                "Master install to reuse a model you have already downloaded"
+                "Where LLM Studio keeps its runtime, models, characters and chats. Empty "
+                "uses a folder in the WebUI data directory"
             ),
             mc_llm_paths.OPT_MODELS: shared.OptionInfo(
                 "",
                 "LLM models folder",
                 gr.Textbox,
             ).info(
-                "scanned for .gguf files to fill the model chooser at the top of the LLM "
-                "Studio tab, so a model can be switched to without typing a path. Empty scans "
-                "the models folder inside the LLM data directory above. A model does not have "
-                "to be in here to be used — it is read, not started — this is only what the "
-                "chooser offers"
+                "Scanned for .gguf files to fill the model chooser. Empty scans the models "
+                "folder inside the LLM data directory"
             ),
-            # -- what the LLM is placed at ---------------------------------
-            #
-            # These five were controls in the tab's own "Models, hardware and
-            # memory" panel and are here now for the same reason the VRAM
-            # settings above are: every one of them describes the installation
-            # rather than the click being made, the host already persists and
-            # restores exactly this kind of value, and a context budget says
-            # nothing useful in an infotext. The tab keeps what a Settings page
-            # cannot draw -- the file dialogs, the download, the estimate and
-            # the residency table -- in its Setup mode.
             mc_llm_state.OPT_CONTEXT_MODE: shared.OptionInfo(
                 mc_llm_state.label_for_context_mode("auto"),
                 "LLM context sizing",
                 gr.Radio,
                 {"choices": [label for _, label in mc_llm_state.CONTEXT_MODES]},
             ).info(
-                "Automatic budgets the key/value cache from whatever VRAM is free once the "
-                "weights and the reserve are accounted for, so a context grows to fill an "
-                "empty card and shrinks when a checkpoint arrives. Fixed buffer spends the "
-                "number below and no more"
+                "Automatic budgets the key/value cache from the VRAM free once the weights "
+                "and the reserve are accounted for. Fixed buffer spends the number below and "
+                "no more"
             ),
             mc_llm_state.OPT_CONTEXT_BUFFER: shared.OptionInfo(
                 4.0,
                 "LLM context / VRAM buffer (GB)",
                 gr.Number,
-            ).info(
-                "memory budgeted for the key/value cache, separate from the weights and from "
-                "the runtime reserve. Used when sizing is Fixed buffer"
-            ),
+            ).info("Memory for the key/value cache under Fixed buffer"),
             mc_llm_state.OPT_CONTEXT_SIZE: shared.OptionInfo(
                 8192,
                 "LLM context size (tokens)",
                 gr.Number,
-            ).info(
-                "used when sizing is Fixed buffer, and never allowed past the model's own "
-                "ceiling. A number rather than a slider because modern ceilings run to a "
-                "million tokens and no slider across that range can be aimed at 32,768"
-            ),
+            ).info("Under Fixed buffer; never past the model's own ceiling"),
             mc_llm_state.OPT_KV_TYPE_K: shared.OptionInfo(
                 "f16",
                 "LLM K cache type",
                 gr.Dropdown,
                 {"choices": [name for name, _ in _kv_types()]},
             ).info(
-                "quantising the key cache buys context at some cost in reply quality. "
-                "llama.cpp sizes the two halves separately, which is why there are two "
-                "settings; f16 for both is what the estimator's numbers assume"
+                "Quantising the key cache buys context at some cost in reply quality. f16 "
+                "is what the estimator's numbers assume"
             ),
             mc_llm_state.OPT_KV_TYPE_V: shared.OptionInfo(
                 "f16",
@@ -811,55 +704,76 @@ shared.options_templates.update(
                 gr.Dropdown,
                 {"choices": [name for name, _ in _kv_types()]},
             ).info(
-                "the value half of the cache. Some llama.cpp builds refuse a quantised V "
-                "cache without flash attention; if llama-server will not start after "
-                "changing this, put it back to f16"
+                "The value half of the cache. If llama-server will not start after a "
+                "change, put it back to f16"
             ),
-            # -- the Forge Assistant ---------------------------------------
-            #
-            # The floating panel, and how it looks. Nothing here is about a
-            # conversation: turning it off removes the panel, its listeners and
-            # its focus treatment, and leaves the guarded store and the
-            # server-owned replies exactly where they are. There is deliberately
-            # no way to get the old unguarded writer back.
+        },
+    )
+)
+
+shared.options_templates.update(
+    shared.options_section(
+        VOICE_BOX_SECTION,
+        {
+            mc_turns.OPT_IMAGE_RETURN: shared.OptionInfo(
+                mc_turns.RETURN_AUTOMATIC,
+                "Bring the image model back after a Voice Box render",
+                gr.Radio,
+                {"choices": [label for _, label in mc_turns.RETURN_MODES]},
+            ).info(
+                "How the image model returns once the Voice Box's engine has had its card. "
+                "From system RAM moves the same model back, LoRAs included, in about twenty "
+                "seconds, but holds its size in RAM meanwhile. From its recipe frees the RAM "
+                "and reloads it from its files. Nothing is written to disk"
+            ),
+            mc_turns.OPT_KEEP_WARM: shared.OptionInfo(
+                mc_turns.WARM_EVERY,
+                "Keep the Voice Box's engine warm between requests",
+                gr.Radio,
+                {"choices": [label for _, label in mc_turns.WARM_MODES]},
+            ).info(
+                "A warm engine answers the next request in seconds instead of loading 8 to "
+                "18 GB again. An image generation, WanGP or the LLM that needs the card "
+                "unloads it first; a request already running is never cut off"
+            ),
+        },
+    )
+)
+
+shared.options_templates.update(
+    shared.options_section(
+        ASSISTANT_SECTION,
+        {
             mc_assistant_settings.OPT_ENABLED: shared.OptionInfo(
                 True,
                 "Show the Forge Assistant",
             ).info(
-                "a floating panel, available from every workspace, that carries the "
-                "conversation LLM Studio has open plus a workspace picker and a focus "
-                "toggle. It runs no model and keeps no history of its own — it is a second "
-                "window onto work Conversation owns"
+                "A floating panel on every workspace with the conversation LLM Studio has "
+                "open, a workspace picker and focus mode. Off removes the panel and nothing "
+                "else"
             ),
             mc_assistant_settings.OPT_LABEL: shared.OptionInfo(
                 mc_assistant_settings.LABEL_DEFAULT,
                 "Forge Assistant label",
                 gr.Textbox,
             ).info(
-                "what the launcher says, and the accessible name it carries when it is "
-                "showing only an icon. A label for a control rather than a persona: it is "
-                "drawn as text and never as markup"
+                "What the launcher says, and its accessible name when it shows only an icon. "
+                "Drawn as text, never as markup"
             ),
             mc_assistant_settings.OPT_APPEARANCE: shared.OptionInfo(
                 mc_assistant_settings.APPEARANCE_DEFAULT,
                 "Forge Assistant launcher",
                 gr.Radio,
                 {"choices": list(mc_assistant_settings.APPEARANCES)},
-            ).info(
-                "text, an icon, or both. Changing this never changes where the launcher "
-                "sits, what is in the conversation, or anything about a model"
-            ),
+            ).info("Text, an icon, or both"),
             mc_assistant_settings.OPT_ANCHOR: shared.OptionInfo(
                 mc_assistant_settings.ANCHOR_DEFAULT,
                 "Forge Assistant position",
                 gr.Radio,
                 {"choices": list(mc_assistant_settings.ANCHORS)},
             ).info(
-                "which of the six corners and edges the launcher rests at. It can also be "
-                "dragged, which sets the same thing for this browser session only — so a "
-                "change here moves every session that has not been dragged, and none that "
-                "has. Stored by name, never as coordinates: a window resized between "
-                "sessions must not be able to leave the launcher off-screen"
+                "Which corner or edge the launcher rests at. Dragging it moves it for this "
+                "browser session only"
             ),
             mc_assistant_settings.OPT_BUBBLE: shared.OptionInfo(
                 mc_assistant_settings.BUBBLE_DEFAULT,
@@ -869,10 +783,8 @@ shared.options_templates.update(
                  "maximum": mc_assistant_settings.BUBBLE_MAX,
                  "step": mc_assistant_settings.BUBBLE_STEP},
             ).info(
-                "how much of the transcript's width a single message may take, in both "
-                "views. Below 480 pixels wide at least 90% is used whatever this says — a "
-                "bubble three-quarters of a phone screen wide is a phone screen "
-                "three-quarters used"
+                "How much of the transcript's width one message may take, in both views. "
+                "Below 480 pixels wide at least 90% is used"
             ),
             mc_assistant_settings.OPT_COLUMN: shared.OptionInfo(
                 mc_assistant_settings.COLUMN_DEFAULT,
@@ -880,38 +792,28 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [name for name, _ in mc_assistant_settings.COLUMNS]},
             ).info(
-                "how wide the transcript and composer are allowed to become in the "
-                "Conversation tab. On a wide monitor a transcript stretched across the "
-                "whole screen is one nobody can follow from one line to the next; this is "
-                "what makes focus mode an improvement there rather than a regression. The "
-                "page never scrolls sideways at any setting, and the floating panel ignores "
-                "it"
+                "How wide the transcript and composer may grow in the Conversation tab. The "
+                "floating panel ignores it"
             ),
             mc_assistant_settings.OPT_TEXT_SIZE: shared.OptionInfo(
                 mc_assistant_settings.TEXT_SIZE_DEFAULT,
                 "Conversation text size (px)",
                 gr.Slider,
                 {"minimum": 0, "maximum": mc_assistant_settings.TEXT_SIZE_MAX, "step": 1},
-            ).info(
-                "0 inherits whatever the theme uses, which is what almost everybody wants. "
-                "Anything from 14 to 22 overrides it in the transcript and the composer"
-            ),
+            ).info("0 inherits the theme's size. 14 to 22 overrides it in the transcript and the composer"),
             mc_assistant_settings.OPT_DENSITY: shared.OptionInfo(
                 mc_assistant_settings.DENSITY_DEFAULT,
                 "Conversation density",
                 gr.Radio,
                 {"choices": list(mc_assistant_settings.DENSITIES)},
             ).info(
-                "how much room there is around each message. Compact tightens the spacing "
-                "and nothing else — touch targets stay at least 44 pixels either way"
+                "Room around each message. Compact tightens the spacing; touch targets stay "
+                "at least 44 pixels"
             ),
             mc_assistant_settings.OPT_AVATARS: shared.OptionInfo(
                 True,
                 "Show avatars in the conversation",
-            ).info(
-                "the two pictures beside the messages. Off is a plainer transcript; the "
-                "left and right alignment still says who wrote what"
-            ),
+            ).info("The two pictures beside the messages. Off is a plainer transcript"),
         },
     )
 )
@@ -1228,6 +1130,16 @@ try:
                                mc_extra_networks_sort.hidden_settings(shared)))
 except Exception:
     errors.report("Model Chain: could not register the extra networks' sort record",
+                  exc_info=True)
+
+# The Forge build the batch-count override was turned on with: the record that
+# stands the override down after a Forge update (mc_batch_once).
+try:
+    shared.options_templates.update(
+        shared.options_section(mc_batch_once.HIDDEN_SECTION,
+                               mc_batch_once.hidden_settings(shared)))
+except Exception:
+    errors.report("Model Chain: could not register the batch-count override's record",
                   exc_info=True)
 
 # Gallery Quadrant: the five tap zones over the gallery's preview, carried in
@@ -2754,6 +2666,9 @@ class ScriptModelChain(scripts.Script):
     # -- hooks ------------------------------------------------------------- #
 
     def before_process(self, p, enabled, target, modules=None, *args):
+        # A host flag flipped for a pass that never reached its first step goes
+        # back before anything else happens on this one (mc_batch_once).
+        mc_batch_once.restore()
         # First of all: whose turn it is on the card. A speech guest that is
         # next on, or rendering on, the image card goes before this generation,
         # and a warm one leaves for it (mc_turns, rules 2 and 6). Before the
@@ -3220,7 +3135,21 @@ class ScriptModelChain(scripts.Script):
             objects = getattr(getattr(p, "sd_model", None), "forge_objects", None)
             unet = getattr(objects, "unet", None)
             mc_memory.evict_for_rebake(unet)
-            mc_memory.note_sampler_demand(unet, getattr(kwargs.get("noise"), "shape", None))
+            # Each image counted once in the request at CFG 1, when it is safe
+            # and the host is the build it was verified on; before the reading
+            # below, so the reading says what the host will actually ask.
+            try:
+                mc_batch_once.apply(p, unet, kwargs.get("c"))
+            except Exception:
+                errors.report("Model Chain: the batch-count override failed", exc_info=True)
+            noise_shape = getattr(kwargs.get("noise"), "shape", None)
+            demand = mc_memory.note_sampler_demand(unet, noise_shape)
+            # What the pass really allocates, measured from its first step and
+            # said beside the request above when it ends (mc_working_vram).
+            try:
+                self._arm_working_vram(p, demand, noise_shape)
+            except Exception:
+                errors.report("Model Chain: could not arm the pass's VRAM window", exc_info=True)
 
         if not self._armed or self._in_stage_2:
             return
@@ -3233,6 +3162,37 @@ class ScriptModelChain(scripts.Script):
                 self._stage1_latent = "x".join(str(int(dim)) for dim in shape)
         except Exception:
             pass
+
+    @staticmethod
+    def _arm_working_vram(p, demand, noise_shape) -> None:
+        """Tell the measurement what pass is about to run: its size, batch and stage."""
+        hires = bool(getattr(p, "is_hr_pass", False))
+        if hires:
+            width = int(getattr(p, "hr_upscale_to_x", 0) or getattr(p, "width", 0) or 0)
+            height = int(getattr(p, "hr_upscale_to_y", 0) or getattr(p, "height", 0) or 0)
+        else:
+            width = int(getattr(p, "width", 0) or 0)
+            height = int(getattr(p, "height", 0) or 0)
+        shape = [int(dim) for dim in noise_shape] if noise_shape else []
+        batch = shape[0] if shape else int(getattr(p, "batch_size", 1) or 1)
+        latent = "x".join(str(dim) for dim in shape)
+        stage = f"{mc_memory.STAGE_1} hires" if hires else mc_memory.STAGE_1
+        mc_working_vram.arm(demand, width, height, batch, stage, latent)
+
+    def post_sample(self, p, ps, *args):
+        """After the host's sampler returns, before the decode.
+
+        The host's batch flag is put back here if the pass never reached its
+        first step (the denoiser callback puts it back when it did), and the
+        pass's VRAM window is closed and said.
+        """
+        if self._in_stage_2:
+            return
+        mc_batch_once.restore()
+        try:
+            mc_working_vram.close()
+        except Exception:
+            errors.report("Model Chain: could not close the pass's VRAM window", exc_info=True)
 
     # -- Stage 2 ----------------------------------------------------------- #
 
@@ -4358,6 +4318,15 @@ def _on_script_unloaded():
     mc_broker.clear()
 
 
+def _on_cfg_denoiser(_params) -> None:
+    """Every sampling step; the first one is the moment the two modules wait for."""
+    mc_batch_once.first_step()
+    try:
+        mc_working_vram.first_step()
+    except Exception:
+        errors.report("Model Chain: could not open the pass's VRAM window", exc_info=True)
+
+
 try:
     from modules import script_callbacks
 
@@ -4372,6 +4341,14 @@ try:
     # the report lands in it.
     script_callbacks.on_app_started(mc_arm.on_app_started)
     script_callbacks.on_app_started(mc_logfile.attach)
+    # The batch-count override: pinned to the Forge build on the first start
+    # with the setting on, stood down after a Forge update, re-pinned by the
+    # switch (mc_batch_once).
+    script_callbacks.on_app_started(mc_batch_once.on_app_started)
+    # The first sampling step of every pass: the host has read its batch flag
+    # by then, so the override puts it back there.
+    if hasattr(script_callbacks, "on_cfg_denoiser"):
+        script_callbacks.on_cfg_denoiser(_on_cfg_denoiser)
     script_callbacks.on_app_started(mc_literal_report.install)
     # The Gallery Quadrant's save route: the top-left zone's copy into a folder.
     script_callbacks.on_app_started(mc_gallery_quadrant.install)

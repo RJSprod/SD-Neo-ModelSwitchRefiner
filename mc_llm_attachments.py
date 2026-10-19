@@ -273,7 +273,7 @@ def data_url(recorded: str) -> str:
             _fitted[key] = url
         return url
     except OSError:
-        logger.warning("Model Chain: could not read the attachment at %s", found, exc_info=True)
+        logger.warning("Model Chain: could not read an attachment", exc_info=True)
         return ""
 
 

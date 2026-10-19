@@ -96,8 +96,7 @@ def _read() -> dict:
             data = json.load(handle)
     except Exception:
         logger.warning(
-            "Model Chain: could not read presets from %s; treating it as empty",
-            file,
+            "Model Chain: could not read the presets file; treating it as empty",
             exc_info=True,
         )
         return {}

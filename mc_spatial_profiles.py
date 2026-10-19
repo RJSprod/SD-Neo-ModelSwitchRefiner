@@ -81,8 +81,8 @@ def _read() -> dict:
         with open(file, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except Exception:
-        logger.warning("Model Chain: could not read spatial layouts from %s; "
-                       "treating it as empty", file, exc_info=True)
+        logger.warning("Model Chain: could not read the spatial layouts file; "
+                       "treating it as empty", exc_info=True)
         return {}
 
     if not isinstance(data, dict):

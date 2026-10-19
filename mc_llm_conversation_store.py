@@ -721,8 +721,7 @@ def report_orphans(store) -> list:
         found.extend(orphans(store, folder.name))
     if found:
         logger.info("Model Chain: %d conversation file(s) were reserved and never written; "
-                    "they are left where they are: %s", len(found),
-                    ", ".join(str(path.name) for path in found[:8]))
+                    "they are left where they are", len(found))
     return found
 
 
