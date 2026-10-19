@@ -16,14 +16,16 @@ and measures what the theme does to it:
     the split     the top row heads the settings column and Generate's box
                   heads the gallery's container, once, however often applied;
     the drawer    the quick settings live in a drawer under the bar, closed
-                  until the header's button opens it, Escape closes it, and
-                  the choice is remembered;
+                  until the header's button opens it, Escape or a tap outside
+                  closes it, and the choice is remembered;
     the networks  Forge's extra-network pages leave its tabs for a drawer on
                   the right once Forge's own script has wired them, with
                   Generation staying the selected tab; the drawer's strip
                   shows one page and its controls; the drawer follows the
-                  main tab; a card's press still reaches the prompt; off puts
-                  the pages back beside Generation;
+                  main tab; a card's press still reaches the prompt; the
+                  cards fill every row at the count the head's slider says,
+                  their names on or off; off puts the pages back beside
+                  Generation;
     the info      Forge's generation parameters, drawn as a prompt block, a
                   negative block and chips, with Forge's own paragraph kept
                   out of view for what reads it; a new generation redraws it;
@@ -109,7 +111,10 @@ textarea { width: 100%; min-height: 60px; }
 .unequal-height { align-content: flex-start; }
 .extra-network-control { display: flex; width: 100%; }
 .extra-network-pane { display: flex; height: calc(100vh - 24rem); min-height: 52rem; flex-direction: column; overflow: hidden; }
-.extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; position: relative; }
+.extra-network-pane .extra-network-pane-content-dirs { display: flex; flex: 1; flex-direction: column; overflow: hidden; }
+.extra-network-pane .extra-network-cards { flex: 3; overflow: clip auto !important; border: 1px solid var(--block-border-color); }
+.extra-network-pane .card { display: inline-block; margin: 0.5rem; width: 16rem; height: 24rem; position: relative; overflow: hidden; }
+.hidden { display: none !important; }
 .extra-network-pane .card .actions { position: absolute; bottom: 0; left: 0; right: 0; padding: 0.5em; }
 .extra-network-pane .card .actions .name { font-size: 1.7em; font-weight: bold; }
 .extra-network-control .extra-network-control--search::before { content: "\\1F50E\\FE0E"; position: absolute; margin: 0.5rem; font-size: 1rem; color: #888; }
@@ -188,6 +193,22 @@ SORT_KEYS = {"bad_hands": {"default": 0, "name": "bad_hands", "date_created": 50
              "style": {"default": 1, "name": "style", "date_created": 100, "date_modified": 300}}
 
 
+def cards_of(page: str, more: int = 0) -> list:
+    """A page's cards, and on the LoRA page `more` besides: enough to fill
+    several rows at every count the drawer's slider offers."""
+    found = list(CARDS[page])
+    if page == "lora":
+        found += [(f"lora_{i:02d}", f"<lora:lora_{i:02d}:1>") for i in range(more)]
+    return found
+
+
+def sort_keys_of(name: str) -> dict:
+    if name in SORT_KEYS:
+        return SORT_KEYS[name]
+    i = int(name.rsplit("_", 1)[1])
+    return {"default": 2 + i, "name": name, "date_created": 300 + i, "date_modified": 500 + i}
+
+
 def controls_html(tabname: str, page: str) -> str:
     """html/extra-networks-pane.html: the page's own controls, hidden until
     Forge's script gathers them into the tab strip and shows the page's.
@@ -233,7 +254,7 @@ POPUP_HTML = """<div class="global-popup"><div class="global-popup-close"></div>
 </div></div></div>"""
 
 
-def pane_html(tabname: str, page: str, *, controls_built: bool) -> str:
+def pane_html(tabname: str, page: str, *, controls_built: bool, more_cards: int = 0) -> str:
     """A page's pane. Forge renders a page twice -- empty when the UI is
     built, whole when the page loads (modules/ui_extra_networks.py,
     `create_html(empty=True)`, then `interface.load`) -- and its script wires
@@ -245,11 +266,11 @@ def pane_html(tabname: str, page: str, *, controls_built: bool) -> str:
     full = f"{tabname}_{page}"
     cards = "".join(
         f'<div class="card" style="width: 256px; height: 384px" data-name="{name}" '
-        + "".join(f'data-sort-{key}="{value}" ' for key, value in SORT_KEYS[name].items())
+        + "".join(f'data-sort-{key}="{value}" ' for key, value in sort_keys_of(name).items())
         + f'onclick="cardClicked(\'{tabname}\', \'{html_module.escape(added)}\')">'
         f'<div class="actions"><div class="additional"><span class="search_terms">{name}</span></div>'
         f'<span class="name">{name}</span></div></div>'
-        for name, added in CARDS[page])
+        for name, added in cards_of(page, more_cards))
     dirs = "".join(f'<button class="lg secondary gradio-button custom-button">{name}</button>'
                    for name in ("all", "krea2\\", "kreaCELEB\\", "kreat\\"))
     return (f'<div id="{full}_pane" class="extra-network-pane">'
@@ -271,17 +292,19 @@ def extra_tabs_nav(tabname: str, *, controls_built: bool) -> str:
     return f'<div class="tab-nav scroll-hide" role="tablist">{buttons}{strip}</div>'
 
 
-def extra_pages(tabname: str, *, controls_built: bool) -> str:
+def extra_pages(tabname: str, *, controls_built: bool, more_cards: int = 0) -> str:
     return "".join(
         f'<div id="{tabname}_{page}" class="tabitem extra-page" role="tabpanel" style="display: none">'
         f'<div id="{tabname}_{page}_prompts" class="extra-page-prompts"></div>'
-        f'<div id="{tabname}_{page}_cards_html">{pane_html(tabname, page, controls_built=controls_built)}</div></div>'
+        f'<div id="{tabname}_{page}_cards_html">'
+        f'{pane_html(tabname, page, controls_built=controls_built, more_cards=more_cards)}</div></div>'
         for page, _ in PAGES[tabname])
 
 
 def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
               controls_built: bool = True, assistant: str = "", popup: bool = False,
-              progress: bool = False, grid_row: bool = False, infotext: str = INFOTEXT_HTML) -> str:
+              progress: bool = False, grid_row: bool = False, infotext: str = INFOTEXT_HTML,
+              more_cards: int = 0) -> str:
     """`assistant` is a user.css to put on a page that also runs the Forge
     Assistant's scripts, in Forge's order (its folder's scripts load before
     this one's), with Gradio's gallery markup for its fill to measure.
@@ -354,7 +377,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
           </div>
         </div>
       </div>
-      {extra_pages("txt2img", controls_built=controls_built)}
+      {extra_pages("txt2img", controls_built=controls_built, more_cards=more_cards)}
     </div>
   </div>
   <div id="tab_img2img" class="tabitem" role="tabpanel" style="display: none">
@@ -365,7 +388,7 @@ def page_html(*, opts: dict, lobe: bool = False, settings_blocks: int = 40,
         <div id="img2img_settings" class="column"><div class="block">Resize</div></div>
         <div id="img2img_results" class="column"><div id="img2img_generate_box" class="row"><button id="img2img_generate">Generate</button></div><div id="img2img_results_panel" class="column panel"><div id="img2img_gallery_container" class="gr-group"><div id="img2img_gallery" class="block"></div></div><div id="html_info_img2img" class="block infotext" style="border-style: solid; overflow: visible; min-width: min(0px, 100%);"><div class="prose"></div></div></div></div>
       </div>
-      {extra_pages("img2img", controls_built=controls_built)}
+      {extra_pages("img2img", controls_built=controls_built, more_cards=more_cards)}
     </div>
   </div>
   <div id="tab_settings" class="tabitem" role="tabpanel" style="display: none">
@@ -457,14 +480,14 @@ ON = {"model_chain_theme": True}
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
               controls_built=True, assistant="", popup=False, progress=False, grid_row=False,
-              settings_blocks=40, infotext=INFOTEXT_HTML):
+              settings_blocks=40, infotext=INFOTEXT_HTML, more_cards=0):
     """A page of its own context, or one in a context given -- two pages of
     one context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height})
     page = owner.new_page()
     html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
                      assistant=assistant, popup=popup, progress=progress, grid_row=grid_row,
-                     settings_blocks=settings_blocks, infotext=infotext)
+                     settings_blocks=settings_blocks, infotext=infotext, more_cards=more_cards)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcTheme" + (" && !!(window.forgeAssistant && window.forgeAssistant.fill)"
@@ -567,7 +590,9 @@ NETWORKS = """() => {
                marked: host.classList.contains("mc-theme-networks-host"),
                layout: host.getAttribute("data-mc-theme-networks"), display: getComputedStyle(host).display,
                width: host.style.getPropertyValue("--mc-theme-networks-width"),
-               chrome: host.style.getPropertyValue("--mc-theme-networks-chrome")},
+               chrome: host.style.getPropertyValue("--mc-theme-networks-chrome"),
+               cols: host.style.getPropertyValue("--mc-theme-networks-cols"),
+               untitled: host.classList.contains("mc-theme-networks-untitled")},
         chrome: chrome ? {parent: chrome.parentElement.id, display: getComputedStyle(chrome).display,
                           position: getComputedStyle(chrome).position, rect: box(chrome), drawn: drawn(chrome),
                           handle: !!chrome.querySelector(".mc-theme-networks-handle")} : null,
@@ -590,6 +615,69 @@ NETWORKS = """() => {
         prompt: q("#txt2img_prompt textarea").value,
     };
 }"""
+
+# A drawer's shown page's cards as the browser has drawn them: the content box
+# of the cards' grid, the drawn cards in rows by their top edge, and the head's
+# cards row -- the names button, the slider and the count beside it.
+ROWS = """(tab) => {
+    const host = document.getElementById(tab + "_extra_tabs");
+    const page = host.querySelector(":scope > .mc-theme-networks-shown");
+    const cards = page.querySelector(".extra-network-cards");
+    const style = getComputedStyle(cards);
+    const box = cards.getBoundingClientRect();
+    const left = box.left + cards.clientLeft + parseFloat(style.paddingLeft);
+    const right = box.left + cards.clientLeft + cards.clientWidth - parseFloat(style.paddingRight);
+    const rows = [];
+    [...cards.querySelectorAll(":scope > .card")].filter((c) => c.getClientRects().length).forEach((c) => {
+        const r = c.getBoundingClientRect();
+        let row = rows.find((x) => Math.abs(x.top - r.top) < 1);
+        if (!row) { row = {top: r.top, cards: []}; rows.push(row); }
+        row.cards.push({left: r.left, right: r.right, width: r.width, height: r.height,
+                        name: c.dataset.name, names: getComputedStyle(c.querySelector(".actions")).display});
+    });
+    const chrome = document.getElementById("mc-theme-networks-" + tab);
+    const slider = chrome.querySelector(".mc-theme-networks-per-row");
+    const titles = chrome.querySelector(".mc-theme-networks-titles");
+    return {left, right, gap: parseFloat(style.columnGap), rows: rows.map((x) => x.cards),
+            cols: host.style.getPropertyValue("--mc-theme-networks-cols"),
+            slider: {min: Number(slider.min), max: Number(slider.max), value: Number(slider.value),
+                     disabled: slider.disabled, said: slider.getAttribute("aria-valuetext")},
+            count: chrome.querySelector(".mc-theme-networks-per-row-count").textContent,
+            titles: {pressed: titles.getAttribute("aria-pressed"), glyph: titles.dataset.mcThemeGlyph,
+                     svg: !!titles.querySelector("svg")},
+            untitled: host.classList.contains("mc-theme-networks-untitled")};
+}"""
+
+
+def filled(found: dict, count: int) -> None:
+    """Every row but the last holds `count` cards, from the grid's left edge
+    to its right to the pixel, one gap apart and all one width; every card
+    is half as tall again as it is wide; the last row starts at the left."""
+    rows = found["rows"]
+    assert rows, found
+    width = (found["right"] - found["left"] - (count - 1) * found["gap"]) / count
+    for i, row in enumerate(rows):
+        assert len(row) == count or (i == len(rows) - 1 and 0 < len(row) < count), (i, len(row), count)
+        assert abs(row[0]["left"] - found["left"]) <= 1, (i, row[0], found["left"])
+        if len(row) == count:
+            assert abs(row[-1]["right"] - found["right"]) <= 1, (i, row[-1], found["right"])
+        for a, b in zip(row, row[1:]):
+            assert abs(b["left"] - a["right"] - found["gap"]) <= 1, (i, a, b)
+        for card in row:
+            assert abs(card["width"] - width) <= 1, (i, card, width)
+            assert abs(card["height"] - 1.5 * card["width"]) <= 1, (i, card)
+
+
+def pick(page, tab: str, count: int) -> None:
+    """The head's slider moved to `count`, as a drag or the arrow keys move
+    it: the value, then an input event."""
+    page.evaluate("""([tab, count]) => {
+        const slider = document.querySelector("#mc-theme-networks-" + tab + " .mc-theme-networks-per-row");
+        slider.value = String(count);
+        slider.dispatchEvent(new Event("input", {bubbles: true}));
+    }""", [tab, count])
+    settle(page)
+
 
 # What Forge's setupExtraNetworksForTab does to the page once the pages'
 # HTML has arrived (javascript/extraNetworks.js): the controls strip in the
@@ -1034,6 +1122,98 @@ class TestTheQuickSettingsDrawer:
         assert found["drawer"]["rect"]["width"] == 340
         page.close()
 
+    QUICK = """() => ({hidden: document.getElementById("mc-theme-quick").hidden,
+                      expanded: document.querySelector(".mc-theme-quick-toggle").getAttribute("aria-expanded"),
+                      kept: localStorage.getItem("mc-theme-quick")})"""
+
+    def test_a_tap_outside_puts_it_away_and_one_inside_does_not(self, browser):
+        """"i want it to close when i tap outside of it": a tap outside the
+        drawer -- a mouse's or a finger's -- puts it away as Escape does, and
+        it is remembered closed. A tap on anything in it leaves it, a list a
+        dropdown in it opens included: Gradio draws that list fixed on the
+        screen but inside the dropdown, so it is the drawer's even where it
+        reaches past the drawer's edge. A finger scrolling the page is not a
+        tap."""
+        context = browser.new_context(viewport={"width": 1600, "height": 900}, has_touch=True)
+        page = open_page(browser, context=context)
+        page.evaluate("""() => {
+            const list = document.createElement("ul");
+            list.className = "options";
+            list.style.cssText = "position: fixed; left: 200px; top: 300px; width: 300px; height: 120px;"
+                + " margin: 0; background: #222; z-index: 1000";
+            document.getElementById("setting_sd_model_checkpoint").appendChild(list);
+        }""")
+        page.click(".mc-theme-quick-toggle")
+        settle(page)
+        assert page.evaluate(self.QUICK) == {"hidden": False, "expanded": "true", "kept": "open"}
+
+        page.click("#setting_sd_vae")
+        page.mouse.click(400, 350)
+        page.touchscreen.tap(100, 120)
+        settle(page)
+        assert page.evaluate(self.QUICK)["hidden"] is False, "taps inside, the list past its edge included"
+
+        cdp = context.new_cdp_session(page)
+        drag(page, cdp, 900, 700, 300)
+        settle(page)
+        assert page.evaluate("window.scrollY") > 0, "the finger scrolled the page"
+        assert page.evaluate(self.QUICK)["hidden"] is False, "a scroll is not a tap"
+
+        page.touchscreen.tap(900, 500)
+        settle(page)
+        assert page.evaluate(self.QUICK) == {"hidden": True, "expanded": "false", "kept": "closed"}
+
+        page.click(".mc-theme-quick-toggle")
+        settle(page)
+        page.mouse.click(900, 500)
+        settle(page)
+        assert page.evaluate(self.QUICK) == {"hidden": True, "expanded": "false", "kept": "closed"}
+        page.close()
+        context.close()
+
+    def test_the_headers_button_and_what_is_no_tap_outside_leave_it_as_they_find_it(self, browser):
+        """The header's button is the drawer's own: it closes the drawer
+        rather than having it closed and opened again. A press that began in
+        the drawer and was let go just past its edge (a slider dragged out of
+        it), a drag across the page, the page's own synthetic clicks and a
+        key that clicks a button are no taps outside it. A tap on something
+        whose own listener stops the click -- the Gallery Quadrant stops a
+        tap on the gallery -- still is one, heard on its way down, and so is
+        one during which a script clicks something of its own."""
+        page = open_page(browser)
+        page.click(".mc-theme-quick-toggle")
+        page.click(".mc-theme-quick-toggle")
+        settle(page)
+        assert page.evaluate(self.QUICK)["hidden"] is True
+        page.click(".mc-theme-quick-toggle")
+        settle(page)
+        assert page.evaluate(self.QUICK)["hidden"] is False
+
+        edge = page.evaluate("document.getElementById('mc-theme-quick').getBoundingClientRect().right")
+        page.mouse.move(edge - 4, 400)
+        page.mouse.down()
+        page.mouse.move(edge + 8, 400, steps=3)
+        page.mouse.up()
+        page.mouse.move(800, 300)
+        page.mouse.down()
+        page.mouse.move(900, 420, steps=5)
+        page.mouse.up()
+        page.evaluate("document.getElementById('txt2img_gallery').click()")
+        page.focus("#txt2img_generate")
+        page.keyboard.press("Enter")
+        settle(page)
+        assert page.evaluate(self.QUICK)["hidden"] is False
+
+        page.evaluate("""() => {
+            const gallery = document.getElementById('txt2img_gallery');
+            gallery.addEventListener('pointerup', () => document.getElementById('paste').click());
+            gallery.addEventListener('click', (event) => event.stopImmediatePropagation());
+        }""")
+        page.click("#txt2img_gallery")
+        settle(page)
+        assert page.evaluate(self.QUICK)["hidden"] is True
+        page.close()
+
     def test_off_leaves_the_row_where_forge_draws_it(self, browser):
         page = open_page(browser, {"model_chain_theme_quick": "off"})
         found = page.evaluate(MEASURE)
@@ -1258,8 +1438,13 @@ class TestTheExtraNetworksDrawer:
         assert [t["active"] for t in found["tabs"]] == [False, True, True]
         assert [t["selected"] for t in found["tabs"]] == ["false", "true", "true"]
         assert found["generationSelected"] == "Generation"
-        # Forge's own sizes, 16 by 24 rem and the inline ones, give way to the setting.
-        assert found["card"] == {"width": 120, "height": 180}
+        # Forge's own sizes, 16 by 24 rem and the inline ones, give way to the
+        # row: two to a row (the count whose cards come nearest the setting's
+        # 120 px at the drawer's 340), the row shared out between them.
+        rows = page.evaluate(ROWS, "txt2img")
+        assert rows["cols"] == "2" and len(rows["rows"][0]) == 2, rows
+        filled(rows, 2)
+        assert 130 < found["card"]["width"] < 150, found["card"]
 
         page.click("#txt2img_lora_cards .card")
         assert page.evaluate(NETWORKS)["prompt"] == "<lora:detail:1>"
@@ -1293,7 +1478,11 @@ class TestTheExtraNetworksDrawer:
 
         assert found["host"]["open"] is True
         assert found["chrome"]["rect"]["width"] == 400 and found["lora"]["rect"]["width"] == 400
-        assert found["card"] == {"width": 100, "height": 150}
+        # Three to a row at 400: the count whose cards come nearest 100 px.
+        rows = page.evaluate(ROWS, "txt2img")
+        assert rows["cols"] == "3", rows
+        filled(rows, 3)
+        assert 100 <= found["card"]["width"] < 120, found["card"]
         page.close()
 
     def test_each_generation_tab_has_a_drawer_of_its_own_and_other_tabs_have_none(self, browser):
@@ -1443,7 +1632,7 @@ class TestTheExtraNetworksDrawer:
 
         assert found["chrome"] is None and found["other"] is None
         assert found["host"] == {"open": False, "marked": False, "layout": None, "display": "block",
-                                 "width": "", "chrome": ""}
+                                 "width": "", "chrome": "", "cols": "", "untitled": False}
         assert found["extraTabsChildren"] == ["tab-nav scroll-hide", "txt2img_generation",
                                               "txt2img_textual_inversion", "txt2img_lora"]
         assert found["navMarked"] is False and found["navDisplay"] == "flex"
@@ -1566,6 +1755,257 @@ class TestTheExtraNetworksDrawer:
         page.evaluate("document.body.classList.remove('forge-assistant-focused')")
         settle(page)
         assert page.evaluate(COLUMN)["hostDisplay"] == "grid"
+        page.close()
+
+
+def lora_drawer(browser, opts=None, **kwargs):
+    """The txt2img drawer open on its LoRA page, sixteen cards on it."""
+    page = open_page(browser, dict({"model_chain_theme_networks": "open"}, **(opts or {})),
+                     more_cards=14, **kwargs)
+    page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+    settle(page)
+    return page
+
+
+class TestTheCardsInTheDrawer:
+    """Asked for: "the ability to show hide titles in the extra networks
+    panels", and the Clipboard's pictures per row for the cards -- "the same
+    thing for extra networks", a slider of how many to a row "so that the
+    grid can better evenly distribute". Forge's cards were inline blocks of
+    the card size setting's width, which left a strip of empty grid at the
+    end of nearly every row; the shown page's cards are a grid of as many
+    equal columns as the head's slider counts now."""
+
+    def test_every_count_the_slider_offers_fills_the_row_to_the_pixel(self, browser):
+        page = lora_drawer(browser)
+        found = page.evaluate(ROWS, "txt2img")
+        room, gap = found["right"] - found["left"], found["gap"]
+        assert gap == 8, found
+
+        # The counts offered are those whose cards come out within the card
+        # size setting's bounds, 60 to 320 px, at this width -- all of them.
+        def card(count):
+            return (room - (count - 1) * gap) / count
+
+        low, high = found["slider"]["min"], found["slider"]["max"]
+        assert card(low) <= 320 + 0.5 and (low == 1 or card(low - 1) > 320), (low, room)
+        assert card(high) >= 60 - 0.5 and card(high + 1) < 60, (high, room)
+        assert high - low >= 2, found["slider"]
+        for count in range(low, high + 1):
+            pick(page, "txt2img", count)
+            found = page.evaluate(ROWS, "txt2img")
+            assert found["cols"] == str(count) and found["slider"]["value"] == count, (count, found)
+            assert found["count"] == str(count)
+            assert found["slider"]["said"] == f"{count} card{'' if count == 1 else 's'} per row"
+            filled(found, count)
+        page.close()
+
+    def test_a_browser_starts_nearest_the_card_size_and_a_chosen_count_is_kept_until_it_changes(self, browser):
+        """The Clipboard's rule, with the drawer's width's memory: a browser
+        starts at the count whose cards come nearest the card size setting,
+        and follows the width while it is on that count; a count chosen is
+        the browser's, kept through a resize within what the width allows,
+        and back when the width allows it again -- until the card size
+        setting changes, which wins."""
+        context = browser.new_context(viewport={"width": 1600, "height": 900})
+        page = lora_drawer(browser, context=context)
+        assert page.evaluate(ROWS, "txt2img")["cols"] == "2", "nearest 120 px at 340"
+        page.evaluate("opts.model_chain_theme_networks_width = 600")
+        changed(page)
+        found = page.evaluate(ROWS, "txt2img")
+        assert found["cols"] == "4", "and the width followed: nearest 120 px at 600"
+        filled(found, 4)
+
+        pick(page, "txt2img", 3)
+        assert json.loads(page.evaluate("localStorage.getItem('mc-theme-networks-per-row')")) == {"count": 3, "setting": 120}
+        page.evaluate("opts.model_chain_theme_networks_width = 340")
+        changed(page)
+        filled(page.evaluate(ROWS, "txt2img"), 3)
+        # Narrower than three cards of 60 px allow: held to what fits, and
+        # three again when there is room.
+        page.evaluate("opts.model_chain_theme_networks_width = 240")
+        changed(page)
+        found = page.evaluate(ROWS, "txt2img")
+        assert found["slider"]["max"] == 2 and found["cols"] == "2", found
+        filled(found, 2)
+        page.evaluate("opts.model_chain_theme_networks_width = 340")
+        changed(page)
+        assert page.evaluate(ROWS, "txt2img")["cols"] == "3"
+        page.close()
+
+        again = lora_drawer(browser, context=context)
+        filled(again.evaluate(ROWS, "txt2img"), 3)
+        again.close()
+        # The card size setting changed: the count nearest it wins.
+        smaller = lora_drawer(browser, {"model_chain_theme_networks_card": 70}, context=context)
+        assert smaller.evaluate(ROWS, "txt2img")["cols"] == "4"
+        smaller.close()
+        context.close()
+
+    def test_the_other_tabs_drawer_draws_the_same_count(self, browser):
+        """A count chosen in one generation tab's drawer is the other's too,
+        given to it while it is hidden, so it is never shown a frame at the
+        count it had."""
+        page = lora_drawer(browser)
+        page.click("#tab_img2img-button")
+        settle(page)
+        assert page.evaluate(ROWS, "img2img")["cols"] == "2"
+        page.click("#tab_txt2img-button")
+        settle(page)
+        pick(page, "txt2img", 3)
+        hidden = page.evaluate("document.getElementById('img2img_extra_tabs').style"
+                               ".getPropertyValue('--mc-theme-networks-cols')")
+        assert hidden == "3", "given to the hidden drawer before it is shown"
+        page.click("#tab_img2img-button")
+        settle(page)
+        found = page.evaluate(ROWS, "img2img")
+        assert found["cols"] == "3" and found["slider"]["value"] == 3, found
+        filled(found, 3)
+        page.close()
+
+    def test_the_names_hide_and_show_in_both_drawers_and_the_choice_is_remembered(self, browser):
+        context = browser.new_context(viewport={"width": 1600, "height": 900})
+        page = lora_drawer(browser, context=context)
+        page.evaluate(FORGE_WIRES)
+        shown = page.evaluate(ROWS, "txt2img")
+        assert shown["titles"] == {"pressed": "true", "glyph": "captions", "svg": True}
+        assert {c["names"] for row in shown["rows"] for c in row} == {"block"}
+
+        page.click("#mc-theme-networks-txt2img .mc-theme-networks-titles")
+        settle(page)
+        hidden = page.evaluate(ROWS, "txt2img")
+        assert hidden["untitled"] is True
+        assert hidden["titles"] == {"pressed": "false", "glyph": "captions-off", "svg": True}
+        assert {c["names"] for row in hidden["rows"] for c in row} == {"none"}
+        assert [[c["width"] for c in row] for row in hidden["rows"]] == [[c["width"] for c in row] for row in shown["rows"]]
+        assert page.evaluate("localStorage.getItem('mc-theme-networks-titles')") == "hidden"
+        # Forge's search reads the names' search terms, drawn or not.
+        page.fill("#txt2img_lora_extra_search", "lora_1")
+        settle(page)
+        assert sorted(c["name"] for row in page.evaluate(ROWS, "txt2img")["rows"] for c in row) == [
+            "lora_10", "lora_11", "lora_12", "lora_13"]
+        page.fill("#txt2img_lora_extra_search", "")
+        page.click("#tab_img2img-button")
+        settle(page)
+        other = page.evaluate(ROWS, "img2img")
+        assert other["untitled"] is True and other["titles"]["pressed"] == "false"
+        assert {c["names"] for row in other["rows"] for c in row} == {"none"}
+        page.close()
+
+        again = lora_drawer(browser, context=context)
+        assert again.evaluate(ROWS, "txt2img")["untitled"] is True
+        again.click("#mc-theme-networks-txt2img .mc-theme-networks-titles")
+        settle(again)
+        found = again.evaluate(ROWS, "txt2img")
+        assert found["untitled"] is False and found["titles"]["glyph"] == "captions"
+        assert {c["names"] for row in found["rows"] for c in row} == {"block"}
+        assert again.evaluate("localStorage.getItem('mc-theme-networks-titles')") == "shown"
+        again.close()
+        context.close()
+
+    def test_the_cards_row_is_one_row_at_the_drawers_narrowest(self, browser):
+        page = lora_drawer(browser, {"model_chain_theme_networks_width": 240})
+        found = page.evaluate("""() => {
+            const chrome = document.getElementById("mc-theme-networks-txt2img");
+            const view = chrome.querySelector(".mc-theme-networks-view");
+            const parts = [...view.children].map((c) => c.getBoundingClientRect());
+            const box = view.getBoundingClientRect();
+            const last = [...chrome.children].filter((c) => getComputedStyle(c).position !== "absolute").pop();
+            return {middles: parts.map((r) => Math.round(r.top + r.height / 2)), right: Math.max(...parts.map((r) => r.right)),
+                    viewRight: box.right, chromeRight: chrome.getBoundingClientRect().right - 12,
+                    slider: parts[2].width, button: parts[0].width, last: last.className};
+        }""")
+
+        assert len(set(found["middles"])) == 1 or max(found["middles"]) - min(found["middles"]) <= 1, found
+        assert found["right"] <= found["viewRight"] + 0.5 and found["viewRight"] <= found["chromeRight"] + 0.5, found
+        assert found["slider"] >= 100 and found["button"] == 30, found
+        assert found["last"] == "mc-theme-networks-view", "the cards' row is the head's last, over the cards"
+        page.close()
+
+    def test_the_cards_width_does_not_change_with_how_many_are_drawn(self, browser):
+        """The row is shared out from the cards' width, and the drawer's page
+        scrolls: a scroll bar that came with sixteen cards and went with one
+        would change that width as the search was typed, and with it what the
+        slider offers. The bar's room is kept either way."""
+        page = lora_drawer(browser, {"model_chain_theme_networks_width": 300})
+        page.evaluate(FORGE_WIRES)
+        many = page.evaluate(ROWS, "txt2img")
+        page.fill("#txt2img_lora_extra_search", "detail")
+        settle(page, 4)
+        one = page.evaluate(ROWS, "txt2img")
+
+        assert sum(len(row) for row in many["rows"]) == 16 and sum(len(row) for row in one["rows"]) == 1
+        assert one["right"] - one["left"] == many["right"] - many["left"], (one, many)
+        assert one["slider"] == many["slider"]
+        page.close()
+
+    def test_a_row_with_room_for_one_count_only_leaves_nothing_to_slide(self, browser):
+        """Forge's tree view beside the cards can leave them room for one
+        card to a row and no other: the slider has nothing to offer then, and
+        has its counts back with the room. Measured when the cards' width
+        changes, which is not an update of the page."""
+        page = lora_drawer(browser)
+        page.evaluate("document.getElementById('txt2img_lora_cards').style.width = '120px'")
+        settle(page, 4)
+        narrow = page.evaluate(ROWS, "txt2img")
+        page.evaluate("document.getElementById('txt2img_lora_cards').style.width = ''")
+        settle(page, 4)
+        wide = page.evaluate(ROWS, "txt2img")
+
+        assert narrow["slider"]["min"] == narrow["slider"]["max"] == 1 and narrow["slider"]["disabled"] is True, narrow
+        filled(narrow, 1)
+        assert wide["slider"]["disabled"] is False and wide["cols"] == "2", wide
+        filled(wide, 2)
+        page.close()
+
+    def test_forges_nothing_here_takes_the_whole_row(self, browser):
+        page = lora_drawer(browser)
+        found = page.evaluate("""() => {
+            const cards = document.getElementById("txt2img_lora_cards");
+            cards.innerHTML = "<div class='nocards'><h1>Nothing here.</h1><ul><li>models/Lora</li></ul></div>";
+            const style = getComputedStyle(cards);
+            const room = cards.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+            return {room, width: cards.querySelector(".nocards").getBoundingClientRect().width};
+        }""")
+
+        assert abs(found["width"] - found["room"]) <= 1, found
+        page.close()
+
+    def test_the_column_layout_shares_its_rows_out_too(self, browser):
+        page = lora_drawer(browser, {"model_chain_theme_networks_mode": "column"})
+        settle(page, 4)
+        found = page.evaluate(ROWS, "txt2img")
+        filled(found, int(found["cols"]))
+        pick(page, "txt2img", found["slider"]["max"])
+        filled(page.evaluate(ROWS, "txt2img"), found["slider"]["max"])
+        page.close()
+
+    def test_applied_again_the_drawers_write_nothing(self, browser):
+        """An apply runs after every update of the page, and Forge raises the
+        next update a quarter second after any change to a child list inside
+        its app element: a count's text or a glyph written again on every
+        apply would keep the page updating for as long as it is open. Nor is
+        an attribute written again, which wakes every other observer."""
+        page = lora_drawer(browser)
+        page.click("#mc-theme-networks-txt2img .mc-theme-networks-titles")
+        pick(page, "txt2img", 3)
+        page.evaluate(HEARD)
+        page.evaluate("""() => {
+            window.attributes = [];
+            const heard = new MutationObserver((records) => records.forEach((r) => window.attributes.push(
+                (r.target.id || r.target.className || r.target.nodeName) + " " + r.attributeName)));
+            // The drawer's host itself, and everything in its head and its pages.
+            heard.observe(document.getElementById("txt2img_extra_tabs"), {attributes: true});
+            ["mc-theme-networks-txt2img", "txt2img_textual_inversion", "txt2img_lora"].forEach((id) =>
+                heard.observe(document.getElementById(id), {attributes: true, subtree: true}));
+        }""")
+        for _ in range(3):
+            changed(page)
+        page.evaluate("hooks.after.forEach((fn) => fn())")
+        settle(page)
+
+        assert page.evaluate("window.heard") == [], "no child list changed"
+        assert page.evaluate("window.attributes") == [], "no attribute written again"
         page.close()
 
 

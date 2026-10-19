@@ -1064,7 +1064,10 @@
    it, hidden unless it is the one the strip shows, and then the drawer's
    scrolling body under the head -- as wide as the head, from under it to
    the window's bottom. Its contents are Forge's, drawn as Forge draws them,
-   at the card size the drawer is set to. */
+   its cards as many to a row as the head's slider says. The scroll bar's
+   room is kept whether or not one is drawn: the cards' row is shared out
+   from their width, and a bar that came and went with how tall they are
+   would change it. */
 :root[data-mc-theme="on"] .mc-theme-networks-host > .mc-theme-networks-page {
     display: none !important;
     padding: 0 !important;
@@ -1083,6 +1086,7 @@
     width: var(--mc-theme-networks-width, 340px);
     max-width: 100vw;
     overflow: auto;
+    scrollbar-gutter: stable;
     padding: 0 var(--mc-theme-pad) var(--mc-theme-pad) !important;
     background: var(--body-background-fill) !important;
     border-left: 1px solid var(--border-color-primary) !important;
@@ -1187,6 +1191,59 @@
 :root[data-mc-theme="on"] .mc-theme-networks > .extra-networks-controls-div {
     margin: 0;
     align-self: stretch;
+}
+
+/* The cards' own row, the head's last, over the cards: a button that shows
+   or hides their names, and a slider of how many cards to a row with the
+   count beside it. One row at the drawer's narrowest, 240 px. */
+:root[data-mc-theme="on"] .mc-theme-networks-view {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-view .mc-theme-action {
+    width: 30px;
+    height: 30px;
+    min-width: 30px !important;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-per-row-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    margin-left: 4px;
+    color: var(--body-text-color-subdued);
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-per-row-icon > svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* A plain range input in the accent: its thumb dragged, a press on its
+   track, or the arrow keys. A sideways finger on it is the slider's, never
+   the page's. */
+:root[data-mc-theme="on"] .mc-theme-networks-per-row {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    accent-color: var(--color-accent);
+    touch-action: pan-y;
+    cursor: pointer;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-per-row:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-per-row-count {
+    flex: 0 0 auto;
+    min-width: 2ch;
+    color: var(--body-text-color-subdued);
+    font-size: var(--text-sm, 13px);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
 }
 
 /* Forge sizes a page's pane to the window less the generation UI, which is
@@ -1320,13 +1377,46 @@
     font-size: 14px;
 }
 
-/* The card's own inline size is Forge's setting, so the drawer's has to say
-   !important. */
+/* The cards: a grid of as many equal columns as the head's slider counts
+   (`--mc-theme-networks-cols`, which the script works out from the cards'
+   width), so every row is filled to the pixel at every count, where cards
+   of one size left a strip of empty grid at the end of nearly every row. A
+   card is as wide as its column and half as tall again. The room round the
+   grid is for the cards' shadows, which Forge's clip on this box would cut;
+   anything in it that is not a card (Forge's "Nothing here" for a page with
+   none) takes a whole row. */
+:root[data-mc-theme="on"] .mc-theme-networks-page .extra-network-cards {
+    display: grid;
+    grid-template-columns: repeat(var(--mc-theme-networks-cols, 2), minmax(0, 1fr));
+    gap: 8px;
+    align-content: start;
+    box-sizing: border-box;
+    padding: 4px;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-page .extra-network-cards > :not(.card) {
+    grid-column: 1 / -1;
+}
+
+/* Forge's own card size, 16 by 24 rem and the one it writes inline from its
+   settings, gives way to the column, so the drawer's has to say !important. */
 :root[data-mc-theme="on"] .mc-theme-networks-page .extra-network-pane .card {
-    width: var(--mc-theme-networks-card, 120px) !important;
-    height: calc(var(--mc-theme-networks-card, 120px) * 1.5) !important;
-    margin: 4px !important;
+    justify-self: stretch;
+    align-self: start;
+    width: auto !important;
+    height: auto !important;
+    min-width: 0 !important;
+    aspect-ratio: 2 / 3;
+    margin: 0 !important;
     font-size: 12px !important;
+}
+
+/* The cards' names off, from the head's button: Forge's band over the bottom
+   of the picture -- the name, the description under it -- is not drawn, and
+   the picture is the card. Forge's search reads the search terms inside the
+   band whether it is drawn or not. */
+:root[data-mc-theme="on"] .mc-theme-networks-untitled > .mc-theme-networks-page .card .actions {
+    display: none;
 }
 
 /* -- Forge's popups: a card's metadata editor, as a dialog ------------------- */

@@ -166,13 +166,13 @@ class TestTheGlyphs:
         name the table lacks is the text "undefined" on the page -- the
         drawer's close button was, on the user's machine."""
         script = SCRIPT.read_text(encoding="utf-8")
-        asked = set(re.findall(r'action\("[^"]*",\s*"([a-z-]+)"', script))
-        asked |= set(re.findall(r'GLYPH\["([a-z-]+)"\]', script))
+        asked = set(re.findall(r'action\("[^"]*",\s*"([a-z0-9-]+)"', script))
+        asked |= set(re.findall(r'GLYPH\["([a-z0-9-]+)"\]', script))
         found = run("out.glyphs = T.glyphs;")
 
         assert asked, "the script asks for glyphs by name"
         assert asked <= set(found["glyphs"]), asked - set(found["glyphs"])
-        assert "x" in asked
+        assert {"x", "captions", "captions-off", "columns-3"} <= asked
 
 
 class TestTheSettingsAsRead:
@@ -320,6 +320,47 @@ class TestOneScrollerForThePage:
         assert found["zero"] is None
 
 
+class TestTheCardsPerRow:
+    """The arithmetic behind the extra-network drawer's slider
+    (model_chain_theme.js, `perRowRange`, `perRowNearest`): the counts a row
+    of cards may hold, cards no wider than the card size setting's top and
+    no narrower than its bottom, and the count a browser starts at. Chromium
+    holds the grid that follows (tests/test_theme_layout.py)."""
+
+    def test_the_counts_offered_keep_every_card_within_the_settings_bounds(self):
+        # The drawer at 340 px: 290 px of row, cards 8 px apart.
+        found = run("out.range = T.perRowRange(290, 8); out.wide = T.perRowRange(776, 8);")
+
+        assert found["range"] == {"min": 1, "max": 4}
+        assert found["wide"] == {"min": 3, "max": 11}
+        for room, key in ((290, "range"), (776, "wide")):
+            low, high = found[key]["min"], found[key]["max"]
+
+            def card(count):
+                return (room - (count - 1) * 8) / count
+
+            assert card(low) <= mc_theme.NETWORKS_CARD_MAX and (low == 1 or card(low - 1) > mc_theme.NETWORKS_CARD_MAX)
+            assert card(high) >= mc_theme.NETWORKS_CARD_MIN and card(high + 1) < mc_theme.NETWORKS_CARD_MIN
+
+    def test_a_row_too_narrow_for_two_small_cards_still_holds_one(self):
+        found = run("out.narrow = T.perRowRange(50, 8); out.none = T.perRowRange(0, 8);")
+
+        assert found["narrow"] == {"min": 1, "max": 1}
+        assert found["none"] == {"min": 1, "max": 1}
+
+    def test_a_browser_starts_at_the_count_whose_cards_come_nearest_the_setting(self):
+        found = run("""
+            const range = T.perRowRange(290, 8);
+            out.default = T.perRowNearest(290, 8, 120, range);
+            out.lobe = T.perRowNearest(290, 8, 86, range);
+            out.tiny = T.perRowNearest(290, 8, 20, range);
+            out.huge = T.perRowNearest(290, 8, 900, range);
+        """)
+
+        # 2 cards of 141 px for 120; 3 of 91 for the 86 the Lobe import gave.
+        assert found == {"default": 2, "lobe": 3, "tiny": 4, "huge": 1}
+
+
 def T_DEFAULTS():
     return {"enabled": False, "split": True, "scroll": True, "quick": "collapsed", "quickWidth": 280,
             "prompts": True, "icons": True, "title": "Forge", "labels": "as_forge",
@@ -427,6 +468,9 @@ class TestTheFirstPaint:
         assert found["hooks"] == {"loaded": 1, "changed": 1, "after": 1, "tab": 1}
         assert "window:resize" in found["listeners"]
         assert "document:keydown" in found["listeners"]
+        # The quick settings drawer's tap outside: a press, and its click.
+        for kind in ("document:pointerdown", "document:click"):
+            assert kind in found["listeners"], kind
         # What changes what the columns are held against without a resize
         # of the window: a pinch, the page shown again, the browser's full
         # screen coming or going under focus mode.
@@ -551,6 +595,12 @@ class TestTheStylesheetSection:
                                       ("mc-theme-networks-page", "mc-theme-networks-page"),
                                       ("mc-theme-networks-handle", "mc-theme-networks-handle"),
                                       ("mc-theme-networks-resizing", "mc-theme-networks-resizing"),
+                                      ("mc-theme-networks-view", "mc-theme-networks-view"),
+                                      ("mc-theme-networks-untitled", "mc-theme-networks-untitled"),
+                                      ("mc-theme-networks-per-row", "mc-theme-networks-per-row"),
+                                      ("mc-theme-networks-per-row-icon", "mc-theme-networks-per-row-icon"),
+                                      ("mc-theme-networks-per-row-count", "mc-theme-networks-per-row-count"),
+                                      ("--mc-theme-networks-cols", "--mc-theme-networks-cols"),
                                       ("data-mc-theme-networks", "data-mc-theme-networks"),
                                       ("mc-theme-info-source", "mc-theme-info-source"),
                                       ("mc-theme-info-block", "mc-theme-info-block"),

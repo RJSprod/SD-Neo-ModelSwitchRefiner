@@ -135,6 +135,9 @@
         "settings": icon('<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>'),
         "sliders-horizontal": icon('<path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/>'),
         "ellipsis": icon('<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>'),
+        "captions": icon('<rect width="18" height="14" x="3" y="5" rx="2" ry="2"/><path d="M7 15h4M15 15h2M7 11h2M13 11h4"/>'),
+        "captions-off": icon('<path d="M10.5 5H19a2 2 0 0 1 2 2v8.5"/><path d="M17 11h-.5"/><path d="M19 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2"/><path d="m2 2 20 20"/><path d="M7 11h4"/><path d="M7 15h2.5"/>'),
+        "columns-3": icon('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/>'),
     };
 
     // Forge's tool-button emoji (modules/ui.py, ui_prompt_styles.py,
@@ -323,7 +326,7 @@
         relabelled: [],     // tab buttons whose text was respaced
         header: null,       // {strip, title, actions, more, menu, quickToggle}
         quick: null,        // the drawer
-        networks: null,     // {hosts: {tabname: {host, nav, chrome, strip, controls, pages, page, observer}}, open, width, setting, mode}
+        networks: null,     // {hosts: {tabname: {host, nav, chrome, strip, controls, pages, page, observer, view, ...}}, open, width, setting, mode, titles, perRow, card}
         infoPanels: new Map(), // Forge's infotext element -> {panel, html}
         scroll: null,       // {entries: {tabname: {row, column, results}}, observer, observed, body, frame}
         unload: null,       // the beforeunload handler while asked for
@@ -1255,6 +1258,58 @@
         }
     }
 
+    // A tap outside the drawer puts it away, as Escape does, and it is
+    // remembered closed. Asked for: "i want it to close when i tap outside of
+    // it". A tap is the click that ends a press made outside the drawer, with
+    // the pointer still about where it went down: a scroll or a pinch makes
+    // no click, a press that began in the drawer (a slider let go past its
+    // edge, a selection) is not a press outside it, and a drag across the page
+    // is not a tap. The header's button is the drawer's own and toggles it.
+    // Only what a person did counts: the page's own clicks (the ⋯ menu's,
+    // Mini Paint's tab presses) are synthetic, and a key that clicks a button
+    // is not a tap. Heard in the capture phase, before anything on the way can
+    // stop it -- the Gallery Quadrant stops a tap on the gallery from going on
+    // -- and nothing is taken from the tap: what it landed on still gets it.
+    // The pointer's type is never asked: a Gecko browser under its
+    // fingerprinting defence, the user's touch screen, reports no touch points.
+
+    const QUICK_TAP_PX = 16;   // further than a finger's tap strays, nearer than a drag goes
+    const quickPress = {at: null};   // where the last press outside went down, until a click spends it
+
+    function quickOpen() {
+        return !!(state.quick && !state.quick.hidden);
+    }
+
+    /** Whether an event happened in the drawer or on the header's button for
+     *  it, by the path it took as it happened. */
+    function inQuick(event) {
+        const own = [state.quick, state.header && state.header.quickToggle].filter(Boolean);
+        const path = typeof event.composedPath === "function" ? event.composedPath() : null;
+        return own.some((node) => (path && path.length ? path.indexOf(node) !== -1
+            : !!event.target && typeof node.contains === "function" && node.contains(event.target)));
+    }
+
+    function notePress(event) {
+        quickPress.at = quickOpen() && !inQuick(event)
+            ? {x: Number(event.clientX) || 0, y: Number(event.clientY) || 0} : null;
+    }
+
+    /** The click a tap outside the drawer makes: the drawer put away. The
+     *  page's own click neither taps nor spends the press: one a script makes
+     *  as a finger lifts comes before the tap's own. */
+    function tapOutsideQuick(event) {
+        if (event.isTrusted === false) return false;
+        const press = quickPress.at;
+        quickPress.at = null;
+        if (!press || !quickOpen() || inQuick(event)) return false;
+        const strayed = Math.max(Math.abs((Number(event.clientX) || 0) - press.x),
+                                 Math.abs((Number(event.clientY) || 0) - press.y));
+        if (strayed > QUICK_TAP_PX) return false;
+        setQuick(false);
+        rememberQuick(false);
+        return true;
+    }
+
     // -- the extra networks drawer ------------------------------------------------------ //
     //
     // Forge Neo keeps the extra-network pages -- Textual Inversion, Checkpoints,
@@ -1315,8 +1370,12 @@
     const NETWORKS_HOST_CLASS = "mc-theme-networks-host";
     const NETWORKS_OPEN_CLASS = "mc-theme-networks-open";
     const NETWORKS_PAGE_CLASS = "mc-theme-networks-page";
+    const NETWORKS_UNTITLED_CLASS = "mc-theme-networks-untitled"; // on a host whose cards show no names
     const NETWORKS_LAYOUT_ATTRIBUTE = "data-mc-theme-networks";
     const NETWORKS_WIDTH_STATE = "mc-theme-networks-width";   // {width, setting}, per browser
+    const NETWORKS_TITLES_STATE = "mc-theme-networks-titles"; // "shown" | "hidden", per browser
+    const NETWORKS_PER_ROW_STATE = "mc-theme-networks-per-row"; // {count, setting}, per browser
+    const NETWORKS_COLUMNS = "--mc-theme-networks-cols";      // on a host: the cards in a row
     const NETWORKS_STEP = 10;                                 // the keyboard's step at the edge
 
     function networksOpenState() {
@@ -1351,6 +1410,35 @@
         } catch (error) { /* ignore */ }
     }
 
+    function titlesState() {
+        try { return localStorage.getItem(NETWORKS_TITLES_STATE); } catch (error) { return null; }
+    }
+
+    function rememberTitles(shown) {
+        try { localStorage.setItem(NETWORKS_TITLES_STATE, shown ? "shown" : "hidden"); } catch (error) { /* ignore */ }
+    }
+
+    /** The count of cards to a row last chosen, with the card size setting it
+     *  was chosen against: a changed setting wins over it, as it does over a
+     *  dragged width. */
+    function rememberedPerRow() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(NETWORKS_PER_ROW_STATE) || "null");
+            if (!parsed || typeof parsed !== "object") return null;
+            const count = Math.round(Number(parsed.count));
+            if (!(count >= 1)) return null;
+            return {count, setting: Number(parsed.setting)};
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function rememberPerRow(count, setting) {
+        try {
+            localStorage.setItem(NETWORKS_PER_ROW_STATE, JSON.stringify({count, setting}));
+        } catch (error) { /* ignore */ }
+    }
+
     function eachHost(fn) {
         const networks = state.networks;
         if (!networks) return;
@@ -1363,6 +1451,8 @@
         networks.open = !!open;
         eachHost((entry) => setClass(entry.host, NETWORKS_OPEN_CLASS, networks.open));
         if (state.header) setAttr(state.header.networksToggle, "aria-expanded", networks.open ? "true" : "false");
+        // Open, the shown page's cards have a width again to share out.
+        if (networks.open) scheduleCards();
     }
 
     function toggleNetworks() {
@@ -1399,6 +1489,7 @@
             });
         }
         sortShown(pageId);
+        layoutCards(entry);
     }
 
     // The cards containers this script has had Forge sort. A rendering of a
@@ -1420,6 +1511,190 @@
         if (!cards || sortedCards.has(cards)) return;
         sortedCards.add(cards);
         applyExtraNetworkFilter(pageId);
+    }
+
+    // -- the cards: their names, and how many to a row ------------------------------ //
+    //
+    // Asked for: "the ability to show hide titles in the extra networks
+    // panels", and the Clipboard's pictures per row for them -- "the same
+    // thing for extra networks", a slider of how many to a row "so that the
+    // grid can better evenly distribute". Forge lays a page's cards out as
+    // inline blocks of one size (the card size setting gave the drawer's), so
+    // nearly every width left a strip of empty grid at the end of each row.
+    // The shown page's cards are a grid of as many equal columns as the
+    // slider counts now, each card as wide as its column and half as tall
+    // again, so every row is filled to the pixel at every count. The slider
+    // offers the counts whose cards come out within the card size setting's
+    // bounds at the cards' width, and they move with that width (the drawer's
+    // edge, the window, Forge's tree view beside the cards). A browser starts
+    // at the count nearest the card size setting and follows the width while
+    // it is there; a count chosen on the slider is the browser's, kept through
+    // a resize within what the width allows, until the card size setting
+    // changes, which wins -- the drawer's width is kept the same way. The names
+    // (Forge's band over the bottom of a card's picture, the description in
+    // it) are shown or hidden by a button beside the slider, per browser too.
+    // Both are the drawer's: every page in it, both generation tabs' drawers.
+
+    /** The counts a row `room` pixels wide may hold with `gap` between its
+     *  cards: from cards as wide as the card size setting goes down to cards
+     *  as narrow. Pure, so the node tests hold it. */
+    function perRowRange(room, gap) {
+        const fewest = Math.max(1, Math.ceil((room + gap) / (NETWORKS_CARD_MAX + gap) - 1e-9));
+        const most = Math.max(fewest, Math.floor((room + gap) / (NETWORKS_CARD_MIN + gap) + 1e-9));
+        return {min: fewest, max: most};
+    }
+
+    function clampCount(count, range) {
+        return Math.min(range.max, Math.max(range.min, Math.round(Number(count) || 0)));
+    }
+
+    /** The count whose cards come nearest `size` pixels wide, within the
+     *  range. Pure. */
+    function perRowNearest(room, gap, size, range) {
+        return clampCount((room + gap) / (size + gap), range);
+    }
+
+    /** The shown page's cards, looked for inside the page: Forge renders a
+     *  page's cards again on every load and refresh. */
+    function shownCards(entry) {
+        const page = entry.pages.find((candidate) => candidate.id === entry.page);
+        return page ? page.querySelector(".extra-network-cards") : null;
+    }
+
+    /** Measured again when the shown page's cards change width. Their height
+     *  is what the count changes, never their width, so the box watched is
+     *  never the box this sizes. */
+    function watchCards(entry, cards) {
+        if (entry.cards === cards) return;
+        if (entry.cards && entry.cardsObserver) entry.cardsObserver.unobserve(entry.cards);
+        entry.cards = cards || null;
+        if (!cards) return;
+        if (!entry.cardsObserver && typeof ResizeObserver === "function") {
+            entry.cardsObserver = new ResizeObserver(function () { scheduleCards(); });
+        }
+        if (entry.cardsObserver) entry.cardsObserver.observe(cards);
+    }
+
+    /** Share a drawer's rows out: the count chosen, or the one nearest the
+     *  card size setting, held to what the cards' width allows, written on the
+     *  host for the stylesheet's grid, with the slider offering the counts
+     *  there are. A page that is not laid out -- the drawer closed, its tab
+     *  not shown -- is given the chosen count held to the last width it had,
+     *  and is measured when it is shown, which gives its cards a width. What
+     *  was found, or null. */
+    function layoutCards(entry) {
+        const networks = state.networks;
+        if (!networks) return null;
+        const cards = shownCards(entry);
+        watchCards(entry, cards);
+        if (!cards || !(cards.getBoundingClientRect().width > 0)) {
+            if (entry.range && networks.perRow) drawCount(entry, clampCount(networks.perRow, entry.range), entry.range);
+            return null;
+        }
+        const style = window.getComputedStyle(cards);
+        const gap = px(style.columnGap);
+        const room = cards.clientWidth - px(style.paddingLeft) - px(style.paddingRight);
+        if (!(room > 0)) return null;
+        const range = perRowRange(room, gap);
+        const count = networks.perRow ? clampCount(networks.perRow, range)
+            : perRowNearest(room, gap, networks.card, range);
+        drawCount(entry, count, range);
+        return {room, gap, range, count, card: (room - (count - 1) * gap) / count};
+    }
+
+    function drawCount(entry, count, range) {
+        entry.range = range;
+        entry.count = count;
+        setVariable(entry.host, NETWORKS_COLUMNS, String(count));
+        syncSlider(entry);
+    }
+
+    /** The slider at the count drawn, offering the counts there are, each
+     *  written only when it changes: an apply runs after every update of the
+     *  page, and the count's text is a child list to Forge's observer. */
+    function syncSlider(entry) {
+        const slider = entry.slider;
+        const range = entry.range;
+        if (!slider || !range) return;
+        const value = String(entry.count);
+        // The limits first: an input holds its value inside them.
+        if (slider.min !== String(range.min)) slider.min = String(range.min);
+        if (slider.max !== String(range.max)) slider.max = String(range.max);
+        if (slider.value !== value) slider.value = value;
+        if (slider.disabled !== (range.min === range.max)) slider.disabled = range.min === range.max;
+        const said = value + (entry.count === 1 ? " card" : " cards") + " per row";
+        setAttr(slider, "aria-valuetext", said);
+        setAttr(slider, "title", said);
+        if (entry.countLabel.textContent !== value) entry.countLabel.textContent = value;
+    }
+
+    function layoutCardsAll() {
+        eachHost((entry) => layoutCards(entry));
+    }
+
+    /** Measured again on the next frame -- once, however many asked. */
+    function scheduleCards() {
+        const networks = state.networks;
+        if (!networks || networks.frame) return;
+        networks.frame = 1;
+        const run = function () {
+            networks.frame = 0;
+            if (state.networks === networks) attempt("share the cards' rows out", layoutCardsAll);
+        };
+        if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
+    }
+
+    /** The slider moved: that many cards to a row, now, in both drawers, and
+     *  for this browser until the card size setting changes. */
+    function setPerRow(count) {
+        const networks = state.networks;
+        const wanted = Math.round(Number(count) || 0);
+        if (!networks || !(wanted >= 1)) return;
+        networks.perRow = wanted;
+        rememberPerRow(wanted, networks.card);
+        layoutCardsAll();
+    }
+
+    /** The names on the cards shown or hidden, in both drawers. */
+    function setTitles(shown) {
+        const networks = state.networks;
+        if (!networks) return;
+        networks.titles = !!shown;
+        eachHost((entry) => syncTitles(entry));
+    }
+
+    function toggleTitles() {
+        const networks = state.networks;
+        if (!networks) return;
+        setTitles(!networks.titles);
+        rememberTitles(networks.titles);
+    }
+
+    /** The host's mark and the button's state. The button's glyph -- the
+     *  names, or the names struck through -- is drawn only when it changes:
+     *  a new glyph is a change to a child list. */
+    function syncTitles(entry) {
+        const shown = !!(state.networks && state.networks.titles);
+        setClass(entry.host, NETWORKS_UNTITLED_CLASS, !shown);
+        const button = entry.titlesButton;
+        setAttr(button, "aria-pressed", shown ? "true" : "false");
+        const glyph = shown ? "captions" : "captions-off";
+        if (button.dataset.mcThemeGlyph !== glyph) {
+            button.dataset.mcThemeGlyph = glyph;
+            button.innerHTML = shown ? GLYPH["captions"] : GLYPH["captions-off"];
+        }
+    }
+
+    /** What the drawers' cards are drawn by, for the console:
+     *  `mcTheme.explainCards()`. */
+    function explainCards() {
+        const networks = state.networks;
+        if (!networks) return [];
+        return Object.keys(networks.hosts).map((tabname) => {
+            const entry = networks.hosts[tabname];
+            return Object.assign({tab: tabname, page: entry.page, wanted: networks.perRow, titles: networks.titles},
+                                 layoutCards(entry) || {reason: "not laid out"});
+        });
     }
 
     /** The header's button follows the tab: a tab with no pages has no
@@ -1482,7 +1757,8 @@
         if (config.networks === "off") { removeNetworks(); return; }
         let networks = state.networks;
         if (!networks) {
-            networks = state.networks = {hosts: {}, open: false, width: null, setting: null, mode: null};
+            networks = state.networks = {hosts: {}, open: false, width: null, setting: null, mode: null,
+                                         titles: titlesState() !== "hidden", perRow: 0, card: null, frame: 0};
             const remembered = networksOpenState();
             networks.open = remembered ? remembered === "open" : config.networks === "open";
         }
@@ -1492,6 +1768,13 @@
             networks.setting = config.networksWidth;
             const kept = rememberedWidth();
             networks.width = kept && kept.setting === config.networksWidth ? kept.width : config.networksWidth;
+        }
+        if (networks.card !== config.networksCard) {
+            // And the card size setting over a count of cards to a row chosen
+            // against an earlier one: the count nearest it is where a row starts.
+            networks.card = config.networksCard;
+            const kept = rememberedPerRow();
+            networks.perRow = kept && kept.setting === config.networksCard ? kept.count : 0;
         }
         networks.mode = config.networksMode;
 
@@ -1530,14 +1813,36 @@
                                     {role: "separator", "aria-orientation": "vertical", tabindex: "0",
                                      "aria-label": "Resize the extra networks", title: "Drag to resize"});
                 wireHandle(handle, tabname);
+                // The cards' own row, last, over the cards: their names on or
+                // off, and how many to a row. Never inside Forge's controls
+                // strip, whose children Forge shows and hides by page.
+                const view = make("div", "mc-theme-networks-view");
+                const titles = action("mc-theme-networks-titles", "captions", "Show the card names");
+                titles.dataset.mcThemeGlyph = "captions";
+                titles.setAttribute("aria-pressed", "true");
+                titles.addEventListener("click", toggleTitles);
+                const columns = make("span", "mc-theme-networks-per-row-icon", {"aria-hidden": "true"});
+                columns.innerHTML = GLYPH["columns-3"];
+                const slider = make("input", "mc-theme-networks-per-row",
+                                    {type: "range", min: "1", max: "1", step: "1", value: "1",
+                                     "aria-label": "Cards per row"});
+                slider.addEventListener("input", function () { setPerRow(slider.value); });
+                const countLabel = make("span", "mc-theme-networks-per-row-count", {"aria-hidden": "true"});
+                view.appendChild(titles);
+                view.appendChild(columns);
+                view.appendChild(slider);
+                view.appendChild(countLabel);
                 chrome.appendChild(head);
                 chrome.appendChild(strip);
                 chrome.appendChild(handle);
+                chrome.appendChild(view);
                 // Inside Forge's own element, where its selectors reach, and
                 // before the pages, where Forge's strip was (`placeHead`).
                 placeHead(host, nav, chrome);
                 entry = networks.hosts[tabname] = {host, nav, chrome, strip, controls: null, pages: [],
-                                                   page: null, observer: null};
+                                                   page: null, observer: null, view, titlesButton: titles,
+                                                   slider, countLabel, cards: null, cardsObserver: null,
+                                                   range: null, count: 0};
                 if (typeof ResizeObserver === "function") {
                     // The page is drawn under the head, wherever the head's
                     // height -- the strip wrapping, the controls' row -- puts
@@ -1556,12 +1861,13 @@
             setClass(host, NETWORKS_OPEN_CLASS, networks.open);
             setAttr(host, NETWORKS_LAYOUT_ATTRIBUTE, config.networksMode);
             setVariable(host, "--mc-theme-networks-width", networks.width + "px");
-            setVariable(host, "--mc-theme-networks-card", config.networksCard + "px");
             setClass(nav, NETWORKS_NAV_CLASS, true);
             if (entry.controls !== gathered) {
-                move(gathered, entry.chrome, null, "networks");
+                // Before the cards' own row, which stays the head's last.
+                move(gathered, entry.chrome, entry.view, "networks");
                 entry.controls = gathered;
             }
+            syncTitles(entry);
             const buttons = tabButtons(nav);
             pages.forEach((page) => {
                 setClass(page, NETWORKS_PAGE_CLASS, true);
@@ -1607,6 +1913,7 @@
         if (networks) {
             eachHost((entry) => {
                 if (entry.observer) entry.observer.disconnect();
+                if (entry.cardsObserver) entry.cardsObserver.disconnect();
                 setClass(entry.nav, NETWORKS_NAV_CLASS, false);
                 entry.pages.forEach((page) => {
                     setClass(page, NETWORKS_SHOWN_CLASS, false);
@@ -1614,8 +1921,9 @@
                 });
                 setClass(entry.host, NETWORKS_HOST_CLASS, false);
                 setClass(entry.host, NETWORKS_OPEN_CLASS, false);
+                setClass(entry.host, NETWORKS_UNTITLED_CLASS, false);
                 if (entry.host.hasAttribute(NETWORKS_LAYOUT_ATTRIBUTE)) entry.host.removeAttribute(NETWORKS_LAYOUT_ATTRIBUTE);
-                ["--mc-theme-networks-width", "--mc-theme-networks-card", "--mc-theme-networks-chrome"]
+                ["--mc-theme-networks-width", NETWORKS_COLUMNS, "--mc-theme-networks-chrome"]
                     .forEach((name) => entry.host.style.removeProperty(name));
                 // Generation is the selected tab, where Forge shows no page's controls.
                 if (entry.controls) {
@@ -1974,6 +2282,13 @@
             if (state.header.actions.contains(event.target)) return;
             closeMenu();
         });
+        // The quick settings drawer's tap outside, in the capture phase.
+        document.addEventListener("pointerdown", function (event) {
+            attempt("note a press", function () { notePress(event); });
+        }, true);
+        document.addEventListener("click", function (event) {
+            attempt("put the quick settings away", function () { tapOutsideQuick(event); });
+        }, true);
         document.addEventListener("keydown", function (event) {
             if (event.key !== "Escape") return;
             if (state.header && !state.header.menu.hidden) { closeMenu(); return; }
@@ -2019,7 +2334,8 @@
         OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
-        NETWORKS_LAYOUTS,
+        NETWORKS_LAYOUTS, perRowRange, perRowNearest, explainCards, setPerRow, setTitles,
+        NETWORKS_COLUMNS, NETWORKS_UNTITLED_CLASS, QUICK_TAP_PX,
         scrollPlan, scrollBoundary, explainScroll, explainBrake, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS,
         RESULTS_HOLD, SCROLL_HOLD, SCROLL_ROW, BRAKE_CLIP_ATTRIBUTE, BRAKE_LOCK_ATTRIBUTE, BRAKE_QUIET_FRAMES,
         icons: Object.keys(ICONS),

@@ -6864,7 +6864,17 @@ one second.
   checkpoint row where Forge draws it; *collapsed* moves it into the drawer,
   opened from the header; *open* opens it at every load. The drawer remembers
   whether you left it open, per browser, Escape closes it, and its width is a
-  setting.
+  setting. **A tap outside it closes it** too ("i want it to close when i tap
+  outside of it"), and it is remembered closed, as with Escape: a click a
+  mouse or a finger makes outside the drawer, with the pointer about where it
+  went down. A scroll or a pinch makes no such click and leaves it open; so
+  does a press that began in the drawer and was let go past its edge (a
+  slider dragged out of it), a drag across the page, a key that clicks a
+  button, and the page's own scripted clicks. A dropdown's list in the drawer
+  is the drawer's, wherever on the screen it opens. The header's button still
+  toggles it. The tap is heard on its way down, before anything can stop it
+  (the Gallery Quadrant stops a tap on the gallery), and nothing is taken
+  from it: what it landed on still gets it.
 - **The extra-network pages beside the generation UI**: Textual Inversion,
   Checkpoints, LoRA and the rest, which Forge draws as tabs beside Generation
   so that a page shows in its place, show beside it instead -- one page at a
@@ -6878,7 +6888,7 @@ one second.
   that width is remembered per browser until the width setting changes,
   which then wins. *off* leaves the pages as Forge's tabs; *collapsed* and
   *open* say how the drawer starts, and it remembers whether you left it
-  open; Escape and its close button close it; the cards' size is a setting.
+  open; Escape and its close button close it.
   **The pages are Forge's own, in place**: nothing is moved but the controls
   strip Forge builds, and that only within Forge's own tabs element, which
   the head joins as one more child -- because Forge's live search filters the
@@ -6909,6 +6919,28 @@ one second.
   the directories as small buttons, a card's name at 11 px over its picture,
   where Forge's page, laid out for the window's width, has them at a size
   that fills a drawer with buttons and names.
+- **Cards per row, and their names on or off**, from a row of the drawer's
+  head over the cards ("the same thing for extra networks" as the Clipboard's
+  pictures per row, "so that the grid can better evenly distribute"; "the
+  ability to show hide titles"). Forge lays the cards out at one size, which
+  left a strip of empty grid at the end of nearly every row; in the drawer
+  they are a grid of as many equal columns as the **slider** says, each card
+  as wide as its column and half as tall again, so every row is filled to
+  the pixel at every count. The slider offers the counts whose cards come out
+  between 60 and 320 px at the cards' width, with the count beside it, and
+  they move with that width: the drawer's edge, the window, Forge's tree view
+  beside the cards. A browser starts at the count whose cards come nearest
+  the **card size** setting and follows the width while it is there; a count
+  you choose is kept per browser, through a resize within what the width
+  allows (narrower than that, it is held to what fits and comes back when
+  there is room), until the card size setting changes, which then wins -- as
+  with the drawer's width. The drawer's page keeps its scroll bar's room
+  whether one is drawn or not, so the row does not change width as cards
+  come and go under a search. The **names button** beside it shows or hides
+  the band Forge draws over the bottom of each card's picture, the name and
+  the description in it, leaving the picture alone; Forge's search still
+  finds a card by its name. Both are the drawer's: every page in it, both
+  generation tabs' drawers, remembered per browser.
 - **Extra networks newest created first.** At the first start with this
   build, Forge's own *Default sorting method* and *Default sorting order* for
   Extra Networks cards (Settings, Extra Networks) are set to *Date Created*

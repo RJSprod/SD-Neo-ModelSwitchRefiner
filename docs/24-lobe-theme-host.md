@@ -345,6 +345,74 @@ nothing on a phone: Chromium takes the minimum scale from the document's
 layout overflow, which the root's clip does not shrink; a clip on a box
 inside the page does.
 
+**Cards per row, the cards' names, and a tap outside the quick settings
+(2026-10-19).** Three asks in one: "I want the ability to show hide titles in
+the extra networks panels"; "we recently created a new scrubber for
+clipboard gallery that scrub the number of thumbs in a row, so that the grid
+can better evenly distribute ... Let's have the same thing for extra
+networks" (Mini Paint NEO's *Pictures per row*, its #119); and "The quick
+settings panel right now comes out from the left, and i like it, but i want
+it to close when i tap outside of it." Built (`model_chain_theme.js`, "the
+cards: their names, and how many to a row", and the quick-settings drawer's
+"tap outside"):
+
+- **Cards per row.** The shown page's cards box is a grid of
+  `--mc-theme-networks-cols` equal columns (`repeat(n, minmax(0, 1fr))`, an
+  8 px gap, 4 px of room for the cards' shadows, which Forge's `overflow:
+  clip` on that box would cut), each card `width: auto`, stretched to its
+  column, `height: auto` with `aspect-ratio: 2 / 3` -- Forge's inline size
+  and its 16 by 24 rem give way, `!important` as before -- so every row is
+  filled to the pixel. The script measures the cards box's content width
+  (`perRowRange`, pure: the counts whose cards come out within the card size
+  setting's 60–320 px bounds) and writes the count on the host; a
+  ResizeObserver on the shown page's cards box measures again when its width
+  changes -- the drawer's edge, the window, Forge's tree view, which is no
+  update of the page -- and the count's own writes change only the box's
+  height, so the box watched is never the box sized. A browser starts at the
+  count nearest the card size setting (`perRowNearest`) and follows the width
+  while it is there; a chosen count is kept per browser with the setting it
+  was chosen against (`mc-theme-networks-per-row`, `{count, setting}`), held
+  to what each width allows and back when there is room, and a changed
+  setting wins, as with the drawer's width. A drawer that is not laid out
+  (the other generation tab's) is given the chosen count held to its last
+  width, so it is never shown a frame at the old one. The page keeps its
+  scroll bar's room (`scrollbar-gutter: stable`): the row is shared out from
+  the cards' width, and a bar that came with sixteen cards and went with one
+  changed that width by the bar's as a search was typed. The slider is
+  a plain range input in the accent, `touch-action: pan-y`, with the count
+  beside it, in a row of the head's own after Forge's controls strip -- never
+  inside that strip, whose children Forge shows and hides by page -- and is
+  disabled when only one count fits. Not built: the Clipboard's other
+  scrubber, the scroll bar of its own, which the drawer's page does not need.
+- **The names** (the "titles": Forge's `.card .actions` band, the name and
+  the description in it) are hidden by a class on the host,
+  `mc-theme-networks-untitled`, from a toggle beside the slider
+  (`aria-pressed`, Lucide's `captions` and `captions-off`), per browser
+  (`mc-theme-networks-titles`). Forge's search reads the search terms inside
+  the band whether it is drawn or not.
+- **A tap outside the quick settings** puts the drawer away, remembered
+  closed as Escape does. A tap is the click that ends a press made outside
+  the drawer and its header button, within 16 px of where it went down --
+  a scroll or a pinch makes no click (the Voice Box's lane listens for
+  `click` for the same reason), a press that began inside and was let go
+  just past the edge is not a press outside, and a drag is not a tap. Heard
+  in the capture phase, because the Gallery Quadrant stops a tap on the
+  gallery in the bubble phase. A synthetic click neither taps nor spends the
+  press -- the first draft spent it, which left the tap itself unheard when a
+  script clicked something as the finger lifted; found while choosing this
+  round's mutations. The pointer's type is
+  never asked: LibreWolf under its fingerprinting defence reports no touch
+  points. Inside is decided by the event's path, so a Gradio dropdown's list
+  (fixed on the screen, inside the dropdown in the DOM) is the drawer's
+  wherever it reaches. Nothing is taken from the tap.
+
+Tests: `TestTheCardsInTheDrawer` and two new quick-settings tests in
+`tests/test_theme_layout.py` (Chromium; the test page now carries Forge's own
+rules for the cards box, its pane content and `.hidden`, and a LoRA page of
+sixteen cards), `TestTheCardsPerRow` in node; the two tests that held the old
+fixed card size translated to the row shared out. Twenty-nine mutations each
+fail a test. Not run on the user's machine or in a Gecko build.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own
@@ -369,7 +437,9 @@ The pieces, and where they are:
   above itself, never on a control, marks the bar to bring the row back,
   and the mark goes with the bar); the **quick-settings drawer** (fixed
   under the header, opened from the header or by the setting, closed by
-  Escape, remembered per browser); the **extra-network drawer** on the right
+  Escape or a tap outside it, remembered per browser); the **extra-network
+  drawer** on the right, its cards as many to a row as its slider says and
+  their names on or off
   (Forge's `.extra-page` tabs and the controls strip Forge's script gathers
   moved into an aside with a strip of its own, one page shown at a time,
   Generation staying the selected Gradio tab; a page is taken only once that
@@ -389,7 +459,8 @@ The pieces, and where they are:
   the host has said it is loaded.
 - `style.css`, *Model Chain -- the theme* — keyed on `data-mc-theme="on"`:
   the header, the menu, the two drawers (the extra-network one with its
-  strip, its page at the card size set, its pane as tall as its cards), the
+  strip, its page's cards a grid of the count chosen, its pane as tall as its
+  cards), the
   info panel's blocks, chips and copy buttons, the split view's rows, the
   sticky results column, a running progress bar in the results panel's flow
   at 14 px with the Generate box not drawn beside it (`:has()`, keyed on a
