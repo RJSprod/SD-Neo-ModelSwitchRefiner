@@ -518,8 +518,7 @@ def settings(shared) -> dict:
             "and the page spends the movement on the settings column first, down to "
             "its end, with Generate, the gallery and its buttons locked where they "
             "rest; then on the results column, down to the generation details, with "
-            "the settings held at their end. Never both at once. A Details button at "
-            "the end of the gallery's button row jumps to the results' end and back. "
+            "the settings held at their end. Never both at once. "
             "With the settings column in the Forge Assistant's panel the page scrolls "
             "the results alone and the column scrolls in the panel"
         ),
@@ -531,8 +530,8 @@ def settings(shared) -> dict:
         ).info(
             "<b>off</b> leaves the checkpoint row above the tabs as Forge draws it · "
             "<b>collapsed</b> moves it into a drawer on the left, opened from the "
-            "header · <b>open</b> the same drawer, open at every load. The drawer "
-            "remembers whether you left it open, per browser"
+            "header · <b>open</b> the same drawer, open at every load. A tap outside "
+            "the drawer closes it, and it remembers whether you left it open, per browser"
         ),
         OPT_QUICK_WIDTH: OptionInfo(
             QUICK_WIDTH_DEFAULT,
@@ -565,7 +564,7 @@ def settings(shared) -> dict:
             "tabs beside Generation · <b>collapsed</b> moves those pages into a drawer on "
             "the right, opened from the header, with Generation always in view · "
             "<b>open</b> the same drawer, open at every load. The drawer remembers "
-            "whether you left it open, per browser"
+            "whether you left it open, and its cards per row and names, per browser"
         ),
         OPT_NETWORKS_MODE: OptionInfo(
             NETWORKS_LAYOUT_DEFAULT,
@@ -589,7 +588,11 @@ def settings(shared) -> dict:
             "Extra networks card size in the drawer (px)",
             gr.Slider,
             {"minimum": NETWORKS_CARD_MIN, "maximum": NETWORKS_CARD_MAX, "step": 2},
-        ).info("the width of a card in the drawer; a card is half as tall again"),
+        ).info(
+            "where a row of cards starts: as many to a row as come nearest this width, "
+            "the row shared out evenly between them, a card half as tall again. The "
+            "drawer's slider picks another count, kept per browser until this changes"
+        ),
         OPT_IMAGE_INFO: OptionInfo(
             True,
             "Generation info as a panel",
