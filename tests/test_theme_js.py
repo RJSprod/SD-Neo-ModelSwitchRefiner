@@ -3,10 +3,11 @@ section as text.
 
 Node has no layout, so the header's fit, the drawer and the moves are checked
 in Chromium (``tests/test_theme_layout.py``). What node holds is what is pure:
-the tab-name spacing, the plan of which tabs fit, the emoji-to-icon match, the
-settings' normalisation, the theme toggle's address, the reading of Forge's
-generation parameters, the first paint from the last configuration, and the
-hooks the script asks the host for.
+the tab-name spacing, the tabs' icons and the letters of a tab with none, the
+plan of which tabs fit, the emoji-to-icon match, the settings' normalisation,
+the theme toggle's address, the reading of Forge's generation parameters, the
+first paint from the last configuration, and the hooks the script asks the
+host for.
 """
 
 from __future__ import annotations
@@ -83,7 +84,9 @@ def run(scenario: str, store=None, opts=None, dark=True) -> dict:
                .replace("__DARK__", "true" if dark else "false")
                .replace("SOURCE", SCRIPT.read_text(encoding="utf-8"))
                .replace("__SCENARIO__", scenario))
-    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+    # On standard input, not as `-e`: Linux takes no single argument over
+    # 128 KiB (MAX_ARG_STRLEN), and the script with the tab icons is more.
+    result = subprocess.run(["node", "--input-type=module"], input=harness,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -105,6 +108,63 @@ class TestTheTabNames:
         assert found["names"] == ["Txt 2 Img", "Img 2 Img", "LLM Studio", "Extended LoRA Details",
                                   "PNG Info", "WanGP", "Voice Box", "Clipboard", "Mini Paint",
                                   "Checkpoint Merger", "", "Spaced"]
+
+
+class TestTheTabsAsIcons:
+    """The tab names set to icons (model_chain_theme.js, "the tabs as icons"):
+    a tab is known by its panel's id and drawn as its icon, or as two letters
+    when the theme has none for it. Chromium holds the bar that follows
+    (tests/test_theme_layout.py)."""
+
+    def test_a_tab_is_known_by_its_panels_id(self):
+        found = run("""
+            const button = (attrs) => ({getAttribute: (name) => (name in attrs ? attrs[name] : null),
+                                        id: attrs.id || ""});
+            out.controls = T.tabId(button({"aria-controls": "tab_llm_studio", id: "tab_llm_studio-button"}));
+            out.byId = T.tabId(button({id: "tab_wangp-button"}));
+            out.bare = T.tabId(button({"aria-controls": "elsewhere"}));
+        """)
+
+        assert found == {"controls": "llm_studio", "byId": "wangp", "bare": "elsewhere"}
+
+    def test_a_tab_with_no_icon_is_its_first_two_letters(self):
+        found = run("""out.letters = ["ADetailer", "Deforum", "Extended LoRA Details", "sd_dynamic-prompts",
+                                        "   ", "X"].map(T.monogram);""")
+
+        assert found["letters"] == ["AD", "De", "EL", "SD", "", "X"]
+
+    def test_every_one_of_the_users_tabs_has_an_icon_of_its_own(self):
+        """Forge Neo's own tabs (modules/ui.py) and the extensions' by their
+        `on_ui_tabs` ids: this repository's read from its modules, Mini Paint
+        NEO's (`minipaint`, `minipaint_clipboard`, `wangp`) and Extended LoRA
+        Details' as those repositories register them."""
+        found = run("out.icons = T.TAB_ICONS; out.glyphs = T.glyphs;")
+        own = {re.search(r'^TAB_ID = "([a-z_]+)"', (ROOT / name).read_text(encoding="utf-8"), re.M).group(1)
+               for name in ("mc_llm_studio.py", "mc_voice_box_ui.py")}
+        forge = {"txt2img", "img2img", "extras", "pnginfo", "modelmerger", "settings", "extensions"}
+        others = {"minipaint", "minipaint_clipboard", "wangp", "extended_lora_details"}
+
+        assert own == {"llm_studio", "mc_voice_box"}
+        assert set(found["icons"]) == forge | own | others
+        assert set(found["icons"].values()) <= set(found["glyphs"])
+        assert len(set(found["icons"].values())) == len(found["icons"]), "no two tabs share an icon"
+
+    def test_no_tab_shares_its_icon_with_the_headers_own_buttons(self):
+        """The header's Theme settings button gave the gear up to the Settings
+        tab."""
+        script = SCRIPT.read_text(encoding="utf-8")
+        actions = dict(re.findall(r'action\("(mc-theme-[a-z-]+)",\s*"([a-z0-9-]+)"', script))
+        found = run("out.icons = T.TAB_ICONS;")
+
+        assert actions["mc-theme-settings"] == "swatch-book"
+        assert found["icons"]["settings"] == "settings"
+        assert not (set(actions.values()) | {"sun", "moon"}) & set(found["icons"].values())
+
+    def test_icons_is_a_tab_name_choice_as_python_registers_it(self):
+        found = run(f"out.modes = {json.dumps(list(mc_theme.TAB_LABEL_MODES))}.map((m) => T.normalise({{labels: m}}).labels);")
+
+        assert found["modes"] == list(mc_theme.TAB_LABEL_MODES)
+        assert "icons" in found["modes"]
 
 
 class TestThePlanOfWhatFits:

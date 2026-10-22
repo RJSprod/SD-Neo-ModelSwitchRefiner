@@ -13,6 +13,12 @@ and measures what the theme does to it:
     the overflow  tabs that do not fit are hidden and listed under the
                   ellipsis, the selected one never; a menu entry presses the
                   real button; at a wide window nothing is hidden;
+    the icons     with the tab names set to icons, every tab is its icon on a
+    on the bar    bar that scrolls sideways, its name kept in the button; the
+                  header's buttons stay at the bar's edge; a tab selected
+                  from elsewhere is brought into view once; a finger past
+                  the first tab is not the browser's Back; a wheel scrolls
+                  the bar; the strips beside it are painted;
     the split     the top row heads the settings column and Generate's box
                   heads the gallery's container, once, however often applied;
     the drawer    the quick settings live in a drawer under the bar, closed
@@ -58,10 +64,14 @@ SCRIPT = ROOT / "javascript" / "model_chain_theme.js"
 STYLE = ROOT / "style.css"
 ORIGIN = "http://forge-theme.test"
 
-TABS = [("tab_txt2img", "txt2img"), ("tab_img2img", "img2img"), ("tab_clipboard", "Clipboard"),
-        ("tab_wangp", "WanGP"), ("tab_llm_studio", "LLM Studio"), ("tab_voice_box", "Voice Box"),
+# The user's tabs by the ids Forge gives them (`tab_<id>`, modules/ui.py, and
+# each extension's `on_ui_tabs` id), which the icons are keyed on. Train,
+# which Forge Neo no longer has, stands for a tab of an extension the theme
+# has no icon for.
+TABS = [("tab_txt2img", "txt2img"), ("tab_img2img", "img2img"), ("tab_minipaint_clipboard", "Clipboard"),
+        ("tab_wangp", "WanGP"), ("tab_llm_studio", "LLM Studio"), ("tab_mc_voice_box", "Voice Box"),
         ("tab_minipaint", "Mini Paint"), ("tab_pnginfo", "PNG Info"),
-        ("tab_lora_details", "Extended LoRA Details"), ("tab_extras", "Extras"),
+        ("tab_extended_lora_details", "Extended LoRA Details"), ("tab_extras", "Extras"),
         ("tab_modelmerger", "Checkpoint Merger"), ("tab_train", "Train"),
         ("tab_settings", "Settings"), ("tab_extensions", "Extensions")]
 
@@ -480,11 +490,15 @@ ON = {"model_chain_theme": True}
 
 def open_page(browser, opts=None, *, width=1600, height=900, lobe=False, loaded=True, context=None,
               controls_built=True, assistant="", popup=False, progress=False, grid_row=False,
-              settings_blocks=40, infotext=INFOTEXT_HTML, more_cards=0):
+              settings_blocks=40, infotext=INFOTEXT_HTML, more_cards=0, touch=False, back=False):
     """A page of its own context, or one in a context given -- two pages of
-    one context share a localStorage, which is what the first paint reads."""
-    owner = context or browser.new_context(viewport={"width": width, "height": height})
+    one context share a localStorage, which is what the first paint reads.
+    `touch` makes the context take touches; `back` leaves a page to go Back
+    to, which a swipe the browser takes for its Back would reach."""
+    owner = context or browser.new_context(viewport={"width": width, "height": height}, has_touch=touch)
     page = owner.new_page()
+    if back:
+        page.goto("about:blank")
     html = page_html(opts=dict(ON, **(opts or {})), lobe=lobe, controls_built=controls_built,
                      assistant=assistant, popup=popup, progress=progress, grid_row=grid_row,
                      settings_blocks=settings_blocks, infotext=infotext, more_cards=more_cards)
@@ -937,6 +951,274 @@ class TestTheBar:
         changed(page)
         assert page.evaluate(MEASURE)["txt2imgLabel"] == "txt2img"
         page.close()
+
+
+ICONS = {"model_chain_theme_tab_labels": "icons"}
+
+# The glyph each of TABS is drawn as, in order: Train has none, and is its
+# first two letters.
+TAB_GLYPHS = ["type", "image", "clipboard", "clapperboard", "bot", "audio-waveform", "palette",
+              "scan-search", "book-open-text", "image-upscale", "merge", None, "settings", "puzzle"]
+
+ICON_BAR = """() => {
+    const q = (s) => document.querySelector(s);
+    const nav = q("#tabs > .tab-nav");
+    const rect = (el) => { if (!el) return null; const r = el.getBoundingClientRect();
+                           return {left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+                                   width: r.width, height: r.height}; };
+    const buttons = [...nav.querySelectorAll(":scope > button[role='tab']")];
+    const selected = buttons.find((b) => b.classList.contains("selected"));
+    return {
+        tabs: document.documentElement.getAttribute("data-mc-theme-tabs"),
+        rootOverscroll: getComputedStyle(document.documentElement).overscrollBehaviorX,
+        barOverscroll: getComputedStyle(nav).overscrollBehaviorX,
+        overflowX: getComputedStyle(nav).overflowX,
+        directTabs: buttons.length,
+        drawnTabs: buttons.filter((b) => getComputedStyle(b).display !== "none").length,
+        overflowed: buttons.filter((b) => b.classList.contains("mc-theme-overflow")).map((b) => b.textContent),
+        moreHidden: q(".mc-theme-more") ? q(".mc-theme-more").hidden : null,
+        glyphs: buttons.map((b) => { const g = b.querySelector(":scope > svg.mc-theme-tab-glyph");
+                                     return g ? g.getAttribute("data-mc-theme-glyph") : null; }),
+        svgs: buttons.map((b) => b.querySelectorAll("svg").length),
+        texts: buttons.map((b) => b.textContent),
+        labels: buttons.map((b) => b.getAttribute("aria-label")),
+        titles: buttons.map((b) => b.getAttribute("title")),
+        marked: buttons.map((b) => b.classList.contains("mc-theme-tab-icon")),
+        monograms: buttons.map((b) => b.getAttribute("data-mc-theme-monogram")),
+        trainDrawn: getComputedStyle(q("#tab_train-button"), "::before").content,
+        fontSizes: [...new Set(buttons.map((b) => getComputedStyle(b).fontSize))],
+        sizes: buttons.map((b) => [Math.round(b.getBoundingClientRect().width), Math.round(b.getBoundingClientRect().height)]),
+        glyphSize: (() => { const g = q("#tab_txt2img-button > svg"); return g ? [g.getBoundingClientRect().width, g.getBoundingClientRect().height] : null; })(),
+        settingsSwatch: !!q(".mc-theme-settings") && q(".mc-theme-settings").innerHTML.includes("M16.7 13H19"),
+        bar: rect(nav), scrollLeft: nav.scrollLeft, scrollWidth: nav.scrollWidth, clientWidth: nav.clientWidth,
+        actions: rect(q(".mc-theme-actions")), title: rect(q(".mc-theme-title")),
+        tabRects: buttons.map((b) => rect(b)),
+        selected: selected ? {id: selected.id, rect: rect(selected)} : null,
+        pageWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth,
+        scrollY: window.scrollY,
+    };
+}"""
+
+
+def icon_page(browser, opts=None, **kwargs):
+    return open_page(browser, dict(ICONS, **(opts or {})), **kwargs)
+
+
+def to_bar_end(page):
+    page.evaluate("() => { const nav = document.querySelector('#tabs > .tab-nav'); nav.scrollLeft = nav.scrollWidth; }")
+    settle(page)
+
+
+class TestTheTabsAsIcons:
+    """The tab names set to icons: every tab on the bar as its icon, the bar
+    scrolling sideways where they do not fit, in place of the ⋯ menu, which
+    on a phone held all but three or four of the user's tabs."""
+
+    def test_every_tab_is_its_icon_and_keeps_its_name_for_forge_and_for_a_reader(self, browser):
+        page = icon_page(browser)
+        found = page.evaluate(ICON_BAR)
+        page.close()
+
+        assert found["tabs"] == "icons"
+        assert found["directTabs"] == len(TABS)
+        assert found["glyphs"] == TAB_GLYPHS
+        assert found["svgs"] == [1 if glyph else 0 for glyph in TAB_GLYPHS]
+        names = [label for _, label in TABS]
+        # Forge's own scripts and Mini Paint's read a tab by its text.
+        assert found["texts"] == names
+        assert found["labels"] == names and found["titles"] == names
+        assert all(found["marked"])
+        assert found["monograms"] == [None if glyph else "Tr" for glyph in TAB_GLYPHS]
+        assert found["trainDrawn"] == '"Tr"'
+        assert found["fontSizes"] == ["0px"], "the name is in the button at no size"
+        assert all(size == [40, 36] for size in found["sizes"]), found["sizes"]
+        assert found["glyphSize"] == [20, 20]
+        assert found["overflowed"] == [] and found["moreHidden"] is True
+        assert found["settingsSwatch"], "the Settings tab has the only gear"
+
+    def test_a_phone_keeps_every_tab_on_a_bar_that_scrolls_sideways(self, browser):
+        page = icon_page(browser, width=390, height=844)
+        rest = page.evaluate(ICON_BAR)
+        to_bar_end(page)
+        end = page.evaluate(ICON_BAR)
+        page.close()
+
+        assert rest["overflowed"] == [] and rest["moreHidden"] is True
+        assert rest["drawnTabs"] == len(TABS)
+        assert rest["overflowX"] == "auto"
+        assert rest["scrollWidth"] > rest["clientWidth"], "fourteen icons do not fit 374 px"
+        assert rest["pageWidth"] == rest["innerWidth"], "the bar scrolls, never the page"
+        assert rest["bar"]["height"] == 56
+        # The header's buttons at the bar's right edge, at rest and scrolled
+        # to the end, where the last tab sits clear of them.
+        for found in (rest, end):
+            assert abs(found["actions"]["right"] - found["bar"]["right"]) < 1, found["actions"]
+        assert end["scrollLeft"] > 0
+        last = end["tabRects"][-1]
+        assert last["right"] <= end["actions"]["left"] and last["left"] >= end["bar"]["left"]
+        assert end["title"]["right"] <= end["bar"]["left"], "the title scrolls away with the tabs"
+
+    def test_a_tab_selected_from_elsewhere_is_brought_into_view_once(self, browser):
+        """Send to img2img, Mini Paint's sends and the settings button select a
+        tab without a finger on it. The bar brings it into view -- once: a
+        finger that scrolls the bar to look for another is not undone at the
+        next update of the page."""
+        page = icon_page(browser, width=390, height=844)
+        page.evaluate("document.querySelector('#tab_extensions-button').click()")
+        settle(page, 4)
+        shown = page.evaluate(ICON_BAR)
+        page.evaluate("document.querySelector('#tabs > .tab-nav').scrollLeft = 0")
+        page.evaluate("hooks.after.forEach((fn) => fn())")
+        settle(page, 4)
+        left_alone = page.evaluate(ICON_BAR)
+        page.evaluate("document.querySelector('#tab_txt2img-button').click()")
+        settle(page, 4)
+        back = page.evaluate(ICON_BAR)
+        page.close()
+
+        assert shown["selected"]["id"] == "tab_extensions-button"
+        assert shown["scrollLeft"] > 0
+        assert shown["selected"]["rect"]["right"] <= shown["actions"]["left"]
+        assert shown["selected"]["rect"]["left"] >= shown["bar"]["left"]
+        assert left_alone["scrollLeft"] == 0
+        assert back["scrollLeft"] == 0 and back["selected"]["rect"]["left"] >= back["bar"]["left"]
+
+    def test_a_finger_past_the_first_tab_is_not_the_browsers_back(self, browser):
+        """Chromium takes a sideways swipe no scroller can take for its Back,
+        deciding from the page root's overscroll-behavior while the scroller
+        under the finger leaves its own at auto (CLAUDE.md's trap): the root
+        holds none while the tabs are icons, the bar keeps auto, and a swipe
+        the other way still scrolls the bar."""
+        page = icon_page(browser, width=390, height=844, touch=True, back=True)
+        client = page.context.new_cdp_session(page)
+        navigations = []
+        page.on("framenavigated", lambda frame: navigations.append(frame.url))
+        held = page.evaluate(ICON_BAR)
+        y = held["bar"]["top"] + held["bar"]["height"] / 2
+        start, end = 20, held["actions"]["left"] - 8
+
+        def swipe(begin, finish):
+            client.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": begin, "y": y}]})
+            for index in range(1, 13):
+                client.send("Input.dispatchTouchEvent",
+                            {"type": "touchMove", "touchPoints": [{"x": begin + (finish - begin) * index / 12, "y": y}]})
+                page.wait_for_timeout(16)
+            client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            page.wait_for_timeout(1000)
+
+        swipe(start, end)
+        at_start = page.evaluate(ICON_BAR)
+        swipe(end, start)
+        moved = page.evaluate(ICON_BAR)
+        page.context.close()
+
+        assert held["rootOverscroll"] == "none" and held["barOverscroll"] == "auto"
+        assert navigations == [], navigations
+        assert at_start["scrollLeft"] == 0
+        assert moved["scrollLeft"] > 0
+
+    def test_a_wheel_over_the_bar_scrolls_it_sideways_then_the_page(self, browser):
+        page = icon_page(browser, width=640, height=800)
+        found = page.evaluate(ICON_BAR)
+        page.mouse.move(found["bar"]["left"] + 100, found["bar"]["top"] + found["bar"]["height"] / 2)
+        page.mouse.wheel(0, 100)
+        settle(page, 4)
+        first = page.evaluate(ICON_BAR)
+        page.mouse.wheel(0, 5000)
+        settle(page, 4)
+        end = page.evaluate(ICON_BAR)
+        page.mouse.wheel(0, 300)
+        page.wait_for_timeout(300)
+        past = page.evaluate(ICON_BAR)
+        page.close()
+
+        assert found["scrollWidth"] > found["clientWidth"]
+        assert first["scrollLeft"] == 100 and first["scrollY"] == 0
+        assert end["scrollLeft"] == end["scrollWidth"] - end["clientWidth"] and end["scrollY"] == 0
+        assert past["scrollY"] > 0, "at the bar's end the wheel is the page's again"
+
+    def test_the_strips_beside_the_bar_are_painted_as_the_bars_own(self, browser):
+        """The bar's ground reaches into the page's side padding so the page
+        scrolls under a bar that spans the window; a scroller clips the
+        pseudo-element that drew it, so the bar paints the strips itself."""
+        image = pytest.importorskip("PIL.Image")
+        import io
+
+        page = icon_page(browser, width=390, height=844)
+        page.evaluate("""() => document.querySelector('#tab_txt2img').insertAdjacentHTML('afterbegin',
+            '<div id="under" style="position: relative; margin: 0 -60px; height: 3000px; background: rgb(255, 0, 0)"></div>')""")
+        page.evaluate("window.scrollTo(0, 600)")
+        settle(page, 4)
+        bar = page.evaluate(ICON_BAR)["bar"]
+        shot = image.open(io.BytesIO(page.screenshot(clip={"x": 0, "y": 0, "width": 390, "height": 80}))).convert("RGB")
+        page.close()
+
+        top, bottom = round(bar["top"]), round(bar["bottom"])
+        assert top == 0, "the bar is held at the top"
+        for x in (2, 386):
+            assert shot.getpixel((x, (top + bottom) // 2)) == (0, 0, 0), x
+            assert shot.getpixel((x, bottom - 1)) == (38, 38, 38), x
+            assert shot.getpixel((x, bottom + 6)) == (255, 0, 0), "the page under the bar shows below it"
+
+    def test_another_tab_name_choice_puts_every_tab_back_as_forge_drew_it(self, browser):
+        page = icon_page(browser, width=820)
+        page.evaluate("opts.model_chain_theme_tab_labels = 'as_forge'")
+        changed(page)
+        forge = page.evaluate(ICON_BAR)
+        hidden = page.evaluate(MEASURE)["hidden"]
+        page.evaluate("opts.model_chain_theme_tab_labels = 'spaced'")
+        changed(page)
+        spaced = page.evaluate(ICON_BAR)
+        page.evaluate("opts.model_chain_theme_tab_labels = 'icons'")
+        changed(page)
+        again = page.evaluate(ICON_BAR)
+        page.evaluate("opts.model_chain_theme = false")
+        changed(page)
+        off = page.evaluate(ICON_BAR)
+        page.close()
+
+        names = [label for _, label in TABS]
+        assert forge["tabs"] is None and forge["rootOverscroll"] == "auto"
+        assert forge["svgs"] == [0] * len(TABS) and not any(forge["marked"])
+        assert forge["labels"] == [None] * len(TABS) and forge["titles"] == [None] * len(TABS)
+        assert forge["monograms"] == [None] * len(TABS)
+        assert forge["texts"] == names and forge["overflowX"] != "auto"
+        assert hidden, "the ⋯ menu is back for the tabs that do not fit"
+        assert spaced["texts"][0] == "Txt 2 Img" and spaced["svgs"][0] == 0
+        # The spaced names are put back before the icons are drawn, or
+        # putting a name back would take the icon with it.
+        assert again["texts"] == names and again["glyphs"] == TAB_GLYPHS
+        assert again["labels"] == names
+        assert off["tabs"] is None and off["svgs"] == [0] * len(TABS) and not any(off["marked"])
+
+    def test_applied_to_a_settled_page_it_changes_no_child_list(self, browser):
+        """Forge answers every change to a child list with the next round of
+        after-update callbacks, this theme's among them: the icons are drawn
+        once, and applied an odd number of times nothing is drawn twice."""
+        page = icon_page(browser, width=390, height=844)
+        page.evaluate(HEARD)
+        for _ in range(3):
+            page.evaluate("hooks.after.forEach((fn) => fn())")
+            settle(page, 6)
+        heard = page.evaluate("window.heard")
+        found = page.evaluate(ICON_BAR)
+        page.close()
+
+        assert heard == []
+        assert found["svgs"] == [1 if glyph else 0 for glyph in TAB_GLYPHS]
+
+    def test_a_tab_renamed_keeps_its_icon_and_its_label_follows(self, browser):
+        page = icon_page(browser)
+        page.evaluate("document.querySelector('#tab_extras-button').textContent = 'Extras (3)'")
+        page.evaluate("hooks.after.forEach((fn) => fn())")
+        settle(page, 4)
+        found = page.evaluate(ICON_BAR)
+        page.close()
+
+        extras = [label for _, label in TABS].index("Extras")
+        assert found["glyphs"][extras] == "image-upscale" and found["svgs"][extras] == 1
+        assert found["texts"][extras] == "Extras (3)"
+        assert found["labels"][extras] == "Extras (3)" and found["titles"][extras] == "Extras (3)"
 
 
 class TestTheSplitView:
@@ -1500,7 +1782,7 @@ class TestTheExtraNetworksDrawer:
         assert found["toggle"] == {"hidden": False, "expanded": "true", "disabled": False}
         assert page.evaluate("getComputedStyle(document.getElementById('img2img_lora')).display") == "block"
 
-        page.click("#tab_clipboard-button")
+        page.click("#tab_minipaint_clipboard-button")
         settle(page)
         found = page.evaluate(NETWORKS)
         assert found["chrome"]["drawn"] is False and found["other"]["drawn"] is False

@@ -95,6 +95,17 @@ class TestTheSettings:
             assert registered[name].default == default, name
             assert registered[name].section == mc_theme.SECTION, name
 
+    def test_the_tab_names_can_be_icons_and_the_setting_says_what_that_does(self, host):
+        """A third choice beside Forge's names and the spaced ones: every tab
+        as its icon on a bar that scrolls sideways (model_chain_theme.js,
+        "the tabs as icons")."""
+        import model_chain  # noqa: F401
+
+        info = host.shared.options_templates[mc_theme.OPT_TAB_LABELS]
+        assert info.component_args["choices"] == ["as_forge", "spaced", "icons"]
+        assert info.default == "as_forge"
+        assert "<b>icons</b>" in info.comment_after
+
     def test_the_theme_is_off_until_asked_for(self, host):
         """An LLM and voice extension must not bring a theme with it."""
         import model_chain  # noqa: F401

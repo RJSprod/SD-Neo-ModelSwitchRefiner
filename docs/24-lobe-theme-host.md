@@ -413,6 +413,74 @@ sixteen cards), `TestTheCardsPerRow` in node; the two tests that held the old
 fixed card size translated to the row shared out. Twenty-nine mutations each
 fail a test. Not run on the user's machine or in a Gecko build.
 
+**Icons for the tabs, on a bar that scrolls (2026-10-22).** "I want to extend
+the ModelSwitchRefiner theme, to the tab bar ... propose icons for each tab
+bar tab, so I can have a icon only button. This would allow me to surface
+all the buttons in the tab bar always, instead of today where I have to
+access an overflow menu on mobile because of the narrow display." A
+proposal page came first (an artifact, *Forge Tab Bar Icons*: an icon and
+three or four alternates per tab, the bar previewed at desktop and phone
+widths). It showed that icons alone do not put every tab in one row on a
+phone: thirteen 36 px icons and the header's four buttons need about 750 px,
+a phone's bar is 344 to 396 px, and the proposal's answer was two wrapped
+rows. The user took the icons as proposed and asked for the bar to scroll
+sideways instead of wrapping. Built (`model_chain_theme.js`, "the tabs as
+icons"; `style.css`, the same heading):
+
+- **A third tab-name choice, `icons`** (`TAB_LABEL_MODES`; the default stays
+  `as_forge`). Each tab button gets the icon for its tab, by the tab's panel
+  id less `tab_` (`tabId`, `TAB_ICONS`: Forge Neo's seven and the user's
+  extensions' six by their `on_ui_tabs` ids), ahead of its text, which stays
+  in the button at `font-size: 0` and on the button as its `aria-label` and
+  `title`, followed when the tab is renamed. Nothing is moved and no text is
+  written, so `textContent` is what Forge wrote: Forge's scripts, Mini
+  Paint's `showTab` and the theme's own menu read it. A tab with no icon is
+  its first two letters, drawn by a `::before` from
+  `data-mc-theme-monogram`, so they never join the text (`monogram`). The
+  spaced names are put back before an icon is drawn, since putting one back
+  writes the button's text and would take the icon with it.
+- **The bar scrolls sideways** (`overflow-x: auto`, no scroll bar drawn), and
+  in this mode `fit` hides nothing and the ⋯ is not shown (`fitIcons`). The
+  header's buttons are `position: sticky; right: 0` inside the bar, on the
+  page's colour with a fade on their left; the title scrolls with the tabs.
+  The selected tab is scrolled into view when the selection changes
+  (`reveal`, the least scroll that clears the header's buttons) and only
+  then, because `fit` runs at every update and a finger that scrolled the bar
+  to find a tab must not be undone. A mouse's vertical wheel over a bar that
+  overflows scrolls it sideways until its end in that direction, and from
+  there the page's (`wheelTabs`, non-passive on the bar alone).
+- **The ground**: a scroller clips the absolutely placed `::before` that
+  reaches the bar's ground into the page's side padding, so in this mode the
+  pseudo-element is not drawn and the two strips are the bar's own box
+  shadows, which its overflow does not clip: the page's colour, with the
+  bar's line showing one pixel at the bottom.
+- **The browser's Back**: the root holds `overscroll-behavior-x: none` while
+  the tabs are icons, from the stylesheet (`data-mc-theme-tabs="icons"` on the
+  root), and the bar leaves its own at auto, which is what Chromium reads
+  (CLAUDE.md, the trap of a swipe past the end of a sideways scroller). The
+  Voice Box's inline hold of the same property gives back what it found,
+  which leaves the stylesheet's rule in force.
+- **The header's Theme settings button** is a swatch book now, so the
+  Settings tab has the only gear. Lucide's licence lists `type` and
+  `clipboard` among its icons derived from Feather; the file's notice now
+  names every such icon it draws (`moon` and `x` were drawn already and not
+  named).
+
+The layout test page carries the user's tabs by their real ids now
+(`tab_minipaint_clipboard`, `tab_mc_voice_box`, `tab_extended_lora_details`;
+Train stays as a tab with no icon), and the node harness feeds the script to
+node on standard input: with the icons it is over Linux's 128 KiB limit on one
+argument. Tests: `TestTheTabsAsIcons` in `tests/test_theme_layout.py`
+(Chromium: the icons and the names kept, a phone's bar scrolling with the
+header's buttons at its edge, the selected tab revealed once, a finger
+driven through the DevTools protocol past the first tab going nowhere, the
+wheel, the strips by their pixels, the round trip through the other choices
+and off, no child list changed on a settled page, a renamed tab) and in
+`tests/test_theme_js.py` (the id, the monograms, the table against the
+extensions' ids and the header's glyphs, the choice as Python registers it),
+and the setting in `tests/test_theme.py`. Twenty mutations each fail a test.
+Not run on the user's machine or in a Gecko build.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own
@@ -452,7 +520,8 @@ The pieces, and where they are:
   blocks and chips beside the paragraph, which the stylesheet clips out of
   view; redrawn when the markup changes); **resizable prompts**; **icons**
   from the ISC-licensed Lucide set (the notice is in the file); optional
-  **tab names with spaces** ("Txt 2 Img", but "LoRA" and "WanGP" stay);
+  **tab names with spaces** ("Txt 2 Img", but "LoRA" and "WanGP" stay) or
+  **as icons** on a bar that scrolls sideways;
   **ask before leaving**; the **typeface** link. It **stands down** while a
   Lobe root is on the page (`data-mc-theme="lobe"`), and marks the root from
   the last configuration at the first paint so a themed page is themed before
