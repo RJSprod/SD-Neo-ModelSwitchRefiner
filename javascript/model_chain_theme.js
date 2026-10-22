@@ -3,14 +3,15 @@
 // The palette is a Gradio theme object, installed by mc_theme.py when the
 // page is built; this file does what a palette cannot: it puts Forge's tab
 // bar in a 64 px bar at the top with a title, a theme toggle, a settings
-// button and a menu for the tabs that do not fit; moves Generate above the
-// gallery and the prompt boxes to the top of the settings column; moves the
-// quick settings into a drawer; marks the prompt boxes resizable; and draws
-// icons on the tool buttons in place of their emoji. Each of those is a
-// switch under Settings -> Model Chain: Theme, read live, and each is undone
-// when its switch goes off: every move remembers where its element came
-// from, every icon remembers its text, and nothing is written on an element
-// that a reload would not also write.
+// button and a menu for the tabs that do not fit -- or, with the tab names
+// set to icons, an icon for every tab on a bar that scrolls sideways; moves
+// Generate above the gallery and the prompt boxes to the top of the settings
+// column; moves the quick settings into a drawer; marks the prompt boxes
+// resizable; and draws icons on the tool buttons in place of their emoji.
+// Each of those is a switch under Settings -> Model Chain: Theme, read live,
+// and each is undone when its switch goes off: every move remembers where its
+// element came from, every icon remembers its text, and nothing is written on
+// an element that a reload would not also write.
 //
 // Nothing here comes from sd-webui-lobe-theme. The page it produces is the
 // one the user had under that theme, described (handoff 43, docs/24) and
@@ -42,8 +43,9 @@
 //   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 //   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
-// Of these, arrow-down-left and trash are derived from Feather (MIT,
-// Copyright (c) 2013-present Cole Bemis).
+// Of these, arrow-down-left, clipboard, moon, trash, type and x are derived
+// from Feather (MIT, Copyright (c) 2013-present Cole Bemis), as Lucide's own
+// licence lists them.
 (function () {
     "use strict";
 
@@ -79,7 +81,7 @@
     const NETWORKS_CARD_MAX = 320;
     const NETWORKS_LAYOUTS = ["drawer", "column"];
     const QUICK_MODES = ["off", "collapsed", "open"];
-    const LABEL_MODES = ["as_forge", "spaced"];
+    const LABEL_MODES = ["as_forge", "spaced", "icons"];
     const WIDTH_MIN = 200;
     const WIDTH_MAX = 600;
 
@@ -97,6 +99,10 @@
     const INFO_SOURCE_CLASS = "mc-theme-info-source";       // Forge's own infotext, drawn as the panel instead
     const BAR_CLASS = "mc-theme-bar";
     const OVERFLOW_CLASS = "mc-theme-overflow";   // a tab button the bar has no room for
+    const TABS_ATTRIBUTE = "data-mc-theme-tabs";  // "icons" while the tabs are drawn as icons
+    const TAB_ICON_CLASS = "mc-theme-tab-icon";   // a tab button drawn as its icon
+    const TAB_GLYPH_CLASS = "mc-theme-tab-glyph"; // the icon inside it
+    const MONOGRAM_ATTRIBUTE = "data-mc-theme-monogram"; // the letters of a tab with no icon
     const SETTINGS_SECTION = "Model Chain: Theme";
     const QUICK_ID = "mc-theme-quick";
     const FONT_LINK_ID = "mc-theme-font";
@@ -138,6 +144,38 @@
         "captions": icon('<rect width="18" height="14" x="3" y="5" rx="2" ry="2"/><path d="M7 15h4M15 15h2M7 11h2M13 11h4"/>'),
         "captions-off": icon('<path d="M10.5 5H19a2 2 0 0 1 2 2v8.5"/><path d="M17 11h-.5"/><path d="M19 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2"/><path d="m2 2 20 20"/><path d="M7 11h4"/><path d="M7 15h2.5"/>'),
         "columns-3": icon('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/>'),
+        "swatch-book": icon('<path d="M11 17a4 4 0 0 1-8 0V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2Z"/><path d="M16.7 13H19a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H7"/><path d="M 7 17h.01"/><path d="m11 8 2.3-2.3a2.4 2.4 0 0 1 3.404.004L18.6 7.6a2.4 2.4 0 0 1 .026 3.434L9.9 19.8"/>'),
+        "type": icon('<path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/>'),
+        "image-upscale": icon('<path d="M16 3h5v5"/><path d="M17 21h2a2 2 0 0 0 2-2"/><path d="M21 12v3"/><path d="m21 3-5 5"/><path d="M3 7V5a2 2 0 0 1 2-2"/><path d="m5 21 4.144-4.144a1.21 1.21 0 0 1 1.712 0L13 19"/><path d="M9 3h3"/><rect x="3" y="11" width="10" height="10" rx="1"/>'),
+        "scan-search": icon('<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/>'),
+        "merge": icon('<path d="m8 6 4-4 4 4"/><path d="M12 2v10.3a4 4 0 0 1-1.172 2.872L4 22"/><path d="m20 22-5-5"/>'),
+        "bot": icon('<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>'),
+        "audio-waveform": icon('<path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/>'),
+        "palette": icon('<path d="M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z"/><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/>'),
+        "clipboard": icon('<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>'),
+        "clapperboard": icon('<path d="m12.296 3.464 3.02 3.956"/><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3z"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m6.18 5.276 3.1 3.899"/>'),
+        "book-open-text": icon('<path d="M12 5v16"/><path d="M16 13h2"/><path d="M16 9h2"/><path d="M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z"/><path d="M6 13h2"/><path d="M6 9h2"/>'),
+        "puzzle": icon('<path d="M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z"/>'),
+    };
+
+    // Forge's tabs, by the id it gives each one's panel (`tab_<id>`,
+    // modules/ui.py) less the prefix, each to a glyph -- Forge Neo's own, then
+    // the user's extensions' (their `on_ui_tabs` ids). A tab missing here is
+    // drawn as its first two letters (`monogram`).
+    const TAB_ICONS = {
+        txt2img: "type",                        // the picture starts from words
+        img2img: "image",                       // the gallery's Send to img2img draws the same
+        extras: "image-upscale",                // mostly upscaling; the ruler is Send to extras
+        pnginfo: "scan-search",                 // a picture inspected for what made it
+        modelmerger: "merge",
+        llm_studio: "bot",
+        mc_voice_box: "audio-waveform",
+        minipaint: "palette",                   // the brush is Send to inpaint
+        minipaint_clipboard: "clipboard",       // the one with a list is Apply styles
+        wangp: "clapperboard",
+        extended_lora_details: "book-open-text",
+        settings: "settings",                   // the header's Theme settings gave up the gear for it
+        extensions: "puzzle",
     };
 
     // Forge's tool-button emoji (modules/ui.py, ui_prompt_styles.py,
@@ -324,7 +362,8 @@
         moved: [],          // {node, parent, next, key}: where a moved element came from
         swapped: [],        // buttons whose text became an icon
         relabelled: [],     // tab buttons whose text was respaced
-        header: null,       // {strip, title, actions, more, menu, quickToggle}
+        tabIcons: [],       // {button, title, label}: tab buttons drawn as icons, and what they carried
+        header: null,       // {strip, title, actions, more, menu, quickToggle, icons, revealed}
         quick: null,        // the drawer
         networks: null,     // {hosts: {tabname: {host, nav, chrome, strip, controls, pages, page, observer, view, ...}}, open, width, setting, mode, titles, perRow, card}
         infoPanels: new Map(), // Forge's infotext element -> {panel, html}
@@ -405,7 +444,7 @@
             more.setAttribute("aria-expanded", "false");
             const mode = action("mc-theme-mode", isDark() ? "sun" : "moon",
                                 isDark() ? "Switch to the light theme" : "Switch to the dark theme");
-            const settings = action("mc-theme-settings", "settings", "Theme settings");
+            const settings = action("mc-theme-settings", "swatch-book", "Theme settings");
             const menu = make("div", "mc-theme-menu", {role: "menu"});
             menu.hidden = true;
             actions.appendChild(quickToggle);
@@ -423,7 +462,9 @@
                 try { location.replace(nextThemeUrl(location.href, isDark())); } catch (error) { /* a stub */ }
             });
             settings.addEventListener("click", openSettings);
-            header = state.header = {strip, title, actions, more, menu, quickToggle, networksToggle};
+            strip.addEventListener("wheel", wheelTabs, {passive: false});
+            header = state.header = {strip, title, actions, more, menu, quickToggle, networksToggle,
+                                     icons: false, revealed: null};
         }
         // Written only when they differ. Forge runs every after-update
         // callback 250 ms after any change to a child list inside its app
@@ -459,6 +500,7 @@
         const header = state.header;
         if (!header) return;
         header.strip.classList.remove(BAR_CLASS);
+        header.strip.removeEventListener("wheel", wheelTabs, {passive: false});
         tabButtons(header.strip).forEach((button) => button.classList.remove(OVERFLOW_CLASS));
         if (header.title.parentElement) header.title.parentElement.removeChild(header.title);
         if (header.actions.parentElement) header.actions.parentElement.removeChild(header.actions);
@@ -492,6 +534,8 @@
         const strip = header.strip;
         const buttons = tabButtons(strip);
         if (!buttons.length) return;
+        if (header.icons) { fitIcons(header, buttons); return; }
+        header.revealed = null;
         // Every button shown for the measurement: a hidden one has no width.
         buttons.forEach((button) => setClass(button, OVERFLOW_CLASS, false));
         show(header.more, true);
@@ -529,6 +573,60 @@
         });
     }
 
+    /** The bar with the tabs as icons: every tab on it, none in the menu, the
+     *  bar scrolling sideways where they do not fit, and the selected tab
+     *  brought into view when the selection changes -- a press from
+     *  elsewhere (Send to img2img, Mini Paint's sends, the settings button)
+     *  can select a tab scrolled out of sight. Only when it changes: this
+     *  runs at every update of the page, and bringing the selected tab
+     *  back each time would undo the finger that scrolled the bar to find
+     *  another. */
+    function fitIcons(header, buttons) {
+        buttons.forEach((button) => setClass(button, OVERFLOW_CLASS, false));
+        if (!header.menu.hidden) closeMenu();
+        show(header.more, false);
+        const selected = buttons.find((button) => button.classList.contains("selected")) || null;
+        if (!selected || selected === header.revealed) return;
+        header.revealed = selected;
+        reveal(header.strip, selected, header.actions);
+    }
+
+    /** Scrolls the bar the least that shows `button` whole, clear of the
+     *  header's buttons, which stay at the bar's right edge over the tabs. */
+    function reveal(strip, button, actions) {
+        const box = strip.getBoundingClientRect();
+        const target = button.getBoundingClientRect();
+        let right = box.right;
+        if (actions && actions.isConnected) {
+            const covered = actions.getBoundingClientRect();
+            if (covered.width > 0 && covered.left < right) right = Math.max(box.left, covered.left);
+        }
+        let shift = 0;
+        if (target.right > right) shift = target.right - right + HEADER_GAP_PX;
+        else if (target.left < box.left) shift = target.left - box.left - HEADER_GAP_PX;
+        if (shift) strip.scrollLeft += shift;
+    }
+
+    /** A mouse's wheel over a bar of icons that do not fit scrolls the bar
+     *  sideways, the way a finger or a touchpad already does, until the bar
+     *  reaches its end in that direction; from there the page scrolls as it
+     *  would have. Only while the tabs are icons: otherwise nothing on the
+     *  bar scrolls, and the wheel is the page's. */
+    function wheelTabs(event) {
+        const header = state.header;
+        if (!header || !header.icons || event.ctrlKey) return;
+        if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+        const strip = header.strip;
+        const room = strip.scrollWidth - strip.clientWidth;
+        if (room <= 0) return;
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1;
+        const before = strip.scrollLeft;
+        const after = Math.max(0, Math.min(room, before + event.deltaY * unit));
+        if (Math.abs(after - before) < 0.5) return;
+        strip.scrollLeft = after;
+        event.preventDefault();
+    }
+
     function scheduleFit() {
         if (state.fitPending) return;
         state.fitPending = true;
@@ -555,7 +653,11 @@
 
     function installLabels(strip, config) {
         const buttons = tabButtons(strip);
-        if (config.labels !== "spaced") { restoreLabels(); return; }
+        // The spaced names put back first: putting one back writes the
+        // button's text, which would take an icon drawn before it with it.
+        if (config.labels !== "spaced") restoreLabels();
+        installTabIcons(strip, config);
+        if (config.labels !== "spaced") return;
         buttons.forEach((button) => {
             if (button.dataset.mcThemeLabel !== undefined) return;
             const original = button.textContent;
@@ -575,6 +677,87 @@
             }
         });
         state.relabelled = [];
+    }
+
+    // -- the tabs as icons ------------------------------------------------------ //
+    //
+    // With the tab names set to icons, each tab button gets the icon for its
+    // tab ahead of its name, and the name stays in the button at no size
+    // (style.css): Forge's own scripts, Mini Paint's tab switching and this
+    // file's menu read a tab's text, a screen reader reads the label put on
+    // it, and a mouse shows it on hover. Nothing is moved and no text is
+    // written, so `textContent` is what Forge wrote. Every tab is on the bar,
+    // which scrolls sideways where they do not fit (`fitIcons`).
+
+    /** The id of a tab, as TAB_ICONS keys it: its panel's id less `tab_`. */
+    function tabId(button) {
+        const panel = button.getAttribute("aria-controls") || String(button.id || "").replace(/-button$/, "");
+        return panel.indexOf("tab_") === 0 ? panel.slice(4) : panel;
+    }
+
+    /** Two letters for a tab with no icon of its own: the first letters of
+     *  its first two words, or the first two of a single word as written --
+     *  ADetailer is AD, Deforum is De. */
+    function monogram(label) {
+        const words = String(label || "").trim().split(/[\s_-]+/).filter(Boolean).map((word) => Array.from(word));
+        if (!words.length) return "";
+        if (words.length === 1) return words[0][0].toUpperCase() + (words[0][1] || "");
+        return (words[0][0] + words[1][0]).toUpperCase();
+    }
+
+    function installTabIcons(strip, config) {
+        if (config.labels !== "icons") {
+            restoreTabIcons();
+            if (root().hasAttribute(TABS_ATTRIBUTE)) root().removeAttribute(TABS_ATTRIBUTE);
+            if (state.header) state.header.icons = false;
+            return;
+        }
+        setAttr(root(), TABS_ATTRIBUTE, "icons");
+        if (state.header) state.header.icons = true;
+        tabButtons(strip).forEach((button) => {
+            if (!button.classList.contains(TAB_ICON_CLASS)) {
+                state.tabIcons.push({button, title: button.getAttribute("title"),
+                                     label: button.getAttribute("aria-label")});
+                button.classList.add(TAB_ICON_CLASS);
+            }
+            // The name follows the tab's text, written only when it changed:
+            // this runs at every update of the page (see installHeader).
+            const name = plain(button.textContent);
+            setAttr(button, "title", name);
+            setAttr(button, "aria-label", name);
+            const id = tabId(button);
+            const glyph = Object.prototype.hasOwnProperty.call(TAB_ICONS, id) ? TAB_ICONS[id] : null;
+            const drawn = Array.prototype.find.call(button.children,
+                (child) => child.classList && child.classList.contains(TAB_GLYPH_CLASS)) || null;
+            if (drawn && drawn.getAttribute("data-mc-theme-glyph") !== glyph) button.removeChild(drawn);
+            if (glyph) {
+                if (button.hasAttribute(MONOGRAM_ATTRIBUTE)) button.removeAttribute(MONOGRAM_ATTRIBUTE);
+                if (!drawn || !drawn.parentElement) {
+                    const holder = document.createElement("span");
+                    holder.innerHTML = GLYPH[glyph];
+                    const svg = holder.firstElementChild;
+                    svg.setAttribute("class", TAB_GLYPH_CLASS);
+                    svg.setAttribute("data-mc-theme-glyph", glyph);
+                    button.insertBefore(svg, button.firstChild);
+                }
+            } else {
+                setAttr(button, MONOGRAM_ATTRIBUTE, monogram(name));
+            }
+        });
+    }
+
+    function restoreTabIcons() {
+        state.tabIcons.forEach((entry) => {
+            const button = entry.button;
+            Array.prototype.slice.call(button.children).forEach((child) => {
+                if (child.classList && child.classList.contains(TAB_GLYPH_CLASS)) button.removeChild(child);
+            });
+            button.classList.remove(TAB_ICON_CLASS);
+            button.removeAttribute(MONOGRAM_ATTRIBUTE);
+            if (entry.title === null) button.removeAttribute("title"); else button.setAttribute("title", entry.title);
+            if (entry.label === null) button.removeAttribute("aria-label"); else button.setAttribute("aria-label", entry.label);
+        });
+        state.tabIcons = [];
     }
 
     // -- moving things, and putting them back ------------------------------- //
@@ -2182,6 +2365,8 @@
         restoreMoves();
         restoreIcons();
         restoreLabels();
+        restoreTabIcons();
+        if (root().hasAttribute(TABS_ATTRIBUTE)) root().removeAttribute(TABS_ATTRIBUTE);
         removeHeader();
         if (state.quick) {
             if (state.quick.parentElement) state.quick.parentElement.removeChild(state.quick);
@@ -2333,6 +2518,7 @@
     window.mcTheme = {
         OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
+        tabId, monogram, TAB_ICONS, TABS_ATTRIBUTE, TAB_ICON_CLASS, MONOGRAM_ATTRIBUTE,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS, perRowRange, perRowNearest, explainCards, setPerRow, setTitles,
         NETWORKS_COLUMNS, NETWORKS_UNTITLED_CLASS, QUICK_TAP_PX,

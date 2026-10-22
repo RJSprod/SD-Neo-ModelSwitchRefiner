@@ -945,6 +945,88 @@
     background: var(--body-background-fill);
 }
 
+/* -- the tabs as icons ------------------------------------------------------ */
+
+/* With the tab names set to icons (`data-mc-theme-tabs="icons"`, written by
+   the script): every tab on the bar as its icon, and the bar scrolls
+   sideways where they do not fit, in place of the menu under the ellipsis.
+   The name stays in the button at no size, for Forge's scripts and Mini
+   Paint's, which read a tab by its text; the script puts it on the button
+   as its label and its tooltip. The rule that sizes the name away names
+   the button and never the bar, because no selector naming a tab bar may
+   hide anything in it (focus mode's rule); `#tabs` gives it the weight to
+   outrank the header's own rule for the tab buttons. */
+
+/* A sideways swipe the bar cannot take -- at its first tab, swiped right --
+   is Chromium's Back, which it decides from the page root's
+   overscroll-behavior alone while the scroller under the finger leaves its
+   own at auto (CLAUDE.md, the trap of a swipe past the end of a sideways
+   scroller), so the bar leaves its own alone. On the root and in the
+   stylesheet, because the speech tab's card row holds the same property
+   inline while it is on screen and gives back what it found there, which
+   leaves this rule in force. (Not named here by its tab's name: that
+   section's tests find it by the name's first mention in this file.) */
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] {
+    overscroll-behavior-x: none;
+}
+
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs > .tab-nav {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    /* The bar's ground reaches into the page's side padding (`::before`,
+       above), and a scroller clips what it holds, the ground included; the
+       two strips are painted as the bar's own shadows instead, which its
+       overflow does not clip: the ground's colour, and under it the bar's
+       line, one pixel showing at the bottom. */
+    box-shadow:
+        calc(-1 * var(--mc-theme-page-pad)) -1px 0 var(--body-background-fill),
+        var(--mc-theme-page-pad) -1px 0 var(--body-background-fill),
+        calc(-1 * var(--mc-theme-page-pad)) 0 0 var(--border-color-primary),
+        var(--mc-theme-page-pad) 0 0 var(--border-color-primary);
+}
+
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs > .tab-nav::before {
+    content: none;
+}
+
+/* The header's own buttons stay at the bar's right edge, over the tabs that
+   scroll under them, with the ground fading in on their left. */
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] .mc-theme-actions {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    background: var(--body-background-fill);
+    box-shadow: -12px 0 12px -4px var(--body-background-fill);
+}
+
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs button[role="tab"].mc-theme-tab-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 36px;
+    padding: 0;
+    font-size: 0;
+    line-height: 0;
+}
+
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs button[role="tab"].mc-theme-tab-icon > .mc-theme-tab-glyph {
+    flex: none;
+    width: 20px;
+    height: 20px;
+}
+
+/* A tab with no icon of its own: its first two letters, drawn, so the
+   button's text stays the tab's name. */
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs button[role="tab"].mc-theme-tab-icon[data-mc-theme-monogram]::before {
+    content: attr(data-mc-theme-monogram);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.02em;
+}
+
 /* -- the quick settings drawer ------------------------------------------- */
 
 :root[data-mc-theme="on"] .mc-theme-drawer {

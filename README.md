@@ -6745,9 +6745,31 @@ one second.
   scrolls. It is Forge's own tab bar, styled in place and never moved, with a
   **title** first (a setting), and last a quick-settings button, a **⋯ menu of
   the tabs the bar has no room for** (the selected one is always shown), a
-  light/dark toggle and a button that opens these settings. **Tab names** can
-  be left as Forge writes them or spaced ("Txt 2 Img"; "LoRA" and "WanGP" stay
-  whole).
+  light/dark toggle and a button that opens these settings (a swatch book;
+  the gear is the Settings tab's). **Tab names** can be left as Forge writes
+  them, spaced ("Txt 2 Img"; "LoRA" and "WanGP" stay whole), or **icons**.
+- **Icons for tabs** (*Tab names* set to *icons*). Every tab is drawn as an
+  icon, with its name on hover, and **every tab stays on the bar**: where
+  they do not fit, the bar scrolls sideways under a finger, a touchpad or a
+  mouse's wheel, instead of folding tabs under ⋯. The header's own buttons
+  stay at the bar's right edge, over the tabs scrolling under them, and the
+  title scrolls away with the tabs. A tab selected from somewhere else —
+  Send to img2img, Mini Paint's sends, the settings button — is scrolled
+  into view once; a finger that scrolls the bar to look for another tab is
+  not undone at the next update. The icons (Lucide's, like the tool
+  buttons'): txt2img a **T**, img2img a **picture** (the gallery's Send to
+  img2img draws the same), Extras **upscale**, PNG Info a **scan with a
+  magnifier**, Checkpoint Merger **two lines merging**, LLM Studio a
+  **bot**, Voice Box a **waveform**, Mini Paint a **palette**, Clipboard a
+  **clipboard**, WanGP a **clapperboard**, Extended LoRA Details an **open
+  book**, Settings the **gear**, Extensions a **puzzle piece**. A tab the
+  theme has no icon for — another extension's — shows its first two letters
+  (ADetailer reads AD). The name stays in each button, at no size, so
+  Forge's scripts and Mini Paint's, which find a tab by its text, and a
+  screen reader read it as before. While the tabs are icons, a sideways
+  swipe that the bar cannot take (past its first tab, say) is not the
+  browser's Back: the page holds its root's sideways overscroll at none, as
+  the Voice Box does while it is on screen.
 - **Generate above the gallery, the prompt boxes at the top of the settings
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
   compact prompt-box styles both handled. The results column stays where it
@@ -6993,7 +7015,8 @@ browser remembered.
 The theme applies itself again after every update of the page and writes only
 what changed: the same title is not written again, a class already on a button
 is not put on again, the **⋯** menu is rebuilt only when the tabs it holds
-or their names change, the one scroller's numbers are written only when they
+or their names change, a tab's icon is drawn once and its label written only
+when its name changes, the one scroller's numbers are written only when they
 change. That is not tidiness. Forge answers any change to the
 page's contents with another round of every extension's after-update callbacks
 a quarter of a second later, so a theme that rewrote its title on every apply

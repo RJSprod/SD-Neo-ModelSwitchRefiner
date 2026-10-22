@@ -80,7 +80,7 @@ QUICK_MODES = ("off", "collapsed", "open")
 QUICK_DEFAULT = "collapsed"
 QUICK_WIDTH_DEFAULT = 280
 QUICK_WIDTH_MIN, QUICK_WIDTH_MAX = 200, 600
-TAB_LABEL_MODES = ("as_forge", "spaced")
+TAB_LABEL_MODES = ("as_forge", "spaced", "icons")
 TAB_LABEL_DEFAULT = "as_forge"
 TITLE_DEFAULT = "Forge"
 NETWORKS_MODES = QUICK_MODES
@@ -501,7 +501,9 @@ def settings(shared) -> dict:
         ).info(
             "<b>as_forge</b> keeps the names as Forge writes them · <b>spaced</b> "
             "puts a space before a capital or a digit and capitalises each word, so "
-            "txt2img reads Txt 2 Img and LoRA stays LoRA"
+            "txt2img reads Txt 2 Img and LoRA stays LoRA · <b>icons</b> draws every "
+            "tab as an icon, its name on hover, on a bar that scrolls sideways "
+            "instead of folding tabs under ⋯"
         ),
         OPT_SPLIT: OptionInfo(
             True,
