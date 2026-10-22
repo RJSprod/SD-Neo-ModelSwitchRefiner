@@ -2986,6 +2986,130 @@ the summary's on the server). Containment: the root's rule and no `contain`
 elsewhere (two mutations). The full suite is green. Nothing of this has run
 on the user's machine.
 
+## 3.37 The tab bar in focus mode (2026-10-22)
+
+Asked for once the Model Chain theme drew every tab as an icon on one bar
+(handoff 49): "Let's make that entire row available in focus mode. So by
+default, the tab bar should be available. I want options in the flyout menu
+"..." for toggling the new thin tabbar to show / hide. Also when hidden, lets
+make a tap of the flyout button or flyout menu drag area tap temporarily show
+the tab bar."
+
+### The bar kept, found by its button
+
+Focus used to take every tab bar out of the layout with the rest of the
+chrome. It now keeps one: the strip holding the button that shows the
+focused workspace (`ownBar` in `forge_assistant_focus.js`, a child whose
+`aria-controls` is the root's id), which is Forge's `#tabs > .tab-nav` and,
+under the Model Chain theme, its header. Found by the button and not by a
+name, for the reason every other bar is marked one at a time: `.tab-nav` and
+`[role=tablist]` are on every nested tab group too. Kept only where its parent
+is on the workspace's path; a bar a theme moved under some other parent sits
+inside chrome the path rule takes out, and is hidden one at a time as it
+always was. Never one that holds the workspace or the assistant.
+
+The kept bar carries `forge-assistant-focus-bar` (the path rule leaves it in
+the layout, with anything marked `forge-assistant-focus-keep`), and the body
+says its mode, `data-forge-assistant-focus-bar`:
+
+- `shown`, the default: fixed along the window's top, 8 px in from each side
+  as the workspace's content is (the root's inset), a step above the
+  workspace and below the assistant (`--forge-assistant-workspace-layer` + 2),
+  on the page's colour; the focus root starts at the bar's bottom edge, which
+  the module measures and writes as `--forge-assistant-focus-top` on the body,
+  again whenever the bar changes size (a ResizeObserver: the theme's thin bar,
+  Forge's own bar wrapping onto a second row).
+- `hidden`: above the window's top edge (`translateY(-100% - 2px)`,
+  `visibility: hidden`), and the root at the window's top. No slide either
+  way: a transition also ran as focus came on and showed the bar leaving a
+  workspace it was never meant to be over.
+- `peek`: the bar over the workspace's top, the root where it was.
+
+Nothing is moved in the DOM. A press on one of the bar's tabs is the host's
+own; the shell's `subscribeNavigation` moves focus to the new workspace, and
+`moveTo` keeps the bar for it. The mode is the person's, kept on the Focus
+instance across focus going off and on (`setBar`, `placeBar`, `keptBar`);
+the safety valve's plain overlay keeps no bar.
+
+### The host reads Gradio's word in focus mode
+
+A press on the kept bar first did nothing visible: focus stayed on the old
+workspace. `getActiveWorkspace` asks which panel is *showing*, and in focus
+mode that is focus's own doing -- the focused panel fixed and drawn whatever is
+selected, every other one taken out by the path rule, Gradio's inline
+`display: block` on the new one notwithstanding. So in focus mode
+(`forge-assistant-focused` on the body) the host reads the panel Gradio's
+inline display names, and the selected button after it; out of focus mode,
+what is drawn decides as before. The same fix lets a switch made elsewhere
+while focused -- Send to img2img -- move focus, which it never could. The
+workspace picker's switch went round this by leaving focus first
+(`switchWorkspace`), and still does.
+
+### The ⋯ menu's switch, and a tap to peek
+
+**Tab Bar in Focus**, a `menuitemcheckbox` in the Panel group after Free
+Float, remembered in this browser (`forge-assistant-focus-bar:<base path>`,
+on until turned off). Off, a tap on the launcher (`tapLauncher`, any press,
+the keyboard's too) or on the header's space (`tapHeader`, at once, whether
+or not more taps follow) brings the bar over the workspace for `PEEK_MS`,
+4 s (`peekBar`, `armPeek`). Anything done on the bar or on what goes with it
+-- a press, a move, a wheel, focus or a key inside, heard in the capture phase
+and passively, and ignored unless the bar is peeking (`notePeek`) -- begins
+the moment again. At its end the bar stays while a mouse rests on it or while
+something in it holds a focus the browser draws (`peekHeld`): a finger's tap
+leaves `:hover` on what it tapped and focus on the button it pressed, and
+either would have held the bar for good, so hover counts for a mouse alone
+and focus only under `:focus-visible` (the keyboard's, or a text box being
+typed in). Focus going off ends the moment (`focusOff`, `endPeek`).
+
+### What goes with the bar
+
+The Model Chain theme's bar carries two drawers' buttons. Its quick settings
+drawer lives beside Gradio's container and was taken out with the chrome; it
+is marked `forge-assistant-focus-keep` now, and under focus hangs from the
+bar's bottom edge (`--forge-assistant-focus-top`) a step above the workspace
+and under the bar, and is not drawn while the bar is hidden. Its extra
+networks drawer lives inside the workspace's own tab and was hidden in focus
+mode; with the bar shown or peeking it opens as on the page, over the
+workspace's right edge from the bar's bottom, in both of its layouts -- the
+column layout's grid is not drawn in focus mode, where the workspace is its
+own scroller and has nothing to stick under (docs/24 §0).
+
+### Mini Paint NEO
+
+The focus root no longer always starts at the window's top. Mini Paint's
+WanGP tab sizes its frame from its column's top to the panel's bottom
+(`fitFrame` in `browser/minipaint_wangp.js`), so a root that starts under the
+bar is filled from there with nothing changed on that side; its tests carry a
+copy of this stylesheet's focus rule (`FOCUS_STAND_IN_CSS`), which is to
+follow the rule.
+
+### Verified
+
+`tests/test_assistant_focus_js.py` (node): the bar holding the workspace's
+button kept and the root's top its bottom (44 px), a bar showing no workspace
+and the workspace's own nested tabs as before; hidden and peeking the root at
+0, a mode it does not know changing nothing; the choice outliving focus going
+off and on; every mark gone on leaving; a bar under a parent off the path
+hidden as before; the safety valve keeping none. `tests/test_assistant_js.py`
+(node): the switch a remembered checkbox that tells focus, on until turned
+off; a tap peeking only with the bar hidden in focus mode; the launcher (a
+press and a key) and the header both peeking; the moment ending alone, held
+by a resting mouse and not by a finger's hover, held by a typed focus and not
+a pressed button's, renewed by what is done on the bar and not elsewhere,
+ended by focus going off; in focus mode the host reading the panel Gradio
+chose while the drawn one is the old workspace. `tests/test_theme_layout.py`
+(Chromium, the theme's page with the assistant's scripts): the bar fixed at
+the top, 44 px, 8 px in from each side, the workspace under it and a press on
+a tab reaching the tab; a tab pressed on it moving focus to its workspace;
+both drawers opening from its bottom edge over the workspace; hidden, the bar
+and the quick drawer gone and the workspace the window, the menu's entry
+unchecked, and both back when it is shown again; a launcher tap and a header
+tap peeking it over the workspace, which stays where it was, and the moment
+ending on its own; leaving focus putting the bar back in the page. The three
+older tests that held focus mode's bar out of the layout now hold it with the
+bar hidden and also measure it kept.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

@@ -1,8 +1,10 @@
 // Forge Assistant -- workspace focus, as a transaction that can be undone.
 //
-// Focus makes one workspace take the whole browser window: the Forge Neo tab
-// bar, a theme's sidebars, the footer -- none of it is visible until the person
-// leaves focus mode, by the control on the assistant or by pressing Escape. It
+// Focus makes one workspace take the whole browser window: a theme's sidebars,
+// the footer, the other tabs -- none of it is visible until the person leaves
+// focus mode, by the control on the assistant or by pressing Escape. The one
+// piece of chrome it can keep is the workspace's own tab bar, along the top
+// (see "the workspace's own tab bar" below); the shell decides whether. It
 // is not the Fullscreen API, and does not use it: an element in full screen is
 // the only thing the browser draws, so a workspace made full screen would take
 // the assistant -- the way back out -- off the screen with everything else. The
@@ -10,11 +12,12 @@
 // whole document's, and belongs to the shell: see `enterScreen` in
 // forge_assistant.js.
 //
-// It does not hide, remove or restyle the host's tab bar, and it never touches
-// the host's DOM. The tab bar is still there, underneath; this extension's own
-// root element is simply laid over everything else. That is what keeps it safe:
-// nothing about the host changes, so nothing about the host can break, and
-// leaving is one class removal.
+// It never moves, removes or rewrites anything of the host's. What it does is
+// classes and a few recorded inline values: the chrome taken out of the
+// layout by a rule that reads the classes, the workspace fixed over the
+// window, the kept tab bar fixed along its top. That is what keeps it safe:
+// nothing about the host's DOM changes, so nothing about the host can break,
+// and leaving is the classes coming off.
 //
 // The other rule: never change a canvas's bitmap dimensions. Mini Paint and the
 // Krea spatial editor both draw into one, and resizing a canvas element clears
@@ -31,6 +34,18 @@
     const PATH_CLASS = "forge-assistant-focus-path";
     const HIDDEN_CLASS = "forge-assistant-focus-hidden";
     const ASSISTANT_ROOT = "forge-assistant-root";
+    // The workspace's own tab bar, kept along the top of the window, and what
+    // the body says about it while focus is on: "shown" above the workspace,
+    // "hidden" above the window's edge, "peek" over the workspace's top for a
+    // moment. The focus root starts under a shown bar, at the property.
+    const BAR_CLASS = "forge-assistant-focus-bar";
+    const BAR_ATTRIBUTE = "data-forge-assistant-focus-bar";
+    const BAR_MODES = ["shown", "hidden", "peek"];
+    const TOP_PROPERTY = "--forge-assistant-focus-top";
+    // Chrome of somebody else's that goes with the kept bar -- the Model Chain
+    // theme's quick settings drawer, which the bar's button opens -- left in
+    // the layout by the rule that takes the rest out. It draws itself.
+    const KEEP_CLASS = "forge-assistant-focus-keep";
 
     // Tab bars outside the focused workspace. Marked one at a time by the
     // script rather than selected by a stylesheet, because the decision that
@@ -49,6 +64,8 @@
         this.adapters = new Map();
         this.active = null;
         this.observer = null;
+        this.barMode = "shown";
+        this.barObserver = null;
     }
 
     Focus.prototype.registerAdapter = function (adapter) {
@@ -149,6 +166,47 @@
         context.path = [];
         context.hidden = [];
         context.stuck = [];
+        clearBar(context);
+    }
+
+    // -- the workspace's own tab bar ---------------------------------------- //
+    //
+    // The strip that holds the button showing this workspace -- Forge's
+    // `#tabs > .tab-nav`, the Model Chain theme's header -- kept, at the top
+    // of the window, instead of taken out with the rest of the chrome: asked
+    // for once every tab was a button on it ("Let's make that entire row
+    // available in focus mode"). Found by the button, not by a name, for the
+    // reason the other tab bars are marked one at a time: the names are on
+    // every nested tab group too. Kept only where its parent is on the
+    // workspace's path, because a bar under any other parent sits inside
+    // chrome the rule below takes out, and is hidden as it always was.
+    // Nothing is moved: the class makes it fixed along the top, and a press
+    // on one of its tabs is the host's own, which focus follows to the new
+    // workspace (the shell's `subscribeNavigation`).
+
+    function ownBar(root) {
+        if (!root || !root.id) return null;
+        let found = null;
+        each(TAB_BARS, (bar) => {
+            if (found || bar === root || root.contains(bar) || bar.contains(root)) return;
+            const buttons = Array.prototype.slice.call(bar.children || []);
+            if (buttons.some((button) => button && button.getAttribute
+                             && button.getAttribute("aria-controls") === root.id)) {
+                found = bar;
+            }
+        });
+        if (!found || !found.parentElement || !found.parentElement.classList
+            || !found.parentElement.classList.contains(PATH_CLASS)) return null;
+        return found;
+    }
+
+    function clearBar(context) {
+        if (context.bar && context.bar.classList) context.bar.classList.remove(BAR_CLASS);
+        context.bar = null;
+        const body = document.body;
+        if (!body) return;
+        if (body.hasAttribute(BAR_ATTRIBUTE)) body.removeAttribute(BAR_ATTRIBUTE);
+        if (body.style && body.style.getPropertyValue(TOP_PROPERTY)) body.style.removeProperty(TOP_PROPERTY);
     }
 
     function paddingTop(root) {
@@ -309,12 +367,17 @@
             walk = walk.parentElement;
         }
 
+        // The workspace's own tab bar, kept along the top.
+        context.bar = ownBar(root);
+        if (context.bar) context.bar.classList.add(BAR_CLASS);
+
         // Tab bars the marking above did not reach, because the theme moved
         // them out of the workspace's ancestry. Never one that contains the
-        // workspace, and never one inside it -- a workspace with nested tabs
-        // keeps its own.
+        // workspace, never one inside it -- a workspace with nested tabs
+        // keeps its own -- and never the bar kept above.
         each(TAB_BARS, (bar) => {
             if (bar === root || root.contains(bar) || bar.contains(root)) return;
+            if (bar === context.bar) return;
             if (bar.id === ASSISTANT_ROOT || bar.querySelector("#" + ASSISTANT_ROOT)) return;
             bar.classList.add(HIDDEN_CLASS);
             context.hidden.push(bar);
@@ -398,6 +461,16 @@
         }
 
         this.active = context;
+        // The kept bar along the top, and the root under it. Measured again
+        // whenever the bar changes size -- a theme's thinner bar, Forge's own
+        // wrapping onto a second row -- because the root starts where it ends.
+        this.placeBar();
+        if (context.bar && typeof ResizeObserver === "function") {
+            this.barObserver = new ResizeObserver(() => {
+                if (this.placeBar()) refill();
+            });
+            this.barObserver.observe(context.bar);
+        }
         // The results column's height is measured against what scrolls it,
         // and that just changed from the page to this root.
         refill();
@@ -410,6 +483,7 @@
                 + (context.degraded ? " (chrome left in place)" : "")
                 + ", " + context.path.length + " ancestors marked, "
                 + context.hidden.length + " tab bars hidden, "
+                + (context.bar ? "its own tab bar " + this.barMode + ", " : "")
                 + context.stuck.length + " sticky offsets closed"
                 + (context.note ? ", note: " + context.note : ""));
         } catch (error) { /* a console that cannot be written to */ }
@@ -431,6 +505,10 @@
         if (this.observer) {
             this.observer.disconnect();
             this.observer = null;
+        }
+        if (this.barObserver) {
+            this.barObserver.disconnect();
+            this.barObserver = null;
         }
         try {
             if (typeof context.adapter.exit === "function") context.adapter.exit(context);
@@ -472,6 +550,45 @@
         if (!this.active) return {ok: false, reason: "Focus is not on."};
         this.exit();
         return this.enter(id, host);
+    };
+
+    /** The kept bar's mode, said on the body, and where the root starts: under
+     *  a shown bar, at the window's top edge otherwise -- a hidden bar is
+     *  above that edge and a peeking one over the workspace's top. Written
+     *  only when it changes; true when the root's top moved, for what has to
+     *  measure again. */
+    Focus.prototype.placeBar = function () {
+        const context = this.active;
+        const body = document.body;
+        if (!context || !context.bar || !body) return false;
+        if (body.getAttribute(BAR_ATTRIBUTE) !== this.barMode) body.setAttribute(BAR_ATTRIBUTE, this.barMode);
+        let top = 0;
+        if (this.barMode === "shown") {
+            try {
+                const box = context.bar.getBoundingClientRect();
+                top = Math.max(0, Math.round((box.top || 0) + (box.height || 0)));
+            } catch (error) {
+                top = 0;
+            }
+        }
+        const value = top + "px";
+        if (body.style.getPropertyValue(TOP_PROPERTY) === value) return false;
+        body.style.setProperty(TOP_PROPERTY, value);
+        return true;
+    };
+
+    /** Shown, hidden or peeking: kept across focus going off and on, because
+     *  it is the person's choice and not the workspace's. */
+    Focus.prototype.setBar = function (mode) {
+        if (BAR_MODES.indexOf(mode) === -1) return this.barMode;
+        this.barMode = mode;
+        if (this.placeBar()) refill();
+        return this.barMode;
+    };
+
+    /** The bar kept for the focused workspace, or null. */
+    Focus.prototype.keptBar = function () {
+        return this.active ? this.active.bar || null : null;
     };
 
     Focus.prototype.isActive = function () {
@@ -545,6 +662,8 @@
     }
 
     NS.Focus = Focus;
+    NS.FOCUS_BAR_CLASS = BAR_CLASS;
+    NS.FOCUS_KEEP_CLASS = KEEP_CLASS;
     NS.focusTrapped = trapped;
     NS.canvasAdapter = canvasAdapter;
 

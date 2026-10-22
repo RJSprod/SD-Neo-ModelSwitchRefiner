@@ -3794,6 +3794,21 @@ the panel at once, and a drag of the launcher is never counted as a press. With
 focus on, going back takes focus with it to the other workspace, as the picker
 does.
 
+**Focus mode keeps the tab bar.** With focus on, the workspace's own tab bar —
+Forge's, or the Model Chain theme's thin bar of icons — stays along the top of
+the window, and the workspace fills the window under it. Pressing a tab on it
+moves focus to that workspace, and its buttons work as they do on the page:
+the theme's quick settings and extra networks open from the bar's bottom edge,
+over the workspace. **Tab Bar in Focus**, in the **⋯** menu's Panel group, is
+on until you turn it off, and remembered in this browser. Off, focus mode is
+the workspace alone again, and the bar is a tap away: one press on the
+launcher, or one tap on the open panel's header (the space you drag it by),
+brings it over the top of the workspace for four seconds — longer while you
+use it: anything you do on it starts the four seconds again, and it stays
+while a mouse rests on it or you type into one of its fields. A press on the
+launcher still does what it always did (the panel opens after its 300 ms);
+two and three presses still go back and toggle focus.
+
 **Collapsed, the panel is a tab bar.** Under the header it lists every
 workspace this installation has, one press each — a tab bar you can put
 wherever you want one, in focus mode as much as out of it. Pressing one
@@ -3896,7 +3911,7 @@ entries act on, and a **Cancel**:
 | --- | --- |
 | **Chat**, headed by the character's name | **New chat**, **Threads ›**, **System prompt…** |
 | **Composer** | **Auto Attach**, **Send to Generate** |
-| **Panel** | **Free Float**, **Customize…** |
+| **Panel** | **Free Float**, **Tab Bar in Focus**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
 
 A menu opens inside the panel, in the conversation's place — or the workspace
@@ -4008,16 +4023,18 @@ does now:
   it; its text stays in the composer and the conversation shows whether it
   arrived.
 
-**Focus** gives the whole browser viewport to whichever workspace is open: the
-Forge tab bar, a theme's header and sidebars and the footer go, and the
-workspace takes the space they were using. There is no Focus button: press the
+**Focus** gives the whole browser viewport to whichever workspace is open: a
+theme's header and sidebars, the footer and the other tabs go, and the
+workspace takes the space they were using under the tab bar, which stays along
+the top unless the **⋯** menu's **Tab Bar in Focus** is off (see *Focus mode
+keeps the tab bar*, above). There is no Focus button: press the
 open panel's header three times — the space you drag it by, not one of its
 glyphs — or the launcher three times, at a double-click's pace, to turn it on;
 the same three presses, or Escape, turn it off.
 
 The same press takes the browser full screen as well — its address bar and
 tabs, and on a phone the system bars — and the presses that turn focus off bring
-back both the tab bar and the browser's own chrome. It is the whole page that goes
+back both the page and the browser's own chrome. It is the whole page that goes
 full screen, not the workspace, so the assistant, dialogs and popups stay on
 it. The two are kept in step:
 
@@ -6751,7 +6768,13 @@ one second.
 - **Icons for tabs** (*Tab names* set to *icons*). Every tab is drawn as an
   icon, with its name on hover, and **every tab stays on the bar**: where
   they do not fit, the bar scrolls sideways under a finger, a touchpad or a
-  mouse's wheel, instead of folding tabs under ⋯. The header's own buttons
+  mouse's wheel, instead of folding tabs under ⋯. The bar is **thinner** in
+  this mode, 44 px: its 36 px buttons with 4 px above and below, and
+  everything held under the bar (the drawers, the results column's hold)
+  follows it. Changing tab never shows a tab's name, not for a frame: Gradio
+  makes the pressed tab's button and the one that was selected again on every
+  change, and their icons are drawn before the browser paints them, with
+  their names given no size even before that. The header's own buttons
   stay at the bar's right edge, over the tabs scrolling under them, and the
   title scrolls away with the tabs. A tab selected from somewhere else —
   Send to img2img, Mini Paint's sends, the settings button — is scrolled
@@ -6792,9 +6815,10 @@ one second.
   gallery and its buttons fit the view under the bar without a scroll, the
   gallery as tall as that leaves, and what follows the buttons scrolls; the
   results column is held where it rests while the settings scroll, and under
-  the assistant's focus mode, where the bar is hidden and the workspace is
-  the whole window, it is held at the workspace's padding instead, so the
-  fitted gallery stays whole there too.
+  the assistant's focus mode, where the workspace is its own scroller under
+  the bar the assistant keeps (or the whole window, with that bar hidden), it
+  is held at the workspace's padding instead, so the fitted gallery stays
+  whole there too.
 - **One scroller for the page: the settings first, then the results** (a
   setting, on). Asked for: "the entire page takes one scroll action ... first
   move the left column until I reach bottom, then the right column until I
@@ -6927,8 +6951,10 @@ one second.
   selects. Each generation tab has a drawer of its own, which
   goes with the tab: Txt2Img's pages on Txt2Img, Img2Img's on Img2Img,
   nothing on any other tab (the header's button is disabled there), and
-  back on a generation tab it is as it was; under focus mode it stays out of
-  the workspace. A page is taken only once Forge's script has wired it (it
+  back on a generation tab it is as it was; under the assistant's focus mode,
+  with the bar it keeps shown or peeking, the header's button opens it over
+  the workspace's right edge from the bar's bottom, in either layout, and with
+  that bar hidden it stays out of the workspace. A page is taken only once Forge's script has wired it (it
   does so after the page's HTML arrives, later than the page's load), and is
   drawn at the drawer's density: the search box on a row of its own, as tall
   as a button, its magnifier in its left padding and centred (Forge draws the

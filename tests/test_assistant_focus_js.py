@@ -794,6 +794,111 @@ class TestEntering:
                 + selector.strip() + " { " + hidden.strip() + " }")
 
 
+OWN_BAR = """
+// Forge's bar gets the buttons it really has: one per workspace, each saying
+// which panel it shows. The bar is 44 px tall, the Model Chain theme's thin one.
+["tab_txt2img", "tab_llm_studio", "tab_minipaint"].forEach((id) => {
+    const button = make(id + "-button", bar);
+    button.setAttribute("aria-controls", id);
+});
+bar.box = {width: 1264, height: 44};
+const marks = () => ({
+    kept: bar.classList.contains("forge-assistant-focus-bar"),
+    hidden: bar.classList.contains("forge-assistant-focus-hidden"),
+    mode: document.body.getAttribute("data-forge-assistant-focus-bar"),
+    top: document.body.style.getPropertyValue("--forge-assistant-focus-top") || null,
+});
+"""
+
+
+class TestTheWorkspacesOwnTabBar:
+    """Kept along the window's top, at the user's word, instead of taken out
+    with the rest of the chrome: the bar that holds the button showing the
+    workspace, found by that button."""
+
+    def test_the_bar_holding_the_workspaces_button_is_kept_and_the_root_starts_under_it(self):
+        found = run(OWN_BAR + """
+            const answer = focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify(Object.assign({ok: answer.ok,
+                themeHidden: themeBar.classList.contains("forge-assistant-focus-hidden"),
+                nestedHidden: nestedTxt.classList.contains("forge-assistant-focus-hidden")},
+                marks(), {kept: focus.keptBar() === bar})));
+        """)
+
+        assert found["ok"] is True and found["kept"] is True
+        assert found["hidden"] is False
+        assert found["mode"] == "shown" and found["top"] == "44px"
+        assert found["themeHidden"] is True, "a bar that shows no workspace is still chrome"
+        assert found["nestedHidden"] is False, "the workspace's own nested tabs are its own"
+
+    def test_hidden_or_peeking_the_root_starts_at_the_windows_top(self):
+        found = run(OWN_BAR + """
+            focus.enter("tab_txt2img", HOST);
+            const out = {};
+            ["hidden", "peek", "shown", "sideways"].forEach((mode) => {
+                const answer = focus.setBar(mode);
+                out[mode] = Object.assign({answer}, marks());
+            });
+            console.log(JSON.stringify(out));
+        """)
+
+        assert found["hidden"] == {"answer": "hidden", "kept": True, "hidden": False, "mode": "hidden", "top": "0px"}
+        assert found["peek"]["mode"] == "peek" and found["peek"]["top"] == "0px"
+        assert found["shown"]["mode"] == "shown" and found["shown"]["top"] == "44px"
+        assert found["sideways"]["answer"] == "shown", "a mode it does not know changes nothing"
+
+    def test_the_choice_outlives_focus_going_off_and_on(self):
+        found = run(OWN_BAR + """
+            focus.setBar("hidden");
+            focus.enter("tab_txt2img", HOST);
+            const first = marks();
+            focus.exit();
+            focus.enter("tab_llm_studio", HOST);
+            console.log(JSON.stringify({first, second: marks()}));
+        """)
+
+        assert found["first"]["mode"] == "hidden" and found["first"]["top"] == "0px"
+        assert found["second"]["mode"] == "hidden" and found["second"]["kept"] is True
+
+    def test_leaving_takes_every_mark_of_the_bar_off(self):
+        found = run(OWN_BAR + """
+            focus.enter("tab_txt2img", HOST);
+            focus.exit();
+            console.log(JSON.stringify(Object.assign(marks(), {observed: globalThis.observed,
+                kept: focus.keptBar()})));
+        """)
+
+        assert found == {"kept": None, "hidden": False, "mode": None, "top": None, "observed": False}
+
+    def test_a_bar_whose_parent_is_not_on_the_workspaces_path_is_hidden_as_before(self):
+        """A theme that moved the bar into a header of its own puts it inside
+        chrome the rule takes out: kept, it would be fixed inside something
+        not drawn. It is hidden one at a time, as every such bar always was."""
+        found = run("""
+            const button = make("theme-txt2img-button", themeBar);
+            button.setAttribute("aria-controls", "tab_txt2img");
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify({
+                kept: themeBar.classList.contains("forge-assistant-focus-bar"),
+                hidden: themeBar.classList.contains("forge-assistant-focus-hidden"),
+                mode: document.body.getAttribute("data-forge-assistant-focus-bar"),
+                bar: focus.keptBar()}));
+        """)
+
+        assert found == {"kept": False, "hidden": True, "mode": None, "bar": None}
+
+    def test_a_workspace_that_is_not_painted_keeps_no_bar(self):
+        """The safety valve's plain overlay: every mark comes off, the bar's
+        with the rest."""
+        found = run(OWN_BAR + """
+            txt2img.box = {width: 0, height: 0};
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify(marks()));
+        """)
+
+        assert found == {"kept": False, "hidden": False, "mode": None, "top": None}
+
+
 class TestLeaving:
     def test_leaving_is_the_class_coming_off(self):
         found = run("""

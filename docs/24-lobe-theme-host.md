@@ -481,6 +481,59 @@ extensions' ids and the header's glyphs, the choice as Python registers it),
 and the setting in `tests/test_theme.py`. Twenty mutations each fail a test.
 Not run on the user's machine or in a Gecko build.
 
+**A thinner bar, a tab change that never shows a name, and the bar in focus
+mode (2026-10-22, after #298).** The user, with every tab on the bar: "make
+the tab bar shorter in height, more fit to the size of the buttons, but not
+all the way ... Minimum paddings"; "Let's make that entire row available in
+focus mode" (the Forge Assistant's side, docs/22 §3.37); and "when changing
+tab sometimes the tab name text renders and then turns back into icon.
+Let's make it so that never happens." Built:
+
+- **44 px** while the tabs are icons (`--mc-theme-header` on the root under
+  `data-mc-theme-tabs="icons"`, at every width): the 36 px buttons with 4 px
+  above and below. Everything held under the bar reads that property, so the
+  drawers and the results column's hold follow; the bar of names keeps its
+  64 px (56 on a phone).
+- **The flash.** Gradio 4.40's Tabs.svelte draws the selected tab and the
+  others from two branches of one `{#if}`, so every change of tab throws away
+  the pressed button and the one that was selected and makes new ones holding
+  only the name; the theme drew icons at Forge's after-update, a quarter of a
+  second after the page settles, and the new buttons showed their names until
+  then. Now a MutationObserver on the bar's own child list (`watchTabs`)
+  draws them in the microtask after the change, before the browser paints,
+  and the stylesheet gives the name no size on every tab button of the bar,
+  drawn or not (`.mc-theme-bar > button[role="tab"]`), so a button the script
+  has not reached shows nothing rather than its name. Watching the bar's
+  child list alone means an icon going into a button never wakes the
+  observer. Buttons Gradio threw away are dropped from what is put back
+  (`drawTabIcons`). Checked on **real Gradio 4.40.0** in Chromium (a Tabs page
+  with this script and stylesheet, a tab pressed, the buttons read in the next
+  animation frame): with `main`'s build every rebuilt button was painted with
+  its name at 14 px; with this one none was, and the buttons were still
+  rebuilt on every press. The layout test page now rebuilds the two buttons on
+  a press as Gradio does, instead of moving a class between them.
+- **The bar in the Forge Assistant's focus mode.** The assistant keeps the
+  workspace's own tab bar along the window's top (docs/22 §3.37); the theme's
+  two drawers go with it. The quick settings drawer is marked
+  `forge-assistant-focus-keep` so focus's rule leaves it in the layout, and
+  under focus it hangs from the bar's bottom edge
+  (`--forge-assistant-focus-top`), a step above the workspace, and is not drawn
+  while the bar is hidden. The extra networks drawer, which focus mode used to
+  keep out of the workspace, opens with the bar shown or peeking as on the
+  page, over the workspace's right edge from the bar's bottom, in both layouts
+  (the column layout's grid is not drawn in focus mode). In focus mode the bar
+  is fixed 8 px in from each side, so its ground (the icons mode's shadows, the
+  names mode's `::before`) reaches the window's edges as on the page.
+
+Tests: in `tests/test_theme_layout.py`, the bar's 44 px with the drawer
+hanging from it and the names bar's 64 px; a change of tab with the new
+buttons read synchronously (no size for their names) and in the next frame
+(icons and labels drawn); `TestTheBarInFocusMode` (the assistant's scripts on
+the theme's page); the phone test's 56 px translated to 44; two focus tests
+that held the bar out of focus mode translated to hold it with the bar
+hidden, and to measure it kept. Mutations are listed in docs/22 §3.37 and
+the commit. Not run on the user's machine or in a Gecko build.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own
