@@ -422,15 +422,35 @@ function onOptionsChanged(fn) {{ hooks.changed.push(fn); }}
 function onAfterUiUpdate(fn) {{ hooks.after.push(fn); }}
 function onUiTabChange(fn) {{ hooks.tab.push(fn); }}
 window.pressed = [];
-const mainButtons = [...document.querySelectorAll('#tabs > .tab-nav > button')];
-mainButtons.forEach((b) => b.addEventListener('click', () => {{
+// What Gradio 4.40 does for a press (its Tabs.svelte): the selected tab and the
+// others are two branches of one `{{#if}}`, so the button that was selected and
+// the one pressed are both thrown away and made again, holding only the tab's
+// name -- the selected one with no click handler of its own. Then its panel is
+// displayed, and Forge's script.js, seeing the change, runs the tab-change
+// callbacks. A page whose buttons merely swapped a class proved nothing about
+// what a theme drew on them.
+const tabNames = {json.dumps(dict(TABS))};
+function tabButton(id, selected) {{
+    const b = document.createElement('button');
+    b.setAttribute('role', 'tab');
+    b.id = id + '-button';
+    b.setAttribute('aria-controls', id);
+    b.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (selected) b.className = 'selected';
+    else b.addEventListener('click', () => pressTab(b));
+    b.textContent = tabNames[id];
+    return b;
+}}
+function pressTab(b) {{
     window.pressed.push(b.id);
-    // What Gradio does for a press: the button selected, its panel displayed, and
-    // what Forge's script.js does on seeing it: the tab-change callbacks.
-    mainButtons.forEach((x) => {{ x.classList.toggle('selected', x === b); x.setAttribute('aria-selected', x === b ? 'true' : 'false'); }});
-    document.querySelectorAll('#tabs > .tabitem').forEach((p) => {{ p.style.display = p.id === b.getAttribute('aria-controls') ? 'block' : 'none'; }});
+    const id = b.getAttribute('aria-controls');
+    const was = document.querySelector('#tabs > .tab-nav > button.selected');
+    if (was) was.replaceWith(tabButton(was.getAttribute('aria-controls'), false));
+    b.replaceWith(tabButton(id, true));
+    document.querySelectorAll('#tabs > .tabitem').forEach((p) => {{ p.style.display = p.id === id ? 'block' : 'none'; }});
     hooks.tab.forEach((fn) => fn());
-}}));
+}}
+document.querySelectorAll('#tabs > .tab-nav > button:not(.selected)').forEach((b) => b.addEventListener('click', () => pressTab(b)));
 function cardClicked(tabname, text) {{
     const area = document.querySelector('#' + tabname + '_prompt textarea');
     area.value = (area.value ? area.value + ', ' : '') + text;
@@ -1048,7 +1068,7 @@ class TestTheTabsAsIcons:
         assert rest["overflowX"] == "auto"
         assert rest["scrollWidth"] > rest["clientWidth"], "fourteen icons do not fit 374 px"
         assert rest["pageWidth"] == rest["innerWidth"], "the bar scrolls, never the page"
-        assert rest["bar"]["height"] == 56
+        assert rest["bar"]["height"] == 44, "the thin bar on a phone too"
         # The header's buttons at the bar's right edge, at rest and scrolled
         # to the end, where the last tab sits clear of them.
         for found in (rest, end):
@@ -1057,6 +1077,54 @@ class TestTheTabsAsIcons:
         last = end["tabRects"][-1]
         assert last["right"] <= end["actions"]["left"] and last["left"] >= end["bar"]["left"]
         assert end["title"]["right"] <= end["bar"]["left"], "the title scrolls away with the tabs"
+
+    def test_the_bar_is_thin_and_what_hangs_under_it_follows(self, browser):
+        """The 36 px buttons with 4 px above and below, asked for as "more fit
+        to the size of the buttons, but not all the way". The quick settings
+        drawer hangs from the bar's bottom edge, which is the one property
+        everything held under the bar reads."""
+        page = icon_page(browser)
+        page.click(".mc-theme-quick-toggle")
+        settle(page)
+        found = page.evaluate("""() => ({
+            bar: document.querySelector('#tabs > .tab-nav').getBoundingClientRect().height,
+            tab: document.querySelector('#tab_txt2img-button').getBoundingClientRect().height,
+            drawer: document.querySelector('#mc-theme-quick').getBoundingClientRect().top})""")
+        page.evaluate("opts.model_chain_theme_tab_labels = 'as_forge'")
+        changed(page)
+        names = page.evaluate("document.querySelector('#tabs > .tab-nav').getBoundingClientRect().height")
+        page.close()
+
+        assert found["bar"] == 44 and found["tab"] == 36
+        assert found["drawer"] == 44
+        assert names == 64, "the bar of names keeps its height"
+
+    def test_a_change_of_tab_never_shows_a_tabs_name(self, browser):
+        """Gradio 4.40 makes the pressed button and the one that was selected
+        again on every change of tab, holding only the name. The first build
+        drew their icons at Forge's after-update, a quarter of a second
+        later, and the names showed until then (the user's report). Right
+        after the press, before any script has run, the stylesheet already
+        gives the new buttons' names no size; by the next frame -- before the
+        browser paints -- they have their icons and their labels."""
+        page = icon_page(browser)
+        found = page.evaluate("""() => new Promise((done) => {
+            const press = document.querySelector('#tab_img2img-button');
+            press.click();
+            const fresh = ['#tab_img2img-button', '#tab_txt2img-button'].map((s) => document.querySelector(s));
+            const read = (b) => ({svg: !!b.querySelector(':scope > svg.mc-theme-tab-glyph'),
+                                  size: getComputedStyle(b).fontSize, width: b.getBoundingClientRect().width,
+                                  label: b.getAttribute('aria-label')});
+            const pressed = fresh.map(read);
+            requestAnimationFrame(() => done({rebuilt: !press.isConnected, pressed, frame: fresh.map(read)}));
+        })""")
+        page.close()
+
+        assert found["rebuilt"] is True, "the test page makes the buttons again, as Gradio does"
+        assert [b["size"] for b in found["pressed"]] == ["0px", "0px"]
+        assert [b["width"] for b in found["pressed"]] == [40, 40]
+        assert all(b["svg"] for b in found["frame"]), found["frame"]
+        assert [b["label"] for b in found["frame"]] == ["img2img", "txt2img"]
 
     def test_a_tab_selected_from_elsewhere_is_brought_into_view_once(self, browser):
         """Send to img2img, Mini Paint's sends and the settings button select a
@@ -1221,6 +1289,176 @@ class TestTheTabsAsIcons:
         assert found["labels"][extras] == "Extras (3)" and found["titles"][extras] == "Extras (3)"
 
 
+FOCUS_BAR = """() => {
+    const q = (s) => document.querySelector(s);
+    const rect = (el) => { if (!el) return null; const r = el.getBoundingClientRect();
+                           return {top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height}; };
+    const nav = q("#tabs > .tab-nav");
+    const root = q(".forge-assistant-focus-root");
+    const style = getComputedStyle(nav);
+    const at = (el) => { const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(
+        r.left + r.width / 2, r.top + Math.min(r.height / 2, 20)); return !!hit && el.contains(hit); };
+    const quick = q("#mc-theme-quick");
+    const networks = q("#mc-theme-networks-txt2img");
+    return {
+        mode: document.body.getAttribute("data-forge-assistant-focus-bar"),
+        kept: nav.classList.contains("forge-assistant-focus-bar"),
+        position: style.position, visibility: style.visibility, bar: rect(nav),
+        barOnTop: style.visibility === "visible" && at(q("#tab_img2img-button")),
+        root: root ? {id: root.id, rect: rect(root)} : null,
+        workspace: forgeAssistant.focus.activeWorkspace(),
+        quick: quick && !quick.hidden ? {display: getComputedStyle(quick).display, rect: rect(quick),
+                                         onTop: getComputedStyle(quick).display !== "none" && at(quick)} : null,
+        networks: networks && getComputedStyle(networks).display !== "none"
+            ? {rect: rect(networks), onTop: at(networks)} : null,
+        width: document.documentElement.clientWidth,
+    };
+}"""
+
+
+def focus_page(browser, width=1280, height=800, opts=None):
+    page = open_page(browser, dict(ICONS, **(opts or {})), width=width, height=height,
+                     assistant=USER_CSS_WHOLE)
+    settle(page, 8)
+    return page
+
+
+def enter_focus(page, tab="tab_txt2img"):
+    """Through the shell, as the launcher's three presses do (less the
+    browser's full screen), so the shell follows a switch of workspace."""
+    assert page.evaluate(f"forgeAssistant.shell.refocus('{tab}')") is True
+    settle(page, 6)
+
+
+class TestTheBarInFocusMode:
+    """The Forge Assistant's focus mode keeps the workspace's own tab bar
+    along the window's top: asked for once every tab was an icon on it
+    ("make that entire row available in focus mode ... by default"). The ⋯
+    menu's Tab Bar in Focus hides it, and then a tap on the launcher or the
+    panel's header brings it over the workspace for a moment."""
+
+    def test_the_bar_is_kept_along_the_top_and_the_workspace_starts_under_it(self, browser):
+        page = focus_page(browser)
+        enter_focus(page)
+        found = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert found["mode"] == "shown" and found["kept"] is True
+        assert found["position"] == "fixed" and found["visibility"] == "visible"
+        assert found["bar"]["top"] == 0 and found["bar"]["height"] == 44
+        assert found["bar"]["left"] == 8 and found["bar"]["right"] == found["width"] - 8, found["bar"]
+        assert found["root"]["rect"]["top"] == 44, "the workspace starts under the bar"
+        assert found["barOnTop"] is True, "a press on a tab reaches the tab"
+
+    def test_the_workspace_follows_the_bar_when_its_height_changes(self, browser):
+        """Measured, and measured again whenever the bar changes size: the
+        names' bar is 64 px where the icons' is 44."""
+        page = focus_page(browser)
+        enter_focus(page)
+        thin = page.evaluate(FOCUS_BAR)
+        page.evaluate("opts.model_chain_theme_tab_labels = 'as_forge'")
+        changed(page)
+        settle(page, 4)
+        names = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert thin["root"]["rect"]["top"] == 44
+        assert names["bar"]["height"] == 64 and names["root"]["rect"]["top"] == 64, names
+
+    def test_a_tab_pressed_on_the_bar_moves_focus_to_its_workspace(self, browser):
+        page = focus_page(browser)
+        enter_focus(page)
+        page.click("#tab_img2img-button")
+        settle(page, 6)
+        found = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert found["workspace"] == "tab_img2img" and found["root"]["id"] == "tab_img2img", found
+        assert found["kept"] is True and found["root"]["rect"]["top"] == 44
+
+    def test_the_bars_drawers_open_over_the_workspace_from_its_bottom_edge(self, browser):
+        """Its quick settings and extra networks buttons work in focus mode:
+        each drawer hangs from the bar's bottom edge, over the workspace."""
+        page = focus_page(browser)
+        enter_focus(page)
+        page.click(".mc-theme-quick-toggle")
+        settle(page, 4)
+        quick = page.evaluate(FOCUS_BAR)["quick"]
+        page.click(".mc-theme-quick-toggle")
+        page.click(".mc-theme-networks-toggle")
+        settle(page, 6)
+        networks = page.evaluate(FOCUS_BAR)["networks"]
+        page.close()
+
+        assert quick and quick["display"] != "none" and quick["rect"]["top"] == 44 and quick["onTop"], quick
+        assert networks and networks["rect"]["top"] == 44 and networks["onTop"], networks
+
+    def test_hidden_the_bar_and_its_drawers_are_gone_and_the_workspace_is_the_window(self, browser):
+        page = focus_page(browser)
+        page.click(".mc-theme-quick-toggle")
+        settle(page, 4)
+        page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+        enter_focus(page)
+        found = page.evaluate(FOCUS_BAR)
+        item = page.evaluate("(() => { const i = forgeAssistant.shell.utilityItems()"
+                             ".find((x) => x.textContent === 'Tab Bar in Focus');"
+                             " return {checked: i.getAttribute('aria-checked'), role: i.getAttribute('role')}; })()")
+        page.evaluate("forgeAssistant.shell.setFocusBar(true)")
+        settle(page, 4)
+        shown = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert found["mode"] == "hidden" and found["visibility"] == "hidden" and found["bar"]["bottom"] <= 0
+        assert found["root"]["rect"]["top"] == 0
+        assert found["quick"] is None or found["quick"]["display"] == "none", found["quick"]
+        assert item == {"checked": "false", "role": "menuitemcheckbox"}
+        assert shown["mode"] == "shown" and shown["root"]["rect"]["top"] == 44
+        assert shown["quick"]["display"] != "none", "the open drawer comes back with the bar"
+
+    def test_hidden_a_tap_on_the_launcher_brings_it_over_the_workspace_for_a_moment(self, browser):
+        page = focus_page(browser)
+        page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+        enter_focus(page)
+        page.click("#forge-assistant-launcher")
+        settle(page, 4)
+        peeking = page.evaluate(FOCUS_BAR)
+        page.wait_for_timeout(4600)
+        settle(page, 4)
+        after = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert peeking["mode"] == "peek" and peeking["visibility"] == "visible"
+        assert peeking["bar"]["top"] == 0 and peeking["barOnTop"] is True
+        assert peeking["root"]["rect"]["top"] == 0, "over the workspace, which stays where it was"
+        assert after["mode"] == "hidden" and after["visibility"] == "hidden"
+
+    def test_hidden_a_tap_on_the_panels_header_brings_it_too(self, browser):
+        page = focus_page(browser)
+        page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+        enter_focus(page)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page, 4)
+        grip = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-grip')"
+                             ".getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()")
+        page.mouse.click(*grip)
+        settle(page, 2)
+        found = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert found["mode"] == "peek" and found["visibility"] == "visible" and found["barOnTop"], found
+
+    def test_leaving_focus_puts_the_bar_back_in_the_page(self, browser):
+        page = focus_page(browser)
+        enter_focus(page)
+        page.evaluate("forgeAssistant.shell.toggleFocus()")
+        settle(page, 4)
+        found = page.evaluate(FOCUS_BAR)
+        page.close()
+
+        assert found["root"] is None and found["mode"] is None and found["kept"] is False
+        assert found["position"] == "sticky" and found["bar"]["top"] == 8
+
+
 class TestTheSplitView:
     def test_the_top_row_heads_the_settings_column_and_generate_heads_the_gallery(self, browser):
         page = open_page(browser)
@@ -1276,7 +1514,8 @@ class TestTheSplitView:
         under focus and four times that outside it, and asked for the page
         to match. Under the theme the page's padding is focus mode's inset
         on every side, measured here against the window's edges in both
-        modes, and the bar's ground reaches those edges through it."""
+        modes, and the bar's ground reaches those edges through it -- under
+        focus too, where the bar is kept along the window's top."""
         page = open_page(browser, assistant=USER_CSS_WHOLE)
         settle(page, 8)
         edges = """() => {
@@ -1303,7 +1542,8 @@ class TestTheSplitView:
         assert entered["ok"] is True
         settle(page, 8)
         focused = page.evaluate(edges)
-        assert focused["bar"]["display"] == "none"
+        assert focused["bar"]["display"] == "flex" and focused["bar"]["top"] == 0, focused
+        assert focused["bar"]["groundLeft"] == 0 and focused["bar"]["groundRight"] == 0, focused
         assert focused["left"] == 8 and focused["right"] == 8, focused
         page.evaluate("forgeAssistant.focus.exit()")
         settle(page, 4)
@@ -2467,10 +2707,11 @@ class TestWithTheForgeAssistant:
     def test_scrolling_keeps_the_column_in_view_under_the_bar_and_focus_mode_takes_the_whole_window(self, browser):
         """Normal mode: the settings scroll, the results column is held where
         it rests, a margin under the bar and never under it (it used to creep
-        up to that margin first; the one-scroller rule locks it). Focus mode:
-        the bar is hidden, the workspace is the window, the column is held at
-        its padding, where the fill measured it, scrolled or not; leaving
-        focus puts it back."""
+        up to that margin first; the one-scroller rule locks it). Focus mode
+        with the bar hidden (the Forge Assistant's Tab Bar in Focus off): the
+        workspace is the window, the column is held at its padding, where the
+        fill measured it, scrolled or not; leaving focus puts it back. The bar
+        kept, its default, is `TestTheBarInFocusMode`'s."""
         page = open_page(browser, assistant=USER_CSS_WHOLE)
         settle(page, 8)
         at_rest = page.evaluate(FILLED)
@@ -2484,14 +2725,17 @@ class TestWithTheForgeAssistant:
         page.evaluate("window.scrollTo(0, 0)")
         settle(page, 4)
 
+        page.evaluate("forgeAssistant.focus.setBar('hidden')")
         entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', forgeAssistant.shell.host)")
         assert entered["ok"] is True
         settle(page, 8)
         focused = page.evaluate(FILLED)
         root = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-focus-root');"
-                             " const b = r.getBoundingClientRect(); return {top: b.top, bottom: b.bottom,"
-                             " navDisplay: getComputedStyle(document.querySelector('#tabs > .tab-nav')).display}; })()")
-        assert root["navDisplay"] == "none", "the bar is not drawn under focus"
+                             " const b = r.getBoundingClientRect(); const nav = document.querySelector('#tabs > .tab-nav');"
+                             " return {top: b.top, bottom: b.bottom, navVisibility: getComputedStyle(nav).visibility,"
+                             " navBottom: nav.getBoundingClientRect().bottom}; })()")
+        assert root["navVisibility"] == "hidden" and root["navBottom"] <= 0, "the bar is not drawn under focus"
+        assert root["top"] == 0, "the workspace is the window"
         assert focused["marked"] is True and focused["reason"] == "", focused
         space = focused["buttons"]["top"] - focused["gallery"]["bottom"]
         assert abs(focused["generate"]["top"] - (root["top"] + space + 16)) <= 1, (focused, root)

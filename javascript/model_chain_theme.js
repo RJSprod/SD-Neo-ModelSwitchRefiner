@@ -105,6 +105,7 @@
     const MONOGRAM_ATTRIBUTE = "data-mc-theme-monogram"; // the letters of a tab with no icon
     const SETTINGS_SECTION = "Model Chain: Theme";
     const QUICK_ID = "mc-theme-quick";
+    const FOCUS_KEEP_CLASS = "forge-assistant-focus-keep"; // the Forge Assistant's: left in the layout by its focus mode
     const FONT_LINK_ID = "mc-theme-font";
     const HEADER_GAP_PX = 4;
 
@@ -464,7 +465,7 @@
             settings.addEventListener("click", openSettings);
             strip.addEventListener("wheel", wheelTabs, {passive: false});
             header = state.header = {strip, title, actions, more, menu, quickToggle, networksToggle,
-                                     icons: false, revealed: null};
+                                     icons: false, revealed: null, watcher: watchTabs(strip)};
         }
         // Written only when they differ. Forge runs every after-update
         // callback 250 ms after any change to a child list inside its app
@@ -501,6 +502,7 @@
         if (!header) return;
         header.strip.classList.remove(BAR_CLASS);
         header.strip.removeEventListener("wheel", wheelTabs, {passive: false});
+        if (header.watcher) header.watcher.disconnect();
         tabButtons(header.strip).forEach((button) => button.classList.remove(OVERFLOW_CLASS));
         if (header.title.parentElement) header.title.parentElement.removeChild(header.title);
         if (header.actions.parentElement) header.actions.parentElement.removeChild(header.actions);
@@ -714,6 +716,36 @@
         }
         setAttr(root(), TABS_ATTRIBUTE, "icons");
         if (state.header) state.header.icons = true;
+        drawTabIcons(strip);
+    }
+
+    /** Gradio 4.40 draws the selected tab and the others from two branches
+     *  of one `{#if}` (its Tabs.svelte), so every change of tab throws both
+     *  buttons away and makes new ones holding only the name. Drawn from
+     *  Forge's after-update, which runs a quarter of a second after the page
+     *  settles, the new buttons showed their names until then -- the user's
+     *  "the tab name text renders and then turns back into icon". A
+     *  MutationObserver's callback runs in the microtask after the change,
+     *  before the browser paints, so the new buttons are drawn before anyone
+     *  sees them; and the stylesheet sizes the name away on every tab button
+     *  of the bar, drawn or not, so not even a button this misses shows it.
+     *  Only the bar's own children are watched: an icon going into a button
+     *  is not a change to the bar's child list, so drawing never wakes it. */
+    function watchTabs(strip) {
+        if (typeof MutationObserver !== "function") return null;
+        const watcher = new MutationObserver(function () {
+            if (!state.header || state.header.strip !== strip || !state.header.icons) return;
+            attempt("draw the tabs' icons", function () { drawTabIcons(strip); });
+            scheduleFit();
+        });
+        watcher.observe(strip, {childList: true});
+        return watcher;
+    }
+
+    function drawTabIcons(strip) {
+        // The buttons Gradio has thrown away are forgotten: there is nothing
+        // of theirs to put back.
+        state.tabIcons = state.tabIcons.filter((entry) => entry.button.isConnected);
         tabButtons(strip).forEach((button) => {
             if (!button.classList.contains(TAB_ICON_CLASS)) {
                 state.tabIcons.push({button, title: button.getAttribute("title"),
@@ -1420,8 +1452,10 @@
         }
         let quick = state.quick;
         if (!quick) {
-            quick = make("aside", "mc-theme-drawer", {id: QUICK_ID, role: "complementary",
-                                                       "aria-label": "Quick settings"});
+            // The drawer goes with the bar into the Forge Assistant's focus
+            // mode, which keeps the bar along the top (style.css).
+            quick = make("aside", "mc-theme-drawer " + FOCUS_KEEP_CLASS,
+                         {id: QUICK_ID, role: "complementary", "aria-label": "Quick settings"});
             quick.hidden = true;
             mount(quick);
             state.quick = quick;

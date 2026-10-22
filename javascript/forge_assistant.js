@@ -69,6 +69,13 @@
     // fast pair is never missed. A single press waits this long to be sure it
     // is single before the panel opens.
     const TAP_WINDOW = 300;
+    // The workspace's own tab bar in focus mode, hidden by the ⋯ menu's switch:
+    // a tap on the launcher or on the header's space shows it over the
+    // workspace for this long, longer while it or what goes with it is
+    // pointed at, pressed or focused. The classes are the focus module's.
+    const PEEK_MS = 4000;
+    const FOCUS_BAR_CLASS = "forge-assistant-focus-bar";
+    const FOCUS_KEEP_CLASS = "forge-assistant-focus-keep";
     // The Conversation tab's open bridge: a box for a thread's id and a
     // button that opens it there (mc_llm_chat_panel.py). See `openInStudio`.
     const STUDIO_OPEN_AT = "mc-llm-chat-open-at";
@@ -400,6 +407,9 @@
             showAnyway: false,
             autoAttach: false,
             sendToGenerate: false,
+            // The workspace's own tab bar above the workspace in focus mode;
+            // off, it is hidden until a tap brings it for a moment.
+            focusBar: true,
         };
         this.settings = {
             enabled: true,
@@ -425,6 +435,9 @@
         this._restoreFloat();
         this._restoreAutoAttach();
         this._restoreSendToGenerate();
+        this._restoreFocusBar();
+        this.peekTimer = 0;
+        this.applyFocusBar();
         // Which picture Auto Attach last sent, per conversation. See
         // `autoAttachable`.
         this.autoSent = new Map();
@@ -555,6 +568,27 @@
         try {
             window.localStorage.setItem(this._sendToGenerateKey(),
                                         this.state.sendToGenerate ? "on" : "off");
+        } catch (error) { /* memory only; the switch still works */ }
+    };
+
+    // The tab bar in focus mode, the same way: a preference about how focus
+    // looks, remembered in this browser under a key of its own, on until
+    // turned off.
+    Shell.prototype._focusBarKey = function () {
+        return "forge-assistant-focus-bar:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreFocusBar = function () {
+        try {
+            this.state.focusBar = window.localStorage.getItem(this._focusBarKey()) !== "off";
+        } catch (error) {
+            this.state.focusBar = true;
+        }
+    };
+
+    Shell.prototype._saveFocusBar = function () {
+        try {
+            window.localStorage.setItem(this._focusBarKey(), this.state.focusBar ? "on" : "off");
         } catch (error) { /* memory only; the switch still works */ }
     };
 
@@ -2062,6 +2096,10 @@
             this.store.flushDrafts();
         });
         this.on(document, "keydown", (event) => this.documentKey(event), true);
+        // The peeking tab bar's moment, renewed by what is done on it.
+        ["pointerdown", "pointermove", "focusin", "keydown", "wheel"].forEach((type) => {
+            this.on(document, type, (event) => this.notePeek(event), {capture: true, passive: true});
+        });
         // The browser's full screen, which focus asks for and the browser can
         // end without asking anybody. Both names: Safari's are prefixed. See
         // `enterScreen`.
@@ -2401,6 +2439,9 @@
      * has passed with no further press, since either may still become more.
      */
     Shell.prototype.tapLauncher = function (event) {
+        // In focus mode with the tab bar hidden, any press on the launcher
+        // shows it for a moment, whatever else the press goes on to do.
+        this.peekBar();
         // A keyboard activation is one press, and nobody pressing Enter
         // expects to wait to find out whether they pressed it again.
         if (!event || !event.detail) {
@@ -2495,6 +2536,9 @@
      * on it but the count.
      */
     Shell.prototype.tapHeader = function () {
+        // Like the launcher: in focus mode with the tab bar hidden, a tap
+        // here shows it for a moment, at once, whether or not more follow.
+        this.peekBar();
         const taps = (this.headerTaps || 0) + 1;
         this.resetHeaderTaps();
         if (taps >= 3) {
@@ -2561,7 +2605,94 @@
         this.state.focusEnabled = false;
         this.state.focusWorkspaceId = null;
         this.markFocus(false);
+        this.endPeek();
         this.leaveScreen();
+    };
+
+    // -- the tab bar in focus mode ------------------------------------------ //
+    //
+    // Focus keeps the workspace's own tab bar along the top of the window
+    // (forge_assistant_focus.js): asked for once every tab was a button on it.
+    // Shown above the workspace by default; the ⋯ menu's Tab Bar in Focus
+    // hides it, and then a tap on the launcher or on the header's space
+    // brings it over the workspace's top for a moment -- PEEK_MS, renewed by
+    // anything done on it or on what goes with it (the theme's quick
+    // settings), and held while it is pointed at or holds the keyboard's
+    // focus. A tab pressed on it is the host's own, and focus follows it.
+
+    Shell.prototype.applyFocusBar = function () {
+        if (!this.focus || typeof this.focus.setBar !== "function") return;
+        this.focus.setBar(this.state.focusBar ? "shown" : (this.peekTimer ? "peek" : "hidden"));
+    };
+
+    Shell.prototype.setFocusBar = function (on) {
+        this.state.focusBar = !!on;
+        this._saveFocusBar();
+        this.endPeek();
+        this.applyFocusBar();
+        this.tell(on ? "The tab bar shows above the workspace in focus mode."
+            : "The tab bar is hidden in focus mode: a tap on the button or on the panel's "
+              + "header shows it for a moment.", "info");
+        return this.state.focusBar;
+    };
+
+    /** The bar over the workspace for a moment, when focus is on with the bar
+     *  hidden and kept for this workspace; true if it peeks. */
+    Shell.prototype.peekBar = function () {
+        if (this.state.focusBar || !this.focus || typeof this.focus.setBar !== "function"
+            || !this.focus.isActive() || !this.focus.keptBar()) return false;
+        this.focus.setBar("peek");
+        this.armPeek();
+        return true;
+    };
+
+    Shell.prototype.armPeek = function () {
+        if (this.peekTimer) window.clearTimeout(this.peekTimer);
+        this.peekTimer = window.setTimeout(() => {
+            this.peekTimer = 0;
+            if (this.peekHeld()) this.armPeek();
+            else this.endPeek();
+        }, PEEK_MS);
+    };
+
+    /** Pointed at by a mouse, or holding a focus that shows -- the bar, or
+     *  anything the page marked to go with it. A finger's tap leaves `:hover`
+     *  on what it tapped and focus on the button it pressed, and either would
+     *  hold the bar for good: so hover counts for a mouse alone, and focus
+     *  only where the browser draws it (`:focus-visible`: the keyboard's, or a
+     *  text box being typed in). */
+    Shell.prototype.peekHeld = function () {
+        const nodes = [this.focus.keptBar()].concat(
+            Array.prototype.slice.call(document.querySelectorAll("." + FOCUS_KEEP_CLASS)));
+        const active = document.activeElement;
+        const matches = (node, selector) => {
+            try {
+                return !!node && typeof node.matches === "function" && node.matches(selector);
+            } catch (error) {
+                return false;
+            }
+        };
+        const typing = matches(active, ":focus-visible");
+        return nodes.some((node) => !!node
+            && ((this.peekPointer === "mouse" && matches(node, ":hover"))
+                || (typing && node.contains(active))));
+    };
+
+    Shell.prototype.endPeek = function () {
+        if (this.peekTimer) window.clearTimeout(this.peekTimer);
+        this.peekTimer = 0;
+        if (this.focus && this.focus.barMode === "peek") this.applyFocusBar();
+    };
+
+    /** Something done on the peeking bar, or on what goes with it, renews the
+     *  moment: a tab hunted for, a quick setting changed. Heard in the capture
+     *  phase and passively, and asked nothing unless the bar is peeking. */
+    Shell.prototype.notePeek = function (event) {
+        if (event && event.pointerType) this.peekPointer = event.pointerType;
+        if (!this.peekTimer) return;
+        const target = event && event.target;
+        if (!target || typeof target.closest !== "function") return;
+        if (target.closest("." + FOCUS_BAR_CLASS + ", ." + FOCUS_KEEP_CLASS)) this.armPeek();
     };
 
     /** Whether focus is on, written on the panel for anything that draws
@@ -2980,7 +3111,7 @@
         if (NS.systemEditor) items.push(this.systemPromptItem());
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
-        items.push(this.groupLabel("Panel"), this.floatItem());
+        items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem());
         if (NS.look) items.push(this.customizeItem());
         const utilities = this.host.listUtilities();
         // Models: where the loaded LoRA's originals live, then whatever the
@@ -3121,6 +3252,26 @@
         item.addEventListener("click", () => {
             this.closeMenu();
             this.setFreeFloat(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.focusBarItem = function () {
+        const on = !!this.state.focusBar;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-focus-bar-switch",
+                             "Tab Bar in Focus");
+        item.type = "button";
+        // A mode, like Free Float above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Hide the tab bar in focus mode: a tap on the button or on the panel's header "
+              + "shows it for a moment"
+            : "Show the tab bar above the workspace in focus mode";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setFocusBar(!on);
         });
         return item;
     };

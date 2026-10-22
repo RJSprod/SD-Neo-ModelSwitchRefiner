@@ -952,10 +952,19 @@
    sideways where they do not fit, in place of the menu under the ellipsis.
    The name stays in the button at no size, for Forge's scripts and Mini
    Paint's, which read a tab by its text; the script puts it on the button
-   as its label and its tooltip. The rule that sizes the name away names
-   the button and never the bar, because no selector naming a tab bar may
-   hide anything in it (focus mode's rule); `#tabs` gives it the weight to
+   as its label and its tooltip. The rule that sizes the name away is for
+   every tab button of the bar, drawn or not: Gradio makes new buttons on
+   every change of tab, and a button the script has not reached yet shows
+   nothing rather than its name. It names the bar by the theme's class and
+   never as a tab bar, because no selector naming a tab bar may hide
+   anything in it (focus mode's rule); `#tabs` gives it the weight to
    outrank the header's own rule for the tab buttons. */
+
+/* A thinner bar: the 36 px buttons with 4 px above and below, at every
+   width. Everything held under the bar reads this one property. */
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] {
+    --mc-theme-header: 44px;
+}
 
 /* A sideways swipe the bar cannot take -- at its first tab, swiped right --
    is Chromium's Back, which it decides from the page root's
@@ -1000,7 +1009,7 @@
     box-shadow: -12px 0 12px -4px var(--body-background-fill);
 }
 
-:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs button[role="tab"].mc-theme-tab-icon {
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs .mc-theme-bar > button[role="tab"] {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1011,7 +1020,7 @@
     line-height: 0;
 }
 
-:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs button[role="tab"].mc-theme-tab-icon > .mc-theme-tab-glyph {
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs .mc-theme-bar > button[role="tab"] > .mc-theme-tab-glyph {
     flex: none;
     width: 20px;
     height: 20px;
@@ -1019,7 +1028,7 @@
 
 /* A tab with no icon of its own: its first two letters, drawn, so the
    button's text stays the tab's name. */
-:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs button[role="tab"].mc-theme-tab-icon[data-mc-theme-monogram]::before {
+:root[data-mc-theme="on"][data-mc-theme-tabs="icons"] #tabs .mc-theme-bar > button[role="tab"][data-mc-theme-monogram]::before {
     content: attr(data-mc-theme-monogram);
     font-size: 12px;
     font-weight: 700;
@@ -1043,6 +1052,21 @@
     background: var(--body-background-fill);
     border-right: 1px solid var(--border-color-primary);
     box-shadow: var(--shadow-drop-lg);
+}
+
+/* In the Forge Assistant's focus mode the drawer goes with the bar its button
+   is on: the assistant leaves it in the layout (the script marks it
+   `forge-assistant-focus-keep`), it hangs from the bar's bottom while the bar
+   is shown -- from the window's top while the bar peeks over the workspace --
+   a step above the workspace and under the bar, and with the bar hidden it is
+   not drawn, as focus mode drew none of the page's chrome before. */
+:root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-drawer {
+    top: var(--forge-assistant-focus-top, 0px);
+    z-index: calc(var(--forge-assistant-workspace-layer, 1100) + 1);
+}
+
+:root[data-mc-theme="on"] body.forge-assistant-focused:not([data-forge-assistant-focus-bar="shown"]):not([data-forge-assistant-focus-bar="peek"]) .mc-theme-drawer {
+    display: none;
 }
 
 /* Forge lays the quick settings out as a row of fitted boxes; in the drawer
@@ -1258,15 +1282,42 @@
     }
 }
 
-/* Focus mode is the workspace alone: the drawer, which now lives inside the
-   workspace's own tab, stays out of it as it did when it lived outside. */
-:root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-networks-host > .mc-theme-networks,
-:root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-networks-host > .mc-theme-networks-page.mc-theme-networks-shown {
+/* Focus mode (the Forge Assistant's) with the bar hidden is the workspace
+   alone: the drawer, which lives inside the workspace's own tab, stays out
+   of it. With the bar shown or peeking -- the assistant keeps the bar along
+   the top, and its Extra networks button with it -- the drawer opens as it
+   does on the page, over the workspace's right edge from the bar's bottom,
+   and in both layouts: the column layout's grid is not drawn in focus mode,
+   where the workspace is its own scroller and has no header to stick
+   under. */
+:root[data-mc-theme="on"] body.forge-assistant-focused:not([data-forge-assistant-focus-bar="shown"]):not([data-forge-assistant-focus-bar="peek"]) .mc-theme-networks-host > .mc-theme-networks,
+:root[data-mc-theme="on"] body.forge-assistant-focused:not([data-forge-assistant-focus-bar="shown"]):not([data-forge-assistant-focus-bar="peek"]) .mc-theme-networks-host > .mc-theme-networks-page.mc-theme-networks-shown {
     display: none !important;
 }
 
 :root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-networks-host.mc-theme-networks-open {
     display: block;
+}
+
+:root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-networks-host.mc-theme-networks-open > .mc-theme-networks {
+    position: fixed;
+    top: var(--forge-assistant-focus-top, 0px);
+    right: 0;
+    width: var(--mc-theme-networks-width, 340px);
+    max-width: 100vw;
+    box-shadow: var(--shadow-drop-lg);
+}
+
+:root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-networks-host.mc-theme-networks-open > .mc-theme-networks-page.mc-theme-networks-shown {
+    position: fixed !important;
+    top: calc(var(--forge-assistant-focus-top, 0px) + var(--mc-theme-networks-chrome, 0px));
+    right: 0;
+    bottom: 0;
+    width: var(--mc-theme-networks-width, 340px);
+    max-width: 100vw;
+    max-height: none;
+    margin-top: 0;
+    box-shadow: var(--shadow-drop-lg);
 }
 
 /* The page's own controls -- search, sort, refresh -- in the head. */
@@ -8800,9 +8851,42 @@
    nominally on top of it.
 
    `[hidden]` is excluded from the "not" list deliberately: something already
-   hidden stays hidden, and comes back hidden. */
-body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root):not(#forge-assistant-root):not([role="dialog"]):not([aria-modal="true"]) {
+   hidden stays hidden, and comes back hidden. The workspace's own tab bar,
+   when the script keeps it, is not chrome to take out (below), and nor is
+   what another part of the page marked to go with it. */
+body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root):not(#forge-assistant-root):not([role="dialog"]):not([aria-modal="true"]):not(.forge-assistant-focus-bar):not(.forge-assistant-focus-keep) {
     display: none !important;
+}
+
+/* The workspace's own tab bar, kept along the top of the window: the strip
+   holding the button that shows the workspace, marked by the script, which
+   found it by that button and checked it holds neither the workspace nor
+   the assistant -- the reason no rule here names a tab bar. Fixed, as wide as
+   the workspace's content (the root's 8 px inset at each side), a step
+   above the workspace and below the assistant. Three modes, said on the
+   body: shown, with the workspace starting under it (the root's top is the
+   bar's bottom, measured, `--forge-assistant-focus-top`); hidden, above the
+   window's top edge; and peeking, over the workspace's top for a moment,
+   with the workspace where it was. Nothing is moved in the DOM: the host's
+   buttons work as they do on the page, and focus follows the tab chosen. */
+body.forge-assistant-focused .forge-assistant-focus-bar {
+    position: fixed !important;
+    top: 0 !important;
+    right: 8px !important;
+    bottom: auto !important;
+    left: 8px !important;
+    z-index: calc(var(--forge-assistant-workspace-layer, 1100) + 2) !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+    background: var(--body-background-fill, var(--background-fill-primary, #101010)) !important;
+}
+
+/* Hidden at once, with no slide: a transition would also run as focus came
+   on, and show the bar sliding away from a workspace it was never meant to be
+   over. */
+body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-assistant-focus-bar {
+    transform: translateY(calc(-100% - 2px)) !important;
+    visibility: hidden !important;
 }
 
 /* Chrome the script decided to hide: a tab bar the theme moved somewhere the
@@ -8838,7 +8922,9 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 .forge-assistant-focus-root {
     position: fixed !important;
     inset: 0 !important;
-    top: 0 !important;
+    /* Under the workspace's own tab bar while it is shown (above), at the
+       window's top edge otherwise: the script writes the bar's bottom. */
+    top: var(--forge-assistant-focus-top, 0px) !important;
     right: 0 !important;
     bottom: 0 !important;
     left: 0 !important;

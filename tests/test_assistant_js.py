@@ -1865,6 +1865,31 @@ class TestTheHostReadsForgesTabs:
 
         assert found["active"] == "tab_txt2img"
 
+    def test_in_focus_mode_the_hosts_choice_is_gradios_own_word_on_each_panel(self):
+        """Focus's rules draw the panels: the focused one fixed over the window
+        whatever is selected, the others out of the layout. With the tab bar
+        kept in focus mode a tab pressed on it -- Gradio switching its panels'
+        inline display -- read as no change, and focus stayed on the old
+        workspace. In focus mode the inline display Gradio wrote decides."""
+        found = run(HOST_TREE + """
+            const tree = forgeTree();
+            document.body = tree.body;
+            tree.body.classList.add("forge-assistant-focused");
+            tree.txt2img.style.display = "none";
+            tree.img2img.style.display = "block";
+            const drawn = {tab_txt2img: "block", tab_img2img: "none", tab_llm_studio: "none"};
+            const computed = globalThis.getComputedStyle;
+            globalThis.getComputedStyle = (node) => Object.assign({}, computed(node),
+                node && drawn[node.id] ? {display: drawn[node.id]} : {});
+            const host = NS.host();
+            const focused = host.getActiveWorkspace();
+            tree.body.classList.remove("forge-assistant-focused");
+            console.log(JSON.stringify({focused, page: host.getActiveWorkspace()}));
+        """, sources=("host",))
+
+        assert found["focused"] == "tab_img2img"
+        assert found["page"] == "tab_txt2img", "out of focus mode, what is drawn decides, as before"
+
     def test_buttons_are_paired_with_panels_by_aria_controls_not_by_position(self):
         """Gradio renders the panel of a tab that is not offered -- `visible`
         false -- and leaves out its button. Paired by position, every workspace
@@ -2061,6 +2086,179 @@ class TestEveryMenuHasAWayOut:
         toggle = shell.split("Shell.prototype.toggleMenu = function", 1)[1] \
             .split("Shell.prototype", 1)[0]
         assert "showMenu" in toggle and "cancelItem" not in toggle
+
+
+PEEK = """
+// A shell whose focus answers for the tab bar it keeps, and timers a test can
+// run: the peek's moment is a timeout.
+const timers = [];
+window.setTimeout = (fn, ms) => { timers.push({fn, ms, cleared: false}); return timers.length; };
+window.clearTimeout = (id) => { if (timers[id - 1]) timers[id - 1].cleared = true; };
+const live = () => timers.filter((t) => !t.cleared);
+const fire = () => { const t = live().pop(); t.cleared = true; t.fn(); };
+const store = {};
+globalThis.localStorage = {getItem: (k) => (k in store ? store[k] : null),
+                           setItem: (k, v) => { store[k] = String(v); }};
+NS.basePath = NS.basePath || (() => "/");
+function peeking(options) {
+    const bar = {matches: () => false, contains: () => false};
+    const shell = picker(null, {
+        on: "tab_txt2img", barMode: "shown", modes: [],
+        setBar(mode) { this.barMode = mode; this.modes.push(mode); return mode; },
+        keptBar() { return this.on ? bar : null; },
+    });
+    shell.state.focusBar = !!(options && options.shown);
+    shell.peekTimer = 0;
+    shell.told = [];
+    shell.tell = (text) => shell.told.push(text);
+    shell.leaveScreen = () => {};
+    shell.resetTaps = () => {};
+    shell.resetHeaderTaps = () => {};
+    shell.open = () => {};
+    return {shell, bar};
+}
+"""
+
+
+class TestTheTabBarInFocusMode:
+    """The ⋯ menu's Tab Bar in Focus, and the moment a tap brings the hidden
+    bar back for. Chromium holds what is drawn (tests/test_theme_layout.py,
+    `TestTheBarInFocusMode`); node holds the rules and the clock."""
+
+    def test_the_switch_is_a_checkbox_that_is_remembered_and_tells_focus(self):
+        found = run(PICKER + PEEK + """
+            const {shell} = peeking({shown: true});
+            const item = shell.focusBarItem();
+            const before = {checked: item.getAttribute("aria-checked"), role: item.getAttribute("role")};
+            item.handlers.click.forEach((fn) => fn());
+            shell._restoreFocusBar();
+            console.log(JSON.stringify({before, after: shell.state.focusBar, modes: shell.focus.modes,
+                                        stored: Object.values(store), closed: shell.closed}));
+        """, sources=("shell",))
+
+        assert found["before"] == {"checked": "true", "role": "menuitemcheckbox"}
+        assert found["after"] is False, "read back off, as a reload would"
+        assert found["modes"] == ["hidden"] and found["stored"] == ["off"]
+        assert found["closed"] == 1
+
+    def test_on_until_turned_off(self):
+        found = run(PICKER + PEEK + """
+            const {shell} = peeking();
+            shell._restoreFocusBar();
+            console.log(JSON.stringify({on: shell.state.focusBar}));
+        """, sources=("shell",))
+
+        assert found["on"] is True
+
+    def test_a_tap_brings_the_hidden_bar_only_in_focus_mode(self):
+        found = run(PICKER + PEEK + """
+            const out = {};
+            let {shell} = peeking();
+            out.hidden = [shell.peekBar(), shell.focus.barMode, live().map((t) => t.ms)];
+            ({shell} = peeking({shown: true}));
+            out.shown = [shell.peekBar(), shell.focus.modes];
+            ({shell} = peeking());
+            shell.focus.on = "";
+            out.unfocused = [shell.peekBar(), shell.focus.modes];
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        assert found["hidden"][:2] == [True, "peek"] and found["hidden"][2][-1] == 4000
+        assert found["shown"] == [False, []], "a shown bar has nothing to peek"
+        assert found["unfocused"] == [False, []]
+
+    def test_the_launcher_and_the_headers_space_both_bring_it(self):
+        found = run(PICKER + PEEK + """
+            const out = {};
+            let {shell} = peeking();
+            shell.tapLauncher({detail: 1});
+            out.launcher = shell.focus.barMode;
+            ({shell} = peeking());
+            shell.tapLauncher(null);
+            out.keyboard = shell.focus.barMode;
+            ({shell} = peeking());
+            shell.tapHeader();
+            out.header = shell.focus.barMode;
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        assert found == {"launcher": "peek", "keyboard": "peek", "header": "peek"}
+
+    def test_the_moment_ends_unless_something_holds_it(self):
+        found = run(PICKER + PEEK + """
+            const out = {};
+            let {shell, bar} = peeking();
+            shell.peekBar();
+            fire();
+            out.alone = shell.focus.barMode;
+            // A mouse resting on the bar holds it; its moment begins again.
+            ({shell, bar} = peeking());
+            shell.peekBar();
+            shell.notePeek({pointerType: "mouse", target: {closest: () => null}});
+            bar.matches = (selector) => selector === ":hover";
+            fire();
+            out.mouse = [shell.focus.barMode, live().length];
+            // A finger's tap leaves :hover on what it tapped: that holds nothing.
+            ({shell, bar} = peeking());
+            shell.peekBar();
+            shell.notePeek({pointerType: "touch", target: {closest: () => null}});
+            bar.matches = (selector) => selector === ":hover";
+            fire();
+            out.finger = shell.focus.barMode;
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        assert found["alone"] == "hidden"
+        assert found["mouse"] == ["peek", 1]
+        assert found["finger"] == "hidden"
+
+    def test_focus_held_by_a_pressed_button_holds_nothing_but_a_typed_one_does(self):
+        found = run(PICKER + PEEK + """
+            const out = {};
+            const pressed = {matches: (s) => false};
+            const typed = {matches: (s) => s === ":focus-visible"};
+            let {shell, bar} = peeking();
+            bar.contains = (node) => node === pressed || node === typed;
+            shell.peekBar();
+            document.activeElement = pressed;
+            fire();
+            out.pressed = shell.focus.barMode;
+            ({shell, bar} = peeking());
+            bar.contains = (node) => node === pressed || node === typed;
+            shell.peekBar();
+            document.activeElement = typed;
+            fire();
+            out.typed = shell.focus.barMode;
+            document.activeElement = null;
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        assert found == {"pressed": "hidden", "typed": "peek"}
+
+    def test_something_done_on_the_bar_renews_the_moment_and_elsewhere_does_not(self):
+        found = run(PICKER + PEEK + """
+            const {shell} = peeking();
+            shell.peekBar();
+            const first = live().length;
+            shell.notePeek({target: {closest: () => null}});
+            const elsewhere = timers.length;
+            shell.notePeek({target: {closest: (s) => s.indexOf("forge-assistant-focus-bar") >= 0 ? {} : null}});
+            console.log(JSON.stringify({first, elsewhere, on: timers.length, live: live().length}));
+        """, sources=("shell",))
+
+        assert found["first"] == 1
+        assert found["elsewhere"] == 1, "a press elsewhere renews nothing"
+        assert found["on"] == 2 and found["live"] == 1, "renewed: the old moment cleared, a new one armed"
+
+    def test_focus_going_off_ends_the_moment(self):
+        found = run(PICKER + PEEK + """
+            const {shell} = peeking();
+            shell.peekBar();
+            shell.focusOff();
+            console.log(JSON.stringify({mode: shell.focus.barMode, live: live().length}));
+        """, sources=("shell",))
+
+        assert found == {"mode": "hidden", "live": 0}
 
 
 class TestSwitchingWorkspaceWhileFocused:
@@ -2523,7 +2721,7 @@ class TestFreeFloat:
 
         assert found["labels"] == ["Chat · Ada", "New chat", "Threads",
                                    "Composer", "Auto Attach", "Send to Generate",
-                                   "Panel", "Free Float",
+                                   "Panel", "Free Float", "Tab Bar in Focus",
                                    "Models", "Warm LoRA", "Cold LoRA",
                                    "Unload All Models", "Unload LLM"]
         assert found["checked"] == "false"

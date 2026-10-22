@@ -230,6 +230,7 @@ class TestTheMenuIsGrouped:
             ["BUTTON", "menuitemcheckbox", "Send to Generate"],
             ["DIV", "presentation", "Panel"],
             ["BUTTON", "menuitemcheckbox", "Free Float"],
+            ["BUTTON", "menuitemcheckbox", "Tab Bar in Focus"],
             ["BUTTON", "menuitem", "Customize…"],
             ["DIV", "presentation", "Models"],
             ["BUTTON", "menuitemradio", "Warm LoRA"],

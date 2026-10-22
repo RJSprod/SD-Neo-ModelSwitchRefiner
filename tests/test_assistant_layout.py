@@ -424,6 +424,9 @@ def test_the_gallery_fills_the_view_between_generate_and_its_buttons(browser):
 
 
 def test_focus_mode_spaces_the_gallery_in_its_own_view(browser):
+    """The workspace's own tab bar is kept along the window's top by default,
+    and the view starts under it; with the bar hidden (the ⋯ menu's Tab Bar in
+    Focus off) the view is the window. Spaced alike either way."""
     page = open_page(browser)
     try:
         entered = page.evaluate("forgeAssistant.focus.enter('tab_txt2img', "
@@ -431,9 +434,18 @@ def test_focus_mode_spaces_the_gallery_in_its_own_view(browser):
         assert entered["ok"] is True
         settle(page)
         found = measure(page)
+        bar = page.evaluate("document.querySelector('.tab-nav').getBoundingClientRect().bottom")
+        assert bar == 40 and found["view"]["top"] == bar, (bar, found["view"])
+        assert_spaced(found)
+        assert found["first"] <= bar + 80, "the header's reservation is gone"
+
+        page.evaluate("forgeAssistant.focus.setBar('hidden')")
+        settle(page)
+        found = measure(page)
         assert found["view"]["top"] == 0
         assert_spaced(found)
         assert found["first"] <= 80, "the header's reservation is gone"
+        page.evaluate("forgeAssistant.focus.setBar('shown')")
 
         page.evaluate("forgeAssistant.focus.exit()")
         settle(page)

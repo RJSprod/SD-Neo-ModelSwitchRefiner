@@ -63,6 +63,12 @@
         return true;
     }
 
+    /** Focus mode is on: the focus module's class on the body. */
+    function focusing() {
+        const body = document.body;
+        return !!(body && body.classList && body.classList.contains("forge-assistant-focused"));
+    }
+
     function depth(node, top) {
         let count = 0;
         let walk = node;
@@ -230,8 +236,22 @@
         if (!workspaces.length) return "";
         // The authority is which *panel* is showing, not which button looks
         // selected: a theme is free to restyle the button and several do.
-        const showing = workspaces.find((item) => item.panel && visible(item.panel));
-        if (showing) return showing.id;
+        //
+        // Except in focus mode, where focus's own rules draw the panels: the
+        // focused one fixed over the window whatever is selected, every other
+        // one taken out of the layout. What shows there says nothing about the
+        // host's choice, and a tab pressed on the bar focus keeps -- or a Send
+        // to img2img -- read as no change at all. Gradio's own word on each
+        // panel is its inline display, written on every switch; that is read
+        // there, and the selected button after it.
+        if (focusing()) {
+            const chosen = workspaces.find((item) => item.panel && item.panel.style
+                && item.panel.style.display && item.panel.style.display !== "none");
+            if (chosen) return chosen.id;
+        } else {
+            const showing = workspaces.find((item) => item.panel && visible(item.panel));
+            if (showing) return showing.id;
+        }
         const selected = workspaces.find((item) => item.button.classList.contains("selected")
             || item.button.getAttribute("aria-selected") === "true");
         return selected && selected.panel ? selected.id : "";

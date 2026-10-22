@@ -548,7 +548,7 @@ const box = {};
 globalThis.localStorage = {getItem: (k) => box[k] === undefined ? null : box[k],
                            setItem: (k, v) => { box[k] = String(v); }};
 const shell = Object.create(NS.Shell.prototype);
-shell.state = {freeFloat: true, autoAttach: false, sendToGenerate: true};
+shell.state = {freeFloat: true, autoAttach: false, sendToGenerate: true, focusBar: false};
 shell.host = {listUtilities: () => []};
 shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
 shell.nodes = {status: {dataset: {}, textContent: ""}};
@@ -567,10 +567,10 @@ class TestTheMenuSaysWhatIsOn:
                 .map((item) => [item.textContent, item.getAttribute("aria-checked")])));
         """)
 
-        # In the menu's order: the Composer group's two, then Free Float in
-        # the Panel group.
+        # In the menu's order: the Composer group's two, then Free Float and
+        # Tab Bar in Focus in the Panel group.
         assert found == [["Auto Attach", "false"], ["Send to Generate", "true"],
-                         ["Free Float", "true"]]
+                         ["Free Float", "true"], ["Tab Bar in Focus", "false"]]
 
     def test_the_check_is_drawn_from_that_state(self):
         on = rule('.forge-assistant-menu-item[role="menuitemcheckbox"]'
