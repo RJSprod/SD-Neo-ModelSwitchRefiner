@@ -1014,6 +1014,28 @@ class TestEditModeOrchestration:
 
         assert chain.refine_calls[0].override_settings == {"klein_do_reference": True}
 
+    def test_fibo2_is_overridden_by_its_own_toggle_end_to_end(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("fibo2"))
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Disable")
+
+        assert chain.refine_calls[0].override_settings == {"fibo2_do_reference": False}
+
+    def test_a_fibo2_edit_at_a_low_denoise_is_called_out(self, chain, host, image_factory, monkeypatch):
+        """FIBO 2's edits want denoise 1, and its toggle is on by default, so a
+        refine at the usual 0.35 is an edit at a denoise it was not made for."""
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("fibo2"))
+        host.shared.opts.fibo2_do_reference = True
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Auto", denoise=0.35)
+
+        assert "FIBO 2.0 edit mode" in processed.comments
+        assert chain.refine_calls[0].override_settings == {}
+
     def test_stale_references_are_cleared_before_refining(self, krea2_target, host, image_factory, monkeypatch):
         """A cached model keeps its engine -- and its reference list -- around."""
         cleared = []
@@ -1423,3 +1445,62 @@ class TestDenoiseDefault:
         )
 
         assert "denoise 0.3 is" in processed.comments
+
+
+# --------------------------------------------------------------------------- #
+# The engine is told the pass's size, where its own script would have
+# --------------------------------------------------------------------------- #
+
+
+class TestTheEngineIsToldEachRefinesSize:
+    """FIBO 2's engine crops a single picture to edit to the result's size, which
+    its extension's script hands it at the start of every ordinary generation.
+    Stage 2 runs without scripts, so a cached engine kept its last ordinary
+    generation's size: a 1024x1024 crop of an 832x1216 Stage 1 image, refined
+    into a 1248x1824 result."""
+
+    def record(self, chain, host, monkeypatch):
+        seen = []
+        original = chain.module.process_images
+
+        def process_images(p2):
+            seen.append((getattr(host.shared.sd_model, "fibo2_output_size", "absent"),
+                         (p2.width, p2.height)))
+            return original(p2)
+
+        monkeypatch.setattr(chain.module, "process_images", process_images)
+        return seen
+
+    def test_a_fibo2_engine_is_told_every_refines_size(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("fibo2"))
+        host.shared.sd_model = types.SimpleNamespace(fibo2_output_size=(1024, 1024))
+        seen = self.record(chain, host, monkeypatch)
+        p = make_p(host, batch_size=2, width=832, height=1216)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, size_multiplier=1.5)
+
+        assert [told for told, _ in seen] == [(1248, 1824), (1248, 1824)]
+        assert all(told == size for told, size in seen)
+
+    def test_an_engine_without_the_attribute_is_left_as_it_was(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("fibo2"))
+        host.shared.sd_model = types.SimpleNamespace()
+        seen = self.record(chain, host, monkeypatch)
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        assert [told for told, _ in seen] == ["absent"]
+
+    def test_another_architecture_is_not_written_to(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("krea2"))
+        host.shared.sd_model = types.SimpleNamespace(fibo2_output_size=(640, 640))
+        seen = self.record(chain, host, monkeypatch)
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        assert [told for told, _ in seen] == [(640, 640)]

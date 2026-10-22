@@ -13,8 +13,11 @@ the detector a dict of lightweight stubs.
 An extension that teaches the host a model of its own registers a guess class
 with that same detector and an engine with the same loader, so it is known here
 by those two class names and by nothing else: nothing of it is imported, and no
-file of its own is read. MOSS-Image is the first (``moss``); the row says where
-the names come from.
+file of its own is read. MOSS-Image was the first (``moss``), FIBO 2.0 the second
+(``fibo2``); each row says where its names come from. When Forge Neo learns such
+a model itself it does so under names of its own -- MOSS-Image's are
+``MOSSImage`` since Forge Neo's ``be6fa5d`` of 2026-10-21 -- and both spellings
+stay in the maps, because the extension's survive on any Forge older than that.
 """
 
 from __future__ import annotations
@@ -119,6 +122,18 @@ class Architecture:
     which is why detection here does not stop at the checkpoint name.
     """
 
+    output_size_attr: str | None = None
+    """An attribute on the *engine* that holds the pass's ``(width, height)``.
+
+    Set by the architecture's own always-on script at the start of every
+    ordinary generation, because the engine needs the result's size before
+    sampling starts -- FIBO 2's crops a single picture to edit to it, so the
+    edit lines up with the result pixel for pixel. Stage 2 runs without scripts,
+    so the chain sets it itself for each refine (``ScriptModelChain``); left
+    alone it would hold whatever the cached engine's last ordinary generation
+    wrote, and the picture would be cropped to that size instead.
+    """
+
     @property
     def supports_edit(self) -> bool:
         return self.edit_option is not None
@@ -203,7 +218,25 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
     # no reference path: a picture goes in as an img2img init latent, and that
     # is all it does with one. Creative Mode, Spatial Layout and the literal
     # prompts are Krea 2's and stand down for it (mc_krea_pipeline.objection).
+    # Forge Neo has its own MOSS-Image since 2026-10-21, under its own names.
     Architecture("moss", "MOSS-Image", 16, 3.0),
+    # FIBO 2.0 (Bria's Dev and Edit Turbo), from the fibo2-forge-neo extension:
+    # the FLUX.2 autoencoder under a DiT that reads its latents as they are ->
+    # 16, and Dev at Bria's CFG 5 (Edit Turbo and Dev with the turbo LoRA want
+    # 1, which only the user can tell apart: the two detect alike). Editing is
+    # the extension's own "[FIBO 2] Enable Reference", on by default: on, the
+    # Stage 1 picture is shown to Qwen3-VL and becomes reference latents, the
+    # prompt is read as the edit instruction, and denoise 1 is what it wants --
+    # a deliberate mode, so the chain warns about a lower one; off, Stage 2 is
+    # plain img2img. Its engine keeps ImageStitch's pictures as references the
+    # way Krea 2's does, unvalidated here. It reads Bria's own JSON captions
+    # (VGL), not Krea 2's structured prompt, so the Krea 2 stages stand down.
+    Architecture(
+        "fibo2", "FIBO 2.0", 16, 5.0,
+        edit_option="fibo2_do_reference", edit_on_value=True, edit_needs_lora=False,
+        reference_support=REF_EXPERIMENTAL,
+        output_size_attr="fibo2_output_size",
+    ),
 )
 
 UNKNOWN = Architecture("unknown", "unknown", _UNKNOWN_ALIGNMENT, _UNKNOWN_CFG)
@@ -232,6 +265,10 @@ _GUESS_CLASS_TO_KEY = {
     "PiD": "pid",
     # The MOSS-Image extension's huggingface_guess class (forge_moss.native.model).
     "MossImage": "moss",
+    # Forge Neo's own MOSS-Image, since be6fa5d (2026-10-21).
+    "MOSSImage": "moss",
+    # The FIBO 2 extension's huggingface_guess class (forge_fibo2.native.model).
+    "Fibo2": "fibo2",
 }
 
 
@@ -243,6 +280,10 @@ _ENGINE_CLASS_TO_KEY = {
     "Wan": "wan",
     # The MOSS-Image extension's engine (forge_moss.native.engine).
     "MossImageEngine": "moss",
+    # Forge Neo's own MOSS-Image engine (backend/diffusion_engine/moss_image.py).
+    "MOSSImage": "moss",
+    # The FIBO 2 extension's engine (forge_fibo2.native.engine).
+    "Fibo2Engine": "fibo2",
 }
 """Forge Neo diffusion-engine class -> our table.
 

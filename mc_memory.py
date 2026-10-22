@@ -1169,7 +1169,8 @@ def describe_spill(spilled: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
-MODEL_FLAGS = ("kontext", "edit", "nunchaku", "klein", "wan", "pid", "anima", "krea2")
+MODEL_FLAGS = ("kontext", "edit", "qwen21", "nunchaku", "klein", "wan", "pid", "anima",
+               "krea2", "moss")
 """``backend.args.dynamic_args`` fields that describe *which model is loaded*.
 
 ``forge_loader`` sets these every time it loads a checkpoint, but a warm swap
@@ -1178,6 +1179,17 @@ Leaving them describing the previously loaded checkpoint is not cosmetic:
 ``nunchaku`` selects a different LoRA application path, ``kontext`` and ``edit``
 decide whether Flux.1 and Qwen-Image use reference conditioning, ``klein``
 changes sampling, and ``pid`` changes the latent shape.
+
+Forge's own ``dynamic_args.reset()`` does not touch these -- it clears only the
+per-generation latents -- so a flag missing here keeps whatever the last real
+load wrote. Two arrived after this list was written and were missing from it:
+``qwen21`` (Forge Neo's Qwen-Image 2.1, 2026-10-07), which ``can_reference``
+reads for ImageStitch, and ``moss`` (its native MOSS-Image, 2026-10-21), which
+its Skip Layer Guidance reads to decide whether to skip block 22 in the
+negative pass: a MOSS checkpoint brought back warm after another model ran
+without it, and any other model brought back after MOSS was sampled with it.
+The list is the loader's own assignments (``backend/loader.py``, after
+``huggingface_guess``); each Forge update can add one.
 """
 
 

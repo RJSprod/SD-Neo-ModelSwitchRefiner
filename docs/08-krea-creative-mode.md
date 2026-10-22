@@ -2466,3 +2466,12 @@ with a refused checkpoint composing nothing and calling no model, both stages
 named on the result, no plan handed anything before the question; the plan
 tests for the guard, the Neutralizer kept, and a guard that raises. Each fails
 with its change reverted.
+
+FIBO 2.0 (22 October 2026) is the second checkpoint recognised from another
+extension's class names (`mc_arch`'s `fibo2` row, from fibo2-forge-neo's
+`Fibo2` and `Fibo2Engine`), and the guard refuses it by name the same way: it
+reads Bria's JSON captions (VGL), not Krea 2's structured prompt. Forge Neo's
+own MOSS-Image, from 21 October, is known by its own class names
+(`MOSSImage`) under the same `moss` row, so the refusal does not depend on
+which of the two loaded it. Test: `test_a_fibo2_checkpoint_is_refused_by_name`
+in `tests/test_krea_creative.py`.

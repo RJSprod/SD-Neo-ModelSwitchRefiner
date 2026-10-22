@@ -696,6 +696,22 @@ class TestModelFlags:
         assert mc_memory.reinstate_pending() is True
         assert flags.krea2 is False
 
+    @pytest.mark.parametrize("flag", ["qwen21", "moss"])
+    def test_the_flags_forge_added_later_travel_with_their_model(self, residency, flags, flag):
+        """Forge Neo's loader sets ``qwen21`` (Qwen-Image 2.1, 2026-10-07) and
+        ``moss`` (its own MOSS-Image, 2026-10-21) on every load, and its
+        ``reset()`` leaves both alone. Not carried, a MOSS checkpoint brought
+        back warm ran without its Skip Layer Guidance, and any model brought
+        back after MOSS ran with it."""
+        mc_memory.ensure_resident("B")
+        setattr(flags, flag, True)
+
+        mc_memory.ensure_resident("A")
+        assert getattr(flags, flag) is False
+
+        assert mc_memory.ensure_resident("B") == "warm"
+        assert getattr(flags, flag) is True
+
     def test_repeated_switching_keeps_flags_in_step_with_the_model(self, residency, flags):
         mc_memory.ensure_resident("B")
         flags.krea2 = True
