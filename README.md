@@ -390,6 +390,14 @@ for them. A JSON caption (Bria's VGL) reaches the model whole in Inherit and
 Replace; Append joins your text after it with a comma, which leaves no JSON
 object for the model to read, so the whole prompt is read as plain text.
 
+FIBO 2.0's own edits, outside the chain, run as its extension describes, with
+Model Chain on or off: in txt2img from ImageStitch's pictures (the first is
+`<image_1>`), in img2img from the input picture (`<image_1>` there, ImageStitch's
+from `<image_2>` on), and with a LoRA such as the turbo LoRA in either. Nothing here touches their pictures
+before the model reads them. The literal-command parser that reads every prompt
+keeps a JSON caption and the `<image_N>` names as typed, and moves a `<lora:…>`
+tag only to the front, which Forge strips before the model sees the prompt.
+
 Each image is refined on its own (batch size 1 per pass), which matters here:
 Krea 2 captures only the *first* image of a batch as its reference, so a batched
 refine would silently reuse image 1's reference for the whole set.
@@ -397,6 +405,18 @@ refine would silently reuse image 1's reference for the whole set.
 Stale references are cleared before Stage 2 runs. A cached model keeps its engine
 object — and its reference list — across generations, and ImageStitch cannot
 clear it because Stage 2 runs with scripts disabled.
+
+The same holds the other way. A model the cache puts back — Stage 1 after a
+Stage 2 on another checkpoint, or any warm swap — starts with no pictures on it,
+as a freshly loaded one does, and ImageStitch is made to encode its gallery
+again. Without that, ImageStitch, which empties an engine only when it was on
+for the previous generation and is off for this one, left the old pictures in
+place: a generation with ImageStitch off was still an edit of the pictures from
+the generation before. A checkpoint dropped and reloaded from its own files —
+by Cold LoRA after a change of LoRA, or for a Voice Box turn that keeps only the
+recipe — also makes ImageStitch encode again, because its memo still matches the
+reloaded model's loading parameters and it would otherwise skip the encode the
+new engine needs.
 
 ### Stage 2 reference images
 
