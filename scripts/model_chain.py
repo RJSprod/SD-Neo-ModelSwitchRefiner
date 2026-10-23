@@ -39,7 +39,12 @@ import mc_llm_studio
 import mc_llm_vision
 import mc_logfile
 import mc_lora
+import mc_lora_details
+import mc_lora_hashing
+import mc_lora_jobs
 import mc_lora_ram
+import mc_lora_settings
+import mc_lora_tab
 import mc_memory
 import mc_pipeline_panel
 import mc_plan
@@ -50,6 +55,7 @@ import mc_progress
 import mc_references
 import mc_styles
 import mc_theme
+import mc_extra_networks_filter
 import mc_extra_networks_sort
 import mc_turns
 import mc_turns_guests
@@ -1149,6 +1155,22 @@ try:
         shared.options_section(mc_gallery_quadrant.SECTION, mc_gallery_quadrant.settings(shared)))
 except Exception:
     errors.report("Model Chain: could not register the Gallery Quadrant settings section",
+                  exc_info=True)
+
+# LoRA Details, carried in from the user's standalone extension: the dialog,
+# the CSV library and the gallery images; the Civitai fetch; the extra-network
+# browsers' folder filter and folder buttons; and one hidden option, the record
+# of the one-time carry-over of that extension's files and settings
+# (mc_lora_settings).
+try:
+    for _section, _options in (
+            (mc_lora_settings.SECTION, mc_lora_settings.settings(shared)),
+            (mc_lora_settings.FETCH_SECTION, mc_lora_settings.fetch_settings(shared)),
+            (mc_lora_settings.NETWORKS_SECTION, mc_lora_settings.networks_settings(shared)),
+            (mc_lora_settings.HIDDEN_SECTION, mc_lora_settings.hidden_settings(shared))):
+        shared.options_templates.update(shared.options_section(_section, _options))
+except Exception:
+    errors.report("Model Chain: could not register the LoRA Details settings sections",
                   exc_info=True)
 
 mc_progress.install()
@@ -4342,6 +4364,14 @@ def _on_script_unloaded():
     except Exception:
         errors.report("Model Chain: failed to stop the LLM runtime", exc_info=True)
     mc_broker.clear()
+    # The LoRA details' background jobs -- a Civitai fetch, image downloads, a
+    # hash run -- cancelled, and the hash cache they fill written out, so a
+    # reload starts with nothing running and nothing computed lost.
+    try:
+        mc_lora_jobs.MANAGER.cancel_all()
+        mc_lora_hashing.flush()
+    except Exception:
+        errors.report("Model Chain: failed to stop the LoRA details' jobs", exc_info=True)
 
 
 def _on_cfg_denoiser(_params) -> None:
@@ -4401,5 +4431,14 @@ try:
     # Forge renders the extra network pages while it builds the page: their
     # creation times are corrected and the default sort set before that.
     script_callbacks.on_before_ui(mc_extra_networks_sort.on_before_ui)
+    # The same moment for the LoRA details: the preset folder filter and the
+    # top-level folder buttons wrap the page class Forge renders with, and the
+    # LoRA dialog wraps the editor class Forge builds the popup with.
+    script_callbacks.on_before_ui(mc_extra_networks_filter.on_before_ui)
+    script_callbacks.on_before_ui(mc_lora_details.on_before_ui)
+    script_callbacks.on_ui_tabs(mc_lora_tab.on_ui_tabs)
+    # The one-time carry-over of the standalone extension's files and
+    # settings, then the CSV library: both need the settings loaded.
+    script_callbacks.on_app_started(mc_lora_settings.on_app_started)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

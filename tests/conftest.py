@@ -172,7 +172,7 @@ def _make_gradio() -> types.ModuleType:
         "Dropdown", "Radio", "Textbox", "Slider", "Number", "Checkbox",
         "Markdown", "Row", "Column", "Group", "Accordion", "Button", "HTML",
         "State", "Gallery", "Image", "Chatbot", "File", "Blocks", "Tab",
-        "DownloadButton", "Timer",
+        "DownloadButton", "Timer", "Tabs", "TabItem",
     ):
         setattr(gradio, name, type(name, (_Component,), {}))
 
@@ -1416,6 +1416,31 @@ def voice_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def lora_root(tmp_path, monkeypatch):
+    """The LoRA details' data root under ``tmp_path``.
+
+    ``mc_lora_paths`` answers from the host's data directory, "." here, so
+    without this a test's hash cache, CSV library, gallery images and the two
+    JSON files would land in the checkout -- which the guard at the bottom of
+    this file fails. The two stores that cache their path are forgotten too,
+    so a test reads the file under its own root and not one another test
+    opened.
+    """
+    import mc_extra_networks_folders
+    import mc_lora_hashing
+    import mc_lora_last_used
+    import mc_lora_paths
+
+    root = tmp_path / mc_lora_paths.DIRNAME
+    monkeypatch.setattr(mc_lora_paths, "_webui_data_path", lambda: tmp_path)
+    monkeypatch.setattr(mc_lora_hashing, "CACHE",
+                        mc_lora_hashing.HashCache(root / mc_lora_paths.CACHE_DIRNAME / "hashes.json"))
+    monkeypatch.setattr(mc_extra_networks_folders, "_STORE", None)
+    monkeypatch.setattr(mc_lora_last_used, "_STORE", None)
+    return root
+
+
+@pytest.fixture
 def fake_worker(tmp_path, monkeypatch, voice_root, request):
     """A started-on-demand Voice Worker that is a Python script, not a model.
 
@@ -2532,7 +2557,7 @@ def _forget_card_turns():
 # or run finds (a pipeline test once wrote "whatever an earlier test left
 # behind" into its own setup), and under parallel workers two tests write the
 # same files at the same time.
-_HOST_DATA_DIRS = ("model_chain_voice", "model_chain_llm")
+_HOST_DATA_DIRS = ("model_chain_voice", "model_chain_llm", "model_chain_lora")
 
 
 def _host_data_stamp(base: Path) -> dict:

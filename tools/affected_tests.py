@@ -51,7 +51,7 @@ EVERYTHING = (CONFTEST, "pytest.ini", "tools/affected_tests.py", "tools/run_test
 # (whose scripts the tests load by path under their own names).
 FLAT = ("", "scripts", "tests", "tools")
 SKIP = {".git", "__pycache__", ".pytest_cache", ".venv", "venv", "node_modules",
-        "model_chain_llm", "model_chain_voice"}
+        "model_chain_llm", "model_chain_voice", "model_chain_lora"}
 
 FILE_NAME = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,8}$")
 GLOB = re.compile(r"^[\w.\-/\[\]*?]*[*?][\w.\-/\[\]*?]*$")
