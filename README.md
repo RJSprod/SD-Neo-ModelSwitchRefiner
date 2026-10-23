@@ -312,7 +312,7 @@ stages differ it says so in the panel.
 To use a LoRA during refinement, put it in the **Stage 2** prompt box, in Append
 or Replace mode.
 
-### Edit mode (Krea 2, Anima, Flux.2 Klein)
+### Edit mode (Krea 2, Anima, Flux.2 Klein, FIBO 2.0)
 
 Some architectures can take the Stage 1 image as an **edit reference** —
 vision-conditioning the text encoder and concatenating reference latents — rather
@@ -341,12 +341,13 @@ To refine with Krea 2 Edit:
    it, ticking Enable raises it back.
 
 The underlying toggles (`krea2_do_reference`, `anima_do_reference`,
-`klein_do_reference`) are **global** settings. Enable and Disable are applied
-through the host's per-generation `override_settings`, so they are scoped to the
-Stage 2 pass and your global value is restored afterwards — the extension never
-leaves a global toggle flipped behind your back. Auto touches nothing.
+`klein_do_reference`, and the FIBO 2 extension's `fibo2_do_reference`) are
+**global** settings. Enable and Disable are applied through the host's
+per-generation `override_settings`, so they are scoped to the Stage 2 pass and
+your global value is restored afterwards — the extension never leaves a global
+toggle flipped behind your back. Auto touches nothing.
 
-Two details worth knowing:
+Three details worth knowing:
 
 - **The polarity used to differ between architectures.** Krea 2 and Anima opt
   *in* (`*_do_reference = True` enables edit mode), and since Forge Neo renamed
@@ -364,6 +365,38 @@ Two details worth knowing:
   img2img init as well, so an ordinary low-denoise Klein refine is perfectly
   valid and is not warned about. Krea 2 and Anima edit mode is a deliberate mode
   switch away from img2img, so there the denoise and Edit-LoRA warnings do apply.
+- **FIBO 2.0 edits by default.** The FIBO 2 extension's *[FIBO 2] Enable
+  Reference* is on until you turn it off, so under Auto a FIBO Stage 2 is an
+  edit: the Stage 1 picture is shown to its Qwen3-VL text encoder and becomes
+  reference latents, and the Stage 2 prompt is read as the edit *instruction*.
+  Replace with something like *Sharpen the fur and the leaves behind the fox* is
+  the shape of it; Inherit hands it the whole Stage 1 prompt as the
+  instruction. It is a deliberate mode like Krea 2's, so denoise 1 is what it
+  wants and a lower one is warned about, but it needs no LoRA. For a plain
+  img2img refine — with Dev, Bria's text-to-image model, the usual one —
+  choose **Disable**. The engine crops a single picture to the result's size
+  before it edits, a size its extension's script gives it at the start of each
+  generation; Stage 2 runs without scripts, so the chain gives it each refine's
+  size itself rather than leave it the last ordinary generation's. One thing
+  the chain does not reach: the extension keeps img2img's inpaint mask until the
+  next generation starts, so when Stage 1 is a FIBO inpaint and Stage 2 is FIBO
+  too, Stage 2's edit sees Stage 1's masked area greyed out — choose Disable
+  there.
+
+**FIBO 2.0's Stage 2 CFG starts at Dev's 5.** Edit Turbo, and Dev with
+Comfy-Org's turbo LoRA, want 4 steps at CFG 1, and nothing in the weights tells
+the two apart from Dev: set **Stage 2 steps** and **Stage 2 CFG scale** yourself
+for them. A JSON caption (Bria's VGL) reaches the model whole in Inherit and
+Replace; Append joins your text after it with a comma, which leaves no JSON
+object for the model to read, so the whole prompt is read as plain text.
+
+FIBO 2.0's own edits, outside the chain, run as its extension describes, with
+Model Chain on or off: in txt2img from ImageStitch's pictures (the first is
+`<image_1>`), in img2img from the input picture (`<image_1>` there, ImageStitch's
+from `<image_2>` on), and with a LoRA such as the turbo LoRA in either. Nothing here touches their pictures
+before the model reads them. The literal-command parser that reads every prompt
+keeps a JSON caption and the `<image_N>` names as typed, and moves a `<lora:…>`
+tag only to the front, which Forge strips before the model sees the prompt.
 
 Each image is refined on its own (batch size 1 per pass), which matters here:
 Krea 2 captures only the *first* image of a batch as its reference, so a batched
@@ -372,6 +405,18 @@ refine would silently reuse image 1's reference for the whole set.
 Stale references are cleared before Stage 2 runs. A cached model keeps its engine
 object — and its reference list — across generations, and ImageStitch cannot
 clear it because Stage 2 runs with scripts disabled.
+
+The same holds the other way. A model the cache puts back — Stage 1 after a
+Stage 2 on another checkpoint, or any warm swap — starts with no pictures on it,
+as a freshly loaded one does, and ImageStitch is made to encode its gallery
+again. Without that, ImageStitch, which empties an engine only when it was on
+for the previous generation and is off for this one, left the old pictures in
+place: a generation with ImageStitch off was still an edit of the pictures from
+the generation before. A checkpoint dropped and reloaded from its own files —
+by Cold LoRA after a change of LoRA, or for a Voice Box turn that keeps only the
+recipe — also makes ImageStitch encode again, because its memo still matches the
+reloaded model's loading parameters and it would otherwise skip the encode the
+new engine needs.
 
 ### Stage 2 reference images
 
@@ -415,7 +460,7 @@ a universal one:
 | Stage 2 architecture | Support |
 | --- | --- |
 | Flux.2 Klein (4B / 9B), Krea 2 | validated |
-| Anima, Qwen-Image-Edit, Flux.1 Kontext | experimental — Forge exposes the path, this pairing is not validated here |
+| Anima, Qwen-Image-Edit, Flux.1 Kontext, FIBO 2.0 | experimental — Forge (or, for FIBO 2.0, its extension) exposes the path, this pairing is not validated here |
 | everything else | no reference path; references are ignored with a notice |
 
 The mode stays selectable whatever you pick, and the panel says what will
@@ -481,19 +526,34 @@ overrides the whole batch with one seed.
 
 The size multiplier scales both axes by the same factor, preserving aspect
 ratio, then snaps each to the target architecture's required pixel grid — 8 for
-SD 1.5 and SDXL, 16 for the Flux, Wan, Qwen, Lumina and MOSS-Image families. The
-panel shows the resulting resolution live as you move the slider. Unrecognised
-architectures fall back to 16, which is a multiple of 8 and therefore valid for
-an 8-aligned model too.
+SD 1.5 and SDXL, 16 for the Flux, Wan, Qwen, Lumina, MOSS-Image and FIBO 2.0
+families. The panel shows the resulting resolution live as you move the slider.
+Unrecognised architectures fall back to 16, which is a multiple of 8 and
+therefore valid for an 8-aligned model too.
 
-MOSS-Image is recognised although it is not Forge Neo's own model: the
+MOSS-Image and FIBO 2.0 are recognised although Forge Neo knew neither when its
+row was added: the
 [MOSS-Image extension](https://github.com/eduardoabreu81/moss-image-forge-neo)
-teaches the host the model, and this extension knows it by the two class names
-that extension registers with the host and by nothing else — nothing of it is
-imported. Without that extension a MOSS checkpoint is unknown here, as it is to
-the loader. Its row carries upstream's CFG of 3 for the Stage 2 default, no edit
-toggle and no reference path; the memory residency, parking, turns and Warm /
-Cold LoRA machinery are architecture-agnostic and apply to it unchanged.
+and the [FIBO 2 extension](https://github.com/eduardoabreu81/fibo2-forge-neo)
+each teach the host its model, and this extension knows each by the two class
+names its extension registers with the host and by nothing else — nothing of
+either is imported. Without its extension a checkpoint of either is unknown
+here, as it is to the loader. MOSS-Image's row carries upstream's CFG of 3 for
+the Stage 2 default, no edit toggle and no reference path; FIBO 2.0's carries
+Dev's CFG of 5 and the extension's own edit toggle (see
+[Edit mode](#edit-mode-krea-2-anima-flux2-klein-fibo-20)). The memory residency,
+parking, turns and Warm / Cold LoRA machinery are architecture-agnostic and
+apply to both unchanged.
+
+Forge Neo learned MOSS-Image itself on 21 October 2026 (`be6fa5d`), under names
+of its own — `MOSSImage` for its detector's class and for its engine — and both
+spellings are known here, so a MOSS checkpoint is recognised whichever of the
+two loads it. **Remove the MOSS-Image extension once your Forge Neo has its
+own.** Read from the two sources rather than seen: the extension's startup check
+still passes, its detector runs before Forge's and answers with a `freq_dim`
+that Forge's own MOSS DiT does not take, and Forge's guess, which comes first in
+the host's list, builds that DiT from the answer — so a MOSS checkpoint stops
+loading at all.
 
 The multiplier scales **the image Stage 2 was handed**, not the width and height
 sliders. Those two are usually the same number, but not always: hires fix
@@ -958,17 +1018,24 @@ extension should make.
 #### Model flags travel with the cached model
 
 `forge_loader` sets a group of `dynamic_args` flags on every load — `kontext`,
-`edit`, `nunchaku`, `klein`, `wan`, `pid`, `anima`, `krea2` — that describe
-*which model is loaded*. A warm pointer swap never runs the loader, so the cache
-snapshots those flags alongside each model and re-applies them (plus
-`dynamic_args.reset()`) on reinstatement.
+`edit`, `qwen21`, `nunchaku`, `klein`, `wan`, `pid`, `anima`, `krea2`, `moss` —
+that describe *which model is loaded*. A warm pointer swap never runs the
+loader, so the cache snapshots those flags alongside each model and re-applies
+them (plus `dynamic_args.reset()`) on reinstatement.
 
 This is not cosmetic. `nunchaku` selects a different LoRA application path,
 `kontext` and `edit` decide whether Flux.1 and Qwen-Image use reference
-conditioning, `klein` changes sampling, and `pid` changes the latent shape.
+conditioning, `qwen21` whether ImageStitch hands Qwen-Image 2.1 its pictures,
+`klein` changes sampling, `pid` changes the latent shape, and `moss` whether
+Skip Layer Guidance runs at all (Forge Neo runs it for MOSS-Image alone).
 Leaving them describing the previously loaded checkpoint would corrupt
 generation — and it would show up exactly when chaining two architecturally
 different models, which is the whole point of the extension.
+
+The list is the loader's own assignments, and Forge Neo grows it: `qwen21`
+(7 October 2026) and `moss` (21 October 2026) came later than the rest and were
+added here on 22 October. `dynamic_args.reset()` does not clear these flags, so
+a flag missing here keeps whatever the last real load wrote.
 
 #### So does the latent scale
 
@@ -2636,8 +2703,8 @@ what goes where — you draw boxes on a canvas the shape of your image, type a
 prompt into each one, and those boxes reach Krea 2 as part of a structured
 prompt. It is off until you turn it on, and it changes nothing at all while it
 is off. It is Krea 2's: with any other recognised checkpoint selected — SDXL,
-Flux, MOSS-Image — the layout is not applied, the result says so, and your
-regions are left exactly as you drew them.
+Flux, MOSS-Image, FIBO 2.0 — the layout is not applied, the result says so, and
+your regions are left exactly as you drew them.
 
 ```
 Spatial                                               [ON]
@@ -3093,8 +3160,9 @@ reproduction away from what you asked to reproduce.
   on, so a checkpoint that cannot read Krea 2's structured prompt is never
   handed one by a layout composed around a refused roll, and the plan reserves
   for neither stage. Neutralize Prompt still runs, because its answer is plain
-  text any checkpoint can read. MOSS-Image is such a checkpoint — recognised,
-  and refused by name — since it reads captions and JSON layouts of its own.
+  text any checkpoint can read. MOSS-Image and FIBO 2.0 are such checkpoints —
+  recognised, and refused by name — since each reads captions of its own: MOSS's
+  JSON layouts, FIBO's VGL.
   LLM Studio does not consult this — writing a prompt settles nothing about
   what draws it.
 - **Duplicate a Forge control.** Steps, size, sampler, CFG and the image seed

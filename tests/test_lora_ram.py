@@ -413,6 +413,25 @@ class TestTheBlobIsEvictedBeforeAChange:
         assert type(model_data.sd_model).__name__ == "FakeInitialModel"
         assert model_data.forge_hash == "", "the host reloads from disk at this generation"
 
+    def test_an_evicted_blob_makes_imagestitch_encode_again(self, blob, host):
+        """FIBO 2's edit with its turbo LoRA and ImageStitch's pictures: a change
+        of weight reloads the checkpoint from the same loading parameters, and
+        ImageStitch, whose memo still matched them, skipped the encode the new
+        engine needed -- the edit ran without its pictures."""
+        import mc_references
+
+        class Stitch:
+            cached_parameters = ["the loading parameters and picture hashes of its last encode"]
+
+            def title(self):
+                return mc_references.STITCH_TITLE
+
+        host.scripts.scripts_txt2img.alwayson_scripts.append(Stitch())
+
+        assert mc_lora_ram.before_pass(make_p("a castle <lora:x:0.8>"))
+        assert dropped(host)
+        assert Stitch.cached_parameters is None
+
     def test_a_second_lora_evicts_the_blob(self, blob, host):
         assert mc_lora_ram.before_pass(make_p("a castle <lora:x:1.0> <lora:y:1.0>"))
         assert dropped(host)

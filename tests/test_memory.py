@@ -450,6 +450,76 @@ class TestRestoreSelection:
         assert mc_memory._is_real_model(residency.model_data.sd_model)
 
 
+class _Stitch:
+    """Forge's ImageStitch as far as its memo goes: found by its title, the memo
+    on the class, where ImageStitch itself reads and writes it."""
+
+    cached_parameters = None
+
+    def title(self):
+        import mc_references
+
+        return mc_references.STITCH_TITLE
+
+
+def remembered_stitch(host, memo):
+    """An ImageStitch on the txt2img tab whose memo says it has already encoded."""
+    _Stitch.cached_parameters = memo
+    host.scripts.scripts_txt2img.alwayson_scripts.append(_Stitch())
+
+
+class TestAModelBroughtBackWarmHoldsNoPictures:
+    """A cached engine comes back holding what its last generation left on it.
+
+    ImageStitch empties an engine only when it was on for the previous generation
+    and is off for this one, and encodes only when its memo changes. So a Stage 1
+    model brought back after a Stage 2 on another checkpoint, into a generation
+    with ImageStitch off, sampled the pictures of the generation before -- a FIBO
+    2, Krea 2 or Klein txt2img that edited pictures no longer in the gallery.
+    """
+
+    def test_the_swap_back_to_stage_1_empties_its_engine(self, residency):
+        model_a = residency.model_data.sd_model
+        model_a.ref_latents = ["Stage 1's ImageStitch picture"]
+        model_a.ini_latent = "Stage 1's img2img picture"
+
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+
+        assert mc_memory.reinstate_pending() is True
+        assert residency.model_data.sd_model is model_a
+        assert model_a.ref_latents == []
+        assert model_a.ini_latent is None
+
+    def test_a_warm_swap_to_any_cached_model_empties_its_engine(self, residency):
+        model_a = residency.model_data.sd_model
+        model_a.ref_latents = ["a picture A's last generation was given"]
+        model_a.ini_latent = "an img2img picture"
+        mc_memory.ensure_resident("B")
+
+        assert mc_memory.ensure_resident("A") == "warm"
+        assert model_a.ref_latents == []
+        assert model_a.ini_latent is None
+
+    def test_imagestitch_encodes_again_into_the_model_brought_back(self, residency, host):
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+        remembered_stitch(host, ["the loading parameters and picture hashes of its last encode"])
+
+        assert mc_memory.reinstate_pending() is True
+        assert _Stitch.cached_parameters is None
+
+    def test_an_engine_with_no_reference_path_comes_back_as_it_left(self, residency):
+        """SDXL and the rest have no picture lists, and none is put on them."""
+        model_a = residency.model_data.sd_model
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+
+        assert mc_memory.reinstate_pending() is True
+        assert not hasattr(model_a, "ref_latents")
+        assert not hasattr(model_a, "ini_latent")
+
+
 class TestProtectedEviction:
     """Recency picks the wrong victim at exactly the moment a switch happens.
 
@@ -613,6 +683,16 @@ class TestStaleLoadingHash:
         assert mc_memory.ensure_model_loadable() is True
         assert residency.model_data.forge_hash == ""
 
+    def test_imagestitch_encodes_again_into_the_model_loaded_instead(self, residency, host):
+        """The load this forces builds an engine with no pictures from the same
+        loading parameters, which ImageStitch's memo still matches."""
+        residency.model_data.sd_model = None
+        residency.model_data.forge_hash = "key::something"
+        remembered_stitch(host, ["the loading parameters and picture hashes of its last encode"])
+
+        assert mc_memory.ensure_model_loadable() is True
+        assert _Stitch.cached_parameters is None
+
 
 class TestRelease:
     def test_release_all_empties_the_cache(self, residency):
@@ -695,6 +775,22 @@ class TestModelFlags:
 
         assert mc_memory.reinstate_pending() is True
         assert flags.krea2 is False
+
+    @pytest.mark.parametrize("flag", ["qwen21", "moss"])
+    def test_the_flags_forge_added_later_travel_with_their_model(self, residency, flags, flag):
+        """Forge Neo's loader sets ``qwen21`` (Qwen-Image 2.1, 2026-10-07) and
+        ``moss`` (its own MOSS-Image, 2026-10-21) on every load, and its
+        ``reset()`` leaves both alone. Not carried, a MOSS checkpoint brought
+        back warm ran without its Skip Layer Guidance, and any model brought
+        back after MOSS ran with it."""
+        mc_memory.ensure_resident("B")
+        setattr(flags, flag, True)
+
+        mc_memory.ensure_resident("A")
+        assert getattr(flags, flag) is False
+
+        assert mc_memory.ensure_resident("B") == "warm"
+        assert getattr(flags, flag) is True
 
     def test_repeated_switching_keeps_flags_in_step_with_the_model(self, residency, flags):
         mc_memory.ensure_resident("B")

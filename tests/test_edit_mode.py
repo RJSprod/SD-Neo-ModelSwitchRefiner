@@ -74,6 +74,13 @@ class TestEditOverride:
         override = mc_arch.edit_override(mc_arch.by_key("flux2_9b"), mc_arch.EDIT_DISABLE)
         assert override == {"klein_do_reference": False}
 
+    def test_fibo2_is_overridden_through_its_own_toggle(self, host):
+        fibo2 = mc_arch.by_key("fibo2")
+
+        assert mc_arch.edit_override(fibo2, mc_arch.EDIT_ENABLE) == {"fibo2_do_reference": True}
+        assert mc_arch.edit_override(fibo2, mc_arch.EDIT_DISABLE) == {"fibo2_do_reference": False}
+        assert mc_arch.edit_override(fibo2, mc_arch.EDIT_AUTO) == {}
+
     def test_unsupported_architecture_produces_no_override(self):
         assert mc_arch.edit_override(mc_arch.by_key("sdxl"), mc_arch.EDIT_ENABLE) == {}
         assert mc_arch.edit_override(mc_arch.UNKNOWN, mc_arch.EDIT_ENABLE) == {}
@@ -106,6 +113,16 @@ class TestEditIsActive:
 
     def test_unsupported_architecture_is_never_active(self, host):
         assert mc_arch.edit_is_active(mc_arch.by_key("sdxl"), mc_arch.EDIT_ENABLE) is False
+
+    def test_auto_follows_fibo2s_toggle(self, host):
+        """On by default in the FIBO 2 extension, so an Auto Stage 2 on FIBO 2 is
+        an edit unless the user turned it off."""
+        fibo2 = mc_arch.by_key("fibo2")
+        host.shared.opts.fibo2_do_reference = True
+        assert mc_arch.edit_is_active(fibo2, mc_arch.EDIT_AUTO) is True
+
+        host.shared.opts.fibo2_do_reference = False
+        assert mc_arch.edit_is_active(fibo2, mc_arch.EDIT_AUTO) is False
 
 
 class TestTheRenamedKleinToggle:

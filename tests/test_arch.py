@@ -155,6 +155,98 @@ class TestAModelAnExtensionTeachesTheHost:
         assert mc_arch.detect_loaded_engine().key == "moss"
 
 
+def detector_answering(monkeypatch, class_name):
+    """The host's detector, hooked to answer with a guess class of this name, as
+    an extension's hook (or Forge's own list) makes it. Only the class's name is
+    read, so a bare class of that name stands in for it."""
+    guess = type(class_name, (), {})
+    package = types.ModuleType("huggingface_guess")
+    package.detection = types.SimpleNamespace(
+        unet_prefix_from_state_dict=lambda stub: "model.diffusion_model.",
+        model_config_from_unet=lambda stub, prefix: guess(),
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_guess", package)
+
+
+class TestForgeNeosOwnMossImage:
+    """Forge Neo learnt MOSS-Image itself on 2026-10-21 (``be6fa5d``), under names
+    of its own: ``MOSSImage`` for both its guess class and its engine. Without
+    them a natively loaded MOSS checkpoint read as unknown, and the Krea 2 guard
+    let it through, which is what the MOSS row exists to stop."""
+
+    def test_its_guess_class_reaches_the_moss_row(self, monkeypatch):
+        detector_answering(monkeypatch, "MOSSImage")
+
+        assert mc_arch._detect_from_stub({}).key == "moss"
+
+    def test_its_loaded_engine_reports_moss_image_by_its_engine_class(self, host):
+        engine = type("MOSSImage", (), {})()
+        engine.model_config = object()
+        host.shared.sd_model = engine
+
+        assert mc_arch.detect_loaded_engine().key == "moss"
+
+    def test_the_extensions_names_still_answer_on_an_older_forge(self, monkeypatch):
+        detector_answering(monkeypatch, "MossImage")
+
+        assert mc_arch._detect_from_stub({}).key == "moss"
+
+
+class TestFibo2:
+    """FIBO 2.0 comes from the fibo2-forge-neo extension, known here by the two
+    class names it registers with the host, as MOSS-Image was."""
+
+    def test_its_row_has_its_geometry_and_devs_cfg(self):
+        fibo2 = mc_arch.by_key("fibo2")
+
+        assert fibo2 is not mc_arch.UNKNOWN
+        assert fibo2.label == "FIBO 2.0"
+        # The FLUX.2 autoencoder, read by the DiT as it is: 16 pixels a latent.
+        assert fibo2.alignment == 16
+        # Bria's model card samples Dev at 5; Edit Turbo wants 1, by hand.
+        assert fibo2.cfg == pytest.approx(5.0)
+
+    def test_it_edits_through_its_own_toggle_as_a_deliberate_mode(self):
+        """The extension's "[FIBO 2] Enable Reference", on by default: the Stage 1
+        picture becomes the picture to edit and denoise 1 is what it wants."""
+        fibo2 = mc_arch.by_key("fibo2")
+
+        assert fibo2.edit_option == "fibo2_do_reference"
+        assert fibo2.edit_on_value is True
+        assert fibo2.edit_needs_lora is False
+        assert fibo2.edit_denoise == pytest.approx(1.0)
+        assert fibo2.edit_is_deliberate(mc_arch.EDIT_AUTO)
+
+    def test_its_reference_path_is_experimental_and_needs_no_loader_flag(self):
+        fibo2 = mc_arch.by_key("fibo2")
+
+        assert fibo2.supports_references
+        assert not fibo2.references_are_validated
+        assert fibo2.reference_flag is None
+        assert mc_arch.references_available(fibo2)
+
+    def test_its_engine_is_told_the_pass_size_through_its_own_attribute(self):
+        assert mc_arch.by_key("fibo2").output_size_attr == "fibo2_output_size"
+        assert mc_arch.by_key("krea2").output_size_attr is None
+
+    def test_its_guess_class_reaches_the_row_through_the_hosts_detector(self, monkeypatch):
+        detector_answering(monkeypatch, "Fibo2")
+
+        assert mc_arch._detect_from_stub({}).key == "fibo2"
+
+    def test_its_loaded_engine_reports_itself_by_its_config_class(self, host):
+        host.shared.sd_model = types.SimpleNamespace(model_config=type("Fibo2", (), {})())
+
+        assert mc_arch.detect_loaded_engine().key == "fibo2"
+
+    def test_its_loaded_engine_reports_itself_by_its_engine_class_as_a_last_resort(self, host):
+        engine = type("Fibo2Engine", (), {})()
+        engine.model_config = object()
+        host.shared.sd_model = engine
+
+        assert mc_arch.detect_loaded_engine().key == "fibo2"
+
+
 # --------------------------------------------------------------------------- #
 # Header reading
 # --------------------------------------------------------------------------- #

@@ -1583,6 +1583,14 @@ class TestTheCheckpointGuard:
         monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.by_key("sdxl"))
         assert "SDXL" in mc_creative_krea.checkpoint_objection()
 
+    def test_a_fibo2_checkpoint_is_refused_by_name(self, monkeypatch, host):
+        """FIBO 2.0 reads Bria's JSON captions (VGL), not Krea 2's structured
+        prompt: recognised, it is refused like SDXL."""
+        import mc_arch
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.by_key("fibo2"))
+        assert "FIBO 2.0" in mc_creative_krea.checkpoint_objection()
+
     def test_a_moss_image_checkpoint_is_refused_by_name(self, monkeypatch, host):
         """MOSS-Image reads captions and JSON layouts of its own, not Krea 2's
         structured prompt. It is recognised, so it is refused like SDXL rather

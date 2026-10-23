@@ -1169,7 +1169,8 @@ def describe_spill(spilled: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
-MODEL_FLAGS = ("kontext", "edit", "nunchaku", "klein", "wan", "pid", "anima", "krea2")
+MODEL_FLAGS = ("kontext", "edit", "qwen21", "nunchaku", "klein", "wan", "pid", "anima",
+               "krea2", "moss")
 """``backend.args.dynamic_args`` fields that describe *which model is loaded*.
 
 ``forge_loader`` sets these every time it loads a checkpoint, but a warm swap
@@ -1178,6 +1179,17 @@ Leaving them describing the previously loaded checkpoint is not cosmetic:
 ``nunchaku`` selects a different LoRA application path, ``kontext`` and ``edit``
 decide whether Flux.1 and Qwen-Image use reference conditioning, ``klein``
 changes sampling, and ``pid`` changes the latent shape.
+
+Forge's own ``dynamic_args.reset()`` does not touch these -- it clears only the
+per-generation latents -- so a flag missing here keeps whatever the last real
+load wrote. Two arrived after this list was written and were missing from it:
+``qwen21`` (Forge Neo's Qwen-Image 2.1, 2026-10-07), which ``can_reference``
+reads for ImageStitch, and ``moss`` (its native MOSS-Image, 2026-10-21), which
+its Skip Layer Guidance reads to decide whether to skip block 22 in the
+negative pass: a MOSS checkpoint brought back warm after another model ran
+without it, and any other model brought back after MOSS was sampled with it.
+The list is the loader's own assignments (``backend/loader.py``, after
+``huggingface_guess``); each Forge update can add one.
 """
 
 
@@ -1348,6 +1360,54 @@ def _apply_model_flags(flags: dict) -> None:
             setattr(dynamic_args, name, value)
     except Exception:
         logger.warning("Model Chain: failed to restore model flags on warm swap", exc_info=True)
+
+
+def _start_without_references(model) -> None:
+    """Leave a model put back by a warm swap holding no pictures, as a fresh load would.
+
+    Edit-capable engines keep the pictures they were given on the engine
+    object -- ImageStitch's in ``ref_latents``, the img2img input in
+    ``ini_latent`` -- and a cached object comes back with whatever its last
+    generation left there. A real load starts with neither, and ImageStitch is
+    built on that: it encodes again only when its memo of loading parameters
+    and picture hashes changes, and empties the engine only when it was on for
+    the previous generation and is off for this one. So a Stage 1 model brought
+    back after a Stage 2 on another checkpoint, into a generation with
+    ImageStitch off, was sampled with the pictures of the generation before: a
+    FIBO 2, Krea 2 or Klein txt2img that edited pictures no longer in the
+    gallery. The memo goes too, so a generation with ImageStitch on encodes
+    into the emptied engine rather than trusting what was there.
+
+    The two are emptied here rather than through the engine's
+    ``clear_references``, which also empties the CUDA cache behind a device
+    synchronise -- not something a warm swap should pay for.
+    """
+    try:
+        references = getattr(model, "ref_latents", None)
+        if isinstance(references, list):
+            references.clear()
+        if getattr(model, "ini_latent", None) is not None:
+            model.ini_latent = None
+    except Exception:
+        logger.debug("Model Chain: could not empty a reinstated model's references",
+                     exc_info=True)
+    forget_stitch_memo()
+
+
+def forget_stitch_memo() -> None:
+    """Make ImageStitch encode its pictures again at its next run.
+
+    For every place this module changes the engine the host is holding: a warm
+    swap, and a drop whose reload builds a new one. ImageStitch keys its memo on
+    the loading parameters, which neither changes, so it would otherwise skip the
+    encode the new engine needs (``mc_references.invalidate_stitch_cache``).
+    """
+    try:
+        import mc_references
+
+        mc_references.invalidate_stitch_cache()
+    except Exception:
+        logger.debug("Model Chain: could not reset ImageStitch's memo", exc_info=True)
 
 
 def _apply_latent_scale(model) -> None:
@@ -2737,9 +2797,11 @@ def ensure_resident(name: str, modules=None) -> str:
             model_data.forge_hash = target_key
             shared.opts.data["sd_checkpoint_hash"] = entry.sd_model.sd_checkpoint_info.sha256
             # The loader did not run, so re-apply the globals it would have set:
-            # the model flags, and the latent scale that sizes the next pass.
+            # the model flags, and the latent scale that sizes the next pass --
+            # and leave the engine as empty of pictures as a load would.
             _apply_model_flags(entry.model_flags)
             _apply_latent_scale(entry.sd_model)
+            _start_without_references(entry.sd_model)
             prepared = _restore_prepared_state(entry, STAGE_2)
             processing.need_global_unload = False
             _log_restored(entry, prepared)
@@ -2845,6 +2907,7 @@ def reinstate_pending() -> bool:
         model_data.forge_hash = key
         _apply_model_flags(entry.model_flags)
         _apply_latent_scale(restored)
+        _start_without_references(restored)
         prepared = _restore_prepared_state(entry, STAGE_1)
         processing.need_global_unload = False
         _log_restored(entry, prepared)
@@ -2878,6 +2941,7 @@ def ensure_model_loadable() -> bool:
             "model. If you saw this after a chained generation, please report it."
         )
         model_data.forge_hash = ""
+        forget_stitch_memo()
         return True
     except Exception:
         logger.warning("Model Chain: failed to check the loaded-model state", exc_info=True)
@@ -4991,6 +5055,9 @@ def drop_image_model(reason: str = "") -> str:
                 if key:
                     _cache.drop(key)
                 unload()
+                # The reload builds an engine with no pictures on it from the
+                # same loading parameters, which ImageStitch's memo still matches.
+                forget_stitch_memo()
         except Exception:
             logger.warning("Model Chain: could not drop the image model for %s",
                            reason or "another workload", exc_info=True)

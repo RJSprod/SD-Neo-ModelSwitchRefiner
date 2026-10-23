@@ -3592,6 +3592,7 @@ class ScriptModelChain(scripts.Script):
                     image.width, image.height, size_multiplier, arch.alignment
                 )
                 stage_2_positives.append(positive)
+                self._tell_engine_the_size(reference_arch, width, height)
 
                 result = self._refine_one(
                     p,
@@ -4082,6 +4083,31 @@ class ScriptModelChain(scripts.Script):
             )
             logger.warning(message)
             processed.comments += f"\n{message}"
+
+    @staticmethod
+    def _tell_engine_the_size(arch, width: int, height: int) -> None:
+        """Hand the loaded engine this refine's size, where its own script would have.
+
+        ``Architecture.output_size_attr``: an engine that needs the result's
+        size before it samples is told it by its extension's always-on script,
+        which Stage 2 does not run (``p2.scripts`` is unset). FIBO 2's crops a
+        single picture to edit to that size, and a cached engine would
+        otherwise keep the size of its last ordinary generation -- a 1024x1024
+        crop of an 832x1216 Stage 1 image, refined into an 832x1216 result.
+
+        Only an attribute the engine already has is written, so an engine from
+        another version of the extension, or another model under the same
+        architecture key, is left as it was.
+        """
+        attr = getattr(arch, "output_size_attr", None)
+        if not attr:
+            return
+        try:
+            model = shared.sd_model
+            if hasattr(model, attr):
+                setattr(model, attr, (int(width), int(height)))
+        except Exception:
+            logger.debug("Model Chain: could not tell the engine the Stage 2 size", exc_info=True)
 
     @staticmethod
     def _stage_2_has_lora(p) -> bool:

@@ -727,12 +727,14 @@ def _install_modules() -> None:
 
         kontext = False
         edit = False
+        qwen21 = False
         nunchaku = False
         klein = False
         wan = False
         pid = False
         anima = False
         krea2 = False
+        moss = False
         ref_latents = []
         concat_latent = None
         lq_latent = [None, None]
@@ -945,7 +947,8 @@ def host():
 
     from backend.args import dynamic_args
 
-    for name in ("kontext", "edit", "nunchaku", "klein", "wan", "pid", "anima", "krea2"):
+    for name in ("kontext", "edit", "qwen21", "nunchaku", "klein", "wan", "pid", "anima",
+                 "krea2", "moss"):
         setattr(dynamic_args, name, False)
     dynamic_args.ref_latents.clear()
     dynamic_args.resets = 0

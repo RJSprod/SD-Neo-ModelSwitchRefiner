@@ -1920,6 +1920,41 @@ class TestMakingRoomInForge:
         assert loaded.forge_loading_parameters == {"checkpoint": "flux.safetensors"}
         assert cleared == ["pins", "stage 2"], "a reference this module kept would pin it"
 
+    def test_dropping_makes_imagestitch_encode_again(self, loaded, host):
+        """The reload builds an engine with no pictures from the same loading
+        parameters, which ImageStitch's memo still matches, so it would skip the
+        encode: a FIBO 2, Krea 2 or Klein edit after a Voice Box turn ran without
+        the pictures in its gallery."""
+        import mc_references
+
+        class Stitch:
+            cached_parameters = ["the loading parameters and picture hashes of its last encode"]
+
+            def title(self):
+                return mc_references.STITCH_TITLE
+
+        host.scripts.scripts_txt2img.alwayson_scripts.append(Stitch())
+
+        assert mc_memory.drop_image_model("a test") == mc_memory.PARKED_RECIPE
+        assert Stitch.cached_parameters is None
+
+    def test_parking_leaves_imagestitch_its_memo(self, loaded, host):
+        """The very same engine comes back from RAM with its pictures on it."""
+        import mc_references
+
+        memo = ["the loading parameters and picture hashes of its last encode"]
+
+        class Stitch:
+            cached_parameters = memo
+
+            def title(self):
+                return mc_references.STITCH_TITLE
+
+        host.scripts.scripts_txt2img.alwayson_scripts.append(Stitch())
+
+        assert mc_memory.park_image_model("a test") == mc_memory.PARKED_RAM
+        assert Stitch.cached_parameters is memo
+
     def test_dropping_lets_go_of_a_warm_copy_of_the_same_checkpoint_only(self, loaded):
         """Another cached checkpoint is a different model, already in RAM
         before this; the same one would keep every byte the drop was for."""
