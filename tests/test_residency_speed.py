@@ -1595,20 +1595,24 @@ class TestSettingsRegistration:
         # own settings are split by what they are about (model_chain.SECTIONS),
         # at the user's word, because one section of sixty was unreadable.
         import mc_gallery_quadrant
+        import mc_lora_settings
         import mc_theme
 
         known = {*model_chain.SECTIONS, model_chain.VOICE_SECTION, mc_theme.SECTION,
-                 mc_gallery_quadrant.SECTION}
-        # The two deliberate uses of the host's hidden idiom: the record of
-        # the one-time import of the user's Lobe settings, and the record of
-        # the one-time default sort of the extra networks (newest created
-        # first, set in Forge's own settings) -- each read back and never
-        # meant to be changed by hand. Not settings, so not drawn.
+                 mc_gallery_quadrant.SECTION, mc_lora_settings.SECTION,
+                 mc_lora_settings.FETCH_SECTION, mc_lora_settings.NETWORKS_SECTION}
+        # The deliberate uses of the host's hidden idiom: the record of the
+        # one-time import of the user's Lobe settings, the record of the
+        # one-time default sort of the extra networks (newest created first,
+        # set in Forge's own settings), the batch-count override's pin, and
+        # the record of the one-time carry-over of the standalone LoRA
+        # extension's files and settings -- each read back and never meant to
+        # be changed by hand. Not settings, so not drawn.
         import mc_batch_once
         import mc_extra_networks_sort
 
         records = {mc_theme.OPT_IMPORT, mc_extra_networks_sort.OPT_RECORD,
-                   mc_batch_once.OPT_RECORD}
+                   mc_batch_once.OPT_RECORD, mc_lora_settings.OPT_IMPORT}
         for name, option in host.shared.options_templates.items():
             if name in records:
                 assert option.section[0] is None, f"{name} is a record and must not be drawn"

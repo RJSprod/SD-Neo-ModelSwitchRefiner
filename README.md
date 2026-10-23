@@ -630,8 +630,9 @@ and position, and the conversation's bubble width, column width, text size,
 density and avatars: see [The Forge Assistant](#the-forge-assistant). Turning
 the panel off removes the panel and nothing else.
 
-**Model Chain: Theme**, **Model Chain: Gallery Quadrant** and **Voice Chat**
-are sections of their own, described in their chapters.
+**Model Chain: Theme**, **Model Chain: Gallery Quadrant**, **Model Chain: LoRA
+Details**, **Model Chain: Civitai fetch**, **Model Chain: Extra networks** and
+**Voice Chat** are sections of their own, described in their chapters.
 
 ### Progress and ETA
 
@@ -7196,6 +7197,187 @@ imported at the top of `mc_gallery_quadrant.py`: imported inside `install()`,
 it resolved to nothing, FastAPI read `request` as a required query parameter,
 and every save answered HTTP 422.
 
+## LoRA Details
+
+What a LoRA is, from inside its card: the user's own
+`SD-ForgeNeo-ExtendedLoraDetails` extension, carried in (2026-10-23) so that one
+extension is installed instead of two. A CSV library of what Civitai says about
+each LoRA — its name, version, base model and creator, its trigger words, its
+description and version notes, its gallery prompts and the images behind them —
+a fetch that fills the library, and Forge's own LoRA dialog redrawn to show all
+of it beside Forge's fields, **the width of the window**. On by default, under
+**Settings → Model Chain: LoRA Details**; its own tab, **LoRA Details**, holds
+the library, the fetch, the folders per UI Preset and the jobs.
+`docs/26-lora-details.md` is the record of the design.
+
+### The dialog
+
+A LoRA card's *edit metadata* dialog opens as it always did and is laid out
+again: a head row, three columns, Forge's buttons last. Nothing of Forge's is
+rebuilt — its components are moved, so every field saves as before.
+
+- **The head row.** Forge's name for the card; then what Civitai calls it, with
+  its version, base model and creator as pills, **Open on Civitai**, and how the
+  row was found ("Matched by SHA256 in civitai-moss.csv (row 2)"). A LoRA the
+  library has nothing for says so here instead.
+- **File.** Forge's preview (gone when there is none), its table of the file's
+  fields, and every field you edit, in Forge's order: Description, Preset, the
+  training tags, Activation Text, Preferred Weight, Negative Prompt, Random
+  Prompt, Notes.
+- **Civitai.** The facts (version, base model, creator, the model and version
+  ids, the architecture read from the file's own tensor names, the SHA256 and
+  Forge's hash); the trigger words as chips — a click puts the word into the
+  Activation Text or takes it out again, and a lit chip is one that is in it;
+  **Copy all**, **Use** (the whole list as the activation text) and **Append**
+  (only the missing words); the description and the version notes, long ones
+  folded with **Show more**; the negative prompt with **Copy** and **Append to
+  negative**; and, folded away, **All fields** of the row and the **Raw CSV
+  row**. For a LoRA the library has nothing for, **Fetch from Civitai** looks
+  up the LoRAs in its folder the library does not have yet, in the background;
+  for one Civitai had nothing for last time, **Retry on Civitai**.
+- **Gallery prompts** — only when there are any. A selector with ‹ › through
+  every prompt (a MOSS-Image layout prompt is named by its caption); the
+  selected prompt large beside its image, with **Download this image**,
+  **Download all images**, **Append to prompt** and **Replace prompt** (which
+  closes the dialog); and every prompt as a card with its thumbnail or a
+  **Download image** button, **Copy**, **Append**, **Replace**, and the
+  card's number to open it above.
+- **Cancel**, **Replace preview** and **Save**, across the width.
+
+The three columns are 3 : 4 : 6 of the width and wrap one under the other when
+the window is too narrow for them. With the theme on or off alike; the
+checkpoint and embedding dialogs are not touched. If the dialog cannot be laid
+out — another extension changed what Forge draws — Forge's dialog is left as it
+was, with the details under the notes, and the console says so. **Draw a LoRA
+card's details dialog the width of the window** (default on) turns the whole
+thing off; it needs a Reload UI.
+
+### The library
+
+CSV files in `library/` under the data root (below), or wherever **Library
+directory** points; every CSV in the folder, recursively, read on first use and
+re-read when one changes. A LoRA is matched to a row by its SHA256 first,
+computed when the dialog opens unless **Compute a missing SHA256 when the dialog
+opens** is off (then **Precompute hashes** on the tab does it ahead of time, and
+Forge's own short hash is tried); then by its path relative to a LoRA folder,
+its file name, its name without the extension. Rows from several CSVs for one
+LoRA are pooled. Column names are forgiving: `sha256` or `SHA-256`, `Model
+Name` or `civitai_model_name`, `prompt_1` or `positive_prompt_1`, and so on;
+a column this does not know is kept and shown under **All fields**. Add a CSV
+on the tab's **Library** page (drop it in, reload the folder, remove one), from
+the uploader in **Settings**, or by writing it into the folder.
+
+### The Civitai fetch
+
+The tab's **Fetch from Civitai** page: the folder to scan (the last one scanned
+is remembered), **Include subfolders**, the CSV's name, **Only fetch LoRAs the
+library does not already have**, **Keep rows already in the target CSV**,
+**Also retry LoRAs Civitai could not resolve last time**, **Fetch model
+descriptions**, **Fill in text details missing from rows already in the
+library**, the base-model gate (**Only accept these base models**, several
+comma-separated; **Require an explicit base-model label**), the API key, the
+gallery images inspected per version, the delay and the timeout. **Start fetch**
+queues a job; **Cancel running job** stops it; the **Jobs** page shows each
+job's progress, log and outcome. Every file is hashed and looked up by hash;
+a version whose own file hashes disagree with the file is refused; a MOSS-Image
+LoRA is recognised by its tensor names (`layers.N.proj.ffn_up_gate`,
+`ffn_down`), which count as an explicit label; a layout prompt from a MOSS-Image
+gallery is kept exactly as Forge compiles it. Descriptions are stored as text.
+The key Civitai last accepted is remembered in `last_used.json` (owner-only)
+and offered next time; **Remember the Civitai API key that last worked** off
+forgets it. `tools/civitai_lora_csv.py` runs the same fetch from a terminal.
+
+### Gallery images
+
+Downloaded into one flat folder, `images/` under the data root or **Folder for
+downloaded gallery images**, as `civitai-<id>.<ext>`; whether an image is there
+is read from disk, so one you delete is offered again. Thumbnails for the cards
+are made once, under `cache/thumbs`. The size cap and the timeout are settings;
+the tab's **Images** page counts them and empties the folder after a
+confirmation.
+
+### Folders per UI Preset
+
+The tab's **Preset folders** page: pick the UI Preset, then for each network
+type (LoRA, Checkpoints, Textual Inversion, whatever is registered) the
+**Folders shown for this preset** and which of them **include their
+subfolders**; **Apply to the network browsers** rebuilds them. With folders
+assigned, that preset's browsers list only the networks in them and a search
+cannot surface the others; the folder buttons above the cards keep only the
+assigned folders (**Also hide the folder buttons of folders that are not
+assigned**); switching preset rebuilds the browsers (**Rebuild the network
+browsers when the UI Preset changes**); a preset with nothing assigned shows
+everything unless **Show nothing when the active preset has no folders
+assigned** is on; and Forge's own Checkpoint quick setting can follow the
+Checkpoints assignment (**Also narrow Forge's own Checkpoint quick setting**,
+off by default; the loaded checkpoint always stays listed). The assignments are
+`preset_folders.json` under the data root, so a settings reset leaves them.
+
+### The folder row
+
+The drawer's **show / hide folders** (Forge's Tree View button) works again
+under the theme: the theme drew the row of folder buttons with a rule that
+outranked Forge's hiding one, so the button changed the pane and nothing
+changed on screen. And **Show only top-level folders in the folder buttons**
+(default on) keeps the row to the folders directly under a LoRA directory — a
+button for `SDXL`, none for `SDXL/LIGHTING`; pressing `SDXL` still lists the
+subfolders' LoRAs, because the button searches by path. Off draws every
+folder's button, as Forge does.
+
+### Coming from the standalone extension
+
+The first start brings the standalone's files and settings over, once: its
+`library/`, `images/`, `preset_folders.json`, `last_used.json` and hash cache
+into the data root where nothing of the name is there yet (a file already
+here is never overwritten), and each `eld_*` setting into its
+`model_chain_lora_*` where the setting here is still at its default. The
+record goes into a hidden option, and the console says how many files and
+settings came over and that the extension can be uninstalled. Its folder is
+left as it is: uninstall it, or disable it under **Extensions** — while it is
+installed its own panel and folder filter run beside these, and the console
+says so at every start. Three of its settings have no counterpart, because
+the panel they described is gone: the panel opened by default, opened on a
+match, or drawn above Forge's fields.
+
+### Settings
+
+**Model Chain: LoRA Details** — **Draw a LoRA card's details dialog the width
+of the window** (on), **Library directory**, **Add a CSV to the library** (the
+uploader, with the library's status), **Match a LoRA to its CSV row by SHA256
+first** (on), **Compute a missing SHA256 when the dialog opens** (on), **Prompt
+cards drawn in the dialog** (50), **Characters of each prompt shown in the
+selector** (90), **Folder for downloaded gallery images**, **Largest gallery
+image to download** (32 MB), **Gallery image download timeout** (30 s).
+
+**Model Chain: Civitai fetch** — **Civitai API key**, **Remember the Civitai
+API key that last worked** (on), **Open the fetch tab on the folder that was
+scanned last** (on), **Fetch the model description** (on), **On a refresh, fill
+in text details missing from LoRAs already in the library** (on), **On a
+refresh, look up LoRAs Civitai had nothing for last time** (off), **Minimum
+delay between Civitai requests** (0.15 s), **Civitai request timeout** (30 s),
+**Gallery images inspected per version** (0 = all), **Only accept these base
+models**, **Require an explicit base-model label** (off).
+
+**Model Chain: Extra networks** — **Filter the extra-network browsers by the
+folders assigned to the active UI Preset** (on), **Also hide the folder buttons
+of folders that are not assigned** (on), **Show only top-level folders in the
+folder buttons** (on), **Also narrow Forge's own Checkpoint quick setting to
+the assigned folders** (off), **Show nothing when the active preset has no
+folders assigned for a network type** (off), **Rebuild the network browsers
+when the UI Preset changes** (on).
+
+### Where things are
+
+```
+<WebUI data>/model_chain_lora/
+    library/               the CSV files            (Library directory)
+    images/                downloaded gallery images (Folder for downloaded gallery images)
+    cache/hashes.json      SHA256 and AddNet hashes, by file
+    cache/thumbs/          the cards' thumbnails
+    preset_folders.json    folder assignments per UI Preset
+    last_used.json         the key and folder of the last fetch, owner-only
+```
+
 ## Layout
 
 ```
@@ -7211,6 +7393,25 @@ mc_memory.py          image model residency / cache management
 mc_plan.py            the generation's execution plan and the VRAM budget from it
 mc_plan_panel.py      the Generation Memory & Persistent LLM section on txt2img
 mc_lora.py            prepared LoRA state + stage isolation
+mc_lora_details.py    the LoRA dialog the width of the window: Forge's components moved
+                      into three columns, and the details that fill them
+mc_lora_settings.py   the LoRA details' three settings sections, the uploader, and the
+                      one-time carry-over from the standalone extension
+mc_lora_paths.py      where the LoRA details keep their files: one data root
+mc_lora_common.py     the LoRA details' logger, settings reader and normalisers
+mc_lora_library.py    the CSV library: rows, and matching by hash, path and name
+mc_lora_civitai.py    the Civitai client, the base-model gate, the scan of a folder
+mc_lora_descriptions.py   a model page's HTML as readable text
+mc_lora_layouts.py    MOSS-Image layout prompts, read and labelled
+mc_lora_hashing.py    SHA256 and AddNet hashes, cached
+mc_lora_images.py     the gallery images: downloads, thumbnails, one flat folder
+mc_lora_jobs.py       the background jobs: a fetch, a hash run, image downloads
+mc_lora_last_used.py  the key and the folder of the last fetch
+mc_lora_render.py     every HTML fragment of the dialog and the tab
+mc_lora_tab.py        the LoRA Details tab: library, folders, images, fetch, jobs
+mc_extra_networks_folders.py     folder assignments per UI Preset and network page
+mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
+mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
 mc_spatial_profiles.py     named Spatial layouts
@@ -7346,7 +7547,7 @@ prompt_master/models/managed_profiles.py  the hidden per-backbone quality profil
 scripts/model_chain.py                Script class, UI, orchestration
 scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
 scripts/model_chain_turns.py          the card's turn gate, on txt2img and img2img
-style.css             progress-bar appearance, LLM Studio, the Image Pipeline
+style.css             progress-bar appearance, LLM Studio, the Image Pipeline, the LoRA dialog
 javascript/           the settings-to-CSS layer, LLM Studio polish, the pipeline,
                       the two spatial canvases, Voice Chat's capture and playback
 javascript/forge_assistant.js        the panel: docking, transcript, composer
@@ -7355,11 +7556,13 @@ javascript/forge_assistant_host.js   Forge's tabs and header, as an adapter
 javascript/forge_assistant_focus.js  workspace focus, as a reversible transaction
 javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
 javascript/model_chain_night.js      the quieter night mode's one attribute
+javascript/model_chain_lora_details.js  the LoRA dialog's chips, clipboard, cards and preset watcher
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension
 tools/run_tests.py    the suite on every core, or only what a change reaches
 tools/affected_tests.py  which test files a change can reach
+tools/civitai_lora_csv.py  the Civitai fetch from a terminal, into the library
 docs/                 revised specifications for the progress and LLM work
 ```
 
@@ -7516,8 +7719,8 @@ tests/test_vibevoice_upstream.py`; it takes about a minute.
 
 A passing test's temporary folder is deleted as it passes (`pytest.ini`); a
 failing test's is kept to look at. A test that writes into the extension's own
-data folders (`model_chain_voice/` and `model_chain_llm/`, where the stand-in
-host's data path puts them) fails: every test and every run share those
+data folders (`model_chain_voice/`, `model_chain_llm/` and `model_chain_lora/`,
+where the stand-in host's data path puts them) fails: every test and every run share those
 folders, and so do workers running side by side.
 
 The suite stubs the host, so it runs without a WebUI checkout or any model
@@ -7882,3 +8085,15 @@ faster than a cold disk load, that a preserved LoRA state survives 20–50
 alternating jobs without drift, and that multiple Stage 2 references visibly
 condition a Flux.2 Klein or Krea 2 + Edit LoRA refine — are left to manual
 verification.
+
+The LoRA details' tests (`tests/test_lora_*.py`,
+`tests/test_extra_networks_folders.py`) cover the CSV library and its matching,
+the Civitai scan against a stub shaped like the API, the gallery downloads
+against a local server, the background jobs, the folder assignments and the
+filter, the top-level folder buttons, the one-time carry-over from the
+standalone extension, the three settings sections, and the dialog: Forge's
+components moved into the columns against a stand-in of Gradio's block tree,
+and the stylesheet and the script run for real in Chromium — the dialog the
+window less its gutters with the theme on and off, and the drawer's folder row
+hidden by Forge's toggle under the theme. The `lora_root` fixture puts the LoRA
+data root under `tmp_path`.

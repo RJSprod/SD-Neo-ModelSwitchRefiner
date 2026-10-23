@@ -16,6 +16,7 @@ voice/managed-voice-models.local.json
 # be somebody else's avatars and logs.
 model_chain_llm/
 model_chain_voice/
+model_chain_lora/
 
 # Sopro artifact pins filled in by tools/pin_sopro_models.py, for the same
 # reason the Kokoro ones are untracked: they are a property of a machine that
