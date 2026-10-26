@@ -84,7 +84,7 @@ DRAWN = """() => {
 }"""
 
 
-def open_wangp(browser, watch=None):
+def open_wangp(browser, watch=None, css=""):
     page = browser.new_page(viewport={"width": 1600, "height": 900})
     if watch is not None:
         # Every WebSocket, every event stream and every request still open,
@@ -103,6 +103,8 @@ def open_wangp(browser, watch=None):
 </div>
 </div></gradio-app>""", WANGP_PANEL, 1)
     html = html.replace('<script src="/forge_assistant', STAND_IN + '<script src="/forge_assistant', 1)
+    if css:
+        html = html.replace("</head>", "<style>" + css + "</style></head>", 1)
     assert 'id="tab_wangp"' in html and "minipaintWanGP" in html
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
@@ -220,5 +222,160 @@ def test_no_live_connection_the_box_opens_no_stream_and_leaves_no_request_open(b
         assert sockets == [], sockets
         assert streams == [], streams
         assert list(live.values()) == [], "every request has finished: " + repr(list(live.values()))
+    finally:
+        page.close()
+
+
+# --------------------------------------------------------------------------- #
+# Its lines, and its size (docs/22 §3.39)
+# --------------------------------------------------------------------------- #
+
+#: A theme with opinions about every text area on the page, and a page line
+#: height set as a length for small text -- which `font: inherit` would bring
+#: into the box at the panel's own size.
+HOSTILE_LINES = ("body { line-height: 11px !important; }"
+                 " textarea { white-space: normal !important; line-height: 11px !important; }")
+
+LINES = """() => {
+    const box = document.querySelector(".forge-assistant-wangp-prompt");
+    const style = getComputedStyle(box);
+    const one = box.value;
+    // As short as it can be, so what it scrolls is what its text needs.
+    box.style.setProperty("min-height", "0px", "important");
+    box.style.setProperty("height", "0px", "important");
+    const measure = (text) => { box.value = text; return box.scrollHeight; };
+    const single = measure("a fox at dawn");
+    const four = measure("a fox at dawn\\na crane in the reeds\\n\\na heron at dusk");
+    box.value = one;
+    box.style.removeProperty("min-height");
+    box.style.removeProperty("height");
+    return {white: style.whiteSpace, line: parseFloat(style.lineHeight), size: parseFloat(style.fontSize),
+            single, four};
+}"""
+
+
+def test_wangps_lines_are_lines_in_the_box_and_do_not_touch(browser):
+    """Reported: "in wan2gp prompt box i see new lines, but in the flyout there
+    is no space at all between lines." WanGP's prompt is lines, each one a
+    video: here each is its own line, with room between them, whatever a
+    theme says about text areas or the page says about its line height."""
+    page = open_wangp(browser, css=HOSTILE_LINES)
+    try:
+        page.evaluate("window.minipaintWanGP.page = 'a fox at dawn\\na crane in the reeds'")
+        page.click(".forge-assistant-settings")
+        page.wait_for_function("document.querySelector('.forge-assistant-wangp-prompt').value.includes('crane')")
+        assert page.evaluate("document.querySelector('.forge-assistant-wangp-prompt').value") \
+            == "a fox at dawn\na crane in the reeds"
+        found = page.evaluate(LINES)
+        assert found["white"] == "pre-wrap", found
+        assert found["line"] >= 1.4 * found["size"], found
+        assert found["four"] - found["single"] >= 3 * 1.4 * found["size"] - 2, (
+            "three more lines, the blank one among them, each a line's height", found)
+    finally:
+        page.close()
+
+
+def test_the_box_starts_tall_and_a_dragged_height_is_kept_for_the_next_page(browser):
+    """Asked for: "i really like that i can resize the flyout menu for the text
+    field ... i was worried at first when i opened the flyout prompt view for
+    wan2gp and it was really small." It starts eight lines tall, and the
+    height its corner is dragged to is the height it has from then on."""
+    page = open_wangp(browser)
+    try:
+        page.click(".forge-assistant-settings")
+        page.wait_for_function("document.querySelector('.forge-assistant-wangp-prompt').value")
+        box = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-wangp-prompt')"
+                            ".getBoundingClientRect(); return [r.right, r.bottom, r.height]; })()")
+        size = page.evaluate("parseFloat(getComputedStyle(document.querySelector('.forge-assistant-wangp-prompt')).fontSize)")
+        assert box[2] >= 8 * 1.4 * size, "eight lines to start with"
+        page.mouse.move(box[0] - 3, box[1] - 3)
+        page.mouse.down()
+        page.mouse.move(box[0] - 3, box[1] + 120, steps=6)
+        page.mouse.up()
+        settle(page)
+        dragged = page.evaluate("document.querySelector('.forge-assistant-wangp-prompt').getBoundingClientRect().height")
+        assert dragged > box[2] + 90, (box, dragged)
+        kept = page.evaluate("Object.keys(localStorage).filter((k) => k.startsWith('forge-assistant-wangp-prompt-height'))"
+                             ".map((k) => localStorage.getItem(k))")
+        assert kept == [str(round(dragged)) + "px"], kept
+
+        page.reload()
+        page.wait_for_function("!!(window.forgeAssistant && window.forgeAssistant.shell)")
+        page.evaluate(SWITCH, "tab_wangp")
+        page.evaluate("forgeAssistant.shell.open()")
+        page.wait_for_function("!document.querySelector('.forge-assistant-wangp').hidden"
+                               " || !document.querySelector('.forge-assistant-settings').hidden")
+        if page.evaluate("document.querySelector('.forge-assistant-wangp').hidden"):
+            page.click(".forge-assistant-settings")
+        settle(page)
+        again = page.evaluate("document.querySelector('.forge-assistant-wangp-prompt').getBoundingClientRect().height")
+        assert abs(again - dragged) <= 1, (dragged, again)
+    finally:
+        page.close()
+
+
+# --------------------------------------------------------------------------- #
+# Two presses: Normal, Focused, Super Focused (docs/22 §3.39)
+# --------------------------------------------------------------------------- #
+
+MODE = """() => {
+    const root = document.getElementById("tab_wangp");
+    const shell = forgeAssistant.shell;
+    return {focus: root.classList.contains("forge-assistant-focus-root"),
+            studio: root.classList.contains("forge-assistant-wangp-studio"),
+            open: shell.state.panelOpen, panelHidden: document.getElementById("forge-assistant-panel").hidden,
+            launcher: !document.getElementById("forge-assistant-launcher").hidden,
+            bar: document.body.getAttribute("data-forge-assistant-focus-bar")};
+}"""
+
+GRIP = """() => { const g = document.querySelector(".forge-assistant-grip").getBoundingClientRect();
+                  return [g.left + g.width / 2, g.top + g.height / 2]; }"""
+LAUNCHER = """() => { const b = document.getElementById("forge-assistant-launcher").getBoundingClientRect();
+                      return [b.left + b.width / 2, b.top + b.height / 2]; }"""
+
+
+def test_two_presses_cycle_normal_focused_super_focused_and_back(browser):
+    """On the WanGP tab, from an open panel: two presses on the header's
+    space are Focused (the panel stays), two more are Super Focused -- the
+    panel put away, the tab bar with it, the studio's class on the focused
+    panel for Mini Paint's tab to hear -- and two on the launcher, the one
+    thing left, are Normal again with the panel back."""
+    page = open_wangp(browser)
+    try:
+        start = page.evaluate(MODE)
+        assert start["open"] and not start["focus"] and not start["studio"], start
+        page.mouse.dblclick(*page.evaluate(GRIP))
+        settle(page)
+        focused = page.evaluate(MODE)
+        assert focused["focus"] and not focused["studio"] and focused["open"], focused
+        page.wait_for_timeout(350)
+        page.mouse.dblclick(*page.evaluate(GRIP))
+        settle(page)
+        superfocused = page.evaluate(MODE)
+        assert superfocused["focus"] and superfocused["studio"], superfocused
+        assert superfocused["open"] is False and superfocused["panelHidden"] and superfocused["launcher"], superfocused
+        assert superfocused["bar"] == "hidden", "the tab bar goes with the panel"
+        page.wait_for_timeout(350)
+        page.mouse.dblclick(*page.evaluate(LAUNCHER))
+        settle(page)
+        normal = page.evaluate(MODE)
+        assert not normal["focus"] and not normal["studio"], normal
+        assert normal["open"] and not normal["panelHidden"], "the panel is back as it was"
+    finally:
+        page.close()
+
+
+def test_super_focus_is_left_by_escape_with_everything_back(browser):
+    page = open_wangp(browser)
+    try:
+        page.mouse.dblclick(*page.evaluate(GRIP))
+        page.wait_for_timeout(350)
+        page.mouse.dblclick(*page.evaluate(GRIP))
+        settle(page)
+        assert page.evaluate(MODE)["studio"] is True
+        page.keyboard.press("Escape")
+        settle(page)
+        found = page.evaluate(MODE)
+        assert not found["focus"] and not found["studio"] and found["open"], found
     finally:
         page.close()

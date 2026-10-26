@@ -1,10 +1,16 @@
-"""Quick actions on the launcher: two presses go back, three toggle focus.
+"""Quick actions on the launcher: two presses move to the next mode.
 
-Asked for from use: with the panel put away to its launcher, a double press
-should return to the workspace before this one -- and, pressed again, to the
-one just left, so two workspaces can be flipped between -- and a triple press
-should turn focus mode on or off. Neither should need a pace that is hard to
-hit or one that turns two unhurried presses into a gesture.
+Asked for from use, first: with the panel put away to its launcher, a double
+press should return to the workspace before this one -- and, pressed again, to
+the one just left, so two workspaces can be flipped between -- and a triple
+press should turn focus mode on or off. Then (docs/22 §3.39): "if I double tap
+the flyout button action activation / drag handle, it cycles through Normal
+Mode / Focused Mode / Super Focused Wan2gp Mode". So two presses are the mode
+cycle (`cycleMode`, held in test_assistant_modes_js.py), acting inside the
+second press as the triple did, for focus's full screen; going back is the
+workspace menu's first entry, and `backToPrevious` is still what it does.
+Neither should need a pace that is hard to hit or one that turns two
+unhurried presses into a gesture.
 
 Timers are a fake clock here: the harness's own `setTimeout` never fires, and
 the whole point of these tests is what happens when the window passes.
@@ -34,6 +40,7 @@ function tapShell() {
     shell.did = [];
     shell.open = () => shell.did.push("open");
     shell.toggleFocus = () => shell.did.push("focus");
+    shell.cycleMode = () => shell.did.push("cycle");
     shell.switchWorkspace = (id) => { shell.did.push("switch:" + id); return Promise.resolve(id); };
     shell.fault = (error) => shell.did.push("fault:" + error.message);
     shell.host = {active: "txt2img", getActiveWorkspace() { return this.active; }};
@@ -55,26 +62,13 @@ class TestCountingPresses:
 
         assert found == {"before": [], "after": ["open"]}
 
-    def test_two_presses_go_back_and_do_not_open(self):
-        found = run(CLOCK + """
-            const shell = tapShell();
-            shell.previousWorkspace = "img2img";
-            shell.tapLauncher(press());
-            shell.tapLauncher(press());
-            lapse();
-            console.log(JSON.stringify({did: shell.did}));
-        """)
-
-        assert found == {"did": ["switch:img2img"]}
-
-    def test_three_presses_toggle_focus_inside_the_third_press(self):
+    def test_two_presses_move_to_the_next_mode_inside_the_second_press(self):
         """Entering focus asks for the browser's full screen, which a browser
-        grants only while a press is being handled -- so the third press acts
-        itself, not a timer after it."""
+        grants only while a press is being handled -- so the second press acts
+        itself, not a timer after it; and the panel does not open."""
         found = run(CLOCK + """
             const shell = tapShell();
             shell.previousWorkspace = "img2img";
-            shell.tapLauncher(press());
             shell.tapLauncher(press());
             shell.tapLauncher(press());
             const during = shell.did.slice();
@@ -82,7 +76,22 @@ class TestCountingPresses:
             console.log(JSON.stringify({during, fired, after: shell.did}));
         """)
 
-        assert found == {"during": ["focus"], "fired": 0, "after": ["focus"]}
+        assert found == {"during": ["cycle"], "fired": 0, "after": ["cycle"]}
+
+    def test_a_third_press_starts_a_new_count(self):
+        """Two acted; a third is the first of the next gesture, and alone it
+        is one press: the panel opens once the window has passed."""
+        found = run(CLOCK + """
+            const shell = tapShell();
+            shell.tapLauncher(press());
+            shell.tapLauncher(press());
+            shell.tapLauncher(press());
+            const during = shell.did.slice();
+            lapse();
+            console.log(JSON.stringify({during, after: shell.did}));
+        """)
+
+        assert found == {"during": ["cycle"], "after": ["cycle", "open"]}
 
     def test_presses_further_apart_than_the_window_are_separate(self):
         found = run(CLOCK + """
@@ -229,8 +238,9 @@ def test_the_launcher_and_the_navigation_feed_are_wired_to_them():
 
     assert re.search(r'this\.on\(nodes\.launcher, "click", \(event\) => this\.launcherClick\(event\)\)',
                      wiring)
-    subscriber = wiring.split("subscribeNavigation((active)", 1)[1]
-    assert subscriber.lstrip(" =>{\n").startswith("this.noteWorkspace(active);")
+    assert "subscribeNavigation((active) => this.navigated(active))" in wiring
+    subscriber = shell.split("Shell.prototype.navigated = function (active) {", 1)[1]
+    assert subscriber.lstrip(" \n").startswith("this.noteWorkspace(active);")
 
 
 # --------------------------------------------------------------------------- #
@@ -285,7 +295,8 @@ class TestPressesOnTheHeader:
     area to be the toggle focus on / off ... just like the launcher's triple
     tap" -- and then, once it did not work in a real browser: "lets bring the
     double tap to that area. So double tap to last tab, and triple tap to
-    toggle focus. Just like the button!"
+    toggle focus. Just like the button!" -- and since docs/22 §3.39, like the
+    button again: two presses move to the next mode.
 
     The drag area is the header's own space -- the grip and the padding
     between its buttons. The first version listened for clicks on the header
@@ -294,10 +305,9 @@ class TestPressesOnTheHeader:
     the browser puts them and come up where capture puts them.
     """
 
-    def test_three_presses_on_the_space_toggle_focus_inside_the_third(self):
+    def test_two_presses_on_the_space_move_to_the_next_mode_inside_the_second(self):
         found = run(HEADER + """
             const shell = headerShell();
-            tap(shell, space);
             tap(shell, space);
             const before = shell.did.slice();
             tap(shell, space);
@@ -307,22 +317,8 @@ class TestPressesOnTheHeader:
                                         captured: !!panel.captured}));
         """)
 
-        assert found == {"before": [], "during": ["focus"], "fired": 0, "after": ["focus"],
+        assert found == {"before": [], "during": ["cycle"], "fired": 0, "after": ["cycle"],
                          "captured": True}
-
-    def test_two_presses_go_back_once_the_window_has_passed(self):
-        """Not before: they may still become three."""
-        found = run(HEADER + """
-            const shell = headerShell();
-            shell.previousWorkspace = "img2img";
-            tap(shell, space);
-            tap(shell, space);
-            const before = shell.did.slice();
-            lapse();
-            console.log(JSON.stringify({before, after: shell.did}));
-        """)
-
-        assert found == {"before": [], "after": ["switch:img2img"]}
 
     def test_one_press_does_nothing_and_is_forgotten(self):
         found = run(HEADER + """
@@ -331,23 +327,25 @@ class TestPressesOnTheHeader:
             tap(shell, space);
             lapse();
             tap(shell, space);
+            const after = shell.did.slice();
             tap(shell, space);
-            tap(shell, space);
-            console.log(JSON.stringify(shell.did));
+            console.log(JSON.stringify({after, then: shell.did}));
         """)
 
-        assert found == ["focus"], "the lone press before the window is not the first of three"
+        assert found == {"after": [], "then": ["cycle"]}, \
+            "the lone press before the window is not the first of two"
 
-    def test_with_nowhere_to_go_back_to_two_presses_do_nothing(self):
+    def test_going_back_is_never_two_presses_any_more(self):
         found = run(HEADER + """
             const shell = headerShell();
+            shell.previousWorkspace = "img2img";
             tap(shell, space);
             tap(shell, space);
             lapse();
             console.log(JSON.stringify(shell.did));
         """)
 
-        assert found == []
+        assert found == ["cycle"]
 
     def test_the_click_is_read_where_the_captured_pointer_puts_it(self):
         """On the panel, not the header: the listener is the panel's, and a
@@ -394,7 +392,7 @@ class TestPressesOnTheHeader:
             .split("Shell.prototype", 1)[0]
 
         assert "TAP_WINDOW" in tap
-        assert "backToPrevious" in tap and "toggleFocus" in tap
+        assert "cycleMode" in tap and "backToPrevious" not in tap and "toggleFocus" not in tap
 
     def test_a_press_on_a_button_in_the_row_is_that_button_s(self):
         """It never starts a drag, so it is never a press on the space; and it
@@ -406,11 +404,10 @@ class TestPressesOnTheHeader:
             tap(shell, space);
             tap(shell, control);
             tap(shell, space);
-            tap(shell, space);
             console.log(JSON.stringify({onControls, then: shell.did}));
         """)
 
-        assert found == {"onControls": [], "then": ["focus"]}
+        assert found == {"onControls": [], "then": ["cycle"]}
 
     def test_a_synthetic_click_is_not_a_press(self):
         """`detail` is 0 for a keyboard activation, and a header cannot be
@@ -427,17 +424,16 @@ class TestPressesOnTheHeader:
         found = run(HEADER + """
             const shell = headerShell();
             tap(shell, space);
-            tap(shell, space);
             tap(shell, space, {moved: true});
             const afterDrag = {did: shell.did.slice(), flag: shell.suppressHeaderClick,
                                count: shell.headerTaps || 0, at: shell.state.anchorOverride};
-            [1, 2, 3].forEach(() => tap(shell, space));
+            [1, 2].forEach(() => tap(shell, space));
             console.log(JSON.stringify({afterDrag, then: shell.did}));
         """)
 
         assert found["afterDrag"] == {"did": [], "flag": False, "count": 0, "at": "top-left"}, (
-            "the drag moved the panel and was not the third press; the flag is spent")
-        assert found["then"] == ["focus"]
+            "the drag moved the panel and was not the second press; the flag is spent")
+        assert found["then"] == ["cycle"]
 
     def test_a_new_press_clears_a_tail_that_never_came(self):
         """With the pointer captured the click may not come at all, so a flag
@@ -457,7 +453,6 @@ class TestPressesOnTheHeader:
         found = run(HEADER + """
             const shell = headerShell();
             shell.drag = null; shell.strip = null; shell.resizing = null;
-            tap(shell, space);
             tap(shell, space);
             shell.cancelGestures();
             tap(shell, space);
