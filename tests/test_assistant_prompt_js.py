@@ -493,3 +493,45 @@ def test_the_view_is_remembered_with_the_rest_of_the_panels_layout():
     """)
 
     assert found == {"stored": True, "restored": True}
+
+
+def test_no_live_connection_nothing_opened_nothing_polled_nothing_left_waiting():
+    """Asked for once it was built: "Make sure there is no live stream. No
+    live connections!" Every read and write is a call into Mini Paint NEO's
+    bundle, which carries it to WanGP's frame as a message; the panel opens
+    no stream, makes no request and sets no repeating timer for it, and once
+    the box has been typed in, written, generated from, read again and put
+    away, no timer of its own is left waiting."""
+    found = run(WORLD + """
+        const opened = [];
+        globalThis.fetch = (url) => { opened.push(["fetch", String(url)]);
+                                      return Promise.reject(new Error("no network")); };
+        globalThis.EventSource = function (url) { opened.push(["eventsource", String(url)]); };
+        globalThis.WebSocket = function (url) { opened.push(["websocket", String(url)]); };
+        globalThis.XMLHttpRequest = function () { opened.push(["xhr", ""]); };
+        globalThis.setInterval = (fn, ms) => { opened.push(["interval", ms]); return 1; };
+        (async () => {
+            const {shell, bridge} = promptShell("tab_wangp");
+            shell.nodes.generate.hidden = false;
+            shell.toggleDock(); await settle();
+            typed(shell, "a fox"); await elapse();
+            typed(shell, "a fox at dawn"); shell.writePrompt(); await settle();
+            typed(shell, "a fox at dawn, snow"); await shell.generateInWanGP();
+            shell.promptKey({key: "Enter", ctrlKey: true, preventDefault() {}, stopPropagation() {}});
+            await settle();
+            bridge.touched += 1; shell.applyPrompt(); await settle();
+            shell.applyPrompt(); shell.applyPrompt(); await settle();
+            typed(shell, "put away with this"); shell.toggleDock(); await settle();
+            // Read before any timer is let run: what is still set now is what
+            // the box left behind.
+            console.log(JSON.stringify({opened, waiting: timers.filter((t) => t.live).map((t) => t.ms),
+                                        calls: bridge.calls.map((c) => c[0])}));
+        })();
+    """)
+
+    assert found["opened"] == [], found["opened"]
+    # ▶'s own three seconds of saying how the press went is the button's, a
+    # one-off; nothing of the box's is left.
+    assert found["waiting"] == [3000], "no timer of the box's own is left behind"
+    assert found["calls"] == ["prompt", "setPrompt", "setPrompt", "setPrompt", "generate",
+                              "generate", "prompt", "setPrompt"]

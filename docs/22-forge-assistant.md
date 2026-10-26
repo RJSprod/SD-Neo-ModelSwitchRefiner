@@ -3181,6 +3181,25 @@ prompt here.", and nothing is asked in either case. A page whose prompt is over
 the ceiling (12000 characters) is not read out, and the box says to edit it on
 the WanGP page.
 
+### No live connection
+
+Asked for once it was built: "Make sure there is no live stream. No live
+connections!" The panel opens nothing for the box: every read and write is a
+call into Mini Paint's bundle, which posts a message into WanGP's frame and
+waits, with a deadline, for the one that answers it -- no `fetch`, no stream,
+no socket, no repeating timer of the box's own, and after the box has been
+typed in, written, generated from and put away nothing of its own is left
+set. The panel's five-second beat was already there (the free-memory reading's
+plain request with its deadline, §3.26) and asks WanGP nothing for the box
+unless WanGP's form was touched by hand. Inside WanGP's page each read or
+write is one Gradio event, as every bridge operation is: on Gradio 5.29,
+WanGP's pin, a `queue/join` POST and a `queue/data` result stream that Gradio
+closes as soon as the event answers -- about 60 ms on a 5.29 page carrying the
+real bridge's controls, event, page script and plugin handler, driven in
+Chromium; at rest the only thing open there was Gradio's own heartbeat, open
+from the page's load before any prompt operation and WanGP's, not the box's
+(Mini Paint's `docs/wangp/CONTRACTS.md`, *Bridge 1.14.0: the prompt*).
+
 ### Verified
 
 `tests/test_assistant_prompt_js.py` (node, Mini Paint's bundle a stand-in of
@@ -3194,16 +3213,21 @@ write was refused, asking nothing first when nothing was typed; a read never
 over unsent text, again only after a touch by hand, afresh when shown again;
 the box shut with its reason and asking nothing, the wizard's box named, a
 refused read shutting it until WanGP is touched; Ctrl+Enter; the state kept
-with the layout. Twelve mutations each fail a test.
+with the layout; and the whole flow opening no stream, socket or request,
+setting no interval and leaving no timer of the box's own. Seventeen mutations
+each fail a test.
 `tests/test_assistant_wangp_prompt.py` (Chromium, the layout test's page with
 a WanGP tab): the box drawn inside the panel, on its surface, taking a press;
 typing reaching `setPrompt` once the keys go quiet through the real wiring; ▶
 straight after typing and Ctrl+Enter generating with what was typed; on
-Txt2Img the button its own, and back on WanGP the page read again. Mini Paint
+Txt2Img the button its own, and back on WanGP the page read again; from the
+page's load through typing, ▶ and Ctrl+Enter no WebSocket and no event stream,
+and every request finished. Mini Paint
 NEO's halves are its `tests/test_wangp_queue.py` (the plugin's operation),
 `tests/test_wangp_protocol.py` (`prompt_checks`, the bundle on its virtual
-clock, and the WanGP document's script) and ten mutations. Not run against a
-real WanGP or on the user's machine.
+clock, nothing opened or left pending, and the WanGP document's script) and
+twelve mutations. The bridge's prompt read and write ran once on a real Gradio
+5.29 page, as above; not against a real WanGP or on the user's machine.
 
 ## 4. Deliberate deviations
 

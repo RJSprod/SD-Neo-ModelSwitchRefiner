@@ -84,8 +84,18 @@ DRAWN = """() => {
 }"""
 
 
-def open_wangp(browser):
+def open_wangp(browser, watch=None):
     page = browser.new_page(viewport={"width": 1600, "height": 900})
+    if watch is not None:
+        # Every WebSocket, every event stream and every request still open,
+        # from before the page loads.
+        sockets, streams, live = watch
+        page.on("websocket", lambda socket: sockets.append(socket.url))
+        page.on("request", lambda request: (
+            streams.append(request.url) if request.resource_type == "eventsource" else None,
+            live.__setitem__(id(request), request.url)))
+        page.on("requestfinished", lambda request: live.pop(id(request), None))
+        page.on("requestfailed", lambda request: live.pop(id(request), None))
     html = page_html()
     html = html.replace("""aria-selected="false">Img2img</button>
   </div>""", """aria-selected="false">Img2img</button>""" + WANGP_TAB, 1)
@@ -182,3 +192,33 @@ def test_on_txt2img_the_same_button_docks_its_own_column_and_wangps_view_waits(b
     finally:
         page.close()
 
+
+
+def test_no_live_connection_the_box_opens_no_stream_and_leaves_no_request_open(browser):
+    """"Make sure there is no live stream. No live connections!" -- in the
+    browser: from the page's load through showing the box, typing, ▶ and
+    Ctrl+Enter, no WebSocket and no event stream is opened, and every request
+    the page made has finished. (The page's own requests are the panel's
+    ordinary ones -- the free-memory reading's plain request, the
+    conversation's -- each with its deadline; the box adds none.)"""
+    sockets, streams, live = [], [], {}
+    page = open_wangp(browser, watch=(sockets, streams, live))
+    try:
+        page.click(".forge-assistant-settings")
+        page.wait_for_function("document.querySelector('.forge-assistant-wangp-prompt').value")
+        page.click(".forge-assistant-wangp-prompt")
+        page.keyboard.press("Control+A")
+        page.keyboard.type("a lynx in the pines")
+        page.click(".forge-assistant-generate")
+        page.wait_for_function("wangpCalls.some((c) => c[0] === 'generate')")
+        page.click(".forge-assistant-wangp-prompt")
+        page.keyboard.type(", at dusk")
+        page.keyboard.press("Control+Enter")
+        page.wait_for_function("wangpCalls.filter((c) => c[0] === 'generate').length === 2")
+        page.wait_for_timeout(600)
+        settle(page)
+        assert sockets == [], sockets
+        assert streams == [], streams
+        assert list(live.values()) == [], "every request has finished: " + repr(list(live.values()))
+    finally:
+        page.close()
