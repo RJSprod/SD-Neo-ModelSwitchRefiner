@@ -46,6 +46,13 @@
     // theme's quick settings drawer, which the bar's button opens -- left in
     // the layout by the rule that takes the rest out. It draws itself.
     const KEEP_CLASS = "forge-assistant-focus-keep";
+    // Super focus (docs/22 §3.39): on Mini Paint NEO's WanGP tab, focus with
+    // WanGP's page laid out as a studio -- its prompt, its Generate and its
+    // progress beside its gallery. This class beside ROOT_CLASS on the focused
+    // panel is the whole of it here: Mini Paint's tab watches the panel's
+    // classes and tells WanGP's page (its bridge 1.15.0). Shared with that
+    // extension -- do not rename (CLAUDE.md, "Shared with Mini Paint NEO").
+    const STUDIO_CLASS = "forge-assistant-wangp-studio";
 
     // Tab bars outside the focused workspace. Marked one at a time by the
     // script rather than selected by a stylesheet, because the decision that
@@ -519,7 +526,7 @@
         // workspace rebuilt by a Gradio update is still a workspace that has to
         // stop being fixed to the viewport.
         if (context.root && context.root.classList) {
-            context.root.classList.remove(ROOT_CLASS);
+            context.root.classList.remove(ROOT_CLASS, STUDIO_CLASS);
         }
         undo(context);
         document.body.classList.remove(BODY_CLASS);
@@ -584,6 +591,23 @@
         this.barMode = mode;
         if (this.placeBar()) refill();
         return this.barMode;
+    };
+
+    /** Super focus on the focused panel, or off it: the studio's class, and
+     *  nothing else. True when the panel says what was asked; false with
+     *  focus off, which is where the class cannot go. Off with focus, always
+     *  (`exit`). */
+    Focus.prototype.setStudio = function (on) {
+        const context = this.active;
+        if (!context || !context.root || !context.root.classList) return false;
+        context.studio = !!on;
+        if (on) context.root.classList.add(STUDIO_CLASS);
+        else context.root.classList.remove(STUDIO_CLASS);
+        return true;
+    };
+
+    Focus.prototype.isStudio = function () {
+        return !!(this.active && this.active.studio);
     };
 
     /** The bar kept for the focused workspace, or null. */
@@ -664,6 +688,7 @@
     NS.Focus = Focus;
     NS.FOCUS_BAR_CLASS = BAR_CLASS;
     NS.FOCUS_KEEP_CLASS = KEEP_CLASS;
+    NS.FOCUS_STUDIO_CLASS = STUDIO_CLASS;
     NS.focusTrapped = trapped;
     NS.canvasAdapter = canvasAdapter;
 

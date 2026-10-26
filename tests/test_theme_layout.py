@@ -1324,7 +1324,7 @@ def focus_page(browser, width=1280, height=800, opts=None):
 
 
 def enter_focus(page, tab="tab_txt2img"):
-    """Through the shell, as the launcher's three presses do (less the
+    """Through the shell, as the launcher's two presses do (less the
     browser's full screen), so the shell follows a switch of workspace."""
     assert page.evaluate(f"forgeAssistant.shell.refocus('{tab}')") is True
     settle(page, 6)

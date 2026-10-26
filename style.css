@@ -9164,7 +9164,7 @@ body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-ass
 
 .forge-assistant-wangp-prompt {
     width: 100%;
-    min-height: 4.5em;
+    min-height: 6em;
     max-height: max(160px, 60vh);
     box-sizing: border-box;
     padding: 0.4em 0.55em;
@@ -9174,6 +9174,15 @@ body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-ass
     color: inherit;
     font: inherit;
     font-size: var(--forge-assistant-text, inherit);
+    /* WanGP's prompt is lines -- each one a video -- so each line is its own
+       line here, and they do not touch. `font: inherit` brings the page's
+       line height with the face, and a page whose line height is a length
+       set for smaller text closes the lines up at the panel's text size; a
+       theme may say how text areas wrap. Both are this box's own. */
+    line-height: 1.5 !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+    tab-size: 4;
     resize: vertical;
     overflow-y: auto;
     overscroll-behavior: contain;

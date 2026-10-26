@@ -159,6 +159,10 @@
     // keyboard or ▶ is pressed. Mini Paint NEO's `prompt()` and `setPrompt()`
     // are the contract (its docs/wangp/CONTRACTS.md, bridge 1.14.0).
     const PROMPT_QUIET = 400;
+    // The box's height as the person last dragged it, kept in this browser:
+    // it starts PROMPT_ROWS lines tall, and a drag of its corner is the size
+    // it has from then on, on every page (`watchPromptSize`).
+    const PROMPT_ROWS = 8;
 
     // -- geometry ---------------------------------------------------------- //
 
@@ -423,6 +427,11 @@
             // The workspace's own tab bar above the workspace in focus mode;
             // off, it is hidden until a tap brings it for a moment.
             focusBar: true,
+            // What super focus put away to show the studio, to be put back
+            // when it ends (`endStudio`): saved with the layout, so a reload
+            // in super focus -- which starts outside focus, like every reload
+            // -- starts from what was there before it.
+            studioReturn: null,
         };
         this.settings = {
             enabled: true,
@@ -450,6 +459,8 @@
         this._restoreSendToGenerate();
         this._restoreFocusBar();
         this.peekTimer = 0;
+        // Super focus, while it is on: the workspace it is on. See `cycleMode`.
+        this.studio = null;
         this.applyFocusBar();
         // Which picture Auto Attach last sent, per conversation. See
         // `autoAttachable`.
@@ -486,6 +497,12 @@
             ["panelOpen", "conversationExpanded", "settingsDocked", "wangpPrompt"].forEach((name) => {
                 if (typeof found[name] === "boolean") this.state[name] = found[name];
             });
+            // Saved in super focus: what it put away comes back, because the
+            // reload has ended super focus as it ends focus.
+            const back = found.studioReturn;
+            if (back && typeof back === "object" && typeof back.panelOpen === "boolean") {
+                this.state.panelOpen = back.panelOpen;
+            }
             // Focus is deliberately not restored here. A reload starts outside
             // focus and the saved workspace is only honoured once an eligible
             // root has been verified -- see `resumeFocus`.
@@ -616,6 +633,7 @@
             wangpPrompt: this.state.wangpPrompt,
             focusEnabled: this.state.focusEnabled,
             focusWorkspaceId: this.state.focusWorkspaceId,
+            studioReturn: this.state.studioReturn,
         };
         try {
             window.sessionStorage.setItem(
@@ -825,7 +843,8 @@
         const wangp = element("div", "forge-assistant-wangp");
         wangp.hidden = true;
         const prompt = element("textarea", "forge-assistant-wangp-prompt");
-        prompt.rows = 6;
+        prompt.rows = PROMPT_ROWS;
+        this._restorePromptHeight(prompt);
         prompt.setAttribute("aria-label", PROMPT_LABEL);
         prompt.placeholder = "WanGP's prompt\u2026";
         const promptNote = element("p", "forge-assistant-wangp-note");
@@ -2058,6 +2077,7 @@
         // the keyboard, and Ctrl+Enter is ▶ as it is Generate on Forge's own
         // prompt boxes.
         this.on(nodes.prompt, "input", () => this.typedPrompt());
+        this.watchPromptSize();
         this.on(nodes.prompt, "blur", () => this.writePrompt());
         this.on(nodes.prompt, "keydown", (event) => this.promptKey(event));
         // The row's own space, counted from the panel and not from the row:
@@ -2208,25 +2228,31 @@
                 }
             });
         }));
-        this.disposers.push(this.host.subscribeNavigation((active) => {
-            this.noteWorkspace(active);
-            this.applyGenerate();
-            this.applyDock();
-            this.applyPrompt();
-            this.applySuppression();
-            this.renderWorkspaces();
-            if (this.state.focusEnabled && active && this.focus.isActive()
-                && active !== this.focus.activeWorkspace()) {
-                const moved = this.focus.moveTo(active, this.host);
-                if (!moved.ok) {
-                    this.focusOff();
-                    this.say(moved.reason, "warn");
-                    this._save();
-                } else if (moved.note) {
-                    this.say(moved.note, "warn");
-                }
+        this.disposers.push(this.host.subscribeNavigation((active) => this.navigated(active)));
+    };
+
+    /** The host's selection moved, or was read again: what follows it. */
+    Shell.prototype.navigated = function (active) {
+        this.noteWorkspace(active);
+        this.applyGenerate();
+        this.applyDock();
+        this.applyPrompt();
+        this.applySuppression();
+        this.renderWorkspaces();
+        // Super focus is the WanGP tab's: a switch away ends it, puts back
+        // what it put away, and focus follows the switch as it always has.
+        if (this.studio && active && active !== this.studio.workspace) this.endStudio();
+        if (this.state.focusEnabled && active && this.focus.isActive()
+            && active !== this.focus.activeWorkspace()) {
+            const moved = this.focus.moveTo(active, this.host);
+            if (!moved.ok) {
+                this.focusOff();
+                this.say(moved.reason, "warn");
+                this._save();
+            } else if (moved.note) {
+                this.say(moved.note, "warn");
             }
-        }));
+        }
     };
 
     /** The box was typed into. It is the draft -- unless it holds an edit,
@@ -2504,6 +2530,44 @@
         });
     };
 
+    // The box's height, the person's: what its corner was last dragged to,
+    // remembered in this browser under a key of its own, like Free Float.
+    Shell.prototype._promptHeightKey = function () {
+        return "forge-assistant-wangp-prompt-height:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restorePromptHeight = function (box) {
+        let found = "";
+        try {
+            found = window.localStorage.getItem(this._promptHeightKey()) || "";
+        } catch (error) {
+            found = "";
+        }
+        // A height in pixels and nothing else; the stylesheet's bounds hold it.
+        if (/^\d{2,4}px$/.test(found) && box && box.style) box.style.height = found;
+    };
+
+    /** A drag of the box's corner is the browser writing the box's inline
+     *  height; it is heard here and kept. Only read and remembered, never
+     *  written back, so the observer cannot answer its own change. */
+    Shell.prototype.watchPromptSize = function () {
+        const box = this.nodes && this.nodes.prompt;
+        if (!box || typeof ResizeObserver !== "function") return;
+        let kept = box.style ? box.style.height : "";
+        const observer = new ResizeObserver(() => {
+            const height = box.style ? box.style.height : "";
+            if (!height || height === kept) return;
+            const px = Math.round(parseFloat(height));
+            if (!(px >= 10 && px < 10000) || !/px$/.test(height)) return;
+            kept = height;
+            try {
+                window.localStorage.setItem(this._promptHeightKey(), px + "px");
+            } catch (error) { /* memory only; the box keeps its size until a reload */ }
+        });
+        observer.observe(box);
+        this.disposers.push(() => observer.disconnect());
+    };
+
     /** Typed in: written to WanGP's page once the keys go quiet. */
     Shell.prototype.typedPrompt = function () {
         this._promptDirty = true;
@@ -2682,15 +2746,17 @@
 
     /** A press on the launcher, counted.
      *
-     * One press opens the panel, two go back to the previous workspace, three
-     * toggle focus. The count is ours rather than the click's `detail`,
-     * because `detail` follows the system's double-click setting and does not
-     * count taps the same way on every touchscreen.
+     * One press opens the panel; two move to the next mode -- Normal, Focused
+     * and, on the WanGP tab, Super Focused (`cycleMode`). The count is ours
+     * rather than the click's `detail`, because `detail` follows the system's
+     * double-click setting and does not count taps the same way on every
+     * touchscreen.
      *
-     * Three acts at once, inside the press, because entering focus asks for
-     * the browser's full screen and a browser grants that only to a press
-     * that is still being handled. One and two cannot act until the window
-     * has passed with no further press, since either may still become more.
+     * Two act at once, inside the second press, because entering focus asks
+     * for the browser's full screen and a browser grants that only to a press
+     * that is still being handled. One cannot act until the window has passed
+     * with no second press, since it may still become two. A press after two
+     * starts a new count.
      */
     Shell.prototype.tapLauncher = function (event) {
         // In focus mode with the tab bar hidden, any press on the launcher
@@ -2705,17 +2771,15 @@
         }
         const taps = (this.taps || 0) + 1;
         this.resetTaps();
-        if (taps >= 3) {
-            this.toggleFocus();
+        if (taps >= 2) {
+            this.cycleMode();
             return;
         }
         this.taps = taps;
         this.tapTimer = window.setTimeout(() => {
-            const counted = this.taps;
             this.resetTaps();
             try {
-                if (counted === 2) this.backToPrevious();
-                else this.open();
+                this.open();
             } catch (error) {
                 this.fault(error);
             }
@@ -2780,15 +2844,13 @@
         this.tapHeader();
     };
 
-    /** The launcher's two quick actions, on the header's space: two presses
-     * go back to the workspace before this one, three turn focus on or off.
-     * "Just like the button." The launcher's pace: a press belongs to the
-     * gesture when it lands within TAP_WINDOW of the one before it. Two
-     * cannot act until the window has passed with no third, since they may
-     * still become three; the third acts inside its own press, for the
+    /** The launcher's quick action, on the header's space: two presses move
+     * to the next mode (`cycleMode`). "Just like the button." The launcher's
+     * pace: a press belongs to the gesture when it lands within TAP_WINDOW of
+     * the one before it, and the second acts inside its own press, for the
      * launcher's reason -- a browser grants full screen only to a press that
-     * is still being handled. One press is nothing here, so nothing waits
-     * on it but the count.
+     * is still being handled. One press is nothing here, so nothing waits on
+     * it but the count.
      */
     Shell.prototype.tapHeader = function () {
         // Like the launcher: in focus mode with the tab bar hidden, a tap
@@ -2796,20 +2858,12 @@
         this.peekBar();
         const taps = (this.headerTaps || 0) + 1;
         this.resetHeaderTaps();
-        if (taps >= 3) {
-            this.toggleFocus();
+        if (taps >= 2) {
+            this.cycleMode();
             return;
         }
         this.headerTaps = taps;
-        this.headerTapTimer = window.setTimeout(() => {
-            const counted = this.headerTaps;
-            this.resetHeaderTaps();
-            try {
-                if (counted === 2) this.backToPrevious();
-            } catch (error) {
-                this.fault(error);
-            }
-        }, TAP_WINDOW);
+        this.headerTapTimer = window.setTimeout(() => this.resetHeaderTaps(), TAP_WINDOW);
     };
 
     /** Forget a half-counted header gesture. */
@@ -2822,7 +2876,9 @@
     /** Back to the workspace before this one -- and, pressed again, forward to
      * the one just left, because that is now the one before. Through
      * `switchWorkspace`, so focus mode follows the switch rather than hiding
-     * it. With nowhere to go back to yet, nothing happens.
+     * it. With nowhere to go back to yet, nothing happens. The first entry of
+     * the workspace menu (`workspaceItems`) since two presses became the
+     * mode cycle.
      */
     Shell.prototype.backToPrevious = function () {
         const back = this.previousWorkspace;
@@ -2837,6 +2893,101 @@
 
     // One press, both ways: focus and the browser's full screen go on
     // together and come off together. See `enterScreen`.
+    // -- the three modes -------------------------------------------------------- //
+    //
+    // Two presses on the launcher or on the header's space move to the next of
+    // three: Normal, Focused (the workspace given the window) and -- on Mini
+    // Paint NEO's WanGP tab -- Super Focused: focus with WanGP's page laid out
+    // as a studio, its prompt, its Generate and its progress beside its
+    // gallery, and nothing else on the screen: the panel put away, the tab bar
+    // with it. Asked for as "a wan2gp focused mode ... when i return out of
+    // it, everything and all settings return (except updated prompt and
+    // gallery)" (docs/22 §3.39). The studio itself is WanGP's page, drawn by
+    // Mini Paint's bridge (1.15.0); here it is one class on the focused panel
+    // (`focus.setStudio`), which Mini Paint's tab hears. What super focus puts
+    // away -- the panel, if it was open -- is noted when it starts and put
+    // back when it ends, whichever way it ends: two presses, Escape, the
+    // browser leaving full screen, a switch to another tab.
+
+    /** Whether super focus can be had here: "" when it can, "elsewhere" off
+     *  the WanGP tab (nothing to say), or why not in words. A WanGP that is
+     *  not loaded yet can have it: the page is laid out when it is ready. */
+    Shell.prototype.studioRefusal = function () {
+        const active = this.focus && this.focus.isActive() ? this.focus.activeWorkspace() : this.currentWorkspace();
+        if (active !== WANGP_WORKSPACE) return "elsewhere";
+        const bridge = window.minipaintWanGP;
+        if (!bridge || typeof bridge.state !== "function") return "elsewhere";
+        let found = null;
+        try {
+            found = bridge.state();
+        } catch (error) { /* not loaded */ }
+        if (found && found.ready && found.layout && found.layout.studio === false) {
+            return "Reinstall WanGP's bridge from the WanGP tab for Super Focused mode.";
+        }
+        return "";
+    };
+
+    /** Two presses: the next mode. Normal to Focused, Focused to Super
+     *  Focused where there is one and to Normal where there is not, Super
+     *  Focused to Normal. Inside the press, for focus's full screen. Answers
+     *  the mode it moved to. */
+    Shell.prototype.cycleMode = function () {
+        if (this.studio) {
+            this.toggleFocus();
+            return "normal";
+        }
+        if (this.focus.isActive()) {
+            const refusal = this.studioRefusal();
+            if (!refusal && this.enterStudio()) return "super";
+            if (refusal && refusal !== "elsewhere") this.tell(refusal, "warn");
+            this.toggleFocus();
+            return "normal";
+        }
+        this.toggleFocus();
+        return this.focus.isActive() ? "focused" : "normal";
+    };
+
+    /** Super focus on: the studio's class on the focused panel, the panel put
+     *  away and the tab bar with it, and what was put away noted. */
+    Shell.prototype.enterStudio = function () {
+        if (!this.focus.setStudio(true)) return false;
+        this.studio = {workspace: this.focus.activeWorkspace()};
+        this.state.studioReturn = {panelOpen: !!this.state.panelOpen};
+        this.closeMenu();
+        if (this.state.panelOpen) this.showOpen(false);
+        this.endPeek();
+        this.applyFocusBar();
+        this.markStudio(true);
+        this._save();
+        this.place();
+        return true;
+    };
+
+    /** Super focus off, however it ended: the class off the panel and what it
+     *  put away back. Focus itself is the caller's. */
+    Shell.prototype.endStudio = function () {
+        if (!this.studio) return false;
+        const back = this.state.studioReturn || {};
+        this.studio = null;
+        this.state.studioReturn = null;
+        if (this.focus) this.focus.setStudio(false);
+        this.markStudio(false);
+        this.applyFocusBar();
+        // As it was before: a panel opened over the studio and left open goes
+        // away again, one that was open comes back.
+        if (typeof back.panelOpen === "boolean" && back.panelOpen !== !!this.state.panelOpen) {
+            this.showOpen(back.panelOpen);
+        }
+        this._save();
+        return true;
+    };
+
+    /** Whether super focus is on, written on the panel beside `focus`. */
+    Shell.prototype.markStudio = function (on) {
+        const panel = this.nodes.panel;
+        if (panel && panel.dataset) panel.dataset.studio = on ? "on" : "off";
+    };
+
     Shell.prototype.toggleFocus = function () {
         if (this.focus.isActive()) {
             this.focus.exit();
@@ -2857,6 +3008,8 @@
      * forgot it would leave the browser full screen with the tab bar back.
      */
     Shell.prototype.focusOff = function () {
+        // Super focus is focus too, and what it put away comes back with it.
+        this.endStudio();
         this.state.focusEnabled = false;
         this.state.focusWorkspaceId = null;
         this.markFocus(false);
@@ -2877,6 +3030,12 @@
 
     Shell.prototype.applyFocusBar = function () {
         if (!this.focus || typeof this.focus.setBar !== "function") return;
+        // Super focus is the studio and nothing else: no bar, whatever the
+        // setting says, and no peek of it.
+        if (this.studio) {
+            this.focus.setBar("hidden");
+            return;
+        }
         this.focus.setBar(this.state.focusBar ? "shown" : (this.peekTimer ? "peek" : "hidden"));
     };
 
@@ -2894,7 +3053,7 @@
     /** The bar over the workspace for a moment, when focus is on with the bar
      *  hidden and kept for this workspace; true if it peeks. */
     Shell.prototype.peekBar = function () {
-        if (this.state.focusBar || !this.focus || typeof this.focus.setBar !== "function"
+        if (this.studio || this.state.focusBar || !this.focus || typeof this.focus.setBar !== "function"
             || !this.focus.isActive() || !this.focus.keptBar()) return false;
         this.focus.setBar("peek");
         this.armPeek();
@@ -3245,7 +3404,8 @@
 
     Shell.prototype.workspaceItems = function () {
         const active = this.host.getActiveWorkspace();
-        return this.host.listWorkspaces().map((workspace) => {
+        const workspaces = this.host.listWorkspaces();
+        return this.backItems(workspaces, active).concat(workspaces.map((workspace) => {
             const item = element("button", "forge-assistant-menu-item", workspace.label);
             item.type = "button";
             item.setAttribute("role", "menuitem");
@@ -3271,7 +3431,26 @@
                 this.switchWorkspace(workspace.id);
             });
             return item;
+        }));
+    };
+
+    /** Back to the workspace before this one, first in the list: what two
+     *  presses on the launcher did before they became the mode cycle. Only
+     *  while there is one to go back to, and it can be opened. */
+    Shell.prototype.backItems = function (workspaces, active) {
+        const back = this.previousWorkspace;
+        const found = back && back !== active ? workspaces.find((workspace) => workspace.id === back) : null;
+        if (!found || !found.available) return [];
+        const item = element("button", "forge-assistant-menu-item forge-assistant-back-workspace",
+                             "Back to " + found.label);
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.title = "The workspace before this one";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.backToPrevious();
         });
+        return [item];
     };
 
     // Switching workspace, with focus mode taken into account.

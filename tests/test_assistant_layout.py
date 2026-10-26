@@ -1957,16 +1957,17 @@ def test_a_finger_on_the_launcher_moves_it_and_pans_nothing(browser):
         context.close()
 
 
-def test_three_taps_on_the_header_still_toggle_focus(browser):
+def test_two_taps_on_the_header_still_turn_focus_on(browser):
     """The one time the drag cancelled every press, Chromium delivered a
     finger's click with `detail` 0 -- a keyboard activation to `headerClick`
-    -- and the header's three taps stopped toggling focus. A finger's press
-    begins the drag uncancelled."""
+    -- and the header's taps stopped toggling focus. A finger's press begins
+    the drag uncancelled. Two taps since the mode cycle (docs/22 §3.39), as
+    three were before it."""
     context, page = open_phone(browser, free_float=False)
     try:
         assert page.evaluate("forgeAssistant.shell.state.focusEnabled") is False
         grip = page.evaluate(PANEL_BOX)["grip"]
-        for _ in range(3):
+        for _ in range(2):
             page.touchscreen.tap(*grip)
             page.wait_for_timeout(80)
         settle(page)

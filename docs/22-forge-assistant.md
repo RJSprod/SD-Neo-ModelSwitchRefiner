@@ -3229,6 +3229,140 @@ clock, nothing opened or left pending, and the WanGP document's script) and
 twelve mutations. The bridge's prompt read and write ran once on a real Gradio
 5.29 page, as above; not against a real WanGP or on the user's machine.
 
+## 3.39 Three modes, and Super Focused on the WanGP tab (2026-10-26)
+
+Asked for once §3.38 had run on the user's machine ("Okay, that worked
+well"), in three parts:
+
+- "The text in the new box does not seem to properly handle new line. It
+  strange, in wan2gp prompt box i see new lines, but in the flyout there is no
+  space at all between lines."
+- "i really like that i can resize the flyout menu for the text field ... i was
+  worried at first when i opened the flyout prompt view for wan2gp and it was
+  really small."
+- "a new mode that is just the video gallery from wangp (currently playing and
+  strip) with playback controls, and the prompt box with a generation button,
+  and progress bar. The view should try to layout in two columns that can be
+  resized, with prompting on left, and gallery on right, sort of like text to
+  image tab in forge neo! ... if I double tap the flyout button action
+  activation / drag handle, it cycles through Normal Mode / Focused Mode /
+  Super Focused Wan2gp Mode. Super Focused mode would just be those elements,
+  and when i return out of it, everything and all settings return (except
+  updated prompt and gallery)."
+
+### The box's lines and its size
+
+Not reproduced as reported: every hop keeps a newline -- WanGP's page through
+Gradio 5.29 and the bridge (driven on a real 5.29 page), Mini Paint's bundle,
+the panel's `readPrompt` -- and Chromium and a Gecko build (Zen) draw the box's
+lines as lines under the panel's stylesheet. Two things could still close them
+up on the user's page, and both are now the box's own: the box said `font:
+inherit`, which brings the page's *line height* with the face -- a line height
+a theme or a page sets as a length for smaller text is less than a line at the
+panel's text size, and the lines touch -- and a theme may say how text areas
+wrap. `.forge-assistant-wangp-prompt` says `line-height: 1.5` and `white-space:
+pre-wrap`, both `!important` (a class outranks a theme's `textarea` among
+important declarations), and `overflow-wrap: anywhere`. The box starts
+`PROMPT_ROWS` (8) lines tall rather than six, at least 6em; a drag of its corner
+is the browser writing an inline height, which a `ResizeObserver` hears and
+keeps in `localStorage` under `forge-assistant-wangp-prompt-height:<base>`
+(`watchPromptSize`) -- read and remembered, never written back, so the
+observer cannot answer its own change -- and the box is built at that height
+(`_restorePromptHeight`), the stylesheet's 60vh still the ceiling.
+
+### Two presses, three modes
+
+`tapLauncher` and `tapHeader` count presses as before (`TAP_WINDOW`), and the
+second press now acts inside itself, as the third did, because entering focus
+asks for the browser's full screen and Firefox grants that only while a press
+is being handled: `cycleMode`. A third press is the first of a new count.
+Normal goes to Focused (`toggleFocus`); Focused goes to Super Focused where
+there is one (`enterStudio`) and to Normal where there is not; Super Focused
+goes to Normal. Going back to the previous workspace, which two presses did
+since round one, is the workspace menu's first entry, **Back to** the
+workspace before this one (`backItems`, `backToPrevious` unchanged), shown
+only while there is one.
+
+### Super Focused
+
+It is the WanGP tab's (`studioRefusal`): elsewhere, or without Mini Paint NEO's
+bundle, there is no third mode and nothing is said; a bridge whose READY did
+not say `layout_studio` (older than 1.15.0) skips it with "Reinstall WanGP's
+bridge from the WanGP tab for Super Focused mode." on the status line; a WanGP
+not loaded yet has it, because Mini Paint tells the page its layout at its
+ready.
+
+Here it is one class beside focus's on the focused panel,
+`forge-assistant-wangp-studio` (`focus.setStudio`; `exit` takes it off with
+focus's own, so no path out of focus can leave it), which Mini Paint's WanGP tab
+already watches the panel's classes for: it sends `LAYOUT_STATE {compact:
+true, studio: true}` and the bridge lays WanGP's page out (Mini Paint's
+`docs/wangp/CONTRACTS.md`, *Bridge 1.15.0: the studio*). The class's name is a
+contract with that extension, like the focus root's. `enterStudio` notes what
+it puts away -- whether the panel was open -- in `state.studioReturn`, closes
+the panel and hides the tab bar whatever *Tab Bar in Focus* says
+(`applyFocusBar`; `peekBar` peeks nothing). `endStudio` puts the panel back as
+it was, an open panel opened again and one opened over the studio closed, and is
+called from `focusOff` -- the path two presses, Escape, the menu's exit and the
+browser leaving full screen all take -- and from `navigated` when the
+selection moves off the WanGP tab (focus then follows the switch as it always
+has). `studioReturn` is saved with the layout, so a reload in Super Focused
+(which, like every reload, starts outside focus) opens the panel as it was
+before. The panel says `data-studio="on"` while it lasts.
+
+### The studio, in WanGP's page
+
+Mini Paint's half, recorded there and summarised here. Nothing in WanGP's page
+moves: the generator form's row becomes a grid, its two columns `display:
+contents`, and the blocks kept are placed in it where they already are in the
+document -- the prompt boxes (found by the ids wgp.py gives them, with the
+wizard's variables between), WanGP's action bar (Generate, or One More, Pause,
+Abort and Add to Queue while it generates) and its progress in the left column,
+the gallery tabs (the video playing with its controls, the strip under it) in
+the right, spanning every row, the gallery itself as tall as the window leaves
+it. Every other block of the form, what WanGP has around it and Gradio's footer
+are taken out the compact layout's way; every declaration written is inline,
+`!important`, and recorded with what was there, so whole puts each back as it
+was. A divider of the bridge's own between the columns is dragged, moved with
+the arrow keys or reset with a double click, and its share is kept in this
+browser; under 720 px the columns stack. The page answers what it settled on
+(`LAYOUT_RESULT`), and Mini Paint's journal says when that is less than was
+asked: no prompt box (compact), no Generate bar or progress (a studio without
+it).
+
+### Verified
+
+`tests/test_assistant_modes_js.py` (node): the cycle on the WanGP tab
+(Normal, Focused, Super Focused, Normal, with the panel, the bar, the mark and
+what was put away at each step) and elsewhere (no third mode); no bundle, an
+older bridge (skipped, with the sentence) and a WanGP not loaded yet; a closed
+panel staying closed; Escape's and the full screen's path, a switch of tab and
+a blank read of the selection; a reload; the bar and its peek; the workspace
+menu leading with Back to. `tests/test_assistant_taps_js.py` translated: two
+presses act inside the second, a third starts again, the header's space the
+same, going back never two presses. `tests/test_assistant_focus_js.py`: the
+class on the focused panel and off it, with focus and on a move.
+`tests/test_assistant_wangp_prompt.py` (Chromium): a two-line prompt read into
+the box as two lines, the lines a line and a half apart and three more lines a
+box three lines taller, under a theme that says `white-space: normal` and an
+11 px line height about every text area, both `!important`; the box eight lines
+tall to start, its corner dragged, the height kept and the box that height
+after a reload; two presses on the header's space, two more, two on the
+launcher -- Focused, Super Focused with the panel put away and the bar hidden,
+Normal with the panel back; Super Focused left by Escape with everything back.
+`tests/test_assistant_layout.py`'s finger test is two taps now. Sixteen
+mutations each fail a test. Mini Paint NEO's halves: its
+`tests/test_wangp_protocol.py` (`layout_checks`: the vocabulary, the studio
+scenario on the virtual clock, an older bridge told compact) and
+`tests/browser_intercept.py` (`check_super_focus_makes_the_wangp_page_a_studio`,
+the bridge's own script on WanGP's page as Gradio 5.29 draws it, captured,
+under a hostile theme; six mutations). The studio was also watched on a live
+Gradio 5.29 page shaped like WanGP's form, with WanGP's own stylesheet and
+page script and the real bridge, through a generation: the progress moving,
+the live controls in Generate's place, a new picture in the gallery, the
+layout holding, and every declaration put back. Not against a real WanGP or on
+the user's machine.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

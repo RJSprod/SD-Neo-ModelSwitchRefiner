@@ -899,6 +899,47 @@ class TestTheWorkspacesOwnTabBar:
         assert found == {"kept": False, "hidden": False, "mode": None, "top": None}
 
 
+class TestSuperFocus:
+    """Super focus (docs/22 §3.39) is one class beside focus's on the focused
+    panel, `forge-assistant-wangp-studio`: what Mini Paint NEO's WanGP tab
+    reads to lay WanGP's page out as the studio. The name is the contract."""
+
+    def test_the_studio_class_goes_on_the_focused_panel_and_off_again(self):
+        found = run("""
+            const root = document.getElementById("tab_llm_studio");
+            const before = focus.setStudio(true);
+            focus.enter("tab_llm_studio", HOST);
+            const on = focus.setStudio(true);
+            const marked = [root.classList.contains("forge-assistant-wangp-studio"),
+                            root.classList.contains("forge-assistant-focus-root"), focus.isStudio()];
+            focus.setStudio(false);
+            const off = [root.classList.contains("forge-assistant-wangp-studio"),
+                         root.classList.contains("forge-assistant-focus-root"), focus.isStudio()];
+            console.log(JSON.stringify({before, on, marked, off, name: forgeAssistant.FOCUS_STUDIO_CLASS}));
+        """)
+
+        assert found == {"before": False, "on": True, "marked": [True, True, True],
+                         "off": [False, True, False], "name": "forge-assistant-wangp-studio"}
+
+    def test_leaving_focus_takes_the_studio_class_with_it(self):
+        found = run("""
+            const root = document.getElementById("tab_llm_studio");
+            focus.enter("tab_llm_studio", HOST);
+            focus.setStudio(true);
+            focus.exit();
+            const gone = !root.classList.contains("forge-assistant-wangp-studio") && !focus.isStudio();
+            // And a move to another workspace leaves it behind.
+            focus.enter("tab_llm_studio", HOST);
+            focus.setStudio(true);
+            focus.moveTo("tab_txt2img", HOST);
+            console.log(JSON.stringify({gone, left: root.classList.contains("forge-assistant-wangp-studio"),
+                                        moved: document.getElementById("tab_txt2img").classList
+                                            .contains("forge-assistant-wangp-studio")}));
+        """)
+
+        assert found == {"gone": True, "left": False, "moved": False}
+
+
 class TestLeaving:
     def test_leaving_is_the_class_coming_off(self):
         found = run("""
