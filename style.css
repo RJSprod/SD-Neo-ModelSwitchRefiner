@@ -9147,6 +9147,48 @@ body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-ass
     pointer-events: none;
 }
 
+/* The third state on the WanGP tab: WanGP's prompt in a box of the panel's
+   own (`applyPrompt` in forge_assistant.js). The panel keeps its surface --
+   nothing is drawn under it here -- and the box is the composer's, taller:
+   six lines to start with, taller by a drag of its corner, scrolling inside
+   itself past that, and given up first when the panel is capped to what a
+   phone shows. The line under it says why the box is shut when it is. */
+.forge-assistant-wangp {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+    gap: 0.3em;
+    padding: 0 0.6em 0.6em;
+}
+
+.forge-assistant-wangp-prompt {
+    width: 100%;
+    min-height: 4.5em;
+    max-height: max(160px, 60vh);
+    box-sizing: border-box;
+    padding: 0.4em 0.55em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-primary);
+    color: inherit;
+    font: inherit;
+    font-size: var(--forge-assistant-text, inherit);
+    resize: vertical;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.forge-assistant-wangp-prompt:disabled {
+    opacity: 0.6;
+}
+
+.forge-assistant-wangp-note {
+    margin: 0;
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
 /* Docked, a field takes a drag only once a tap has engaged it (`Guard` in
    forge_assistant_layout.js, whose GUARDED list names the same controls):
    until then a text box, a number box, a slider or the compact spatial

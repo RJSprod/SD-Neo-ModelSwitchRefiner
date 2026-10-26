@@ -90,6 +90,10 @@
     // (its svgIcon option), and this one is on none of its lists.
     const SETTINGS_GLYPH = "\u{1F39B}\uFE0F";
     const SETTINGS_LABEL = "Generation settings";
+    // The same button on the WanGP tab, where the panel's third state is a box
+    // for WanGP's prompt (`applyPrompt`): the settings column of a page in a
+    // frame cannot be drawn under the panel, and the prompt is what was asked.
+    const PROMPT_LABEL = "WanGP prompt";
     const SEND_GLYPH = "\u27A4";              // an arrowhead
     const STOP_GLYPH = "\u25A0";              // a square
     // How long a request for the browser's full screen is waited on before
@@ -150,6 +154,11 @@
     const GENERATE_GLYPH = "\u25b6\ufe0e";  // a play triangle, text style
     const GENERATE_LABEL = "Generate in WanGP";
     const GENERATE_SHOWN = 3000;
+    // WanGP's prompt in the panel, on the WanGP tab: written to WanGP's page
+    // this long after the last keystroke, and at once when the box loses the
+    // keyboard or ▶ is pressed. Mini Paint NEO's `prompt()` and `setPrompt()`
+    // are the contract (its docs/wangp/CONTRACTS.md, bridge 1.14.0).
+    const PROMPT_QUIET = 400;
 
     // -- geometry ---------------------------------------------------------- //
 
@@ -402,6 +411,10 @@
             // `conversationExpanded` says, and taken up again on return; the
             // column stays out of the page all the while (`syncDock`).
             settingsDocked: false,
+            // The same third state on the WanGP tab: WanGP's prompt in a box
+            // (`applyPrompt`). Its own, so a view chosen on one tab never
+            // changes another's.
+            wangpPrompt: false,
             focusEnabled: false,
             focusWorkspaceId: null,
             showAnyway: false,
@@ -470,7 +483,7 @@
                 this.state.panelWidth = Math.min(MAX_WIDTH,
                                                  Math.max(MIN_WIDTH, found.panelWidth));
             }
-            ["panelOpen", "conversationExpanded", "settingsDocked"].forEach((name) => {
+            ["panelOpen", "conversationExpanded", "settingsDocked", "wangpPrompt"].forEach((name) => {
                 if (typeof found[name] === "boolean") this.state[name] = found[name];
             });
             // Focus is deliberately not restored here. A reload starts outside
@@ -600,6 +613,7 @@
             panelOpen: this.state.panelOpen,
             conversationExpanded: this.state.conversationExpanded,
             settingsDocked: this.state.settingsDocked,
+            wangpPrompt: this.state.wangpPrompt,
             focusEnabled: this.state.focusEnabled,
             focusWorkspaceId: this.state.focusWorkspaceId,
         };
@@ -802,6 +816,27 @@
         panel.appendChild(dock);
         this.nodes.dock = dock;
 
+        // The third state on the WanGP tab: WanGP's prompt, in a box of the
+        // panel's own. WanGP's form is a page in a frame, so it cannot be drawn
+        // under the panel as Txt2Img's column is; the box reads WanGP's prompt
+        // and writes what is typed back into it (`applyPrompt`, `writePrompt`),
+        // and ▶ then generates with it. A line under it says why the box is
+        // shut when it is.
+        const wangp = element("div", "forge-assistant-wangp");
+        wangp.hidden = true;
+        const prompt = element("textarea", "forge-assistant-wangp-prompt");
+        prompt.rows = 6;
+        prompt.setAttribute("aria-label", PROMPT_LABEL);
+        prompt.placeholder = "WanGP's prompt\u2026";
+        const promptNote = element("p", "forge-assistant-wangp-note");
+        promptNote.setAttribute("role", "status");
+        promptNote.setAttribute("aria-live", "polite");
+        promptNote.hidden = true;
+        wangp.appendChild(prompt);
+        wangp.appendChild(promptNote);
+        panel.appendChild(wangp);
+        Object.assign(this.nodes, {wangp, prompt, promptNote});
+
         // The conversation body, the whole of what Chat shows and hides.
         //
         // It used to open with a line saying which conversation this is --
@@ -902,7 +937,13 @@
     Shell.prototype.applyChat = function () {
         const docked = this.dockShown();
         this.dockedNow = docked;
-        const open = this.state.conversationExpanded && !docked;
+        // WanGP's prompt takes the conversation's place the same way, on its
+        // own tab; `third` is either.
+        const prompted = this.promptShown();
+        const shownBefore = !!this.promptedNow;
+        this.promptedNow = prompted;
+        const third = docked || prompted;
+        const open = this.state.conversationExpanded && !third;
         this.nodes.chat.setAttribute("aria-expanded", String(open));
         this.applySettingsButton();
         // The header's Workspace menu and the row are the same list. Collapsed
@@ -912,8 +953,8 @@
         // is hidden, it closes -- a menu whose button is gone cannot be
         // dismissed by pressing that button again. Docked, there is no row,
         // so the menu stays.
-        this.nodes.picker.hidden = !open && !docked;
-        if (!open && !docked && this.nodes.menu.dataset.owner === "workspaces") {
+        this.nodes.picker.hidden = !open && !third;
+        if (!open && !third && this.nodes.menu.dataset.owner === "workspaces") {
             this.closeMenu();
         }
         // A menu that is up has the conversation's place (see `applyMenu`):
@@ -922,11 +963,17 @@
         // `hidden`, not a class: the body has to leave the accessibility tree,
         // not merely stop being painted.
         this.nodes.body.hidden = !open || menuUp;
-        this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open && !docked);
+        this.nodes.panel.classList.toggle("forge-assistant-collapsed", !open && !third);
         this.nodes.panel.classList.toggle("forge-assistant-docked", docked);
+        this.nodes.panel.classList.toggle("forge-assistant-prompting", prompted);
         if (this.nodes.dock) this.nodes.dock.hidden = !docked || menuUp;
-        this.nodes.workspaces.hidden = open || docked || menuUp;
-        if (!open && !docked && !menuUp) this.renderWorkspaces();
+        if (this.nodes.wangp) this.nodes.wangp.hidden = !prompted || menuUp;
+        this.nodes.workspaces.hidden = open || third || menuUp;
+        if (!open && !third && !menuUp) this.renderWorkspaces();
+        // Shown now, or again: what WanGP's page holds is read afresh. Put
+        // away: whatever was typed goes to WanGP first.
+        if (prompted && !shownBefore) this.applyPrompt(true);
+        if (!prompted && shownBefore) this.writePrompt();
         // The panel is sized to its content while collapsed, so the row
         // appearing or going changes how wide it is and therefore where its
         // anchor puts it.
@@ -950,19 +997,35 @@
                   && dock.available(this.currentWorkspace()));
     };
 
-    /** The settings button: on Txt2Img only, lit while the column is docked. */
+    /** Is the panel's view WanGP's prompt? Its state, on the WanGP tab, with
+     *  Mini Paint NEO's bundle there to read and write the prompt. */
+    Shell.prototype.promptShown = function () {
+        return !!(this.state.wangpPrompt && this.currentWorkspace() === WANGP_WORKSPACE
+                  && wangpPrompt());
+    };
+
+    /** The settings button: on Txt2Img, lit while the column is docked; on
+     *  the WanGP tab, lit while the panel shows WanGP's prompt. */
     Shell.prototype.applySettingsButton = function () {
         const button = this.nodes && this.nodes.settings;
         if (!button) return;
         const dock = NS.dock;
-        const available = !!(dock && dock.available(this.currentWorkspace()));
+        const workspace = this.currentWorkspace();
+        const prompt = workspace === WANGP_WORKSPACE && !!wangpPrompt();
+        const available = prompt || !!(dock && dock.available(workspace));
         button.hidden = !available;
-        button.setAttribute("aria-pressed", String(available && !!this.state.settingsDocked));
+        const label = prompt ? PROMPT_LABEL : SETTINGS_LABEL;
+        if (button.getAttribute("aria-label") !== label) {
+            button.setAttribute("aria-label", label);
+            button.title = label;
+        }
+        const on = prompt ? !!this.state.wangpPrompt : !!this.state.settingsDocked;
+        button.setAttribute("aria-pressed", String(available && on));
     };
 
     /** The workspace changed, or the page under it did: the view follows. */
     Shell.prototype.applyDock = function () {
-        if (this.dockShown() !== !!this.dockedNow) {
+        if (this.dockShown() !== !!this.dockedNow || this.promptShown() !== !!this.promptedNow) {
             this.applyChat();
             return;
         }
@@ -1057,7 +1120,12 @@
     Shell.prototype.toggleDock = function () {
         const menuUp = !!(this.nodes.menu && !this.nodes.menu.hidden);
         if (menuUp) this.closeMenu();
-        this.state.settingsDocked = menuUp ? true : !this.dockedNow;
+        // On the WanGP tab the same button is WanGP's prompt.
+        if (this.currentWorkspace() === WANGP_WORKSPACE && wangpPrompt()) {
+            this.state.wangpPrompt = menuUp ? true : !this.promptedNow;
+        } else {
+            this.state.settingsDocked = menuUp ? true : !this.dockedNow;
+        }
         this.applyChat();
         this._save();
     };
@@ -1986,6 +2054,12 @@
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
         this.on(nodes.generate, "click", () => this.generateInWanGP());
+        // WanGP's prompt: written as it is typed, at once when the box loses
+        // the keyboard, and Ctrl+Enter is ▶ as it is Generate on Forge's own
+        // prompt boxes.
+        this.on(nodes.prompt, "input", () => this.typedPrompt());
+        this.on(nodes.prompt, "blur", () => this.writePrompt());
+        this.on(nodes.prompt, "keydown", (event) => this.promptKey(event));
         // The row's own space, counted from the panel and not from the row:
         // the drag takes pointer capture, and a captured pointer's click lands
         // on the panel rather than on the header the press began in. See
@@ -2138,6 +2212,7 @@
             this.noteWorkspace(active);
             this.applyGenerate();
             this.applyDock();
+            this.applyPrompt();
             this.applySuppression();
             this.renderWorkspaces();
             if (this.state.focusEnabled && active && this.focus.isActive()
@@ -2195,6 +2270,7 @@
         // Called again by every repair (`heal`), so it starts the reading only
         // when nothing is already asking or waiting to.
         if (open) this.applyGenerate();
+        if (open) this.applyPrompt(true);
         if (!open) this.stopMemory();
         else if (!this._memoryTimer && !this._memoryBusy) this.readMemory();
     };
@@ -2264,13 +2340,15 @@
                 return Promise.resolve();
             }
             const resolve = line[0];
-            const bridge = wangp();
-            let asked;
-            try {
-                asked = Promise.resolve(bridge ? bridge.generate() : null);
-            } catch (error) {
-                asked = Promise.reject(error);
-            }
+            // What was typed in the panel's prompt box reaches WanGP's page
+            // before WanGP's Generate reads it. A prompt that could not be
+            // written stops the press: generating with the one it replaced is
+            // not what the press was for.
+            const asked = this.settlePrompt().then((written) => {
+                if (written && written.ok === false) return written;
+                const bridge = wangp();
+                return bridge ? bridge.generate() : null;
+            });
             return asked.then((found) => found, () => null).then((found) => {
                 line.shift();
                 this.answerGenerate(found);
@@ -2324,6 +2402,181 @@
         this.applyGenerate();
     };
 
+    // -- WanGP's prompt ----------------------------------------------------------- //
+    //
+    // Asked for from use: "text to image has an option in the flyout menu that
+    // pulls in the entire configuration into the flyout. I want a very simple
+    // version of this, but for wan2gp ... the ability to directly modify the
+    // prompt from the flyout menu just like image generation in text to image,
+    // but just the prompt." On the WanGP tab the settings button shows a box
+    // holding WanGP's prompt -- the box WanGP generates from, the prompt
+    // wizard's while that is on -- and what is typed in it is written into
+    // WanGP's page as WanGP's own value, as if typed there. ▶ then generates
+    // with it. WanGP's page is read afresh whenever the box is shown, and
+    // again on the panel's beat when somebody has touched WanGP's form by
+    // hand since; never while the box holds something WanGP has not got.
+
+    /** Mini Paint NEO's WanGP bundle, when it reads and writes the prompt. */
+    function wangpPrompt() {
+        const bridge = window.minipaintWanGP;
+        return bridge && typeof bridge.prompt === "function"
+            && typeof bridge.setPrompt === "function" ? bridge : null;
+    }
+
+    /** Why WanGP's prompt cannot be had now, in words, or "" when it can. */
+    function promptBlocked(bridge) {
+        let found = null;
+        try {
+            found = bridge.state();
+        } catch (error) { /* not loaded */ }
+        if (!found || !found.ready) return "WanGP is not loaded yet.";
+        if (found.prompt && found.prompt.offered === false) {
+            return "Reinstall WanGP's bridge from the WanGP tab to edit its prompt here.";
+        }
+        return "";
+    }
+
+    /** The box, kept true to WanGP's page: shut with a reason while WanGP
+     *  cannot be asked, read when it is shown (`fresh`) or when WanGP's form
+     *  was touched by hand since the last answer. Nothing is asked while the
+     *  panel is closed or showing something else, and nothing is asked again
+     *  on the beat for an answer that has not changed -- a refusal included:
+     *  one question per touch of WanGP's form, never one per beat. */
+    Shell.prototype.applyPrompt = function (fresh) {
+        const box = this.nodes && this.nodes.prompt;
+        if (!box || !this.promptedNow || !this.state.panelOpen) return;
+        const bridge = wangpPrompt();
+        if (!bridge) return;
+        const blocked = promptBlocked(bridge);
+        if (blocked) {
+            box.disabled = true;
+            this.notePrompt(blocked);
+            this._promptRead = null;
+            return;
+        }
+        // Text typed here that WanGP has not got yet is the newer of the two:
+        // the box stays open for it and nothing is read over it.
+        if (this._promptDirty || this._promptSending) {
+            box.disabled = false;
+            return;
+        }
+        let touched = null;
+        try {
+            const found = bridge.state().prompt;
+            touched = found && typeof found.touched === "number" ? found.touched : null;
+        } catch (error) { /* read anyway */ }
+        if (!fresh && this._promptRead !== null && this._promptRead === touched) return;
+        this.readPrompt(touched);
+    };
+
+    /** Ask WanGP's page what its prompt is, and show it -- unless something
+     *  typed here is still on its way there, which is newer. */
+    Shell.prototype.readPrompt = function (touched) {
+        const bridge = wangpPrompt();
+        const box = this.nodes.prompt;
+        if (!bridge || this._promptDirty || this._promptSending || this._promptReading) return;
+        this._promptReading = true;
+        let asked;
+        try {
+            asked = Promise.resolve(bridge.prompt());
+        } catch (error) {
+            asked = Promise.resolve(null);
+        }
+        asked.then((found) => found, () => null).then((found) => {
+            this._promptReading = false;
+            if (this._promptDirty || this._promptSending) return;
+            if (found && found.ok) {
+                this._promptRead = touched === undefined ? null : touched;
+                box.disabled = false;
+                if (box.value !== found.prompt) box.value = found.prompt;
+                this.notePrompt(found.wizard ? "WanGP's prompt wizard is on: this is its box." : "");
+                return;
+            }
+            const code = found && found.code;
+            // Asked again when WanGP's form is touched, not on every beat. A
+            // WanGP that answered "no" keeps the box shut; one that did not
+            // answer in time keeps what the box shows and says so.
+            this._promptRead = touched === undefined ? null : touched;
+            if (code !== "RECEIVER_QUERY_TIMEOUT") box.disabled = true;
+            this.notePrompt(code === "IFRAME_NOT_READY" ? "WanGP is not loaded yet."
+                : code === "PROMPT_TOO_LONG" ? "WanGP's prompt is too long to edit here; edit it on the WanGP page."
+                : (found && found.message) || "WanGP did not say what its prompt is.");
+        });
+    };
+
+    /** Typed in: written to WanGP's page once the keys go quiet. */
+    Shell.prototype.typedPrompt = function () {
+        this._promptDirty = true;
+        window.clearTimeout(this._promptTimer);
+        this._promptTimer = window.setTimeout(() => {
+            this._promptTimer = 0;
+            this.writePrompt();
+        }, PROMPT_QUIET);
+    };
+
+    /** Write what the box holds into WanGP's page, if it holds anything
+     *  WanGP has not got. One write at a time; text typed while one is on its
+     *  way is written after it. Resolves with the last write's answer, or
+     *  null when there was nothing to write. */
+    Shell.prototype.writePrompt = function () {
+        window.clearTimeout(this._promptTimer);
+        this._promptTimer = 0;
+        if (this._promptSending) return this._promptSending;
+        const bridge = wangpPrompt();
+        if (!this._promptDirty || !bridge) return Promise.resolve(null);
+        const box = this.nodes.prompt;
+        const text = box.value;
+        this._promptDirty = false;
+        let asked;
+        try {
+            asked = Promise.resolve(bridge.setPrompt(text));
+        } catch (error) {
+            asked = Promise.resolve(null);
+        }
+        this._promptSending = asked.then((found) => found, () => null).then((found) => {
+            this._promptSending = null;
+            if (!found || !found.ok) {
+                // Kept as unsent, so no read puts WanGP's old prompt over it,
+                // and said; the next keystroke, blur or ▶ tries again.
+                this._promptDirty = true;
+                const said = (found && found.message) || "WanGP did not take the prompt.";
+                this.notePrompt(said);
+                return {ok: false, message: "WanGP's prompt was not updated: " + said};
+            }
+            this.notePrompt(found.wizard ? "WanGP's prompt wizard is on: this is its box." : "");
+            // Typed while that write was on its way: its own write now.
+            if (this._promptDirty) return this.writePrompt();
+            return found;
+        });
+        return this._promptSending;
+    };
+
+    /** Before WanGP's Generate reads the page: anything typed here written
+     *  first. Resolves with the write's answer, or null when nothing was
+     *  waiting; never rejects. */
+    Shell.prototype.settlePrompt = function () {
+        if (!this._promptDirty && !this._promptSending) return Promise.resolve(null);
+        return this.writePrompt();
+    };
+
+    /** Ctrl+Enter (or Cmd+Enter) in the box: ▶. */
+    Shell.prototype.promptKey = function (event) {
+        if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+        if (event.isComposing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const button = this.nodes.generate;
+        if (button && !button.hidden && !button.disabled) this.generateInWanGP();
+    };
+
+    /** The line under the box: why it is shut, or what went wrong. */
+    Shell.prototype.notePrompt = function (text) {
+        const note = this.nodes && this.nodes.promptNote;
+        if (!note) return;
+        if (note.textContent !== text) note.textContent = text;
+        note.hidden = !text;
+    };
+
     // -- what is free ----------------------------------------------------------- //
 
     /** Ask what is free now, paint it, and ask again MEMORY_EVERY after the
@@ -2333,8 +2586,9 @@
         if (!this.state.panelOpen || document.hidden || !this.store
             || typeof this.store.request !== "function") return;
         // WanGP coming up or going away is said by nothing; the reading's
-        // beat is when the button looks again.
+        // beat is when the button looks again, and the prompt box too.
         this.applyGenerate();
+        this.applyPrompt();
         const asked = this._memoryAsk = (this._memoryAsk || 0) + 1;
         this._memoryBusy = true;
         this.store.request(MEMORY_ROUTE, {deadline: MEMORY_DEADLINE})
@@ -2484,9 +2738,10 @@
         const menuUp = !!(this.nodes.menu && !this.nodes.menu.hidden);
         if (menuUp) this.closeMenu();
         // Docked, Chat is the way to the conversation: the column goes back to
-        // the page and the conversation shows.
-        if (this.dockedNow) {
-            this.state.settingsDocked = false;
+        // the page and the conversation shows. So it is from WanGP's prompt.
+        if (this.dockedNow || this.promptedNow) {
+            if (this.dockedNow) this.state.settingsDocked = false;
+            if (this.promptedNow) this.state.wangpPrompt = false;
             this.state.conversationExpanded = true;
             this.applyChat();
             this._save();
@@ -2938,15 +3193,18 @@
             if (nodes.body) nodes.body.hidden = true;
             if (nodes.workspaces) nodes.workspaces.hidden = true;
             if (nodes.dock) nodes.dock.hidden = true;
+            if (nodes.wangp) nodes.wangp.hidden = true;
             this.place();
             return;
         }
         const docked = !!this.dockedNow;
-        const expanded = !!this.state.conversationExpanded && !docked;
+        const prompted = !!this.promptedNow;
+        const expanded = !!this.state.conversationExpanded && !docked && !prompted;
         if (nodes.body) nodes.body.hidden = !expanded;
-        if (nodes.workspaces) nodes.workspaces.hidden = expanded || docked;
+        if (nodes.workspaces) nodes.workspaces.hidden = expanded || docked || prompted;
         if (nodes.dock) nodes.dock.hidden = !docked;
-        if (!expanded && !docked) this.renderWorkspaces();
+        if (nodes.wangp) nodes.wangp.hidden = !prompted;
+        if (!expanded && !docked && !prompted) this.renderWorkspaces();
         this.place();
     };
 

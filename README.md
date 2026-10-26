@@ -3927,6 +3927,28 @@ kept with the rest of the panel's layout for the browser tab, so a reload with
 the panel closed keeps the column out of the page too. Img2Img has no such
 state yet.
 
+**On the WanGP tab the same 🎛 is WanGP's prompt.** On Mini Paint NEO's
+**WanGP** tab the button is called *WanGP prompt*, and pressed, the panel shows
+a box holding WanGP's prompt in the conversation's place — the box WanGP
+generates from, or the prompt wizard's while WanGP's wizard is on (the line
+under the box says so). What you type there is written into WanGP's page a
+moment after you stop typing, and at once when you leave the box, as WanGP's
+own value: WanGP's page shows it as if you had typed it there, and nothing puts
+the old prompt back. **▶** then generates with it — a press waits for what you
+just typed to reach WanGP's page first, and one whose prompt WanGP did not take
+generates nothing and says why — and **Ctrl+Enter** in the box is **▶** too
+(Enter alone is a new line, which WanGP reads as a second prompt). The box reads
+WanGP's page each time it is shown, and again when somebody has touched WanGP's
+form by hand since, so a prompt typed or loaded on WanGP's own page appears in
+it within a few seconds; it never reads over something you typed that WanGP
+has not got yet. The box is greyed with a line saying why while WanGP is not
+loaded, and while WanGP's bridge is older than 1.14.0 (reinstall it from the
+WanGP tab). Only the prompt: every other WanGP setting stays on WanGP's page.
+**Chat** or **🎛** again goes back to the conversation or the tab bar, and the
+choice is the WanGP tab's own — kept with the panel's layout like Txt2Img's,
+and neither one changes the other. It needs Mini Paint NEO with
+`minipaintWanGP.prompt()` and `setPrompt()`, and its bridge 1.14.0 in WanGP.
+
 **Docked, a field needs a tap before it takes a drag.** In the panel the whole
 column scrolls, and a drag that starts on a text box, a number box, a slider or
 the compact spatial canvas scrolls the column too, rather than the box's text,

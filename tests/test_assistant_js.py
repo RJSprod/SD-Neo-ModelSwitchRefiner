@@ -600,7 +600,7 @@ class TestTheStylesheetCanHideThings:
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
                           "launcherLabel", "input", "ghost", "workspaces",
-                          "picker", "editBar", "dock"}, hidden
+                          "picker", "editBar", "dock", "wangp", "promptNote"}, hidden
 
 
 class TestOpeningAndClosing:

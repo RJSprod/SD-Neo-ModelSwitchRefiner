@@ -3110,6 +3110,101 @@ ending on its own; leaving focus putting the bar back in the page. The three
 older tests that held focus mode's bar out of the layout now hold it with the
 bar hidden and also measure it kept.
 
+## 3.38 WanGP's prompt in the panel (2026-10-26)
+
+Asked for from use: "I like how text to image has an option in the flyout
+menu that pulls in the entire configuration into the flyout. I want a very
+simple version of this, but for wan2gp. when I'm on that tab for generating
+content, I would like the ability to directly modify the prompt from the
+flyout menu just like image generation in text to image, but just the prompt."
+
+### Why a box of the panel's own, and not WanGP's drawn under it
+
+Txt2Img's column can be drawn under the panel because it is in this page
+(§3.29). WanGP's form is not: it is a Gradio 5 page in Mini Paint NEO's frame,
+on Forge's origin through its proxy, and nothing outside that document may
+reach into it -- Mini Paint's bridge is the only thing that knows a WanGP
+component (its `compatibility.py`), and its page script is the only thing in
+that document that speaks to this one. So the panel draws a box of its own and
+the bridge reads and writes WanGP's: bridge **1.14.0**'s `PROMPT_REQUEST`,
+answered by `PROMPT_RESULT`, behind `minipaintWanGP.prompt()` and
+`setPrompt(text)` (Mini Paint's `docs/wangp/CONTRACTS.md`, *Bridge 1.14.0: the
+prompt*). The box is the one WanGP generates from -- `wizard_prompt` while
+WanGP's prompt wizard is on, `prompt` otherwise, the choice a queue request
+already makes -- and a write is that box's own value from then on, through the
+bridge's one Gradio event as an output: not a queue request's overlay, so
+nothing puts it back, and WanGP's page shows it as if it had been typed there.
+The text crosses as typed (`normalize_prompt_edit`): line endings made `\n` and
+control characters removed, never stripped, and an empty box is a prompt
+cleared.
+
+### The panel's side
+
+The same 🎛 button, on the WanGP tab, named *WanGP prompt* there
+(`applySettingsButton`); a third state of its own, `wangpPrompt`, beside
+`settingsDocked` and saved with it, so a view chosen on one tab never changes
+the other's (`promptShown`, `toggleDock`; `toggleChat` leaves it as it leaves
+the dock). Its view, `.forge-assistant-wangp`, takes the conversation's place
+as the dock's placeholder does (`applyChat`, `applyMenu`), on the panel's own
+surface -- not `forge-assistant-docked`, whose see-through panel lets presses
+through it to a column that is not there here. It needs a Mini Paint NEO
+bundle with both functions; without them the button is not offered on the
+WanGP tab.
+
+*Reading.* `applyPrompt` reads WanGP's page when the view is shown (the press,
+the WanGP tab coming back with the view on, the panel opening) and on the
+panel's five-second beat only when `state().prompt.touched` -- the WanGP page's
+own change notices, a person's hand on its form -- has moved since the last
+answer: one question per touch, never one per beat, a refusal included. A read
+never lands over text the box holds that WanGP has not got (`_promptDirty`,
+`_promptSending`), and only one is in flight.
+
+*Writing.* `PROMPT_QUIET` (400 ms) after the last keystroke, at once on blur and
+when the view is put away (`writePrompt`); one write at a time, and text typed
+while one is on its way gets a write of its own after it. A write Mini Paint
+counts as a change to WanGP's form (its record is saved a second later, as
+after a touch) and not as a touch, so the box is never sent back to read its
+own writes. A write WanGP did not take keeps the text as unsent and says why
+under the box.
+
+*Generating.* ▶'s pump settles the box first (`settlePrompt`): a press waits
+for what was typed to be in WanGP's page before `generate()` asks WanGP's own
+Generate to read it, and a press whose prompt was not taken generates nothing
+and says "WanGP's prompt was not updated: ...". Ctrl+Enter (or Cmd+Enter) in the
+box is ▶, with the key's default prevented (Enter alone is a new line, which
+WanGP reads as one more prompt).
+
+*Shut.* While WanGP's page has not answered the box is greyed with "WanGP is not
+loaded yet."; under a bridge whose READY did not say `prompt_edit` -- one older
+than 1.14.0 -- with "Reinstall WanGP's bridge from the WanGP tab to edit its
+prompt here.", and nothing is asked in either case. A page whose prompt is over
+the ceiling (12000 characters) is not read out, and the box says to edit it on
+the WanGP page.
+
+### Verified
+
+`tests/test_assistant_prompt_js.py` (node, Mini Paint's bundle a stand-in of
+its contract): the button on the WanGP tab only with both functions, named for
+it; a press showing the box in the conversation's place and reading the page,
+nothing drawn under the panel; a second press, Chat and the tab bar going back;
+Txt2Img's column and WanGP's view each the other's no business; one write once
+the keys go quiet, at once on blur, after the one on its way, and before the
+view goes; ▶ writing first and then generating, generating nothing when the
+write was refused, asking nothing first when nothing was typed; a read never
+over unsent text, again only after a touch by hand, afresh when shown again;
+the box shut with its reason and asking nothing, the wizard's box named, a
+refused read shutting it until WanGP is touched; Ctrl+Enter; the state kept
+with the layout. Twelve mutations each fail a test.
+`tests/test_assistant_wangp_prompt.py` (Chromium, the layout test's page with
+a WanGP tab): the box drawn inside the panel, on its surface, taking a press;
+typing reaching `setPrompt` once the keys go quiet through the real wiring; ▶
+straight after typing and Ctrl+Enter generating with what was typed; on
+Txt2Img the button its own, and back on WanGP the page read again. Mini Paint
+NEO's halves are its `tests/test_wangp_queue.py` (the plugin's operation),
+`tests/test_wangp_protocol.py` (`prompt_checks`, the bundle on its virtual
+clock, and the WanGP document's script) and ten mutations. Not run against a
+real WanGP or on the user's machine.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).
