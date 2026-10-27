@@ -3964,17 +3964,21 @@ window at most).
 
 **Super Focused on the WanGP tab.** From Focused on the WanGP tab, two more
 presses on the launcher or the header's space give the window to WanGP's
-prompt, its Generate and its progress in one column and its gallery — the video
-playing, with its playback controls, and the strip of results under it — in
-the other, like Txt2Img's prompt and gallery, and nothing else: WanGP's title,
-tabs, model row, every other setting and its queue are put away, the panel goes
-back to its launcher and Forge's tab bar goes too. The divider between the two
-columns can be dragged (or moved with the arrow keys once it has the keyboard,
-or put back with a double click), and the share you give the prompt's column is
-remembered in this browser for the next time. On a page narrower than 720
-pixels the columns stack, the prompt's over the gallery. While WanGP generates,
-its own live controls (One More, Pause, Abort) take Generate's place in the
-prompt's column, and its progress moves under them.
+prompt in one column — the prompt alone, its box the whole height of the
+column, scrolling inside itself when the text is longer — and, in the other,
+its Generate and its progress over its gallery (the video playing, with its
+playback controls, and the strip of results under it), like Txt2Img's prompt
+and gallery, and nothing else: WanGP's title, tabs, model row, every other
+setting and its queue are put away, the panel goes back to its launcher and
+Forge's tab bar goes too. The divider between the two columns can be dragged
+(or moved with the arrow keys once it has the keyboard, or put back with a
+double click), which makes the prompt's box wider or narrower, and the share
+you give the prompt's column is remembered in this browser for the next time.
+Only a phone's page, narrower than 520 pixels, stacks the columns — the prompt,
+then Generate, the progress and the gallery — and opens at the prompt; a tablet,
+or a folded-out phone zoomed in, keeps two. While WanGP generates, its own live
+controls (One More, Pause, Abort) take Generate's place over the gallery, which
+gives up the room they need.
 
 Two presses on the launcher — the one thing left on the screen — go back to
 Normal, and everything is as it was: WanGP's page whole, every setting where it
@@ -3985,9 +3989,11 @@ you typed is WanGP's prompt, and the gallery holds what you generated. A reload
 in Super Focused starts outside focus, as every reload does, with the panel as
 it was before Super Focused.
 
-It needs Mini Paint NEO, and its bridge 1.15.0 installed in WanGP (from the
-WanGP tab): with an older bridge Super Focused is skipped — two presses from
-Focused go back to Normal — and the panel's status line says to reinstall it.
+It needs Mini Paint NEO, and its bridge 1.15.1 installed in WanGP (from the
+WanGP tab; 1.15.0 put Generate and the progress under the prompt and stacked
+the columns below 720 pixels): with a bridge older than 1.15.0 Super Focused
+is skipped — two presses from Focused go back to Normal — and the panel's
+status line says to reinstall it.
 While WanGP is not loaded yet it can still be had: its page is laid out as soon
 as it is ready. Mini Paint NEO lays the page out; here it is one class on the
 focused panel, `forge-assistant-wangp-studio`, which its WanGP tab reads.
