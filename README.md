@@ -3819,9 +3819,10 @@ and the glyph is lit while the conversation is showing. There is no line naming
 the character and the thread any more — the **⋯** menu's Chat group is headed
 by the character's name, and its **Threads** entry lists the threads with the
 one you are on marked. The space between the **⋯** and the **✕** is what you
-drag the panel by, and it has the launcher's two quick actions: press it twice
+drag the panel by, and it has the launcher's quick actions: press it twice
 to go back to the workspace you were in before, three times to turn focus mode
-on or off (see *Focus*); the buttons in that row stay buttons. That space also
+on or off (see *Focus*), four times on the WanGP tab for Super Focused; the
+buttons in that row stay buttons. That space also
 says what is free, in small grey italics: system RAM and each NVIDIA card's
 VRAM, in gigabytes — `RAM 61.2  5090 18.4  3090 7.1` — with the full names and
 totals as a tooltip. It is read with one short request every five seconds while
@@ -3848,26 +3849,29 @@ arriving, a picture loading, a message's actions opening — the panel is placed
 again, so one docked along the bottom grows upwards and its composer never goes
 off the window.
 
-**Press the launcher twice for the next mode.** There are three: *Normal*,
-*Focused* (the workspace given the window — see *Focus*, below) and, on Mini
-Paint NEO's **WanGP** tab, *Super Focused* — WanGP's page as a studio (see
-*Super Focused on the WanGP tab*, below). Two presses move to the next one:
-Normal to Focused, Focused to Super Focused on the WanGP tab and back to
-Normal anywhere else, Super Focused to Normal. Two presses on the open panel's
-header — the space you drag it by — do the same. Presses count as one gesture
-when each follows the last within 300 ms — a double-click's pace — so two
-unhurried presses are still two ordinary presses, and a third press after two
-starts a new count. The cost is that a single press waits those 300 ms before
-the panel opens, to be sure no second press is coming. A keyboard press (Enter
-or Space) is always a single press and opens the panel at once, and a drag of
-the launcher is never counted as a press.
+**Press the launcher two, three or four times.** Twice goes back to the
+workspace you were in before this one — twice again and you are back where you
+started, so two workspaces can be flipped between; with focus on, focus goes
+with you to the other workspace, as it does from the picker. Three times turns
+focus on or off (the workspace given the window — see *Focus*, below). Four
+times, on Mini Paint NEO's **WanGP** tab, turns *Super Focused* on or off —
+WanGP's page as a studio (see *Super Focused on the WanGP tab*, below): from
+Normal or Focused, four presses are Super Focused; from Super Focused, they are
+Focused again; on any other tab, four presses are Focused. The same presses on
+the open panel's header — the space you drag it by — do the same, except that
+one press there does nothing. Presses count as one gesture when each follows
+the last within 300 ms — a double-click's pace — so two unhurried presses are
+still two ordinary presses, and a press after four starts a new count. Turning
+focus on happens on the third press itself, because a browser grants full
+screen only to a press it is still handling, and a fourth press adds Super
+Focused to it. Everything else waits those 300 ms to be sure no further press
+is coming: one press before the panel opens, two before going back, and three
+with focus on before focus turns off — a fourth would mean Super Focused
+instead. A keyboard press (Enter or Space) is always a single press and opens
+the panel at once, and a drag of the launcher is never counted as a press.
 
-Two presses used to go back to the workspace you were in before this one, and
-three toggled focus. Going back is now the first entry of the workspace menu
-(the header's workspace button): **Back to** the workspace before this one —
-pressed again, you are back where you started, so two workspaces can still be
-flipped between. With focus on, going back takes focus with it to the other
-workspace, as the picker does.
+Going back is also the first entry of the workspace menu (the header's
+workspace button): **Back to** the workspace before this one.
 
 **Focus mode keeps the tab bar.** With focus on, the workspace's own tab bar —
 Forge's, or the Model Chain theme's thin bar of icons — stays along the top of
@@ -3882,8 +3886,8 @@ brings it over the top of the workspace for four seconds — longer while you
 use it: anything you do on it starts the four seconds again, and it stays
 while a mouse rests on it or you type into one of its fields. A press on the
 launcher still does what it always did (the panel opens after its 300 ms);
-two presses still move to the next mode. Super Focused has no tab bar at all,
-whatever this setting says, and no tap brings it.
+two presses still go back and three still turn focus off. Super Focused has no
+tab bar at all, whatever this setting says, and no tap brings it.
 
 **Collapsed, the panel is a tab bar.** Under the header it lists every
 workspace this installation has, one press each — a tab bar you can put
@@ -3962,8 +3966,8 @@ text areas. It starts eight lines tall; drag its bottom corner and that is its
 height from then on, in this browser, on every page (as tall as 60% of the
 window at most).
 
-**Super Focused on the WanGP tab.** From Focused on the WanGP tab, two more
-presses on the launcher or the header's space give the window to WanGP's
+**Super Focused on the WanGP tab.** Four presses on the launcher or the
+header's space, on the WanGP tab, give the window to WanGP's
 prompt in one column — the prompt alone, its box the whole height of the
 column, scrolling inside itself when the text is longer — and, in the other,
 its Generate and its progress over its gallery (the video playing, with its
@@ -3980,20 +3984,24 @@ or a folded-out phone zoomed in, keeps two. While WanGP generates, its own live
 controls (One More, Pause, Abort) take Generate's place over the gallery, which
 gives up the room they need.
 
-Two presses on the launcher — the one thing left on the screen — go back to
-Normal, and everything is as it was: WanGP's page whole, every setting where it
-was, the panel open again if it was open before, the tab bar back. Escape, the
-browser leaving full screen, or a switch to another tab end it the same way (a
-switch keeps focus on the new tab). What you did meanwhile stays: the prompt
-you typed is WanGP's prompt, and the gallery holds what you generated. A reload
-in Super Focused starts outside focus, as every reload does, with the panel as
-it was before Super Focused.
+It is focus, on the WanGP tab. Two presses on the launcher — the one thing
+left on the screen — go back to the tab you were on before, still in focus,
+with the panel and the tab bar as focus has them there; two more come back to
+WanGP, Super Focused again. Any switch does the same — a tab pressed on the
+bar, a picture sent to another tab: while focus lasts, the WanGP tab is Super
+Focused whenever you come back to it, until four presses make it Focused again.
+Three presses leave focus altogether, and everything is as it was: WanGP's page
+whole, every setting where it was, the panel open again if it was open before,
+the tab bar back; Escape and the browser leaving full screen do the same. Focus
+turned on again later is Focused, and four presses make it Super Focused. What
+you did meanwhile stays: the prompt you typed is WanGP's prompt, and the
+gallery holds what you generated. A reload in Super Focused starts outside
+focus, as every reload does, with the panel as it was before Super Focused.
 
 It needs Mini Paint NEO, and its bridge 1.15.1 installed in WanGP (from the
 WanGP tab; 1.15.0 put Generate and the progress under the prompt and stacked
-the columns below 720 pixels): with a bridge older than 1.15.0 Super Focused
-is skipped — two presses from Focused go back to Normal — and the panel's
-status line says to reinstall it.
+the columns below 720 pixels): with a bridge older than 1.15.0 four presses
+leave you Focused and the panel's status line says to reinstall it.
 While WanGP is not loaded yet it can still be had: its page is laid out as soon
 as it is ready. Mini Paint NEO lays the page out; here it is one class on the
 focused panel, `forge-assistant-wangp-studio`, which its WanGP tab reads.
@@ -4168,10 +4176,10 @@ theme's header and sidebars, the footer and the other tabs go, and the
 workspace takes the space they were using under the tab bar, which stays along
 the top unless the **⋯** menu's **Tab Bar in Focus** is off (see *Focus mode
 keeps the tab bar*, above). There is no Focus button: press the
-open panel's header twice — the space you drag it by, not one of its glyphs —
-or the launcher twice, at a double-click's pace, to turn it on; two more
-presses turn it off (or, on the WanGP tab, go on to Super Focused), and Escape
-turns it off from either.
+open panel's header three times — the space you drag it by, not one of its
+glyphs — or the launcher three times, at a double-click's pace, to turn it on;
+three more presses turn it off, and Escape turns it off from either. On the
+WanGP tab, four presses are Super Focused.
 
 The same press takes the browser full screen as well — its address bar and
 tabs, and on a phone the system bars — and the presses that turn focus off bring
