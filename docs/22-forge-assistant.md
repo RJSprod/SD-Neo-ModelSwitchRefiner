@@ -3363,6 +3363,47 @@ the live controls in Generate's place, a new picture in the gallery, the
 layout holding, and every declaration put back. Not against a real WanGP or on
 the user's machine.
 
+### The studio laid out again (2026-10-27, Mini Paint's bridge 1.15.1)
+
+The user's first run, in two parts:
+
+- "It goes into single column mobile optimized way too soon. Let's reduce the
+  limit, so that single column narrow view only happens on narrower displays
+  like a phone. When I 120% zoom on my fold 7, it went into single column"
+- "Left column should just be the prompt field, the entire column is just the
+  prompt field which can resize by moving the divider. If too much text, than
+  I can scroll the input field. The right side should have the generate and
+  progress bar, above the gallery."
+
+All of it is Mini Paint's (its `docs/wangp/CONTRACTS.md`, *Bridge 1.15.0: the
+studio*, which says what 1.15.1 changed); nothing here changed -- the class,
+the cycle and the refusal read `layout_studio`, which both bridges offer. The
+left column is WanGP's settings column with the prompt the one thing left in
+it, across every row of the grid, and the prompt's box is as tall as the column:
+its height comes from a stylesheet rule of the bridge's (`!important`, keyed on
+a custom property the studio writes on the row) because Gradio writes the box's
+height inline as it is typed in, and it scrolls inside itself. The right column
+is Generate, then the progress, then the gallery tabs, the gallery taking what
+the window leaves; when WanGP's live controls take Generate's place the studio
+is fitted again (a `ResizeObserver` on what stands above the gallery and on the
+prompt's blocks, never on what it sizes), so the gallery gives the room back and
+the two columns still end together. The columns stack only below **520 px** --
+a phone -- where the prompt's box is 30% of the window; above it each column
+keeps a minimum (200 px for the prompt's, 280 for the gallery's), so a Fold 7's
+inner screen at 120% (about 690 px) is two columns. A stacked page starts at
+its top, and leaving the studio puts the page's scroll back where it was.
+
+Verified there: `check_super_focus_makes_the_wangp_page_a_studio` rewritten for
+the new shape (the prompt alone on the left, its box ending where the gallery
+does; Generate over the progress over the gallery; typed past its height under
+Gradio's inline height and a theme's cap, the box keeps its size and scrolls;
+the action bar grown by 60 px, the gallery shrinks and both columns still fit;
+two columns at 700 px, stacked at 480; the scroll at the top and put back),
+thirteen mutations each caught; and on a live Gradio 5.29 page with WanGP's own
+stylesheet and page script, through a generation and at 1400, 680 and 400 px.
+Not against a real WanGP or on the user's machine; the bridge needs
+reinstalling from the WanGP tab.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).
