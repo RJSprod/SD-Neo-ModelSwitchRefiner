@@ -85,11 +85,17 @@
     // Focus, Send -- was most of a collapsed panel, and on a phone twice over.
     const WORKSPACE_GLYPH = "\u{1F4D1}";      // bookmark tabs: the tab bar
     const CHAT_GLYPH = "\u{1F4AC}";           // a speech balloon: the conversation
-    // Control knobs: Txt2Img's settings column, docked in the panel. Not the
-    // gear: the Lobe theme swaps a button holding "⚙️" for an icon of its own
-    // (its svgIcon option), and this one is on none of its lists.
+    // Control knobs: Txt2Img's or Img2Img's settings column, docked in the
+    // panel. Not the gear: the Lobe theme swaps a button holding "⚙️" for an
+    // icon of its own (its svgIcon option), and this one is on none of its
+    // lists.
     const SETTINGS_GLYPH = "\u{1F39B}\uFE0F";
     const SETTINGS_LABEL = "Generation settings";
+    // Which state says each workspace's column is docked: Txt2Img's under the
+    // name it has always been saved by, Img2Img's beside it. One each, so a
+    // view chosen on one tab never changes the other's, as WanGP's prompt is
+    // its own (`wangpPrompt`).
+    const DOCK_STATE = {tab_txt2img: "settingsDocked", tab_img2img: "img2imgDocked"};
     // The same button on the WanGP tab, where the panel's third state is a box
     // for WanGP's prompt (`applyPrompt`): the settings column of a page in a
     // frame cannot be drawn under the panel, and the prompt is what was asked.
@@ -101,8 +107,23 @@
     // this is for one that never answers at all.
     const SCREEN_WAIT = 5000;
     const MIN_WIDTH = 320;
-    const MAX_WIDTH = 640;
+    // As wide as the panel may be dragged. It was 640 while only the edge
+    // resized it; with the corner -- "I would like for the conversation view
+    // to be within a resizable flyout window so that I can resize it" -- and
+    // a docked Img2Img column with its picture in it, a wider panel is what
+    // the corner is for. The window's own width still caps it (`placePanel`).
+    const MAX_WIDTH = 960;
     const NOMINAL_WIDTH = 360;
+    // The conversation's height, as the corner sets it: no shorter than the
+    // stylesheet's own floor for the transcript -- or than it was drawn when
+    // the corner was taken, if that was less: a conversation with a message or
+    // none is shorter, and jumping it to the floor at the first pixel would
+    // take the corner from under the hand. Unset (null, or dragged back to
+    // nothing), the transcript is as tall as its messages up to the
+    // stylesheet's cap, as it always was.
+    const MIN_CONVERSATION = 120;
+    const CONVERSATION_VAR = "--forge-assistant-conversation";
+    const SIZED_CLASS = "forge-assistant-sized";
     // The least the panel's height is ever capped to, however little of the
     // window shows: the header and a line of whatever is under it.
     const MIN_VISIBLE_HEIGHT = 120;
@@ -154,6 +175,16 @@
     const GENERATE_GLYPH = "\u25b6\ufe0e";  // a play triangle, text style
     const GENERATE_LABEL = "Generate in WanGP";
     const GENERATE_SHOWN = 3000;
+    // The same ▶ on Txt2Img and Img2Img, asked for beside the docked settings:
+    // "for the flyout menu in both the text to image and image to image, I
+    // would like to have a play button, just like I do for WAN2GP, and its
+    // function should be to initiate generate". It presses the tab's own
+    // Generate (`generateHere`), as Send to Generate does, so everything that
+    // button does with the page happens because it is the button.
+    const FORGE_GENERATE = {
+        tab_txt2img: {name: "txt2img", label: "Txt2img"},
+        tab_img2img: {name: "img2img", label: "Img2img"},
+    };
     // WanGP's prompt in the panel, on the WanGP tab: written to WanGP's page
     // this long after the last keystroke, and at once when the box loses the
     // keyboard or ▶ is pressed. Mini Paint NEO's `prompt()` and `setPrompt()`
@@ -408,6 +439,9 @@
             freeFloat: false,
             floatAt: null,
             panelWidth: null,
+            // The conversation's height, dragged by the corner; null is the
+            // stylesheet's (`applyConversationHeight`).
+            conversationHeight: null,
             panelOpen: false,
             conversationExpanded: true,
             // The third state: Txt2Img's settings column in the panel. Kept
@@ -415,6 +449,8 @@
             // `conversationExpanded` says, and taken up again on return; the
             // column stays out of the page all the while (`syncDock`).
             settingsDocked: false,
+            // The same for Img2Img's column, on its own (`DOCK_STATE`).
+            img2imgDocked: false,
             // The same third state on the WanGP tab: WanGP's prompt in a box
             // (`applyPrompt`). Its own, so a view chosen on one tab never
             // changes another's.
@@ -496,7 +532,12 @@
                 this.state.panelWidth = Math.min(MAX_WIDTH,
                                                  Math.max(MIN_WIDTH, found.panelWidth));
             }
-            ["panelOpen", "conversationExpanded", "settingsDocked", "wangpPrompt"].forEach((name) => {
+            if (typeof found.conversationHeight === "number" && isFinite(found.conversationHeight)
+                && found.conversationHeight >= 1) {
+                this.state.conversationHeight = Math.round(found.conversationHeight);
+            }
+            ["panelOpen", "conversationExpanded", "settingsDocked", "img2imgDocked",
+             "wangpPrompt"].forEach((name) => {
                 if (typeof found[name] === "boolean") this.state[name] = found[name];
             });
             // Saved in super focus: what it put away comes back, because the
@@ -629,9 +670,11 @@
             schemaVersion: 5,
             anchorOverride: this.state.anchorOverride,
             panelWidth: this.state.panelWidth,
+            conversationHeight: this.state.conversationHeight,
             panelOpen: this.state.panelOpen,
             conversationExpanded: this.state.conversationExpanded,
             settingsDocked: this.state.settingsDocked,
+            img2imgDocked: this.state.img2imgDocked,
             wangpPrompt: this.state.wangpPrompt,
             focusEnabled: this.state.focusEnabled,
             focusWorkspaceId: this.state.focusWorkspaceId,
@@ -763,10 +806,10 @@
                                 CHAT_GLYPH, "Chat");
         chat.setAttribute("aria-expanded", String(this.state.conversationExpanded));
         chat.setAttribute("aria-controls", "forge-assistant-conversation");
-        // The third state, on Txt2Img only (`applySettingsButton`): its
-        // settings column, prompts and all, scrolling in the panel and gone
-        // from the page, so the gallery has the whole width. A switch, so a
-        // screen reader says whether it is on.
+        // The third state, on Txt2Img and Img2Img (`applySettingsButton`):
+        // the tab's settings column, prompts and all, scrolling in the panel
+        // and gone from the page, so the gallery has the whole width. A
+        // switch, so a screen reader says whether it is on.
         const settings = iconButton("forge-assistant-nav-button forge-assistant-settings",
                                     SETTINGS_GLYPH, SETTINGS_LABEL);
         settings.setAttribute("aria-pressed", "false");
@@ -775,7 +818,8 @@
                                      "⋯", "More actions");
         utilities.setAttribute("aria-haspopup", "menu");
         utilities.setAttribute("aria-expanded", "false");
-        // Only on the WanGP tab, with WanGP there to press it (`applyGenerate`).
+        // On the WanGP tab, with WanGP there to press it, and on Txt2Img and
+        // Img2Img, where it is the tab's Generate (`applyGenerate`).
         const generate = iconButton("forge-assistant-nav-button forge-assistant-generate",
                                     GENERATE_GLYPH, GENERATE_LABEL);
         generate.hidden = true;
@@ -947,9 +991,26 @@
         panel.appendChild(handle);
         this.nodes.resize = handle;
 
+        // The window's corner. Asked for: "I would like for the conversation
+        // view to be within a resizable flyout window so that I can resize
+        // it." The edge only ever made the panel wider; the corner is drawn,
+        // at whichever corner is away from where the panel is held
+        // (`cornerSides`, `data-corner`), and a drag of it makes the panel as
+        // wide and its conversation as tall as the hand says -- the docked
+        // settings column's view with it, which is the conversation's height.
+        // A double press puts the panel's own size back (`resetSize`).
+        const corner = element("div", "forge-assistant-corner");
+        corner.setAttribute("role", "separator");
+        corner.setAttribute("tabindex", "0");
+        corner.setAttribute("aria-label", "Resize the conversation");
+        corner.title = "Resize (double-click for the panel's own size)";
+        panel.appendChild(corner);
+        this.nodes.corner = corner;
+
         this.nodes.root.appendChild(panel);
         this.menuHandle = {close: () => this.closeMenu()};
         this.disposers.push(this.host.registerMenu(this.menuHandle));
+        this.applyConversationHeight();
         this.applyChat();
     };
 
@@ -1008,14 +1069,26 @@
                 ? this.host.getActiveWorkspace() : "");
     };
 
-    /** Is the panel's view the docked settings column? Its state, on the one
-     *  workspace that has the column. Whether the panel is open is not part of
-     *  it: a closed panel keeps its view, and `syncDock` puts the column back
-     *  in the page while it is closed. */
+    /** Is `workspace`'s settings column docked, as the panel's state says? */
+    Shell.prototype.dockedOn = function (workspace) {
+        const key = DOCK_STATE[workspace];
+        return !!(key && this.state[key]);
+    };
+
+    /** Dock `workspace`'s settings column, or not. */
+    Shell.prototype.setDocked = function (workspace, on) {
+        const key = DOCK_STATE[workspace];
+        if (key) this.state[key] = !!on;
+    };
+
+    /** Is the panel's view the docked settings column? The state of the
+     *  workspace on screen, where it has the column. Whether the panel is
+     *  open is not part of it: a closed panel keeps its view, and `syncDock`
+     *  keeps the column out of sight while it is closed. */
     Shell.prototype.dockShown = function () {
         const dock = NS.dock;
-        return !!(this.state.settingsDocked && dock
-                  && dock.available(this.currentWorkspace()));
+        const workspace = this.currentWorkspace();
+        return !!(this.dockedOn(workspace) && dock && dock.available(workspace));
     };
 
     /** Is the panel's view WanGP's prompt? Its state, on the WanGP tab, with
@@ -1025,8 +1098,9 @@
                   && wangpPrompt());
     };
 
-    /** The settings button: on Txt2Img, lit while the column is docked; on
-     *  the WanGP tab, lit while the panel shows WanGP's prompt. */
+    /** The settings button: on Txt2Img and Img2Img, lit while that tab's
+     *  column is docked; on the WanGP tab, lit while the panel shows WanGP's
+     *  prompt. */
     Shell.prototype.applySettingsButton = function () {
         const button = this.nodes && this.nodes.settings;
         if (!button) return;
@@ -1040,7 +1114,7 @@
             button.setAttribute("aria-label", label);
             button.title = label;
         }
-        const on = prompt ? !!this.state.wangpPrompt : !!this.state.settingsDocked;
+        const on = prompt ? !!this.state.wangpPrompt : this.dockedOn(workspace);
         button.setAttribute("aria-pressed", String(available && on));
     };
 
@@ -1068,20 +1142,33 @@
      *  tab mode". The first build put it back whenever the panel closed, so a
      *  panel closed in focus mode, for the whole gallery, brought the column
      *  back and focus mode ended with it in the page. It is shown in the
-     *  panel while the panel is open on Txt2Img with no menu up, and hidden
-     *  -- still out of the page, the gallery keeping the row -- otherwise. */
+     *  panel while the panel is open on its own workspace with no menu up,
+     *  and hidden -- still out of the page, the gallery keeping the row --
+     *  otherwise.
+     *
+     *  Txt2Img's and Img2Img's each, by its own state: a column docked on
+     *  one tab stays out of its page while the other tab's is in the panel,
+     *  or is in its page, or is docked too. The one on screen goes last, so
+     *  it is the one the guard ends up on. */
     Shell.prototype.syncDock = function () {
         const dock = NS.dock;
         if (!dock) return;
         const slot = this.nodes.dock;
-        if (!this.state.settingsDocked || !slot) {
-            dock.release();
-            return;
-        }
+        const current = this.currentWorkspace();
         // The placeholder shows only in the docked view with no menu up
         // (`applyChat`, `applyMenu`), so it is the whole of the question.
-        const showing = this.state.panelOpen && !slot.hidden;
-        dock.place(showing ? slot.getBoundingClientRect() : null);
+        const showing = !!slot && this.state.panelOpen && !slot.hidden;
+        const order = Object.keys(DOCK_STATE).filter((workspace) => workspace !== current);
+        if (DOCK_STATE[current]) order.push(current);
+        order.forEach((workspace) => {
+            if (!dock.available(workspace)) return;
+            if (!slot || !this.dockedOn(workspace)) {
+                dock.release(workspace);
+                return;
+            }
+            dock.place(showing && workspace === current ? slot.getBoundingClientRect() : null,
+                       workspace);
+        });
     };
 
     /** The docked column carried through a drag of the panel: moved by the
@@ -1092,7 +1179,8 @@
      *  Gradio's: 85 layouts a move on the user's Txt2Img. */
     Shell.prototype.shiftDock = function (dx, dy) {
         const dock = NS.dock;
-        if (!dock || !this.state.settingsDocked) return;
+        // The dock knows which column is in the panel; any docked one may be.
+        if (!dock || !Object.keys(DOCK_STATE).some((workspace) => this.dockedOn(workspace))) return;
         if (typeof dock.shift === "function") dock.shift(dx, dy);
         else this.syncDock();
     };
@@ -1142,10 +1230,11 @@
         const menuUp = !!(this.nodes.menu && !this.nodes.menu.hidden);
         if (menuUp) this.closeMenu();
         // On the WanGP tab the same button is WanGP's prompt.
-        if (this.currentWorkspace() === WANGP_WORKSPACE && wangpPrompt()) {
+        const workspace = this.currentWorkspace();
+        if (workspace === WANGP_WORKSPACE && wangpPrompt()) {
             this.state.wangpPrompt = menuUp ? true : !this.promptedNow;
         } else {
-            this.state.settingsDocked = menuUp ? true : !this.dockedNow;
+            this.setDocked(workspace, menuUp ? true : !this.dockedNow);
         }
         this.applyChat();
         this._save();
@@ -1309,7 +1398,19 @@
         root.setAttribute("data-anchor", this.anchor());
         root.classList.toggle("forge-assistant-narrow", narrow);
         if (open) this.sizeDock();
-        if (open && narrow && !this.state.freeFloat) {
+        const sheet = open && narrow && !this.state.freeFloat;
+        if (open) {
+            // Under a drag of the corner, the corner the drag began on, though
+            // the panel's middle crosses the window's.
+            const resizing = this.resizing;
+            const corner = cornerName(resizing && resizing.handle === this.nodes.corner
+                ? resizing.sides : this.cornerSides(sheet));
+            if (this.placedCorner !== corner) {
+                this.placedCorner = corner;
+                this.nodes.panel.setAttribute("data-corner", corner);
+            }
+        }
+        if (sheet) {
             // The mobile sheet: full width, anchored to the half the anchor
             // names, and modal -- dialog semantics, contained focus, inert
             // background. A non-modal sheet on a phone is a sheet the page
@@ -1358,9 +1459,26 @@
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
         if (open) this.placedHeight = node.offsetHeight;
-        const at = this.state.freeFloat && this.state.floatAt
-            ? floatPoint(this.state.floatAt, box, view, pad, this.floatHold(node))
-            : anchorPoint(this.anchor(), box, view, pad);
+        let at;
+        if (this.state.freeFloat && this.state.floatAt) {
+            const hold = this.floatHold(node);
+            at = floatPoint(this.state.floatAt, box, view, pad, hold);
+            // Resized while floating: the edges the hand is not moving stay
+            // where they were, and the fraction is the one that puts them
+            // there (`heldEdges`).
+            const held = open && this.sizeHold;
+            if (held) {
+                const left = typeof held.right === "number" ? held.right - box.width
+                    : (typeof held.left === "number" ? held.left : at.left);
+                const top = typeof held.bottom === "number" ? held.bottom - box.height
+                    : (typeof held.top === "number" ? held.top : at.top);
+                this.state.floatAt = fractionOf({left, top, width: box.width, height: box.height},
+                                                view, pad, this.state.floatAt, hold);
+                at = floatPoint(this.state.floatAt, box, view, pad, hold);
+            }
+        } else {
+            at = anchorPoint(this.anchor(), box, view, pad);
+        }
         node.style.left = at.left + "px";
         node.style.top = at.top + "px";
     };
@@ -2074,7 +2192,7 @@
         this.on(nodes.settings, "click", () => this.toggleDock());
         this.on(nodes.picker, "click", () => this.toggleMenu("workspaces"));
         this.on(nodes.utilities, "click", () => this.toggleMenu("utilities"));
-        this.on(nodes.generate, "click", () => this.generateInWanGP());
+        this.on(nodes.generate, "click", () => this.pressGenerate());
         // WanGP's prompt: written as it is typed, at once when the box loses
         // the keyboard, and Ctrl+Enter is ▶ as it is Generate on Forge's own
         // prompt boxes.
@@ -2124,12 +2242,17 @@
         this.on(nodes.transcript, "load", () => {
             if (this.following) this.toBottom();
         }, true);
-        this.on(nodes.resize, "keydown", (event) => this.resizeKey(event));
-        this.on(nodes.resize, "pointerdown", (event) => this.startResize(event));
+        // The edge and the corner are one machine (`startResize`).
+        [nodes.resize, nodes.corner].forEach((handle) => {
+            if (!handle) return;
+            this.on(handle, "keydown", (event) => this.resizeKey(event, handle));
+            this.on(handle, "pointerdown", (event) => this.startResize(event, handle));
+            this.on(handle, "lostpointercapture", (event) => this.endResize(event, true));
+        });
+        this.on(nodes.corner, "dblclick", () => this.resetSize());
         this.on(window, "pointermove", (event) => this.moveResize(event));
         this.on(window, "pointerup", (event) => this.endResize(event, false));
         this.on(window, "pointercancel", (event) => this.endResize(event, true));
-        this.on(nodes.resize, "lostpointercapture", (event) => this.endResize(event, true));
 
         this.on(window, "resize", () => this.place());
         if (window.visualViewport) {
@@ -2313,17 +2436,45 @@
         return bridge && typeof bridge.generate === "function" ? bridge : null;
     }
 
-    /** Shown on the WanGP tab when Mini Paint NEO can press WanGP's Generate;
-     * pressable once WanGP's page has answered. */
+    /** Shown on the WanGP tab when Mini Paint NEO can press WanGP's Generate,
+     * pressable once WanGP's page has answered; and on Txt2Img and Img2Img
+     * while the tab has its Generate button. One button for all three: what
+     * it last said belongs to the workspace it said it on, and goes when
+     * another workspace shows -- WanGP's presses still in line are painted
+     * again on return. */
     Shell.prototype.applyGenerate = function () {
         const button = this.nodes && this.nodes.generate;
         if (!button) return;
+        const active = this.currentWorkspace();
+        if (button.dataset.for !== active) {
+            const before = button.dataset.for;
+            button.dataset.for = active;
+            if (before !== undefined) {
+                window.clearTimeout(this._generateShown);
+                delete button.dataset.state;
+                delete button.dataset.count;
+                button.removeAttribute("aria-busy");
+                if (active === WANGP_WORKSPACE) this.paintGenerateLine();
+            }
+        }
+        const forge = FORGE_GENERATE[active];
+        if (forge) {
+            button.hidden = !hostElement(forge.name + "_generate");
+            if (button.hidden) return;
+            const label = "Generate in " + forge.label;
+            if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+            // Never locked: a press while a run is on is refused with the
+            // reason, as Forge covers its own Generate then.
+            button.disabled = false;
+            if (!button.dataset.state) button.title = label;
+            return;
+        }
         const bridge = wangp();
-        const active = this.activeWorkspace
-            || (this.host && typeof this.host.getActiveWorkspace === "function"
-                ? this.host.getActiveWorkspace() : "");
         button.hidden = !bridge || active !== WANGP_WORKSPACE;
         if (button.hidden) return;
+        if (button.getAttribute("aria-label") !== GENERATE_LABEL) {
+            button.setAttribute("aria-label", GENERATE_LABEL);
+        }
         let ready = false;
         try {
             const found = bridge.state();
@@ -2334,6 +2485,38 @@
         if (!button.dataset.state) {
             button.title = ready ? GENERATE_LABEL : "WanGP is not loaded yet";
         }
+    };
+
+    /** The header's ▶: the tab's Generate on Txt2Img and Img2Img, WanGP's
+     *  on the WanGP tab. */
+    Shell.prototype.pressGenerate = function () {
+        if (FORGE_GENERATE[this.currentWorkspace()]) return this.generateHere();
+        return this.generateInWanGP();
+    };
+
+    /** Press the tab's own Generate, on Txt2Img or Img2Img: the page as it
+     *  is, the settings docked in the panel or not. Not while the tab is
+     *  generating: Forge covers its Generate with Interrupt and Skip then, so
+     *  a person cannot press it, and neither does this -- the press is
+     *  refused and says so, on the status line and for a moment on the
+     *  button. Resolves with what was said. */
+    Shell.prototype.generateHere = function () {
+        const workspace = this.currentWorkspace();
+        const forge = FORGE_GENERATE[workspace];
+        if (!forge) return Promise.resolve(null);
+        const generate = hostElement(forge.name + "_generate");
+        let found;
+        if (!generate) {
+            found = {ok: false, message: "There is no " + forge.label + " Generate button on this page."};
+        } else if (generating(forge.name) || generate.disabled) {
+            found = {ok: false, message: forge.label + " is already generating."};
+        } else {
+            generate.click();
+            found = {ok: true, message: "Generating in " + forge.label + "."};
+        }
+        this.tell(found.message, found.ok ? "info" : "warn");
+        this.showGenerated(found.message, found.ok, workspace);
+        return Promise.resolve(found);
     };
 
     /** Press WanGP's own Generate: the page as it is, started now when WanGP
@@ -2393,6 +2576,9 @@
     Shell.prototype.paintGenerateLine = function () {
         const button = this.nodes && this.nodes.generate;
         if (!button) return;
+        // The line is WanGP's: on Txt2Img or Img2Img the button is theirs, and
+        // the line is painted again when the WanGP tab is back.
+        if (button.dataset.for !== undefined && button.dataset.for !== WANGP_WORKSPACE) return;
         const waiting = (this._generateLine || []).length;
         window.clearTimeout(this._generateShown);
         if (waiting) {
@@ -2410,21 +2596,32 @@
     /** One press answered: said on the line and, once the line is empty, on
      * the button for GENERATE_SHOWN. */
     Shell.prototype.answerGenerate = function (found) {
-        const button = this.nodes && this.nodes.generate;
         const ok = !!(found && found.ok);
         const said = ok
             ? (found.status === "started" ? "Generating in WanGP."
                 : "Added to WanGP's queue.")
             : (found && found.message) || "WanGP did not take it.";
         this.tell(said, ok ? "info" : "warn");
+        const button = this.nodes && this.nodes.generate;
         if (!button) return;
         if (!ok) this._generateFailed = said;
         this.paintGenerateLine();
         if ((this._generateLine || []).length) return;
         const failed = this._generateFailed;
         this._generateFailed = "";
-        button.dataset.state = failed ? "failed" : "done";
-        button.title = failed || said;
+        this.showGenerated(failed || said, !failed, WANGP_WORKSPACE);
+    };
+
+    /** The last answer on the button for GENERATE_SHOWN -- green taken, red
+     *  refused, the words as its tooltip -- when the button is still the one
+     *  of the workspace that was answered. */
+    Shell.prototype.showGenerated = function (said, ok, workspace) {
+        const button = this.nodes && this.nodes.generate;
+        if (!button) return;
+        if (button.dataset.for !== undefined && button.dataset.for !== workspace) return;
+        window.clearTimeout(this._generateShown);
+        button.dataset.state = ok ? "done" : "failed";
+        button.title = said;
         this._generateShown = window.setTimeout(() => {
             delete button.dataset.state;
             this.applyGenerate();
@@ -2867,7 +3064,7 @@
         // Docked, Chat is the way to the conversation: the column goes back to
         // the page and the conversation shows. So it is from WanGP's prompt.
         if (this.dockedNow || this.promptedNow) {
-            if (this.dockedNow) this.state.settingsDocked = false;
+            if (this.dockedNow) this.setDocked(this.currentWorkspace(), false);
             if (this.promptedNow) this.state.wangpPrompt = false;
             this.state.conversationExpanded = true;
             this.applyChat();
@@ -4083,34 +4280,197 @@
         else if (action === "exit-focus") this.toggleFocus();
     };
 
-    Shell.prototype.resizeKey = function (event) {
+    /** Which edges the corner moves: the ones away from where the panel is
+     *  held. Anchored, the anchor's corner is held, so the corner is the one
+     *  opposite (left of a panel on the right, top of a panel along the
+     *  bottom), and a panel centred across the window grows both ways, twice
+     *  what the hand moves; floating, the corner away from the window's
+     *  nearest; the phone's sheet is the screen's width, and only its free
+     *  edge moves -- the top of a sheet along the bottom. `x` is "left",
+     *  "right" or null, `y` "top" or "bottom". */
+    Shell.prototype.cornerSides = function (sheet) {
+        const panel = this.nodes.panel;
+        const parts = this.anchor().split("-");
+        const vertical = parts[0];
+        const horizontal = parts[1];
+        if (sheet === undefined) {
+            sheet = !!(panel && panel.classList && panel.classList.contains("forge-assistant-sheet"));
+        }
+        if (sheet) {
+            return {x: null, y: vertical === "top" ? "bottom" : "top", factor: 1};
+        }
+        if (this.state.freeFloat && panel && panel.getBoundingClientRect) {
+            const box = panel.getBoundingClientRect();
+            const view = viewport();
+            return {x: box.left + box.width / 2 >= view.left + view.width / 2 ? "left" : "right",
+                    y: box.top + box.height / 2 >= view.top + view.height / 2 ? "top" : "bottom",
+                    factor: 1};
+        }
+        return {x: horizontal === "left" ? "right" : "left",
+                y: vertical === "top" ? "bottom" : "top",
+                factor: horizontal === "center" ? 2 : 1};
+    };
+
+    /** The corner's place, for the stylesheet: "top-left" and so on, or the
+     *  edge alone ("top", "bottom") on the sheet. */
+    function cornerName(sides) {
+        return sides.x ? sides.y + "-" + sides.x : sides.y;
+    }
+
+    /** The conversation's height now, and the least and most it may be:
+     *  what the transcript is drawn at -- or, docked, the height the docked
+     *  view is given for it (`sizeDock`, the transcript's max-height) -- the
+     *  floor, or less if it is drawn shorter, and the panel's cap less
+     *  everything else in the panel. */
+    Shell.prototype.conversationRange = function () {
+        const panel = this.nodes.panel;
+        const transcript = this.nodes.transcript;
+        const body = this.nodes.body;
+        const hidden = !!(this.dockedNow || (body && body.hidden));
+        let current = hidden ? NaN : ((transcript && transcript.offsetHeight) || 0);
+        let cap = NaN;
+        // Pixels only: the phone's sheet caps itself as a percentage of the
+        // window, which a computed style reports as it was written ("100%"),
+        // and read as a number that was a cap of a hundred pixels.
+        const pixels = (value) => (/px$/.test(String(value || "")) ? parseFloat(value) : NaN);
+        try {
+            if (hidden) current = pixels(window.getComputedStyle(transcript).maxHeight);
+            cap = pixels(window.getComputedStyle(panel).maxHeight);
+        } catch (error) { /* a host without computed styles */ }
+        if (!(current >= 0)) current = MIN_CONVERSATION;
+        if (!(cap > 0)) cap = viewport().height - 2 * WIDE_GAP;
+        const extra = Math.max(0, ((panel && panel.offsetHeight) || 0) - current);
+        const least = Math.min(MIN_CONVERSATION, Math.round(current));
+        const most = Math.max(least, Math.floor(cap - extra));
+        return {fromHeight: Math.min(most, Math.max(least, Math.round(current))), least, most};
+    };
+
+    /** What of a floating panel stays where it is while the corner or the
+     *  edge resizes it: the edges opposite the ones that move, so the edge
+     *  under the hand follows the hand. Anchored, the anchor holds already. */
+    Shell.prototype.heldEdges = function (sides) {
+        const panel = this.nodes.panel;
+        if (!this.state.freeFloat || !panel || !panel.getBoundingClientRect) return null;
+        const box = panel.getBoundingClientRect();
+        const held = {};
+        if (sides.x === "left") held.right = box.right;
+        else if (sides.x === "right") held.left = box.left;
+        if (sides.y === "top") held.bottom = box.bottom;
+        else if (sides.y === "bottom") held.top = box.top;
+        return held;
+    };
+
+    /** The conversation's height on the panel, as one variable the
+     *  stylesheet sizes the transcript from -- and so the docked view, which
+     *  is the conversation's height (`sizeDock`). Unset, the stylesheet's. */
+    Shell.prototype.applyConversationHeight = function () {
+        const panel = this.nodes.panel;
+        if (!panel || !panel.style) return;
+        const height = this.state.conversationHeight;
+        if (height > 0) {
+            const value = Math.round(height) + "px";
+            if (panel.style.getPropertyValue(CONVERSATION_VAR) !== value) {
+                panel.style.setProperty(CONVERSATION_VAR, value);
+            }
+        } else if (panel.style.getPropertyValue(CONVERSATION_VAR)) {
+            panel.style.removeProperty(CONVERSATION_VAR);
+        }
+        if (panel.classList) {
+            if (height > 0) panel.classList.add(SIZED_CLASS);
+            else panel.classList.remove(SIZED_CLASS);
+        }
+    };
+
+    function clampWidth(width) {
+        return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
+    }
+
+    /** Resized from the keyboard, or put back: placed once, a floating panel
+     *  holding the edges the hand would have. */
+    Shell.prototype.resizedOnce = function (sides) {
+        this.sizeHold = sides ? this.heldEdges(sides) : null;
+        this.applyConversationHeight();
+        this.placeNow();
+        this.sizeHold = null;
+        this._save();
+        if (this.state.freeFloat) this._saveFloat();
+    };
+
+    Shell.prototype.resizeKey = function (event, handle) {
+        if (handle && handle === this.nodes.corner) {
+            this.cornerKey(event);
+            return;
+        }
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
         const step = event.key === "ArrowLeft" ? RESIZE_STEP : -RESIZE_STEP;
         const width = (this.state.panelWidth || NOMINAL_WIDTH) + step;
-        this.state.panelWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
+        this.state.panelWidth = clampWidth(width);
         this._save();
         this.placeNow();
     };
 
-    // The edge handle. It used to add a pointermove and a pointerup listener
-    // to the window per gesture and take them off only on pointerup -- so a
-    // gesture that ended any other way (a touch the browser cancelled, a
-    // release outside the window) left them there, and from then on every
-    // pointer movement anywhere on the page resized the panel and forced a
-    // layout doing it. Now it is the same machine as the other two: one set of
-    // listeners for the life of the shell, a pointer id, capture, and an end
-    // that every way out reaches.
-    Shell.prototype.startResize = function (event) {
+    /** The corner's arrows move it: left and right the side it is on, up and
+     *  down its edge. */
+    Shell.prototype.cornerKey = function (event) {
+        const keys = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]};
+        const move = keys[event.key];
+        if (!move) return;
+        const sides = this.cornerSides();
+        const grow = move[0] ? (sides.x ? move[0] * (sides.x === "left" ? -1 : 1) : 0)
+            : move[1] * (sides.y === "top" ? -1 : 1);
+        if (!grow) return;
+        event.preventDefault();
+        if (move[0]) {
+            const width = (this.state.panelWidth || this.nodes.panel.offsetWidth || NOMINAL_WIDTH)
+                + grow * RESIZE_STEP * sides.factor;
+            this.state.panelWidth = clampWidth(width);
+        } else {
+            const range = this.conversationRange();
+            this.state.conversationHeight = Math.min(range.most, Math.max(range.least,
+                range.fromHeight + grow * RESIZE_STEP)) || null;
+        }
+        this.resizedOnce(sides);
+    };
+
+    /** The panel's own size again: its width, and the conversation as tall
+     *  as its messages up to the stylesheet's cap. */
+    Shell.prototype.resetSize = function () {
+        if (this.resizing) this.endResize(null, true);
+        this.state.panelWidth = null;
+        this.state.conversationHeight = null;
+        this.resizedOnce(this.cornerSides());
+    };
+
+    // The edge handle and the corner. It used to add a pointermove and a
+    // pointerup listener to the window per gesture and take them off only on
+    // pointerup -- so a gesture that ended any other way (a touch the browser
+    // cancelled, a release outside the window) left them there, and from then
+    // on every pointer movement anywhere on the page resized the panel and
+    // forced a layout doing it. Now it is the same machine as the other two:
+    // one set of listeners for the life of the shell, a pointer id, capture,
+    // and an end that every way out reaches. The edge moves the panel's left
+    // side; the corner the sides `cornerSides` names, the conversation's
+    // height with the vertical one.
+    Shell.prototype.startResize = function (event, handle) {
         if (event.button !== undefined && event.button !== 0) return;
         if (!event.isPrimary) return;
-        this.resizing = {
+        const node = handle || this.nodes.resize;
+        const sides = node && node === this.nodes.corner ? this.cornerSides()
+            : {x: "left", y: null, factor: 1};
+        const resizing = {
             pointerId: event.pointerId,
+            handle: node,
             start: event.clientX,
+            startY: event.clientY,
             from: this.state.panelWidth || this.nodes.panel.offsetWidth || NOMINAL_WIDTH,
+            sides,
         };
+        if (sides.y) Object.assign(resizing, this.conversationRange());
+        this.resizing = resizing;
+        this.sizeHold = this.heldEdges(sides);
         try {
-            this.nodes.resize.setPointerCapture(event.pointerId);
+            node.setPointerCapture(event.pointerId);
         } catch (error) { /* capture is an optimisation, not a requirement */ }
         event.preventDefault();
     };
@@ -4118,8 +4478,18 @@
     Shell.prototype.moveResize = function (event) {
         const resizing = this.resizing;
         if (!resizing || event.pointerId !== resizing.pointerId) return;
-        const width = resizing.from + (resizing.start - event.clientX);
-        this.state.panelWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width));
+        const sides = resizing.sides || {x: "left", y: null, factor: 1};
+        if (sides.x) {
+            const dx = (event.clientX - resizing.start) * (sides.x === "left" ? -1 : 1);
+            this.state.panelWidth = clampWidth(resizing.from + dx * (sides.factor || 1));
+        }
+        if (sides.y && typeof event.clientY === "number") {
+            const dy = (event.clientY - resizing.startY) * (sides.y === "top" ? -1 : 1);
+            // Dragged back to nothing, it is the stylesheet's again.
+            this.state.conversationHeight = Math.round(Math.min(resizing.most,
+                Math.max(resizing.least, resizing.fromHeight + dy))) || null;
+            this.applyConversationHeight();
+        }
         // Once a frame, not once an event: a pointer reports far more often
         // than the screen draws, and every placement reads the panel's size.
         this.place();
@@ -4131,14 +4501,19 @@
         // Cleared before capture is released, so the `lostpointercapture` that
         // releasing causes finds nothing to end.
         this.resizing = null;
+        const node = resizing.handle || this.nodes.resize;
         try {
-            this.nodes.resize.releasePointerCapture(resizing.pointerId);
+            node.releasePointerCapture(resizing.pointerId);
         } catch (error) { /* never held, or already released */ }
-        // A cancelled resize keeps the width it reached: it was on screen the
+        // A cancelled resize keeps the size it reached: it was on screen the
         // whole time, and snapping back would be the surprise.
         void cancelled;
         this._save();
         this.placeNow();
+        // Placed for the last time holding what the hand held; a floating
+        // panel's place is its fraction, kept between sessions.
+        this.sizeHold = null;
+        if (this.state.freeFloat) this._saveFloat();
     };
 
     // -- attachments ---------------------------------------------------------- //

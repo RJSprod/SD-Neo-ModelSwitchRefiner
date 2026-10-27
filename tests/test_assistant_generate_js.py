@@ -66,7 +66,10 @@ def test_it_sits_next_to_the_more_actions_menu():
                      "glyph": "▶︎"}
 
 
-def test_it_shows_on_the_wangp_tab_only():
+def test_wangps_shows_on_the_wangp_tab_only():
+    """WanGP's ▶: on its tab, with Mini Paint NEO there. (This Txt2img has no
+    Generate button of its own, so nothing is offered there either; with one,
+    the ▶ is that tab's -- below.)"""
     found = run(WORLD + """
         const there = generateShell("tab_wangp");
         there.shell.applyGenerate();
@@ -231,3 +234,124 @@ def test_a_press_right_after_the_line_empties_is_not_lost():
     """)
 
     assert found == {"won": "answered", "calls": 2}
+
+
+# -- Txt2Img's and Img2Img's own Generate --------------------------------------- #
+#
+# Asked for: "for the flyout menu in both the text to image and image to image,
+# I would like to have a play button, just like I do for WAN2GP, and its
+# function should be to initiate generate". The same ▶ presses the tab's own
+# Generate button, as Send to Generate does.
+
+FORGE = """
+function forgeTab(name) {
+    const generate = element(name + "_generate", "BUTTON");
+    const interrupt = element(name + "_interrupt", "BUTTON");
+    return {generate, interrupt};
+}
+"""
+
+
+def test_on_txt2img_and_img2img_it_is_the_tabs_own_generate():
+    found = run(WORLD + FORGE + """
+        forgeTab("txt2img");
+        const here = generateShell("tab_txt2img", null);
+        here.shell.applyGenerate();
+        const missing = generateShell("tab_img2img", null);
+        missing.shell.applyGenerate();
+        const hidden = missing.button.hidden;
+        forgeTab("img2img");
+        missing.shell.applyGenerate();
+        console.log(JSON.stringify({
+            txt2img: [here.button.hidden, here.button.disabled,
+                      here.button.getAttribute("aria-label"), here.button.title],
+            img2img: [hidden, missing.button.hidden, missing.button.getAttribute("aria-label")],
+        }));
+    """)
+
+    # No Mini Paint needed; a tab without its Generate button offers none.
+    assert found["txt2img"] == [False, False, "Generate in Txt2img", "Generate in Txt2img"]
+    assert found["img2img"] == [True, False, "Generate in Img2img"]
+
+
+def test_a_press_on_a_generation_tab_presses_its_generate_button():
+    found = run(WORLD + FORGE + """
+        const tab = forgeTab("img2img");
+        const {shell, bridge, button} = generateShell("tab_img2img");
+        shell.applyGenerate();
+        const answer = await shell.pressGenerate();
+        console.log(JSON.stringify({clicks: tab.generate.clicks || 0, wangp: bridge.calls,
+                                    answer, told: shell.told, state: button.dataset.state,
+                                    title: button.title}));
+    """)
+
+    assert found["clicks"] == 1 and found["wangp"] == 0
+    assert found["answer"] == {"ok": True, "message": "Generating in Img2img."}
+    assert found["told"] == [["Generating in Img2img.", "info"]]
+    assert found["state"] == "done" and found["title"] == "Generating in Img2img."
+
+
+def test_a_press_while_the_tab_generates_presses_nothing_and_says_so():
+    """Forge covers its Generate with Interrupt and Skip while a run is on, so
+    a person cannot press it then, and neither does the ▶ -- it never locks,
+    and says why it did nothing."""
+    found = run(WORLD + FORGE + """
+        const tab = forgeTab("txt2img");
+        tab.interrupt.style.display = "block";
+        const {shell, button} = generateShell("tab_txt2img", null);
+        shell.applyGenerate();
+        const disabled = button.disabled;
+        await shell.pressGenerate();
+        const refused = {clicks: tab.generate.clicks || 0, state: button.dataset.state,
+                         title: button.title, told: shell.told.slice(), disabled};
+        // Once the run is over the next press generates.
+        tab.interrupt.style.display = "none";
+        await shell.pressGenerate();
+        console.log(JSON.stringify({refused, clicks: tab.generate.clicks || 0,
+                                    state: button.dataset.state}));
+    """)
+
+    assert found["refused"] == {"clicks": 0, "state": "failed",
+                                "title": "Txt2img is already generating.",
+                                "told": [["Txt2img is already generating.", "warn"]],
+                                "disabled": False}
+    assert found["clicks"] == 1 and found["state"] == "done"
+
+
+def test_wangps_line_is_not_painted_on_another_tabs_button():
+    """One button for every tab: presses still in line for WanGP go on, but
+    their count and their answer are WanGP's, and Txt2Img's ▶ shows neither;
+    back on WanGP its line is painted again."""
+    found = run(WORLD + FORGE + """
+        forgeTab("txt2img");
+        const {shell, bridge, button} = generateShell("tab_wangp");
+        const answers = [];
+        bridge.generate = function () {
+            this.calls += 1;
+            return new Promise((resolve) => answers.push(() => resolve({ok: true, status: "queued"})));
+        };
+        shell.applyGenerate();
+        const presses = [shell.generateInWanGP(), shell.generateInWanGP(), shell.generateInWanGP()];
+        await settle();
+        const there = {state: button.dataset.state, count: button.dataset.count};
+        shell.activeWorkspace = "tab_txt2img";
+        shell.applyGenerate();
+        const away = {state: button.dataset.state || "", count: button.dataset.count || "",
+                      label: button.getAttribute("aria-label")};
+        answers.shift()(); await settle(); await settle();
+        const during = {state: button.dataset.state || "", count: button.dataset.count || ""};
+        shell.activeWorkspace = "tab_wangp";
+        shell.applyGenerate();
+        const back = {state: button.dataset.state, count: button.dataset.count,
+                      label: button.getAttribute("aria-label")};
+        while (answers.length) { answers.shift()(); await settle(); await settle(); }
+        await Promise.all(presses);
+        console.log(JSON.stringify({there, away, during, back, calls: bridge.calls,
+                                    done: button.dataset.state}));
+    """)
+
+    assert found["there"] == {"state": "busy", "count": "3"}
+    assert found["away"] == {"state": "", "count": "", "label": "Generate in Txt2img"}
+    assert found["during"] == {"state": "", "count": ""}
+    assert found["back"] == {"state": "busy", "count": "2", "label": "Generate in WanGP"}
+    assert found["calls"] == 3 and found["done"] == "done"

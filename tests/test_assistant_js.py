@@ -2814,7 +2814,9 @@ class TestFreeFloat:
             sized(420, 640);
             const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
             const roles = {};
-            shell.nodes.panel.setAttribute = (n, v) => { roles[n] = v; };
+            // What says whether it is modal; the resize corner's place is
+            // written on the panel too, and is not that.
+            shell.nodes.panel.setAttribute = (n, v) => { if (n !== "data-corner") roles[n] = v; };
             shell.nodes.panel.removeAttribute = (n) => { delete roles[n]; };
             const classes = new Set();
             shell.nodes.panel.classList = {add: (n) => classes.add(n),

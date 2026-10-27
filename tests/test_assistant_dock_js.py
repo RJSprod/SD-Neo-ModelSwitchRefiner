@@ -378,3 +378,272 @@ def test_the_docked_view_is_the_conversations_height_at_its_fullest():
     # 310 - 60 of status line and composer, and 199 of transcript.
     assert found["docked"] == {"height": "449px", "body": True, "slot": False}
     assert found["undocked"] == ""
+
+
+# -- Img2Img's column, beside Txt2Img's ---------------------------------------- #
+#
+# Asked for: "Let's add the same ability for the image to image tab. I want all
+# of the settings from the left panel to appear in the flyout menu, and only the
+# generation content from the right panel should remain. It should be just like
+# the text to image tab". Each tab's column is docked by its own state, and a
+# docked column stays out of its page whichever tab is on screen.
+
+BOTH = """
+function bothShell(active, state) {
+    const dock = {calls: [], docked: new Set(),
+                  available(id) { return id === "tab_txt2img" || id === "tab_img2img"; },
+                  place(rect, id) { this.calls.push(["place", id, !!rect]); this.docked.add(id);
+                                    return true; },
+                  release(id) { this.calls.push(["release", id]); this.docked.delete(id);
+                                return true; }};
+    NS.dock = dock;
+    const shell = Object.create(NS.Shell.prototype);
+    shell.settings = {label: "Forge Assistant", bubbleWidth: 80};
+    shell.state = Object.assign({panelOpen: true, conversationExpanded: true,
+                                 settingsDocked: false, img2imgDocked: false}, state || {});
+    shell.nodes = {root: {appendChild() {}}};
+    shell.disposers = [];
+    shell.host = {registerMenu: () => () => undefined, openOnly() {},
+                  getActiveWorkspace: () => shell.activeWorkspace,
+                  listWorkspaces: () => []};
+    shell.activeWorkspace = active;
+    shell.saved = 0;
+    shell._save = () => { shell.saved += 1; };
+    shell.place = () => shell.syncDock();
+    shell.buildPanel();
+    shell.nodes.dock.getBoundingClientRect = () => ({left: 10, top: 50, width: 340, height: 700});
+    return {shell, dock};
+}
+"""
+
+
+def test_the_button_shows_on_img2img_too_and_docks_its_own_column():
+    found = run(WORLD + BOTH + """
+        const {shell, dock} = bothShell("tab_img2img");
+        const before = view(shell);
+        shell.toggleDock();
+        const last = dock.calls.filter((call) => call[0] === "place").pop();
+        console.log(JSON.stringify({before, after: view(shell), last,
+                                    img2img: shell.state.img2imgDocked,
+                                    txt2img: shell.state.settingsDocked,
+                                    docked: Array.from(dock.docked)}));
+    """)
+
+    assert found["before"]["button"] is True and found["before"]["pressed"] == "false"
+    assert found["after"]["docked"] is True and found["after"]["slot"] is True
+    assert found["after"]["pressed"] == "true" and found["after"]["body"] is False
+    assert found["img2img"] is True and found["txt2img"] is False, "a state of its own"
+    # Drawn where the placeholder is, and Txt2Img's column left in its page.
+    assert found["last"] == ["place", "tab_img2img", True]
+    assert found["docked"] == ["tab_img2img"]
+
+
+def test_each_tabs_column_follows_its_own_state_across_a_switch():
+    """Txt2Img's column docked, then Img2Img's: on Img2Img its own is in the
+    panel and Txt2Img's is held out of its page out of sight; on Txt2Img the
+    other way round; and Chat on one gives back that one alone."""
+    found = run(WORLD + BOTH + """
+        const {shell, dock} = bothShell("tab_txt2img");
+        shell.toggleDock();
+        shell.activeWorkspace = "tab_img2img";
+        shell.applyDock();
+        const there = {view: view(shell), txt2img: shell.state.settingsDocked};
+        shell.toggleDock();
+        dock.calls.length = 0;
+        shell.syncDock();
+        const both = dock.calls.slice();
+        shell.activeWorkspace = "tab_txt2img";
+        dock.calls.length = 0;
+        shell.applyDock();
+        const back = {view: view(shell), calls: dock.calls.slice()};
+        shell.toggleChat();
+        console.log(JSON.stringify({there, both, back, after: view(shell),
+                                    states: [shell.state.settingsDocked, shell.state.img2imgDocked],
+                                    docked: Array.from(dock.docked).sort()}));
+    """)
+
+    # On Img2Img, Txt2Img's column docked: the conversation, and the button
+    # Img2Img's own, unpressed.
+    assert found["there"]["view"]["docked"] is False and found["there"]["view"]["body"] is True
+    assert found["there"]["view"]["pressed"] == "false" and found["there"]["txt2img"] is True
+    # Both docked, on Img2Img: Txt2Img's out of sight, Img2Img's drawn -- last.
+    assert found["both"] == [["place", "tab_txt2img", False], ["place", "tab_img2img", True]]
+    assert found["back"]["view"]["docked"] is True and found["back"]["view"]["pressed"] == "true"
+    assert found["back"]["calls"] == [["place", "tab_img2img", False],
+                                      ["place", "tab_txt2img", True]]
+    # Chat on Txt2Img gives Txt2Img's back, and Img2Img's stays docked.
+    assert found["states"] == [False, True]
+    assert found["after"]["body"] is True and found["after"]["docked"] is False
+    assert found["docked"] == ["tab_img2img"]
+
+
+def test_img2imgs_choice_is_saved_with_the_panels_layout():
+    found = run(WORLD + BOTH + """
+        NS.basePath = () => "/";
+        const {shell} = bothShell("tab_img2img");
+        shell._save = NS.Shell.prototype._save;
+        shell.toggleDock();
+        const key = Object.keys(sessionStorage.store)[0];
+        const stored = JSON.parse(sessionStorage.store[key]);
+        const next = Object.create(NS.Shell.prototype);
+        next.state = {settingsDocked: false, img2imgDocked: false};
+        next._restore();
+        console.log(JSON.stringify({stored: [stored.settingsDocked, stored.img2imgDocked],
+                                    restored: [next.state.settingsDocked, next.state.img2imgDocked]}));
+    """)
+
+    assert found == {"stored": [False, True], "restored": [False, True]}
+
+
+TWO_COLUMNS = """
+function columnOf(id) {
+    const row = {classList: classes(), parentElement: null, children: []};
+    const column = {id, classList: classes(), parentElement: row,
+                    addEventListener() {}, removeEventListener() {},
+                    querySelectorAll: () => [], scrollTop: 0,
+                    style: styled({}),
+                    getBoundingClientRect() {
+                        return {left: parseFloat(this.style.values.left) || 0,
+                                top: parseFloat(this.style.values.top) || 0};
+                    }};
+    const settings = {parentElement: column,
+                      closest: (s) => s === ".resize-handle-row" ? row : null};
+    return {row, column, settings};
+}
+const t2i = columnOf("txt2img_settings");
+const i2i = columnOf("img2img_settings");
+document.getElementById = (id) => id === "txt2img_settings" ? t2i.settings
+    : id === "img2img_settings" ? i2i.settings : null;
+"""
+
+
+def test_the_dock_keeps_a_column_per_tab_and_the_guard_on_the_one_shown():
+    found = run(COLUMN_WORLD + TWO_COLUMNS + """
+        const dock = NS.dock;
+        const available = [dock.available("tab_txt2img"), dock.available("tab_img2img"),
+                           dock.available("tab_extras")];
+        dock.place(null, "tab_txt2img");
+        const hidden = {guard: dock.guard.column === t2i.column,
+                        visibility: t2i.column.style.values.visibility};
+        dock.place({left: 10, top: 50, width: 340, height: 700}, "tab_img2img");
+        const shown = {guard: dock.guard.column === i2i.column,
+                       docked: [dock.isDocked("tab_txt2img"), dock.isDocked("tab_img2img")],
+                       img2img: Object.assign({}, i2i.column.style.values),
+                       marks: [t2i.column.classList.contains("forge-assistant-docked-column"),
+                               i2i.column.classList.contains("forge-assistant-docked-column"),
+                               i2i.row.classList.contains("forge-assistant-docked-row")]};
+        // A drag carries the one in the panel.
+        dock.shift(5, 6);
+        const shifted = [t2i.column.style.values.transform || "",
+                         i2i.column.style.values.transform || ""];
+        dock.release("tab_img2img");
+        const one = {docked: [dock.isDocked("tab_txt2img"), dock.isDocked("tab_img2img")],
+                     img2img: Object.assign({}, i2i.column.style.values),
+                     guard: dock.guard.column === null,
+                     still: t2i.column.classList.contains("forge-assistant-docked-column")};
+        dock.place({left: 10, top: 50, width: 340, height: 700}, "tab_txt2img");
+        const back = dock.guard.column === t2i.column;
+        dock.release();
+        console.log(JSON.stringify({available, hidden, shown, shifted, one, back,
+                                    none: dock.isDocked(), after: t2i.column.style.values}));
+    """, sources=("layout",))
+
+    assert found["available"] == [True, True, False]
+    # Docked out of sight, Txt2Img's column takes the guard while none has it.
+    assert found["hidden"] == {"guard": True, "visibility": "hidden"}
+    # Img2Img's in the panel: the guard goes with it, both stay docked.
+    assert found["shown"]["guard"] is True and found["shown"]["docked"] == [True, True]
+    assert found["shown"]["img2img"]["left"] == "10px" and found["shown"]["img2img"]["visibility"] == "visible"
+    assert found["shown"]["marks"] == [True, True, True]
+    assert found["shifted"] == ["", "translate(5px, 6px)"]
+    # One released, exactly as found; the other stays out of its page.
+    assert found["one"] == {"docked": [True, False], "img2img": {}, "guard": True, "still": True}
+    assert found["back"] is True
+    assert found["none"] is False and found["after"] == {}
+
+
+GUARD_WORLD = """
+// Enough of a column for the guard: a block, a canvas in it with a brush's
+// slider inside, and a text box in a block of its own.
+function node(tag, classes, rect, parent) {
+    const made = {tagName: tag, classList: {names: new Set(classes),
+                                           add(n) { this.names.add(n); },
+                                           remove(n) { this.names.delete(n); },
+                                           contains(n) { return this.names.has(n); }},
+                  parentElement: parent || null, children: [], rect,
+                  getBoundingClientRect() { return this.rect; },
+                  addEventListener() {}, removeEventListener() {}};
+    if (parent) parent.children.push(made);
+    made.matches = (selector) => selector.split(",").some((part) => test(made, part.trim()));
+    made.closest = (selector) => { let walk = made; while (walk) { if (walk.matches(selector)) return walk;
+                                                                  walk = walk.parentElement; } return null; };
+    made.contains = (other) => { let walk = other; while (walk) { if (walk === made) return true;
+                                                                walk = walk.parentElement; } return false; };
+    made.querySelectorAll = (selector) => {
+        const found = [];
+        const walk = (at) => at.children.forEach((child) => { if (child.matches(selector)) found.push(child); walk(child); });
+        walk(made);
+        return found;
+    };
+    return made;
+}
+// The selectors the guard uses, read as plainly as they are written.
+function test(made, part) {
+    const not = part.indexOf(":not(.gradio-dropdown *)");
+    if (not >= 0) part = part.slice(0, not);
+    if (part === ".block") return made.classList.contains("block");
+    if (part === ".forge-container") return made.classList.contains("forge-container");
+    if (part === ".mc-krea-spatial-compact-frame") return made.classList.contains("mc-krea-spatial-compact-frame");
+    if (part === "textarea") return made.tagName === "TEXTAREA";
+    if (part === "input[type=range]") return made.tagName === "INPUT" && made.type === "range";
+    return false;
+}
+const column = node("DIV", ["column"], {left: 0, top: 0, right: 340, bottom: 900, width: 340, height: 900});
+const block = node("DIV", ["block"], {left: 0, top: 0, right: 340, bottom: 600, width: 340, height: 600}, column);
+const canvas = node("DIV", ["forge-container"], {left: 0, top: 20, right: 340, bottom: 532, width: 340, height: 512}, block);
+const brush = node("INPUT", [], {left: 10, top: 30, right: 110, bottom: 40, width: 100, height: 10}, canvas);
+brush.type = "range";
+const other = node("DIV", ["block"], {left: 0, top: 610, right: 340, bottom: 700, width: 340, height: 90}, column);
+const area = node("TEXTAREA", [], {left: 0, top: 620, right: 340, bottom: 690, width: 340, height: 70}, other);
+"""
+
+
+def test_forges_image_canvas_is_a_guarded_field_of_its_own():
+    """Img2Img's picture is Forge's canvas, which takes every drag and the
+    wheel for itself. Docked, it is guarded as the compact spatial canvas is:
+    a field of its own, its brush's slider part of it."""
+    found = run(GUARD_WORLD + """
+        const guard = new NS.Guard();
+        guard.column = column;
+        const listed = NS.GUARDED.split(", ").some((s) => s.indexOf(".forge-container") === 0);
+        console.log(JSON.stringify({
+            listed,
+            canvas: guard.unitOf(canvas) === canvas,
+            brush: guard.unitOf(brush) === canvas,
+            tapped: guard.unitAt(block, 200, 300) === canvas,
+            text: guard.unitAt(other, 100, 650) === other,
+        }));
+    """, sources=("layout",))
+
+    assert found == {"listed": True, "canvas": True, "brush": True, "tapped": True, "text": True}
+
+
+def test_something_dragged_over_a_guarded_field_engages_it():
+    """A picture dropped on the docked canvas -- a file, a picture dragged
+    from the gallery beside it -- lands on the canvas: the drag engages the
+    field under it, which a guarded field would otherwise leave to its block.
+    A script's synthetic drag engages nothing."""
+    found = run(GUARD_WORLD + """
+        const guard = new NS.Guard();
+        guard.column = column;
+        guard.dragOver({isTrusted: false, target: block, clientX: 200, clientY: 300});
+        const scripted = guard.engaged;
+        guard.dragOver({isTrusted: true, target: block, clientX: 200, clientY: 300});
+        const engaged = guard.engaged === canvas && canvas.classList.contains("forge-assistant-engaged");
+        guard.dragOver({isTrusted: true, target: other, clientX: 100, clientY: 650});
+        console.log(JSON.stringify({scripted: scripted === null, engaged,
+                                    moved: guard.engaged === other,
+                                    let: !canvas.classList.contains("forge-assistant-engaged")}));
+    """, sources=("layout",))
+
+    assert found == {"scripted": True, "engaged": True, "moved": True, "let": True}
