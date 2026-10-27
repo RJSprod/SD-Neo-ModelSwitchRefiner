@@ -315,14 +315,15 @@ def test_the_box_starts_tall_and_a_dragged_height_is_kept_for_the_next_page(brow
 
 
 # --------------------------------------------------------------------------- #
-# Two presses: Normal, Focused, Super Focused (docs/22 §3.39)
+# Three presses focus, four Super Focused (docs/22 §3.39, §3.40)
 # --------------------------------------------------------------------------- #
 
-MODE = """() => {
-    const root = document.getElementById("tab_wangp");
+MODE = """(id) => {
+    const root = document.getElementById(id || "tab_wangp");
     const shell = forgeAssistant.shell;
     return {focus: root.classList.contains("forge-assistant-focus-root"),
             studio: root.classList.contains("forge-assistant-wangp-studio"),
+            anywhere: document.querySelectorAll(".forge-assistant-wangp-studio").length,
             open: shell.state.panelOpen, panelHidden: document.getElementById("forge-assistant-panel").hidden,
             launcher: !document.getElementById("forge-assistant-launcher").hidden,
             bar: document.body.getAttribute("data-forge-assistant-focus-bar")};
@@ -332,32 +333,47 @@ GRIP = """() => { const g = document.querySelector(".forge-assistant-grip").getB
                   return [g.left + g.width / 2, g.top + g.height / 2]; }"""
 LAUNCHER = """() => { const b = document.getElementById("forge-assistant-launcher").getBoundingClientRect();
                       return [b.left + b.width / 2, b.top + b.height / 2]; }"""
+# The tab buttons as Gradio's own: a press selects its tab. The stand-in page
+# has no Gradio, and going back presses the host's own button.
+TAB_BUTTONS = """(switchTo) => {
+    const go = new Function("return " + switchTo)();
+    document.querySelectorAll("[role=tab]").forEach((button) => {
+        button.addEventListener("click", () => go(button.id.replace(/-button$/, "")));
+    });
+}"""
 
 
-def test_two_presses_cycle_normal_focused_super_focused_and_back(browser):
-    """On the WanGP tab, from an open panel: two presses on the header's
-    space are Focused (the panel stays), two more are Super Focused -- the
+def presses(page, where, count):
+    """`count` presses in a row at the grip or the launcher, as a browser
+    delivers them (detail 1, 2, ...), then the window left to pass."""
+    page.mouse.click(*page.evaluate(GRIP if where == "grip" else LAUNCHER), click_count=count)
+    page.wait_for_timeout(400)
+    settle(page)
+
+
+def test_three_presses_are_focus_four_super_focus_and_four_again_focus(browser):
+    """On the WanGP tab, from an open panel: three presses on the header's
+    space are Focused (the panel stays); four more are Super Focused -- the
     panel put away, the tab bar with it, the studio's class on the focused
-    panel for Mini Paint's tab to hear -- and two on the launcher, the one
-    thing left, are Normal again with the panel back."""
+    panel for Mini Paint's tab to hear; four on the launcher, the one thing
+    left, are Focused again with the panel back; and three on the header's
+    space are Normal."""
     page = open_wangp(browser)
     try:
         start = page.evaluate(MODE)
         assert start["open"] and not start["focus"] and not start["studio"], start
-        page.mouse.dblclick(*page.evaluate(GRIP))
-        settle(page)
+        presses(page, "grip", 3)
         focused = page.evaluate(MODE)
         assert focused["focus"] and not focused["studio"] and focused["open"], focused
-        page.wait_for_timeout(350)
-        page.mouse.dblclick(*page.evaluate(GRIP))
-        settle(page)
+        presses(page, "grip", 4)
         superfocused = page.evaluate(MODE)
         assert superfocused["focus"] and superfocused["studio"], superfocused
         assert superfocused["open"] is False and superfocused["panelHidden"] and superfocused["launcher"], superfocused
         assert superfocused["bar"] == "hidden", "the tab bar goes with the panel"
-        page.wait_for_timeout(350)
-        page.mouse.dblclick(*page.evaluate(LAUNCHER))
-        settle(page)
+        presses(page, "launcher", 4)
+        again = page.evaluate(MODE)
+        assert again["focus"] and not again["studio"] and again["open"], again
+        presses(page, "grip", 3)
         normal = page.evaluate(MODE)
         assert not normal["focus"] and not normal["studio"], normal
         assert normal["open"] and not normal["panelHidden"], "the panel is back as it was"
@@ -365,13 +381,79 @@ def test_two_presses_cycle_normal_focused_super_focused_and_back(browser):
         page.close()
 
 
+def test_four_presses_on_the_launcher_from_normal_are_super_focus(browser):
+    """The usual way in: the panel put away to its launcher, four presses.
+    The third turns focus on inside its press, the fourth adds the studio."""
+    page = open_wangp(browser)
+    try:
+        page.evaluate("forgeAssistant.shell.close()")
+        settle(page)
+        presses(page, "launcher", 4)
+        found = page.evaluate(MODE)
+        assert found["focus"] and found["studio"] and found["open"] is False, found
+    finally:
+        page.close()
+
+
+def test_a_switch_away_keeps_focus_and_coming_back_is_super_focus_again(browser):
+    """"Treat super focus the same as focus mode, meaning if I switch to
+    another tab, then I'm still in focus mode, but when I return back to
+    wan2gp It should be in either focus or super focus, whichever I left it
+    off on." In super focus the launcher is all there is, and two presses on
+    it go back to the tab before -- in focus, with the panel and the tab bar
+    as focus has them; two on the header's space there come back to WanGP in
+    super focus."""
+    page = open_wangp(browser)
+    try:
+        page.evaluate(TAB_BUTTONS, SWITCH)
+        page.evaluate("forgeAssistant.shell.previousWorkspace = 'tab_txt2img'")
+        presses(page, "grip", 3)
+        presses(page, "grip", 4)
+        assert page.evaluate(MODE)["studio"] is True
+        presses(page, "launcher", 2)
+        away = page.evaluate(MODE, "tab_txt2img")
+        assert away["focus"] and not away["studio"] and away["anywhere"] == 0, away
+        assert away["open"] and not away["panelHidden"], "the panel is back, as focus has it"
+        assert away["bar"] == "shown", "and the tab bar"
+        assert page.evaluate("document.getElementById('tab_txt2img').style.display") == "block"
+        presses(page, "grip", 2)
+        back = page.evaluate(MODE)
+        assert back["focus"] and back["studio"], back
+        assert back["open"] is False and back["panelHidden"] and back["bar"] == "hidden", back
+    finally:
+        page.close()
+
+
+def test_a_tab_changed_by_the_page_keeps_focus_and_the_bars_wangp_button_brings_super_focus(browser):
+    """Not every switch is the panel's own: Mini Paint's sends press the
+    host's tab button themselves, and on another tab in focus the tab bar is
+    back, its WanGP button one press away. Both reach the panel as the host's
+    navigation, and super focus follows them as it follows going back."""
+    page = open_wangp(browser)
+    try:
+        page.evaluate(TAB_BUTTONS, SWITCH)
+        presses(page, "grip", 3)
+        presses(page, "grip", 4)
+        assert page.evaluate(MODE)["studio"] is True
+        page.evaluate("document.getElementById('tab_txt2img-button').click()")
+        page.wait_for_timeout(300)
+        settle(page)
+        away = page.evaluate(MODE, "tab_txt2img")
+        assert away["focus"] and away["anywhere"] == 0 and away["open"] and away["bar"] == "shown", away
+        page.click("#tab_wangp-button")
+        page.wait_for_timeout(300)
+        settle(page)
+        back = page.evaluate(MODE)
+        assert back["focus"] and back["studio"] and back["open"] is False and back["bar"] == "hidden", back
+    finally:
+        page.close()
+
+
 def test_super_focus_is_left_by_escape_with_everything_back(browser):
     page = open_wangp(browser)
     try:
-        page.mouse.dblclick(*page.evaluate(GRIP))
-        page.wait_for_timeout(350)
-        page.mouse.dblclick(*page.evaluate(GRIP))
-        settle(page)
+        presses(page, "grip", 3)
+        presses(page, "grip", 4)
         assert page.evaluate(MODE)["studio"] is True
         page.keyboard.press("Escape")
         settle(page)

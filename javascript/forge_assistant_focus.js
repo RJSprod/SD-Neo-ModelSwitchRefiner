@@ -46,9 +46,9 @@
     // theme's quick settings drawer, which the bar's button opens -- left in
     // the layout by the rule that takes the rest out. It draws itself.
     const KEEP_CLASS = "forge-assistant-focus-keep";
-    // Super focus (docs/22 §3.39): on Mini Paint NEO's WanGP tab, focus with
-    // WanGP's page laid out as a studio -- its prompt, its Generate and its
-    // progress beside its gallery. This class beside ROOT_CLASS on the focused
+    // Super focus (docs/22 §3.39, §3.40): on Mini Paint NEO's WanGP tab, focus
+    // with WanGP's page laid out as a studio -- its prompt beside its Generate,
+    // its progress and its gallery. This class beside ROOT_CLASS on the focused
     // panel is the whole of it here: Mini Paint's tab watches the panel's
     // classes and tells WanGP's page (its bridge 1.15.0). Shared with that
     // extension -- do not rename (CLAUDE.md, "Shared with Mini Paint NEO").

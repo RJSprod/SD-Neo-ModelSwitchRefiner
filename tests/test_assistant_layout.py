@@ -1230,11 +1230,15 @@ def test_a_page_that_keeps_updating_while_idle_is_written_to_the_journal_once(br
 
 
 def press_three_times(page, selector) -> None:
+    """Three presses, and the window after them: with focus on, three turn it
+    off only once the window has passed, since a fourth would mean Super
+    Focused (docs/22 §3.40)."""
     box = page.evaluate("(s) => { const r = document.querySelector(s).getBoundingClientRect();"
                         " return [r.left + r.width / 2, r.top + r.height / 2]; }", selector)
     for _ in range(3):
         page.mouse.click(*box)
         page.wait_for_timeout(60)
+    page.wait_for_timeout(400)
     settle(page, 4)
 
 
@@ -1957,17 +1961,17 @@ def test_a_finger_on_the_launcher_moves_it_and_pans_nothing(browser):
         context.close()
 
 
-def test_two_taps_on_the_header_still_turn_focus_on(browser):
+def test_three_taps_on_the_header_still_turn_focus_on(browser):
     """The one time the drag cancelled every press, Chromium delivered a
     finger's click with `detail` 0 -- a keyboard activation to `headerClick`
     -- and the header's taps stopped toggling focus. A finger's press begins
-    the drag uncancelled. Two taps since the mode cycle (docs/22 §3.39), as
-    three were before it."""
+    the drag uncancelled. Three taps, as before the mode cycle of docs/22
+    §3.39 made it two, and again since §3.40."""
     context, page = open_phone(browser, free_float=False)
     try:
         assert page.evaluate("forgeAssistant.shell.state.focusEnabled") is False
         grip = page.evaluate(PANEL_BOX)["grip"]
-        for _ in range(2):
+        for _ in range(3):
             page.touchscreen.tap(*grip)
             page.wait_for_timeout(80)
         settle(page)

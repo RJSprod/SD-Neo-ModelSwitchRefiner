@@ -3404,6 +3404,77 @@ stylesheet and page script, through a generation and at 1400, 680 and 400 px.
 Not against a real WanGP or on the user's machine; the bridge needs
 reinstalling from the WanGP tab.
 
+## 3.40 Two presses back, three focus, four Super Focused (2026-10-27)
+
+Once §3.39 had run on the user's machine:
+
+- "I noticed that doube tap flyout to switch to last tab no longer works. I
+  think you updated handling because of super focus mode. Let's fix this."
+- "Let's make double tap switch to last tab, triple tap open focus and 4 taps
+  open super super focus."
+- "Please treat super focus the same as focus mode, meaning if I switch to
+  another tab, then I'm still in focus mode, but when I return back to wan2gp
+  It should be in either focus or super focus, whichever I left it off on."
+
+The diagnosis was right: §3.39 made two presses the mode cycle (`cycleMode`)
+and moved going back to the workspace menu, which with the panel put away in
+super focus is out of reach.
+
+### The counts
+
+The launcher and the header's space count the same way (`tapLauncher`,
+`tapHeader`), and the decisions are shared (`pressThree`, `pressFour`,
+`afterPresses`):
+
+| Presses | Acts | Does |
+|---|---|---|
+| 1 | when the window passes | the launcher opens the panel; the header's space does nothing |
+| 2 | when the window passes | back to the workspace before this one (`backToPrevious`) |
+| 3, focus off | inside the third press | focus on -- the browser's full screen is granted only to a press being handled |
+| 3, focus on | when the window passes | focus off: a fourth press may still come, and four mean super focus, not out |
+| 4 | inside the fourth press | focus on if it is not; on the WanGP tab Super Focused on, or off again to Focused; elsewhere Focused |
+
+A press after four starts a new count. On the WanGP tab with a bridge that
+cannot lay the page out, four presses leave focus on and say to reinstall, as
+the cycle said it. Two presses' going back is what it was before §3.39 (on a
+timer, the panel never opening), and the workspace menu's **Back to** stays.
+
+### Super focus is focus, on the WanGP tab
+
+`studioKept` is the wish, set by `enterStudio` and kept for as long as focus
+lasts. A switch away -- going back (`switchWorkspace`), or any switch the host
+reports (`navigated`: a tab on the kept bar, a picture another extension sends
+to another tab) -- puts the studio away with `endStudio(true)`: the class off,
+the panel and the bar back as ordinary focus has them, the wish kept. A switch
+that lands focus on the WanGP tab brings the studio again (`resumeStudio`, from
+`refocus` and from `navigated`), the panel put away again and what it was noted
+again. The wish goes with focus (`focusOff`: three presses, Escape, the browser
+leaving full screen, a switch focus cannot follow) and with four presses back
+to Focused. Mini Paint needs nothing: its tab lays WanGP's page out from the
+panel's classes, whole when focus moves away and a studio when it comes back
+(and since bridge 1.15.1 puts the page's scroll back each time).
+
+### Verified
+
+`tests/test_assistant_taps_js.py` (node, a fake clock): two presses go back
+when the window passes and not before; three turn focus on inside the third,
+or off once the window passes; four act inside the fourth and, in focus, never
+leave it; a fifth starts again; the header's space the same, one press
+nothing. `tests/test_assistant_modes_js.py`: three and four on the WanGP tab,
+four again back to Focused (the wish gone), three in super focus out of both,
+four elsewhere Focused, no Mini Paint, an older bridge, a WanGP not loaded
+yet, a closed panel; a switch away is focus with the panel and the bar back
+and a switch back super focus again, through `navigated` and through going
+back; plain focus comes back plain; focus ended on another tab forgets it.
+`tests/test_assistant_wangp_prompt.py` (Chromium, real presses): three on the
+header's space, four, four on the launcher, three; four on the launcher from
+Normal; two on the launcher in super focus to the tab before, in focus, and
+two on the header's space back to super focus; a tab pressed by the page and
+the kept bar's WanGP button; Escape. `tests/test_assistant_layout.py`'s finger
+test is three taps again. Thirteen mutations each fail a node test, and the
+three on the switch's paths a Chromium test too. Not run on the user's
+machine.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

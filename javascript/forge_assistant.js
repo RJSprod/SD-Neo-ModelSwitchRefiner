@@ -459,8 +459,10 @@
         this._restoreSendToGenerate();
         this._restoreFocusBar();
         this.peekTimer = 0;
-        // Super focus, while it is on: the workspace it is on. See `cycleMode`.
+        // Super focus, while it is on: the workspace it is on; and whether it
+        // is kept for the WanGP tab while focus lasts. See "Super Focused".
         this.studio = null;
+        this.studioKept = false;
         this.applyFocusBar();
         // Which picture Auto Attach last sent, per conversation. See
         // `autoAttachable`.
@@ -2239,9 +2241,10 @@
         this.applyPrompt();
         this.applySuppression();
         this.renderWorkspaces();
-        // Super focus is the WanGP tab's: a switch away ends it, puts back
-        // what it put away, and focus follows the switch as it always has.
-        if (this.studio && active && active !== this.studio.workspace) this.endStudio();
+        // Super focus is the WanGP tab's: a switch away puts the studio away
+        // and what it put away back, keeping the wish, and focus follows the
+        // switch as it always has; a switch back brings the studio again.
+        if (this.studio && active && active !== this.studio.workspace) this.endStudio(true);
         if (this.state.focusEnabled && active && this.focus.isActive()
             && active !== this.focus.activeWorkspace()) {
             const moved = this.focus.moveTo(active, this.host);
@@ -2253,6 +2256,7 @@
                 this.say(moved.note, "warn");
             }
         }
+        if (active) this.resumeStudio();
     };
 
     /** The box was typed into. It is the draft -- unless it holds an edit,
@@ -2746,17 +2750,19 @@
 
     /** A press on the launcher, counted.
      *
-     * One press opens the panel; two move to the next mode -- Normal, Focused
-     * and, on the WanGP tab, Super Focused (`cycleMode`). The count is ours
-     * rather than the click's `detail`, because `detail` follows the system's
-     * double-click setting and does not count taps the same way on every
-     * touchscreen.
+     * One press opens the panel, two go back to the workspace before this
+     * one, three turn focus on or off, four turn Super Focused on or off on
+     * the WanGP tab (`pressFour`). The count is ours rather than the click's
+     * `detail`, because `detail` follows the system's double-click setting
+     * and does not count taps the same way on every touchscreen.
      *
-     * Two act at once, inside the second press, because entering focus asks
+     * Turning focus on acts at once, inside the third press, because it asks
      * for the browser's full screen and a browser grants that only to a press
-     * that is still being handled. One cannot act until the window has passed
-     * with no second press, since it may still become two. A press after two
-     * starts a new count.
+     * that is still being handled; so does the fourth, which may turn focus
+     * on too. Everything else waits for the window to pass with no further
+     * press, since it may still become more: one, two, and a third that
+     * would turn focus off (`pressThree`). A press after four starts a new
+     * count.
      */
     Shell.prototype.tapLauncher = function (event) {
         // In focus mode with the tab bar hidden, any press on the launcher
@@ -2771,15 +2777,18 @@
         }
         const taps = (this.taps || 0) + 1;
         this.resetTaps();
-        if (taps >= 2) {
-            this.cycleMode();
+        if (taps >= 4) {
+            this.pressFour();
             return;
         }
         this.taps = taps;
+        if (taps === 3) this.tapLeaving = this.pressThree() === "leaving";
         this.tapTimer = window.setTimeout(() => {
+            const counted = this.taps;
+            const off = this.tapLeaving;
             this.resetTaps();
             try {
-                this.open();
+                this.afterPresses(counted, off, () => this.open());
             } catch (error) {
                 this.fault(error);
             }
@@ -2791,6 +2800,60 @@
         if (this.tapTimer) window.clearTimeout(this.tapTimer);
         this.tapTimer = 0;
         this.taps = 0;
+        this.tapLeaving = false;
+    };
+
+    // -- the press counts ---------------------------------------------------- //
+    //
+    // The launcher and the header's space count presses the same way: two go
+    // back to the workspace before this one, three turn focus on or off, four
+    // turn Super Focused on or off on the WanGP tab. Asked for first as two and
+    // three ("double tap to last tab, and triple tap to toggle focus"), then as
+    // a cycle of two presses (docs/22 §3.39), and then, once the cycle had
+    // taken going back away, as all three: "Let's make double tap switch to
+    // last tab, triple tap open focus and 4 taps open super super focus"
+    // (§3.40).
+
+    /** The third press, inside it. Focus off: focus on, now, for the full
+     *  screen's sake -- a fourth press only adds the studio to it. Focus on:
+     *  nothing yet, because a fourth press means super focus, not out; the
+     *  window's end turns focus off (`afterPresses`). Answers "focused" or
+     *  "leaving". */
+    Shell.prototype.pressThree = function () {
+        if (this.focus.isActive()) return "leaving";
+        this.toggleFocus();
+        return "focused";
+    };
+
+    /** The fourth press, inside it: focus, and on the WanGP tab Super Focused
+     *  on or off. Super focus goes back to focus; focus -- on before the
+     *  gesture, or turned on by its third press -- goes to super focus where
+     *  there is one, and stays focus where there is not, with the reason
+     *  said where there is one to say. Answers the mode it is in. */
+    Shell.prototype.pressFour = function () {
+        if (!this.focus.isActive()) this.toggleFocus();
+        if (!this.focus.isActive()) return "normal";
+        if (this.studio) {
+            this.endStudio();
+            return "focused";
+        }
+        const refusal = this.studioRefusal();
+        if (!refusal && this.enterStudio()) return "super";
+        if (refusal && refusal !== "elsewhere") this.tell(refusal, "warn");
+        return "focused";
+    };
+
+    /** The window passed after `counted` presses: one is `one` (the
+     *  launcher's panel; nothing on the header), two go back, and three that
+     *  found focus on turn it off. */
+    Shell.prototype.afterPresses = function (counted, leaving, one) {
+        if (counted === 1) {
+            if (typeof one === "function") one();
+        } else if (counted === 2) {
+            this.backToPrevious();
+        } else if (counted === 3 && leaving && this.focus.isActive()) {
+            this.toggleFocus();
+        }
     };
 
     /** The Chat button: the conversation shown, or put away -- the whole of
@@ -2844,13 +2907,12 @@
         this.tapHeader();
     };
 
-    /** The launcher's quick action, on the header's space: two presses move
-     * to the next mode (`cycleMode`). "Just like the button." The launcher's
-     * pace: a press belongs to the gesture when it lands within TAP_WINDOW of
-     * the one before it, and the second acts inside its own press, for the
-     * launcher's reason -- a browser grants full screen only to a press that
-     * is still being handled. One press is nothing here, so nothing waits on
-     * it but the count.
+    /** The launcher's quick actions, on the header's space: two presses go
+     * back, three turn focus on or off, four turn Super Focused on or off.
+     * "Just like the button." The launcher's pace and the launcher's counts
+     * (`pressThree`, `pressFour`, `afterPresses`): a press belongs to the
+     * gesture when it lands within TAP_WINDOW of the one before it, and what
+     * turns focus on acts inside its own press. One press is nothing here.
      */
     Shell.prototype.tapHeader = function () {
         // Like the launcher: in focus mode with the tab bar hidden, a tap
@@ -2858,12 +2920,22 @@
         this.peekBar();
         const taps = (this.headerTaps || 0) + 1;
         this.resetHeaderTaps();
-        if (taps >= 2) {
-            this.cycleMode();
+        if (taps >= 4) {
+            this.pressFour();
             return;
         }
         this.headerTaps = taps;
-        this.headerTapTimer = window.setTimeout(() => this.resetHeaderTaps(), TAP_WINDOW);
+        if (taps === 3) this.headerLeaving = this.pressThree() === "leaving";
+        this.headerTapTimer = window.setTimeout(() => {
+            const counted = this.headerTaps;
+            const off = this.headerLeaving;
+            this.resetHeaderTaps();
+            try {
+                this.afterPresses(counted, off, null);
+            } catch (error) {
+                this.fault(error);
+            }
+        }, TAP_WINDOW);
     };
 
     /** Forget a half-counted header gesture. */
@@ -2871,14 +2943,15 @@
         if (this.headerTapTimer) window.clearTimeout(this.headerTapTimer);
         this.headerTapTimer = 0;
         this.headerTaps = 0;
+        this.headerLeaving = false;
     };
 
     /** Back to the workspace before this one -- and, pressed again, forward to
      * the one just left, because that is now the one before. Through
      * `switchWorkspace`, so focus mode follows the switch rather than hiding
-     * it. With nowhere to go back to yet, nothing happens. The first entry of
-     * the workspace menu (`workspaceItems`) since two presses became the
-     * mode cycle.
+     * it, and Super Focused with it (`resumeStudio`). With nowhere to go back
+     * to yet, nothing happens. Two presses, and the first entry of the
+     * workspace menu (`workspaceItems`).
      */
     Shell.prototype.backToPrevious = function () {
         const back = this.previousWorkspace;
@@ -2893,21 +2966,28 @@
 
     // One press, both ways: focus and the browser's full screen go on
     // together and come off together. See `enterScreen`.
-    // -- the three modes -------------------------------------------------------- //
+    // -- Super Focused ----------------------------------------------------------- //
     //
-    // Two presses on the launcher or on the header's space move to the next of
-    // three: Normal, Focused (the workspace given the window) and -- on Mini
-    // Paint NEO's WanGP tab -- Super Focused: focus with WanGP's page laid out
-    // as a studio, its prompt, its Generate and its progress beside its
-    // gallery, and nothing else on the screen: the panel put away, the tab bar
-    // with it. Asked for as "a wan2gp focused mode ... when i return out of
-    // it, everything and all settings return (except updated prompt and
-    // gallery)" (docs/22 §3.39). The studio itself is WanGP's page, drawn by
-    // Mini Paint's bridge (1.15.0); here it is one class on the focused panel
-    // (`focus.setStudio`), which Mini Paint's tab hears. What super focus puts
-    // away -- the panel, if it was open -- is noted when it starts and put
-    // back when it ends, whichever way it ends: two presses, Escape, the
-    // browser leaving full screen, a switch to another tab.
+    // Four presses on the launcher or on the header's space, on Mini Paint
+    // NEO's WanGP tab: focus with WanGP's page laid out as a studio -- its
+    // prompt beside its Generate, its progress and its gallery -- and nothing
+    // else on the screen: the panel put away, the tab bar with it. Asked for
+    // as "a wan2gp focused mode ... when i return out of it, everything and
+    // all settings return (except updated prompt and gallery)" (docs/22
+    // §3.39). The studio itself is WanGP's page, drawn by Mini Paint's bridge
+    // (1.15.0); here it is one class on the focused panel (`focus.setStudio`),
+    // which Mini Paint's tab hears. What super focus puts away -- the panel,
+    // if it was open -- is noted when it starts and put back when it ends.
+    //
+    // It is focus, on the WanGP tab (§3.40: "treat super focus the same as
+    // focus mode ... if I switch to another tab, then I'm still in focus
+    // mode, but when I return back to wan2gp It should be in either focus or
+    // super focus, whichever I left it off on"). A switch away puts the studio
+    // away and the panel and the bar back, as for ordinary focus, and keeps
+    // the wish (`studioKept`); a switch back to WanGP while focus lasts brings
+    // the studio again (`resumeStudio`). It ends for good, the wish with it,
+    // when focus ends -- three presses, Escape, the browser leaving full
+    // screen -- or when four presses go back to ordinary focus.
 
     /** Whether super focus can be had here: "" when it can, "elsewhere" off
      *  the WanGP tab (nothing to say), or why not in words. A WanGP that is
@@ -2927,31 +3007,13 @@
         return "";
     };
 
-    /** Two presses: the next mode. Normal to Focused, Focused to Super
-     *  Focused where there is one and to Normal where there is not, Super
-     *  Focused to Normal. Inside the press, for focus's full screen. Answers
-     *  the mode it moved to. */
-    Shell.prototype.cycleMode = function () {
-        if (this.studio) {
-            this.toggleFocus();
-            return "normal";
-        }
-        if (this.focus.isActive()) {
-            const refusal = this.studioRefusal();
-            if (!refusal && this.enterStudio()) return "super";
-            if (refusal && refusal !== "elsewhere") this.tell(refusal, "warn");
-            this.toggleFocus();
-            return "normal";
-        }
-        this.toggleFocus();
-        return this.focus.isActive() ? "focused" : "normal";
-    };
-
     /** Super focus on: the studio's class on the focused panel, the panel put
-     *  away and the tab bar with it, and what was put away noted. */
+     *  away and the tab bar with it, what was put away noted, and the wish
+     *  kept for as long as focus lasts. */
     Shell.prototype.enterStudio = function () {
         if (!this.focus.setStudio(true)) return false;
         this.studio = {workspace: this.focus.activeWorkspace()};
+        this.studioKept = true;
         this.state.studioReturn = {panelOpen: !!this.state.panelOpen};
         this.closeMenu();
         if (this.state.panelOpen) this.showOpen(false);
@@ -2963,9 +3025,12 @@
         return true;
     };
 
-    /** Super focus off, however it ended: the class off the panel and what it
-     *  put away back. Focus itself is the caller's. */
-    Shell.prototype.endStudio = function () {
+    /** Super focus off: the class off the panel and what it put away back.
+     *  `keep` for a switch to another tab, which only puts the studio away
+     *  until focus is back on the WanGP tab; without it the wish goes too.
+     *  Focus itself is the caller's. */
+    Shell.prototype.endStudio = function (keep) {
+        if (!keep) this.studioKept = false;
         if (!this.studio) return false;
         const back = this.state.studioReturn || {};
         this.studio = null;
@@ -2980,6 +3045,14 @@
         }
         this._save();
         return true;
+    };
+
+    /** Focus back on the WanGP tab with super focus kept from earlier in
+     *  this focus: the studio again. True when it came back. */
+    Shell.prototype.resumeStudio = function () {
+        if (!this.studioKept || this.studio || !this.focus || !this.focus.isActive()
+            || this.focus.activeWorkspace() !== WANGP_WORKSPACE || this.studioRefusal()) return false;
+        return this.enterStudio();
     };
 
     /** Whether super focus is on, written on the panel beside `focus`. */
@@ -3138,6 +3211,8 @@
         this.state.focusEnabled = true;
         this.state.focusWorkspaceId = id;
         this.markFocus(true);
+        // Back on the WanGP tab with super focus kept: the studio again.
+        this.resumeStudio();
         this._save();
         this.place();
         return true;
@@ -3475,6 +3550,9 @@
     // did not happen should not cost focus mode either.
     Shell.prototype.switchWorkspace = function (id) {
         const focused = this.focus.isActive() ? this.focus.activeWorkspace() : "";
+        // Super focus kept, put away for the switch: `refocus` brings it back
+        // if the switch lands on WanGP again.
+        if (this.studio && id !== this.studio.workspace) this.endStudio(true);
         if (focused) this.focus.exit();
         return this.host.activateWorkspace(id).then(() => {
             if (focused) this.refocus(id);
