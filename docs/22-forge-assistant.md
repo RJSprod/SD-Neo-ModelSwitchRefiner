@@ -2130,7 +2130,8 @@ turn, and nothing is painted in between. The placeholder may shrink
 
 The state is the panel's (`settingsDocked`, saved with the rest of its layout
 for the tab). It shows only on Txt2Img; elsewhere the panel shows the
-conversation or the tab bar as `conversationExpanded` says.
+conversation or the tab bar as `conversationExpanded` says. (Since §3.41
+Img2Img has the same state, its own: `img2imgDocked`.)
 
 While it is on, the column stays out of the page: `syncDock` places it over the
 placeholder when the panel is open in the docked view, and otherwise keeps it
@@ -3474,6 +3475,152 @@ the kept bar's WanGP button; Escape. `tests/test_assistant_layout.py`'s finger
 test is three taps again. Thirteen mutations each fail a node test, and the
 three on the switch's paths a Chromium test too. Not run on the user's
 machine.
+
+## 3.41 Img2Img's settings in the panel, a window you resize by its corner, and ▶ on the generation tabs (2026-10-27)
+
+Three asks in one message:
+
+- "I really like the feature in the fly out menu where I'm able to take all of
+  the settings from text to image and force them into the fly out menu. Let's
+  add the same ability for the image to image tab. I want all of the settings
+  from the left panel to appear in the flyout menu, and only the generation
+  content from the right panel should remain. It should be just like the text
+  to image tab in regards to being able to see a full gallery view in the tab,
+  And all of the settings to be configured appear within the flyout menu."
+- "Additionally, for the flyout menu, I would like for the conversation view to
+  be within a resizable flyout window so that I can resize it."
+- "And last, for the flyout menu in both the text to image and image to image,
+  I would like to have a play button, just like I do for WAN2GP, and its
+  function should be to initiate generate".
+
+### Img2Img's column, docked
+
+Forge Neo builds Img2Img as it builds Txt2Img (`modules/ui.py`: a
+`ResizeHandleRow` holding `#img2img_settings` and the results column from
+`create_output_panel`), so §3.29 applies whole; only the dock knew one tab.
+`Dock` keeps a column per workspace now (`DOCK_COLUMNS`: `tab_txt2img`,
+`tab_img2img`; `docks`, a map), each with what it replaced on it, and
+`place(rect, workspace)`, `release(workspace)` and `isDocked(workspace)` take
+the workspace (Txt2Img's when a call names none, so the old calls mean what
+they meant). One guard, on the column drawn in the panel: only one is ever
+shown, and a column docked out of sight keeps its text boxes as they were
+until it is drawn again. `shift` carries the column in the panel.
+
+The panel's state is per workspace too, as WanGP's prompt is its own
+(`DOCK_STATE`: `settingsDocked` for Txt2Img under the name it was always saved
+by, `img2imgDocked` for Img2Img). `syncDock` goes through both: a column whose
+state is off goes back to its page, the one on screen is drawn in the slot,
+any other docked one is held out of its page out of sight -- the screen's last,
+so the guard ends on it. Chat and 🎛 change the tab on screen's alone. Forge's
+mobile script asks the same `offsetLeft` of `#img2img_results` as of
+Txt2Img's, so `besideOf` and its pixel apply unchanged; the fill already
+measured both tabs; the theme's one scroller already stood down for any
+column carrying the dock's class.
+
+**The canvas.** Img2Img's column holds what Txt2Img's does not: Forge's image
+canvas (ForgeCanvas, `.forge-container`, for the img2img picture, Sketch,
+Inpaint and the rest), which says `touch-action: none`, pans or paints on every
+drag and zooms on the wheel -- 512 px of it in a view about as tall, so a
+finger on it could never scroll the column past it. It is guarded as the
+compact spatial canvas is (§3.31): in `GUARDED` and the stylesheet's list, a
+field of its own (`FRAMES`, whatever block it is in, its brush's sliders part
+of it), engaged by a tap. And because a picture is dropped onto it -- a file,
+or one dragged from the gallery now beside it -- a drag carried over a guarded
+field engages that field (`Guard.dragOver`, trusted events only), so the drop
+is hit-tested onto the canvas and not onto the block a guarded field leaves
+its presses to.
+
+**A defect found on the way, older than this.** The rule giving an engaged
+canvas its presses back was written as `.forge-assistant-guarded
+.forge-assistant-engaged.mc-krea-spatial-compact-frame` (0,3,0) beside the
+rule taking them away, `.forge-assistant-guarded :is(...):not(.gradio-dropdown
+*)` (0,3,1): the lighter rule lost, so an engaged compact spatial canvas never
+took a press either. Both canvases now have a rule of their own at (0,4,0); a
+Chromium check reads both states' computed `pointer-events`.
+
+### A window you resize by its corner
+
+The only way to resize the panel was an invisible 8 px strip on its left
+edge, width alone, 320 to 640. The panel has a corner now
+(`.forge-assistant-corner`), drawn -- a triangle of hatching, its hit area the
+triangle alone through `clip-path` -- at the corner away from where it is held
+(`cornerSides`, written as `data-corner` at every placement): opposite the
+anchor's corner when anchored, away from the window's nearest corner when
+floating, and on the phone's sheet a grabber in the middle of the free edge,
+height only. A drag of it (`startResize` with the corner; the edge is the same
+machine) makes the panel as wide as the hand says (`panelWidth`, now up to 960,
+the window's width still capping it; a panel centred across the window grows
+both ways, twice the hand's travel) and the conversation as tall
+(`conversationHeight`): one variable on the panel,
+`--forge-assistant-conversation`, which the stylesheet makes the transcript's
+height and max-height under `forge-assistant-sized`. The docked settings
+column's view is the conversation's height by §3.29's rule (`sizeDock` reads
+the transcript's max-height), so the corner sizes it too, from the corner in
+that view. The conversation never goes past what the panel's cap leaves for
+it, nor below 120 px -- or below the height it was drawn at when the corner
+was taken, if that was less (an empty conversation is 0 tall, and starting
+from the floor or the stylesheet's cap jumped it at the first pixel); dragged
+back to nothing it is the stylesheet's again. The cap is read in pixels only:
+the sheet caps itself as a percentage of the window, which a computed style
+reports as written, and the first build read "100%" as a hundred pixels and
+let the sheet's grabber move nothing. A double press puts the panel's own
+size back (`resetSize`); the arrows move the focused corner. Not in the
+tab bar, WanGP's prompt view (its box has a corner of its own) or under a menu:
+there is no conversation to size. The size is the panel's layout, kept with
+it for the browser tab, as the width always was.
+
+Floating, the panel's place is a fraction of the room around it (§3.12), so
+growing it moved every edge, the corner too. While the corner or the edge
+drags it, `placePanel` holds the edges they are not moving (`heldEdges`,
+`sizeHold`) and works the fraction back out from them; the fraction is saved
+when the hand lets go. The corner the drag began on is kept through it, though
+the panel's middle crosses the window's.
+
+### ▶ on Txt2Img and Img2Img
+
+The header's ▶ (§3.27) is the tab's own Generate on Txt2Img and Img2Img
+(`FORGE_GENERATE`, `pressGenerate`, `generateHere`): `#txt2img_generate` or
+`#img2img_generate` pressed, as Send to Generate presses it (§3.21), so what
+that button does with the page -- the pipeline, the literal boxes, Img2Img's
+mode -- happens because it is the button. Shown while the tab has its
+Generate; never locked. Not twice: while the tab is generating, Forge covers
+its Generate with Interrupt and Skip, so a person cannot press it, and the ▶
+does not either -- the press is refused with *Txt2img is already generating.*
+on the status line and, red for three seconds, on the button. Forge has no
+queue of a page's own to put a second press in, which is why it does not line
+presses up as WanGP's does.
+
+One button for three tabs: what it last said is the workspace's it said it on
+(`data-for`), cleared when another workspace shows; WanGP's presses still in
+line go on, painted only on WanGP's button (`paintGenerateLine`) and again on
+return.
+
+### Verified
+
+`tests/test_assistant_dock_js.py` (node): the button on Img2Img docking its
+own column, each tab's state across switches in both directions (the screen's
+column placed last, the other held out of sight), Chat giving back one, the
+state saved; the dock itself with two columns (the guard following the one
+drawn, a drag carrying it, one released exactly as found while the other
+stays); the canvas a guarded field with its slider; a drag engaging the field
+under it, a script's not. `tests/test_assistant_generate_js.py`: the ▶ on
+each tab with its Generate, a press pressing it, a press during a run refused,
+WanGP's line kept off another tab's button. `tests/test_assistant_resize_js.py`:
+which corner for each anchor, floating and on the sheet; a drag sizing both,
+its bounds, a centred panel, the docked view's height, the edge still only
+widening, an empty conversation, the arrows and the reset, what is saved.
+`tests/test_assistant_layout.py` (Chromium, an Img2Img tab on the Forge-shaped
+page with a canvas that zooms on the wheel and counts presses): Img2Img's
+column over the slot, scrolling, the gallery the row's width, held out of
+sight on Txt2Img and back, Chat; a wheel over the docked canvas scrolling the
+column until a tap engages it; a picture dragged from the gallery reaching
+the canvas; the ▶ pressing each tab's Generate; the corner drawn top-left,
+dragged by (100, 120) with the right and bottom edges held, the docked view
+following, hidden in the tab bar, reset by a double press; a floating panel
+keeping its other edges; on a phone's sheet, a finger drawing the grabber in
+the middle of its top edge up 80 px. Thirty-four mutations each fail a test.
+Not run on the user's machine, against Forge's own canvas, or in a Gecko
+build.
 
 ## 4. Deliberate deviations
 

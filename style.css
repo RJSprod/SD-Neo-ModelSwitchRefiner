@@ -8224,10 +8224,11 @@
     box-shadow: inset 0 0 0 1px var(--color-accent, #2563eb);
 }
 
-/* WanGP's Generate, on the WanGP tab only. It never locks: presses line up
-   and go one after another. The last answer stays on it for a few seconds,
-   because the status line may be put away with the conversation: the accent
-   while it asks, then green for taken and red if any press was refused. */
+/* The header's Generate: WanGP's on the WanGP tab, the tab's own on Txt2Img
+   and Img2Img. It never locks: on WanGP presses line up and go one after
+   another. The last answer stays on it for a few seconds, because the status
+   line may be put away with the conversation: the accent while it asks, then
+   green for taken and red if any press was refused. */
 .forge-assistant-generate[data-state="busy"] {
     border-color: var(--color-accent, #2563eb);
 }
@@ -8779,6 +8780,118 @@
     touch-action: none;
 }
 
+/* The conversation as tall as the corner made it (`applyConversationHeight`):
+   its height, whatever it holds, and no more -- the docked settings column's
+   view reads the same max-height for its own (`sizeDock`). It still gives way
+   when the panel is capped to what the window shows: the transcript may
+   shrink in its column (`min-height: 0` above). */
+.forge-assistant-panel.forge-assistant-sized .forge-assistant-transcript {
+    height: var(--forge-assistant-conversation);
+    max-height: var(--forge-assistant-conversation);
+}
+
+/* The window's corner: drag it to resize the panel -- its width, and the
+   conversation's height (`startResize` with the corner). It sits at the
+   corner away from where the panel is held, which the script writes as
+   `data-corner`, and is a triangle of hatching in that corner: the hit area
+   is the triangle alone (`clip-path` clips hit testing too), so it takes
+   almost nothing from the header's first button when it is at the top. On
+   the phone's sheet only the free edge moves, and the corner is a grabber in
+   the middle of it. Not while the panel is the tab bar, WanGP's prompt (its
+   box has a corner of its own) or a menu: there is no conversation to size. */
+.forge-assistant-corner {
+    position: absolute;
+    z-index: 2;
+    width: 18px;
+    height: 18px;
+    color: var(--body-text-color-subdued, #8a8a8a);
+    opacity: 0.7;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.forge-assistant-corner:hover,
+.forge-assistant-corner:focus-visible {
+    opacity: 1;
+    color: var(--color-accent, #2563eb);
+}
+
+.forge-assistant-corner:focus-visible {
+    outline: none;
+}
+
+@media (pointer: coarse) {
+    .forge-assistant-corner {
+        width: 28px;
+        height: 28px;
+    }
+}
+
+.forge-assistant-panel[data-corner="top-left"] > .forge-assistant-corner {
+    top: 0;
+    left: 0;
+    cursor: nwse-resize;
+    clip-path: polygon(0 0, 100% 0, 0 100%);
+    background: repeating-linear-gradient(135deg, transparent 0 3px,
+                                          currentColor 3px 4px) top left / 100% 100% no-repeat;
+    border-top-left-radius: var(--radius-lg, 10px);
+}
+
+.forge-assistant-panel[data-corner="top-right"] > .forge-assistant-corner {
+    top: 0;
+    right: 0;
+    cursor: nesw-resize;
+    clip-path: polygon(0 0, 100% 0, 100% 100%);
+    background: repeating-linear-gradient(45deg, transparent 0 3px,
+                                          currentColor 3px 4px);
+    border-top-right-radius: var(--radius-lg, 10px);
+}
+
+.forge-assistant-panel[data-corner="bottom-left"] > .forge-assistant-corner {
+    bottom: 0;
+    left: 0;
+    cursor: nesw-resize;
+    clip-path: polygon(0 0, 0 100%, 100% 100%);
+    background: repeating-linear-gradient(45deg, transparent 0 3px,
+                                          currentColor 3px 4px);
+    border-bottom-left-radius: var(--radius-lg, 10px);
+}
+
+.forge-assistant-panel[data-corner="bottom-right"] > .forge-assistant-corner {
+    bottom: 0;
+    right: 0;
+    cursor: nwse-resize;
+    clip-path: polygon(100% 0, 100% 100%, 0 100%);
+    background: repeating-linear-gradient(135deg, transparent 0 3px,
+                                          currentColor 3px 4px);
+    border-bottom-right-radius: var(--radius-lg, 10px);
+}
+
+.forge-assistant-panel[data-corner="top"] > .forge-assistant-corner,
+.forge-assistant-panel[data-corner="bottom"] > .forge-assistant-corner {
+    left: calc(50% - 24px);
+    width: 48px;
+    height: 14px;
+    cursor: ns-resize;
+    background: linear-gradient(currentColor, currentColor) center / 36px 4px no-repeat;
+    border-radius: 999px;
+}
+
+.forge-assistant-panel[data-corner="top"] > .forge-assistant-corner {
+    top: 0;
+}
+
+.forge-assistant-panel[data-corner="bottom"] > .forge-assistant-corner {
+    bottom: 0;
+}
+
+.forge-assistant-panel.forge-assistant-collapsed > .forge-assistant-corner,
+.forge-assistant-panel.forge-assistant-prompting > .forge-assistant-corner,
+.forge-assistant-panel.forge-assistant-menu-open > .forge-assistant-corner {
+    display: none;
+}
+
 .forge-assistant-jump {
     align-self: center;
     padding: 0.2em 0.6em;
@@ -9037,8 +9150,8 @@ body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-ass
     margin-bottom: var(--forge-assistant-fill-after, 0px) !important;
 }
 
-/* Txt2Img's settings column, docked in the panel (`Dock`, and the panel's
-   third state in forge_assistant.js).
+/* Txt2Img's or Img2Img's settings column, docked in the panel (`Dock`, and
+   the panel's third state in forge_assistant.js).
 
    The column is not moved -- Forge finds its prompt boxes inside <gradio-app>
    and the panel is outside it -- it is drawn over the panel's empty body.
@@ -9200,22 +9313,36 @@ body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-ass
 
 /* Docked, a field takes a drag only once a tap has engaged it (`Guard` in
    forge_assistant_layout.js, whose GUARDED list names the same controls):
-   until then a text box, a number box, a slider or the compact spatial
-   canvas takes no presses, so a drag that starts on one scrolls the column
-   instead of the text, the value or a box. A tap engages the field's block:
-   an outline in the accent, and its controls take presses again. Dropdowns
-   are left out -- a drag across one scrolls already, and it opens on a tap. */
+   until then a text box, a number box, a slider, the compact spatial canvas
+   or Forge's image canvas (Img2Img's picture, Sketch, Inpaint: `.forge-container`,
+   which takes every drag and the wheel for itself) takes no presses, so a
+   drag that starts on one scrolls the column instead of the text, the value,
+   a box or the picture. A tap engages the field's block -- a canvas is its
+   own -- an outline in the accent, and its controls take presses again.
+   Dropdowns are left out -- a drag across one scrolls already, and it opens
+   on a tap. */
 .forge-assistant-guarded :is(textarea, input[type=text], input:not([type]),
         input[type=search], input[type=number], input[type=range],
-        [contenteditable=true], .mc-krea-spatial-compact-frame):not(.gradio-dropdown *) {
+        [contenteditable=true], .mc-krea-spatial-compact-frame,
+        .forge-container):not(.gradio-dropdown *) {
     pointer-events: none !important;
 }
 
 .forge-assistant-guarded .forge-assistant-engaged :is(textarea, input[type=text],
         input:not([type]), input[type=search], input[type=number], input[type=range],
         [contenteditable=true]),
-.forge-assistant-guarded .forge-assistant-engaged.mc-krea-spatial-compact-frame,
 .forge-assistant-guarded :is(textarea, input, [contenteditable=true]).forge-assistant-engaged {
+    pointer-events: auto !important;
+}
+
+/* A canvas engaged. Its own rule, at more weight than the one above that
+   takes its presses away (0,3,1 there; 0,4,0 here): written as a class pair
+   beside that rule's, it was the lighter of the two and lost, so an engaged
+   canvas -- the compact spatial one too, since it was first guarded -- took
+   no presses at all. Everything inside it inherits its presses: the brush's
+   slider by the rule above. */
+.forge-assistant-guarded .forge-assistant-engaged:is(.mc-krea-spatial-compact-frame,
+        .forge-container):not(.gradio-dropdown *) {
     pointer-events: auto !important;
 }
 

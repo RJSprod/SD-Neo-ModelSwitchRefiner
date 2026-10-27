@@ -1,6 +1,6 @@
 // Forge Assistant -- the generation tabs' layout: the results column fills the
-// window, and Txt2Img's settings column can be docked into the panel, where a
-// field takes a drag only after a tap has engaged it.
+// window, and Txt2Img's and Img2Img's settings columns can be docked into the
+// panel, where a field takes a drag only after a tap has engaged it.
 //
 // Two things, one file, because both are about the same two columns of the
 // host's page and each has to know what the other did to them.
@@ -44,7 +44,8 @@
 //
 // THE DOCK. The flyout's third state, beside the conversation and the tab bar:
 // Txt2Img's left column -- prompts and every setting -- taken out of the page
-// and shown, scrolling, in the panel, so the gallery has the whole width.
+// and shown, scrolling, in the panel, so the gallery has the whole width; and
+// Img2Img's the same way, its picture and canvases with it.
 //
 // The column is never moved in the DOM. Forge finds the prompt boxes through
 // `gradioApp()`, the <gradio-app> element, and so do this extension's own
@@ -794,6 +795,17 @@
     // Dropdowns, checkboxes, radios and buttons are left alone: a drag across
     // them scrolls already, and they act only on a tap.
     //
+    // Img2Img's column brought one more: Forge's image canvas (ForgeCanvas,
+    // `.forge-container`: the img2img picture, Sketch, Inpaint and the rest),
+    // which says `touch-action: none` and takes every drag for panning or
+    // painting and the wheel for zooming. Docked, a finger on it could not
+    // scroll the column past it -- 512 px of canvas in a view about that tall
+    // -- so it is guarded as the compact spatial canvas is: a field of its own,
+    // its brush sliders and buttons with it, engaged by a tap. And because a
+    // picture is dropped onto it -- a file from the desktop, a picture dragged
+    // from the gallery beside it -- a drag carried over a guarded field
+    // engages that field (`dragover`), so the drop lands where it is aimed.
+    //
     // The selector is the stylesheet's too (`.forge-assistant-guarded` in
     // style.css); the two lists must name the same controls.
 
@@ -808,11 +820,14 @@
         "input[type=range]",
         "[contenteditable=true]",
         ".mc-krea-spatial-compact-frame",
+        ".forge-container",
     ].map((selector) => selector + ":not(.gradio-dropdown *)").join(", ");
     // Controls a tap on which should bring a keyboard up.
     const TYPED = "textarea, input[type=text], input:not([type]), input[type=search], " +
         "input[type=number], [contenteditable=true]";
-    const COMPACT = ".mc-krea-spatial-compact-frame";
+    // The canvases: each a field of its own, whatever block it is in, and
+    // everything inside it -- a brush's slider, its toolbar -- part of it.
+    const FRAMES = ".mc-krea-spatial-compact-frame, .forge-container";
 
     function shows(node) {
         if (!node || !node.getBoundingClientRect) return false;
@@ -846,6 +861,7 @@
         this.onKey = this.key.bind(this);
         this.onFocus = this.focus.bind(this);
         this.onInput = (event) => this.fit(event.target);
+        this.onDrag = this.dragOver.bind(this);
     }
 
     /** Make `area` as tall as its text, keeping the column where it is. */
@@ -1002,8 +1018,8 @@
      *  number box are one block, and a tap on any of them engages all three). */
     Guard.prototype.unitOf = function (control) {
         if (!control || !control.closest) return null;
-        const compact = control.closest(COMPACT);
-        if (compact) return compact;
+        const frame = control.closest(FRAMES);
+        if (frame) return frame;
         const block = control.closest(".block");
         return block && this.column && this.column.contains(block) ? block : control;
     };
@@ -1022,8 +1038,8 @@
      *  meant. */
     Guard.prototype.unitAt = function (target, x, y) {
         if (!target || !target.closest || !this.column.contains(target)) return null;
-        const compact = target.closest(COMPACT);
-        if (compact) return compact;
+        const frame = target.closest(FRAMES);
+        if (frame) return frame;
         const block = target.closest(".block");
         const scope = block && this.column.contains(block) ? block : this.column;
         const controls = this.controls(scope);
@@ -1051,6 +1067,7 @@
         // Bubbling, so it runs after the box's own handlers -- Gradio's
         // resize among them -- in the same task, before anything is painted.
         column.addEventListener("input", this.onInput);
+        column.addEventListener("dragover", this.onDrag);
         if (typeof MutationObserver === "function") {
             this.observer = new MutationObserver(() => this.schedule());
             this.observer.observe(column, {childList: true, subtree: true, attributes: true,
@@ -1071,6 +1088,7 @@
         document.removeEventListener("keydown", this.onKey, true);
         column.removeEventListener("focusin", this.onFocus);
         column.removeEventListener("input", this.onInput);
+        column.removeEventListener("dragover", this.onDrag);
         this.column = null;
     };
 
@@ -1151,6 +1169,18 @@
         if (event.key === "Escape" && this.release()) event.stopPropagation();
     };
 
+    /** Something dragged over a field -- a file, a picture from the gallery
+     *  -- engages it, without the keyboard, so the drop lands on the field
+     *  and not on the block a guarded field leaves its presses to. The drag
+     *  is the reader's, as a tap is. */
+    Guard.prototype.dragOver = function (event) {
+        if (!event || event.isTrusted === false) return;
+        const target = event.target;
+        if (this.engaged && target && this.engaged.contains(target)) return;
+        const unit = this.unitAt(target, event.clientX, event.clientY);
+        if (unit && unit !== this.engaged) this.engage(unit);
+    };
+
     /** A control reached from the keyboard (Tab) is engaged, outline and all:
      *  it is as much "in it" as a tapped one. */
     Guard.prototype.focus = function (event) {
@@ -1162,8 +1192,19 @@
 
     // -- the dock ------------------------------------------------------------ //
 
+    // The workspaces whose settings column docks, and that column's id in each:
+    // Txt2Img's first, then Img2Img's -- "Let's add the same ability for the
+    // image to image tab. I want all of the settings from the left panel to
+    // appear in the flyout menu, and only the generation content from the
+    // right panel should remain." Forge builds both the same way (a
+    // `ResizeHandleRow` holding `#<tab>_settings` and `#<tab>_results`), so one
+    // dock serves both. Each is docked on its own -- the panel keeps a state
+    // per workspace -- and a docked column stays out of its page whichever
+    // workspace is on screen; only the one on screen is drawn in the panel.
+    const DOCK_COLUMNS = {tab_txt2img: "txt2img_settings", tab_img2img: "img2img_settings"};
+    const DOCK_WORKSPACES = Object.keys(DOCK_COLUMNS);
+    // The workspace a call that names none means: the dock's first.
     const DOCK_WORKSPACE = "tab_txt2img";
-    const DOCK_SETTINGS = "txt2img_settings";
     const DOCK_COLUMN = "forge-assistant-docked-column";
     const DOCK_ROW = "forge-assistant-docked-row";
     // On the results column while it is docked beside the settings rather
@@ -1177,7 +1218,8 @@
     // the dock (the browser's full screen resizes the window both ways). The
     // dock gives the row's whole width to the results, so without this the
     // column was the edge. A column that was at the edge already -- a phone --
-    // gets no margin and stays what the script took it for.
+    // gets no margin and stays what the script took it for. The script asks
+    // the same of Txt2Img's and Img2Img's results.
     const DOCK_BESIDE = "forge-assistant-docked-beside";
     // The inline properties the dock writes, each put back as it was found.
     const DOCK_PROPS = ["left", "top", "width", "height", "visibility", "transform", "will-change"];
@@ -1187,15 +1229,24 @@
     }
 
     function Dock() {
-        this.active = null;
+        // Every docked column, by workspace: what it was found as and what
+        // the dock replaced on it.
+        this.docks = new Map();
+        // The one drawn in the panel, which a drag of the panel carries.
+        this.shown = null;
+        // The one a drag has moved by transform, until `settle`.
+        this.shifted = null;
+        // One guard, on the column in the panel: only one is ever shown.
         this.guard = new Guard();
     }
 
-    /** The column and the row it sits in: the row's child that holds
-     *  `#txt2img_settings` -- the column itself, or the accordion Forge wraps
-     *  it in when "Open for Settings" is on. Null when the page has none. */
-    Dock.prototype.find = function () {
-        const settings = byId(DOCK_SETTINGS);
+    /** The column and the row it sits in, for `workspaceId` (Txt2Img when it
+     *  names none): the row's child that holds `#<tab>_settings` -- the column
+     *  itself, or the accordion Forge wraps it in when "Open for Settings" is
+     *  on. Null when the page has none. */
+    Dock.prototype.find = function (workspaceId) {
+        const id = DOCK_COLUMNS[workspaceId || DOCK_WORKSPACE];
+        const settings = id ? byId(id) : null;
         if (!settings) return null;
         const row = settings.closest ? settings.closest(".resize-handle-row") : null;
         const column = row ? childOf(row, settings) : settings;
@@ -1216,15 +1267,19 @@
 
     /** Can the dock be offered on this workspace? */
     Dock.prototype.available = function (workspaceId) {
-        return workspaceId === DOCK_WORKSPACE && !!this.find();
+        return Object.prototype.hasOwnProperty.call(DOCK_COLUMNS, workspaceId)
+            && !!this.find(workspaceId);
     };
 
-    /** Draw the column in `rect` (the panel's placeholder, in the viewport's
-     *  pixels). A rect with no area -- the placeholder hidden under a menu --
-     *  keeps the column docked and out of sight. */
-    Dock.prototype.place = function (rect) {
-        if (!this.active) {
-            const found = this.find();
+    /** Draw `workspaceId`'s column (Txt2Img's when it names none) in `rect`
+     *  (the panel's placeholder, in the viewport's pixels). A rect with no
+     *  area -- the placeholder hidden under a menu, the panel closed, another
+     *  workspace on screen -- keeps the column docked and out of sight. */
+    Dock.prototype.place = function (rect, workspaceId) {
+        const workspace = workspaceId || DOCK_WORKSPACE;
+        let active = this.docks.get(workspace);
+        if (!active) {
+            const found = this.find(workspace);
             if (!found) return false;
             const saved = DOCK_PROPS.map((name) => ({
                 name,
@@ -1232,20 +1287,18 @@
                 priority: found.column.style.getPropertyPriority(name),
             }));
             const beside = besideOf(found.row);
-            this.active = Object.assign({saved, beside}, found);
+            active = Object.assign({saved, beside, workspace}, found);
+            this.docks.set(workspace, active);
             found.column.classList.add(DOCK_COLUMN);
             if (found.row) found.row.classList.add(DOCK_ROW);
             if (beside) beside.classList.add(DOCK_BESIDE);
-            this.guard.attach(found.column);
+            // The guard goes with the column that is drawn; a column docked
+            // out of sight takes it only while no other has it.
+            if (!this.guard.column) this.guard.attach(found.column);
             if (NS.fill) NS.fill.refresh();
         }
         this.settle();
-        const style = this.active.column.style;
-        // A wider or narrower panel rewraps every box.
-        if (rect && Math.round(rect.width) !== this.active.width) {
-            this.active.width = Math.round(rect.width || 0);
-            this.guard.schedule();
-        }
+        const style = active.column.style;
         if (!rect || !(rect.width > 0) || !(rect.height > 0)) {
             // An engaged field stays engaged: only the reader lets it go. The
             // slot has no height for a moment more often than it looks -- a
@@ -1253,8 +1306,21 @@
             // and the slot gives way first -- and letting go here closed the
             // keyboard under somebody typing.
             style.setProperty("visibility", "hidden", "important");
+            if (this.shown === workspace) this.shown = null;
             this.guard.forget();
             return true;
+        }
+        this.shown = workspace;
+        // The column in the panel has the guard. Another column docked out of
+        // sight keeps its boxes as they were found until it is drawn again.
+        if (this.guard.column !== active.column) {
+            this.guard.attach(active.column);
+            active.width = Math.round(rect.width || 0);
+        }
+        // A wider or narrower panel rewraps every box.
+        if (Math.round(rect.width) !== active.width) {
+            active.width = Math.round(rect.width || 0);
+            this.guard.schedule();
         }
         const write = (left, top) => {
             style.setProperty("left", Math.round(left) + "px", "important");
@@ -1268,7 +1334,7 @@
         // filter or containment instead of the window (focus mode checks for
         // the same trap). Whatever such an ancestor adds, the box is now off
         // by exactly that; it is taken back once, from where the box landed.
-        const landed = this.active.column.getBoundingClientRect();
+        const landed = active.column.getBoundingClientRect();
         const dx = landed.left - rect.left;
         const dy = landed.top - rect.top;
         if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) write(rect.left - dx, rect.top - dy);
@@ -1280,14 +1346,16 @@
         return true;
     };
 
-    /** Carried through a drag of the panel: the column moved by the same
-     *  transform, on a layer of its own for the drag's duration, laid out
-     *  for nothing. `place` settles it where the drag ends. */
+    /** Carried through a drag of the panel: the column in the panel moved by
+     *  the same transform, on a layer of its own for the drag's duration,
+     *  laid out for nothing. `place` settles it where the drag ends. */
     Dock.prototype.shift = function (dx, dy) {
-        if (!this.active) return false;
-        const style = this.active.column.style;
-        if (!this.shifted) {
-            this.shifted = true;
+        const active = this.shown ? this.docks.get(this.shown) : null;
+        if (!active) return false;
+        const style = active.column.style;
+        if (this.shifted !== active) {
+            this.settle();
+            this.shifted = active;
             style.setProperty("will-change", "transform", "important");
         }
         style.setProperty("transform", "translate(" + Math.round(dx) + "px, " + Math.round(dy) + "px)",
@@ -1298,25 +1366,34 @@
 
     /** The shift taken off again, as the column was found. */
     Dock.prototype.settle = function () {
-        if (!this.shifted) return;
-        this.shifted = false;
-        if (!this.active) return;
-        const style = this.active.column.style;
+        const active = this.shifted;
+        if (!active) return;
+        this.shifted = null;
+        const style = active.column.style;
         ["transform", "will-change"].forEach((name) => {
-            const entry = this.active.saved.find((saved) => saved.name === name);
+            const entry = active.saved.find((saved) => saved.name === name);
             if (entry && entry.value) style.setProperty(name, entry.value, entry.priority || "");
             else style.removeProperty(name);
         });
         this.guard.forget();
     };
 
-    /** Back in the page, exactly as it was. */
-    Dock.prototype.release = function () {
-        const active = this.active;
+    /** `workspaceId`'s column back in its page, exactly as it was; every
+     *  docked column when it names none. */
+    Dock.prototype.release = function (workspaceId) {
+        if (workspaceId === undefined || workspaceId === null) {
+            let any = false;
+            Array.from(this.docks.keys()).forEach((key) => {
+                if (this.release(key)) any = true;
+            });
+            return any;
+        }
+        const active = this.docks.get(workspaceId);
         if (!active) return false;
-        this.shifted = false;
-        this.active = null;
-        this.guard.detach();
+        if (this.shifted === active) this.shifted = null;
+        if (this.shown === workspaceId) this.shown = null;
+        this.docks.delete(workspaceId);
+        if (this.guard.column === active.column) this.guard.detach();
         const style = active.column.style;
         active.saved.forEach((entry) => {
             if (entry.value) style.setProperty(entry.name, entry.value, entry.priority || "");
@@ -1329,8 +1406,10 @@
         return true;
     };
 
-    Dock.prototype.isDocked = function () {
-        return !!this.active;
+    /** Is `workspaceId`'s column docked -- or, naming none, any column? */
+    Dock.prototype.isDocked = function (workspaceId) {
+        if (workspaceId === undefined || workspaceId === null) return this.docks.size > 0;
+        return this.docks.has(workspaceId);
     };
 
     NS.Fill = Fill;
@@ -1340,6 +1419,7 @@
     NS.fill = new Fill();
     NS.dock = new Dock();
     NS.DOCK_WORKSPACE = DOCK_WORKSPACE;
+    NS.DOCK_WORKSPACES = DOCK_WORKSPACES;
 
     const start = () => {
         try {

@@ -157,7 +157,77 @@ MOBILE_JS = """
 """
 
 
-def page_html() -> str:
+# Img2Img, when a test asks for it: the same row as Txt2Img's, with Forge's
+# image canvas (ForgeCanvas, `.forge-container`) at the top of the settings --
+# a stand-in that does what the real one does with a press: `touch-action:
+# none`, the wheel taken (zoom) and every press counted, as a pan or a stroke.
+IMG2IMG_CSS = """
+#img2img_settings > .block[id^='i2i_setting_'] { height: 90px; background: #1f2937; }
+#img2img_gallery_container { gap: 24px; }
+.forge-container { width: 100%; height: 512px; position: relative; overflow: hidden;
+                   touch-action: none; background: #ccc; }
+"""
+
+CANVAS_JS = """
+(function () {
+    const canvas = document.getElementById("container_img2img");
+    window.canvasHeard = {pointerdown: 0, wheel: 0, dragover: 0};
+    canvas.addEventListener("pointerdown", () => { window.canvasHeard.pointerdown += 1; });
+    canvas.addEventListener("wheel", (event) => { event.preventDefault();
+                                                  window.canvasHeard.wheel += 1; },
+                            {passive: false});
+    canvas.addEventListener("dragover", (event) => { event.preventDefault();
+                                                     window.canvasHeard.dragover += 1; });
+    window.generated = {txt2img: 0, img2img: 0};
+    for (const tab of ["txt2img", "img2img"]) {
+        const button = document.getElementById(tab + "_generate");
+        if (button) button.addEventListener("click", () => { window.generated[tab] += 1; });
+    }
+})();
+"""
+
+
+def img2img_html(buttons: str) -> str:
+    blocks = "".join(f'<div class="block" id="i2i_setting_{n}">Setting {n}</div>'
+                     for n in range(SETTINGS_BLOCKS))
+    return f"""
+  <div id="tab_img2img" class="tabitem" role="tabpanel" style="display: none">
+    <div class="row resize-handle-row unequal-height"
+         style="display: grid; gap: 0; grid-template-columns: 1fr 16px 1fr">
+      <div id="img2img_settings" class="column" style="min-width: min(320px, 100%)">
+        <div id="img2img_toprow" class="row">
+          <div class="block" id="img2img_prompt"><textarea aria-label="Prompt"></textarea></div>
+          <div id="img2img_actions_column" class="column">
+            <div id="img2img_tools" class="row"><button>paste</button></div>
+          </div>
+        </div>
+        <div class="block" id="img2img_image">
+          <div class="forge-container" id="container_img2img">
+            <canvas width="300" height="300"></canvas>
+            <div class="forge-toolbar"><input type="range" id="brush_img2img" min="1" max="100"></div>
+          </div>
+        </div>
+        {blocks}
+      </div>
+      <div class="resize-handle"></div>
+      <div id="img2img_results" class="column">
+        <div id="img2img_results_panel" class="column panel">
+          <div id="img2img_gallery_container" class="gr-group">
+            <div id="img2img_generate_box" class="row"><button id="img2img_generate">Generate</button></div>
+            <div class="styler">
+              <div id="img2img_gallery" class="block gradio-gallery">
+                <div class="grid-wrap fixed-height"><div class="grid-container" style="--grid-cols: 4"></div></div>
+              </div>
+            </div>
+          </div>
+          <div id="image_buttons_img2img" class="row image-buttons">{buttons}</div>
+        </div>
+      </div>
+    </div>
+  </div>"""
+
+
+def page_html(img2img: bool = False) -> str:
     blocks = "".join(f'<div class="block" id="setting_{n}">Setting {n}</div>'
                      for n in range(SETTINGS_BLOCKS))
     buttons = "".join(f"<button>{n}</button>" for n in range(8))
@@ -165,7 +235,7 @@ def page_html() -> str:
                       for path in sorted(JAVASCRIPT.glob("forge_assistant*.js")))
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{HOST_CSS}</style>
+<style>{HOST_CSS}{IMG2IMG_CSS if img2img else ""}</style>
 <link rel="stylesheet" href="/style.css">
 <style id="user-css">{USER_CSS}</style>
 </head><body class="dark">
@@ -210,7 +280,8 @@ def page_html() -> str:
       </div>
     </div>
   </div>
-  <div id="tab_img2img" class="tabitem" role="tabpanel" style="display: none"></div>
+  {img2img_html(buttons) if img2img else
+   '<div id="tab_img2img" class="tabitem" role="tabpanel" style="display: none"></div>'}
 </div>
 </div></gradio-app>
 <script>
@@ -227,6 +298,7 @@ const afterUpdate = [];
 function onAfterUiUpdate(fn) {{ afterUpdate.push(fn); }}
 </script>
 <script>{MOBILE_JS}</script>
+{"<script>" + CANVAS_JS + "</script>" if img2img else ""}
 {scripts}
 <script>uiLoaded.forEach((fn) => fn());</script>
 </body></html>"""
@@ -279,9 +351,9 @@ def settle(page, frames: int = 3) -> None:
                   "requestAnimationFrame(() => step(k - 1)) : done(); step(n); })", frames)
 
 
-def open_page(browser, width: int = 1600, height: int = 1000):
+def open_page(browser, width: int = 1600, height: int = 1000, img2img: bool = False):
     page = browser.new_page(viewport={"width": width, "height": height})
-    html = page_html()
+    html = page_html(img2img)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!(window.forgeAssistant && window.forgeAssistant.shell)")
@@ -2057,5 +2129,340 @@ def test_the_page_stays_still_where_a_host_rule_took_the_handles_touch_action(br
         assert before["touch"] == ["auto", "auto"], before
         assert after["scrollY"] == 0, after
         assert abs(after["launcher"]["top"] - (before["launcher"]["top"] - 200)) <= 1, (before, after)
+    finally:
+        context.close()
+
+
+# -- Img2Img's column, the canvas in it, the ▶ and the corner ------------------ #
+#
+# Asked for: "Let's add the same ability for the image to image tab. I want all
+# of the settings from the left panel to appear in the flyout menu, and only the
+# generation content from the right panel should remain"; "the conversation view
+# to be within a resizable flyout window so that I can resize it"; and "in both
+# the text to image and image to image, I would like to have a play button,
+# just like I do for WAN2GP, and its function should be to initiate generate".
+
+def switch_to(page, workspace: str, shown: bool) -> None:
+    """Show `workspace` as Gradio does, and wait for the panel to hear it:
+    the settings button shown or hidden as `shown` says."""
+    page.evaluate(SWITCH, workspace)
+    page.wait_for_function("(shown) => document.querySelector('.forge-assistant-settings')"
+                           ".hidden === !shown", arg=shown)
+    settle(page)
+
+
+DOCKED_IMG2IMG = """() => {
+    const box = (node) => { const r = node.getBoundingClientRect();
+                            return [Math.round(r.left), Math.round(r.top),
+                                    Math.round(r.width), Math.round(r.height)]; };
+    const column = document.getElementById("img2img_settings");
+    const other = document.getElementById("txt2img_settings");
+    const slot = document.querySelector(".forge-assistant-dock");
+    const results = document.getElementById("img2img_results");
+    return {column: box(column), slot: box(slot),
+            docked: column.classList.contains("forge-assistant-docked-column"),
+            shown: getComputedStyle(column).visibility === "visible",
+            scroll: [column.scrollHeight, column.clientHeight],
+            full: Math.abs(results.getBoundingClientRect().width
+                           - results.parentElement.getBoundingClientRect().width) <= 1,
+            beside: column.getBoundingClientRect().right <= results.getBoundingClientRect().left + 1,
+            other: other.classList.contains("forge-assistant-docked-column"),
+            pressed: document.querySelector(".forge-assistant-settings").getAttribute("aria-pressed"),
+            conversation: !document.getElementById("forge-assistant-conversation").hidden};
+}"""
+
+
+def test_img2imgs_settings_column_docks_in_the_panel_like_txt2imgs(browser):
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        switch_to(page, "tab_img2img", True)
+        before = page.evaluate(DOCKED_IMG2IMG)
+        assert before["docked"] is False and before["beside"] is True, before
+        page.click(".forge-assistant-settings")
+        settle(page)
+        docked = page.evaluate(DOCKED_IMG2IMG)
+        assert docked["column"] == docked["slot"], docked
+        assert docked["shown"] is True and docked["pressed"] == "true"
+        assert docked["scroll"][0] > docked["scroll"][1] + 500, "the column scrolls inside itself"
+        assert docked["full"] is True, "the gallery has the row's width"
+        assert docked["other"] is False, "Txt2Img's column is its own"
+
+        # On Txt2Img the panel is the conversation -- that tab's state -- and
+        # Img2Img's column stays out of its page, out of sight.
+        switch_to(page, "tab_txt2img", True)
+        away = page.evaluate(DOCKED_IMG2IMG)
+        assert away["docked"] is True and away["shown"] is False, away
+        assert away["pressed"] == "false" and away["conversation"] is True, away
+
+        # Back on Img2Img it is in the panel again; Chat gives it back.
+        switch_to(page, "tab_img2img", True)
+        back = page.evaluate(DOCKED_IMG2IMG)
+        assert back["shown"] is True and back["column"] == back["slot"], back
+        page.click(".forge-assistant-chat")
+        settle(page)
+        given = page.evaluate(DOCKED_IMG2IMG)
+        assert given["docked"] is False and given["beside"] is True and given["full"] is False, given
+    finally:
+        page.close()
+
+
+CANVAS_AT = """() => {
+    const r = document.getElementById("container_img2img").getBoundingClientRect();
+    const column = document.getElementById("img2img_settings");
+    return {x: r.left + r.width / 2, y: Math.max(r.top, column.getBoundingClientRect().top) + 60,
+            scroll: column.scrollTop, heard: Object.assign({}, window.canvasHeard),
+            engaged: document.getElementById("container_img2img")
+                .classList.contains("forge-assistant-engaged")};
+}"""
+
+
+def test_a_docked_canvas_lets_the_column_scroll_until_a_tap_engages_it(browser):
+    """Forge's canvas takes every drag and the wheel for itself. Docked, a
+    wheel over it scrolls the column and the canvas hears nothing; a tap
+    engages it (the outline), and from then on it is the canvas's."""
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        switch_to(page, "tab_img2img", True)
+        page.click(".forge-assistant-settings")
+        settle(page)
+        at = page.evaluate(CANVAS_AT)
+        page.mouse.move(at["x"], at["y"])
+        page.mouse.wheel(0, 120)
+        settle(page, 6)
+        scrolled = page.evaluate(CANVAS_AT)
+        assert scrolled["scroll"] > at["scroll"], "the column scrolled"
+        assert scrolled["heard"] == {"pointerdown": 0, "wheel": 0, "dragover": 0}, scrolled
+
+        page.mouse.click(scrolled["x"], scrolled["y"])
+        settle(page)
+        engaged = page.evaluate(CANVAS_AT)
+        assert engaged["engaged"] is True, engaged
+        page.mouse.move(engaged["x"], engaged["y"])
+        page.mouse.wheel(0, 120)
+        page.mouse.down()
+        page.mouse.up()
+        settle(page, 4)
+        heard = page.evaluate(CANVAS_AT)
+        assert heard["heard"]["wheel"] >= 1 and heard["heard"]["pointerdown"] >= 1, heard
+        assert heard["scroll"] == engaged["scroll"], "the engaged canvas's wheel is its own"
+
+        # The compact spatial canvas is engaged by the same rule: guarded it
+        # takes no presses, engaged it takes them, and so does what is in it.
+        frames = page.evaluate("""() => {
+            const column = document.getElementById("img2img_settings");
+            const frame = document.createElement("div");
+            frame.className = "mc-krea-spatial-compact-frame";
+            const inner = document.createElement("div");
+            frame.appendChild(inner);
+            column.appendChild(frame);
+            const read = () => [getComputedStyle(frame).pointerEvents,
+                                getComputedStyle(inner).pointerEvents];
+            const guarded = read();
+            frame.classList.add("forge-assistant-engaged");
+            const engaged = read();
+            frame.remove();
+            return {guarded, engaged};
+        }""")
+        assert frames == {"guarded": ["none", "none"], "engaged": ["auto", "auto"]}, frames
+    finally:
+        page.close()
+
+
+def test_a_picture_dragged_from_the_gallery_lands_on_the_docked_canvas(browser):
+    """A guarded canvas takes no presses, and a drop is hit-tested the same
+    way; the drag carried over it engages it, so a picture dragged from the
+    gallery beside it is dropped on the canvas and not on the block."""
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        page.evaluate("""() => {
+            const thumb = document.createElement("img");
+            thumb.id = "thumb";
+            thumb.draggable = true;
+            thumb.width = 80;
+            thumb.height = 80;
+            thumb.src = "data:image/svg+xml," + encodeURIComponent(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">'
+                + '<rect width="80" height="80" fill="red"/></svg>');
+            document.querySelector("#img2img_gallery .grid-container").appendChild(thumb);
+        }""")
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        switch_to(page, "tab_img2img", True)
+        page.click(".forge-assistant-settings")
+        settle(page)
+        start = page.evaluate("(() => { const r = document.getElementById('thumb')"
+                              ".getBoundingClientRect(); return [r.left + 40, r.top + 40]; })()")
+        at = page.evaluate(CANVAS_AT)
+        page.mouse.move(*start)
+        page.mouse.down()
+        page.mouse.move(start[0] - 50, start[1], steps=4)
+        page.mouse.move(at["x"], at["y"], steps=12)
+        page.mouse.move(at["x"] + 5, at["y"] + 5, steps=4)
+        page.mouse.up()
+        settle(page, 4)
+        heard = page.evaluate(CANVAS_AT)
+        assert heard["engaged"] is True, heard
+        assert heard["heard"]["dragover"] >= 1, heard
+    finally:
+        page.close()
+
+
+GENERATE = """() => {
+    const button = document.querySelector(".forge-assistant-generate");
+    return {hidden: button.hidden, label: button.getAttribute("aria-label"),
+            generated: Object.assign({}, window.generated)};
+}"""
+
+
+def test_the_play_button_presses_the_tabs_own_generate(browser):
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        here = page.evaluate(GENERATE)
+        assert here["hidden"] is False and here["label"] == "Generate in Txt2img", here
+        page.click(".forge-assistant-generate")
+        settle(page)
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 1, "img2img": 0}
+
+        # Img2Img, with its column docked: the ▶ is beside it in the header.
+        switch_to(page, "tab_img2img", True)
+        page.click(".forge-assistant-settings")
+        settle(page)
+        there = page.evaluate(GENERATE)
+        assert there["hidden"] is False and there["label"] == "Generate in Img2img", there
+        page.click(".forge-assistant-generate")
+        settle(page)
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 1, "img2img": 1}
+    finally:
+        page.close()
+
+
+CORNER_BOX = """() => {
+    const r = document.getElementById("forge-assistant-panel").getBoundingClientRect();
+    const c = document.querySelector(".forge-assistant-corner").getBoundingClientRect();
+    const panel = document.getElementById("forge-assistant-panel");
+    return {left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right),
+            bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height),
+            corner: [Math.round(c.left), Math.round(c.top), Math.round(c.width)],
+            where: panel.getAttribute("data-corner"),
+            transcript: Math.round(document.querySelector(".forge-assistant-transcript")
+                .getBoundingClientRect().height),
+            cursor: getComputedStyle(document.querySelector(".forge-assistant-corner")).cursor};
+}"""
+
+
+def drag_corner(page, dx: int, dy: int) -> None:
+    box = page.evaluate(CORNER_BOX)
+    x, y = box["corner"][0] + 3, box["corner"][1] + 3
+    if box["where"].endswith("right"):
+        x = box["corner"][0] + box["corner"][2] - 3
+    if box["where"].startswith("bottom"):
+        y = box["corner"][1] + box["corner"][2] - 3
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + dx, y + dy, steps=6)
+    page.mouse.up()
+    settle(page, 4)
+
+
+def test_the_corner_resizes_the_panel_and_its_conversation(browser):
+    """Along the bottom right, the corner is the top-left one, drawn there;
+    dragged up and to the left by (100, 120) the panel is that much wider and
+    taller with its right and bottom edges where they were, all of the height
+    the conversation's. The docked column's view is the conversation's height,
+    so it follows; a double press puts the panel's own size back."""
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        start = page.evaluate(CORNER_BOX)
+        assert start["where"] == "top-left" and start["cursor"] == "nwse-resize", start
+        # Inside the panel's one-pixel border, at that corner.
+        assert [start["corner"][0] - start["left"], start["corner"][1] - start["top"]] == [1, 1], start
+        drag_corner(page, -100, -120)
+        grown = page.evaluate(CORNER_BOX)
+        assert grown["width"] == start["width"] + 100, (start, grown)
+        assert abs(grown["height"] - (start["height"] + 120)) <= 1, (start, grown)
+        assert (grown["right"], grown["bottom"]) == (start["right"], start["bottom"])
+        assert abs(grown["transcript"] - (start["transcript"] + 120)) <= 1
+
+        # Docked, the panel is as tall as the conversation is now.
+        page.click(".forge-assistant-settings")
+        settle(page)
+        docked = page.evaluate(CORNER_BOX)
+        column = page.evaluate("""() => { const r = document.getElementById('txt2img_settings')
+                                  .getBoundingClientRect(); return [Math.round(r.width),
+                                  Math.round(r.bottom)]; }""")
+        assert abs(docked["height"] - grown["height"]) <= 1, (docked, grown)
+        assert column[0] == docked["width"] - 2 and abs(column[1] - (docked["bottom"] - 1)) <= 1, column
+        # And its corner sizes it the same way.
+        drag_corner(page, 0, -50)
+        taller = page.evaluate(CORNER_BOX)
+        assert abs(taller["height"] - (docked["height"] + 50)) <= 1, (docked, taller)
+        page.click(".forge-assistant-chat")
+        settle(page)
+        # The tab bar has no conversation to size: no corner.
+        page.click(".forge-assistant-chat")
+        settle(page)
+        assert page.evaluate("getComputedStyle(document.querySelector('.forge-assistant-corner'))"
+                             ".display") == "none"
+        page.click(".forge-assistant-chat")
+        settle(page)
+
+        page.dblclick(".forge-assistant-corner", position={"x": 3, "y": 3})
+        settle(page, 4)
+        back = page.evaluate(CORNER_BOX)
+        assert (back["width"], back["height"]) == (start["width"], start["height"]), (start, back)
+    finally:
+        page.close()
+
+
+def test_a_floating_panel_resized_by_its_corner_keeps_its_other_edges(browser):
+    """Floating, the panel's place is a fraction of the room around it, which
+    would move every edge as it grew; the corner holds the edges it is not
+    moving, so the corner stays under the hand."""
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.evaluate("""() => { const shell = forgeAssistant.shell; shell.setFreeFloat(true);
+                                 shell.state.floatAt = {x: 0.8, y: 0.8}; shell.placeNow(); }""")
+        settle(page, 4)
+        start = page.evaluate(CORNER_BOX)
+        assert start["where"] == "top-left", start
+        drag_corner(page, -120, -90)
+        grown = page.evaluate(CORNER_BOX)
+        assert (grown["right"], grown["bottom"]) == (start["right"], start["bottom"]), (start, grown)
+        assert grown["width"] == start["width"] + 120 and abs(grown["height"] - start["height"] - 90) <= 1
+        saved = page.evaluate("forgeAssistant.shell.state.floatAt")
+        assert saved["x"] < 0.8 and saved["y"] < 0.8, saved
+    finally:
+        page.close()
+
+
+def test_on_a_phones_sheet_the_corner_is_a_grabber_that_sizes_the_height(browser):
+    """The sheet is the screen's width; only its free edge moves. Along the
+    bottom that is its top, where the corner is a grabber in the middle, and
+    a finger drawing it up 80 px makes the conversation, and the sheet, that
+    much taller."""
+    context, page = open_phone(browser, free_float=False)
+    try:
+        start = page.evaluate(CORNER_BOX)
+        assert start["where"] == "top" and start["cursor"] == "ns-resize", start
+        grab = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-corner')"
+                             ".getBoundingClientRect(); return [r.left + r.width / 2,"
+                             " r.top + r.height / 2, r.left + r.width / 2 - innerWidth / 2]; })()")
+        assert abs(grab[2]) <= 1, "in the middle of the edge"
+        touch_drag(page, grab[:2], (grab[0], grab[1] - 80))
+        settle(page, 4)
+        grown = page.evaluate(CORNER_BOX)
+        assert grown["width"] == start["width"], (start, grown)
+        assert abs(grown["height"] - (start["height"] + 80)) <= 1, (start, grown)
+        assert grown["bottom"] == start["bottom"], (start, grown)
     finally:
         context.close()

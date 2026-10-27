@@ -3840,6 +3840,13 @@ how many are still to go on the button's corner. When the line is empty the
 button says how it went for three seconds (green taken, red if any press was
 refused, the words as its tooltip), since the status line may be put away with
 the conversation. It needs Mini Paint NEO with `minipaintWanGP.generate()`.
+On **Txt2Img** and **Img2Img** the same **▶** is that tab's own **Generate**
+(*Generate in Txt2img*, *Generate in Img2img*): pressed, it presses the tab's
+Generate button, so the generation is exactly the one that button would start —
+with the settings docked in the panel or not. While the tab is already
+generating, Forge covers its Generate with Interrupt and Skip and the **▶**
+does not press it either: it says *Txt2img is already generating.* (red for
+three seconds, and on the status line) and does nothing. It never locks.
 **✕** puts the panel back to the
 launcher, at the same place; pressing the launcher brings it back there. Both
 rows — this one and the composer's, where **Send** is a glyph too — are 36
@@ -3848,6 +3855,24 @@ the row itself. As the conversation grows — a reply
 arriving, a picture loading, a message's actions opening — the panel is placed
 again, so one docked along the bottom grows upwards and its composer never goes
 off the window.
+
+**Resize it by its corner, like a window.** A small hatched corner sits at the
+corner away from where the panel is held — the top-left of a panel along the
+bottom right, the bottom-left of one along the top right, and for a floating
+panel the corner away from the window's corner it is nearest. Drag it and the
+panel is as wide as you make it (320 pixels to 960, and never wider than the
+window) and the conversation as tall as you make it (at least 120 pixels, at
+most what the window leaves), whatever the conversation holds; the corner stays
+under your hand, and a floating panel keeps its other two edges where they
+were. A double click (or tap) on the corner puts the panel's own size back —
+the width it starts at, and the conversation as tall as its messages up to the
+usual cap. With the keyboard, Tab to the corner and use the arrows. The docked
+settings column's view (below) is the conversation's height, so the corner
+sizes that too. On a phone's sheet the corner is a grabber in the middle of
+the sheet's free edge, and only the height changes. There is no corner while
+the panel is the tab bar, WanGP's prompt or a menu. The size is kept with the
+rest of the panel's layout for the browser tab, as the width always was; the
+thin strip along the panel's left edge still drags the width alone.
 
 **Press the launcher two, three or four times.** Twice goes back to the
 workspace you were in before this one — twice again and you are back where you
@@ -3907,11 +3932,13 @@ so a strip that continues looks like it continues, and there is no scrollbar
 to spend the panel's height on. While the tabs are on screen the header's
 **Workspace** button goes — it opens the same list one press further away.
 
-**On Txt2Img the panel has a third state: the settings column.** A **🎛**
-(*Generation settings*) sits beside **Chat** on Txt2Img only. Pressed, the
-tab's whole left column — the prompts, the Literal boxes and every setting
-under them — leaves the page and is shown in the panel, scrolling up and down
-inside it, and the gallery takes the full width of the row. The panel is as tall
+**On Txt2Img and Img2Img the panel has a third state: the settings column.**
+A **🎛** (*Generation settings*) sits beside **Chat** on Txt2Img and on
+Img2Img. Pressed, the tab's whole left column — the prompts, the Literal boxes
+and every setting under them; on Img2Img the picture and its canvases too —
+leaves the page and is shown in the panel, scrolling up and down inside it,
+and the gallery takes the full width of the row: only Generate, the gallery
+and what goes with them stay on the page. The panel is as tall
 as it is with the conversation at its fullest — the same height, not the
 window's — and the column scrolls inside that. Everything in the column works there as it did
 in the page: it is the same column, not a copy (Forge and every extension find
@@ -3930,13 +3957,15 @@ changes nothing — and opening the panel shows it there again. Generate stays
 where your theme put it through all of this: Forge's own mobile script takes a
 results column on the row's left edge for a phone and moves the Generate box on
 every window resize (the browser's full screen is one), so while the column is
-docked beside the settings the gallery keeps a pixel off that edge. On another
-workspace the button goes and the panel shows the conversation or the tab bar;
-coming back to Txt2Img shows the column in the panel again. A menu takes the
-column's place while it is up, as it does the conversation's. The choice is
-kept with the rest of the panel's layout for the browser tab, so a reload with
-the panel closed keeps the column out of the page too. Img2Img has no such
-state yet.
+docked beside the settings the gallery keeps a pixel off that edge. Each tab's
+choice is its own: docking Img2Img's column leaves Txt2Img's in its page, and
+the other way round. On another workspace — the other generation tab with its
+column in its page, or any other tab — the panel shows the conversation or the
+tab bar, and a docked column stays out of its page out of sight; coming back to
+its tab shows it in the panel again. A menu takes the column's place while it
+is up, as it does the conversation's. The choice is kept with the rest of the
+panel's layout for the browser tab, so a reload with the panel closed keeps the
+column out of the page too.
 
 **On the WanGP tab the same 🎛 is WanGP's prompt.** On Mini Paint NEO's
 **WanGP** tab the button is called *WanGP prompt*, and pressed, the panel shows
@@ -4007,10 +4036,16 @@ as it is ready. Mini Paint NEO lays the page out; here it is one class on the
 focused panel, `forge-assistant-wangp-studio`, which its WanGP tab reads.
 
 **Docked, a field needs a tap before it takes a drag.** In the panel the whole
-column scrolls, and a drag that starts on a text box, a number box, a slider or
-the compact spatial canvas scrolls the column too, rather than the box's text,
-the slider's value or a region. Tap the field first: it is *engaged* — outlined
-in the accent colour — and from then on it works as it does in the page. A tap
+column scrolls, and a drag (or the wheel) that starts on a text box, a number
+box, a slider, the compact spatial canvas or Img2Img's image canvas scrolls the
+column too, rather than the box's text, the slider's value, a region or the
+picture — Forge's canvas for the picture, Sketch and Inpaint pans or paints on
+every drag and zooms on the wheel, and docked it would otherwise stop the
+column scrolling past it. Tap the field first: it is *engaged* — outlined in
+the accent colour — and from then on it works as it does in the page; on the
+canvas the first tap engages it and the next one draws, pans or uploads. A
+picture dragged onto a docked canvas — a file, or one from the gallery beside
+it — lands on it without the tap. A tap
 on a text box puts the keyboard up with the caret where you tapped, and the
 column does not move: what was on screen stays on screen. A tap on a slider's
 track lets you slide it (tap its number to type a value instead). Only you let
