@@ -8149,10 +8149,13 @@
     /* A basis of nothing: the grip is what the row has left once the
        buttons have taken their room, and the memory reading inside it is
        clipped to that rather than counted -- counted, a reading one digit
-       wider put the ✕ on a second row. */
+       wider put the ✕ on a second row. At least a finger's width of it,
+       asked for ("make the drag handle hit area larger. Its too small
+       now"); the ✕ gone with Tap Outside to Close on gives it that much
+       more, and a drag may start on the row's buttons as well. */
     flex: 1 1 0%;
     align-self: stretch;
-    min-width: 1.5em;
+    min-width: 3.5em;
     display: flex;
     align-items: center;
     justify-content: center;

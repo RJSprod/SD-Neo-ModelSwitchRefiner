@@ -493,6 +493,9 @@
         // An edit in progress is in the message editor's dialog, whose
         // Escape is its own and never reaches here.
         if (context.focusActive) return "exit-focus";
+        // With no ✕ on the panel, Escape in it puts it away; elsewhere it is
+        // the host's (Forge's interrupts a generation).
+        if (context.closesPanel && context.insideAssistant) return "close-panel";
         return "";                                         // the host's Escape
     }
 

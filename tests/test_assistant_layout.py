@@ -1117,7 +1117,9 @@ def test_a_drag_moves_the_panel_by_transform_and_the_docked_column_with_it(brows
         start = page.evaluate(WHERE)
         page.mouse.move(*grip)
         page.mouse.down()
-        page.mouse.move(grip[0] - 300, grip[1] + 40, steps=6)
+        # Up and to the left, inside the window: a move past an edge cuts the
+        # panel and places the column instead (the intelligent drag, below).
+        page.mouse.move(grip[0] - 300, grip[1] - 40, steps=6)
         moving = page.evaluate(inline)
         where = page.evaluate(WHERE)
         page.mouse.up()
@@ -1125,11 +1127,11 @@ def test_a_drag_moves_the_panel_by_transform_and_the_docked_column_with_it(brows
         after = page.evaluate(inline)
         landed = page.evaluate(WHERE)
 
-        assert moving["panel"][0] == "translate(-300px, 40px)" and moving["panel"][1] == "transform", moving
+        assert moving["panel"][0] == "translate(-300px, -40px)" and moving["panel"][1] == "transform", moving
         assert moving["panel"][2:] == rest["panel"][2:], "the position is not written under a drag"
-        assert moving["column"] == ["translate(-300px, 40px)", "important", "transform"], moving
+        assert moving["column"] == ["translate(-300px, -40px)", "important", "transform"], moving
         assert where["column"] == where["slot"], where
-        assert where["column"][0] == start["column"][0] - 300 and where["column"][1] == start["column"][1] + 40
+        assert where["column"][0] == start["column"][0] - 300 and where["column"][1] == start["column"][1] - 40
         assert after["panel"][:2] == ["", ""] and after["column"] == ["", "", ""], after
         assert after["panel"][2:] != rest["panel"][2:], "let go, the position is written once"
         assert landed["column"] == landed["slot"] and landed["column"][0] < start["column"][0] - 250, landed
@@ -1196,8 +1198,10 @@ def test_moving_the_docked_panel_measures_no_text_box_and_lays_nothing_out(brows
         page.mouse.move(grip[0] - 6, grip[1] - 6)
         settle(page, 2)
         before = layouts(cdp)
+        # Inside the window: up and to the left (a move past an edge cuts the
+        # panel, which is a layout by design: the intelligent drag, below).
         for step in range(1, 31):
-            page.mouse.move(grip[0] - 6 - 8 * step, grip[1] - 6 + 3 * step)
+            page.mouse.move(grip[0] - 6 - 8 * step, grip[1] - 6 - 3 * step)
             page.wait_for_timeout(16)
         settle(page, 2)
         during = layouts(cdp) - before
@@ -1343,7 +1347,10 @@ def test_the_docked_column_stays_out_of_the_page_until_chat_or_the_tab_bar(brows
         # focus ended from the launcher.
         press_three_times(page, ".forge-assistant-grip")
         assert page.evaluate(ROW)["focus"] is True
-        page.click(".forge-assistant-header [aria-label='Minimize the assistant']")
+        # Put away by one tap on the header's space (the ✕ is gone while a tap
+        # outside closes it), once the window for a second tap has passed.
+        page.mouse.click(*centre_of(page, ".forge-assistant-grip"))
+        page.wait_for_timeout(400)
         settle(page)
         closed = page.evaluate(ROW)
         assert closed["docked"] is True and closed["shown"] is False, closed
@@ -2774,3 +2781,249 @@ def test_a_tap_in_a_frame_on_the_page_puts_it_away(browser):
         assert page.evaluate(IS_OPEN) is False, "a tap in the frame loaded again while open"
     finally:
         page.close()
+
+
+# -- the intelligent drag, one tap on the header, no ✕ --------------------------- #
+#
+# Asked for: "I want intelligent drag when the flyout menu is open ... if I drag
+# to the edge of the screen and the flyout menu is now off screen, then it
+# should resize so the edge that was going to be off screen is now in screen
+# ... This should fix annoying bounce reset back to position I get when I drag
+# it to the edge. Also, make the drag handle hit are larger"; "single tap of the
+# drag handle perform the minimize"; and the ✕ gone while a tap outside closes.
+
+PANEL_RECT = """() => {
+    const r = document.getElementById("forge-assistant-panel").getBoundingClientRect();
+    return {left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right),
+            bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height)};
+}"""
+
+
+def floating_page(browser, width_px: int = 500):
+    page = open_page(browser, 1600, 900)
+    page.evaluate("""(w) => { const shell = forgeAssistant.shell; shell.state.panelWidth = w;
+                              shell.open(); shell.setFreeFloat(true);
+                              shell.state.floatAt = {x: 0.5, y: 0.3}; shell.placeNow(); }""", width_px)
+    settle(page, 4)
+    return page
+
+
+def grip_point(page):
+    return centre_of(page, ".forge-assistant-grip")
+
+
+def test_a_floating_panel_dragged_past_an_edge_is_drawn_cut_and_let_go_without_a_bounce(browser):
+    page = floating_page(browser)
+    try:
+        start = page.evaluate(PANEL_RECT)
+        grip = grip_point(page)
+        mouse_drag(page, grip, (grip[0] + 700, grip[1]), steps=12)
+        right = page.evaluate(PANEL_RECT)
+        # Held at the window's edge (1600 - 24), cut on that side, the grip
+        # still under the hand.
+        assert right["right"] == 1576 and right["width"] < start["width"], (start, right)
+        assert right["left"] == start["left"] + (1576 - start["right"]) + (start["width"] - right["width"])
+        mouse_drag_more(page, (grip[0] + 700, grip[1]), (grip[0] + 700, grip[1] + 600))
+        corner = page.evaluate(PANEL_RECT)
+        assert corner["bottom"] <= 876 and corner["height"] < start["height"], corner
+        assert corner["right"] == 1576
+        page.mouse.up()
+        settle(page, 6)
+        landed = page.evaluate(PANEL_RECT)
+        assert landed == corner, ("no bounce", corner, landed)
+
+        # Taken again where it lies, cut: it is still drawn inside the window
+        # -- its own height is read again for the drag, not taken to be the
+        # height it was cut to.
+        grip = grip_point(page)
+        mouse_drag(page, grip, (grip[0] - 30, grip[1] + 5), steps=4)
+        again = page.evaluate(PANEL_RECT)
+        page.mouse.up()
+        settle(page, 4)
+        assert again["bottom"] <= 876 and again["height"] == corner["height"], (corner, again)
+
+        # Taken back in, it is its own size again as it is drawn back -- under
+        # the hand, before it is let go.
+        grip = grip_point(page)
+        mouse_drag(page, grip, (grip[0] - 600, grip[1] - 500), steps=12)
+        back = page.evaluate(PANEL_RECT)
+        page.mouse.up()
+        settle(page, 6)
+        assert back["width"] == start["width"] and back["height"] == start["height"], (start, back)
+        assert page.evaluate(PANEL_RECT) == back, "and stays so"
+    finally:
+        page.close()
+
+
+def mouse_drag_more(page, start, end, steps: int = 10) -> None:
+    """The same drag, on from where the hand is, the button still down."""
+    for step in range(1, steps + 1):
+        page.mouse.move(start[0] + (end[0] - start[0]) * step / steps,
+                        start[1] + (end[1] - start[1]) * step / steps)
+        page.wait_for_timeout(16)
+
+
+def test_past_the_left_its_right_follows_the_hand_and_past_the_top_it_stops(browser):
+    page = floating_page(browser)
+    try:
+        start = page.evaluate(PANEL_RECT)
+        grip = grip_point(page)
+        mouse_drag(page, grip, (grip[0] - start["left"] - 100, grip[1]), steps=12)
+        left = page.evaluate(PANEL_RECT)
+        assert left["left"] == 24 and left["width"] < start["width"], left
+        assert abs(left["right"] - (start["right"] - start["left"] - 100)) <= 1, (start, left)
+        mouse_drag_more(page, (grip[0] - start["left"] - 100, grip[1]),
+                        (grip[0] - start["left"] - 100, grip[1] - start["top"] - 200))
+        top = page.evaluate(PANEL_RECT)
+        assert top["top"] == 24, top
+        assert top["height"] == start["height"], "the top is never cut"
+        page.mouse.up()
+        settle(page, 6)
+        assert page.evaluate(PANEL_RECT) == top, "no bounce"
+    finally:
+        page.close()
+
+
+def test_anchored_a_drag_stays_on_the_window_and_snaps_to_its_corner(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.state.panelWidth = 500; forgeAssistant.shell.open()")
+        settle(page, 4)
+        start = page.evaluate(PANEL_RECT)
+        grip = grip_point(page)
+        mouse_drag(page, grip, (grip[0] + 400, grip[1] + 400), steps=12)
+        moving = page.evaluate(PANEL_RECT)
+        assert moving["right"] <= 1576 and moving["bottom"] <= 876, moving
+        page.mouse.up()
+        settle(page, 6)
+        assert page.evaluate(PANEL_RECT) == start, "back at its corner, its own size"
+    finally:
+        page.close()
+
+
+def test_cut_at_the_bottom_the_docked_column_stays_over_its_slot(browser):
+    page = floating_page(browser, 420)
+    try:
+        page.click(".forge-assistant-settings")
+        settle(page, 4)
+        grip = grip_point(page)
+        mouse_drag(page, grip, (grip[0], grip[1] + 500), steps=12)
+        where = page.evaluate(WHERE)
+        panel = page.evaluate(PANEL_RECT)
+        page.mouse.up()
+        settle(page, 4)
+        assert panel["bottom"] <= 876, panel
+        assert where["column"] == where["slot"], where
+        column = page.evaluate("(() => { const r = document.getElementById('txt2img_settings')"
+                               ".getBoundingClientRect(); return Math.round(r.bottom); })()")
+        assert column <= 876, column
+    finally:
+        page.close()
+
+
+def test_a_drag_may_start_on_a_header_button_and_a_tap_stays_the_buttons(browser):
+    page = floating_page(browser)
+    try:
+        start = page.evaluate(PANEL_RECT)
+        expanded = page.evaluate("document.querySelector('.forge-assistant-chat')"
+                                 ".getAttribute('aria-expanded')")
+        chat = centre_of(page, ".forge-assistant-chat")
+        mouse_drag(page, chat, (chat[0] - 120, chat[1] + 60), steps=8)
+        page.mouse.up()
+        settle(page, 4)
+        moved = page.evaluate(PANEL_RECT)
+        assert (moved["left"], moved["top"]) == (start["left"] - 120, start["top"] + 60), (start, moved)
+        assert page.evaluate("document.querySelector('.forge-assistant-chat')"
+                             ".getAttribute('aria-expanded')") == expanded, "the drag pressed nothing"
+        page.click(".forge-assistant-chat")
+        settle(page)
+        assert page.evaluate("document.querySelector('.forge-assistant-chat')"
+                             ".getAttribute('aria-expanded')") != expanded, "a tap is the button's"
+    finally:
+        page.close()
+
+
+def test_one_tap_on_the_header_puts_it_away_and_escape_does_without_a_cross(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        assert page.evaluate("document.querySelector(\"[aria-label='Minimize the assistant']\")"
+                             ".hidden") is True, "no ✕ while a tap outside closes"
+        page.mouse.click(*grip_point(page))
+        assert page.evaluate(IS_OPEN) is True, "not before the window for a second tap"
+        page.wait_for_timeout(400)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False
+        assert page.evaluate("document.activeElement.classList.contains('forge-assistant-launcher')")
+
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.focus(".forge-assistant-input")
+        page.keyboard.press("Escape")
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False, "Escape in the panel, with no ✕"
+
+        page.evaluate("forgeAssistant.shell.setTapToClose(false); forgeAssistant.shell.open()")
+        settle(page)
+        assert page.evaluate("document.querySelector(\"[aria-label='Minimize the assistant']\")"
+                             ".hidden") is False
+        page.focus(".forge-assistant-input")
+        page.keyboard.press("Escape")
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "with the ✕ there, Escape is the page's"
+    finally:
+        page.close()
+
+
+def test_the_handle_is_a_fingers_width_at_least(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("""() => { const shell = forgeAssistant.shell; shell.state.panelWidth = 320;
+                                 shell.open(); shell.setTapToClose(false); }""")
+        settle(page, 4)
+        found = page.evaluate("""() => {
+            const grip = document.querySelector(".forge-assistant-grip");
+            const size = parseFloat(getComputedStyle(grip).fontSize);
+            const header = document.querySelector(".forge-assistant-header");
+            const rows = new Set([...header.querySelectorAll("button")]
+                .filter((b) => !b.hidden).map((b) => Math.round(b.getBoundingClientRect().top)));
+            return {width: grip.getBoundingClientRect().width, em: size, rows: rows.size,
+                    least: parseFloat(getComputedStyle(grip).minWidth)};
+        }""")
+        # However full the row: never under a finger's width.
+        assert found["least"] >= 3.5 * found["em"] - 0.5, found
+        assert found["width"] >= found["least"] - 0.5, found
+        assert found["rows"] == 1, "every button still on one row, the ✕ shown"
+    finally:
+        page.close()
+
+
+def test_on_a_phone_a_finger_drags_the_panel_down_past_the_bottom_without_a_bounce(browser):
+    """The user's phone, floating: drawn cut at the bottom while the finger
+    goes on, as wide as before though the finger drifts, and where it was
+    let go once it has been."""
+    context, page = open_phone(browser, free_float=True)
+    try:
+        start = page.evaluate(PANEL_RECT)
+        grip = grip_point(page)
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Input.dispatchTouchEvent",
+                 {"type": "touchStart", "touchPoints": [{"x": grip[0], "y": grip[1]}]})
+        for step in range(1, 13):
+            page.wait_for_timeout(16)
+            cdp.send("Input.dispatchTouchEvent",
+                     {"type": "touchMove", "touchPoints": [{"x": grip[0] + step,
+                                                            "y": grip[1] + 75 * step}]})
+        page.wait_for_timeout(120)
+        drawn = page.evaluate(PANEL_RECT)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        cdp.detach()
+        settle(page, 6)
+        landed = page.evaluate(PANEL_RECT)
+        assert drawn["bottom"] <= 844 - 16, drawn
+        assert drawn["width"] == start["width"] and drawn["left"] == start["left"], (start, drawn)
+        assert drawn["top"] > start["top"] and drawn["height"] < start["height"], (start, drawn)
+        assert landed == drawn, ("no bounce", drawn, landed)
+    finally:
+        context.close()

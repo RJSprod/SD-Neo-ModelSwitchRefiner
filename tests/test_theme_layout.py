@@ -2761,6 +2761,8 @@ class TestWithTheForgeAssistant:
         row, which the user saw on every page after a long generation."""
         page = open_page(browser, assistant=USER_CSS_WHOLE)
         page.evaluate("forgeAssistant.shell.open()")
+        # The ✕ shows while a tap outside does not close the panel.
+        page.evaluate("forgeAssistant.shell.setTapToClose(false)")
         settle(page, 4)
         page.evaluate("""() => {
             const reading = document.querySelector(".forge-assistant-memory");

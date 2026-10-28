@@ -3047,10 +3047,11 @@ class TestFreeFloat:
                           startX: 0, startY: 0, offsetX: 0, offsetY: 0,
                           width: 358, height: 140, moved: false,
                           anchor: "bottom-right", committed: false};
-            // Let go with its bottom past the window's (720 + 140 > 828) and
-            // its header still well inside its own range (720 < 780): it was
-            // put against the bottom.
-            shell.moveDrag({pointerId: 1, clientX: 16, clientY: 720});
+            // Let go with its bottom on the window's (688 + 140 = 828) and its
+            // header still well inside its own range (688 < 780): it was put
+            // against the bottom. (Taken past it, a drag now cuts the panel
+            // at the edge instead: TestTheIntelligentDrag.)
+            shell.moveDrag({pointerId: 1, clientX: 16, clientY: 688});
             shell.endDrag({pointerId: 1}, false);
             const bottoms = [];
             [140, 342, 90].forEach((height) => {
@@ -3465,7 +3466,9 @@ class TestADragTakesOnlyTheHandle:
             shell.moveDrag(press({clientX: 960, clientY: 541}));
             const first = [handle.style.transform, handle.style.willChange,
                            handle.style.left || "", handle.style.top || ""];
-            shell.moveDrag(press({clientX: 1000, clientY: 600}));
+            // Inside the room: the panel starts against the right edge, and a
+            // move past it is drawn cut (TestTheIntelligentDrag).
+            shell.moveDrag(press({clientX: 930, clientY: 600}));
             const second = handle.style.transform;
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
             console.log(JSON.stringify({first, second, placed: placements,
@@ -3474,7 +3477,7 @@ class TestADragTakesOnlyTheHandle:
         """, sources=("shell",))
 
         assert found["first"] == ["translate(10px, 21px)", "transform", "", ""]
-        assert found["second"] == "translate(50px, 80px)"
+        assert found["second"] == "translate(-20px, 80px)"
         assert found["after"] == ["", "", "", ""] and found["placed"] == 1
 
     def test_a_dragged_panel_shifts_the_docked_column_and_places_it_where_it_is_let_go(self):
@@ -3497,8 +3500,11 @@ class TestADragTakesOnlyTheHandle:
             shell.nodes.dock = {hidden: false,
                                 getBoundingClientRect: () => ({left: 1, top: 2, width: 300, height: 400})};
             shell.startDrag(press(), shell.nodes.panel);
-            shell.moveDrag(press({clientX: 960, clientY: 540}));
-            shell.moveDrag(press({clientX: 970, clientY: 550}));
+            // Inside the room: leftwards, the panel starting against the
+            // right edge (a move past an edge cuts it and places the column
+            // instead: TestTheIntelligentDrag).
+            shell.moveDrag(press({clientX: 940, clientY: 540}));
+            shell.moveDrag(press({clientX: 930, clientY: 550}));
             const during = placements;
             shell.endDrag({pointerId: 1, type: "pointerup"}, false);
             const afterPanel = placements;
@@ -3508,7 +3514,7 @@ class TestADragTakesOnlyTheHandle:
             console.log(JSON.stringify({shifts, during, afterPanel, placed: placements}));
         """, sources=("shell",))
 
-        assert found["shifts"] == [[10, 20], [20, 30]]
+        assert found["shifts"] == [[-10, 20], [-20, 30]]
         assert found["during"] == 0 and found["afterPanel"] == 1
         assert found["placed"] == 2, "the launcher's end places too, and shifts nothing"
 
