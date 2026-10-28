@@ -2512,8 +2512,8 @@ function panel(options) {
     const shell = Object.create(NS.Shell.prototype);
     shell.state = Object.assign({
         panelOpen: true, conversationExpanded: false, panelWidth: 360,
-        anchorOverride: null, freeFloat: false, floatAt: null,
-        focusEnabled: false, focusWorkspaceId: null,
+        anchorOverride: null, panelAnchor: null, freeFloat: false, floatAt: null,
+        panelAt: null, focusEnabled: false, focusWorkspaceId: null,
     }, options.state || {});
     shell.settings = {label: "Forge Assistant", defaultAnchor: "bottom-right",
                       bubbleWidth: 80};
@@ -2749,11 +2749,16 @@ class TestFreeFloat:
         23 px left and 7 px up while the fraction looked right."""
         found = run(PANEL + """
             sized(1280, 900);
-            const shell = panel();
+            const shell = panel({state: {anchorOverride: "top-left"}});
             shell.setFreeFloat(true);
-            console.log(JSON.stringify({at: shell.state.floatAt,
+            console.log(JSON.stringify({at: shell.state.panelAt,
+                                        launcher: shell.state.floatAt,
                                         placed: placed(shell.nodes.panel)}));
         """, sources=("shell",))
+
+        # The launcher, put away, is where its own resting place is: the
+        # top left is a free place of none across and none down.
+        assert found["launcher"] == {"x": 0, "y": 0}
 
         # The stub panel sits at left 900, top 500. 900 is 4 px past the
         # furthest a panel 360 wide goes inside the 24 px gap (896), so it is
@@ -2768,10 +2773,10 @@ class TestFreeFloat:
     def test_a_floated_panel_is_placed_from_its_fraction(self):
         found = run(PANEL + """
             sized(1280, 900);
-            const shell = panel({state: {freeFloat: true, floatAt: {x: 0, y: 0}}});
+            const shell = panel({state: {freeFloat: true, panelAt: {x: 0, y: 0}}});
             shell.placeNow();
             const topLeft = placed(shell.nodes.panel);
-            shell.state.floatAt = {x: 1, y: 1};
+            shell.state.panelAt = {x: 1, y: 1};
             shell.placeNow();
             console.log(JSON.stringify({topLeft,
                                         bottomRight: placed(shell.nodes.panel)}));
@@ -2787,7 +2792,7 @@ class TestFreeFloat:
         anchors were protecting exactly this, and a remembered pixel position
         is what would have lost it."""
         found = run(PANEL + """
-            const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
+            const shell = panel({state: {freeFloat: true, panelAt: {x: 1, y: 1}}});
             const seen = [];
             // Phones as well: free float floats below the 640px breakpoint
             // too, where the panel is otherwise a sheet.
@@ -2812,7 +2817,7 @@ class TestFreeFloat:
         the sheet, so a drag moved the panel and the release put it back."""
         found = run(PANEL + """
             sized(420, 640);
-            const shell = panel({state: {freeFloat: true, floatAt: {x: 1, y: 1}}});
+            const shell = panel({state: {freeFloat: true, panelAt: {x: 1, y: 1}}});
             const roles = {};
             // What says whether it is modal; the resize corner's place is
             // written on the panel too, and is not that.
@@ -2839,7 +2844,7 @@ class TestFreeFloat:
         and modal, positioned by the stylesheet."""
         found = run(PANEL + """
             sized(420, 640);
-            const shell = panel({state: {freeFloat: false, floatAt: {x: 1, y: 1}}});
+            const shell = panel({state: {freeFloat: false, panelAt: {x: 1, y: 1}}});
             shell.nodes.panel.style.maxHeight = "500px";
             shell.placeNow();
             console.log(JSON.stringify({placed: placed(shell.nodes.panel)}));
@@ -2851,13 +2856,15 @@ class TestFreeFloat:
         found = run(PANEL + """
             sized(1280, 900);
             const shell = panel({state: {freeFloat: false,
-                                         floatAt: {x: 0, y: 0},
-                                         anchorOverride: "bottom-right"}});
+                                         panelAt: {x: 0, y: 0},
+                                         panelAnchor: "bottom-right",
+                                         anchorOverride: "top-left"}});
             shell.placeNow();
             console.log(JSON.stringify(placed(shell.nodes.panel)));
         """, sources=("shell",))
 
-        assert found["left"] == "896px", "a stale fraction is ignored while off"
+        assert found["left"] == "896px", (
+            "a stale fraction is ignored while off, and the launcher's place is its own")
         assert found["top"] == "736px"
 
     def test_the_choice_outlives_the_session(self):
@@ -2931,14 +2938,16 @@ class TestFreeFloat:
             shell.moveDrag({pointerId: 1, clientX: 600, clientY: 300});
             const at = shell.drag.at;
             shell.endDrag({pointerId: 1}, false);
-            console.log(JSON.stringify({at, stored: shell.state.floatAt,
-                                        anchor: shell.state.anchorOverride,
+            console.log(JSON.stringify({at, stored: shell.state.panelAt,
+                                        anchor: shell.state.panelAnchor,
+                                        launcher: shell.state.floatAt,
                                         previewed: !!shell.previewed}));
         """, sources=("shell",))
 
         assert found["previewed"] is False
         assert found["anchor"] is None, "free float chooses no anchor"
         assert found["stored"] == found["at"]
+        assert found["launcher"] is None, "the panel's drag is the panel's place alone"
 
     def test_a_drag_with_it_off_still_chooses_an_anchor(self):
         found = run(PANEL + """
@@ -2951,14 +2960,16 @@ class TestFreeFloat:
                           anchor: "bottom-right", committed: false};
             shell.moveDrag({pointerId: 1, clientX: 200, clientY: 100});
             shell.endDrag({pointerId: 1}, false);
-            console.log(JSON.stringify({anchor: shell.state.anchorOverride,
-                                        at: shell.state.floatAt,
+            console.log(JSON.stringify({anchor: shell.state.panelAnchor,
+                                        at: shell.state.panelAt,
+                                        launcher: shell.state.anchorOverride,
                                         previewed: !!shell.previewed}));
         """, sources=("shell",))
 
         assert found["previewed"] is True
         assert found["anchor"] == "top-left"
         assert found["at"] is None
+        assert found["launcher"] is None, "the panel's drag is the panel's place alone"
 
 
     def test_a_drop_is_placed_back_exactly_where_it_was_let_go(self):
@@ -2993,7 +3004,7 @@ class TestFreeFloat:
         across on a wider window."""
         found = run(PANEL + """
             sized(390, 844);
-            const shell = panel({state: {freeFloat: true, floatAt: {x: 0.8, y: 0.1}}});
+            const shell = panel({state: {freeFloat: true, panelAt: {x: 0.8, y: 0.1}}});
             shell.preview = () => undefined;
             shell.drag = {node: shell.nodes.panel, pointerId: 1,
                           startX: 0, startY: 0, offsetX: 0, offsetY: 0,
@@ -3001,7 +3012,7 @@ class TestFreeFloat:
                           anchor: "bottom-right", committed: false};
             shell.moveDrag({pointerId: 1, clientX: 16, clientY: 400});
             shell.endDrag({pointerId: 1}, false);
-            console.log(JSON.stringify({at: shell.state.floatAt}));
+            console.log(JSON.stringify({at: shell.state.panelAt}));
         """, sources=("shell",))
 
         assert found["at"]["x"] == 0.8
@@ -3059,7 +3070,7 @@ class TestFreeFloat:
                 shell.placeNow();
                 bottoms.push(parseInt(shell.nodes.panel.style.top, 10) + height);
             });
-            console.log(JSON.stringify({bottoms, y: shell.state.floatAt.y}));
+            console.log(JSON.stringify({bottoms, y: shell.state.panelAt.y}));
         """, sources=("shell",))
 
         assert found["y"] == 1
@@ -3071,7 +3082,7 @@ class TestFreeFloat:
         shows, inside the gap and the safe-area insets, on every placement."""
         found = run(PANEL + """
             element("forge-assistant-root");   // where the insets are read
-            const shell = panel({state: {freeFloat: true, floatAt: {x: 0, y: 1}}});
+            const shell = panel({state: {freeFloat: true, panelAt: {x: 0, y: 1}}});
             const seen = [];
             [[390, 844], [390, 380], [1280, 900], [390, 90]].forEach(([w, h]) => {
                 sized(w, h);
@@ -3967,7 +3978,7 @@ class TestTheCollapsedPanelIsARowOfWorkspaces:
         found = run("""
             const shell = Object.create(NS.Shell.prototype);
             shell.state = {panelOpen: true, panelWidth: 360, freeFloat: false,
-                           floatAt: null, anchorOverride: "bottom-right"};
+                           panelAt: null, panelAnchor: "bottom-right"};
             shell.settings = {defaultAnchor: "bottom-right"};
             shell.placeMenu = () => {};
             const seen = [];

@@ -98,8 +98,11 @@ function dragShell(state) {
                                           height: panel.offsetHeight});
     shell.nodes = {panel, root: {classList: {add() {}, remove() {}}, appendChild() {}},
                    header: {contains: () => false}, launcher: {}};
-    shell.state = Object.assign({panelOpen: true, freeFloat: true, floatAt: {x: 0.5, y: 0.5},
-                                 panelWidth: 400, anchorOverride: "bottom-right",
+    // The panel's own place, and the launcher's elsewhere: a drag of the
+    // panel is the panel's alone.
+    shell.state = Object.assign({panelOpen: true, freeFloat: true, panelAt: {x: 0.5, y: 0.5},
+                                 panelWidth: 400, panelAnchor: "bottom-right",
+                                 floatAt: {x: 0, y: 0}, anchorOverride: "top-left",
                                  fitWidth: null, fitHeight: null}, state || {});
     shell.settings = {defaultAnchor: "bottom-right"};
     shell.placed = 0;
@@ -168,11 +171,13 @@ def test_let_go_cut_a_floating_panel_stays_where_and_as_it_was_drawn():
         anchored.shell.startDrag(press(900, 410), anchored.shell.nodes.panel);
         anchored.shell.moveDrag(press(1100, 710));
         anchored.shell.endDrag(press(1100, 710), false);
+        const launcher = (s) => [s.state.anchorOverride, s.state.floatAt];
         console.log(JSON.stringify({
-            cut: [cut.shell.state.fitWidth, cut.shell.state.fitHeight, cut.shell.state.floatAt],
+            cut: [cut.shell.state.fitWidth, cut.shell.state.fitHeight, cut.shell.state.panelAt],
             uncut: [uncut.shell.state.fitWidth, uncut.shell.state.fitHeight],
             anchored: [anchored.shell.state.fitWidth, anchored.shell.state.fitHeight,
-                       anchored.shell.state.anchorOverride],
+                       anchored.shell.state.panelAnchor],
+            launchers: [launcher(cut.shell), launcher(uncut.shell), launcher(anchored.shell)],
         }));
     """, viewport={"offsetLeft": 0, "offsetTop": 0, "width": 1280, "height": 800})
 
@@ -181,6 +186,8 @@ def test_let_go_cut_a_floating_panel_stays_where_and_as_it_was_drawn():
     assert at["x"] == 1 and 0 < at["y"] < 1, at
     assert found["uncut"] == [None, None], "dragged inward, its own size again"
     assert found["anchored"] == [None, None, "bottom-right"]
+    assert found["launchers"] == [["top-left", {"x": 0, "y": 0}]] * 3, (
+        "the launcher keeps its own place")
 
 
 PLACE = """
@@ -192,7 +199,7 @@ def test_the_placement_keeps_a_cut_floating_panel_as_it_was_let_go():
     from test_assistant_js import PANEL  # noqa: E402 -- the shared stub
     found = run(PANEL + """
         sized(1280, 800);
-        const floating = panel({state: {freeFloat: true, floatAt: {x: 1, y: 0.5},
+        const floating = panel({state: {freeFloat: true, panelAt: {x: 1, y: 0.5},
                                         panelWidth: 400, fitWidth: 356, fitHeight: 176}});
         floating.placeNow();
         const anchored = panel({state: {freeFloat: false, panelWidth: 400,
@@ -230,7 +237,7 @@ def test_what_forgets_a_cut_and_what_takes_it_as_the_panels_own_size():
                                             adopt.shell.state.conversationHeight].concat(fits(adopt.shell))}));
     """, viewport={"offsetLeft": 0, "offsetTop": 0, "width": 1280, "height": 800})
 
-    assert found["away"] == [None, None], "put at a resting place, at its own size"
+    assert found["away"] == [356, 176], "put away, it keeps where and as it was drawn"
     assert found["anchored"] == [None, None]
     assert found["reset"] == [None, None]
     # The corner takes what is drawn: the cut width as its own, the

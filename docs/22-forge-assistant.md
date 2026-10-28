@@ -3661,7 +3661,8 @@ nothing on the way can stop them -- the Gallery Quadrant stops a tap on the
 gallery in the bubble phase -- and nothing is taken from the tap: what it
 landed on still gets it. So the panel is put away with `showOpen(false)`, not
 `close()`: the ✕ gives the launcher the keyboard's focus, and here the tap has
-just given it to what it landed on.
+just given it to what it landed on. (**Replaced by §3.45**: the tap is taken
+from the page and lands nowhere.)
 
 **Not outside**: the assistant's root (the panel, the launcher), a docked
 settings column (drawn over the panel's body, living in Forge's page), and
@@ -3678,6 +3679,9 @@ cannot be reached and is left alone. A click ends only a press of its own
 document.
 
 ### Where the launcher comes back
+
+**Replaced by §3.44**, at the user's word: the launcher comes back at its own
+place, and nothing moves. What follows is what this section built.
 
 At the nearest of the six resting places (`closeFromOutside`). Anchored, the
 panel is at one already and the launcher takes its place, as after the ✕.
@@ -3744,7 +3748,8 @@ Asked for on the same branch as §3.42, to go in the same pull request:
 the switch is turned off. One press on the header's space, once the window for
 a second has passed, puts the panel away (`afterPresses` is handed `putAway(true)`
 for the header, as it is handed `open` for the launcher): back to the launcher
-at the nearest of the six resting places, exactly as a tap outside does
+at the nearest of the six resting places (at its own place since §3.44),
+exactly as a tap outside does
 (`putAway` is that tap's code, `closeFromOutside` now calling it), with the
 launcher given the keyboard's focus as the ✕ gave it -- the tap was the
 panel's own. Two, three and four presses are what they were.
@@ -3802,7 +3807,8 @@ never "against the bottom", which would mean its own height grown back up the
 window. `placePanel` reads the two: a floating panel's width is the cut one,
 its max-height no more than the cut one. Anchored, the release snaps to the
 nearest anchor at the panel's own size, and the cut is forgotten. So is it when
-the panel is put at a resting place (`putAway`), when Free Float is turned off,
+the panel is put at a resting place (`putAway`; since §3.44 a panel put away
+keeps its place and its cut), when Free Float is turned off,
 and on the corner's reset; the corner, the edge and their keys take it as the
 panel's own size first (`adoptFit`: the cut width as `panelWidth`, the
 conversation as tall as it is drawn), so nothing springs back under the hand.
@@ -3841,6 +3847,190 @@ docked column test closes the panel by one tap on the header, and the theme's
 first-row test turns the switch off to see the ✕. Thirty-one mutations each
 fail a test (two survived a first pass and the tests were tightened). Not run
 on the user's machine or in a Gecko build.
+
+## 3.44 The launcher and the panel, each at its own place (2026-10-28)
+
+Asked for once §3.42 and §3.43 had merged (#307):
+
+> "Let's change the global behavior of the open and closed positions of the
+> flyout menu. I want the flyout menu open state to stay put when opened and
+> closed, as well as the button to stay in its position. They should keep
+> their positions independently. So, for example, if I have the button in the
+> upper right, and I have the open state in the lower left, closing returns
+> the button in the upper right. So it should keep the same position
+> separately, independently. This should be the new global behavior for open
+> and closing. The last PR wrote behavior I no longer want."
+
+Since round one the launcher and the open panel had one place between them:
+one of the six (`anchorOverride`) or, with Free Float on, one free place
+(`floatAt`), written by a drag of either and read by `placePanel` for
+whichever was on screen. §3.42 added a step on closing that moved that place
+to the resting place nearest the panel. Both are gone.
+
+### Two places
+
+The launcher keeps the two names it had, so a saved place carries over; the
+panel has two of its own, `panelAnchor` and `panelAt`. `placeNames(node)` says
+which pair is a node's -- the panel's, or the launcher's; without a node, the
+one on screen -- and `anchor(node)` and `floatOf(node)` read through it, the
+anchor falling back to the default setting for each alike. Everything that
+reads or writes a place goes through them:
+
+- `placePanel` puts the node on screen at its own: anchored at its anchor,
+  floating at its free place, the corner's held edges written into the
+  panel's own. The root's `data-anchor` is the shown node's, so the phone's
+  sheet takes its half from the panel's anchor.
+- A drag starts from the dragged node's anchor (`startDrag`) and its free
+  place (`moveDrag`), and `endDrag` writes only the dragged node's pair. A
+  panel's cut (§3.43) stays the panel's, as before.
+- `putAway` (a tap outside, one tap on the header) and the ✕ and Escape only
+  put the panel away (`showOpen(false)`): the launcher shows at its own place,
+  and the panel keeps its own and its cut for the next time it opens.
+- `cornerSides` reads the panel's anchor.
+
+### Free Float, each where it is
+
+Turning Free Float on or off carries both, each where it is (`keepPlace`).
+Turned on, the node on screen is measured and its free place is where it is
+drawn (the old code did this for the shown node, and only when it had no free
+place yet, so a stale one from an earlier turn moved it); the node put away
+takes the free place exactly on its anchor (`anchorFraction`, which is exact
+for the panel too, a free place of 1 down being against the bottom). Turned
+off, the node on screen goes to the anchor nearest its box (`nearestAnchor`,
+as a drag would choose), and the node put away to the anchor nearest its free
+place (`anchorNear`: the six are the free places at none, half and all of the
+way across and at either end up and down, so the nearest is the nearest of
+those on each axis). Free places are kept for the next turn, as they were.
+
+### From one place to two
+
+A layout saved before this has one place. On reading it, the panel takes the
+launcher's: a session layout without `panelAnchor` gives the panel the
+`anchorOverride` it has (`_restore`), and a Free Float record without
+`panelAt` gives the panel its `floatAt` (`_restoreFloat`), so nothing moves on
+the update. A layout saved since says the panel's own, `null` when it has none,
+and a panel with none stays at the default rather than taking the launcher's.
+The session payload keeps schema 5: it gained a key, and a bump would have
+thrown away the rest of the layout.
+
+### Verified
+
+`tests/test_assistant_places_js.py` (node, new): each node placed at its own,
+anchored and floating, and the sheet's half the panel's; a drag of the
+launcher writing the launcher's place alone, anchored and floating; Free Float
+on and off carrying each where it is, the one on screen measured and the one
+put away by its own place, a stale free place not used; a layout from before
+giving the panel the shared place, one saved since coming back as two, and a
+panel saved without a place staying without one.
+`tests/test_assistant_tap_close_js.py`: putting the panel away by a tap
+outside and by the header moves neither place nor the cut, anchored and
+floating (replacing the test of the nearest of the six).
+`tests/test_assistant_layout.py` (Chromium, new): the user's example by hand
+-- the launcher dragged to the top right, the panel to the bottom left -- with
+Free Float off and on, then a tap outside, one tap on the header, Escape and
+the ✕, each showing the launcher where it was put and each opening the panel
+where it was put (replacing the test of the nearest of the six). Translated:
+every test that sets or reads an open panel's place sets or reads the panel's
+own (`panelAt`, `panelAnchor`) -- in `test_assistant_js.py`'s Free Float
+tests (with the launcher's place asserted untouched by a panel's drag and its
+own when Free Float is turned on), the drag-fit, resize and header-tap tests,
+and in Chromium the shared floating page, the corner, the phone's free float
+and the gallery under a panel at the top -- and the cut is kept when the panel
+is put away.
+Twenty-one mutations each fail a test (two survived a first pass, one of them
+a mutant the corner test's stub could not tell apart, and the tests and the
+mutant were tightened). Not run on the user's machine or in a Gecko build.
+
+## 3.45 The first tap outside only puts the panel away (2026-10-28)
+
+Asked for on the same branch as §3.44, to go in the same pull request:
+
+> "I want the first tap outside of an open flyout menu to do nothing except
+> close the flyout menu. Essentially, catch all the taps and make flyout menu
+> minimize action the priority. This means I have to tap twice to do
+> something outside of an open flyout menu. Drag scroll should still work
+> though."
+
+Until now (§3.42) the tap closed the panel and went on to land: a button under
+it was pressed, a text box under it took the keyboard.
+
+### Taken at the press
+
+Whether a press is a tap is known only when it is let go, and by then its
+pointerdown has done its work -- a text box focused, a dropdown opened, a
+slider moved, a stroke begun. So the press outside is taken from the page as
+it goes down (`notePressOutside`, `holdBack`): cancelled, which starts no
+focus, no selection, no native drag and no emulated mouse events, and stopped
+on the window in the capture phase, so nothing on the page hears it. The tap
+is now decided on the release (`tapOutside` on `pointerup`, no longer on the
+click), the release taken too, and the panel put away there. A key between
+the press and the release spends the press rather than forgetting it, so the
+release is still taken (`spent`).
+
+### What follows the release
+
+A finger's tap goes on after `pointerup`: `touchend`, then the emulated
+`mousedown` and `mouseup`, then the click; a mouse's sends `mouseup` and the
+click. All of it is the press's (`holdTrail`, `outsideTrail`): held for
+TAP_TRAIL_MS (1 s) after the release, in the press's own document, ending at
+the click or at the next press. `touchend` is heard not passive and cancelled,
+which sends no emulated mouse events and no click at all. While the press is
+down, its `mousedown`, a long press's `contextmenu` and `selectstart` are held
+as well. Only trusted events are.
+
+### What is left to the page
+
+Nothing that decides a scroll. A finger's pan is the browser's whatever the
+pointerdown says (cancelling a pointerdown stops emulated mouse events, never
+a pan), `touchstart` and `touchmove` are not listened to at all -- a
+non-passive one would make the browser wait for the page before every pan --
+a press the browser takes for a scroll is cancelled by it (`pointercancel`),
+which ends the press with nothing held after it, and its `touchend` reaches
+the page: the theme's momentum break reads a fling from its `touchstart` and
+`touchend`. The wheel is never
+touched, and a press on a scroll bar is not taken (`onScrollbar`).
+
+A drag that is no scroll -- a slider, a selection, a stroke on a canvas -- is
+the press's, taken with it, and does nothing while the panel is open, which
+the press closing nothing leaves as it was. With one exception: a press on
+something the browser drags of its own -- a picture, a link, anything
+`draggable` (`dragsNatively`) -- is stopped and not cancelled, its
+`mousedown` too, because cancelling it stops the drag, and a gallery picture
+dragged onto the settings column docked in the panel (§3.41) is a drag the
+panel is open for. Found by that feature's browser test, which failed with
+every press cancelled. Its release and click are taken whole, so a tap on it
+still only puts the panel away.
+
+The keyboard's focus, which the tap no longer moves, goes to the launcher if
+it was in the panel (`closeFromOutside`), as the ✕ and one tap on the header
+give it; elsewhere it stays.
+
+### Verified
+
+`tests/test_assistant_tap_close_js.py` (node): a tap's pointerdown, its
+mousedown, its release, its touchend, its mouseup and its click each
+cancelled and stopped, the panel open until the release, a click after the
+trail and the next tap's events passing; a finger's scroll (cancelled) leaving
+its touchend and click to the page, a scroll bar's press, a press with the
+panel closed or the switch off and the page's own events not taken, a drag
+closing nothing but its click held, the trail ending after its time, at a new
+press, and in its own document only; a press on a picture stopped but not
+cancelled; focus to the launcher only from the panel; the listeners' set and
+their options (`touchend` not passive, no `touchstart` or `touchmove`).
+Translated: the wiring test's release is a `pointerup`, and a key spends the
+press instead of forgetting it. `tests/test_assistant_layout.py` (Chromium):
+a mouse's first tap on a page button closes the panel, presses nothing and is
+heard by nothing on the page, the second presses it; a tap on a text box with
+the composer focused gives the box nothing and the launcher the focus, the
+second focuses the box; the wheel still scrolls the box it is over with the
+panel open; on a phone a finger's scroll still scrolls the page, a finger's
+first tap on a button presses nothing and the page hears no press, click or
+emulated mouse event, the second presses it, and a tapped text box is not
+given the keyboard; a tap in a same-origin frame does not press the frame's
+button, the second does (translated from the tap that landed). The gallery
+picture dragged onto the docked canvas holds the exception. Twenty-two
+mutations each fail a test. Not run on the user's machine, in a Gecko build,
+or against the real WanGP frame.
 
 ## 4. Deliberate deviations
 

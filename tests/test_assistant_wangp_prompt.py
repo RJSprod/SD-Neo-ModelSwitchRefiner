@@ -427,8 +427,10 @@ def test_a_switch_away_keeps_focus_and_coming_back_is_super_focus_again(browser)
 def test_a_tab_changed_by_the_page_keeps_focus_and_the_bars_wangp_button_brings_super_focus(browser):
     """Not every switch is the panel's own: Mini Paint's sends press the
     host's tab button themselves, and on another tab in focus the tab bar is
-    back, its WanGP button one press away. Both reach the panel as the host's
-    navigation, and super focus follows them as it follows going back."""
+    back, its WanGP button a press away -- two with the panel open, the first
+    tap outside only putting the panel away (docs/22 §3.45). Both reach the
+    panel as the host's navigation, and super focus follows them as it
+    follows going back."""
     page = open_wangp(browser)
     try:
         page.evaluate(TAB_BUTTONS, SWITCH)
@@ -440,6 +442,12 @@ def test_a_tab_changed_by_the_page_keeps_focus_and_the_bars_wangp_button_brings_
         settle(page)
         away = page.evaluate(MODE, "tab_txt2img")
         assert away["focus"] and away["anywhere"] == 0 and away["open"] and away["bar"] == "shown", away
+        page.click("#tab_wangp-button")
+        page.wait_for_timeout(300)
+        settle(page)
+        first = page.evaluate(MODE, "tab_txt2img")
+        assert first["focus"] and first["open"] is False and first["bar"] == "shown", (
+            "the first tap only put the panel away", first)
         page.click("#tab_wangp-button")
         page.wait_for_timeout(300)
         settle(page)
