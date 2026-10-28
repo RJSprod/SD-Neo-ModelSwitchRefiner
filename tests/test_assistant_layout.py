@@ -2511,24 +2511,51 @@ def centre_of(page, selector):
                          " return [r.left + r.width / 2, r.top + r.height / 2]; }", selector)
 
 
-def test_a_tap_outside_puts_the_panel_away_and_the_tap_still_lands(browser):
+# What the page heard of a press, on the document -- after the window's
+# capture, where the panel takes a tap outside.
+PAGE_HEARS = """() => {
+    window.pageHeard = [];
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click",
+                        "touchstart", "touchend"]) {
+        document.addEventListener(type, (event) => window.pageHeard.push(type), true);
+    }
+}"""
+
+
+def test_the_first_tap_outside_only_puts_the_panel_away(browser):
+    """Asked for: "I want the first tap outside of an open flyout menu to do
+    nothing except close the flyout menu ... This means I have to tap twice
+    to do something outside of an open flyout menu." A mouse's tap on a page
+    button closes the panel and presses nothing, and nothing on the page
+    hears it; a tap on a text box closes it and the box is not given the
+    keyboard -- the launcher is, the focus having been in the panel. The
+    second tap is the page's."""
     page = open_page(browser, 1600, 900)
     try:
         page.evaluate(OUTSIDE_SETUP)
+        page.evaluate(PAGE_HEARS)
         page.evaluate("forgeAssistant.shell.open()")
         settle(page)
         page.click("#txt2img_tools button")
         settle(page)
         assert page.evaluate(IS_OPEN) is False
-        assert page.evaluate("window.pasted") == 1, "the button it landed on still got it"
+        assert page.evaluate("window.pasted") == 0, "the first tap pressed nothing"
+        assert page.evaluate("window.pageHeard") == [], "nothing on the page heard it"
         assert page.evaluate("!document.querySelector('.forge-assistant-launcher').hidden")
-        # A tap on a text box: closed, and the box keeps the keyboard -- the
-        # launcher is not given it, as the ✕ gives it.
+        page.click("#txt2img_tools button")
+        settle(page)
+        assert page.evaluate("window.pasted") == 1, "the second tap is the page's"
+
         page.evaluate("forgeAssistant.shell.open()")
         settle(page)
+        page.focus(".forge-assistant-input")
         page.click("#txt2img_prompt textarea")
         settle(page)
         assert page.evaluate(IS_OPEN) is False
+        assert page.evaluate("document.activeElement.getAttribute('aria-label')") != "Prompt"
+        assert page.evaluate("document.activeElement.classList.contains('forge-assistant-launcher')")
+        page.click("#txt2img_prompt textarea")
+        settle(page)
         assert page.evaluate("document.activeElement.getAttribute('aria-label')") == "Prompt"
     finally:
         page.close()
@@ -2545,11 +2572,12 @@ def test_a_drag_a_wheel_a_scroll_bar_or_the_pages_own_click_leaves_it_open(brows
         page.mouse.up()
         settle(page)
         assert page.evaluate(IS_OPEN) is True, "a drag"
-        # The wheel.
-        page.mouse.move(400, 500)
+        # The wheel, which still scrolls what it is over.
+        page.mouse.move(400, 190)
         page.mouse.wheel(0, 300)
         settle(page, 4)
         assert page.evaluate(IS_OPEN) is True, "the wheel"
+        assert page.evaluate("document.getElementById('scroller').scrollTop") > 0, "it scrolled"
         # The page's own click on a button.
         page.evaluate("document.querySelector('#txt2img_tools button').click()")
         settle(page)
@@ -2630,9 +2658,33 @@ def test_on_a_phone_a_finger_scroll_leaves_it_open_and_a_finger_tap_puts_it_away
         settle(page, 6)
         assert page.evaluate("scrollY") != before, "the page scrolled under the finger"
         assert page.evaluate(IS_OPEN) is True, "a scroll is no tap"
-        page.touchscreen.tap(200, 100)
+        # A finger's tap on a page button: the panel put away, the button not
+        # pressed, nothing on the page hearing a press, a click or the
+        # emulated mouse events; the next tap presses it.
+        page.evaluate(OUTSIDE_SETUP)
+        page.evaluate(PAGE_HEARS)
+        button = page.evaluate("(() => { const r = document.querySelector('#txt2img_tools button')"
+                               ".getBoundingClientRect(); return [r.left + r.width / 2,"
+                               " r.top + r.height / 2]; })()")
+        page.touchscreen.tap(*button)
         settle(page)
         assert page.evaluate(IS_OPEN) is False
+        assert page.evaluate("window.pasted") == 0, "the first tap pressed nothing"
+        heard = page.evaluate("window.pageHeard")
+        assert not set(heard) & {"pointerdown", "mousedown", "pointerup", "mouseup", "click",
+                                 "touchend"}, heard
+        page.touchscreen.tap(*button)
+        settle(page)
+        assert page.evaluate("window.pasted") == 1, "the second tap is the page's"
+        # A text box tapped with the panel open is not given the keyboard.
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        box = page.evaluate("(() => { const r = document.querySelector('#txt2img_prompt textarea')"
+                            ".getBoundingClientRect(); return [r.left + 20, r.top + 10]; })()")
+        page.touchscreen.tap(*box)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False
+        assert page.evaluate("document.activeElement.getAttribute('aria-label')") != "Prompt"
     finally:
         context.close()
 
@@ -2786,7 +2838,9 @@ RELOAD_FRAME = """() => new Promise((done) => {
 def test_a_tap_in_a_frame_on_the_page_puts_it_away(browser):
     """Mini Paint NEO's WanGP tab is a frame on Forge's own origin, and a tap
     in a frame never reaches the page's document: the panel hears the frame's
-    own, a drag in it is no tap, and a frame that loads again is heard again."""
+    own, a drag in it is no tap, a tap in it is the panel's alone -- the
+    frame's button is not pressed -- and a frame that loads again is heard
+    again."""
     page = open_page(browser, 1600, 900)
     try:
         # No beat: what is heard is heard from the panel opening, and from the
@@ -2799,9 +2853,18 @@ def test_a_tap_in_a_frame_on_the_page_puts_it_away(browser):
         page.mouse.up()
         settle(page)
         assert page.evaluate(IS_OPEN) is True, "a drag in the frame"
+        pressed = """() => { const doc = document.getElementById("a-frame").contentDocument;
+                             return doc.defaultView.pressed || 0; }"""
+        page.evaluate("""() => { const doc = document.getElementById("a-frame").contentDocument;
+                                 doc.getElementById("b").addEventListener("click", () => {
+                                     doc.defaultView.pressed = (doc.defaultView.pressed || 0) + 1; }); }""")
         page.mouse.click(150, 400)
         settle(page)
         assert page.evaluate(IS_OPEN) is False, "a tap in the frame"
+        assert page.evaluate(pressed) == 0, "the frame's button is not pressed by the first tap"
+        page.mouse.click(150, 400)
+        settle(page)
+        assert page.evaluate(pressed) == 1, "the second tap is the frame's"
         page.evaluate("forgeAssistant.shell.open()")
         settle(page)
         page.evaluate(RELOAD_FRAME)

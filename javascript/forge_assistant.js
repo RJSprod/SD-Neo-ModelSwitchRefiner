@@ -80,6 +80,11 @@
     // (model_chain_theme.js, QUICK_TAP_PX). Further than a finger's tap
     // strays, nearer than a drag goes.
     const TAP_OUTSIDE_PX = 16;
+    // How long after a press outside is let go what follows it -- a finger's
+    // emulated mouse events, the click -- is still that press's own, and taken
+    // from the page with it (`holdTrail`). A click follows its release at
+    // once; a finger's, on a page that is not a phone's, up to 300 ms later.
+    const TAP_TRAIL_MS = 1000;
     // What a tap outside is not outside of, beyond the assistant's own root:
     // a docked settings column, drawn over the panel's body but living in
     // Forge's page, and any dialog -- this extension's editors are modal
@@ -3605,17 +3610,35 @@
     // should make it minimize to the flyout button. Make the new tap to close
     // function enabled / disabled via a new "..." menu entry".
     //
-    // A tap is the click that ends a press made outside the panel with the
-    // pointer about where it went down (TAP_OUTSIDE_PX), the rule the theme's
-    // quick settings drawer goes by: a scroll or a pinch makes no click -- a
-    // touch the browser takes for a scroll is cancelled, a second finger is
-    // not a tap -- a drag across the page strays past the distance, a press
-    // on a scroll bar is a scroll, a press that began in the panel is the
-    // panel's, and only what a person did counts: the page's own clicks are
-    // synthetic, and a key between the press and the click (a key that
-    // clicks a button) spends the press. Nothing is taken from the tap: what
-    // it landed on still gets it, focus included -- so the launcher is not
-    // given the keyboard's focus, as the ✕ gives it.
+    // A tap is a press made outside the panel and let go about where it went
+    // down (TAP_OUTSIDE_PX), the rule the theme's quick settings drawer goes
+    // by: a scroll or a pinch is no tap -- a touch the browser takes for a
+    // scroll is cancelled, a second finger is not primary -- a drag across
+    // the page strays past the distance, a press on a scroll bar is a scroll,
+    // a press that began in the panel is the panel's, and only what a person
+    // did counts: the page's own events are synthetic, and a key between the
+    // press and the release (a key that clicks a button) spends the press.
+    //
+    // And the tap is the panel's alone. Asked for once a tap outside closed
+    // the panel and went on to land: "I want the first tap outside of an open
+    // flyout menu to do nothing except close the flyout menu. Essentially,
+    // catch all the taps and make flyout menu minimize action the priority.
+    // This means I have to tap twice to do something outside of an open
+    // flyout menu. Drag scroll should still work though." So a press outside
+    // is taken from the page as it goes down (`holdBack`: cancelled, which
+    // starts no focus, no selection, no native drag and no emulated mouse
+    // events, and stopped, so nothing on the page hears it), and so are its
+    // release, its emulated mouse events, its click and a long press's menu
+    // (`holdTrail`). Nothing of a scroll is: the browser pans a finger's
+    // press whatever its pointerdown says, its touchstart and touchmove are
+    // left to the page, a cancelled press (the browser's scroll) leaves no
+    // trail, the wheel is never touched, and a scroll bar's press is not
+    // taken at all. A drag that is no scroll -- a slider, a selection, a
+    // stroke on a canvas -- is the press's too, and does nothing while the
+    // panel is open; but a picture or a link the browser drags of its own is
+    // not cancelled, only stopped, so a gallery's picture can still be
+    // dragged onto the settings column docked in the panel (§3.41) -- its
+    // click is still taken, and its press focuses nothing that acts.
     //
     // Heard in the capture phase, before anything on the way can stop it, on
     // the window and in every frame on the page this document may reach:
@@ -3659,34 +3682,65 @@
         return across || along;
     }
 
-    /** The press a tap outside would end, or none. `frame` says which
-     *  document it was made in: a click ends only a press of its own
-     *  document. */
+    /** An event taken from the page: its default cancelled, where it can
+     *  be and `keep` does not say otherwise, and no listener after this one
+     *  hearing it. */
+    function holdBack(event, keep) {
+        if (!keep && typeof event.preventDefault === "function" && event.cancelable !== false) {
+            event.preventDefault();
+        }
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+        else if (typeof event.stopPropagation === "function") event.stopPropagation();
+    }
+
+    /** Does a press on `event`'s target start the browser's own drag -- a
+     *  picture, a link, anything `draggable`? Cancelling its press would
+     *  stop the drag. */
+    function dragsNatively(event) {
+        const target = event && event.target;
+        const node = target && target.nodeType === 1 ? target : (target && target.parentElement);
+        const found = node && typeof node.closest === "function"
+            ? node.closest("[draggable], img, a[href]") : null;
+        return !!(found && found.draggable === true);
+    }
+
+    /** The press a tap outside would end, or none -- taken from the page
+     *  (`holdBack`). `frame` says which document it was made in: a release
+     *  ends only a press of its own document. */
     Shell.prototype.notePressOutside = function (event, frame) {
         this.outsidePress = null;
+        this.outsideTrail = null;
         if (!this.state.tapToClose || !this.state.panelOpen || !event) return false;
         if (event.isTrusted === false || event.isPrimary === false) return false;
         if (event.button !== undefined && event.button !== 0) return false;
         if (!this.outsideOf(event) || onScrollbar(event)) return false;
+        const drags = dragsNatively(event);
         this.outsidePress = {x: Number(event.clientX) || 0, y: Number(event.clientY) || 0,
-                             frame: frame || null};
+                             frame: frame || null, pointerId: event.pointerId, spent: false,
+                             drags};
+        holdBack(event, drags);
         return true;
     };
 
-    /** The click that ends a press made outside: the panel put away, the
-     *  launcher at its own place. True if it was. */
+    /** The release that ends a press made outside, taken from the page with
+     *  it, and what follows it for a moment (`outsideTrail`); a tap puts the
+     *  panel away, the launcher at its own place. True if it did. */
     Shell.prototype.tapOutside = function (event, frame) {
         const press = this.outsidePress;
-        this.outsidePress = null;
         if (!press || !event || event.isTrusted === false) return false;
+        if (press.frame !== (frame || null)) return false;
+        if (press.pointerId !== undefined && event.pointerId !== undefined
+            && event.pointerId !== press.pointerId) return false;
+        this.outsidePress = null;
+        holdBack(event);
+        this.outsideTrail = {frame: press.frame, until: Date.now() + TAP_TRAIL_MS};
         // The switch is read at the press; turning it off spends the press.
-        if (!this.state.panelOpen) return false;
-        if (press.frame !== (frame || null) || !this.outsideOf(event)) return false;
+        if (press.spent || !this.state.panelOpen) return false;
         const x = Number(event.clientX) || 0;
         const y = Number(event.clientY) || 0;
         if (Math.max(Math.abs(x - press.x), Math.abs(y - press.y)) > TAP_OUTSIDE_PX) return false;
-        // A press just outside let go just inside clicks their common
-        // ancestor, which is outside; where the hand came off says otherwise.
+        // A press just outside let go over the panel is no tap: a finger's
+        // release is reported to where it went down.
         const panel = this.nodes.panel;
         if (!frame && panel && typeof panel.getBoundingClientRect === "function") {
             const box = panel.getBoundingClientRect();
@@ -3696,10 +3750,36 @@
         return true;
     };
 
+    /** What a press outside is still followed by, taken from the page as
+     *  the press was: while it is down, its emulated mouse events, a long
+     *  press's menu and the selection or drag it would start; once let go,
+     *  for TAP_TRAIL_MS, the rest -- a finger's touchend (cancelled, which
+     *  sends no emulated mouse events and no click), its mouse events and
+     *  the click, which ends the trail. True if `event` was taken. */
+    Shell.prototype.holdTrail = function (event, frame) {
+        if (!event || event.isTrusted === false) return false;
+        const press = this.outsidePress;
+        const trail = this.outsideTrail;
+        const own = frame || null;
+        if (press && press.frame === own) {
+            // The browser's own drag starts from the press's mousedown.
+            holdBack(event, press.drags && event.type === "mousedown");
+            return true;
+        }
+        if (!(trail && trail.frame === own && Date.now() <= trail.until)) return false;
+        if (event.type === "click") this.outsideTrail = null;
+        holdBack(event);
+        return true;
+    };
+
     /** Put away by a tap outside: back to the launcher, at the launcher's
-     *  own place (`putAway`). */
+     *  own place (`putAway`). The tap put the keyboard's focus nowhere, so
+     *  focus in the panel goes to the launcher, as the ✕ gives it. */
     Shell.prototype.closeFromOutside = function () {
-        this.putAway(false);
+        const panel = this.nodes.panel;
+        const active = typeof document !== "undefined" ? document.activeElement : null;
+        this.putAway(!!(panel && active && typeof panel.contains === "function"
+                        && panel.contains(active)));
     };
 
     /** The panel back to the launcher, by a tap outside and by one tap on the
@@ -3744,9 +3824,17 @@
      *  capture phase. */
     Shell.prototype.listenForTaps = function (view, frame) {
         this.on(view, "pointerdown", (event) => this.notePressOutside(event, frame), true);
-        this.on(view, "click", (event) => this.tapOutside(event, frame), true);
+        this.on(view, "pointerup", (event) => this.tapOutside(event, frame), true);
+        // The browser took it for a scroll: no tap, and nothing follows.
         this.on(view, "pointercancel", () => { this.outsidePress = null; }, true);
-        this.on(view, "keydown", () => { this.outsidePress = null; }, true);
+        this.on(view, "keydown", () => {
+            if (this.outsidePress) this.outsidePress.spent = true;
+        }, true);
+        ["mousedown", "mouseup", "click", "contextmenu", "selectstart"]
+            .forEach((type) => this.on(view, type, (event) => this.holdTrail(event, frame), true));
+        // Not passive: cancelled, a finger's touchend sends no click.
+        this.on(view, "touchend", (event) => this.holdTrail(event, frame),
+                {capture: true, passive: false});
     };
 
     /** Every frame on the page whose document this one may reach -- Mini

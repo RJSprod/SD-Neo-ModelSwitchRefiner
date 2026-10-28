@@ -3906,12 +3906,21 @@ thin strip along the panel's left edge still drags the width alone.
 outside it closes it back to the launcher — on the page, on the tab bar, and
 inside Mini Paint NEO's WanGP page too. Only a tap counts: a drag, a scroll
 (the wheel, a finger, a scroll bar), a pinch, a press that began inside the
-panel, or the page's own clicks leave it open. The tap still does what it does
-where it lands — a button you tap is pressed, a text box you tap gets the
-keyboard — so the panel simply gets out of the way. Inside the panel, on the
-settings column docked in it, and inside a dialog (the panel's own editors,
-or anyone's) is not outside. The launcher comes back at its own place, and
-the panel opens at its own next time: nothing is moved. **Tap Outside to Close**, in the **⋯** menu's Panel group, is
+panel, or the page's own clicks leave it open. **The first tap only closes
+the panel**: it does nothing where it lands — a button under it is not
+pressed, a text box under it is not given the keyboard, a link is not
+followed, nothing on the page hears it — so doing something outside an open
+panel takes two taps, the first to close it. Scrolling is untouched: a
+finger's drag still scrolls what it is on, the wheel still scrolls what it is
+over, a scroll bar still drags, and the panel stays open through all of
+them. A drag that is not a scroll — a slider, a selection, a stroke on a
+canvas — does nothing while the panel is open, except that a picture or a
+link can still be dragged, so a gallery picture still drops onto the settings
+column docked in the panel. Inside the panel, on the settings column docked
+in it, and inside a dialog (the panel's own editors, or anyone's) is not
+outside. The launcher comes back at its own place, and the panel opens at its
+own next time: nothing is moved. If the keyboard was in the panel, it goes to
+the launcher. **Tap Outside to Close**, in the **⋯** menu's Panel group, is
 on until you turn it off, and remembered in this browser. While it is on the
 header has no **✕**: a tap outside, or one tap on the header's space, puts the
 panel away, and from the keyboard **Escape** inside the panel does (Escape
