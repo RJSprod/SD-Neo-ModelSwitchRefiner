@@ -74,6 +74,19 @@
     // workspace for this long, longer while it or what goes with it is
     // pointed at, pressed or focused. The classes are the focus module's.
     const PEEK_MS = 4000;
+    // A tap outside the open panel puts it away (`tapOutside`): the click
+    // that ends a press made outside it, with the pointer no further than this
+    // from where it went down -- the theme's quick settings drawer's rule
+    // (model_chain_theme.js, QUICK_TAP_PX). Further than a finger's tap
+    // strays, nearer than a drag goes.
+    const TAP_OUTSIDE_PX = 16;
+    // What a tap outside is not outside of, beyond the assistant's own root:
+    // a docked settings column, drawn over the panel's body but living in
+    // Forge's page, and any dialog -- this extension's editors are modal
+    // dialogs on the body, and a dialog anybody opened is where the hand is
+    // meant to be (`noticeCover` spares the same).
+    const NOT_OUTSIDE = ".forge-assistant-docked-column, dialog, [role=\"dialog\"], "
+        + "[aria-modal=\"true\"], #lightboxModal";
     const FOCUS_BAR_CLASS = "forge-assistant-focus-bar";
     const FOCUS_KEEP_CLASS = "forge-assistant-focus-keep";
     // The Conversation tab's open bridge: a box for a thread's id and a
@@ -463,6 +476,10 @@
             // The workspace's own tab bar above the workspace in focus mode;
             // off, it is hidden until a tap brings it for a moment.
             focusBar: true,
+            // A tap outside the open panel puts it away, the launcher at the
+            // nearest of the six resting places; the ⋯ menu's Tap Outside to
+            // Close turns it off.
+            tapToClose: true,
             // What super focus put away to show the studio, to be put back
             // when it ends (`endStudio`): saved with the layout, so a reload
             // in super focus -- which starts outside focus, like every reload
@@ -494,6 +511,7 @@
         this._restoreAutoAttach();
         this._restoreSendToGenerate();
         this._restoreFocusBar();
+        this._restoreTapToClose();
         this.peekTimer = 0;
         // Super focus, while it is on: the workspace it is on; and whether it
         // is kept for the WanGP tab while focus lasts. See "Super Focused".
@@ -662,6 +680,25 @@
     Shell.prototype._saveFocusBar = function () {
         try {
             window.localStorage.setItem(this._focusBarKey(), this.state.focusBar ? "on" : "off");
+        } catch (error) { /* memory only; the switch still works */ }
+    };
+
+    // Tap Outside to Close, the same way: on until turned off.
+    Shell.prototype._tapToCloseKey = function () {
+        return "forge-assistant-tap-close:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreTapToClose = function () {
+        try {
+            this.state.tapToClose = window.localStorage.getItem(this._tapToCloseKey()) !== "off";
+        } catch (error) {
+            this.state.tapToClose = true;
+        }
+    };
+
+    Shell.prototype._saveTapToClose = function () {
+        try {
+            window.localStorage.setItem(this._tapToCloseKey(), this.state.tapToClose ? "on" : "off");
         } catch (error) { /* memory only; the switch still works */ }
     };
 
@@ -2138,6 +2175,8 @@
         // And before a press lands, a message's open actions go if the press
         // is not on that message. See `dismissActions`.
         this.on(window, "pointerdown", (event) => this.dismissActions(event), true);
+        // A tap outside the open panel. See `tapOutside`.
+        this.listenForTaps(window, null);
 
         [nodes.launcher, nodes.header].forEach((handle) => {
             this.on(handle, "pointerdown", (event) => {
@@ -2360,6 +2399,7 @@
     Shell.prototype.navigated = function (active) {
         this.noteWorkspace(active);
         this.applyGenerate();
+        this.watchFrames();
         this.applyDock();
         this.applyPrompt();
         this.applySuppression();
@@ -2424,6 +2464,8 @@
         // when nothing is already asking or waiting to.
         if (open) this.applyGenerate();
         if (open) this.applyPrompt(true);
+        if (open) this.watchFrames();
+        else this.outsidePress = null;
         if (!open) this.stopMemory();
         else if (!this._memoryTimer && !this._memoryBusy) this.readMemory();
     };
@@ -2851,9 +2893,11 @@
         if (!this.state.panelOpen || document.hidden || !this.store
             || typeof this.store.request !== "function") return;
         // WanGP coming up or going away is said by nothing; the reading's
-        // beat is when the button looks again, and the prompt box too.
+        // beat is when the button looks again, and the prompt box too, and
+        // for a frame a tap outside may land in.
         this.applyGenerate();
         this.applyPrompt();
+        this.watchFrames();
         const asked = this._memoryAsk = (this._memoryAsk || 0) + 1;
         this._memoryBusy = true;
         this.store.request(MEMORY_ROUTE, {deadline: MEMORY_DEADLINE})
@@ -3285,6 +3329,189 @@
         this.markFocus(false);
         this.endPeek();
         this.leaveScreen();
+    };
+
+    // -- a tap outside -------------------------------------------------------- //
+    //
+    // Asked for: "if the flyout menu is open, tapping anywhere outside of it
+    // will close it. It should close back to the button state. Additionally,
+    // the location of the flyout button when I tap out to close should be the
+    // closest docked location. The docked locations are those when free float
+    // is off, there are six of them. Dragging or scrolling outside of the open
+    // fly out should have no impact, only tapping / clicking outside of it
+    // should make it minimize to the flyout button. Make the new tap to close
+    // function enabled / disabled via a new "..." menu entry".
+    //
+    // A tap is the click that ends a press made outside the panel with the
+    // pointer about where it went down (TAP_OUTSIDE_PX), the rule the theme's
+    // quick settings drawer goes by: a scroll or a pinch makes no click -- a
+    // touch the browser takes for a scroll is cancelled, a second finger is
+    // not a tap -- a drag across the page strays past the distance, a press
+    // on a scroll bar is a scroll, a press that began in the panel is the
+    // panel's, and only what a person did counts: the page's own clicks are
+    // synthetic, and a key between the press and the click (a key that
+    // clicks a button) spends the press. Nothing is taken from the tap: what
+    // it landed on still gets it, focus included -- so the launcher is not
+    // given the keyboard's focus, as the ✕ gives it.
+    //
+    // Heard in the capture phase, before anything on the way can stop it, on
+    // the window and in every frame on the page this document may reach:
+    // Mini Paint NEO's WanGP tab is a frame on Forge's own origin, and a tap
+    // in a frame never reaches this document (`watchFrames`).
+
+    /** Did `event` happen outside the assistant? Its root (the panel, the
+     *  launcher), a docked settings column and any dialog are not outside. */
+    Shell.prototype.outsideOf = function (event) {
+        const root = this.nodes && this.nodes.root;
+        const target = event && event.target;
+        const path = event && typeof event.composedPath === "function" ? event.composedPath() : null;
+        if (root && (path && path.length ? path.indexOf(root) !== -1
+            : !!(target && typeof root.contains === "function" && root.contains(target)))) {
+            return false;
+        }
+        const node = target && target.nodeType === 1 ? target : (target && target.parentElement);
+        return !(node && typeof node.closest === "function" && node.closest(NOT_OUTSIDE));
+    };
+
+    /** Was `event` a press on a scroll bar -- the page's or a box's? A press
+     *  there scrolls, and a scroll is no tap. */
+    function onScrollbar(event) {
+        const target = event && event.target;
+        if (!target || target.nodeType !== 1 || typeof target.getBoundingClientRect !== "function") {
+            return false;
+        }
+        const doc = target.ownerDocument;
+        const page = doc && doc.documentElement;
+        if (page && (target === page || target === doc.body)) {
+            return (page.clientWidth > 0 && event.clientX >= page.clientWidth)
+                || (page.clientHeight > 0 && event.clientY >= page.clientHeight);
+        }
+        const box = target.getBoundingClientRect();
+        const x = event.clientX - box.left - (target.clientLeft || 0);
+        const y = event.clientY - box.top - (target.clientTop || 0);
+        const across = target.scrollHeight > target.clientHeight && target.clientWidth > 0
+            && x >= target.clientWidth && x < box.width - (target.clientLeft || 0);
+        const along = target.scrollWidth > target.clientWidth && target.clientHeight > 0
+            && y >= target.clientHeight && y < box.height - (target.clientTop || 0);
+        return across || along;
+    }
+
+    /** The press a tap outside would end, or none. `frame` says which
+     *  document it was made in: a click ends only a press of its own
+     *  document. */
+    Shell.prototype.notePressOutside = function (event, frame) {
+        this.outsidePress = null;
+        if (!this.state.tapToClose || !this.state.panelOpen || !event) return false;
+        if (event.isTrusted === false || event.isPrimary === false) return false;
+        if (event.button !== undefined && event.button !== 0) return false;
+        if (!this.outsideOf(event) || onScrollbar(event)) return false;
+        this.outsidePress = {x: Number(event.clientX) || 0, y: Number(event.clientY) || 0,
+                             frame: frame || null};
+        return true;
+    };
+
+    /** The click that ends a press made outside: the panel put away, the
+     *  launcher at the nearest of the six resting places. True if it was. */
+    Shell.prototype.tapOutside = function (event, frame) {
+        const press = this.outsidePress;
+        this.outsidePress = null;
+        if (!press || !event || event.isTrusted === false) return false;
+        // The switch is read at the press; turning it off spends the press.
+        if (!this.state.panelOpen) return false;
+        if (press.frame !== (frame || null) || !this.outsideOf(event)) return false;
+        const x = Number(event.clientX) || 0;
+        const y = Number(event.clientY) || 0;
+        if (Math.max(Math.abs(x - press.x), Math.abs(y - press.y)) > TAP_OUTSIDE_PX) return false;
+        // A press just outside let go just inside clicks their common
+        // ancestor, which is outside; where the hand came off says otherwise.
+        const panel = this.nodes.panel;
+        if (!frame && panel && typeof panel.getBoundingClientRect === "function") {
+            const box = panel.getBoundingClientRect();
+            if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return false;
+        }
+        this.closeFromOutside();
+        return true;
+    };
+
+    /** Put away by a tap outside: back to the launcher, and the launcher at
+     *  the nearest of the six resting places. Anchored, the panel is at one
+     *  already and the launcher takes its place, as the ✕ leaves it.
+     *  Floating, it is the one nearest the panel's middle, and the panel
+     *  opens there next time: the place is the launcher's and the panel's
+     *  alike (`floatAt`), and the corner is remembered for Free Float off as
+     *  well. */
+    Shell.prototype.closeFromOutside = function () {
+        const panel = this.nodes.panel;
+        if (this.state.freeFloat && panel && typeof panel.getBoundingClientRect === "function") {
+            const box = panel.getBoundingClientRect();
+            if (box.width > 0 && box.height > 0) {
+                const anchor = nearestAnchor({x: box.left + box.width / 2, y: box.top + box.height / 2},
+                                             {width: box.width, height: box.height},
+                                             viewport(), insets(), this.anchor());
+                this.state.floatAt = anchorFraction(anchor);
+                this.state.anchorOverride = anchor;
+                this._saveFloat();
+            }
+        }
+        this.showOpen(false);
+    };
+
+    /** Where an anchor is as a floating place: against the edge it names, or
+     *  halfway across. The launcher's travel is the whole box's, so these
+     *  are exactly the anchor's own pixels (`floatPoint`, `anchorPoint`). */
+    function anchorFraction(anchor) {
+        const parts = String(anchor || DEFAULT_ANCHOR).split("-");
+        return {x: parts[1] === "left" ? 0 : (parts[1] === "right" ? 1 : 0.5),
+                y: parts[0] === "top" ? 0 : 1};
+    }
+
+    /** A tap outside, heard on `view` -- the window, or a frame's -- in the
+     *  capture phase. */
+    Shell.prototype.listenForTaps = function (view, frame) {
+        this.on(view, "pointerdown", (event) => this.notePressOutside(event, frame), true);
+        this.on(view, "click", (event) => this.tapOutside(event, frame), true);
+        this.on(view, "pointercancel", () => { this.outsidePress = null; }, true);
+        this.on(view, "keydown", () => { this.outsidePress = null; }, true);
+    };
+
+    /** Every frame on the page whose document this one may reach -- Mini
+     *  Paint NEO's WanGP tab, on Forge's own origin -- heard for taps too,
+     *  once each document, again when a frame loads another. A frame from
+     *  another origin cannot be reached, and is left alone. Looked for when
+     *  the panel opens, on a change of workspace and on the panel's beat. */
+    Shell.prototype.watchFrames = function () {
+        if (!this.state.tapToClose || !this.state.panelOpen) return 0;
+        if (!document.querySelectorAll || typeof WeakSet !== "function") return 0;
+        this.watchedFrames = this.watchedFrames || new WeakSet();
+        this.watchedDocs = this.watchedDocs || new WeakSet();
+        let heard = 0;
+        Array.prototype.forEach.call(document.querySelectorAll("iframe"), (frame) => {
+            if (!this.watchedFrames.has(frame)) {
+                this.watchedFrames.add(frame);
+                this.on(frame, "load", () => this.watchFrame(frame));
+            }
+            if (this.watchFrame(frame)) heard += 1;
+        });
+        return heard;
+    };
+
+    Shell.prototype.watchFrame = function (frame) {
+        let view = null;
+        try {
+            view = frame.contentWindow;
+            // Another origin's window answers nothing about its document.
+            if (!view || !view.document) return false;
+        } catch (error) {
+            return false;
+        }
+        if (this.watchedDocs.has(view.document)) return true;
+        try {
+            this.listenForTaps(view, frame);
+        } catch (error) {
+            return false;
+        }
+        this.watchedDocs.add(view.document);
+        return true;
     };
 
     // -- the tab bar in focus mode ------------------------------------------ //
@@ -3806,7 +4033,8 @@
      *   Composer -- what goes with a message and what a reply's button does:
      *   Auto Attach and Send to Generate, the two switches.
      *
-     *   Panel -- the panel itself: Free Float, and the launcher's look.
+     *   Panel -- the panel itself: Free Float, the tab bar in focus, a tap
+     *   outside putting it away, and the launcher's look.
      *
      *   Models -- the host's utilities, which give a graphics card back and
      *   are last because they are not what anybody wants to hit on the way to
@@ -3823,7 +4051,8 @@
         if (NS.systemEditor) items.push(this.systemPromptItem());
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
-        items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem());
+        items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem(),
+                   this.tapToCloseItem());
         if (NS.look) items.push(this.customizeItem());
         const utilities = this.host.listUtilities();
         // Models: where the loaded LoRA's originals live, then whatever the
@@ -3986,6 +4215,36 @@
             this.setFocusBar(!on);
         });
         return item;
+    };
+
+    Shell.prototype.tapToCloseItem = function () {
+        const on = !!this.state.tapToClose;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-tap-close",
+                             "Tap Outside to Close");
+        item.type = "button";
+        // A mode, like Free Float above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Keep the panel open when you tap outside it"
+            : "Put the panel away when you tap outside it, the button at the nearest "
+              + "of the six resting places";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setTapToClose(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.setTapToClose = function (on) {
+        this.state.tapToClose = !!on;
+        this.outsidePress = null;
+        this._saveTapToClose();
+        if (this.state.tapToClose) this.watchFrames();
+        this.tell(on ? "A tap outside the panel puts it away."
+            : "A tap outside the panel leaves it open.", "info");
+        return this.state.tapToClose;
     };
 
     Shell.prototype.autoAttachItem = function () {

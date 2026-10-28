@@ -3622,6 +3622,103 @@ the middle of its top edge up 80 px. Thirty-four mutations each fail a test.
 Not run on the user's machine, against Forge's own canvas, or in a Gecko
 build.
 
+## 3.42 A tap outside puts the panel away (2026-10-28)
+
+Asked for once §3.41 had merged:
+
+> "Let's make it so if the flyout menu is open, tapping anywhere outside of it
+> will close it. It should close back to the button state. Additionally, the
+> location of the flyout button when I tap out to close should be the closest
+> docked location. The docked locations are those when free float is off,
+> there are six of them. Dragging or scrolling outside of the open fly out
+> should have no impact, only tapping / clicking outside of it should make it
+> minimize to the flyout button. Make the new tap to close function enabled /
+> disabled via a new "..." menu entry"
+
+### What a tap is
+
+The rule the theme's quick settings drawer already goes by (docs/24 §0,
+2026-10-19; `tapOutsideQuick`): a tap is the `click` that ends a press made
+outside the panel with the pointer no further than `TAP_OUTSIDE_PX` (16) from
+where it went down (`notePressOutside`, `tapOutside`). What that leaves out:
+
+- a scroll or a pinch: a touch the browser takes for a scroll is cancelled
+  and makes no click, and a second finger is not primary;
+- a drag across the page: it strays past the distance;
+- a press on a scroll bar (`onScrollbar`, the page's or a box's): Chromium
+  sends no click after one, and the press is not even recorded, for a
+  browser that might;
+- a press that began inside the panel (a selection, the panel's own drag or
+  resize let go outside it), and a press just outside let go over it (the
+  click goes to the two targets' common ancestor; where the hand came off
+  says otherwise);
+- the page's own clicks (synthetic: Forge's, the theme's, Mini Paint's), a
+  button other than the first, and a key between the press and the click (a
+  key that clicks a button has no press of its own).
+
+The listeners are on the window in the capture phase (`listenForTaps`), so
+nothing on the way can stop them -- the Gallery Quadrant stops a tap on the
+gallery in the bubble phase -- and nothing is taken from the tap: what it
+landed on still gets it. So the panel is put away with `showOpen(false)`, not
+`close()`: the ✕ gives the launcher the keyboard's focus, and here the tap has
+just given it to what it landed on.
+
+**Not outside**: the assistant's root (the panel, the launcher), a docked
+settings column (drawn over the panel's body, living in Forge's page), and
+any dialog -- this extension's editors are native modal dialogs on the body,
+and a dialog anybody opened is where the hand is meant to be (`NOT_OUTSIDE`,
+the same list `noticeCover` spares).
+
+**Frames.** A tap in a frame never reaches this document, and Mini Paint
+NEO's WanGP tab is a frame on Forge's own origin. Every frame whose document
+this one may reach is listened to as well (`watchFrames`, `watchFrame`: when
+the panel opens, on a change of workspace and on the panel's beat, once per
+document, and again when a frame loads another); a frame from another origin
+cannot be reached and is left alone. A click ends only a press of its own
+document.
+
+### Where the launcher comes back
+
+At the nearest of the six resting places (`closeFromOutside`). Anchored, the
+panel is at one already and the launcher takes its place, as after the ✕.
+Floating, `nearestAnchor` is asked with the panel's own box and middle, and
+the answer is written as the floating place exactly on it
+(`anchorFraction`: 0 or 1 against the edges it names, 0.5 across the middle
+-- the launcher's travel is its whole box, so these are the anchor's own
+pixels) and as the anchor too, both saved: Free Float stays on, the panel
+opens at that place next time, and turning Free Float off leaves it there.
+The ✕ is unchanged: it leaves the launcher where the panel was.
+
+### The switch
+
+**Tap Outside to Close**, in the ⋯ menu's Panel group after Tab Bar in Focus
+(`tapToCloseItem`, `setTapToClose`): a `menuitemcheckbox`, on until turned
+off, remembered in `localStorage` under a key of its own like Free Float's
+(`_restoreTapToClose`, `_saveTapToClose`). It is read at the press; turning it
+off spends any press waiting.
+
+### Verified
+
+`tests/test_assistant_tap_close_js.py` (node): a tap closes without moving
+the focus; each of the cases above is no tap; the panel, a docked column and a
+dialog are not outside; floating, the six places from four panel positions,
+anchored nothing moved; the switch's place in the menu, its storage and its
+default; the wired listeners spending a press on a cancel and on a key.
+`tests/test_assistant_layout.py` (Chromium): a tap on a page button closes
+the panel and the button is still pressed, a tap on a text box leaves it the
+keyboard; a drag, the wheel, a script's click and a press from the panel let
+go outside leave it open; a press on a scroll bar that takes room (in a
+Chromium started without Playwright's `--hide-scrollbars`) records no press
+and scrolls its box; on a phone a finger's scroll leaves it open and a
+finger's tap closes it; the docked column and a modal dialog are not
+outside; floating, the launcher lands exactly on the top-left and the
+bottom-centre resting places and the panel opens there; the menu's switch off
+and on; a tap in a same-origin frame closes it and a drag in it does not, with
+the panel's beat turned off, from the panel opening and from the frame loading
+again while it is open. Three menu-list tests translated to the new entry.
+Twenty mutations each fail a test. Not run on the user's machine, in a Gecko
+build, or against Mini Paint NEO's real WanGP frame.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

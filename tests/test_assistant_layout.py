@@ -2466,3 +2466,311 @@ def test_on_a_phones_sheet_the_corner_is_a_grabber_that_sizes_the_height(browser
         assert grown["bottom"] == start["bottom"], (start, grown)
     finally:
         context.close()
+
+
+# -- a tap outside the open panel ---------------------------------------------- #
+#
+# Asked for: "if the flyout menu is open, tapping anywhere outside of it will
+# close it. It should close back to the button state ... the location of the
+# flyout button when I tap out to close should be the closest docked location
+# ... Dragging or scrolling outside of the open fly out should have no impact,
+# only tapping / clicking outside of it should make it minimize to the flyout
+# button. Make the new tap to close function enabled / disabled via a new "..."
+# menu entry".
+
+IS_OPEN = "forgeAssistant.shell.state.panelOpen"
+
+# A box with a scroll bar that takes room (a styled one: headless Chromium's
+# own are overlays), and a counter on a button of the page.
+OUTSIDE_SETUP = """() => {
+    const style = document.createElement("style");
+    style.textContent = "#scroller::-webkit-scrollbar { width: 16px; }"
+        + "#scroller::-webkit-scrollbar-thumb { background: #888; }"
+        + "#scroller { position: fixed; left: 300px; top: 120px; width: 200px; height: 150px;"
+        + " overflow-y: scroll; background: #333; z-index: 5; }";
+    document.head.appendChild(style);
+    const scroller = document.createElement("div");
+    scroller.id = "scroller";
+    scroller.innerHTML = "<div style='height: 900px'>tall</div>";
+    document.querySelector("gradio-app").appendChild(scroller);
+    window.pasted = 0;
+    document.querySelector("#txt2img_tools button").addEventListener("click", () => {
+        window.pasted += 1; });
+}"""
+
+
+def centre_of(page, selector):
+    return page.evaluate("(s) => { const r = document.querySelector(s).getBoundingClientRect();"
+                         " return [r.left + r.width / 2, r.top + r.height / 2]; }", selector)
+
+
+def test_a_tap_outside_puts_the_panel_away_and_the_tap_still_lands(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate(OUTSIDE_SETUP)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.click("#txt2img_tools button")
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False
+        assert page.evaluate("window.pasted") == 1, "the button it landed on still got it"
+        assert page.evaluate("!document.querySelector('.forge-assistant-launcher').hidden")
+        # A tap on a text box: closed, and the box keeps the keyboard -- the
+        # launcher is not given it, as the ✕ gives it.
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.click("#txt2img_prompt textarea")
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False
+        assert page.evaluate("document.activeElement.getAttribute('aria-label')") == "Prompt"
+    finally:
+        page.close()
+
+
+def test_a_drag_a_wheel_a_scroll_bar_or_the_pages_own_click_leaves_it_open(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate(OUTSIDE_SETUP)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        # A drag across the page, let go.
+        mouse_drag(page, (400, 400), (400, 470))
+        page.mouse.up()
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "a drag"
+        # The wheel.
+        page.mouse.move(400, 500)
+        page.mouse.wheel(0, 300)
+        settle(page, 4)
+        assert page.evaluate(IS_OPEN) is True, "the wheel"
+        # The page's own click on a button.
+        page.evaluate("document.querySelector('#txt2img_tools button').click()")
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "a script's click"
+        # A press in the panel let go outside it.
+        start = centre_of(page, ".forge-assistant-transcript")
+        mouse_drag(page, start, (400, 400))
+        page.mouse.up()
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "a press that began in the panel"
+    finally:
+        page.close()
+
+
+def with_scroll_bars(browser):
+    """A Chromium that draws scroll bars that take room: Playwright starts it
+    with `--hide-scrollbars`, under which no press can land on one."""
+    try:
+        return browser.browser_type.launch(ignore_default_args=["--hide-scrollbars"])
+    except Exception:
+        pass
+    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/opt/pw-browsers"
+    for pattern in ("chromium-*/chrome-linux/chrome", "chromium-*/chrome-linux64/chrome"):
+        for executable in sorted(glob.glob(str(Path(base) / pattern)), reverse=True):
+            try:
+                return browser.browser_type.launch(executable_path=executable,
+                                                   ignore_default_args=["--hide-scrollbars"])
+            except Exception:
+                continue
+    pytest.skip("no Chromium that draws scroll bars")
+
+
+def test_a_press_on_a_scroll_bar_is_a_scroll_and_leaves_it_open(browser):
+    """Pressed, a scroll bar scrolls its box, and Chromium sends the press and
+    a click to the box: a scroll, not a tap."""
+    drawn = with_scroll_bars(browser)
+    page = drawn.new_page(viewport={"width": 1600, "height": 900})
+    try:
+        html = page_html()
+        page.route(ORIGIN + "/**", lambda route: _answer(route, html))
+        page.goto(ORIGIN + "/")
+        page.wait_for_function("!!(window.forgeAssistant && window.forgeAssistant.shell)")
+        settle(page)
+        page.evaluate(OUTSIDE_SETUP)
+        page.evaluate("""() => { window.heard = [];
+            for (const type of ["pointerdown", "click"]) window.addEventListener(type,
+                (event) => window.heard.push(type), true); }""")
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        box = page.evaluate("(() => { const s = document.getElementById('scroller');"
+                            " const r = s.getBoundingClientRect(); return [r.right - 8, r.bottom - 30,"
+                            " s.offsetWidth - s.clientWidth]; })()")
+        assert box[2] >= 12, "a scroll bar that takes room"
+        page.mouse.move(box[0], box[1])
+        page.mouse.down()
+        # The press is a scroll from the moment it lands: no tap is waiting
+        # for a click (Chromium sends none after it; another browser may).
+        assert page.evaluate("forgeAssistant.shell.outsidePress") is None
+        page.mouse.up()
+        settle(page, 4)
+        assert page.evaluate("document.getElementById('scroller').scrollTop") > 0, "it scrolled"
+        assert "pointerdown" in page.evaluate("window.heard")
+        assert page.evaluate(IS_OPEN) is True, "a scroll bar is a scroll"
+        page.mouse.click(400, 400)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False, "and a tap beside it is a tap"
+    finally:
+        page.close()
+        drawn.close()
+
+
+def test_on_a_phone_a_finger_scroll_leaves_it_open_and_a_finger_tap_puts_it_away(browser):
+    context, page = open_phone(browser, free_float=True)
+    try:
+        assert page.evaluate(IS_OPEN) is True
+        before = page.evaluate("scrollY")
+        touch_drag(page, (200, 120), (200, 40))
+        settle(page, 6)
+        assert page.evaluate("scrollY") != before, "the page scrolled under the finger"
+        assert page.evaluate(IS_OPEN) is True, "a scroll is no tap"
+        page.touchscreen.tap(200, 100)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False
+    finally:
+        context.close()
+
+
+def test_the_docked_column_and_a_dialog_are_not_outside(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.click(".forge-assistant-settings")
+        settle(page)
+        # A block of the docked column, drawn over the panel's body.
+        block = page.evaluate("(() => { const r = document.getElementById('setting_1')"
+                              ".getBoundingClientRect(); return [r.left + 20, r.top + 20]; })()")
+        page.mouse.click(*block)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "the docked column is the panel's"
+        page.evaluate("""() => {
+            const dialog = document.createElement("dialog");
+            dialog.id = "someones";
+            dialog.innerHTML = "<button id='inside-dialog'>OK</button>";
+            document.body.appendChild(dialog);
+            dialog.showModal();
+        }""")
+        page.click("#inside-dialog")
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "a dialog is where the hand is meant to be"
+    finally:
+        page.close()
+
+
+LAUNCHER_AT = """(anchor) => {
+    const launcher = document.querySelector(".forge-assistant-launcher");
+    const r = launcher.getBoundingClientRect();
+    const want = forgeAssistant.anchorPoint(anchor, {width: r.width, height: r.height},
+                                            forgeAssistant.viewport(), null);
+    const panel = document.getElementById("forge-assistant-panel").getBoundingClientRect();
+    return {launcher: [Math.round(r.left), Math.round(r.top)], want: [want.left, want.top],
+            panel: [Math.round(panel.left), Math.round(panel.top), Math.round(panel.right),
+                    Math.round(panel.bottom)],
+            hidden: launcher.hidden, float: forgeAssistant.shell.state.freeFloat};
+}"""
+
+
+def test_floating_a_tap_outside_puts_the_launcher_at_the_nearest_of_the_six(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        for at, anchor in (({"x": 0.15, "y": 0.1}, "top-left"),
+                           ({"x": 0.55, "y": 0.9}, "bottom-center")):
+            page.evaluate("(at) => { const shell = forgeAssistant.shell; shell.setFreeFloat(true);"
+                          " shell.state.floatAt = at; shell.open(); shell.placeNow(); }", at)
+            settle(page, 4)
+            # Somewhere outside the panel, away from it.
+            box = page.evaluate(LAUNCHER_AT, anchor)["panel"]
+            x = 1500 if box[0] < 800 else 100
+            page.mouse.click(x, 450)
+            settle(page, 4)
+            closed = page.evaluate(LAUNCHER_AT, anchor)
+            assert closed["hidden"] is False and closed["float"] is True, closed
+            assert closed["launcher"] == closed["want"], (anchor, closed)
+            # Opened again, the panel is there too.
+            page.evaluate("forgeAssistant.shell.open()")
+            settle(page, 4)
+            panel = page.evaluate("forgeAssistant.anchorPoint(arguments[0], (() => {"
+                                  " const r = document.getElementById('forge-assistant-panel')"
+                                  ".getBoundingClientRect(); return {width: r.width, height: r.height};"
+                                  " })(), forgeAssistant.viewport(), null)".replace("arguments[0]",
+                                                                                 repr(anchor)))
+            opened = page.evaluate(LAUNCHER_AT, anchor)["panel"]
+            assert [opened[0], opened[1]] == [panel["left"], panel["top"]], (anchor, opened, panel)
+    finally:
+        page.close()
+
+
+def test_the_menus_switch_turns_it_off(browser):
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.click(".forge-assistant-utilities")
+        settle(page)
+        page.click(".forge-assistant-tap-close")
+        settle(page)
+        assert page.evaluate("forgeAssistant.shell.state.tapToClose") is False
+        page.mouse.click(400, 400)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True
+        page.click(".forge-assistant-utilities")
+        settle(page)
+        assert page.evaluate("document.querySelector('.forge-assistant-tap-close')"
+                             ".getAttribute('aria-checked')") == "false"
+        page.click(".forge-assistant-tap-close")
+        settle(page)
+        page.mouse.click(400, 400)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False
+    finally:
+        page.close()
+
+
+FRAME = """() => new Promise((done) => {
+    const frame = document.createElement("iframe");
+    frame.id = "a-frame";
+    frame.style.cssText = "position: fixed; left: 40px; top: 300px; width: 400px; height: 300px;"
+        + " z-index: 5; border: 0; background: white";
+    frame.srcdoc = "<body style='margin:0;height:600px'><button id='b'"
+        + " style='width:300px;height:200px'>in the frame</button></body>";
+    frame.addEventListener("load", () => done(), {once: true});
+    document.querySelector("gradio-app").appendChild(frame);
+})"""
+
+RELOAD_FRAME = """() => new Promise((done) => {
+    const frame = document.getElementById("a-frame");
+    frame.addEventListener("load", () => done(), {once: true});
+    frame.srcdoc = frame.srcdoc + " ";
+})"""
+
+
+def test_a_tap_in_a_frame_on_the_page_puts_it_away(browser):
+    """Mini Paint NEO's WanGP tab is a frame on Forge's own origin, and a tap
+    in a frame never reaches the page's document: the panel hears the frame's
+    own, a drag in it is no tap, and a frame that loads again is heard again."""
+    page = open_page(browser, 1600, 900)
+    try:
+        # No beat: what is heard is heard from the panel opening, and from the
+        # frame loading again while it is open.
+        page.evaluate("forgeAssistant.shell.readMemory = () => undefined")
+        page.evaluate(FRAME)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        mouse_drag(page, (100, 350), (100, 430))
+        page.mouse.up()
+        settle(page)
+        assert page.evaluate(IS_OPEN) is True, "a drag in the frame"
+        page.mouse.click(150, 400)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False, "a tap in the frame"
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        page.evaluate(RELOAD_FRAME)
+        settle(page)
+        page.mouse.click(150, 400)
+        settle(page)
+        assert page.evaluate(IS_OPEN) is False, "a tap in the frame loaded again while open"
+    finally:
+        page.close()

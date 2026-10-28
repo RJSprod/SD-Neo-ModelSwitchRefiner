@@ -3874,6 +3874,21 @@ the panel is the tab bar, WanGP's prompt or a menu. The size is kept with the
 rest of the panel's layout for the browser tab, as the width always was; the
 thin strip along the panel's left edge still drags the width alone.
 
+**A tap outside puts it away.** With the panel open, a tap or a click anywhere
+outside it closes it back to the launcher — on the page, on the tab bar, and
+inside Mini Paint NEO's WanGP page too. Only a tap counts: a drag, a scroll
+(the wheel, a finger, a scroll bar), a pinch, a press that began inside the
+panel, or the page's own clicks leave it open. The tap still does what it does
+where it lands — a button you tap is pressed, a text box you tap gets the
+keyboard — so the panel simply gets out of the way. Inside the panel, on the
+settings column docked in it, and inside a dialog (the panel's own editors,
+or anyone's) is not outside. The launcher comes back at the nearest of the six
+resting places: anchored, that is where the panel already was; with Free Float
+on, it is the corner or centre nearest where the panel was, and the panel opens
+there next time (the **✕** still leaves it exactly where the panel was).
+**Tap Outside to Close**, in the **⋯** menu's Panel group, is on until you turn
+it off, and remembered in this browser.
+
 **Press the launcher two, three or four times.** Twice goes back to the
 workspace you were in before this one — twice again and you are back where you
 started, so two workspaces can be flipped between; with focus on, focus goes
