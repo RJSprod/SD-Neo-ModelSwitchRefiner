@@ -74,6 +74,19 @@
     // workspace for this long, longer while it or what goes with it is
     // pointed at, pressed or focused. The classes are the focus module's.
     const PEEK_MS = 4000;
+    // A tap outside the open panel puts it away (`tapOutside`): the click
+    // that ends a press made outside it, with the pointer no further than this
+    // from where it went down -- the theme's quick settings drawer's rule
+    // (model_chain_theme.js, QUICK_TAP_PX). Further than a finger's tap
+    // strays, nearer than a drag goes.
+    const TAP_OUTSIDE_PX = 16;
+    // What a tap outside is not outside of, beyond the assistant's own root:
+    // a docked settings column, drawn over the panel's body but living in
+    // Forge's page, and any dialog -- this extension's editors are modal
+    // dialogs on the body, and a dialog anybody opened is where the hand is
+    // meant to be (`noticeCover` spares the same).
+    const NOT_OUTSIDE = ".forge-assistant-docked-column, dialog, [role=\"dialog\"], "
+        + "[aria-modal=\"true\"], #lightboxModal";
     const FOCUS_BAR_CLASS = "forge-assistant-focus-bar";
     const FOCUS_KEEP_CLASS = "forge-assistant-focus-keep";
     // The Conversation tab's open bridge: a box for a thread's id and a
@@ -316,6 +329,64 @@
                 width: Math.round(room.width), height: Math.round(room.height)};
     }
 
+    // The intelligent drag. Asked for: "I want intelligent drag when the flyout
+    // menu is open. Such case, if I drag to the edge of the screen and the
+    // flyout menu is now off screen, then it should resize so the edge that
+    // was going to be off screen is now in screen. essentially dynamically
+    // size the window so that it always appears in the screen view. even when
+    // I drag it and try to make it off screen, then that just means the
+    // draggable area appears in screen as well as the rest of the window.
+    // This should fix annoying bounce reset back to position I get when I
+    // drag it to the edge."
+    //
+    // So a dragged box is drawn inside the room `anchorPoint` and `floatPoint`
+    // place against -- the window inside the safe-area insets and the gap --
+    // and a side the hand would take past an edge is held at that edge, the
+    // box cut on that side instead: the panel narrower, its conversation
+    // shorter. Down to `least`, and past that the box stops at the edge. Its
+    // top is never cut: the header is there, and the header is what is held.
+    // The launcher is never cut, only stopped.
+
+    /** The room a dragged box is kept in. */
+    function dragRoom(view, inset) {
+        const gap = gapFor(view);
+        const pad = inset || {top: 0, right: 0, bottom: 0, left: 0};
+        return {minX: view.left + pad.left + gap, maxX: view.left + view.width - pad.right - gap,
+                minY: view.top + pad.top + gap, maxY: view.top + view.height - pad.bottom - gap};
+    }
+
+    /** Where the hand puts `want` (its left, top, width, height), drawn
+     *  inside `room`: cut on a side that would cross an edge, to no less than
+     *  `least`; stopped at the edge past that. `cutX` and `cutY` say whether
+     *  it was cut. Pure. */
+    function fitBox(want, room, least) {
+        let left = Math.max(room.minX, want.left);
+        const right = Math.min(room.maxX, want.left + want.width);
+        let width = right - left;
+        const leastWidth = Math.min(least.width, want.width, room.maxX - room.minX);
+        if (width < leastWidth) {
+            width = leastWidth;
+            left = want.left < room.minX ? room.minX : room.maxX - width;
+        }
+        let top = Math.max(room.minY, want.top);
+        let height = Math.min(want.height, room.maxY - top);
+        const leastHeight = Math.min(least.height, want.height, room.maxY - room.minY);
+        if (height < leastHeight) {
+            height = leastHeight;
+            top = room.maxY - height;
+        }
+        return {left, top, width, height,
+                cutX: width < want.width - 0.5, cutY: height < want.height - 0.5};
+    }
+
+    /** The most the open panel may be tall: what shows of the window, less
+     *  the insets and the gap, never under MIN_VISIBLE_HEIGHT. */
+    function visibleCap(view, inset) {
+        const pad = inset || {top: 0, right: 0, bottom: 0, left: 0};
+        return Math.max(MIN_VISIBLE_HEIGHT,
+                        Math.floor(view.height - pad.top - pad.bottom - gapFor(view) * 2));
+    }
+
     // Nearest by the distance between the dragged element's centre and each
     // snapped rectangle's centre. On an exact tie the previous candidate wins,
     // so a drag held exactly between two anchors does not flicker between them.
@@ -442,6 +513,12 @@
             // The conversation's height, dragged by the corner; null is the
             // stylesheet's (`applyConversationHeight`).
             conversationHeight: null,
+            // What a drag to an edge cut a floating panel to -- its width and
+            // its height -- kept where it was let go, so it does not spring
+            // back to its own size and off the window; null when nothing was
+            // cut (`fitDrag`, `endDrag`).
+            fitWidth: null,
+            fitHeight: null,
             panelOpen: false,
             conversationExpanded: true,
             // The third state: Txt2Img's settings column in the panel. Kept
@@ -463,6 +540,10 @@
             // The workspace's own tab bar above the workspace in focus mode;
             // off, it is hidden until a tap brings it for a moment.
             focusBar: true,
+            // A tap outside the open panel puts it away, the launcher at the
+            // nearest of the six resting places; the ⋯ menu's Tap Outside to
+            // Close turns it off.
+            tapToClose: true,
             // What super focus put away to show the studio, to be put back
             // when it ends (`endStudio`): saved with the layout, so a reload
             // in super focus -- which starts outside focus, like every reload
@@ -494,6 +575,7 @@
         this._restoreAutoAttach();
         this._restoreSendToGenerate();
         this._restoreFocusBar();
+        this._restoreTapToClose();
         this.peekTimer = 0;
         // Super focus, while it is on: the workspace it is on; and whether it
         // is kept for the WanGP tab while focus lasts. See "Super Focused".
@@ -536,6 +618,12 @@
                 && found.conversationHeight >= 1) {
                 this.state.conversationHeight = Math.round(found.conversationHeight);
             }
+            ["fitWidth", "fitHeight"].forEach((name) => {
+                const value = found[name];
+                if (typeof value === "number" && isFinite(value) && value >= 1) {
+                    this.state[name] = Math.round(value);
+                }
+            });
             ["panelOpen", "conversationExpanded", "settingsDocked", "img2imgDocked",
              "wangpPrompt"].forEach((name) => {
                 if (typeof found[name] === "boolean") this.state[name] = found[name];
@@ -665,12 +753,33 @@
         } catch (error) { /* memory only; the switch still works */ }
     };
 
+    // Tap Outside to Close, the same way: on until turned off.
+    Shell.prototype._tapToCloseKey = function () {
+        return "forge-assistant-tap-close:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreTapToClose = function () {
+        try {
+            this.state.tapToClose = window.localStorage.getItem(this._tapToCloseKey()) !== "off";
+        } catch (error) {
+            this.state.tapToClose = true;
+        }
+    };
+
+    Shell.prototype._saveTapToClose = function () {
+        try {
+            window.localStorage.setItem(this._tapToCloseKey(), this.state.tapToClose ? "on" : "off");
+        } catch (error) { /* memory only; the switch still works */ }
+    };
+
     Shell.prototype._save = function () {
         const payload = {
             schemaVersion: 5,
             anchorOverride: this.state.anchorOverride,
             panelWidth: this.state.panelWidth,
             conversationHeight: this.state.conversationHeight,
+            fitWidth: this.state.fitWidth,
+            fitHeight: this.state.fitHeight,
             panelOpen: this.state.panelOpen,
             conversationExpanded: this.state.conversationExpanded,
             settingsDocked: this.state.settingsDocked,
@@ -1011,6 +1120,7 @@
         this.menuHandle = {close: () => this.closeMenu()};
         this.disposers.push(this.host.registerMenu(this.menuHandle));
         this.applyConversationHeight();
+        this.applyMinimize();
         this.applyChat();
     };
 
@@ -1384,8 +1494,21 @@
     };
 
     Shell.prototype.placeNow = function () {
+        // Under a drag that has moved, the drag draws the box (`fitDrag`) and
+        // places it once where it is let go. A placement in between -- the
+        // panel's own size changing as the drag cuts it, which its
+        // ResizeObserver hears -- would write its width, its cap and its
+        // place back over the drag's.
+        if (this.drag && this.drag.moved) return;
         this.placePanel();
         this.syncDock();
+    };
+
+    /** The panel's own width in `view`: the one chosen by the corner or the
+     *  edge, or the nominal one, inside the bounds and the window. */
+    Shell.prototype.ownWidth = function (view) {
+        return Math.min(Math.max(this.state.panelWidth || NOMINAL_WIDTH, MIN_WIDTH),
+                        Math.min(MAX_WIDTH, view.width - 32));
     };
 
     Shell.prototype.placePanel = function () {
@@ -1439,10 +1562,12 @@
             // reached the far side of the screen on an installation with a
             // dozen tabs, which is a panel covering the page it is a control
             // for. It scrolls instead -- see `startStrip`.
-            const width = Math.min(Math.max(this.state.panelWidth || NOMINAL_WIDTH,
-                                            MIN_WIDTH),
-                                   Math.min(MAX_WIDTH, view.width - 32));
-            node.style.width = width + "px";
+            // A floating panel cut at an edge by a drag keeps the width it was
+            // cut to (`fitWidth`), never more than its own.
+            const own = this.ownWidth(view);
+            const fit = this.state.freeFloat && this.state.fitWidth > 0
+                ? Math.min(own, this.state.fitWidth) : own;
+            node.style.width = Math.round(fit) + "px";
         }
         const pad = insets();
         if (open) {
@@ -1453,8 +1578,14 @@
             // and all -- the moment somebody went to type. Written from the
             // visible viewport on every placement, which the keyboard
             // opening, the bar showing and a rotation all ask for.
-            const most = Math.floor(view.height - pad.top - pad.bottom - gapFor(view) * 2);
-            node.style.maxHeight = Math.max(MIN_VISIBLE_HEIGHT, most) + "px";
+            // And floating, the height a drag to the bottom cut it to: the
+            // header stays where it was put, and the panel is what fits
+            // under it (`fitHeight`).
+            let most = visibleCap(view, pad);
+            if (this.state.freeFloat && this.state.fitHeight > 0) {
+                most = Math.max(Math.min(MIN_VISIBLE_HEIGHT, most), Math.min(most, this.state.fitHeight));
+            }
+            node.style.maxHeight = most + "px";
         }
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
@@ -1524,9 +1655,19 @@
         // the header are both handles); the first one stands.
         if (this.drag) return;
         const target = event.target;
-        if (target && target !== node && target.closest
-            && target.closest("button, a, input, textarea, select")
-            && target.closest("button, a, input, textarea, select") !== node) return;
+        const control = target && target !== node && target.closest
+            ? target.closest("button, a, input, textarea, select") : null;
+        // A press on one of the header's buttons may become a drag too:
+        // asked for, "make the drag handle hit area larger. Its too small
+        // now". The whole row is the handle; a tap on a button is still the
+        // button's, because nothing is taken from the press until it has
+        // moved past DRAG_THRESHOLD -- no pointer capture (a captured
+        // pointer's click goes to the panel, not the button), no default
+        // cancelled. Anything else that is a control is not a handle.
+        const onButton = !!(control && control !== node && node === this.nodes.panel
+            && control.tagName === "BUTTON" && this.nodes.header
+            && this.nodes.header.contains(control));
+        if (control && control !== node && !onButton) return;
         // The press is this shell's. Left to the browser, a mouse or pen
         // press on the header's text starts a selection that grows across
         // the page as the hand moves, and a press inside a selection that
@@ -1540,7 +1681,7 @@
         // touch pointerdown with `detail` 0, which `headerClick` reads as a
         // keyboard activation: three taps on the header stopped toggling
         // focus the one time this cancelled every press.
-        if (event.pointerType !== "touch" && typeof event.preventDefault === "function") {
+        if (!onButton && event.pointerType !== "touch" && typeof event.preventDefault === "function") {
             event.preventDefault();
         }
         // A new press. Whatever the last drag left for the header's click to
@@ -1552,7 +1693,9 @@
         // (A press on the launcher notes it too, harmlessly: the launcher's
         // click is its own listener's and never reaches the panel, and the
         // next press anywhere clears the note before its click.)
-        this.headerPress = true;
+        // A press on a button is the button's until it moves, and never a
+        // press the header counts.
+        this.headerPress = !onButton;
         const box = node.getBoundingClientRect();
         this.drag = {
             node,
@@ -1561,15 +1704,19 @@
             startY: event.clientY,
             offsetX: event.clientX - box.left,
             offsetY: event.clientY - box.top,
+            startLeft: box.left,
+            startTop: box.top,
             width: box.width,
             height: box.height,
             moved: false,
             anchor: this.anchor(),
             committed: false,
+            onButton,
         };
         // A mouse never pans the page; anything else can, and in one browser
         // does whatever the handle says. See `watchPan`.
         if (event.pointerType && event.pointerType !== "mouse") this.watchPan(this.drag);
+        if (onButton) return;
         try {
             node.setPointerCapture(event.pointerId);
         } catch (error) { /* capture is an optimisation, not a requirement */ }
@@ -1697,6 +1844,14 @@
         }
         if (!drag.moved) {
             drag.moved = true;
+            // A press that began on a button is a drag from here on, and the
+            // button's: captured now, so its click goes to the panel, where
+            // the drag's tail is swallowed (`headerClick`).
+            if (drag.onButton) {
+                try {
+                    drag.node.setPointerCapture(drag.pointerId);
+                } catch (error) { /* capture is an optimisation, not a requirement */ }
+            }
             // Once: a class put on again, or an inset read again, is a cost
             // on every move for an answer that cannot change under a drag.
             this.nodes.root.classList.add("forge-assistant-dragging");
@@ -1707,26 +1862,110 @@
             drag.node.style.willChange = "transform";
         }
         if (!drag.inset) drag.inset = insets();
-        const left = event.clientX - drag.offsetX;
-        const top = event.clientY - drag.offsetY;
+        const view = viewport();
+        // Drawn inside the window: cut at an edge, stopped past what it may
+        // be cut to (`fitDrag`). Where it is drawn is where it is.
+        const fit = this.fitDrag(drag, event.clientX - drag.offsetX, event.clientY - drag.offsetY,
+                                 view);
+        const left = fit.left;
+        const top = fit.top;
         // Moved by a transform. `endDrag` writes the position once, where
         // the handle is let go.
-        drag.node.style.transform = "translate(" + Math.round(dx) + "px, " + Math.round(dy) + "px)";
-        // A docked settings column travels with the panel it is drawn in.
-        if (drag.node === this.nodes.panel) this.shiftDock(dx, dy);
-        const view = viewport();
+        drag.node.style.transform = "translate(" + Math.round(left - drag.startLeft) + "px, "
+            + Math.round(top - drag.startTop) + "px)";
+        // A docked settings column travels with the panel it is drawn in: by
+        // the same transform while the panel keeps its size, and placed again
+        // over its slot once the panel has been cut, the slot with it.
+        if (drag.node === this.nodes.panel) {
+            if (drag.cut) this.syncDock();
+            else this.shiftDock(left - drag.startLeft, top - drag.startTop);
+        }
         // Free float has nothing to snap to, so there is nothing to preview
         // and nothing to choose: where it is put is where it stays.
         if (this.state.freeFloat) {
             if (drag.hold === undefined) drag.hold = this.floatHold(drag.node);
-            drag.at = fractionOf({left, top, width: drag.width, height: drag.height},
+            drag.at = fractionOf({left, top, width: fit.width, height: fit.height},
                                  view, drag.inset, this.state.floatAt, drag.hold);
+            // Cut at the bottom, the place is the header's: "against the
+            // bottom" would mean the panel's own height, grown back up.
+            if (fit.cutY) drag.at.y = headerFraction(top, fit.height, view, drag.inset, drag.hold);
             return;
         }
         const centre = {x: left + drag.width / 2, y: top + drag.height / 2};
         drag.anchor = nearestAnchor(centre, {width: drag.width, height: drag.height},
                                     view, drag.inset, drag.anchor);
         this.preview(drag.anchor, view);
+    };
+
+    /** Where a floating box's header is, as the fraction `floatPoint` reads:
+     *  its share of the header's travel, never "against the bottom". */
+    function headerFraction(top, height, view, inset, hold) {
+        const room = floatTravel({width: 0, height}, view, inset, hold);
+        return room.travelY >= 1 ? clamp01((top - room.minY) / room.travelY) : 0;
+    }
+
+    /** The box a drag draws, at (`left`, `top`) where the hand puts it,
+     *  kept inside the window (`fitBox`), its size written when it changes.
+     *
+     *  The open panel is cut: its width, at its own width or the edge, down
+     *  to MIN_WIDTH; its height, by its max-height, to the room under its
+     *  header, down to MIN_VISIBLE_HEIGHT. Its own size is read once, at the
+     *  drag's first move -- the width it has without a cut, and the height it
+     *  is at the window's cap -- so a panel cut by an earlier drag grows back
+     *  as it is drawn away from the edge. The phone's sheet is the window's
+     *  width: it moves up and down only. The launcher is only stopped. */
+    Shell.prototype.fitDrag = function (drag, left, top, view) {
+        const room = dragRoom(view, drag.inset);
+        const panel = drag.node === this.nodes.panel && this.state.panelOpen;
+        if (!panel) {
+            return fitBox({left, top, width: drag.width, height: drag.height}, room,
+                          {width: drag.width, height: drag.height});
+        }
+        const style = drag.node.style;
+        if (drag.own === undefined) {
+            drag.sheet = !!(drag.node.classList && drag.node.classList.contains("forge-assistant-sheet"));
+            drag.cap = visibleCap(view, drag.inset);
+            const width = drag.sheet ? drag.width : this.ownWidth(view);
+            let height = drag.height;
+            if (!drag.sheet && (this.state.fitWidth > 0 || this.state.fitHeight > 0)) {
+                // Cut by the last drag: its own size, measured once.
+                style.width = Math.round(width) + "px";
+                style.maxHeight = drag.cap + "px";
+                height = drag.node.offsetHeight || height;
+            }
+            drag.own = {width, height};
+            // What is written on it now, read rather than assumed: a write is
+            // skipped only for the value already there.
+            const written = (value) => (/px$/.test(String(value || "")) ? Math.round(parseFloat(value)) : null);
+            drag.drawnWidth = drag.sheet ? Math.round(drag.width) : written(style.width);
+            drag.drawnCap = drag.sheet ? null : written(style.maxHeight);
+        }
+        // A panel as wide as the room has nowhere to go sideways -- a phone's,
+        // floating -- and a finger drifting a few pixels on its way up or
+        // down would otherwise cut it narrower, and keep it so: it stays put
+        // across, as the sheet does.
+        const across = !(drag.sheet || drag.own.width >= room.maxX - room.minX - 0.5);
+        const fit = fitBox({left: across ? left : drag.startLeft, top,
+                            width: drag.own.width, height: drag.own.height}, room,
+                           {width: across ? MIN_WIDTH : drag.own.width,
+                            height: MIN_VISIBLE_HEIGHT});
+        if (fit.cutX || fit.cutY) drag.cut = true;
+        if (!drag.sheet) {
+            const width = Math.round(fit.width);
+            if (width !== drag.drawnWidth) {
+                style.width = width + "px";
+                drag.drawnWidth = width;
+            }
+        }
+        // The cap only where it binds, and put back once it no longer does:
+        // a max-height written on every move is a layout on every move.
+        const cap = fit.cutY ? Math.round(fit.height) : (drag.sheet ? null : drag.cap);
+        if (cap !== drag.drawnCap) {
+            style.maxHeight = cap === null ? "" : cap + "px";
+            drag.drawnCap = cap;
+        }
+        drag.fit = fit;
+        return fit;
     };
 
     /** The outline at the anchor a drag would snap to. Drawn again only when
@@ -1763,13 +2002,25 @@
         this.nodes.root.classList.remove("forge-assistant-dragging");
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
         if (!cancelled && drag.moved) {
+            const fit = drag.node === this.nodes.panel ? drag.fit : null;
             if (this.state.freeFloat) {
                 if (drag.at) {
                     this.state.floatAt = drag.at;
                     this._saveFloat();
                 }
+                // Where it was let go, at the size it was drawn: no spring
+                // back to its own size, and so none back onto the window.
+                if (fit && !drag.sheet) {
+                    this.state.fitWidth = fit.cutX ? Math.round(fit.width) : null;
+                    this.state.fitHeight = fit.cutY ? Math.round(fit.height) : null;
+                }
             } else {
                 this.state.anchorOverride = drag.anchor;
+                // An anchor has the room: the panel goes there at its own size.
+                if (fit) {
+                    this.state.fitWidth = null;
+                    this.state.fitHeight = null;
+                }
             }
             // Only the launcher's own click is the tail of this gesture. A
             // panel dragged by its header leaves no click on the launcher, and
@@ -2138,6 +2389,8 @@
         // And before a press lands, a message's open actions go if the press
         // is not on that message. See `dismissActions`.
         this.on(window, "pointerdown", (event) => this.dismissActions(event), true);
+        // A tap outside the open panel. See `tapOutside`.
+        this.listenForTaps(window, null);
 
         [nodes.launcher, nodes.header].forEach((handle) => {
             this.on(handle, "pointerdown", (event) => {
@@ -2360,6 +2613,7 @@
     Shell.prototype.navigated = function (active) {
         this.noteWorkspace(active);
         this.applyGenerate();
+        this.watchFrames();
         this.applyDock();
         this.applyPrompt();
         this.applySuppression();
@@ -2424,6 +2678,8 @@
         // when nothing is already asking or waiting to.
         if (open) this.applyGenerate();
         if (open) this.applyPrompt(true);
+        if (open) this.watchFrames();
+        else this.outsidePress = null;
         if (!open) this.stopMemory();
         else if (!this._memoryTimer && !this._memoryBusy) this.readMemory();
     };
@@ -2851,9 +3107,11 @@
         if (!this.state.panelOpen || document.hidden || !this.store
             || typeof this.store.request !== "function") return;
         // WanGP coming up or going away is said by nothing; the reading's
-        // beat is when the button looks again, and the prompt box too.
+        // beat is when the button looks again, and the prompt box too, and
+        // for a frame a tap outside may land in.
         this.applyGenerate();
         this.applyPrompt();
+        this.watchFrames();
         const asked = this._memoryAsk = (this._memoryAsk || 0) + 1;
         this._memoryBusy = true;
         this.store.request(MEMORY_ROUTE, {deadline: MEMORY_DEADLINE})
@@ -3041,8 +3299,8 @@
     };
 
     /** The window passed after `counted` presses: one is `one` (the
-     *  launcher's panel; nothing on the header), two go back, and three that
-     *  found focus on turn it off. */
+     *  launcher's panel; on the header, the panel put away), two go back,
+     *  and three that found focus on turn it off. */
     Shell.prototype.afterPresses = function (counted, leaving, one) {
         if (counted === 1) {
             if (typeof one === "function") one();
@@ -3109,7 +3367,8 @@
      * "Just like the button." The launcher's pace and the launcher's counts
      * (`pressThree`, `pressFour`, `afterPresses`): a press belongs to the
      * gesture when it lands within TAP_WINDOW of the one before it, and what
-     * turns focus on acts inside its own press. One press is nothing here.
+     * turns focus on acts inside its own press. One press puts the panel
+     * away, as the launcher's one press opens it.
      */
     Shell.prototype.tapHeader = function () {
         // Like the launcher: in focus mode with the tab bar hidden, a tap
@@ -3128,7 +3387,14 @@
             const off = this.headerLeaving;
             this.resetHeaderTaps();
             try {
-                this.afterPresses(counted, off, null);
+                // One tap on the header's space puts the panel away: asked
+                // for, "when fly out is open, let's make single tap of the
+                // drag handle perform the minimize as well. So another way
+                // back to the flyout button state." After the window, since
+                // a second tap would mean going back.
+                this.afterPresses(counted, off, () => {
+                    if (this.state.panelOpen) this.putAway(true);
+                });
             } catch (error) {
                 this.fault(error);
             }
@@ -3285,6 +3551,214 @@
         this.markFocus(false);
         this.endPeek();
         this.leaveScreen();
+    };
+
+    // -- a tap outside -------------------------------------------------------- //
+    //
+    // Asked for: "if the flyout menu is open, tapping anywhere outside of it
+    // will close it. It should close back to the button state. Additionally,
+    // the location of the flyout button when I tap out to close should be the
+    // closest docked location. The docked locations are those when free float
+    // is off, there are six of them. Dragging or scrolling outside of the open
+    // fly out should have no impact, only tapping / clicking outside of it
+    // should make it minimize to the flyout button. Make the new tap to close
+    // function enabled / disabled via a new "..." menu entry".
+    //
+    // A tap is the click that ends a press made outside the panel with the
+    // pointer about where it went down (TAP_OUTSIDE_PX), the rule the theme's
+    // quick settings drawer goes by: a scroll or a pinch makes no click -- a
+    // touch the browser takes for a scroll is cancelled, a second finger is
+    // not a tap -- a drag across the page strays past the distance, a press
+    // on a scroll bar is a scroll, a press that began in the panel is the
+    // panel's, and only what a person did counts: the page's own clicks are
+    // synthetic, and a key between the press and the click (a key that
+    // clicks a button) spends the press. Nothing is taken from the tap: what
+    // it landed on still gets it, focus included -- so the launcher is not
+    // given the keyboard's focus, as the ✕ gives it.
+    //
+    // Heard in the capture phase, before anything on the way can stop it, on
+    // the window and in every frame on the page this document may reach:
+    // Mini Paint NEO's WanGP tab is a frame on Forge's own origin, and a tap
+    // in a frame never reaches this document (`watchFrames`).
+
+    /** Did `event` happen outside the assistant? Its root (the panel, the
+     *  launcher), a docked settings column and any dialog are not outside. */
+    Shell.prototype.outsideOf = function (event) {
+        const root = this.nodes && this.nodes.root;
+        const target = event && event.target;
+        const path = event && typeof event.composedPath === "function" ? event.composedPath() : null;
+        if (root && (path && path.length ? path.indexOf(root) !== -1
+            : !!(target && typeof root.contains === "function" && root.contains(target)))) {
+            return false;
+        }
+        const node = target && target.nodeType === 1 ? target : (target && target.parentElement);
+        return !(node && typeof node.closest === "function" && node.closest(NOT_OUTSIDE));
+    };
+
+    /** Was `event` a press on a scroll bar -- the page's or a box's? A press
+     *  there scrolls, and a scroll is no tap. */
+    function onScrollbar(event) {
+        const target = event && event.target;
+        if (!target || target.nodeType !== 1 || typeof target.getBoundingClientRect !== "function") {
+            return false;
+        }
+        const doc = target.ownerDocument;
+        const page = doc && doc.documentElement;
+        if (page && (target === page || target === doc.body)) {
+            return (page.clientWidth > 0 && event.clientX >= page.clientWidth)
+                || (page.clientHeight > 0 && event.clientY >= page.clientHeight);
+        }
+        const box = target.getBoundingClientRect();
+        const x = event.clientX - box.left - (target.clientLeft || 0);
+        const y = event.clientY - box.top - (target.clientTop || 0);
+        const across = target.scrollHeight > target.clientHeight && target.clientWidth > 0
+            && x >= target.clientWidth && x < box.width - (target.clientLeft || 0);
+        const along = target.scrollWidth > target.clientWidth && target.clientHeight > 0
+            && y >= target.clientHeight && y < box.height - (target.clientTop || 0);
+        return across || along;
+    }
+
+    /** The press a tap outside would end, or none. `frame` says which
+     *  document it was made in: a click ends only a press of its own
+     *  document. */
+    Shell.prototype.notePressOutside = function (event, frame) {
+        this.outsidePress = null;
+        if (!this.state.tapToClose || !this.state.panelOpen || !event) return false;
+        if (event.isTrusted === false || event.isPrimary === false) return false;
+        if (event.button !== undefined && event.button !== 0) return false;
+        if (!this.outsideOf(event) || onScrollbar(event)) return false;
+        this.outsidePress = {x: Number(event.clientX) || 0, y: Number(event.clientY) || 0,
+                             frame: frame || null};
+        return true;
+    };
+
+    /** The click that ends a press made outside: the panel put away, the
+     *  launcher at the nearest of the six resting places. True if it was. */
+    Shell.prototype.tapOutside = function (event, frame) {
+        const press = this.outsidePress;
+        this.outsidePress = null;
+        if (!press || !event || event.isTrusted === false) return false;
+        // The switch is read at the press; turning it off spends the press.
+        if (!this.state.panelOpen) return false;
+        if (press.frame !== (frame || null) || !this.outsideOf(event)) return false;
+        const x = Number(event.clientX) || 0;
+        const y = Number(event.clientY) || 0;
+        if (Math.max(Math.abs(x - press.x), Math.abs(y - press.y)) > TAP_OUTSIDE_PX) return false;
+        // A press just outside let go just inside clicks their common
+        // ancestor, which is outside; where the hand came off says otherwise.
+        const panel = this.nodes.panel;
+        if (!frame && panel && typeof panel.getBoundingClientRect === "function") {
+            const box = panel.getBoundingClientRect();
+            if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return false;
+        }
+        this.closeFromOutside();
+        return true;
+    };
+
+    /** Put away by a tap outside: back to the launcher, and the launcher at
+     *  the nearest of the six resting places. Anchored, the panel is at one
+     *  already and the launcher takes its place, as the ✕ leaves it.
+     *  Floating, it is the one nearest the panel's middle, and the panel
+     *  opens there next time: the place is the launcher's and the panel's
+     *  alike (`floatAt`), and the corner is remembered for Free Float off as
+     *  well. */
+    Shell.prototype.closeFromOutside = function () {
+        this.putAway(false);
+    };
+
+    /** The panel back to the launcher, at the nearest of the six resting
+     *  places (above): by a tap outside, and by one tap on the header's space
+     *  (`afterPresses`), which gives the launcher the keyboard's focus as the
+     *  ✕ does -- the tap was the panel's own. A floating panel put at a
+     *  resting place opens there at its own size: whatever a drag to an edge
+     *  cut it to is forgotten, there being room. */
+    Shell.prototype.putAway = function (focusLauncher) {
+        const panel = this.nodes.panel;
+        if (this.state.freeFloat && panel && typeof panel.getBoundingClientRect === "function") {
+            const box = panel.getBoundingClientRect();
+            if (box.width > 0 && box.height > 0) {
+                const anchor = nearestAnchor({x: box.left + box.width / 2, y: box.top + box.height / 2},
+                                             {width: box.width, height: box.height},
+                                             viewport(), insets(), this.anchor());
+                this.state.floatAt = anchorFraction(anchor);
+                this.state.anchorOverride = anchor;
+                this.state.fitWidth = null;
+                this.state.fitHeight = null;
+                this._saveFloat();
+            }
+        }
+        this.showOpen(false);
+        if (focusLauncher && this.nodes.launcher && typeof this.nodes.launcher.focus === "function") {
+            this.nodes.launcher.focus();
+        }
+    };
+
+    /** The ✕, shown only while a tap outside does not put the panel away:
+     *  asked for, "when tap out to close is enabled, the x button in the
+     *  flyout menu should be removed. The close action at that point is the
+     *  tap out gesture." One tap on the header's space puts it away too, and
+     *  from the keyboard Escape in the panel does (`documentKey`). */
+    Shell.prototype.applyMinimize = function () {
+        const button = this.nodes && this.nodes.minimize;
+        if (button) button.hidden = !!this.state.tapToClose;
+    };
+
+    /** Where an anchor is as a floating place: against the edge it names, or
+     *  halfway across. The launcher's travel is the whole box's, so these
+     *  are exactly the anchor's own pixels (`floatPoint`, `anchorPoint`). */
+    function anchorFraction(anchor) {
+        const parts = String(anchor || DEFAULT_ANCHOR).split("-");
+        return {x: parts[1] === "left" ? 0 : (parts[1] === "right" ? 1 : 0.5),
+                y: parts[0] === "top" ? 0 : 1};
+    }
+
+    /** A tap outside, heard on `view` -- the window, or a frame's -- in the
+     *  capture phase. */
+    Shell.prototype.listenForTaps = function (view, frame) {
+        this.on(view, "pointerdown", (event) => this.notePressOutside(event, frame), true);
+        this.on(view, "click", (event) => this.tapOutside(event, frame), true);
+        this.on(view, "pointercancel", () => { this.outsidePress = null; }, true);
+        this.on(view, "keydown", () => { this.outsidePress = null; }, true);
+    };
+
+    /** Every frame on the page whose document this one may reach -- Mini
+     *  Paint NEO's WanGP tab, on Forge's own origin -- heard for taps too,
+     *  once each document, again when a frame loads another. A frame from
+     *  another origin cannot be reached, and is left alone. Looked for when
+     *  the panel opens, on a change of workspace and on the panel's beat. */
+    Shell.prototype.watchFrames = function () {
+        if (!this.state.tapToClose || !this.state.panelOpen) return 0;
+        if (!document.querySelectorAll || typeof WeakSet !== "function") return 0;
+        this.watchedFrames = this.watchedFrames || new WeakSet();
+        this.watchedDocs = this.watchedDocs || new WeakSet();
+        let heard = 0;
+        Array.prototype.forEach.call(document.querySelectorAll("iframe"), (frame) => {
+            if (!this.watchedFrames.has(frame)) {
+                this.watchedFrames.add(frame);
+                this.on(frame, "load", () => this.watchFrame(frame));
+            }
+            if (this.watchFrame(frame)) heard += 1;
+        });
+        return heard;
+    };
+
+    Shell.prototype.watchFrame = function (frame) {
+        let view = null;
+        try {
+            view = frame.contentWindow;
+            // Another origin's window answers nothing about its document.
+            if (!view || !view.document) return false;
+        } catch (error) {
+            return false;
+        }
+        if (this.watchedDocs.has(view.document)) return true;
+        try {
+            this.listenForTaps(view, frame);
+        } catch (error) {
+            return false;
+        }
+        this.watchedDocs.add(view.document);
+        return true;
     };
 
     // -- the tab bar in focus mode ------------------------------------------ //
@@ -3806,7 +4280,8 @@
      *   Composer -- what goes with a message and what a reply's button does:
      *   Auto Attach and Send to Generate, the two switches.
      *
-     *   Panel -- the panel itself: Free Float, and the launcher's look.
+     *   Panel -- the panel itself: Free Float, the tab bar in focus, a tap
+     *   outside putting it away, and the launcher's look.
      *
      *   Models -- the host's utilities, which give a graphics card back and
      *   are last because they are not what anybody wants to hit on the way to
@@ -3823,7 +4298,8 @@
         if (NS.systemEditor) items.push(this.systemPromptItem());
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
-        items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem());
+        items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem(),
+                   this.tapToCloseItem());
         if (NS.look) items.push(this.customizeItem());
         const utilities = this.host.listUtilities();
         // Models: where the loaded LoRA's originals live, then whatever the
@@ -3986,6 +4462,37 @@
             this.setFocusBar(!on);
         });
         return item;
+    };
+
+    Shell.prototype.tapToCloseItem = function () {
+        const on = !!this.state.tapToClose;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-tap-close",
+                             "Tap Outside to Close");
+        item.type = "button";
+        // A mode, like Free Float above it: it reports its state.
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(on));
+        item.title = on
+            ? "Keep the panel open when you tap outside it"
+            : "Put the panel away when you tap outside it, the button at the nearest "
+              + "of the six resting places";
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            this.setTapToClose(!on);
+        });
+        return item;
+    };
+
+    Shell.prototype.setTapToClose = function (on) {
+        this.state.tapToClose = !!on;
+        this.outsidePress = null;
+        this._saveTapToClose();
+        this.applyMinimize();
+        if (this.state.tapToClose) this.watchFrames();
+        this.tell(on ? "A tap outside the panel puts it away."
+            : "A tap outside the panel leaves it open.", "info");
+        return this.state.tapToClose;
     };
 
     Shell.prototype.autoAttachItem = function () {
@@ -4173,6 +4680,11 @@
 
     Shell.prototype.setFreeFloat = function (on) {
         this.state.freeFloat = !!on;
+        // Anchored, every resting place has the room: no cut size.
+        if (!this.state.freeFloat) {
+            this.state.fitWidth = null;
+            this.state.fitHeight = null;
+        }
         // Turned on where the panel already is, rather than somewhere of its
         // own choosing: a mode that moves the thing you were looking at is a
         // mode people turn off again to find it.
@@ -4271,6 +4783,9 @@
                 && this.nodes.root.contains(document.activeElement),
             assistantMenuOpen: this.nodes.menu && !this.nodes.menu.hidden,
             focusActive: this.focus.isActive(),
+            // With no ✕ (Tap Outside to Close on), Escape in the open panel is
+            // the keyboard's way to put it away.
+            closesPanel: !!(this.state.panelOpen && this.state.tapToClose),
         };
         const action = NS.escapeOrder(event, context);
         if (!action) return;                  // the host's Escape still stands
@@ -4278,6 +4793,7 @@
         event.stopPropagation();
         if (action === "close-menu") this.closeMenu();
         else if (action === "exit-focus") this.toggleFocus();
+        else if (action === "close-panel") this.close();
     };
 
     /** Which edges the corner moves: the ones away from where the panel is
@@ -4403,6 +4919,7 @@
         }
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
+        this.adoptFit();
         const step = event.key === "ArrowLeft" ? RESIZE_STEP : -RESIZE_STEP;
         const width = (this.state.panelWidth || NOMINAL_WIDTH) + step;
         this.state.panelWidth = clampWidth(width);
@@ -4416,6 +4933,7 @@
         const keys = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]};
         const move = keys[event.key];
         if (!move) return;
+        this.adoptFit();
         const sides = this.cornerSides();
         const grow = move[0] ? (sides.x ? move[0] * (sides.x === "left" ? -1 : 1) : 0)
             : move[1] * (sides.y === "top" ? -1 : 1);
@@ -4439,6 +4957,8 @@
         if (this.resizing) this.endResize(null, true);
         this.state.panelWidth = null;
         this.state.conversationHeight = null;
+        this.state.fitWidth = null;
+        this.state.fitHeight = null;
         this.resizedOnce(this.cornerSides());
     };
 
@@ -4452,9 +4972,38 @@
     // and an end that every way out reaches. The edge moves the panel's left
     // side; the corner the sides `cornerSides` names, the conversation's
     // height with the vertical one.
+    /** A floating panel cut by a drag, taken at the size it is drawn: the
+     *  corner and the edge resize what is on the screen. Its width becomes
+     *  its own; its conversation, as tall as it is drawn. Nothing moves. */
+    Shell.prototype.adoptFit = function () {
+        if (!(this.state.fitWidth > 0) && !(this.state.fitHeight > 0)) return false;
+        if (this.state.fitWidth > 0) this.state.panelWidth = clampWidth(this.state.fitWidth);
+        if (this.state.fitHeight > 0) {
+            const transcript = this.nodes.transcript;
+            let drawn = transcript && !this.dockedNow ? transcript.offsetHeight : 0;
+            const slot = this.nodes.dock;
+            if (this.dockedNow && slot && transcript) {
+                // Docked, the conversation's height is what the slot is given
+                // for it (`sizeDock`), less what the cut took off the slot.
+                let most = NaN;
+                try {
+                    most = parseFloat(window.getComputedStyle(transcript).maxHeight);
+                } catch (error) { /* a host without computed styles */ }
+                const given = parseFloat(slot.style && slot.style.height);
+                if (most > 0 && given > 0) drawn = most - Math.max(0, given - (slot.offsetHeight || 0));
+            }
+            if (drawn > 0) this.state.conversationHeight = Math.round(drawn);
+        }
+        this.state.fitWidth = null;
+        this.state.fitHeight = null;
+        this.applyConversationHeight();
+        return true;
+    };
+
     Shell.prototype.startResize = function (event, handle) {
         if (event.button !== undefined && event.button !== 0) return;
         if (!event.isPrimary) return;
+        this.adoptFit();
         const node = handle || this.nodes.resize;
         const sides = node && node === this.nodes.corner ? this.cornerSides()
             : {x: "left", y: null, factor: 1};
@@ -6193,6 +6742,8 @@
     NS.memoryText = memoryText;
     NS.anchorPoint = anchorPoint;
     NS.nearestAnchor = nearestAnchor;
+    NS.fitBox = fitBox;
+    NS.dragRoom = dragRoom;
     NS.renderMarkdown = renderMarkdown;
     NS.promptFrom = promptFrom;
     NS.showingPicture = showingPicture;

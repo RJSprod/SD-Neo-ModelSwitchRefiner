@@ -399,9 +399,14 @@ class TestPressesOnTheHeader:
 
         assert found == {"during": ["four"], "fired": 0}
 
-    def test_one_press_does_nothing_and_is_forgotten(self):
+    def test_one_press_puts_the_panel_away_and_is_forgotten(self):
+        """Asked for: "when fly out is open, let's make single tap of the drag
+        handle perform the minimize as well". It was nothing; it is the panel
+        put away now, once the window has passed -- and still forgotten: the
+        lone press before the window is not the first of two or three."""
         found = run(HEADER + """
             const shell = headerShell();
+            shell.putAway = (focus) => shell.did.push("away:" + focus);
             shell.previousWorkspace = "img2img";
             tap(shell, space);
             lapse();
@@ -412,7 +417,7 @@ class TestPressesOnTheHeader:
             console.log(JSON.stringify({after, then: shell.did}));
         """)
 
-        assert found == {"after": [], "then": ["switch:img2img"]}, \
+        assert found == {"after": ["away:true"], "then": ["away:true", "switch:img2img"]}, \
             "the lone press before the window is not the first of three"
 
     def test_the_click_is_read_where_the_captured_pointer_puts_it(self):

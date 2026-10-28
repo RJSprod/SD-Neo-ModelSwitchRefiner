@@ -3810,19 +3810,36 @@ sheet, below). It is never taller than the part of the window that shows, so
 when the keyboard comes up the panel shortens and moves to stay above it, the
 composer with it.
 
+**A drag never takes the panel off the window.** While you drag the open
+panel, it is drawn inside the window: a side you drag past an edge stays at
+that edge and the panel gets narrower (down to 320 pixels) or, past the
+bottom, shorter (down to 120 pixels); past that it simply stops at the edge,
+and its top — the header you are holding — never leaves the window. Drag it
+back in and it grows back to its own size as it comes. With Free Float on,
+where you let go is where it stays, at the size it was drawn: there is no
+spring back onto the window, and the panel keeps that size until you drag it
+away from the edge, resize it by its corner, or tap outside it (which puts it
+at a resting place at its own size). With Free Float off it still snaps to the
+nearest of the six places when you let go, at its own size. A panel as wide as
+the window allows — a phone's — stays put sideways, so a finger drifting on
+its way up or down does not narrow it.
+
 **Opened**, it is one row of glyphs — 📑 **Workspace**, 💬 **Chat**, the **⋯**
-menu and **✕** — and the conversation under it. Every glyph carries its word as
+menu, and **✕** while Tap Outside to Close is off — and the conversation under
+it. Every glyph carries its word as
 a tooltip and to a screen reader. **Chat** shows the conversation or puts it
 away, the whole of it: collapsed, the transcript and the composer leave the
 layout and the accessibility tree rather than merely stopping being painted,
 and the glyph is lit while the conversation is showing. There is no line naming
 the character and the thread any more — the **⋯** menu's Chat group is headed
 by the character's name, and its **Threads** entry lists the threads with the
-one you are on marked. The space between the **⋯** and the **✕** is what you
-drag the panel by, and it has the launcher's quick actions: press it twice
-to go back to the workspace you were in before, three times to turn focus mode
-on or off (see *Focus*), four times on the WanGP tab for Super Focused; the
-buttons in that row stay buttons. That space also
+one you are on marked. The whole row is what you drag the panel by — a drag
+may start on one of its buttons too, and a tap on a button is still that
+button — and the space after the buttons, at least a finger's width of it, has
+the launcher's quick actions: press it once to put the panel away (back to
+the launcher, at the nearest of the six resting places), twice to go back to
+the workspace you were in before, three times to turn focus mode on or off
+(see *Focus*), four times on the WanGP tab for Super Focused. That space also
 says what is free, in small grey italics: system RAM and each NVIDIA card's
 VRAM, in gigabytes — `RAM 61.2  5090 18.4  3090 7.1` — with the full names and
 totals as a tooltip. It is read with one short request every five seconds while
@@ -3874,6 +3891,24 @@ the panel is the tab bar, WanGP's prompt or a menu. The size is kept with the
 rest of the panel's layout for the browser tab, as the width always was; the
 thin strip along the panel's left edge still drags the width alone.
 
+**A tap outside puts it away.** With the panel open, a tap or a click anywhere
+outside it closes it back to the launcher — on the page, on the tab bar, and
+inside Mini Paint NEO's WanGP page too. Only a tap counts: a drag, a scroll
+(the wheel, a finger, a scroll bar), a pinch, a press that began inside the
+panel, or the page's own clicks leave it open. The tap still does what it does
+where it lands — a button you tap is pressed, a text box you tap gets the
+keyboard — so the panel simply gets out of the way. Inside the panel, on the
+settings column docked in it, and inside a dialog (the panel's own editors,
+or anyone's) is not outside. The launcher comes back at the nearest of the six
+resting places: anchored, that is where the panel already was; with Free Float
+on, it is the corner or centre nearest where the panel was, and the panel opens
+there next time. **Tap Outside to Close**, in the **⋯** menu's Panel group, is
+on until you turn it off, and remembered in this browser. While it is on the
+header has no **✕**: a tap outside, or one tap on the header's space, puts the
+panel away, and from the keyboard **Escape** inside the panel does (Escape
+anywhere else is still Forge's, which interrupts a generation). Turned off, the
+**✕** is back, and leaves the launcher exactly where the panel was.
+
 **Press the launcher two, three or four times.** Twice goes back to the
 workspace you were in before this one — twice again and you are back where you
 started, so two workspaces can be flipped between; with focus on, focus goes
@@ -3884,7 +3919,7 @@ WanGP's page as a studio (see *Super Focused on the WanGP tab*, below): from
 Normal or Focused, four presses are Super Focused; from Super Focused, they are
 Focused again; on any other tab, four presses are Focused. The same presses on
 the open panel's header — the space you drag it by — do the same, except that
-one press there does nothing. Presses count as one gesture when each follows
+one press there puts the panel away (it opens it on the launcher). Presses count as one gesture when each follows
 the last within 300 ms — a double-click's pace — so two unhurried presses are
 still two ordinary presses, and a press after four starts a new count. Turning
 focus on happens on the third press itself, because a browser grants full
