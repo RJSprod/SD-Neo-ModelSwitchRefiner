@@ -506,9 +506,17 @@
         this.host = host;
         this.focus = focus;
         this.state = {
+            // Where the launcher rests, and where the open panel does: two
+            // places, each kept by itself -- one of the six with Free Float
+            // off (`anchorOverride`, `panelAnchor`), a free place with it on
+            // (`floatAt`, `panelAt`). Opening shows the panel at its own,
+            // closing the launcher at its own, and a drag moves only the one
+            // it holds (`placeNames`, docs/22 §3.44).
             anchorOverride: null,
+            panelAnchor: null,
             freeFloat: false,
             floatAt: null,
+            panelAt: null,
             panelWidth: null,
             // The conversation's height, dragged by the corner; null is the
             // stylesheet's (`applyConversationHeight`).
@@ -540,9 +548,8 @@
             // The workspace's own tab bar above the workspace in focus mode;
             // off, it is hidden until a tap brings it for a moment.
             focusBar: true,
-            // A tap outside the open panel puts it away, the launcher at the
-            // nearest of the six resting places; the ⋯ menu's Tap Outside to
-            // Close turns it off.
+            // A tap outside the open panel puts it away, the launcher at its
+            // own place; the ⋯ menu's Tap Outside to Close turns it off.
             tapToClose: true,
             // What super focus put away to show the studio, to be put back
             // when it ends (`endStudio`): saved with the layout, so a reload
@@ -587,8 +594,23 @@
         this.autoSent = new Map();
     }
 
-    Shell.prototype.anchor = function () {
-        return this.state.anchorOverride || this.settings.defaultAnchor || DEFAULT_ANCHOR;
+    /** The state's names for where `node` rests: the open panel's own or
+     *  the launcher's own. Without a node, the one on screen. */
+    Shell.prototype.placeNames = function (node) {
+        const panel = node ? node === this.nodes.panel : !!this.state.panelOpen;
+        return panel ? {anchor: "panelAnchor", at: "panelAt"}
+            : {anchor: "anchorOverride", at: "floatAt"};
+    };
+
+    /** The resting place of `node` (above), of the six. */
+    Shell.prototype.anchor = function (node) {
+        return this.state[this.placeNames(node).anchor]
+            || this.settings.defaultAnchor || DEFAULT_ANCHOR;
+    };
+
+    /** The free place of `node`, or null while it has none. */
+    Shell.prototype.floatOf = function (node) {
+        return this.state[this.placeNames(node).at] || null;
     };
 
     Shell.prototype._storageKey = function () {
@@ -610,6 +632,11 @@
             if (ANCHORS.indexOf(found.anchorOverride) >= 0) {
                 this.state.anchorOverride = found.anchorOverride;
             }
+            // The panel's own; a layout saved while the two shared one place
+            // gives the panel that place, so nothing moves on the update.
+            const panelAnchor = ANCHORS.indexOf(found.panelAnchor) >= 0 ? found.panelAnchor
+                : (found.panelAnchor === undefined ? found.anchorOverride : null);
+            if (ANCHORS.indexOf(panelAnchor) >= 0) this.state.panelAnchor = panelAnchor;
             if (typeof found.panelWidth === "number") {
                 this.state.panelWidth = Math.min(MAX_WIDTH,
                                                  Math.max(MIN_WIDTH, found.panelWidth));
@@ -673,10 +700,15 @@
             if (typeof found.freeFloat === "boolean") {
                 this.state.freeFloat = found.freeFloat;
             }
-            const at = found.floatAt;
-            if (at && typeof at.x === "number" && typeof at.y === "number") {
-                this.state.floatAt = {x: clamp01(at.x), y: clamp01(at.y)};
-            }
+            const fraction = (at) => (at && typeof at.x === "number" && typeof at.y === "number"
+                ? {x: clamp01(at.x), y: clamp01(at.y)} : null);
+            const at = fraction(found.floatAt);
+            if (at) this.state.floatAt = at;
+            // The panel's own, or -- remembered while the two shared one --
+            // the launcher's, which was the panel's too.
+            const panelAt = found.panelAt === undefined ? fraction(found.floatAt)
+                : fraction(found.panelAt);
+            if (panelAt) this.state.panelAt = panelAt;
         } catch (error) {
             // A half-read preference is the default one.
         }
@@ -685,7 +717,8 @@
     Shell.prototype._saveFloat = function () {
         try {
             window.localStorage.setItem(this._floatKey(), JSON.stringify(
-                {freeFloat: this.state.freeFloat, floatAt: this.state.floatAt}));
+                {freeFloat: this.state.freeFloat, floatAt: this.state.floatAt,
+                 panelAt: this.state.panelAt}));
         } catch (error) { /* memory only; the panel still works */ }
     };
 
@@ -776,6 +809,7 @@
         const payload = {
             schemaVersion: 5,
             anchorOverride: this.state.anchorOverride,
+            panelAnchor: this.state.panelAnchor,
             panelWidth: this.state.panelWidth,
             conversationHeight: this.state.conversationHeight,
             fitWidth: this.state.fitWidth,
@@ -1518,7 +1552,8 @@
         const node = open ? this.nodes.panel : this.nodes.launcher;
         const view = viewport();
         const narrow = view.width < NARROW_VIEWPORT;
-        root.setAttribute("data-anchor", this.anchor());
+        // The place of the one on screen: the sheet takes its half from it.
+        root.setAttribute("data-anchor", this.anchor(node));
         root.classList.toggle("forge-assistant-narrow", narrow);
         if (open) this.sizeDock();
         const sheet = open && narrow && !this.state.freeFloat;
@@ -1590,10 +1625,13 @@
         const box = {width: node.offsetWidth || NOMINAL_WIDTH,
                      height: node.offsetHeight || 44};
         if (open) this.placedHeight = node.offsetHeight;
+        // Each at its own place: the panel at the panel's, the launcher at
+        // the launcher's (`placeNames`).
+        const names = this.placeNames(node);
         let at;
-        if (this.state.freeFloat && this.state.floatAt) {
+        if (this.state.freeFloat && this.state[names.at]) {
             const hold = this.floatHold(node);
-            at = floatPoint(this.state.floatAt, box, view, pad, hold);
+            at = floatPoint(this.state[names.at], box, view, pad, hold);
             // Resized while floating: the edges the hand is not moving stay
             // where they were, and the fraction is the one that puts them
             // there (`heldEdges`).
@@ -1603,12 +1641,12 @@
                     : (typeof held.left === "number" ? held.left : at.left);
                 const top = typeof held.bottom === "number" ? held.bottom - box.height
                     : (typeof held.top === "number" ? held.top : at.top);
-                this.state.floatAt = fractionOf({left, top, width: box.width, height: box.height},
-                                                view, pad, this.state.floatAt, hold);
-                at = floatPoint(this.state.floatAt, box, view, pad, hold);
+                this.state[names.at] = fractionOf({left, top, width: box.width, height: box.height},
+                                                  view, pad, this.state[names.at], hold);
+                at = floatPoint(this.state[names.at], box, view, pad, hold);
             }
         } else {
-            at = anchorPoint(this.anchor(), box, view, pad);
+            at = anchorPoint(this.anchor(node), box, view, pad);
         }
         node.style.left = at.left + "px";
         node.style.top = at.top + "px";
@@ -1709,7 +1747,7 @@
             width: box.width,
             height: box.height,
             moved: false,
-            anchor: this.anchor(),
+            anchor: this.anchor(node),
             committed: false,
             onButton,
         };
@@ -1885,7 +1923,7 @@
         if (this.state.freeFloat) {
             if (drag.hold === undefined) drag.hold = this.floatHold(drag.node);
             drag.at = fractionOf({left, top, width: fit.width, height: fit.height},
-                                 view, drag.inset, this.state.floatAt, drag.hold);
+                                 view, drag.inset, this.floatOf(drag.node), drag.hold);
             // Cut at the bottom, the place is the header's: "against the
             // bottom" would mean the panel's own height, grown back up.
             if (fit.cutY) drag.at.y = headerFraction(top, fit.height, view, drag.inset, drag.hold);
@@ -2003,9 +2041,12 @@
         if (this.nodes.ghost) this.nodes.ghost.hidden = true;
         if (!cancelled && drag.moved) {
             const fit = drag.node === this.nodes.panel ? drag.fit : null;
+            // Only the place of what was dragged: the launcher's and the
+            // panel's are two, and moving one leaves the other where it is.
+            const names = this.placeNames(drag.node);
             if (this.state.freeFloat) {
                 if (drag.at) {
-                    this.state.floatAt = drag.at;
+                    this.state[names.at] = drag.at;
                     this._saveFloat();
                 }
                 // Where it was let go, at the size it was drawn: no spring
@@ -2015,7 +2056,7 @@
                     this.state.fitHeight = fit.cutY ? Math.round(fit.height) : null;
                 }
             } else {
-                this.state.anchorOverride = drag.anchor;
+                this.state[names.anchor] = drag.anchor;
                 // An anchor has the room: the panel goes there at its own size.
                 if (fit) {
                     this.state.fitWidth = null;
@@ -3633,7 +3674,7 @@
     };
 
     /** The click that ends a press made outside: the panel put away, the
-     *  launcher at the nearest of the six resting places. True if it was. */
+     *  launcher at its own place. True if it was. */
     Shell.prototype.tapOutside = function (event, frame) {
         const press = this.outsidePress;
         this.outsidePress = null;
@@ -3655,38 +3696,24 @@
         return true;
     };
 
-    /** Put away by a tap outside: back to the launcher, and the launcher at
-     *  the nearest of the six resting places. Anchored, the panel is at one
-     *  already and the launcher takes its place, as the ✕ leaves it.
-     *  Floating, it is the one nearest the panel's middle, and the panel
-     *  opens there next time: the place is the launcher's and the panel's
-     *  alike (`floatAt`), and the corner is remembered for Free Float off as
-     *  well. */
+    /** Put away by a tap outside: back to the launcher, at the launcher's
+     *  own place (`putAway`). */
     Shell.prototype.closeFromOutside = function () {
         this.putAway(false);
     };
 
-    /** The panel back to the launcher, at the nearest of the six resting
-     *  places (above): by a tap outside, and by one tap on the header's space
-     *  (`afterPresses`), which gives the launcher the keyboard's focus as the
-     *  ✕ does -- the tap was the panel's own. A floating panel put at a
-     *  resting place opens there at its own size: whatever a drag to an edge
-     *  cut it to is forgotten, there being room. */
+    /** The panel back to the launcher, by a tap outside and by one tap on the
+     *  header's space (`afterPresses`), which gives the launcher the
+     *  keyboard's focus as the ✕ does -- the tap was the panel's own.
+     *
+     *  Nothing moves: the launcher shows at its own place and the panel keeps
+     *  its own -- and the size a drag to an edge cut it to -- for the next
+     *  time it opens. Asked for: "I want the flyout menu open state to stay
+     *  put when opened and closed, as well as the button to stay in its
+     *  position. They should keep their positions independently." Until
+     *  then a put-away panel took the launcher to the resting place nearest
+     *  itself and opened there next time (docs/22 §3.44). */
     Shell.prototype.putAway = function (focusLauncher) {
-        const panel = this.nodes.panel;
-        if (this.state.freeFloat && panel && typeof panel.getBoundingClientRect === "function") {
-            const box = panel.getBoundingClientRect();
-            if (box.width > 0 && box.height > 0) {
-                const anchor = nearestAnchor({x: box.left + box.width / 2, y: box.top + box.height / 2},
-                                             {width: box.width, height: box.height},
-                                             viewport(), insets(), this.anchor());
-                this.state.floatAt = anchorFraction(anchor);
-                this.state.anchorOverride = anchor;
-                this.state.fitWidth = null;
-                this.state.fitHeight = null;
-                this._saveFloat();
-            }
-        }
         this.showOpen(false);
         if (focusLauncher && this.nodes.launcher && typeof this.nodes.launcher.focus === "function") {
             this.nodes.launcher.focus();
@@ -3703,9 +3730,10 @@
         if (button) button.hidden = !!this.state.tapToClose;
     };
 
-    /** Where an anchor is as a floating place: against the edge it names, or
-     *  halfway across. The launcher's travel is the whole box's, so these
-     *  are exactly the anchor's own pixels (`floatPoint`, `anchorPoint`). */
+    /** Where an anchor is as a free place: against the edges it names, or
+     *  halfway across -- exactly the anchor's own pixels, the launcher's and
+     *  the panel's alike, since a free place of 1 down is against the bottom
+     *  (`floatPoint`, `anchorPoint`). */
     function anchorFraction(anchor) {
         const parts = String(anchor || DEFAULT_ANCHOR).split("-");
         return {x: parts[1] === "left" ? 0 : (parts[1] === "right" ? 1 : 0.5),
@@ -4679,29 +4707,60 @@
     };
 
     Shell.prototype.setFreeFloat = function (on) {
+        const was = this.state.freeFloat;
         this.state.freeFloat = !!on;
         // Anchored, every resting place has the room: no cut size.
         if (!this.state.freeFloat) {
             this.state.fitWidth = null;
             this.state.fitHeight = null;
         }
-        // Turned on where the panel already is, rather than somewhere of its
-        // own choosing: a mode that moves the thing you were looking at is a
-        // mode people turn off again to find it.
-        if (this.state.freeFloat && !this.state.floatAt) {
-            const node = this.state.panelOpen ? this.nodes.panel : this.nodes.launcher;
-            const box = node && node.getBoundingClientRect
-                ? node.getBoundingClientRect() : null;
-            if (box) {
-                this.state.floatAt = fractionOf(box, viewport(), insets(), null,
-                                                this.floatHold(node));
-            }
+        // The launcher and the panel each where they are, rather than
+        // somewhere of the mode's own choosing: a mode that moves the thing
+        // you were looking at is a mode people turn off again to find it.
+        if (was !== this.state.freeFloat) {
+            this.keepPlace(this.nodes.launcher);
+            this.keepPlace(this.nodes.panel);
         }
         this._saveFloat();
         this._save();
         this.placeNow();
         return this.state.freeFloat;
     };
+
+    /** `node`'s own place carried into the mode just turned: turned on, a
+     *  free place where it is; turned off, the resting place nearest it.
+     *  The one on screen is measured; the one put away is where its own
+     *  place says (`placeNames`). */
+    Shell.prototype.keepPlace = function (node) {
+        const names = this.placeNames(node);
+        const shown = !!node && node === (this.state.panelOpen ? this.nodes.panel : this.nodes.launcher);
+        const box = shown && typeof node.getBoundingClientRect === "function"
+            ? node.getBoundingClientRect() : null;
+        const measured = box && box.width > 0 && box.height > 0 ? box : null;
+        if (this.state.freeFloat) {
+            this.state[names.at] = measured
+                ? fractionOf(measured, viewport(), insets(), null, this.floatHold(node))
+                : anchorFraction(this.anchor(node));
+            return;
+        }
+        const at = this.state[names.at];
+        if (measured) {
+            this.state[names.anchor] = nearestAnchor(
+                {x: measured.left + measured.width / 2, y: measured.top + measured.height / 2},
+                {width: measured.width, height: measured.height}, viewport(), insets(),
+                this.anchor(node));
+        } else if (at) {
+            this.state[names.anchor] = anchorNear(at);
+        }
+    };
+
+    /** The resting place nearest a free place: the six are the free places
+     *  at either end and the middle across, and at either end up and down
+     *  (`anchorFraction`), so the nearest is the nearest of those on each. */
+    function anchorNear(at) {
+        const x = at.x <= 0.25 ? "left" : (at.x >= 0.75 ? "right" : "center");
+        return (at.y < 0.5 ? "top" : "bottom") + "-" + x;
+    }
 
     // Giving a card back is slow enough to be worth saying so about, and it is
     // one of the few things here that half-succeed: the language model stops
@@ -4806,7 +4865,7 @@
      *  "right" or null, `y` "top" or "bottom". */
     Shell.prototype.cornerSides = function (sheet) {
         const panel = this.nodes.panel;
-        const parts = this.anchor().split("-");
+        const parts = this.anchor(panel).split("-");
         const vertical = parts[0];
         const horizontal = parts[1];
         if (sheet === undefined) {

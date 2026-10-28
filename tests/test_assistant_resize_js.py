@@ -43,8 +43,11 @@ function cornerShell(state) {
     transcript.offsetHeight = 200;
     transcript.maxHeightValue = "167px";
     shell.nodes = {panel, corner, resize, transcript};
-    shell.state = Object.assign({panelOpen: true, freeFloat: false, floatAt: null,
-                                 anchorOverride: "bottom-right", panelWidth: null,
+    // The panel's own place; the launcher's, elsewhere, is not where the
+    // panel is held.
+    shell.state = Object.assign({panelOpen: true, freeFloat: false, panelAt: null,
+                                 panelAnchor: "bottom-right", panelWidth: null,
+                                 floatAt: {x: 0.5, y: 0}, anchorOverride: "top-center",
                                  conversationHeight: null}, state || {});
     shell.settings = {defaultAnchor: "bottom-right"};
     shell.resizing = null;
@@ -71,19 +74,19 @@ function sized(shell) {
 def test_the_corner_is_the_one_away_from_where_the_panel_is_held():
     found = run(WORLD + """
         const at = (anchor, extra) => {
-            const shell = cornerShell(Object.assign({anchorOverride: anchor}, extra || {}));
+            const shell = cornerShell(Object.assign({panelAnchor: anchor}, extra || {}));
             return shell.cornerSides();
         };
-        const floating = cornerShell({freeFloat: true, floatAt: {x: 0, y: 0}});
+        const floating = cornerShell({freeFloat: true, panelAt: {x: 0, y: 0}});
         floating.nodes.panel.getBoundingClientRect = () => ({left: 24, top: 24, right: 384,
                                                              bottom: 524, width: 360, height: 500});
         console.log(JSON.stringify({
             bottomRight: at("bottom-right"), topLeft: at("top-left"),
             bottomCenter: at("bottom-center"), topRight: at("top-right"),
-            floatingLow: at("bottom-right", {freeFloat: true, floatAt: {x: 1, y: 1}}),
+            floatingLow: at("bottom-right", {freeFloat: true, panelAt: {x: 1, y: 1}}),
             floatingHigh: floating.cornerSides(),
             sheet: cornerShell().cornerSides(true),
-            sheetTop: cornerShell({anchorOverride: "top-left"}).cornerSides(true),
+            sheetTop: cornerShell({panelAnchor: "top-left"}).cornerSides(true),
         }));
     """)
 
@@ -146,7 +149,7 @@ def test_the_conversation_keeps_within_the_window_and_above_its_floor():
 
 def test_a_panel_centred_across_the_window_grows_both_ways():
     found = run(WORLD + """
-        const shell = cornerShell({anchorOverride: "bottom-center"});
+        const shell = cornerShell({panelAnchor: "bottom-center"});
         shell.startResize(press(), shell.nodes.corner);
         shell.moveResize(press({clientX: 866}));
         console.log(JSON.stringify(shell.state.panelWidth));

@@ -503,7 +503,7 @@ class TestPressesOnTheHeader:
             tap(shell, space);
             tap(shell, space, {moved: true});
             const afterDrag = {did: shell.did.slice(), flag: shell.suppressHeaderClick,
-                               count: shell.headerTaps || 0, at: shell.state.anchorOverride};
+                               count: shell.headerTaps || 0, at: shell.state.panelAnchor};
             [1, 2].forEach(() => tap(shell, space));
             lapse();
             console.log(JSON.stringify({afterDrag, then: shell.did}));

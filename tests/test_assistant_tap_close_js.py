@@ -44,7 +44,8 @@ function tapShell(state) {
                                                   width: 360, height: 460})};
     shell.nodes = {root, panel, inside};
     shell.state = Object.assign({panelOpen: true, tapToClose: true, freeFloat: false,
-                                 floatAt: null, anchorOverride: "bottom-right"}, state || {});
+                                 floatAt: null, anchorOverride: "bottom-right",
+                                 panelAt: null, panelAnchor: "bottom-right"}, state || {});
     shell.settings = {defaultAnchor: "bottom-right"};
     shell.closed = 0;
     shell.focused = 0;
@@ -130,41 +131,52 @@ def test_the_panel_its_docked_column_and_a_dialog_are_not_outside():
     assert found == {"panel": False, "column": False, "dialog": False, "page": True}
 
 
-def test_floating_the_launcher_goes_to_the_nearest_of_the_six():
-    """Floating, the launcher (and the panel, next time) is put at the
-    resting place nearest the panel's middle, as a floating place exactly on
-    it: against the edges it names, or halfway across. Anchored, it is where
-    the panel was: nothing is moved."""
+def test_putting_the_panel_away_moves_neither_it_nor_the_launcher():
+    """The launcher and the open panel each keep their own place, and putting
+    the panel away -- a tap outside, one tap on the header -- moves neither:
+    the launcher shows at its own, the panel keeps its own, and the size a
+    drag to an edge cut it to, for the next time it opens. Asked for: "if I
+    have the button in the upper right, and I have the open state in the
+    lower left, closing returns the button in the upper right." Until then a
+    put-away panel took the launcher to the resting place nearest itself
+    (docs/22 §3.44)."""
     found = run(WORLD + """
         const places = {};
-        const tapFrom = (box, state) => {
-            const shell = tapShell(Object.assign({freeFloat: true, floatAt: {x: 0.3, y: 0.3}}, state || {}));
-            shell.nodes.panel.getBoundingClientRect = () => Object.assign(
-                {right: box.left + 360, bottom: box.top + 460, width: 360, height: 460}, box);
-            shell.notePressOutside(at(page, 5, 5));
-            shell.tapOutside(at(page, 5, 5));
-            return {float: shell.state.floatAt, anchor: shell.state.anchorOverride,
+        const putAway = (state, how) => {
+            const shell = tapShell(state);
+            shell.nodes.panel.getBoundingClientRect = () => ({left: 40, top: 300, right: 400,
+                                                              bottom: 760, width: 360, height: 460});
+            if (how === "header") shell.putAway(true);
+            else {
+                shell.notePressOutside(at(page, 1200, 40));
+                shell.tapOutside(at(page, 1200, 40));
+            }
+            const s = shell.state;
+            return {closed: shell.closed, launcher: [s.anchorOverride, s.floatAt],
+                    panel: [s.panelAnchor, s.panelAt], cut: [s.fitWidth, s.fitHeight],
                     saved: shell.floatSaved};
         };
-        places.topLeft = tapFrom({left: 60, top: 40});
-        places.bottomCentre = tapFrom({left: 470, top: 330});
-        places.topRight = tapFrom({left: 880, top: 10});
-        places.bottomRight = tapFrom({left: 900, top: 320});
-        const anchored = tapShell({freeFloat: false, floatAt: {x: 0.3, y: 0.3}, anchorOverride: "top-left"});
-        anchored.notePressOutside(at(page, 5, 5));
-        anchored.tapOutside(at(page, 5, 5));
-        places.anchored = {float: anchored.state.floatAt, anchor: anchored.state.anchorOverride,
-                           saved: anchored.floatSaved};
+        const floating = {freeFloat: true, floatAt: {x: 1, y: 0}, panelAt: {x: 0, y: 1},
+                          anchorOverride: "top-right", panelAnchor: "bottom-left",
+                          fitWidth: 330, fitHeight: 400};
+        const anchored = {freeFloat: false, floatAt: null, panelAt: null,
+                          anchorOverride: "top-right", panelAnchor: "bottom-left",
+                          fitWidth: null, fitHeight: null};
+        places.floatingTap = putAway(floating, "tap");
+        places.floatingHeader = putAway(floating, "header");
+        places.anchoredTap = putAway(anchored, "tap");
+        places.anchoredHeader = putAway(anchored, "header");
         console.log(JSON.stringify(places));
     """)
 
-    assert found["topLeft"] == {"float": {"x": 0, "y": 0}, "anchor": "top-left", "saved": 1}
-    assert found["bottomCentre"] == {"float": {"x": 0.5, "y": 1}, "anchor": "bottom-center",
-                                     "saved": 1}
-    assert found["topRight"] == {"float": {"x": 1, "y": 0}, "anchor": "top-right", "saved": 1}
-    assert found["bottomRight"] == {"float": {"x": 1, "y": 1}, "anchor": "bottom-right",
-                                    "saved": 1}
-    assert found["anchored"] == {"float": {"x": 0.3, "y": 0.3}, "anchor": "top-left", "saved": 0}
+    for how in ("floatingTap", "floatingHeader"):
+        assert found[how] == {"closed": 1, "launcher": ["top-right", {"x": 1, "y": 0}],
+                              "panel": ["bottom-left", {"x": 0, "y": 1}], "cut": [330, 400],
+                              "saved": 0}, how
+    for how in ("anchoredTap", "anchoredHeader"):
+        assert found[how] == {"closed": 1, "launcher": ["top-right", None],
+                              "panel": ["bottom-left", None], "cut": [None, None],
+                              "saved": 0}, how
 
 
 def test_the_switch_is_in_the_panel_group_and_remembered_in_this_browser():

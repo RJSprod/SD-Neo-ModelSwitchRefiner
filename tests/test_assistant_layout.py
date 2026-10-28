@@ -465,7 +465,7 @@ def test_the_gallery_fills_the_view_between_generate_and_its_buttons(browser):
         # window -- is not a header: the gallery is measured as before.
         page.evaluate("""() => {
             const shell = forgeAssistant.shell;
-            shell.state.anchorOverride = "top-right";
+            shell.state.panelAnchor = "top-right";
             shell.state.panelWidth = 640;
             shell.open();
         }""")
@@ -1470,7 +1470,7 @@ PANEL_BOX = """() => {
             sheet: panel.classList.contains("forge-assistant-sheet"),
             modal: panel.getAttribute("aria-modal"), role: panel.getAttribute("role"),
             grip: [grip.left + grip.width / 2, grip.top + grip.height / 2],
-            at: forgeAssistant.shell.state.floatAt,
+            at: forgeAssistant.shell.state.panelAt,
             inner: [innerWidth, innerHeight]};
 }"""
 
@@ -2438,7 +2438,7 @@ def test_a_floating_panel_resized_by_its_corner_keeps_its_other_edges(browser):
         page.evaluate("forgeAssistant.shell.open()")
         settle(page)
         page.evaluate("""() => { const shell = forgeAssistant.shell; shell.setFreeFloat(true);
-                                 shell.state.floatAt = {x: 0.8, y: 0.8}; shell.placeNow(); }""")
+                                 shell.state.panelAt = {x: 0.8, y: 0.8}; shell.placeNow(); }""")
         settle(page, 4)
         start = page.evaluate(CORNER_BOX)
         assert start["where"] == "top-left", start
@@ -2446,7 +2446,7 @@ def test_a_floating_panel_resized_by_its_corner_keeps_its_other_edges(browser):
         grown = page.evaluate(CORNER_BOX)
         assert (grown["right"], grown["bottom"]) == (start["right"], start["bottom"]), (start, grown)
         assert grown["width"] == start["width"] + 120 and abs(grown["height"] - start["height"] - 90) <= 1
-        saved = page.evaluate("forgeAssistant.shell.state.floatAt")
+        saved = page.evaluate("forgeAssistant.shell.state.panelAt")
         assert saved["x"] < 0.8 and saved["y"] < 0.8, saved
     finally:
         page.close()
@@ -2664,49 +2664,79 @@ def test_the_docked_column_and_a_dialog_are_not_outside(browser):
         page.close()
 
 
-LAUNCHER_AT = """(anchor) => {
+PLACES = """() => {
+    const box = (node) => { const r = node.getBoundingClientRect();
+                            return [Math.round(r.left), Math.round(r.top),
+                                    Math.round(r.right), Math.round(r.bottom)]; };
     const launcher = document.querySelector(".forge-assistant-launcher");
-    const r = launcher.getBoundingClientRect();
-    const want = forgeAssistant.anchorPoint(anchor, {width: r.width, height: r.height},
-                                            forgeAssistant.viewport(), null);
-    const panel = document.getElementById("forge-assistant-panel").getBoundingClientRect();
-    return {launcher: [Math.round(r.left), Math.round(r.top)], want: [want.left, want.top],
-            panel: [Math.round(panel.left), Math.round(panel.top), Math.round(panel.right),
-                    Math.round(panel.bottom)],
-            hidden: launcher.hidden, float: forgeAssistant.shell.state.freeFloat};
+    const panel = document.getElementById("forge-assistant-panel");
+    return {open: forgeAssistant.shell.state.panelOpen,
+            launcher: launcher.hidden ? null : box(launcher),
+            panel: forgeAssistant.shell.state.panelOpen ? box(panel) : null};
 }"""
 
 
-def test_floating_a_tap_outside_puts_the_launcher_at_the_nearest_of_the_six(browser):
-    page = open_page(browser, 1600, 900)
-    try:
-        page.evaluate("forgeAssistant.shell.open()")
-        settle(page)
-        for at, anchor in (({"x": 0.15, "y": 0.1}, "top-left"),
-                           ({"x": 0.55, "y": 0.9}, "bottom-center")):
-            page.evaluate("(at) => { const shell = forgeAssistant.shell; shell.setFreeFloat(true);"
-                          " shell.state.floatAt = at; shell.open(); shell.placeNow(); }", at)
-            settle(page, 4)
-            # Somewhere outside the panel, away from it.
-            box = page.evaluate(LAUNCHER_AT, anchor)["panel"]
-            x = 1500 if box[0] < 800 else 100
-            page.mouse.click(x, 450)
-            settle(page, 4)
-            closed = page.evaluate(LAUNCHER_AT, anchor)
-            assert closed["hidden"] is False and closed["float"] is True, closed
-            assert closed["launcher"] == closed["want"], (anchor, closed)
-            # Opened again, the panel is there too.
+def drag_by_hand(page, start, end) -> None:
+    mouse_drag(page, start, end, steps=10)
+    page.mouse.up()
+    settle(page, 4)
+
+
+def test_the_launcher_and_the_panel_each_keep_their_own_place(browser):
+    """Asked for: "if I have the button in the upper right, and I have the
+    open state in the lower left, closing returns the button in the upper
+    right. So it should keep the same position separately, independently."
+
+    Both put there by hand -- the launcher dragged to the top right, opened,
+    the panel dragged to the bottom left -- with Free Float off and on; then
+    every way of closing (a tap outside, one tap on the header, Escape, and
+    the ✕ with the switch off) shows the launcher where it was put, and every
+    opening the panel where it was put."""
+    for free in (False, True):
+        page = open_page(browser, 1600, 900)
+        try:
+            page.evaluate("(on) => forgeAssistant.shell.setFreeFloat(on)", free)
+            settle(page)
+            launcher = centre_of(page, ".forge-assistant-launcher")
+            drag_by_hand(page, launcher, (1450, 60))
             page.evaluate("forgeAssistant.shell.open()")
             settle(page, 4)
-            panel = page.evaluate("forgeAssistant.anchorPoint(arguments[0], (() => {"
-                                  " const r = document.getElementById('forge-assistant-panel')"
-                                  ".getBoundingClientRect(); return {width: r.width, height: r.height};"
-                                  " })(), forgeAssistant.viewport(), null)".replace("arguments[0]",
-                                                                                 repr(anchor)))
-            opened = page.evaluate(LAUNCHER_AT, anchor)["panel"]
-            assert [opened[0], opened[1]] == [panel["left"], panel["top"]], (anchor, opened, panel)
-    finally:
-        page.close()
+            drag_by_hand(page, grip_point(page), (250, 800))
+            placed = page.evaluate(PLACES)
+            assert placed["panel"][0] < 400 and placed["panel"][3] > 600, (free, placed)
+
+            def closed_by(how):
+                if how == "outside":
+                    page.mouse.click(1000, 300)
+                elif how == "header":
+                    page.mouse.click(*grip_point(page))
+                    page.wait_for_timeout(400)
+                elif how == "escape":
+                    page.focus(".forge-assistant-input")
+                    page.keyboard.press("Escape")
+                else:
+                    page.evaluate("forgeAssistant.shell.setTapToClose(false)")
+                    settle(page)
+                    page.click("[aria-label='Minimize the assistant']")
+                settle(page, 4)
+                return page.evaluate(PLACES)
+
+            first = None
+            for how in ("outside", "header", "escape", "cross"):
+                closed = closed_by(how)
+                assert closed["open"] is False, (free, how)
+                left, top, right, bottom = closed["launcher"]
+                assert right > 1300 and top < 120, (free, how, closed)
+                first = first or closed["launcher"]
+                assert closed["launcher"] == first, (free, how, "the launcher stays put", closed)
+                # One press opens once the window for a second has passed.
+                page.click(".forge-assistant-launcher")
+                page.wait_for_timeout(400)
+                settle(page, 4)
+                opened = page.evaluate(PLACES)
+                assert opened["panel"] == placed["panel"], (free, how, "the panel stays put", opened)
+        finally:
+            page.close()
 
 
 def test_the_menus_switch_turns_it_off(browser):
@@ -2803,7 +2833,7 @@ def floating_page(browser, width_px: int = 500):
     page = open_page(browser, 1600, 900)
     page.evaluate("""(w) => { const shell = forgeAssistant.shell; shell.state.panelWidth = w;
                               shell.open(); shell.setFreeFloat(true);
-                              shell.state.floatAt = {x: 0.5, y: 0.3}; shell.placeNow(); }""", width_px)
+                              shell.state.panelAt = {x: 0.5, y: 0.3}; shell.placeNow(); }""", width_px)
     settle(page, 4)
     return page
 

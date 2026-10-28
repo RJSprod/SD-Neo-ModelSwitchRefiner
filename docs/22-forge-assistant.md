@@ -3679,6 +3679,9 @@ document.
 
 ### Where the launcher comes back
 
+**Replaced by §3.44**, at the user's word: the launcher comes back at its own
+place, and nothing moves. What follows is what this section built.
+
 At the nearest of the six resting places (`closeFromOutside`). Anchored, the
 panel is at one already and the launcher takes its place, as after the ✕.
 Floating, `nearestAnchor` is asked with the panel's own box and middle, and
@@ -3744,7 +3747,8 @@ Asked for on the same branch as §3.42, to go in the same pull request:
 the switch is turned off. One press on the header's space, once the window for
 a second has passed, puts the panel away (`afterPresses` is handed `putAway(true)`
 for the header, as it is handed `open` for the launcher): back to the launcher
-at the nearest of the six resting places, exactly as a tap outside does
+at the nearest of the six resting places (at its own place since §3.44),
+exactly as a tap outside does
 (`putAway` is that tap's code, `closeFromOutside` now calling it), with the
 launcher given the keyboard's focus as the ✕ gave it -- the tap was the
 panel's own. Two, three and four presses are what they were.
@@ -3802,7 +3806,8 @@ never "against the bottom", which would mean its own height grown back up the
 window. `placePanel` reads the two: a floating panel's width is the cut one,
 its max-height no more than the cut one. Anchored, the release snaps to the
 nearest anchor at the panel's own size, and the cut is forgotten. So is it when
-the panel is put at a resting place (`putAway`), when Free Float is turned off,
+the panel is put at a resting place (`putAway`; since §3.44 a panel put away
+keeps its place and its cut), when Free Float is turned off,
 and on the corner's reset; the corner, the edge and their keys take it as the
 panel's own size first (`adoptFit`: the cut width as `panelWidth`, the
 conversation as tall as it is drawn), so nothing springs back under the hand.
@@ -3841,6 +3846,99 @@ docked column test closes the panel by one tap on the header, and the theme's
 first-row test turns the switch off to see the ✕. Thirty-one mutations each
 fail a test (two survived a first pass and the tests were tightened). Not run
 on the user's machine or in a Gecko build.
+
+## 3.44 The launcher and the panel, each at its own place (2026-10-28)
+
+Asked for once §3.42 and §3.43 had merged (#307):
+
+> "Let's change the global behavior of the open and closed positions of the
+> flyout menu. I want the flyout menu open state to stay put when opened and
+> closed, as well as the button to stay in its position. They should keep
+> their positions independently. So, for example, if I have the button in the
+> upper right, and I have the open state in the lower left, closing returns
+> the button in the upper right. So it should keep the same position
+> separately, independently. This should be the new global behavior for open
+> and closing. The last PR wrote behavior I no longer want."
+
+Since round one the launcher and the open panel had one place between them:
+one of the six (`anchorOverride`) or, with Free Float on, one free place
+(`floatAt`), written by a drag of either and read by `placePanel` for
+whichever was on screen. §3.42 added a step on closing that moved that place
+to the resting place nearest the panel. Both are gone.
+
+### Two places
+
+The launcher keeps the two names it had, so a saved place carries over; the
+panel has two of its own, `panelAnchor` and `panelAt`. `placeNames(node)` says
+which pair is a node's -- the panel's, or the launcher's; without a node, the
+one on screen -- and `anchor(node)` and `floatOf(node)` read through it, the
+anchor falling back to the default setting for each alike. Everything that
+reads or writes a place goes through them:
+
+- `placePanel` puts the node on screen at its own: anchored at its anchor,
+  floating at its free place, the corner's held edges written into the
+  panel's own. The root's `data-anchor` is the shown node's, so the phone's
+  sheet takes its half from the panel's anchor.
+- A drag starts from the dragged node's anchor (`startDrag`) and its free
+  place (`moveDrag`), and `endDrag` writes only the dragged node's pair. A
+  panel's cut (§3.43) stays the panel's, as before.
+- `putAway` (a tap outside, one tap on the header) and the ✕ and Escape only
+  put the panel away (`showOpen(false)`): the launcher shows at its own place,
+  and the panel keeps its own and its cut for the next time it opens.
+- `cornerSides` reads the panel's anchor.
+
+### Free Float, each where it is
+
+Turning Free Float on or off carries both, each where it is (`keepPlace`).
+Turned on, the node on screen is measured and its free place is where it is
+drawn (the old code did this for the shown node, and only when it had no free
+place yet, so a stale one from an earlier turn moved it); the node put away
+takes the free place exactly on its anchor (`anchorFraction`, which is exact
+for the panel too, a free place of 1 down being against the bottom). Turned
+off, the node on screen goes to the anchor nearest its box (`nearestAnchor`,
+as a drag would choose), and the node put away to the anchor nearest its free
+place (`anchorNear`: the six are the free places at none, half and all of the
+way across and at either end up and down, so the nearest is the nearest of
+those on each axis). Free places are kept for the next turn, as they were.
+
+### From one place to two
+
+A layout saved before this has one place. On reading it, the panel takes the
+launcher's: a session layout without `panelAnchor` gives the panel the
+`anchorOverride` it has (`_restore`), and a Free Float record without
+`panelAt` gives the panel its `floatAt` (`_restoreFloat`), so nothing moves on
+the update. A layout saved since says the panel's own, `null` when it has none,
+and a panel with none stays at the default rather than taking the launcher's.
+The session payload keeps schema 5: it gained a key, and a bump would have
+thrown away the rest of the layout.
+
+### Verified
+
+`tests/test_assistant_places_js.py` (node, new): each node placed at its own,
+anchored and floating, and the sheet's half the panel's; a drag of the
+launcher writing the launcher's place alone, anchored and floating; Free Float
+on and off carrying each where it is, the one on screen measured and the one
+put away by its own place, a stale free place not used; a layout from before
+giving the panel the shared place, one saved since coming back as two, and a
+panel saved without a place staying without one.
+`tests/test_assistant_tap_close_js.py`: putting the panel away by a tap
+outside and by the header moves neither place nor the cut, anchored and
+floating (replacing the test of the nearest of the six).
+`tests/test_assistant_layout.py` (Chromium, new): the user's example by hand
+-- the launcher dragged to the top right, the panel to the bottom left -- with
+Free Float off and on, then a tap outside, one tap on the header, Escape and
+the ✕, each showing the launcher where it was put and each opening the panel
+where it was put (replacing the test of the nearest of the six). Translated:
+every test that sets or reads an open panel's place sets or reads the panel's
+own (`panelAt`, `panelAnchor`) -- in `test_assistant_js.py`'s Free Float
+tests (with the launcher's place asserted untouched by a panel's drag and its
+own when Free Float is turned on), the drag-fit, resize and header-tap tests,
+and in Chromium the shared floating page, the corner, the phone's free float
+and the gallery under a panel at the top -- and the cut is kept when the panel
+is put away.
+Twenty-one mutations each fail a test (two survived a first pass, one of them
+a mutant the corner test's stub could not tell apart, and the tests and the
+mutant were tightened). Not run on the user's machine or in a Gecko build.
 
 ## 4. Deliberate deviations
 

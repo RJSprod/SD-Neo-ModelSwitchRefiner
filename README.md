@@ -3752,7 +3752,16 @@ everything below.
 top and bottom. Drag it to move it; a setting picks the same six for anybody who
 would rather not drag, and a second setting picks the default for new sessions.
 What is stored is which of the six, never a pixel position: a window resized
-between sessions must not be able to leave the launcher off-screen. Dragging is
+between sessions must not be able to leave the launcher off-screen. **The open
+panel has a place of its own**, one of the same six, and the two are kept apart:
+drag the launcher and only the launcher moves, drag the open panel and only the
+panel does. Opening shows the panel where you last left it, and every way of
+closing it — a tap outside, one tap on its header, Escape, the **✕** — shows the
+launcher where you last left that, so a launcher in the top right with the panel
+along the bottom left goes back to the top right each time the panel closes.
+Nothing is moved on closing or opening. Both start from the default, and a
+layout from before the two were separate gives the panel the place it shared
+with the launcher. Dragging is
 one gesture for a mouse, a finger and a pen, it costs six pixels of movement
 before it counts as a drag rather than a tap, and it never fires the click it
 was. And it moves only what you took hold of: a mouse or pen press that begins
@@ -3790,13 +3799,14 @@ has been pressed for three and no generation or reply is running, writes one
 `<WebUI data directory>/model_chain_llm/logs/model_chain.log`, once per page
 load, naming the nodes whose contents changed most: where to look.
 
-**Free Float**, in the **⋯** menu, drops the six and lets you put the panel
-anywhere in the window. Turning it on leaves it exactly where it is rather than
-moving it somewhere of its own choosing, and turning it off snaps it back to
-the nearest of the six. It is remembered between sessions — not just this one,
+**Free Float**, in the **⋯** menu, drops the six and lets you put the launcher
+and the panel anywhere in the window, each where you put it. Turning it on
+leaves both exactly where they are rather than moving them somewhere of its own
+choosing, and turning it off snaps each to the nearest of the six to where it
+was. It is remembered between sessions — not just this one,
 unlike the corner and the width, because whether the thing snaps at all is a
 question you answer once. What is remembered is still not a pixel: it is how
-far across the window the panel was, so a smaller screen next time brings it
+far across the window each one was, so a smaller screen next time brings it
 proportionally in rather than leaving it outside. Where you let go is where it
 stays, to the pixel. Up and down, what keeps its place is the panel's
 **header**: when the panel changes height under it — the conversation opening,
@@ -3817,10 +3827,10 @@ bottom, shorter (down to 120 pixels); past that it simply stops at the edge,
 and its top — the header you are holding — never leaves the window. Drag it
 back in and it grows back to its own size as it comes. With Free Float on,
 where you let go is where it stays, at the size it was drawn: there is no
-spring back onto the window, and the panel keeps that size until you drag it
-away from the edge, resize it by its corner, or tap outside it (which puts it
-at a resting place at its own size). With Free Float off it still snaps to the
-nearest of the six places when you let go, at its own size. A panel as wide as
+spring back onto the window, and the panel keeps that place and that size —
+closed and opened again too — until you drag it away from the edge or resize
+it by its corner. With Free Float off it still snaps to the nearest of the six
+places when you let go, at its own size. A panel as wide as
 the window allows — a phone's — stays put sideways, so a finger drifting on
 its way up or down does not narrow it.
 
@@ -3837,7 +3847,7 @@ one you are on marked. The whole row is what you drag the panel by — a drag
 may start on one of its buttons too, and a tap on a button is still that
 button — and the space after the buttons, at least a finger's width of it, has
 the launcher's quick actions: press it once to put the panel away (back to
-the launcher, at the nearest of the six resting places), twice to go back to
+the launcher, at the launcher's own place), twice to go back to
 the workspace you were in before, three times to turn focus mode on or off
 (see *Focus*), four times on the WanGP tab for Super Focused. That space also
 says what is free, in small grey italics: system RAM and each NVIDIA card's
@@ -3865,7 +3875,8 @@ generating, Forge covers its Generate with Interrupt and Skip and the **▶**
 does not press it either: it says *Txt2img is already generating.* (red for
 three seconds, and on the status line) and does nothing. It never locks.
 **✕** puts the panel back to the
-launcher, at the same place; pressing the launcher brings it back there. Both
+launcher, at the launcher's own place; pressing the launcher brings the panel
+back at its own. Both
 rows — this one and the composer's, where **Send** is a glyph too — are 36
 pixels tall rather than a full finger, so a collapsed panel is little more than
 the row itself. As the conversation grows — a reply
@@ -3899,15 +3910,13 @@ panel, or the page's own clicks leave it open. The tap still does what it does
 where it lands — a button you tap is pressed, a text box you tap gets the
 keyboard — so the panel simply gets out of the way. Inside the panel, on the
 settings column docked in it, and inside a dialog (the panel's own editors,
-or anyone's) is not outside. The launcher comes back at the nearest of the six
-resting places: anchored, that is where the panel already was; with Free Float
-on, it is the corner or centre nearest where the panel was, and the panel opens
-there next time. **Tap Outside to Close**, in the **⋯** menu's Panel group, is
+or anyone's) is not outside. The launcher comes back at its own place, and
+the panel opens at its own next time: nothing is moved. **Tap Outside to Close**, in the **⋯** menu's Panel group, is
 on until you turn it off, and remembered in this browser. While it is on the
 header has no **✕**: a tap outside, or one tap on the header's space, puts the
 panel away, and from the keyboard **Escape** inside the panel does (Escape
 anywhere else is still Forge's, which interrupts a generation). Turned off, the
-**✕** is back, and leaves the launcher exactly where the panel was.
+**✕** is back, and closes the panel the same way.
 
 **Press the launcher two, three or four times.** Twice goes back to the
 workspace you were in before this one — twice again and you are back where you
@@ -4096,7 +4105,7 @@ field again.
 The panel is an overlay: it never
 pushes the workspace, and it is not modal on a desktop, so nothing behind it
 stops working while it is open. On a phone it becomes a sheet anchored to the
-half the docking says, and *that* is modal, because a sheet the page scrolls
+half the panel's own place says, and *that* is modal, because a sheet the page scrolls
 behind is a sheet you lose — unless Free Float is on, and then it floats where
 you put it, as on a desktop, and is not modal.
 
