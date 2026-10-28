@@ -1898,6 +1898,9 @@
             // Once: a class put on again, or an inset read again, is a cost
             // on every move for an answer that cannot change under a drag.
             this.nodes.root.classList.add("forge-assistant-dragging");
+            // In focus mode with the tab bar hidden, a drag shows it for a
+            // moment, as a tap does; held while the drag lasts (`peekHeld`).
+            this.peekBar();
             // A layer of its own for the drag's duration. A transformed
             // layer is composited where it lands; a box moved by `left` and
             // `top` is laid out and painted again on every move, and in
@@ -2080,6 +2083,8 @@
             if (drag.node === this.nodes.panel) this.suppressHeaderClick = true;
             this._save();
         }
+        // The bar a drag brought has its moment from the release.
+        if (drag.moved && this.peekTimer) this.armPeek();
         drag.node.style.left = "";
         drag.node.style.top = "";
         // The drag's transform and its layer go before the placement reads
@@ -3887,6 +3892,12 @@
     // anything done on it or on what goes with it (the theme's quick
     // settings), and held while it is pointed at or holds the keyboard's
     // focus. A tab pressed on it is the host's own, and focus follows it.
+    // So does a drag of either, asked for: "Let's make that temporary show
+    // also map to moving / dragging the flyout menu or button. So simply
+    // jiggling the position of it will cause the tab bar to temporarily show
+    // up, and then it will dismiss itself." The bar comes at the drag's first
+    // move, is held while the drag lasts, and has its moment again from the
+    // release (`moveDrag`, `peekHeld`, `endDrag`).
 
     Shell.prototype.applyFocusBar = function () {
         if (!this.focus || typeof this.focus.setBar !== "function") return;
@@ -3905,8 +3916,8 @@
         this.endPeek();
         this.applyFocusBar();
         this.tell(on ? "The tab bar shows above the workspace in focus mode."
-            : "The tab bar is hidden in focus mode: a tap on the button or on the panel's "
-              + "header shows it for a moment.", "info");
+            : "The tab bar is hidden in focus mode: a tap or a drag of the button or of the "
+              + "panel's header shows it for a moment.", "info");
         return this.state.focusBar;
     };
 
@@ -3936,6 +3947,9 @@
      *  only where the browser draws it (`:focus-visible`: the keyboard's, or a
      *  text box being typed in). */
     Shell.prototype.peekHeld = function () {
+        // The launcher or the panel being dragged: the moment starts again
+        // from the release.
+        if (this.drag && this.drag.moved) return true;
         const nodes = [this.focus.keptBar()].concat(
             Array.prototype.slice.call(document.querySelectorAll("." + FOCUS_KEEP_CLASS)));
         const active = document.activeElement;
