@@ -3061,7 +3061,8 @@ something in it holds a focus the browser draws (`peekHeld`): a finger's tap
 leaves `:hover` on what it tapped and focus on the button it pressed, and
 either would have held the bar for good, so hover counts for a mouse alone
 and focus only under `:focus-visible` (the keyboard's, or a text box being
-typed in). Focus going off ends the moment (`focusOff`, `endPeek`).
+typed in). Focus going off ends the moment (`focusOff`, `endPeek`). A drag
+of the launcher or the panel brings it too, since §3.46.
 
 ### What goes with the bar
 
@@ -4031,6 +4032,49 @@ button, the second does (translated from the tap that landed). The gallery
 picture dragged onto the docked canvas holds the exception. Twenty-two
 mutations each fail a test. Not run on the user's machine, in a Gecko build,
 or against the real WanGP frame.
+
+## 3.46 A drag of the launcher or the panel shows the hidden tab bar (2026-10-28)
+
+Asked for once #308 had merged:
+
+> "I have a function that shows or hides the tab bar when I'm in focus mode.
+> And currently tapping the flyout will cause the tap bar to show up
+> temporarily. Let's make that temporary show also map to moving / dragging
+> the flyout menu or button. So simply jiggling the position of it will cause
+> the tab bar to temporarily show up, and then it will dismiss itself."
+
+A drag never reached the peek (§3.37): the peek is asked by `tapLauncher` and
+`tapHeader`, and a drag's click is swallowed (`suppressClick`,
+`suppressHeaderClick`), so no press of a drag was ever counted. Now:
+
+- **At the drag's first move** -- the move past DRAG_THRESHOLD that makes a
+  press a drag, in `moveDrag`'s once-a-drag block -- `peekBar` is asked, as a
+  tap asks it: only in focus mode with the bar hidden and kept for this
+  workspace, never in Super Focused. Not at the press: a press that does not
+  move is a tap, which peeks already, and a press under the threshold is
+  nothing new.
+- **While the drag lasts** the bar is held (`peekHeld` answers yes for a drag
+  that has moved), so a drag longer than PEEK_MS does not lose the bar under
+  the hand.
+- **At the release** its moment starts again (`endDrag`, `armPeek` when a
+  drag that moved leaves a peek running), so the bar goes PEEK_MS after the
+  hand lets go -- "and then it will dismiss itself".
+
+Nothing else changes: the drag is still no press, so the panel neither opens
+nor closes for it, and the setting's sentence says a tap or a drag.
+
+### Verified
+
+`tests/test_assistant_js.py` (node, `TestTheTabBarInFocusMode`): a mouse drag
+of the launcher and of the panel peeks at its first move and not at the press
+or a nudge under the threshold, and nothing with the bar shown or out of focus
+mode; a drag held past the moment keeps the bar, the release arms a fresh
+moment, and its end hides the bar. `tests/test_theme_layout.py` (Chromium,
+`TestTheBarInFocusMode`): a mouse jiggling the launcher brings the bar over
+the workspace, the bar stays through a hold longer than the moment and goes
+the moment after the release, and the panel stays closed; a drag of the
+panel's header brings it and leaves the panel open. Four mutations each fail a
+test. Not run on the user's machine or in a Gecko build.
 
 ## 4. Deliberate deviations
 

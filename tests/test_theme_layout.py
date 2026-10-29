@@ -1335,7 +1335,8 @@ class TestTheBarInFocusMode:
     along the window's top: asked for once every tab was an icon on it
     ("make that entire row available in focus mode ... by default"). The ⋯
     menu's Tab Bar in Focus hides it, and then a tap on the launcher or the
-    panel's header brings it over the workspace for a moment."""
+    panel's header, or a drag of either, brings it over the workspace for a
+    moment."""
 
     def test_the_bar_is_kept_along_the_top_and_the_workspace_starts_under_it(self, browser):
         page = focus_page(browser)
@@ -1446,6 +1447,62 @@ class TestTheBarInFocusMode:
         page.close()
 
         assert found["mode"] == "peek" and found["visibility"] == "visible" and found["barOnTop"], found
+
+    def test_hidden_a_jiggle_of_the_launcher_brings_it_and_it_goes_after_the_release(self, browser):
+        """Asked for: "simply jiggling the position of it will cause the tab
+        bar to temporarily show up, and then it will dismiss itself." A mouse
+        drags the launcher back and forth: the bar comes with the first move,
+        stays while the button is held past the moment, and goes the moment
+        after it is let go."""
+        page = focus_page(browser)
+        page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+        enter_focus(page)
+        box = page.evaluate("(() => { const r = document.getElementById('forge-assistant-launcher')"
+                            ".getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()")
+        page.mouse.move(*box)
+        page.mouse.down()
+        page.mouse.move(box[0] - 30, box[1] - 20, steps=4)
+        page.mouse.move(box[0] + 10, box[1], steps=4)
+        settle(page, 2)
+        jiggled = page.evaluate(FOCUS_BAR)
+        page.wait_for_timeout(4600)
+        held = page.evaluate(FOCUS_BAR)
+        page.mouse.up()
+        settle(page, 2)
+        released = page.evaluate(FOCUS_BAR)
+        page.wait_for_timeout(4600)
+        settle(page, 4)
+        after = page.evaluate(FOCUS_BAR)
+        opened = page.evaluate("forgeAssistant.shell.state.panelOpen")
+        page.close()
+
+        assert jiggled["mode"] == "peek" and jiggled["visibility"] == "visible", jiggled
+        assert jiggled["barOnTop"] is True
+        assert held["mode"] == "peek", "held while the drag lasts"
+        assert released["mode"] == "peek"
+        assert after["mode"] == "hidden" and after["visibility"] == "hidden"
+        assert opened is False, "a drag is no press: the panel stayed closed"
+
+    def test_hidden_a_drag_of_the_panels_header_brings_it_too(self, browser):
+        page = focus_page(browser)
+        page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+        enter_focus(page)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page, 4)
+        grip = page.evaluate("(() => { const r = document.querySelector('.forge-assistant-grip')"
+                             ".getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()")
+        page.mouse.move(*grip)
+        page.mouse.down()
+        page.mouse.move(grip[0] - 40, grip[1] - 30, steps=5)
+        settle(page, 2)
+        found = page.evaluate(FOCUS_BAR)
+        page.mouse.up()
+        settle(page, 2)
+        still = page.evaluate("forgeAssistant.shell.state.panelOpen")
+        page.close()
+
+        assert found["mode"] == "peek" and found["visibility"] == "visible" and found["barOnTop"], found
+        assert still is True, "a drag of the header is no tap: the panel stayed open"
 
     def test_leaving_focus_puts_the_bar_back_in_the_page(self, browser):
         page = focus_page(browser)

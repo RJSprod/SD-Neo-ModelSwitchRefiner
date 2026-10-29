@@ -2250,6 +2250,90 @@ class TestTheTabBarInFocusMode:
         assert found["elsewhere"] == 1, "a press elsewhere renews nothing"
         assert found["on"] == 2 and found["live"] == 1, "renewed: the old moment cleared, a new one armed"
 
+    DRAG = """
+        // The launcher or the panel, dragged by a mouse: pressed, moved past
+        // the threshold, let go. What a drag moves is the shell's own; only
+        // the box it draws is stood in for.
+        const node = () => ({style: {}, setPointerCapture() {}, releasePointerCapture() {},
+                             getBoundingClientRect: () => ({left: 1100, top: 700, width: 140,
+                                                            height: 44})});
+        function handles(shell) {
+            shell.nodes.root = {classList: {add() {}, remove() {}}, appendChild() {}};
+            shell.nodes.launcher = node();
+            shell.nodes.panel = Object.assign(node(), {dataset: {}});
+            shell.nodes.header = {contains: () => false};
+            shell.state.freeFloat = false;
+            shell.settings = {defaultAnchor: "bottom-right"};
+            shell.preview = () => {};
+            shell.placeNow = () => {};
+            shell.shiftDock = () => {};
+            shell.fitDrag = (drag, left, top) => ({left, top, width: drag.width, height: drag.height});
+        }
+        const at = (x, y) => ({pointerId: 1, button: 0, buttons: 1, isPrimary: true,
+                               pointerType: "mouse", clientX: x, clientY: y, target: null,
+                               preventDefault() {}});
+    """
+
+    def test_a_drag_of_the_launcher_or_the_panel_brings_it_too(self):
+        """Asked for: "Let's make that temporary show also map to moving /
+        dragging the flyout menu or button. So simply jiggling the position of
+        it will cause the tab bar to temporarily show up, and then it will
+        dismiss itself." Not at the press -- a press that does not move is a
+        tap, which brings it already -- but at the drag's first move; and not
+        with the bar shown, or out of focus mode."""
+        found = run(PICKER + PEEK + self.DRAG + """
+            const out = {};
+            const drag = (which, options, focusOn) => {
+                const {shell} = peeking(options);
+                if (focusOn === false) shell.focus.on = "";
+                handles(shell);
+                shell.state.panelOpen = which === "panel";
+                const target = which === "panel" ? shell.nodes.panel : shell.nodes.launcher;
+                shell.startDrag(at(1170, 722), target);
+                const pressed = shell.focus.barMode;
+                shell.moveDrag(at(1172, 723));
+                const nudged = shell.focus.barMode;
+                shell.moveDrag(at(1150, 700));
+                const moved = shell.focus.barMode;
+                shell.endDrag(at(1150, 700), false);
+                return [pressed, nudged, moved, shell.focus.modes];
+            };
+            out.launcher = drag("launcher");
+            out.panel = drag("panel");
+            out.shown = drag("launcher", {shown: true});
+            out.unfocused = drag("launcher", null, false);
+            console.log(JSON.stringify(out));
+        """, sources=("shell",))
+
+        # Pressed and nudged within the threshold, nothing; moved, the peek.
+        assert found["launcher"] == ["shown", "shown", "peek", ["peek"]]
+        assert found["panel"] == ["shown", "shown", "peek", ["peek"]]
+        assert found["shown"][3] == [], "a shown bar has nothing to peek"
+        assert found["unfocused"][3] == []
+
+    def test_the_bar_a_drag_brought_stays_while_it_lasts_and_goes_after_the_release(self):
+        """A drag longer than the moment holds the bar; let go, its moment
+        starts again from the release, and then it goes."""
+        found = run(PICKER + PEEK + self.DRAG + """
+            const {shell} = peeking();
+            handles(shell);
+            shell.state.panelOpen = false;
+            shell.startDrag(at(1170, 722), shell.nodes.launcher);
+            shell.moveDrag(at(1150, 700));
+            fire();                       // the moment runs out mid-drag
+            const during = [shell.focus.barMode, live().length];
+            shell.moveDrag(at(1100, 600));
+            const armed = timers.length;
+            shell.endDrag(at(1100, 600), false);
+            const released = [shell.focus.barMode, live().length, timers.length > armed];
+            fire();
+            console.log(JSON.stringify({during, released, after: shell.focus.barMode}));
+        """, sources=("shell",))
+
+        assert found["during"] == ["peek", 1], "held while the drag lasts"
+        assert found["released"] == ["peek", 1, True], "a fresh moment from the release"
+        assert found["after"] == "hidden"
+
     def test_focus_going_off_ends_the_moment(self):
         found = run(PICKER + PEEK + """
             const {shell} = peeking();

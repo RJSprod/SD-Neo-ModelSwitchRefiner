@@ -3962,7 +3962,11 @@ the workspace alone again, and the bar is a tap away: one press on the
 launcher, or one tap on the open panel's header (the space you drag it by),
 brings it over the top of the workspace for four seconds — longer while you
 use it: anything you do on it starts the four seconds again, and it stays
-while a mouse rests on it or you type into one of its fields. A press on the
+while a mouse rests on it or you type into one of its fields. So does moving
+either of them: the moment you drag the launcher or the panel's header —
+even a little jiggle, past the few pixels that make a press a drag — the bar
+comes, stays for as long as you hold on, and goes four seconds after you let
+go. A drag is no press, so the panel neither opens nor closes for it. A press on the
 launcher still does what it always did (the panel opens after its 300 ms);
 two presses still go back and three still turn focus off. Super Focused has no
 tab bar at all, whatever this setting says, and no tap brings it.
