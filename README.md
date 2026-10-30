@@ -3764,16 +3764,33 @@ reply, while every later prompt has the reply alone in that place; the next
 message would read the whole last reply again before its first word — a few
 seconds on the Intel GPU. So the moment such a reply is saved, it is **read
 again in the background**: the status line says *Updating cache…* quietly, with
-a slow dot and no bar, and then *Ready.* Send stays Send. A message sent
-before it is done says **Waiting for the cache update…** in its progress, as
-the busy line, and starts the moment it is. It runs only on the server that
-wrote the reply, never starts or restarts one, gives way to an image job on its
-card and to a Voice Box render, and is skipped where the chat template does not
-render a reply the same way as it continues it (Gemma 4's own template without
-*Keep Gemma's thought marker*, which re-reads the last reply every turn
-anyway); skipped, the next message simply reads the reply again. The reply's
-own saved prompt cache is not kept (it holds the line); the one after the
-update is, so a restart resumes as it would without an emotion.
+a slow dot and no bar, and then *Ready.* Send stays Send.
+
+- **It follows the language model's own rules, whatever the model.** It waits
+  its turn exactly as a reply does — for an image generation on the model's
+  card, a Voice Box render or another language-model job — and never gives up
+  because the card is busy. It needs the server that wrote the reply: if that
+  server was unloaded, evicted or restarted with other settings meanwhile, its
+  cache is gone, nothing is left to update, and the next message reads the
+  conversation as it would without an emotion. It never starts a server.
+- **Every chat template.** Where the template writes a reply the model is still
+  writing the same way as an older one — Gemma 4 with *Keep Gemma's thought
+  marker* on, the default — the update reads the conversation ending on the
+  reply. Everywhere else, Gemma 4's own template among them, it reads the reply
+  as an older reply followed by a placeholder message of yours, which every
+  template writes the same way the next message will; llama-server keeps a
+  resume point at the start of your last message for models that cannot roll
+  their cache back freely, so the next message resumes exactly where its words
+  begin.
+- **A message sent meanwhile.** If the update is already reading, the message
+  says **Waiting for the cache update…** in its progress, as the busy line, and
+  starts the moment it is done. If the update is still waiting for its turn,
+  the message takes its place: it reads the same reply in its own prompt, so
+  nothing is waited for twice.
+- **The saved prompt cache.** The reply's own is not kept (it holds the line).
+  The update's is, in the first form, so a restart resumes as it would without
+  an emotion; in the second it is not (it holds the placeholder), and the last
+  one saved stays.
 
 On a llama-server older than the pinned build, which may not continue a reply
 it is handed, the line reaches the model as a reply of its own and the effect
