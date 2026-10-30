@@ -1111,6 +1111,15 @@
         readAloud.type = "button";
         readAloud.setAttribute("role", "switch");
         readAloud.setAttribute("aria-label", "Read replies aloud");
+        // The thread's emotion, while it has one: its word and a dot, a tap
+        // from the Emotion submenu. Not drawn while it is Off, so it takes
+        // nothing from the row then (`renderEmotion`).
+        const emotion = element("button", "forge-assistant-emotion-pill");
+        emotion.type = "button";
+        emotion.hidden = true;
+        const emotionWordNode = element("span", "forge-assistant-emotion-word");
+        emotion.appendChild(element("span", "forge-assistant-emotion-dot"));
+        emotion.appendChild(emotionWordNode);
         const send = iconButton("forge-assistant-send", SEND_GLYPH, "Send");
         const stop = iconButton("forge-assistant-stop", STOP_GLYPH, "Stop the reply");
         stop.hidden = true;
@@ -1121,6 +1130,7 @@
         toolbar.appendChild(attach);
         toolbar.appendChild(dictate);
         toolbar.appendChild(readAloud);
+        toolbar.appendChild(emotion);
         toolbar.appendChild(send);
         toolbar.appendChild(stop);
         composer.appendChild(chip);
@@ -1128,8 +1138,10 @@
         composer.appendChild(toolbar);
         composer.appendChild(filePicker);
         body.appendChild(composer);
+        emotion.addEventListener("click", () => this.openEmotion());
         Object.assign(this.nodes, {composer, chip, input, toolbar, attach, dictate,
-                                   readAloud, send, stop, filePicker});
+                                   readAloud, emotion, emotionWord: emotionWordNode, send, stop,
+                                   filePicker});
 
         const handle = element("div", "forge-assistant-resize");
         handle.setAttribute("role", "separator");
@@ -4197,7 +4209,8 @@
         menu.innerHTML = "";
         menu.dataset.which = which;
         const items = which === "workspaces" ? this.workspaceItems()
-            : (which === "threads" ? this.threadItems() : this.utilityItems());
+            : (which === "threads" ? this.threadItems()
+                : (which === "emotion" ? this.emotionItems() : this.utilityItems()));
         items.forEach((item) => menu.appendChild(item));
         menu.appendChild(this.cancelItem());
         menu.hidden = false;
@@ -4424,7 +4437,7 @@
     Shell.prototype.utilityItems = function () {
         const character = this.store.snapshot().selection.character;
         const items = [this.groupLabel(character ? "Chat \u00b7 " + character : "Chat"),
-                       this.newChatItem(), this.threadsItem()];
+                       this.newChatItem(), this.threadsItem(), this.emotionItem()];
         if (NS.systemEditor) items.push(this.systemPromptItem());
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
@@ -4491,6 +4504,185 @@
             : "Choose a conversation first";
         item.addEventListener("click", () => this.showMenu("threads"));
         return item;
+    };
+
+    // -- the thread's emotion ---------------------------------------------- //
+    //
+    // A line from a shared list -- Oobabooga's character bias -- that starts
+    // the character's next reply in this thread and is never in it (the
+    // server's mc_llm_emotions). Chosen per thread, Off in a new one; the list
+    // is added to and deleted from here or in LLM Studio.
+
+    const EMOTION_TRASH = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" '
+        + 'focusable="false" fill="none" stroke="currentColor" stroke-width="2" '
+        + 'stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/>'
+        + '<path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>';
+
+    /** The word of a line, for the pill: "*I am so happy*" is "happy". */
+    function emotionWord(line) {
+        const plain = String(line || "").replace(/\*/g, "").trim();
+        const found = /^I am (?:so )?(.+)$/i.exec(plain);
+        return found ? found[1] : plain;
+    }
+    NS.emotionWord = emotionWord;
+
+    function shownEmotion(view) {
+        const shown = (view && view.conversation && view.conversation.conversation) || {};
+        return String(shown.emotion || "");
+    }
+
+    /** Into the Emotion submenu, saying which line is on. */
+    Shell.prototype.emotionItem = function () {
+        const view = this.store.snapshot();
+        const on = shownEmotion(view);
+        // The word is the entry's own text; the dot (placed in the check
+        // column) and the line that is on come after it.
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-submenu "
+                             + "forge-assistant-emotion-item", "Emotion");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "menu");
+        const dot = element("span", "forge-assistant-emotion-dot");
+        dot.dataset.on = String(!!on);
+        item.appendChild(dot);
+        item.appendChild(element("span", "forge-assistant-emotion-value", on || "Off"));
+        item.disabled = !view.selection.thread;
+        item.title = view.selection.thread ? "This thread's emotion: " + (on || "Off")
+            : "Choose a conversation first";
+        item.addEventListener("click", () => this.showMenu("emotion"));
+        return item;
+    };
+
+    /** The Emotion submenu: Off and every line, this thread's checked, each
+     *  line with Delete, and a box to add one -- which is then chosen. */
+    Shell.prototype.emotionItems = function () {
+        const view = this.store.snapshot();
+        const snapshot = view.conversation || {};
+        const shown = snapshot.conversation || {};
+        const chosen = shownEmotion(view);
+        const lines = Array.isArray(snapshot.emotions) ? snapshot.emotions : [];
+        const items = [this.backItem(),
+                       this.groupLabel(shown.title ? "Emotion · " + shown.title : "Emotion")];
+        [""].concat(lines).forEach((line) => items.push(this.emotionRow(line, line === chosen)));
+        items.push(this.emotionAdder());
+        return items;
+    };
+
+    Shell.prototype.emotionRow = function (line, on) {
+        const row = element("div", "forge-assistant-emotion-row");
+        row.setAttribute("role", "presentation");
+        const choice = element("button", "forge-assistant-menu-item forge-assistant-emotion-choice",
+                               line || "Off");
+        choice.type = "button";
+        choice.setAttribute("role", "menuitemradio");
+        choice.setAttribute("aria-checked", String(!!on));
+        choice.dataset.emotion = line;
+        choice.addEventListener("click", () => this.chooseEmotion(line));
+        row.appendChild(choice);
+        if (line) {
+            const remove = element("button", "forge-assistant-emotion-delete");
+            remove.type = "button";
+            remove.setAttribute("role", "menuitem");
+            remove.innerHTML = EMOTION_TRASH;
+            remove.setAttribute("aria-label", "Delete " + line);
+            remove.title = "Delete " + line;
+            remove.dataset.emotion = line;
+            remove.addEventListener("click", () => this.deleteEmotion(line));
+            row.appendChild(remove);
+        }
+        return row;
+    };
+
+    Shell.prototype.emotionAdder = function () {
+        const row = element("div", "forge-assistant-emotion-add");
+        const input = element("input", "forge-assistant-emotion-input");
+        input.type = "text";
+        input.maxLength = 200;
+        input.placeholder = "*I am so nervous*";
+        input.setAttribute("aria-label", "New emotion");
+        const add = element("button", "forge-assistant-emotion-adder", "Add");
+        add.type = "button";
+        const submit = () => this.addEmotion(input.value);
+        add.addEventListener("click", submit);
+        input.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            submit();
+        });
+        row.appendChild(input);
+        row.appendChild(add);
+        return row;
+    };
+
+    /** The Emotion submenu, from the pill: the ⋯ menu opened a level down. */
+    Shell.prototype.openEmotion = function () {
+        const menu = this.nodes.menu;
+        menu.dataset.owner = "utilities";
+        this.showMenu("emotion");
+        this.nodes.utilities.setAttribute("aria-expanded", "true");
+        this.host.openOnly(this.menuHandle);
+    };
+
+    /** Draw the submenu again, if it is still the one up. */
+    Shell.prototype.redrawEmotion = function () {
+        const menu = this.nodes.menu;
+        if (menu && !menu.hidden && menu.dataset.which === "emotion") this.showMenu("emotion");
+    };
+
+    Shell.prototype.chooseEmotion = function (line) {
+        // Checked at once; the snapshot the answer brings says it for good.
+        const menu = this.nodes.menu;
+        if (menu && menu.querySelectorAll) {
+            menu.querySelectorAll(".forge-assistant-emotion-choice").forEach((choice) => {
+                choice.setAttribute("aria-checked", String(choice.dataset.emotion === line));
+            });
+        }
+        return this.store.setEmotion(line).then((outcome) => {
+            if (outcome && !outcome.ok) {
+                this.tell((outcome.error && outcome.error.message)
+                    || "That emotion could not be chosen.", "warn");
+            }
+            return this.store.refresh();
+        }).then(() => this.redrawEmotion());
+    };
+
+    Shell.prototype.deleteEmotion = function (line) {
+        return this.store.changeEmotions({remove: line})
+            .catch((error) => this.tell(error.message || "That emotion could not be deleted.",
+                                        "warn"))
+            .then(() => this.store.refresh())
+            .then(() => this.redrawEmotion());
+    };
+
+    Shell.prototype.addEmotion = function (text) {
+        const line = String(text || "").split(/\s+/).filter(Boolean).join(" ");
+        if (!line) {
+            this.tell("Write the emotion first.", "warn");
+            return Promise.resolve(null);
+        }
+        return this.store.changeEmotions({add: line})
+            .then(() => this.store.setEmotion(line))
+            .catch((error) => this.tell(error.message || "That emotion could not be added.",
+                                        "warn"))
+            .then(() => this.store.refresh())
+            .then(() => this.redrawEmotion());
+    };
+
+    /** The pill: shown while the thread has an emotion, with its word. */
+    Shell.prototype.renderEmotion = function (view) {
+        const pill = this.nodes.emotion;
+        if (!pill) return;
+        const on = view.selection.thread ? shownEmotion(view) : "";
+        // Every render calls this, a streamed reply once a frame: written only
+        // when it changed.
+        if (pill.dataset.line === on) return;
+        pill.dataset.line = on;
+        pill.hidden = !on;
+        if (this.nodes.emotionWord) this.nodes.emotionWord.textContent = emotionWord(on);
+        const label = on ? "Emotion: " + on : "Emotion: Off";
+        pill.setAttribute("aria-label", label);
+        pill.title = label;
     };
 
     /** Warm LoRA / Cold LoRA: two radio entries, the current one checked.
@@ -5687,6 +5879,7 @@
         this.renderChip(view.draft.attachment);
         this.renderAutoAttach();
         this.renderReadAloud(view);
+        this.renderEmotion(view);
         this.renderTranscript(view);
         this.renderStatus(view);
         nodes.send.disabled = !this.canSend(view);
@@ -6761,6 +6954,13 @@
         // The answer to a press, while it is fresh. See `tell`.
         if (fresh) {
             this.say(this.told.text, this.told.kind);
+            return;
+        }
+        // The last reply, written with an emotion, being read again in the
+        // background. Quiet: nothing waits on it until a message is sent, and
+        // that message's own progress then says it is waiting for it.
+        if (view.cacheUpdate && view.selection.thread) {
+            this.say("Updating cache…", "updating");
             return;
         }
         // Connected, with nothing chosen to show. Worth saying: an empty

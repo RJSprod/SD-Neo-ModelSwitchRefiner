@@ -5676,6 +5676,27 @@ class Runtime:
         with self._lock:
             return self._running
 
+    def warm_client(self, needs_vision: bool = False):
+        """A client for the server already up from the settings in force, or None.
+
+        Starts, stops and negotiates nothing, which is what makes it the one a
+        background job asks: the cache update after a reply written with an
+        emotion (:mod:`mc_llm_cache_update`) is worth doing only on the server
+        that wrote the reply. A server started from other settings, or without
+        the projector a request with a picture needs, is none of its business.
+        """
+        with self._lock:
+            if not self._running:
+                return None
+            configuration = self.configuration()
+            if not configuration.configured:
+                return None
+            if needs_vision and self._projector is None:
+                return None
+            if self._identity != _identity(configuration, self._projector):
+                return None
+            return self._client(configuration)
+
     def placement(self) -> mc_llm_context.Placement | None:
         """Where the running server was actually placed, or ``None``.
 

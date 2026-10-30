@@ -106,10 +106,15 @@ SET_RESPONSE_PREFIX = "set_response_prefix"
 DELETE_THREAD = "delete_thread"
 RESTORE_TO_DRAFT = "restore_to_draft"
 STOP = "stop"
+SET_EMOTION = "set_emotion"
+"""This thread's emotion (:mod:`mc_llm_emotions`): a line from the list, or empty
+for Off. A setting kept beside the thread rather than a write to it, so it asks
+for no revision and changes none."""
 
 ACTIONS = (CREATE_THREAD, SEND, EDIT_MESSAGE, REGENERATE, CONTINUE, RESEND_FROM_USER,
            BRANCH, SELECT_VERSION, DROP_VERSION, DELETE_MESSAGE, DELETE_FROM,
-           RENAME_THREAD, SET_RESPONSE_PREFIX, DELETE_THREAD, RESTORE_TO_DRAFT, STOP)
+           RENAME_THREAD, SET_RESPONSE_PREFIX, DELETE_THREAD, RESTORE_TO_DRAFT, STOP,
+           SET_EMOTION)
 """Every command, and nothing else is one.
 
 Adding to this tuple is a compatible change; renaming anything in it is not,
@@ -339,7 +344,7 @@ def _expected(raw, action: str):
     which is the behaviour this whole module replaced.
     """
     if raw is None:
-        if action in (CREATE_THREAD, STOP):
+        if action in (CREATE_THREAD, STOP, SET_EMOTION):
             return None
         raise Refused(INVALID_INPUT, "expected_revision is required.")
     if not isinstance(raw, dict):
@@ -393,6 +398,8 @@ def _payload(raw, action: str) -> dict:
         found["title"] = _text(raw.get("title"), "title", 4096)
     if "prefix" in raw:
         found["prefix"] = _text(raw.get("prefix"), "prefix", 16 * 1024)
+    if "emotion" in raw:
+        found["emotion"] = _text(raw.get("emotion"), "emotion", 4 * 1024)
     if "confirm_count" in raw:
         count = raw.get("confirm_count")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -661,6 +668,8 @@ def _dispatch(envelope: Envelope, scope: str) -> dict:
         return _delete_thread(envelope)
     if envelope.action == BRANCH:
         return _branch(envelope)
+    if envelope.action == SET_EMOTION:
+        return _set_emotion(envelope)
     if envelope.action in GENERATING:
         import mc_llm_conversation_ops as ops
 
@@ -882,8 +891,33 @@ def _delete_thread(envelope: Envelope) -> dict:
     receipt = Receipt(operation_id=envelope.operation_id, action=envelope.action,
                       issued_at=envelope.issued_at, payload_digest=envelope.digest())
     store_module.remove(store, key, envelope.expected_revision, receipt=receipt)
+    import mc_llm_emotions
+
+    mc_llm_emotions.forget(key.character, key.thread_id)
     publish(THREAD_DELETED, key)
     return _accepted(envelope, key, 0)
+
+
+def _set_emotion(envelope: Envelope) -> dict:
+    """Choose this thread's emotion, or Off. Writes nothing in the thread.
+
+    The thread is read only to say a missing one is missing, and its revision
+    is answered back unchanged: a page's next command is still against the
+    revision it has.
+    """
+    import mc_llm_emotions
+
+    store = chats()
+    key = envelope.conversation
+    conversation, raw = store_module.read(store, key)
+    try:
+        chosen = mc_llm_emotions.choose(key.character, key.thread_id,
+                                        envelope.payload.get("emotion") or "")
+    except mc_llm_emotions.Refused as refusal:
+        raise Refused(INVALID_INPUT, str(refusal))
+    revision = store_module.token_of(conversation, raw)
+    publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="emotion")
+    return _accepted(envelope, key, revision, extra={"emotion": chosen})
 
 
 def _branch(envelope: Envelope) -> dict:
@@ -931,8 +965,14 @@ def _branch_from(store, key: Key, expected, index: int, operation_id: str,
     made = Key(character=key.character, thread_id=identifier)
     receipt = Receipt(operation_id=operation_id, action=BRANCH, issued_at=issued_at,
                       payload_digest=digest, resulting_conversation=identifier)
-    return store_module.create(store, made,
-                               lambda: source.branch(index, identifier), receipt=receipt)
+    committed = store_module.create(store, made,
+                                    lambda: source.branch(index, identifier), receipt=receipt)
+    # A branch carries on from here, and the emotion the replies were being
+    # written in is part of what "here" is -- as the response prefix is.
+    import mc_llm_emotions
+
+    mc_llm_emotions.carry(key.character, key.thread_id, committed.conversation.identifier)
+    return committed
 
 
 def _stop(envelope: Envelope) -> dict:
@@ -991,7 +1031,10 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
         "response_prefix": conversation.response_prefix,
         "updated": conversation.updated,
         "damaged": bool(conversation.damaged),
+        "emotion": _emotion_of(key),
+        "cache_update": _cache_updating(key),
     }
+    found["emotions"] = _emotions()
     found["messages"] = [_message_view(index, message)
                          for index, message in enumerate(conversation.messages)]
 
@@ -1005,6 +1048,44 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
         found["operation"] = running.describe()
     found["recovery"] = [item.describe() for item in ops.recoverable(key)]
     return found
+
+
+def _emotion_of(key: Key) -> str:
+    """This thread's emotion, ``""`` for Off -- and Off when it cannot be read."""
+    try:
+        import mc_llm_emotions
+
+        return mc_llm_emotions.for_thread(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read a thread's emotion", exc_info=True)
+        return ""
+
+
+def _emotions() -> list:
+    try:
+        import mc_llm_emotions
+
+        return mc_llm_emotions.listed()
+    except Exception:
+        logger.debug("Model Chain: could not read the emotion list", exc_info=True)
+        return []
+
+
+def _cache_updating(key: Key) -> bool:
+    """Whether the last reply is being read again for this thread right now."""
+    try:
+        import mc_llm_cache_update
+
+        return mc_llm_cache_update.pending(conversation_name(key))
+    except Exception:
+        logger.debug("Model Chain: could not ask about the cache update", exc_info=True)
+        return False
+
+
+def conversation_name(key: Key) -> str:
+    """What a reply names its conversation by: its saved prompt cache's key, and
+    the cache update's (see ``mc_llm_conversation_ops._capture``)."""
+    return f"{key.character}/{key.thread_id}"
 
 
 def _message_view(index: int, message) -> dict:
@@ -1256,10 +1337,13 @@ RESULT_CONFLICT = "result_conflict"
 SPEECH_STATE = "speech_state"
 RESET_REQUIRED = "reset_required"
 CAPABILITIES_CHANGED = "capabilities_changed"
+CACHE_UPDATE = "cache_update"
+"""The last reply being read again after a reply written with an emotion, or
+done: ``updating`` true, then false (:mod:`mc_llm_cache_update`)."""
 
 KINDS = (SNAPSHOT, CONVERSATION_CHANGED, THREAD_CREATED, THREAD_DELETED, CHARACTER_CHANGED,
          MODE_CHANGED, OPERATION_ACCEPTED, OPERATION_PHASE, REPLY_PATCH, OPERATION_TERMINAL,
-         RESULT_CONFLICT, SPEECH_STATE, RESET_REQUIRED, CAPABILITIES_CHANGED)
+         RESULT_CONFLICT, SPEECH_STATE, RESET_REQUIRED, CAPABILITIES_CHANGED, CACHE_UPDATE)
 
 
 def publish(kind: str, key: Key | None = None, **payload) -> None:

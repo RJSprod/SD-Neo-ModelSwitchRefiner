@@ -351,6 +351,7 @@
             speech: Object.assign({}, this.speech),
             readAloud: this.readAloud,
             storageAvailable: this.storageAvailable,
+            cacheUpdate: this.updatingCache(),
         };
     };
 
@@ -828,14 +829,23 @@
         case "reset_required":
             this.refresh();
             break;
+        case "cache_update": {
+            // Published before the reply's own end, so the feed is still open
+            // for it, and held open by it until the update says it is done.
+            const shown = this.snapshots.get(key);
+            if (shown && shown.conversation) {
+                shown.conversation.cache_update = !!(event.payload && event.payload.updating);
+            }
+            break;
+        }
         default:
             break;
         }
         this.announce();
-        // A reply ending, or its read-aloud stopping, is the end of the
-        // boundary the feed was opened for.
+        // A reply ending, its read-aloud stopping, or the cache update after
+        // it ending, is the end of the boundary the feed was opened for.
         if (event.kind === "operation_terminal" || event.kind === "result_conflict"
-            || event.kind === "speech_state") {
+            || event.kind === "speech_state" || event.kind === "cache_update") {
             this.review();
         }
         return true;
@@ -1273,6 +1283,36 @@
         });
     };
 
+    // -- the thread's emotion ---------------------------------------------- //
+
+    /** Choose the open thread's emotion: a line from the list, or "" for Off.
+     *  A setting kept beside the thread, not a change to it, so nothing is
+     *  compared and the thread's revision does not move. */
+    Store.prototype.setEmotion = function (line) {
+        const envelope = this.envelope("set_emotion", {expected_revision: null});
+        envelope.payload = {emotion: String(line || "")};
+        return this.send(envelope);
+    };
+
+    /** Add a line to the shared list (`{add: line}`) or delete one
+     *  (`{remove: line}`). Answers with the list as it now is. */
+    Store.prototype.changeEmotions = function (change) {
+        return this.request("/emotions", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(change || {}),
+        });
+    };
+
+    /** Whether the open thread's last reply is being read again: the cache
+     *  update after a reply written with an emotion. From the snapshot, and
+     *  from the feed's `cache_update` while it lasts. */
+    Store.prototype.updatingCache = function () {
+        const key = conversationKey(this.selection.character, this.selection.thread);
+        const shown = this.snapshots.get(key);
+        return !!(shown && shown.conversation && shown.conversation.cache_update);
+    };
+
     Store.prototype.stop = function (operationId) {
         const envelope = this.envelope("stop", {expected_revision: null});
         envelope.payload = {operation_id: operationId};
@@ -1364,9 +1404,12 @@
     };
 
     /** Whether words are coming that the feed is for: a reply being written,
-     * or a reply being read aloud. */
+     * a reply being read aloud, or -- right after a reply written with an
+     * emotion -- that reply being read again, which ends in a few seconds and
+     * says so on the feed. */
     Store.prototype.needsFeed = function () {
-        return this.writing() || !!(this.speech && this.speech.playing);
+        return this.writing() || !!(this.speech && this.speech.playing)
+            || this.updatingCache();
     };
 
     /** Whether a reply is being written right now: words are arriving, or

@@ -233,6 +233,18 @@ def working(text: str, kind: str = "info") -> str:
             f'<span class="{PREFIX}-busy-bar" aria-hidden="true"></span></div>')
 
 
+def updating(text: str) -> str:
+    """A quiet line for work going on behind a finished one.
+
+    The cache update after a reply written with an emotion: nothing waits on it,
+    so it is not :func:`working`'s busy line with its bar -- the info line, with
+    a slow dot in front that the stylesheet pulses.
+    """
+    return (f'<div class="{PREFIX}-notice {PREFIX}-notice-info {PREFIX}-updating" '
+            f'role="status"><span class="{PREFIX}-updating-dot" aria-hidden="true"></span>'
+            f'<span class="{PREFIX}-updating-text">{escape(text)}</span></div>')
+
+
 def state(label: str, kind: str = "info", detail: str = "") -> str:
     """The runtime's state as one word, with the detail on hover.
 

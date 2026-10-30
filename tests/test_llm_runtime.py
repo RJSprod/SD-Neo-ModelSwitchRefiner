@@ -418,6 +418,46 @@ class TestAServerThatIsAlreadyRunning:
         assert len(started) == 1
         assert managed._process is first
 
+    def test_a_warm_client_is_the_running_server_s_and_starts_nothing(self, placed, server,
+                                                                       tmp_path, monkeypatch):
+        """What the cache update after a reply with an emotion asks for: the
+        server that wrote the reply, or nothing -- never a start."""
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+
+        assert managed.warm_client() is None
+        assert started == []
+
+        managed.client()
+        found = managed.warm_client()
+
+        assert found is not None
+        assert found.base_url.endswith(f":{managed._process.port}")
+        assert len(started) == 1
+
+    def test_a_warm_client_is_not_one_for_other_settings(self, placed, server, tmp_path,
+                                                          monkeypatch):
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        configure(monkeypatch, tmp_path, gpu_layers="all", context=4096, mode="fixed")
+
+        assert managed.warm_client() is None
+        assert len(started) == 1
+
+    def test_a_warm_client_for_a_picture_needs_the_projector_loaded(self, placed, server,
+                                                                     tmp_path, monkeypatch):
+        managed, _ = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        assert managed.warm_client(needs_vision=False) is not None
+        assert managed.warm_client(needs_vision=True) is None
+
     def test_the_card_filling_up_underneath_it_does_not_restart_it(self, placed, server,
                                                                    tmp_path, monkeypatch):
         """The reading that used to cause the thrash, made harmless. Free VRAM

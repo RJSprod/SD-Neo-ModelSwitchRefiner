@@ -863,6 +863,21 @@ class TestTheReply:
         assert wait_for(lambda: server.saved)
         assert server.saved == [(4, client.saved_caches.file_name("Ada/thread-1"))]
 
+    def test_a_reply_started_from_an_emotion_keeps_no_file(self, server, folder):
+        """Its slot holds the emotion's line before the reply, which no later
+        prompt has; the cache update after it is what is saved."""
+        server.answering = 4
+        client = self.saving(folder)
+
+        text = client.stream_conversation(
+            "Ada/thread-1", [{"role": "user", "content": "hi"},
+                             {"role": "assistant", "content": "*I am so happy*"}],
+            512, 7, lambda _text: None, save=False)
+        time.sleep(0.2)
+
+        assert text == "Hello there"
+        assert server.saved == []
+
     def test_the_first_reply_after_a_restore_is_sent_to_that_slot(self, server, folder):
         client = self.saving(folder)
         saved_file(folder, client.saved_caches)

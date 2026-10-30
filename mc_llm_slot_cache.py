@@ -758,7 +758,11 @@ def _define_client():
             return payload
 
         def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
-                                cancel=None, temperature=0.85, top_p=0.95) -> str:
+                                cancel=None, temperature=0.85, top_p=0.95,
+                                save: bool = True) -> str:
+            """``save`` false: restore as usual, but keep no file of this reply's
+            slot -- a reply started from the thread's emotion, whose cache holds a
+            line no later prompt has (:mod:`mc_llm_cache_update` saves after it)."""
             server = self.saved_caches
             if not conversation or server is None or not active():
                 return self.stream_chat(messages, max_tokens, seed, on_text, cancel,
@@ -782,7 +786,7 @@ def _define_client():
             if cancel is not None and cancel.is_set():
                 return "".join(pieces)
             slot = found.get("slot", pinned)
-            if slot is not None:
+            if slot is not None and save:
                 server.save_later(conversation, slot)
             return "".join(pieces)
 
