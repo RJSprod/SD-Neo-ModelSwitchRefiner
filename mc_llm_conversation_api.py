@@ -82,10 +82,15 @@ a plain ``def`` like the memory route's: choosing Cold frees gigabytes under
 two locks, and that belongs in Starlette's threadpool, not on the event loop.
 """
 
+EMOTIONS_ROUTE = f"{PREFIX}/emotions"
+"""The shared emotion list (:mod:`mc_llm_emotions`): GET reads it, POST
+``{"add": line}`` or ``{"remove": line}`` changes it. Which line a thread uses
+is the ``set_emotion`` command's."""
+
 ROUTES = (BOOTSTRAP_ROUTE, COMMANDS_ROUTE, SNAPSHOT_ROUTE, OPERATION_ROUTE, RESOLVE_ROUTE,
           SUBSCRIBE_ROUTE, EVENTS_ROUTE, ATTACHMENTS_ROUTE, ATTACHMENT_ROUTE,
           WORKSPACES_ROUTE, SERVED_ROUTE, UNLOAD_ROUTE, READ_ALOUD_ROUTE,
-          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE, LORA_RAM_ROUTE, JOURNAL_ROUTE)
+          SYSTEM_PROMPT_ROUTE, MEMORY_ROUTE, LORA_RAM_ROUTE, JOURNAL_ROUTE, EMOTIONS_ROUTE)
 
 HEADER = "x-mc-conversation-key"
 """Where the capability travels. A header, so it is never in a URL.
@@ -434,6 +439,34 @@ def lora_ram(mode: str = "") -> tuple[dict, int]:
     found = mc_lora_ram.set_mode(mode)
     message = found.pop("message", "")
     return {"ok": True, "lora": found, "message": message}, 200
+
+
+def emotions(body: dict | None = None) -> tuple[dict, int]:
+    """The emotion list, after ``body``'s change if there is one. ``(payload, status)``.
+
+    ``{"add": line}`` adds a line to the end (and is no change for a line that
+    is there), ``{"remove": line}`` takes one off -- and with it every thread's
+    choice of it, which then reads as Off. Nothing else is a change.
+    """
+    import mc_llm_emotions
+
+    try:
+        if body is None:
+            return {"ok": True, "emotions": mc_llm_emotions.listed()}, 200
+        if not isinstance(body, dict) or len(set(body) & {"add", "remove"}) != 1:
+            return {"ok": False, "error": {"code": service.INVALID_INPUT,
+                                           "message": "Add one emotion or remove one.",
+                                           "retryable": False}}, 400
+        line = body.get("add", body.get("remove"))
+        if not isinstance(line, str):
+            return {"ok": False, "error": {"code": service.INVALID_INPUT,
+                                           "message": "An emotion is a line of text.",
+                                           "retryable": False}}, 400
+        found = mc_llm_emotions.add(line) if "add" in body else mc_llm_emotions.remove(line)
+        return {"ok": True, "emotions": found}, 200
+    except mc_llm_emotions.Refused as refusal:
+        return {"ok": False, "error": {"code": service.INVALID_INPUT, "message": str(refusal),
+                                       "retryable": False}}, 400
 
 
 def forget_memory_reading() -> None:
@@ -870,6 +903,19 @@ def install(_demo=None, app=None) -> bool:
             return _failed("could not read or write a system prompt",
                            "The system prompt could not be read or saved.")
 
+    async def emotions_route(request: Request):
+        try:
+            checked(request)
+            body = await _body(request) if request.method == "POST" else None
+        except Refused as exc:
+            return _refusal(exc)
+        try:
+            payload, status = emotions(body)
+            return _json(payload, status)
+        except Exception:
+            return _failed("could not read or change the emotion list",
+                           "The emotion list could not be read or saved.")
+
     async def workspaces_route(request: Request):
         try:
             checked(request)
@@ -965,6 +1011,7 @@ def install(_demo=None, app=None) -> bool:
                 (MEMORY_ROUTE, memory_route, ["GET"]),
                 (LORA_RAM_ROUTE, lora_ram_route, ["GET", "POST"]),
                 (JOURNAL_ROUTE, journal_route, ["POST"]),
+                (EMOTIONS_ROUTE, emotions_route, ["GET", "POST"]),
                 (SERVED_ROUTE, served_route, ["GET"])):
             if path not in existing:
                 app.add_api_route(path, handler, methods=methods)

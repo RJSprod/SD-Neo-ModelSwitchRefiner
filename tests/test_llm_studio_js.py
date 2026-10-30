@@ -1860,3 +1860,139 @@ class TestEditOpensTheDialog:
         script = SCRIPT.read_text(encoding="utf-8")
         for name in ("edit", "editor", "edit-save", "edit-cancel"):
             assert f'"{ui.ident("chat", name)}"' in script, name
+
+
+# -- the thread's emotion ------------------------------------------------------ #
+
+EMOTION_PAGE = """
+const chip = element("button", "mc-llm-chat-to-emotion");
+const picker = element("div", "mc-llm-chat-emotion");
+const sheet = new El("div");
+const outside = new El("div");
+function emotionRow(where, line, deletable) {
+    const choice = new El("button");
+    choice.className = "mc-llm-emotion-choice";
+    choice.setAttribute("data-emotion", line);
+    const words = new El("span");
+    words.textContent = line || "Off";
+    choice.appendChild(words);
+    where.appendChild(choice);
+    if (!deletable) return {choice, words};
+    const remove = new El("button");
+    remove.className = "mc-llm-emotion-delete";
+    remove.setAttribute("data-emotion", line);
+    where.appendChild(remove);
+    return {choice, words, remove};
+}
+const off = emotionRow(picker, "", false);
+const happy = emotionRow(picker, "*I am so happy*", true);
+const sheetSad = emotionRow(sheet, "*I am so sad*", true);
+const emotionBox = element("div", "mc-llm-chat-emotion-at");
+const emotionField = new El("textarea");
+emotionField.value = "";
+emotionField.events = [];
+emotionField.dispatchEvent = (event) => { emotionField.events.push(event.type); return true; };
+emotionBox.appendChild(emotionField);
+const emotionPresses = [];
+element("button", "mc-llm-chat-emotion-now").click = () => emotionPresses.push(emotionField.value);
+function onDocument(kind, target, extra) {
+    (documentListeners[kind] || []).forEach((fn) => fn(Object.assign({target}, extra || {})));
+}
+function pressChip() {
+    chip.dispatchEvent({type: "click", bubbles: true, target: chip});
+    onDocument("click", chip);
+}
+function openNow() { return picker.classList.contains("mc-llm-emotion-open"); }
+"""
+
+
+def emotion(rehearsal: str) -> dict:
+    return row([("assistant", "reply 0")], rehearsal + """
+        out.presses = emotionPresses.map((v) => JSON.parse(v));
+        out.fieldEvents = emotionField.events;
+    """, setup=EMOTION_PAGE)
+
+
+class TestTheEmotionPicker:
+    def test_the_chip_opens_it_and_presses_it_away(self):
+        found = emotion("""
+            out.before = openNow();
+            pressChip();
+            out.opened = openNow();
+            out.expanded = chip.getAttribute("aria-expanded");
+            pressChip();
+            out.closed = openNow();
+        """)
+
+        assert found["before"] is False
+        assert found["opened"] is True and found["expanded"] == "true"
+        assert found["closed"] is False
+
+    def test_a_press_elsewhere_or_escape_puts_it_away_and_a_press_inside_does_not(self):
+        found = emotion("""
+            pressChip();
+            onDocument("click", off.words);
+            out.afterInside = openNow();
+            onDocument("click", outside);
+            out.afterOutside = openNow();
+            pressChip();
+            onDocument("keydown", outside, {key: "Escape"});
+            out.afterEscape = openNow();
+        """)
+
+        assert found["afterInside"] is True
+        assert found["afterOutside"] is False
+        assert found["afterEscape"] is False
+
+    def test_a_row_names_its_line_and_what_to_do_and_presses_the_button(self):
+        """By its words: a list changed in the other window meanwhile cannot
+        turn a press on one line into an answer about another."""
+        found = emotion("""
+            onDocument("click", happy.words);
+            onDocument("click", off.choice);
+            onDocument("click", happy.remove);
+        """)
+
+        assert found["presses"] == [{"do": "choose", "line": "*I am so happy*"},
+                                    {"do": "choose", "line": ""},
+                                    {"do": "delete", "line": "*I am so happy*"}]
+        assert found["fieldEvents"] == ["input"] * 3
+
+    def test_the_character_sheet_s_rows_are_answered_the_same_way(self):
+        found = emotion("""
+            onDocument("click", sheetSad.choice);
+            onDocument("click", sheetSad.remove);
+        """)
+
+        assert found["presses"] == [{"do": "choose", "line": "*I am so sad*"},
+                                    {"do": "delete", "line": "*I am so sad*"}]
+
+    def test_a_disabled_row_presses_nothing(self):
+        found = emotion("""
+            happy.choice.disabled = true;
+            onDocument("click", happy.words);
+        """)
+
+        assert found["presses"] == []
+
+    def test_wiring_again_listens_once(self):
+        found = emotion("""
+            rewire(); rewire();
+            onDocument("click", happy.choice);
+            pressChip();
+            out.open = openNow();
+        """)
+
+        assert len(found["presses"]) == 1
+        assert found["open"] is True
+
+    def test_the_ids_are_the_panel_s(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import mc_llm_ui as ui
+
+        script = SCRIPT.read_text(encoding="utf-8")
+        for name in ("to-emotion", "emotion", "emotion-at", "emotion-now"):
+            assert f'"{ui.ident("chat", name)}"' in script, name

@@ -4341,3 +4341,109 @@ Mini Paint NEO's pins (`fastapi==0.112.2`, `pydantic==2.8.2`,
 Neo builds the panel, so its Gradio is a 4.40-lineage build of its own (Forge
 Neo pins `fastapi==0.127.1`, `pydantic==2.10.6`); the live script passes
 `autoscroll` only where the signature takes it.
+
+## 40. A thread's emotion, and the cache update after it (30 October 2026)
+
+Asked for: Oobabooga's *character bias* in every conversation -- "on the fly set
+the emotional state of the character you are chatting with" -- per thread, Off in
+a new one, from a list that can be added to and deleted from, with the LLM
+Studio chip and the flyout's ⋯ menu as the ways in. And, once the cost below was
+explained, "the bias should only be considered for writing the current prompt",
+with "some indication somewhere that is subtle" that the cache is being updated
+after a send, and the wait said in the progress area when a message is sent
+before that is done.
+
+### 40.1 What Oobabooga does, and what it costs here
+
+Its `extensions/character_bias/script.py` implements `bot_prefix_modifier`, and
+`modules/chat.py` appends that to the end of the rendered prompt -- after the
+assistant turn's opening, for a fresh reply only (not Continue, not Impersonate)
+-- and never stores it. The reply is generated after the line and the line is
+nowhere in the history. That is reproduced exactly (`mc_llm_emotions`,
+`mc_llm_conversation_ops._emotion_for`): the line is a trailing assistant
+message, which llama-server b10621 continues rather than closes
+(`continue_final_message = AUTO` in `server-common.cpp`, on unless
+`--no-prefill-assistant`), rendering Gemma 4's turn as `<|turn>model\n<|channel>
+thought\n<channel|>` and then the line -- the opening an ordinary reply gets --
+and not echoing the prefill in the stream (`task_result_state` initialises its
+message from the continuation when `echo` is off). Reasoning is off on every
+conversation request, so nothing lands in a thought block. The note in
+`prompt_master/chat/prompt.py` that the endpoint "closes the assistant turn" is
+about older builds.
+
+What it costs is the prompt cache. llama-server resumes at the longest common
+prefix, and the cache after such a reply is `... user, opening, line, reply`
+while the next prompt has `... user, opening, reply, user, ...`: they part at the
+line, so every turn with an emotion on would read the whole last reply again --
+the very cost section 26 and handoff 30's thought-marker template took out of
+every turn (about 4 s for a 331-token reply at 80 tokens a second on the Arc),
+and a saved slot for a sliding-window model would never be restored, since it
+would never be extended exactly. Keeping the line in the history instead (the
+first alternative put to the user) costs nothing in the cache but shows the model
+its past replies opening with mood lines, which it then imitates once the emotion
+is off; the user had never seen that in Oobabooga and did not want it.
+
+### 40.2 The cache update
+
+So the reply is read again without the line, in the background, the moment it
+is saved (`mc_llm_cache_update`, scheduled from `_finish` before the reply's end
+is announced). The request is the conversation as it now stands, ending on the
+reply -- a continuation again -- with one token asked for and thrown away, so
+llama-server reads from the start of the reply to its end and keeps it.
+Cutting the line out of the cache instead (llama-server's KV shifting,
+`--cache-reuse`) is not available and would not be right: b10621 turns it off for
+a server with a projector loaded (this extension's default) and for any context
+that cannot shift (a hybrid like Qwen 3.5), and the reply's cached entries were
+computed with the line in view, so its memory of the reply would stay biased.
+
+- **Only where it helps.** A continued reply has to render exactly as the same
+  reply does as a past turn, or the update reads for nothing. Before reading,
+  llama-server renders both (`/apply-template`, with the request's own template
+  fields) and the update goes ahead only when the continued request is the start
+  of the followed one (`continues`). Gemma 4's own template fails that -- the
+  asymmetry `mc_llm_template` patches -- and with the patch on it passes.
+- **Nothing started, nothing waited on.** `Runtime.warm_client` hands back the
+  server already up from the settings in force, or nothing; an image job on its
+  card or a speech guest's turn stands it down; it takes the language model's
+  lock as background work under the name *the cache update* with two seconds'
+  patience. Skipped, the next message reads the reply again, as it would have.
+- **The next message waits for it**, in the same conversation, and says so at
+  once: `_conversation` yields *Waiting for the cache update…* before it asks for
+  the card (`mc_llm_cache_update.wait`, at most three minutes). Started beside it
+  in another slot it would read the whole conversation. Anything else that
+  wants the model meanwhile waits on the lock under the same name.
+- **Saved caches.** A prefilled reply's slot is not saved (`ChatRequest.prefilled`
+  → `stream_conversation(save=False)`); the update's is, so a restart restores a
+  file the next prompt extends.
+- **Said quietly.** `cache_update` on the conversation feed when it starts (before
+  the reply's terminal event, so the page's feed is still open) and ends, and on
+  the snapshot. The flyout keeps its feed open while it runs (`needsFeed`) and
+  says *Updating cache…* with a pulsing dot; the tab chains a generator after
+  `_settle` that does the same in its status line and stops writing the moment a
+  reply is running in the thread, so the two never take turns on the line. A
+  message's own *Waiting for the cache update…* is its operation's status, drawn
+  as progress in both views.
+
+### 40.3 Where the choice is kept
+
+Not in the conversation file. A write there is a new revision: the other
+window's next Send would be refused as stale, and a choice made while a reply
+streams would make that reply's save refuse as a conflict (the completion guard
+compares the bytes). So `emotions.json` under the LLM data root holds the list
+and each thread's choice by character and thread; `set_emotion` is a command
+that needs and changes no revision, a branch is given its source's
+(`_branch_from` → `carry`), a deleted thread's is forgotten, and a thread whose
+line was deleted from the list reads as Off and its record is dropped, so adding
+the line back does not revive it.
+
+### 40.4 Checked, and not
+
+Read against llama.cpp b10621's own `server-common.cpp`, `server-task.cpp` and
+`common/chat.cpp` (continuation, Gemma 4's generation prompt, the prefill not
+echoed), and against Oobabooga's current `character_bias` and `chat.py`. Not run
+against a real llama-server or on the user's machine; the first things to look
+at there are llama-server's `checking sim` lines on the turn after a reply with an
+emotion (the match should run through the end of the last reply) and the
+console's *the cache update read the last reply again in …* line. Both views
+were drawn in Chromium (the flyout on the layout test page, the tab on a stand-in
+with the real stylesheet and script); not on a real Gradio 4.40 page.

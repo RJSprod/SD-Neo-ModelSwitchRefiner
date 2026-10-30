@@ -1,0 +1,831 @@
+"""Character Emotion: a line that starts the next reply, and the cache update after it.
+
+The ask: Oobabooga's *character bias* for every conversation -- set per thread,
+Off in a new one, a list of lines that can be added to and deleted from -- and,
+because the line is sent before the reply and never kept, the last reply read
+again in the background so the next message is no slower for it, with the wait
+said in the progress area when a message is sent before that is done.
+
+``mc_llm_sessions.conversation`` is replaced with a list of events, as in
+``test_conversation_ops``: the prompt is built by the real builder and the reply
+saved by the real guarded transaction. The cache update's reading is replaced
+where it would reach a llama-server.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+import mc_llm_cache_update as cache_update
+import mc_llm_conversation_api as api
+import mc_llm_conversation_feed as feed
+import mc_llm_conversation_ops as ops
+import mc_llm_conversation_service as service
+import mc_llm_conversation_store as store_module
+import mc_llm_emotions as emotions
+import mc_llm_sessions as sessions
+from test_conversation_ops import chats, replies, run, store, thread  # noqa: F401 (fixtures)
+from test_conversation_service import envelope
+
+HAPPY = "*I am so happy*"
+
+
+@pytest.fixture(autouse=True)
+def updates(monkeypatch):
+    """The cache update's reading, recorded instead of sent."""
+    cache_update.reset()
+    asked = []
+    monkeypatch.setattr(cache_update, "_update", lambda request: asked.append(request) or "")
+    yield asked
+    cache_update.reset()
+
+
+def name_of(conversation) -> str:
+    return f"{conversation.character}/{conversation.identifier}"
+
+
+def asking(monkeypatch, pieces=("Oh,", " hello!")):
+    asked = []
+    events = [sessions.Event(sessions.CHUNK, piece) for piece in pieces]
+    events.append(sessions.Event(sessions.DONE, "".join(pieces)))
+    monkeypatch.setattr(sessions, "conversation",
+                        lambda request, cancel: (asked.append(request), iter(events))[1])
+    return asked
+
+
+def settled(timeout=5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with cache_update._guard:
+            if not cache_update._pending:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def choose(conversation, line, operation_id="emotion-1"):
+    body = envelope(service.SET_EMOTION, conversation, revision=None,
+                    payload={"emotion": line}, operation_id=operation_id)
+    return service.submit(body)
+
+
+# --------------------------------------------------------------------------- #
+# The list
+# --------------------------------------------------------------------------- #
+
+
+class TestTheList:
+    def test_a_new_installation_has_oobaboogas_five(self, store):
+        assert emotions.listed() == ["*I am so happy*", "*I am so sad*", "*I am so excited*",
+                                     "*I am so bored*", "*I am so angry*"]
+
+    def test_reading_it_writes_nothing(self, store):
+        emotions.listed()
+
+        assert not emotions.path().exists()
+
+    def test_a_line_is_added_once_at_the_end(self, store):
+        emotions.add("*I am so nervous*")
+        found = emotions.add("*I am so nervous*")
+
+        assert found[-1] == "*I am so nervous*"
+        assert found.count("*I am so nervous*") == 1
+        assert emotions.listed() == found
+
+    def test_a_line_is_kept_as_one_line(self, store):
+        found = emotions.add("  *I am so\n   tired*  ")
+
+        assert found[-1] == "*I am so tired*"
+
+    def test_an_empty_or_long_line_is_refused_in_a_sentence(self, store):
+        with pytest.raises(emotions.Refused, match="Write the emotion first"):
+            emotions.add("   ")
+        with pytest.raises(emotions.Refused, match="short line"):
+            emotions.add("x" * (emotions.MAX_LENGTH + 1))
+
+    def test_a_full_list_is_refused(self, store, monkeypatch):
+        monkeypatch.setattr(emotions, "MAX_COUNT", 5)
+
+        with pytest.raises(emotions.Refused, match="full"):
+            emotions.add("*I am so nervous*")
+
+    def test_a_line_is_deleted(self, store):
+        found = emotions.remove(HAPPY)
+
+        assert HAPPY not in found
+        assert emotions.listed() == found
+
+    def test_an_unreadable_file_reads_as_the_defaults(self, store):
+        emotions.path().parent.mkdir(parents=True, exist_ok=True)
+        emotions.path().write_text("{ not json", encoding="utf-8")
+
+        assert emotions.listed() == list(emotions.DEFAULTS)
+
+
+# --------------------------------------------------------------------------- #
+# Each thread's choice
+# --------------------------------------------------------------------------- #
+
+
+class TestEachThreadsChoice:
+    def test_a_new_thread_is_off(self, thread):
+        found = service.snapshot("Ada", thread.identifier)
+
+        assert found["conversation"]["emotion"] == ""
+
+    def test_choosing_one_is_said_by_the_snapshot_with_the_list(self, thread):
+        outcome = choose(thread, HAPPY)
+        found = service.snapshot("Ada", thread.identifier)
+
+        assert outcome["ok"] is True, outcome
+        assert outcome["emotion"] == HAPPY
+        assert found["conversation"]["emotion"] == HAPPY
+        assert found["emotions"] == emotions.listed()
+
+    def test_choosing_writes_nothing_in_the_thread_and_moves_no_revision(self, chats, thread):
+        """A setting, not a change to what was said: the other window's next
+        command is against the revision it has, and a reply streaming now still
+        saves into the file it was accepted against."""
+        before = store_module.token(service.chats(), store_module.key_of(thread))
+        written = chats.path_for("Ada", thread.identifier).read_bytes()
+
+        outcome = choose(thread, HAPPY)
+
+        assert outcome["revision"] == before
+        assert store_module.token(service.chats(), store_module.key_of(thread)) == before
+        assert chats.path_for("Ada", thread.identifier).read_bytes() == written
+
+    def test_it_needs_no_revision_to_compare(self, thread):
+        assert choose(thread, HAPPY)["ok"] is True
+
+    def test_a_line_that_is_not_on_the_list_is_refused(self, thread):
+        outcome = choose(thread, "*I am so invented*")
+
+        assert outcome["ok"] is False
+        assert outcome["error"]["code"] == service.INVALID_INPUT
+        assert emotions.for_thread("Ada", thread.identifier) == ""
+
+    def test_off_clears_it(self, thread):
+        choose(thread, HAPPY)
+        choose(thread, "", operation_id="emotion-2")
+
+        assert emotions.for_thread("Ada", thread.identifier) == ""
+
+    def test_it_belongs_to_the_thread_not_the_character(self, chats, thread):
+        other = chats.new("Ada")
+        chats.save(other)
+
+        choose(thread, HAPPY)
+
+        assert emotions.for_thread("Ada", other.identifier) == ""
+
+    def test_a_branch_keeps_it(self, thread):
+        choose(thread, HAPPY)
+
+        outcome = service.submit(envelope(service.BRANCH, thread, index=1,
+                                          operation_id="branch-1"))
+        made = outcome["resulting_conversation"]["thread_id"]
+
+        assert made != thread.identifier
+        assert emotions.for_thread("Ada", made) == HAPPY
+
+    def test_a_deleted_thread_forgets_it(self, thread):
+        choose(thread, HAPPY)
+
+        outcome = service.submit(envelope(service.DELETE_THREAD, thread,
+                                          operation_id="delete-1"))
+
+        assert outcome["ok"] is True, outcome
+        assert f"Ada/{thread.identifier}" not in emotions._read()["threads"]
+
+    def test_a_choice_of_a_line_that_is_not_on_the_list_reads_as_off(self, thread):
+        """A file written by hand, or by a version that kept lines differently:
+        the list is what decides which lines exist."""
+        import json
+
+        emotions.path().parent.mkdir(parents=True, exist_ok=True)
+        emotions.path().write_text(json.dumps({
+            "version": 1, "emotions": [HAPPY],
+            "threads": {f"Ada/{thread.identifier}": "*I am so invented*"}}), encoding="utf-8")
+
+        assert emotions.for_thread("Ada", thread.identifier) == ""
+
+    def test_deleting_the_line_turns_its_threads_off_for_good(self, thread):
+        """Off at once, and not back on when the same line is added again."""
+        choose(thread, HAPPY)
+
+        emotions.remove(HAPPY)
+        assert emotions.for_thread("Ada", thread.identifier) == ""
+
+        emotions.add(HAPPY)
+        assert emotions.for_thread("Ada", thread.identifier) == ""
+
+
+# --------------------------------------------------------------------------- #
+# The wire
+# --------------------------------------------------------------------------- #
+
+
+class TestTheWire:
+    def test_a_new_reply_starts_from_the_emotion(self, thread, monkeypatch):
+        asked = asking(monkeypatch)
+        choose(thread, HAPPY)
+
+        run("send", thread, payload={"text": "Did you finish the painting?"},
+            operation_id="send-1")
+
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert asked[-1].messages[-2]["role"] == "user"
+        assert asked[-1].prefilled is True
+
+    def test_the_reply_is_saved_without_it(self, chats, thread, monkeypatch):
+        asking(monkeypatch, pieces=(" Oh,", " hello!"))
+        choose(thread, HAPPY)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        saved = chats.load("Ada", thread.identifier)
+        assert saved.messages[-1].text == "Oh, hello!"
+        assert all(HAPPY not in message.text for message in saved.messages)
+
+    def test_regenerate_starts_from_it_too(self, thread, monkeypatch):
+        asked = asking(monkeypatch)
+        choose(thread, HAPPY)
+
+        run("regenerate", thread, index=len(thread.messages) - 1, operation_id="again-1")
+
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
+
+    def test_send_again_from_here_starts_from_it_too(self, thread, monkeypatch):
+        asked = asking(monkeypatch)
+        choose(thread, HAPPY)
+
+        run("resend_from_user", thread, index=0, operation_id="resend-1")
+
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
+
+    def test_continue_does_not(self, thread, monkeypatch):
+        asked = asking(monkeypatch)
+        choose(thread, HAPPY)
+
+        run("continue", thread, index=len(thread.messages) - 1, operation_id="more-1")
+
+        assert asked[-1].messages[-1]["role"] == "user"
+        assert all(message.get("content") != HAPPY for message in asked[-1].messages)
+        assert asked[-1].prefilled is False
+
+    def test_off_sends_the_request_as_it_always_was(self, thread, monkeypatch):
+        asked = asking(monkeypatch)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert asked[-1].messages[-1] == {"role": "user", "content": "Hi."}
+        assert asked[-1].prefilled is False
+
+    def test_never_after_a_reply(self, chats, monkeypatch):
+        """llama-server refuses two assistant messages at the end of a request,
+        which a thread whose last message of yours was deleted would send."""
+        from prompt_master.chat.history import ASSISTANT, USER
+
+        found = chats.new("Ada")
+        found.append(USER, "hello")
+        found.append(ASSISTANT, "first")
+        found.append(ASSISTANT, "second")
+        chats.save(found)
+        asked = asking(monkeypatch)
+        choose(found, HAPPY)
+
+        run("regenerate", found, index=2, operation_id="again-1")
+
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": "first"}
+        assert asked[-1].prefilled is False
+
+
+# --------------------------------------------------------------------------- #
+# The cache update is asked for
+# --------------------------------------------------------------------------- #
+
+
+class TestTheCacheUpdateIsAskedFor:
+    def test_after_a_reply_with_an_emotion_it_ends_on_the_saved_reply(self, thread,
+                                                                      monkeypatch, updates):
+        asking(monkeypatch, pieces=(" Oh,", " hello!"))
+        choose(thread, HAPPY)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert settled()
+        request = updates[-1]
+        assert request.messages[-1] == {"role": "assistant", "content": "Oh, hello!"}
+        assert request.messages[-2] == {"role": "user", "content": "Hi."}
+        assert all(message.get("content") != HAPPY for message in request.messages)
+        assert request.max_tokens == 1
+        assert request.prefilled is False
+        assert request.conversation == name_of(thread)
+
+    def test_without_an_emotion_none_is_asked_for(self, thread, monkeypatch, updates):
+        asking(monkeypatch)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert settled()
+        assert updates == []
+
+    def test_it_is_running_before_the_reply_is_announced_as_over(self, thread, monkeypatch):
+        """So a page that reads the conversation at the reply's end finds it
+        running, and keeps listening for its own end."""
+        release = threading.Event()
+        monkeypatch.setattr(cache_update, "_update", lambda request: release.wait(5) and "")
+        asking(monkeypatch)
+        choose(thread, HAPPY)
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+        try:
+            assert cache_update.pending(name_of(thread))
+            assert service.snapshot("Ada", thread.identifier)["conversation"]["cache_update"]
+            kinds = [event["kind"] for event in subscriber.since(cursor)[0]]
+            assert kinds.index(service.CACHE_UPDATE) < kinds.index(service.OPERATION_TERMINAL)
+        finally:
+            release.set()
+        assert settled()
+        assert not service.snapshot("Ada", thread.identifier)["conversation"]["cache_update"]
+
+
+# --------------------------------------------------------------------------- #
+# Waiting for it
+# --------------------------------------------------------------------------- #
+
+
+class TestWaitingForIt:
+    @staticmethod
+    def blocked(name):
+        done = threading.Event()
+        with cache_update._guard:
+            cache_update._pending[name] = done
+        return done
+
+    def test_nothing_to_wait_for_says_nothing(self):
+        steps = list(cache_update.wait("Ada/one", sessions.Cancellation()))
+
+        assert steps == []
+
+    def test_a_reply_says_so_at_once_and_goes_ahead_when_it_ends(self):
+        done = self.blocked("Ada/one")
+        heard, answer = [], {}
+
+        def consume():
+            answer["went"] = yield from cache_update.wait("Ada/one", sessions.Cancellation())
+
+        walker = consume()
+        heard.append(next(walker))
+        assert heard[0].kind == sessions.STATUS
+        assert heard[0].text == "Waiting for the cache update…"
+
+        threading.Timer(0.05, done.set).start()
+        with pytest.raises(StopIteration):
+            next(walker)
+        assert answer["went"] is True
+
+    def test_a_stopped_reply_stops_waiting(self):
+        self.blocked("Ada/one")
+        cancel = sessions.Cancellation()
+        cancel.cancel()
+
+        def consume():
+            return (yield from cache_update.wait("Ada/one", cancel))
+
+        walker = consume()
+        next(walker)
+        with pytest.raises(StopIteration) as stopped:
+            next(walker)
+        assert stopped.value.value is False
+
+    def test_another_conversation_does_not_wait(self):
+        self.blocked("Ada/one")
+
+        assert list(cache_update.wait("Ada/two", sessions.Cancellation())) == []
+
+    def test_the_reply_waits_before_it_asks_for_the_card(self, monkeypatch):
+        order = []
+
+        def waiting(name, cancel):
+            order.append(("wait", name))
+            yield sessions.Event(sessions.STATUS, cache_update.WAITING)
+            return False
+
+        def acquire(self):
+            order.append(("card", None))
+            return True
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(cache_update, "wait", waiting)
+        monkeypatch.setattr(sessions._Gpu, "acquire", acquire)
+        request = sessions.ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                                       conversation="Ada/one")
+
+        events = list(sessions._conversation(request, sessions.Cancellation()))
+
+        assert order == [("wait", "Ada/one")]
+        assert [event.kind for event in events] == [sessions.STATUS, sessions.CANCELLED]
+        assert events[0].text == "Waiting for the cache update…"
+
+    def test_a_prefilled_reply_keeps_no_saved_cache_and_others_are_asked_as_before(
+            self, monkeypatch):
+        calls = []
+
+        class Client:
+            def stream_conversation(self, *args, **kwargs):
+                calls.append(kwargs)
+                return "ok"
+
+        def acquire(self):
+            return True
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(sessions._Gpu, "acquire", acquire)
+        monkeypatch.setattr(sessions, "_client", lambda *args, **kwargs: Client())
+        monkeypatch.setattr(sessions, "_preparing", lambda role="": "Preparing…")
+        monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
+
+        for prefilled in (True, False):
+            request = sessions.ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                                           conversation="Ada/one", prefilled=prefilled)
+            list(sessions._conversation(request, sessions.Cancellation()))
+
+        assert calls[0].get("save") is False
+        assert "save" not in calls[1]
+
+
+# --------------------------------------------------------------------------- #
+# The update itself
+# --------------------------------------------------------------------------- #
+
+
+ENDING = [{"role": "system", "content": "s"}, {"role": "user", "content": "Hi."},
+          {"role": "assistant", "content": "Oh, hello!"}]
+
+
+class Rendered:
+    """llama-server's /apply-template, as a dictionary of what it renders."""
+
+    def __init__(self, continued: str, followed: str):
+        self.continued, self.followed = continued, followed
+
+    def __call__(self, client, messages):
+        return self.followed if messages[-1]["role"] == "user" else self.continued
+
+
+class TestContinues:
+    def test_a_continued_reply_that_starts_the_next_prompt(self, monkeypatch):
+        monkeypatch.setattr(cache_update, "_render",
+                            Rendered("<t>model\nOh, hello!", "<t>model\nOh, hello!<e>\n<t>user"))
+
+        assert cache_update.continues(object(), ENDING) is True
+
+    def test_a_template_that_renders_a_past_reply_otherwise(self, monkeypatch):
+        """Gemma 4's own, without the kept thought marker: the past reply has
+        no empty thought block where the continued one has."""
+        monkeypatch.setattr(cache_update, "_render",
+                            Rendered("<t>model\n<c>thought\n<c|>Oh, hello!",
+                                     "<t>model\nOh, hello!<e>\n<t>user"))
+
+        assert cache_update.continues(object(), ENDING) is False
+
+    def test_a_render_that_failed(self, monkeypatch):
+        monkeypatch.setattr(cache_update, "_render", Rendered("", ""))
+
+        assert cache_update.continues(object(), ENDING) is False
+
+    def test_a_request_that_does_not_end_on_a_reply(self, monkeypatch):
+        monkeypatch.setattr(cache_update, "_render", Rendered("a", "ab"))
+
+        assert cache_update.continues(object(), ENDING[:2]) is False
+
+
+class Warm:
+    def __init__(self, client=None):
+        self.client = client
+        self.asked = []
+
+    def warm_client(self, needs_vision=False):
+        self.asked.append(needs_vision)
+        return self.client
+
+
+class Client:
+    base_url, api_key = "http://127.0.0.1:1", "k"
+
+    def __init__(self):
+        self.streamed = []
+
+    def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
+                            cancel=None, **kwargs):
+        self.streamed.append((conversation, messages, max_tokens, kwargs))
+        return "x"
+
+
+@pytest.fixture
+def real_update(monkeypatch):
+    """The update as written, with llama-server and the runtime replaced."""
+    monkeypatch.setattr(cache_update, "_update", TestTheUpdate.original)
+    monkeypatch.setattr(cache_update, "continues", lambda client, messages: True)
+    import mc_llm_runtime
+
+    monkeypatch.setattr(mc_llm_runtime, "_stands_down_for_the_image_job",
+                        lambda configuration: False)
+    monkeypatch.setattr(sessions._Gpu, "_blocked_by_a_guest",
+                        staticmethod(lambda domain, ours: ""))
+    return monkeypatch
+
+
+def request_for(conversation="Ada/one"):
+    return sessions.ChatRequest(messages=list(ENDING), max_tokens=1, seed=3,
+                                conversation=conversation)
+
+
+class TestTheUpdate:
+    original = staticmethod(cache_update._update)
+
+    def resolve(self, monkeypatch, runtime):
+        monkeypatch.setattr(sessions, "_runtime_for",
+                            lambda role="": sessions._Resolved(runtime, None, None))
+
+    def test_it_reads_the_conversation_on_the_warm_server_and_saves_it(self, real_update):
+        client = Client()
+        self.resolve(real_update, Warm(client))
+
+        said = cache_update._update(request_for())
+
+        assert said.startswith("the cache update read the last reply again")
+        conversation, messages, max_tokens, kwargs = client.streamed[-1]
+        assert (conversation, messages, max_tokens) == ("Ada/one", ENDING, 1)
+        assert "save" not in kwargs
+
+    def test_it_starts_no_server(self, real_update):
+        runtime = Warm(None)
+        self.resolve(real_update, runtime)
+
+        assert cache_update._update(request_for()) == ""
+        assert runtime.asked == [False]
+
+    def test_it_gives_way_to_the_image_job(self, real_update):
+        import mc_llm_runtime
+
+        client = Client()
+        self.resolve(real_update, Warm(client))
+        real_update.setattr(mc_llm_runtime, "_stands_down_for_the_image_job",
+                            lambda configuration: True)
+
+        said = cache_update._update(request_for())
+
+        assert "gave way to the image generation" in said
+        assert client.streamed == []
+
+    def test_it_reads_nothing_where_the_template_would_not_resume(self, real_update):
+        client = Client()
+        self.resolve(real_update, Warm(client))
+        real_update.setattr(cache_update, "continues", lambda client, messages: False)
+
+        assert cache_update._update(request_for()) == ""
+        assert client.streamed == []
+
+    def test_it_never_waits_behind_the_language_model(self, real_update):
+        import mc_broker
+
+        client = Client()
+        self.resolve(real_update, Warm(client))
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with mc_broker.workload(mc_broker.FAMILY_LLM, "a conversation reply"):
+                held.set()
+                release.wait(5)
+
+        worker = threading.Thread(target=holder, daemon=True)
+        worker.start()
+        assert held.wait(5)
+        real_update.setattr(cache_update, "LOCK_WAIT", 0.05)
+        try:
+            said = cache_update._update(request_for())
+        finally:
+            release.set()
+            worker.join(5)
+
+        assert "found the language model busy" in said
+        assert client.streamed == []
+
+    def test_it_holds_the_card_under_its_own_name(self, real_update):
+        import mc_broker
+
+        seen = []
+
+        class Watching(Client):
+            def stream_conversation(self, *args, **kwargs):
+                running = mc_broker.active()
+                seen.append(running.label if running else None)
+                return super().stream_conversation(*args, **kwargs)
+
+        self.resolve(real_update, Warm(Watching()))
+
+        cache_update._update(request_for())
+
+        assert seen == ["the cache update"]
+
+    def test_schedule_says_when_it_starts_and_ends(self, thread, monkeypatch):
+        release = threading.Event()
+        monkeypatch.setattr(cache_update, "_update", lambda request: release.wait(5) and "")
+        published = []
+        monkeypatch.setattr(service, "publish",
+                            lambda kind, key=None, **payload: published.append((kind, payload)))
+        key = store_module.key_of(thread)
+
+        assert cache_update.schedule(key, lambda: request_for(name_of(thread))) is True
+        assert cache_update.pending(name_of(thread))
+        assert cache_update.schedule(key, lambda: request_for(name_of(thread))) is False
+        release.set()
+
+        assert settled()
+        updates = [payload for kind, payload in published if kind == service.CACHE_UPDATE]
+        assert updates == [{"updating": True}, {"updating": False}]
+
+    def test_a_failure_still_ends_it(self, thread, monkeypatch):
+        def broken(request):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(cache_update, "_update", broken)
+        key = store_module.key_of(thread)
+
+        cache_update.schedule(key, lambda: request_for(name_of(thread)))
+
+        assert settled()
+        assert not cache_update.pending(name_of(thread))
+
+
+# --------------------------------------------------------------------------- #
+# The route
+# --------------------------------------------------------------------------- #
+
+
+class TestTheRoute:
+    def test_it_reads_the_list(self, store):
+        payload, status = api.emotions()
+
+        assert status == 200
+        assert payload["emotions"] == list(emotions.DEFAULTS)
+
+    def test_it_adds_and_removes(self, store):
+        added, _ = api.emotions({"add": "*I am so nervous*"})
+        removed, _ = api.emotions({"remove": HAPPY})
+
+        assert added["emotions"][-1] == "*I am so nervous*"
+        assert HAPPY not in removed["emotions"]
+
+    def test_one_change_at_a_time_and_only_text(self, store):
+        for body in ({}, {"add": "a", "remove": "b"}, {"add": 3}, {"rename": "x"}):
+            payload, status = api.emotions(body)
+            assert status == 400, body
+            assert payload["ok"] is False
+
+    def test_a_refusal_comes_back_in_its_own_words(self, store):
+        payload, status = api.emotions({"add": "  "})
+
+        assert status == 400
+        assert payload["error"]["message"] == "Write the emotion first."
+
+    def test_it_is_registered(self):
+        assert api.EMOTIONS_ROUTE in api.ROUTES
+
+
+# --------------------------------------------------------------------------- #
+# LLM Studio's tab
+# --------------------------------------------------------------------------- #
+
+
+class TestTheTab:
+    @staticmethod
+    def panel():
+        import mc_llm_chat_panel
+
+        return mc_llm_chat_panel
+
+    def test_the_heading_marks_whether_the_chip_s_dot_is_filled(self, thread):
+        panel = self.panel()
+
+        assert 'data-emotion="off"' in panel._heading("Ada", thread)
+        choose(thread, HAPPY)
+        assert 'data-emotion="on"' in panel._heading("Ada", thread)
+
+    def test_the_rows_are_off_and_the_list_with_the_thread_s_own_checked(self, thread):
+        panel = self.panel()
+        choose(thread, HAPPY)
+
+        drawn = panel._emotion_rows("Ada", thread.identifier)
+
+        assert drawn.count('class="mc-llm-emotion-choice"') == 1 + len(emotions.DEFAULTS)
+        assert drawn.count('aria-checked="true"') == 1
+        assert f'aria-checked="true" data-emotion="{HAPPY}"' in drawn
+        assert drawn.count('class="mc-llm-emotion-delete"') == len(emotions.DEFAULTS)
+
+    def test_with_no_thread_only_the_list_can_be_changed(self, store):
+        drawn = self.panel()._emotion_rows("", "")
+
+        assert drawn.count(" disabled>") == 1 + len(emotions.DEFAULTS)
+        assert 'class="mc-llm-emotion-delete"' in drawn
+
+    def test_a_line_is_written_into_the_page_escaped(self, store):
+        emotions.add('*I am so <b>"bold"</b>*')
+
+        drawn = self.panel()._emotion_rows("Ada", "t")
+
+        assert "<b>" not in drawn
+        assert "&lt;b&gt;&quot;bold&quot;&lt;/b&gt;" in drawn
+
+    def test_a_press_chooses_through_the_service(self, thread):
+        panel = self.panel()
+
+        drawn = panel._emotion_pressed("Ada", thread.identifier,
+                                       '{"do": "choose", "line": "*I am so happy*"}')
+
+        assert emotions.for_thread("Ada", thread.identifier) == HAPPY
+        assert 'data-emotion="on"' in drawn[3]
+
+    def test_a_press_deletes_the_line(self, thread):
+        panel = self.panel()
+
+        panel._emotion_pressed("Ada", thread.identifier, '{"do": "delete", "line": "*I am so sad*"}')
+
+        assert "*I am so sad*" not in emotions.listed()
+
+    def test_a_press_it_cannot_read_changes_nothing(self, thread):
+        panel = self.panel()
+        before = emotions.listed()
+
+        for nomination in ("", "not json", '{"do": "rename", "line": "x"}', "[1]"):
+            panel._emotion_pressed("Ada", thread.identifier, nomination)
+
+        assert emotions.listed() == before
+        assert emotions.for_thread("Ada", thread.identifier) == ""
+
+    def test_adding_a_line_chooses_it_and_empties_the_box(self, thread):
+        found = self.panel()._emotion_added("Ada", thread.identifier, "*I am so nervous*")
+
+        assert emotions.listed()[-1] == "*I am so nervous*"
+        assert emotions.for_thread("Ada", thread.identifier) == "*I am so nervous*"
+        assert found[-1] == ""
+
+    def test_a_refused_line_is_said_and_the_box_kept(self, thread):
+        import gradio as gr
+
+        found = self.panel()._emotion_added("Ada", thread.identifier, "   ")
+
+        assert "Write the emotion first" in found[-2]
+        assert found[-1] == gr.update()
+
+
+class TestTheTabSaysTheCacheIsUpdating:
+    @staticmethod
+    def statuses(name_who, name_thread):
+        import mc_llm_chat_panel
+
+        return mc_llm_chat_panel._cache_status(name_who, name_thread)
+
+    def test_nothing_to_say_when_none_is_running(self, thread):
+        import gradio as gr
+
+        assert list(self.statuses("Ada", thread.identifier)) == [gr.update()]
+
+    def test_quietly_while_it_runs_and_ready_after(self, thread):
+        done = threading.Event()
+        with cache_update._guard:
+            cache_update._pending[name_of(thread)] = done
+        threading.Timer(0.3, done.set).start()
+
+        said = list(self.statuses("Ada", thread.identifier))
+
+        assert "Updating cache…" in said[0] and "mc-llm-updating" in said[0]
+        assert "mc-llm-busy" not in said[0]
+        assert "Ready." in said[-1]
+
+    def test_it_stops_writing_once_a_message_is_on_its_way(self, thread, monkeypatch):
+        import gradio as gr
+        import mc_llm_chat_panel
+
+        done = threading.Event()
+        with cache_update._guard:
+            cache_update._pending[name_of(thread)] = done
+        replying = iter([False, True])
+        monkeypatch.setattr(mc_llm_chat_panel, "_replying",
+                            lambda who, identifier: next(replying, True))
+        try:
+            said = list(self.statuses("Ada", thread.identifier))
+        finally:
+            done.set()
+
+        assert "Updating cache…" in said[0]
+        assert said[-1] == gr.update()
+        assert not any("Ready." in str(line) for line in said)

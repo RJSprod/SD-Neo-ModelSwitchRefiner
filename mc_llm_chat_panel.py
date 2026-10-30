@@ -277,6 +277,13 @@ def build() -> dict:
                 to_character = gr.Button("Character", size="sm", scale=0, min_width=0,
                                          elem_id=ui.ident("chat", "to-character"),
                                          elem_classes=ui.classes("chip-button"))
+                # This thread's emotion (mc_llm_emotions): a word and a dot
+                # the stylesheet fills while one is on, read off the heading
+                # beside it, and a small picker under the bar rather than a
+                # sheet -- it takes nothing from the conversation.
+                to_emotion = gr.Button("Emotion", size="sm", scale=0, min_width=0,
+                                       elem_id=ui.ident("chat", "to-emotion"),
+                                       elem_classes=ui.classes("chip-button", "emotion-chip"))
                 to_persona = gr.Button("You", size="sm", scale=0, min_width=0,
                                        elem_id=ui.ident("chat", "to-persona"),
                                        elem_classes=ui.classes("chip-button"))
@@ -294,6 +301,22 @@ def build() -> dict:
                 model = gr.Button(_MODEL_LABEL, size="sm", scale=0, min_width=0,
                                   elem_id=ui.ident("chat", "model"),
                                   elem_classes=ui.classes("chip-button"))
+
+            # The Emotion picker. Always built and drawn only while open: which
+            # it is is the browser's (javascript/llm_studio.js opens it from the
+            # chip and puts it away on a press elsewhere or Escape), and what
+            # it lists is Python's, read again on every press of the chip.
+            with gr.Column(elem_id=ui.ident("chat", "emotion"),
+                           elem_classes=ui.classes("emotion-picker")):
+                emotion_title = gr.HTML(_emotion_title(opened),
+                                        elem_classes=ui.classes("emotion-title"))
+                emotion_list = gr.HTML(_emotion_rows(who, getattr(opened, "identifier", "")))
+                with gr.Row(elem_classes=ui.classes("emotion-add")):
+                    emotion_new = gr.Textbox(label=None, show_label=False, container=False,
+                                             lines=1, max_lines=1, scale=1,
+                                             placeholder="*I am so nervous*",
+                                             elem_id=ui.ident("chat", "emotion-new"))
+                    emotion_add = gr.Button("Add", size="sm", scale=0, min_width=64)
 
             # No height= at all. The height is the space the tab has, worked
             # out in the browser and applied in style.css -- a number here
@@ -337,6 +360,14 @@ def build() -> dict:
             action_at = gr.Textbox(value="", visible=False, container=False,
                                    elem_id=ui.ident("chat", "action-at"))
             nominated = _nominated_buttons()
+            # The Emotion lists' rows, the same way: the browser writes which
+            # line and what to do with it ({"do": "choose"|"delete", "line":
+            # ...}) and presses the button; Python reads it against the list
+            # as it is now (:func:`_emotion_pressed`).
+            emotion_at = gr.Textbox(value="", visible=False, container=False,
+                                    elem_id=ui.ident("chat", "emotion-at"))
+            emotion_now = gr.Button("Emotion", visible=False,
+                                    elem_id=ui.ident("chat", "emotion-now"))
 
             # THE FORGE ASSISTANT'S PLUMBING, as far as Gradio is concerned.
             #
@@ -567,6 +598,16 @@ def build() -> dict:
                 # assistant's routes -- so the press never reaches the queue.
                 system_open = gr.Button("⤢ System prompt", size="sm",
                                         elem_id=ui.ident("chat", "system-open"))
+            # The open thread's emotion, beside who it is with: the chip's
+            # picker, kept here too because it is a choice about the character.
+            with gr.Group(elem_classes=ui.classes("emotion-sheet")):
+                gr.Markdown("##### Emotion · this thread", elem_classes=ui.classes("sheet-label"))
+                emotion_sheet_list = gr.HTML(_emotion_rows(who, getattr(opened, "identifier", "")))
+                with gr.Row(elem_classes=ui.classes("emotion-add")):
+                    emotion_sheet_new = gr.Textbox(label=None, show_label=False,
+                                                   container=False, lines=1, max_lines=1,
+                                                   scale=1, placeholder="*I am so nervous*")
+                    emotion_sheet_add = gr.Button("Add", size="sm", scale=0, min_width=64)
             # Choosing, editing and creating a character are three things done
             # to the same object, so they are one screen: the drop-down is who
             # you are talking to, and the editor under it is that same
@@ -717,6 +758,22 @@ def build() -> dict:
                      outputs=screens + [threads], queue=False)
     to_character.click(fn=_open_character_screen, inputs=[character],
                        outputs=screens + [character], queue=False)
+
+    # -- the thread's emotion ---------------------------------------------- #
+    #
+    # Both lists, the picker's heading and the bar's heading (whose mark fills
+    # the chip's dot) are drawn again together, so the chip, the picker and the
+    # Character sheet never disagree about which line is on.
+    emotions_drawn = [emotion_list, emotion_sheet_list, emotion_title, header]
+    for opening in (to_emotion, to_character):
+        opening.click(fn=_emotion_view, inputs=[character, thread_state],
+                      outputs=emotions_drawn, queue=False)
+    emotion_now.click(fn=_emotion_pressed, inputs=[character, thread_state, emotion_at],
+                      outputs=emotions_drawn + [status], queue=False)
+    for box, button in ((emotion_new, emotion_add), (emotion_sheet_new, emotion_sheet_add)):
+        for event in (button.click, box.submit):
+            event(fn=_emotion_added, inputs=[character, thread_state, box],
+                  outputs=emotions_drawn + [status, box], queue=False)
     to_persona.click(fn=_open_persona,
                      outputs=screens + [persona_name, persona_description, persona_face],
                      queue=False)
@@ -930,7 +987,14 @@ def build() -> dict:
         # editor pointed at may not be the message that is there now.
         run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
                  inputs=[character, search], outputs=[threads])
-        run.then(fn=_settle, inputs=[character, thread_state], outputs=view)
+        settled = run.then(fn=_settle, inputs=[character, thread_state], outputs=view)
+        # After the view is read back, and on its own: a reply written with an
+        # emotion is read again in the background (mc_llm_cache_update), and
+        # the status line says so quietly until it is done. Its own event, so
+        # Send is never held behind it -- a message sent meanwhile says it is
+        # waiting, from its own run.
+        settled.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
+                     show_progress="hidden")
         # ``success`` and deliberately not ``then``. Gradio runs a ``then``
         # continuation whether or not the event before it raised, which would
         # make "the run reached its terminal callback" the trigger for speaking
@@ -1366,10 +1430,175 @@ def _heading(who: str | None, conversation) -> str:
     """
     person = (getattr(conversation, "character", None) or who or "No character").strip()
     title = getattr(conversation, "title", None) or "No thread"
-    return (f'<div class="{ui.PREFIX}-heading">'
+    # Read by the stylesheet: the Emotion chip's dot is filled while the
+    # thread has one. Here because every view is drawn with this heading.
+    on = "on" if _emotion_of(person, getattr(conversation, "identifier", "")) else "off"
+    return (f'<div class="{ui.PREFIX}-heading" data-emotion="{on}">'
             f'<span class="{ui.PREFIX}-heading-who">{ui.escape(person)}</span>'
             f'<span class="{ui.PREFIX}-heading-thread">{ui.escape(title)}</span>'
             f'</div>')
+
+
+# --------------------------------------------------------------------------- #
+# The thread's emotion
+# --------------------------------------------------------------------------- #
+
+
+def _emotion_of(who, identifier) -> str:
+    """The thread's emotion, ``""`` for Off -- and Off when it cannot be read."""
+    if not who or not identifier:
+        return ""
+    try:
+        import mc_llm_emotions
+
+        return mc_llm_emotions.for_thread(who, identifier)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's emotion", exc_info=True)
+        return ""
+
+
+def _emotion_title(conversation) -> str:
+    title = getattr(conversation, "title", None) or "No thread"
+    return f'<div class="{ui.PREFIX}-emotion-heading">Emotion · {ui.escape(title)}</div>'
+
+
+EMOTION_TRASH = ('<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" '
+                 'focusable="false" fill="none" stroke="currentColor" stroke-width="2" '
+                 'stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/>'
+                 '<path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>')
+"""Drawn, never typed: a cross in a span is what Lobe's icon swap replaces."""
+
+
+def _emotion_rows(who, identifier) -> str:
+    """Off and every line, the thread's own checked, each line with Delete.
+
+    Buttons the browser reads (``data-emotion``) and Python decides about: see
+    :func:`_emotion_pressed`. With no thread open there is nothing to choose
+    for, and only the list can be changed.
+    """
+    try:
+        import mc_llm_emotions
+
+        lines = mc_llm_emotions.listed()
+    except Exception:
+        logger.debug("Model Chain: could not read the emotion list", exc_info=True)
+        lines = []
+    chosen = _emotion_of(who, identifier)
+    usable = bool(who and identifier)
+    rows = [_emotion_row("", "Off", chosen == "", usable)]
+    rows += [_emotion_row(line, line, chosen == line, usable) for line in lines]
+    return (f'<div class="{ui.PREFIX}-emotion-list" role="radiogroup" aria-label="Emotion">'
+            + "".join(rows) + "</div>")
+
+
+def _emotion_row(line: str, label: str, on: bool, usable: bool) -> str:
+    prefix, value, checked = ui.PREFIX, ui.escape(line), "true" if on else "false"
+    choice = (f'<button type="button" class="{prefix}-emotion-choice" role="radio" '
+              f'aria-checked="{checked}" data-emotion="{value}"'
+              f'{"" if usable else " disabled"}>'
+              f'<span class="{prefix}-emotion-check" aria-hidden="true">{"✓" if on else ""}</span>'
+              f'<span class="{prefix}-emotion-text">{ui.escape(label)}</span></button>')
+    delete = "" if not line else (
+        f'<button type="button" class="{prefix}-emotion-delete" data-emotion="{value}" '
+        f'aria-label="Delete {value}" title="Delete {value}">{EMOTION_TRASH}</button>')
+    return f'<div class="{prefix}-emotion-row" data-chosen="{checked}">{choice}{delete}</div>'
+
+
+def _emotion_view(who, identifier) -> tuple:
+    """Both lists, the picker's heading and the bar's: everything that shows it."""
+    conversation = _load(who, identifier) if who and identifier else None
+    rows = _emotion_rows(who, identifier)
+    return rows, rows, _emotion_title(conversation), _heading(who, conversation)
+
+
+def _emotion_choose(who, identifier, line: str) -> tuple[str, str]:
+    """Set the thread's emotion through the service. ``("", "")`` when it was
+    set -- the check and the chip say so -- or a sentence and its kind."""
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        return "Choose a character and a thread first.", "warn"
+    outcome = _command(service.SET_EMOTION, who, identifier, payload={"emotion": line})
+    return ("", "") if outcome.get("ok") else _refused(outcome)
+
+
+def _emotion_pressed(who, identifier, nomination) -> tuple:
+    """A row of either list was pressed: choose its line (or Off), or delete it.
+
+    The nomination names the line by its words, not its place, so a list that
+    changed in the other window meanwhile cannot turn a press on one line into
+    an answer about another.
+    """
+    import json
+
+    import mc_llm_emotions
+
+    try:
+        asked = json.loads(nomination or "{}")
+    except ValueError:
+        asked = {}
+    if not isinstance(asked, dict) or asked.get("do") not in ("choose", "delete"):
+        return _emotion_view(who, identifier) + (gr.update(),)
+    line = mc_llm_emotions.clean(asked.get("line"))
+    note, kind = "", "info"
+    if asked["do"] == "delete":
+        if line:
+            mc_llm_emotions.remove(line)
+    else:
+        note, kind = _emotion_choose(who, identifier, line)
+    return _emotion_view(who, identifier) + (ui.notice(note, kind) if note else gr.update(),)
+
+
+def _emotion_added(who, identifier, text) -> tuple:
+    """A new line, added to the end of the list and chosen for this thread."""
+    import mc_llm_emotions
+
+    try:
+        mc_llm_emotions.add(text)
+    except mc_llm_emotions.Refused as refusal:
+        return _emotion_view(who, identifier) + (ui.notice(str(refusal), "warn"), gr.update())
+    note, kind = _emotion_choose(who, identifier, mc_llm_emotions.clean(text))
+    return _emotion_view(who, identifier) + (ui.notice(note, kind) if note else gr.update(), "")
+
+
+def _cache_status(who, identifier):
+    """The status line while the last reply is read again, and Ready after.
+
+    Quiet -- the info line with a slow dot, no bar -- because nothing waits on
+    it unless a message is sent meanwhile, and that message's own run says
+    *Waiting for the cache update…* in the busy style. This stops writing the
+    moment such a run is going, so the two never take turns on the line.
+    """
+    import time
+
+    import mc_llm_cache_update as cache_update
+
+    if not who or not identifier:
+        yield gr.update()
+        return
+    name = f"{who}/{identifier}"
+    if not cache_update.pending(name):
+        yield gr.update()
+        return
+    yield ui.updating("Updating cache…")
+    began = time.monotonic()
+    while cache_update.pending(name) and time.monotonic() - began < cache_update.WAIT_LIMIT:
+        if _replying(who, identifier):
+            yield gr.update()
+            return
+        time.sleep(0.25)
+    yield gr.update() if _replying(who, identifier) else ui.notice("Ready.")
+
+
+def _replying(who, identifier) -> bool:
+    """Whether a reply is under way in this thread now."""
+    try:
+        import mc_llm_conversation_ops as ops
+        from mc_llm_conversation_store import Key
+
+        return ops.for_conversation(Key(character=who, thread_id=identifier)) is not None
+    except Exception:
+        return False
 
 
 def _message_at(positions, row, column) -> int:

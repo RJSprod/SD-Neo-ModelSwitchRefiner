@@ -763,12 +763,19 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
     asked = _whole(settings.get("seed"), RANDOM_SEED)
 
     every = _every_picture()
+    context_size = _context_size()
     wire = build(character, persona, _with_pictures(list(history), every),
-                 context_size=_context_size(), reply_tokens=tokens, instruction=instruction,
+                 context_size=context_size, reply_tokens=tokens, instruction=instruction,
                  every_picture=every)
+    emotion = _emotion_for(key, target_kind, wire)
+    if emotion:
+        # The start of the character's turn: llama-server carries on from it and
+        # sends back only what follows, so the reply never holds it.
+        wire.append({"role": "assistant", "content": emotion})
     request = sessions.ChatRequest(
         messages=wire,
-        conversation=f"{key.character}/{key.thread_id}",
+        conversation=service.conversation_name(key),
+        prefilled=bool(emotion),
         needs_vision=needs_vision(wire),
         temperature=_fraction(settings.get("temperature"), character.temperature,
                               DEFAULT_TEMPERATURE),
@@ -784,7 +791,33 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
             "target_version": target_version, "accepted_revision": accepted_revision,
             "opening": opening, "request": request, "character": character,
             "persona": persona, "persisted": persisted, "prefix": prefix,
-            "result_revision": result_revision}
+            "result_revision": result_revision,
+            # What the cache update after a reply with an emotion rebuilds the
+            # conversation from: the same history, window and pictures.
+            "emotion": emotion, "history": list(history), "every_picture": every,
+            "context_size": context_size, "reply_tokens": tokens}
+
+
+def _emotion_for(key: Key, target_kind: str, wire) -> str:
+    """The line this reply starts with, or ``""``.
+
+    Only a new reply has one -- Send, Regenerate and Send again, the two target
+    kinds that make one -- never Continue, which carries on a reply already
+    written (Oobabooga's rule too). And only after a message of yours:
+    llama-server refuses two assistant messages at the end of a request, which
+    a thread whose last message of yours was deleted would otherwise send.
+    """
+    if target_kind not in (APPEND, VERSION):
+        return ""
+    if not wire or not isinstance(wire[-1], dict) or wire[-1].get("role") != "user":
+        return ""
+    try:
+        import mc_llm_emotions
+
+        return mc_llm_emotions.for_thread(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's emotion", exc_info=True)
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -925,11 +958,54 @@ def _finish(operation: Operation, plan: dict, streamed: str, outcome: str,
         return
 
     operation.result_revision = revision
+    # Before the end is announced, so that a page reading the conversation on
+    # it already finds the update running and keeps listening for its end.
+    _update_cache_after(operation, plan, whole)
     _release(operation)
     _advance(operation, outcome, error=error)
     _remember(operation, whole, outcome)
     service.publish(service.CONVERSATION_CHANGED, operation.key, revision=revision)
     _forget_checkpoint(operation)
+
+
+def _update_cache_after(operation: Operation, plan: dict, whole: str) -> None:
+    """After a reply written with an emotion, read it again without one.
+
+    llama-server's cache holds the conversation as the reply was written:
+    with the emotion's line before it. The next turn's prompt has the reply
+    alone in that place, so without this the next message would read the whole
+    reply again before its first word. :mod:`mc_llm_cache_update` reads it now,
+    in the background, while the reply is being read on screen.
+    """
+    if not plan.get("emotion"):
+        return
+    try:
+        import mc_llm_cache_update
+
+        mc_llm_cache_update.schedule(operation.key, lambda: _cache_request(plan, whole))
+    except Exception:
+        logger.debug("Model Chain: could not start the cache update", exc_info=True)
+
+
+def _cache_request(plan: dict, whole: str):
+    """The conversation as it now stands, ending on the reply: the request the
+    cache update makes. Built on its thread, because pictures are read off disk."""
+    from prompt_master.chat.history import ASSISTANT, Message
+    from prompt_master.chat.prompt import build, needs_vision
+
+    import mc_llm_conversation_service as service
+    import mc_llm_sessions as sessions
+
+    every = bool(plan.get("every_picture"))
+    history = list(plan.get("history") or []) + [Message(role=ASSISTANT, versions=[whole])]
+    wire = build(plan["character"], plan["persona"], _with_pictures(history, every),
+                 context_size=plan.get("context_size") or _context_size(),
+                 reply_tokens=plan.get("reply_tokens") or 512, every_picture=every)
+    asked = plan["request"]
+    return sessions.ChatRequest(messages=wire, needs_vision=needs_vision(wire),
+                                temperature=asked.temperature, top_p=asked.top_p,
+                                max_tokens=1, seed=asked.seed,
+                                conversation=service.conversation_name(plan["key"]))
 
 
 def reply_receipt(operation_id: str) -> str:

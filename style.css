@@ -2541,6 +2541,178 @@
     width: auto;
 }
 
+/* The thread's emotion. The chip is one word and a dot, hollow while the
+   thread has none and filled while it has one -- read off the heading beside
+   it, which every view is drawn with (`data-emotion`). The picker hangs under
+   the bar, over the conversation and taking none of its room, and is drawn
+   only while llm_studio.js holds it open. The same rows sit in the Character
+   sheet. */
+#mc-llm-studio .mc-llm-chat-stage {
+    position: relative;
+}
+
+#mc-llm-studio .mc-llm-emotion-chip::before {
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+    box-sizing: border-box;
+    content: "";
+    display: inline-block;
+    height: 0.6em;
+    margin-right: 0.45em;
+    opacity: 0.6;
+    vertical-align: 0.05em;
+    width: 0.6em;
+}
+
+#mc-llm-studio .mc-llm-chat-header:has(.mc-llm-heading[data-emotion="on"]) .mc-llm-emotion-chip::before {
+    background: var(--color-accent, currentColor);
+    border-color: var(--color-accent, currentColor);
+    opacity: 1;
+}
+
+#mc-llm-studio .mc-llm-emotion-picker {
+    background: var(--background-fill-primary, var(--body-background-fill, #111827));
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 10px;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+    gap: 0.3em;
+    max-height: min(70vh, 520px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 0.5em;
+    position: absolute;
+    right: 0.75em;
+    top: 3.4em;
+    width: min(340px, calc(100% - 1.5em));
+    z-index: 4;
+}
+
+#mc-llm-studio .mc-llm-emotion-picker:not(.mc-llm-emotion-open) {
+    display: none !important;
+}
+
+#mc-llm-studio .mc-llm-emotion-heading {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.72em;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    overflow: hidden;
+    padding: 0.1em 0.3em 0.3em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-emotion-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25em;
+}
+
+#mc-llm-studio .mc-llm-emotion-row {
+    align-items: center;
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    display: flex;
+    gap: 2px;
+    overflow: hidden;
+}
+
+#mc-llm-studio .mc-llm-emotion-row[data-chosen="true"] {
+    background: transparent;
+    background: color-mix(in srgb, var(--color-accent, #3b82f6) 12%, transparent);
+    border-color: var(--color-accent, #3b82f6);
+    border-color: color-mix(in srgb, var(--color-accent, #3b82f6) 55%, transparent);
+}
+
+#mc-llm-studio .mc-llm-emotion-choice {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    flex: 1 1 auto;
+    font: inherit;
+    gap: 0.5em;
+    min-height: 2.75em;
+    min-width: 0;
+    padding: 0 0.5em 0 0.6em;
+    text-align: left;
+}
+
+#mc-llm-studio .mc-llm-emotion-choice:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
+#mc-llm-studio .mc-llm-emotion-check {
+    color: var(--color-accent, currentColor);
+    flex: 0 0 1em;
+    font-weight: 700;
+}
+
+#mc-llm-studio .mc-llm-emotion-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-emotion-delete {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: var(--body-text-color-subdued, inherit);
+    cursor: pointer;
+    display: flex;
+    flex: 0 0 auto;
+    height: 2.5em;
+    justify-content: center;
+    width: 2.5em;
+}
+
+#mc-llm-studio .mc-llm-emotion-delete:hover,
+#mc-llm-studio .mc-llm-emotion-delete:focus-visible {
+    color: var(--error-text-color, currentColor);
+}
+
+#mc-llm-studio .mc-llm-emotion-add {
+    align-items: stretch;
+    flex-wrap: nowrap !important;
+    gap: 0.4em;
+    margin-top: 0.3em;
+}
+
+/* The cache update after a reply with an emotion: the quiet line, with a slow
+   dot in front of it. Not the busy line's bar -- nothing is waiting on it. */
+#mc-llm-studio .mc-llm-updating {
+    align-items: center;
+    display: flex;
+    gap: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-updating-dot {
+    animation: mc-llm-updating-pulse 1.6s ease-in-out infinite;
+    background: var(--color-accent, currentColor);
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 6px;
+    width: 6px;
+}
+
+@keyframes mc-llm-updating-pulse {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #mc-llm-studio .mc-llm-updating-dot {
+        animation: none;
+        opacity: 0.7;
+    }
+}
+
 /* Height is taken, not given. gr.Chatbot(height=...) writes an inline style,
    which would win over anything here, so the component is built without one
    and the height is this rule's to decide -- the space the stage has left after
@@ -8751,6 +8923,170 @@
 
 .forge-assistant-pending {
     opacity: 0.6;
+}
+
+/* The thread's emotion in the panel: the ⋯ menu's entry with a dot and the
+   line that is on, the submenu's rows (the line with its check, and Delete)
+   and the box that adds one, and the pill in the composer's row while one is
+   on. */
+.forge-assistant-menu[data-which="emotion"] .forge-assistant-menu-item {
+    position: relative;
+    padding-left: 2em;
+}
+
+.forge-assistant-emotion-item {
+    align-items: center;
+    display: flex;
+    gap: 0.5em;
+}
+
+.forge-assistant-emotion-item .forge-assistant-emotion-dot {
+    left: 0.75em;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.forge-assistant-emotion-value {
+    font-size: 0.85em;
+    margin-left: auto;
+    max-width: 55%;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forge-assistant-emotion-dot {
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    height: 0.55em;
+    opacity: 0.6;
+    width: 0.55em;
+}
+
+.forge-assistant-emotion-dot[data-on="true"],
+.forge-assistant-emotion-pill .forge-assistant-emotion-dot {
+    background: var(--color-accent, #2563eb);
+    border-color: var(--color-accent, #2563eb);
+    opacity: 1;
+}
+
+.forge-assistant-emotion-row {
+    align-items: stretch;
+    display: flex;
+    gap: 0.25em;
+}
+
+.forge-assistant-emotion-row .forge-assistant-emotion-choice {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forge-assistant-emotion-delete {
+    align-items: center;
+    background: transparent;
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: center;
+    opacity: 0.75;
+    width: 2.6em;
+}
+
+.forge-assistant-emotion-delete:hover,
+.forge-assistant-emotion-delete:focus-visible {
+    color: var(--error-text-color, #f87171);
+    opacity: 1;
+}
+
+.forge-assistant-emotion-add {
+    display: flex;
+    gap: 0.3em;
+    margin-top: 0.3em;
+}
+
+.forge-assistant-emotion-input {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    color: inherit;
+    flex: 1 1 auto;
+    font: inherit;
+    min-width: 0;
+    padding: 0.45em 0.55em;
+}
+
+.forge-assistant-emotion-adder {
+    background: transparent;
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    color: inherit;
+    cursor: pointer;
+    flex: 0 0 auto;
+    font: inherit;
+    font-weight: 600;
+    padding: 0 0.9em;
+}
+
+.forge-assistant-emotion-pill {
+    align-items: center;
+    background: transparent;
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 14%, transparent);
+    border: 1px solid var(--color-accent, #2563eb);
+    border-radius: 1em;
+    color: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    font-size: 0.8em;
+    font-weight: 600;
+    gap: 0.4em;
+    height: 2.1em;
+    max-width: 9em;
+    min-width: 0;
+    padding: 0 0.7em;
+}
+
+.forge-assistant-emotion-word {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The cache update after a reply with an emotion: the quiet line, with a slow
+   dot in front. Nothing waits on it unless a message is sent meanwhile. */
+.forge-assistant-status[data-kind="updating"]::before {
+    animation: forge-assistant-updating 1.6s ease-in-out infinite;
+    background: var(--color-accent, #2563eb);
+    border-radius: 50%;
+    content: "";
+    display: inline-block;
+    height: 6px;
+    margin-right: 0.5em;
+    vertical-align: 0.1em;
+    width: 6px;
+}
+
+@keyframes forge-assistant-updating {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .forge-assistant-status[data-kind="updating"]::before {
+        animation: none;
+        opacity: 0.7;
+    }
 }
 
 /* The drag preview. `pointer-events: none` on the class alone was never in

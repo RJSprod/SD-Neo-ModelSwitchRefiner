@@ -667,12 +667,27 @@ class ChatRequest:
     reply that names its conversation has its llama.cpp slot saved after it,
     and the first reply after a restart has that slot read back before it.
     Empty is the old behaviour exactly."""
+    prefilled: bool = False
+    """Whether the request ends on the start of the reply -- the thread's
+    emotion (:mod:`mc_llm_emotions`). Its slot is not saved: what it holds is
+    the line before the reply, which no later prompt has. The cache update
+    after it saves the conversation as it is (:mod:`mc_llm_cache_update`)."""
 
 
 def _conversation(request: ChatRequest, cancel: Cancellation):
     """One streamed reply. Conversation's whole runtime story is this function."""
     gpu = _Gpu("a conversation reply", cancel)
     try:
+        if request.conversation:
+            # The last reply in this conversation being read again, which is
+            # what makes this one cheap: waited for, and said at once.
+            import mc_llm_cache_update
+
+            waited = yield from mc_llm_cache_update.wait(request.conversation, cancel)
+            if not waited:
+                gpu.release()
+                yield Event(CANCELLED, "Cancelled")
+                return
         acquired = yield from gpu.acquire()
         if not acquired:
             gpu.release()
@@ -692,10 +707,15 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
         # conversation -- streams exactly as it always has.
         saving = getattr(client, "stream_conversation", None)
         if request.conversation and callable(saving):
+            # Asked only of a prefilled reply, so a client from before the
+            # keyword is called exactly as it always was.
+            unsaved = {"save": False} if request.prefilled else {}
+
             def work(on_text):
                 return saving(request.conversation, request.messages, request.max_tokens,
                               request.seed, on_text, cancel.event,
-                              temperature=request.temperature, top_p=request.top_p)
+                              temperature=request.temperature, top_p=request.top_p,
+                              **unsaved)
         else:
             def work(on_text):
                 return client.stream_chat(request.messages, request.max_tokens,

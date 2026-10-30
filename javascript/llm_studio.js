@@ -1497,6 +1497,94 @@
     // independent features, and the first of them throwing took the six after
     // it down with it. They are wired in no particular order and none of them
     // needs any other to have run.
+    // -- the thread's emotion ---------------------------------------------- //
+
+    // The chip opens a picker under the bar; a press elsewhere or Escape puts
+    // it away. Which line is on, and every change to the list, is Python's:
+    // a row press is nominated through one hidden box and one hidden button
+    // (mc_llm_chat_panel._emotion_pressed), the line named by its words, as
+    // the action row's presses are. The rows are the same in the Character
+    // sheet, and one listener answers both.
+    const EMOTION_CHIP = "mc-llm-chat-to-emotion";
+    const EMOTION_PICKER = "mc-llm-chat-emotion";
+    const EMOTION_AT = "mc-llm-chat-emotion-at";
+    const EMOTION_NOW = "mc-llm-chat-emotion-now";
+    const EMOTION_OPEN = "mc-llm-emotion-open";
+    const EMOTION_ROWS = ".mc-llm-emotion-choice, .mc-llm-emotion-delete";
+    let emotionWired = false;
+
+    function emotionOpen() {
+        const picker = byId(EMOTION_PICKER);
+        return !!picker && picker.classList.contains(EMOTION_OPEN);
+    }
+
+    // Under the chip, its right edge on the chip's: the chip's place on the
+    // bar depends on how wide the chips after it are.
+    function placeEmotion(picker, chip) {
+        const stage = picker.offsetParent || picker.parentElement;
+        if (!stage || typeof chip.getBoundingClientRect !== "function") return;
+        const box = stage.getBoundingClientRect();
+        const at = chip.getBoundingClientRect();
+        picker.style.top = Math.round(at.bottom - box.top + 6) + "px";
+        picker.style.right = Math.max(8, Math.round(box.right - at.right)) + "px";
+    }
+
+    function showEmotion(open) {
+        const picker = byId(EMOTION_PICKER);
+        if (!picker) return false;
+        const chip = clickable(EMOTION_CHIP);
+        if (open && chip) placeEmotion(picker, chip);
+        picker.classList.toggle(EMOTION_OPEN, !!open);
+        if (chip) chip.setAttribute("aria-expanded", String(!!open));
+        return true;
+    }
+
+    function nominateEmotion(what, line) {
+        const box = byId(EMOTION_AT);
+        if (!box) return false;
+        const field = box.tagName === "TEXTAREA" || box.tagName === "INPUT"
+            ? box : box.querySelector("textarea, input");
+        if (!field) return false;
+        field.value = JSON.stringify({do: what, line: line});
+        field.dispatchEvent(new Event("input", {bubbles: true}));
+        window.setTimeout(function () { press(EMOTION_NOW); }, 0);
+        return true;
+    }
+
+    function onEmotionClick(event) {
+        const target = event.target;
+        if (!target || typeof target.closest !== "function") return;
+        const row = target.closest(EMOTION_ROWS);
+        if (row) {
+            if (!row.disabled) {
+                nominateEmotion(row.classList.contains("mc-llm-emotion-delete") ? "delete"
+                    : "choose", row.getAttribute("data-emotion") || "");
+            }
+            return;
+        }
+        if (!emotionOpen()) return;
+        const picker = byId(EMOTION_PICKER);
+        const chip = clickable(EMOTION_CHIP);
+        if ((picker && picker.contains(target)) || (chip && chip.contains(target))) return;
+        showEmotion(false);
+    }
+
+    function wireEmotion() {
+        const chip = clickable(EMOTION_CHIP);
+        if (chip && chip.dataset.mcLlmEmotion !== "1") {
+            chip.dataset.mcLlmEmotion = "1";
+            chip.setAttribute("aria-haspopup", "dialog");
+            chip.setAttribute("aria-expanded", "false");
+            chip.addEventListener("click", function () { showEmotion(!emotionOpen()); });
+        }
+        if (emotionWired) return;
+        emotionWired = true;
+        document.addEventListener("click", onEmotionClick);
+        document.addEventListener("keydown", function (event) {
+            if (event.key === "Escape" && emotionOpen()) showEmotion(false);
+        });
+    }
+
     function attempt(what, run) {
         try {
             run();
@@ -1513,6 +1601,7 @@
         attempt("draw the action rows", wireBubbles);
         attempt("keep the sheets in view", wireSheets);
         attempt("edit in a dialog", wireEditor);
+        attempt("wire the emotion picker", wireEmotion);
         attempt("count the seconds", function () { watchActivity(); tick(); });
         attempt("fit the workspace", function () { watchWindow(); fit(); });
     }

@@ -3726,6 +3726,59 @@ back, no reload needed. That is the same layout at 320px as on a desktop; what
 changes with the width is that the sheets become a side panel instead of
 covering the screen.
 
+### A thread's emotion
+
+Oobabooga's *character bias*, for every conversation: a short line such as
+`*I am so happy*` that the character's next reply **starts from**, so the reply
+is written in that state. The line is never in the reply — not on screen, not
+read aloud, not copied or sent to the Voice Box, not saved — and never in what
+the character is shown of the conversation afterwards, so it is not copied into
+later replies either, and turning it off leaves nothing behind.
+
+- **Per thread.** Each thread has its own, chosen in LLM Studio or the Forge
+  Assistant; a **new thread starts Off**, a **branch keeps** its thread's, and a
+  deleted thread's is forgotten. It is a setting kept beside the thread rather
+  than a change to it, so choosing one moves no revision: the other window's
+  next message still goes, and a reply streaming meanwhile still saves.
+- **One list**, shared by every character and thread, starting with Oobabooga's
+  five (`*I am so happy*`, `*sad*`, `*excited*`, `*bored*`, `*angry*`). A line
+  is added from the box under the list — Enter adds it and chooses it for the
+  thread — and deleted with the bin beside it. **Deleting a line that threads
+  are using turns those threads Off**, for good: adding the same line back does
+  not turn them on again. A line is one line of up to 200 characters, fifty at
+  most. Kept in `emotions.json` under the LLM data root.
+- **Where:** in LLM Studio, the **Emotion** chip between Character and You — its
+  dot is hollow while the thread has none and filled while it has one — opens a
+  small picker under the bar, put away by a press anywhere else or Escape; the
+  same list is in the **Character** sheet under *Talking to*. In the Forge
+  Assistant, the **⋯** menu's Chat group has **Emotion ›** with the line that is
+  on, and while one is on a pill in the composer's row says its word
+  (*● happy*) and opens it in one tap.
+- **Which replies:** Send, Regenerate and Send again from here start from it;
+  **Continue does not**, since it carries on a reply already written. A change
+  takes effect from the next reply.
+
+**The cache update.** llama-server keeps the conversation as it was read, so
+after a reply written with an emotion its cache holds the line and then the
+reply, while every later prompt has the reply alone in that place; the next
+message would read the whole last reply again before its first word — a few
+seconds on the Intel GPU. So the moment such a reply is saved, it is **read
+again in the background**: the status line says *Updating cache…* quietly, with
+a slow dot and no bar, and then *Ready.* Send stays Send. A message sent
+before it is done says **Waiting for the cache update…** in its progress, as
+the busy line, and starts the moment it is. It runs only on the server that
+wrote the reply, never starts or restarts one, gives way to an image job on its
+card and to a Voice Box render, and is skipped where the chat template does not
+render a reply the same way as it continues it (Gemma 4's own template without
+*Keep Gemma's thought marker*, which re-reads the last reply every turn
+anyway); skipped, the next message simply reads the reply again. The reply's
+own saved prompt cache is not kept (it holds the line); the one after the
+update is, so a restart resumes as it would without an emotion.
+
+On a llama-server older than the pinned build, which may not continue a reply
+it is handed, the line reaches the model as a reply of its own and the effect
+is weaker; nothing fails.
+
 ### While it is working
 
 A two-pixel bar sweeps along the bottom of the status line whenever a request is
@@ -4149,7 +4202,7 @@ entries act on, and a **Cancel**:
 
 | Group | Entries |
 | --- | --- |
-| **Chat**, headed by the character's name | **New chat**, **Threads ›**, **System prompt…** |
+| **Chat**, headed by the character's name | **New chat**, **Threads ›**, **Emotion ›** (the thread's emotion; *A thread's emotion*, above), **System prompt…** |
 | **Composer** | **Auto Attach**, **Send to Generate** |
 | **Panel** | **Free Float**, **Tab Bar in Focus**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
@@ -5116,7 +5169,10 @@ The conversation's cache is kept on disk:
 - **Saved after every completed reply**, by llama-server itself
   (`--slot-save-path`), into `prompt_caches` under the LLM data root. The reply
   asks llama-server which of its warm caches answered, so the right one is saved
-  when several roles share the server. A stopped reply is not saved.
+  when several roles share the server. A stopped reply is not saved. A reply
+  written with the thread's emotion is not saved either — its cache holds the
+  emotion's line, which no later prompt has — and the cache update after it is
+  (*A thread's emotion*, above).
 - **Read back before the first reply after a restart**, once per conversation,
   into a warm cache nobody has used since the server started, and that reply is
   sent to it. It then reads only what is new, as it would have before the restart.

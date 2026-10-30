@@ -2803,7 +2803,7 @@ class TestFreeFloat:
             }));
         """, sources=("shell",))
 
-        assert found["labels"] == ["Chat · Ada", "New chat", "Threads",
+        assert found["labels"] == ["Chat · Ada", "New chat", "Threads", "Emotion",
                                    "Composer", "Auto Attach", "Send to Generate",
                                    "Panel", "Free Float", "Tab Bar in Focus",
                                    "Tap Outside to Close", "Models", "Warm LoRA", "Cold LoRA",
