@@ -38,7 +38,8 @@ def updates(monkeypatch):
     """The cache update's reading, recorded instead of sent."""
     cache_update.reset()
     asked = []
-    monkeypatch.setattr(cache_update, "_update", lambda request: asked.append(request) or "")
+    monkeypatch.setattr(cache_update, "_update",
+                        lambda request, update: asked.append(request) or "")
     yield asked
     cache_update.reset()
 
@@ -338,7 +339,8 @@ class TestTheCacheUpdateIsAskedFor:
         """So a page that reads the conversation at the reply's end finds it
         running, and keeps listening for its own end."""
         release = threading.Event()
-        monkeypatch.setattr(cache_update, "_update", lambda request: release.wait(5) and "")
+        monkeypatch.setattr(cache_update, "_update",
+                            lambda request, update: release.wait(5) and "")
         asking(monkeypatch)
         choose(thread, HAPPY)
         cursor = feed.cursor()
@@ -361,21 +363,24 @@ class TestTheCacheUpdateIsAskedFor:
 # --------------------------------------------------------------------------- #
 
 
-class TestWaitingForIt:
-    @staticmethod
-    def blocked(name):
-        done = threading.Event()
-        with cache_update._guard:
-            cache_update._pending[name] = done
-        return done
+def pending_update(name, reading=True):
+    """An update registered as the scheduler registers one, reading or still
+    waiting for its turn."""
+    update = cache_update._Update()
+    update.reading = reading
+    with cache_update._guard:
+        cache_update._pending[name] = update
+    return update
 
+
+class TestWaitingForIt:
     def test_nothing_to_wait_for_says_nothing(self):
         steps = list(cache_update.wait("Ada/one", sessions.Cancellation()))
 
         assert steps == []
 
     def test_a_reply_says_so_at_once_and_goes_ahead_when_it_ends(self):
-        done = self.blocked("Ada/one")
+        update = pending_update("Ada/one")
         heard, answer = [], {}
 
         def consume():
@@ -386,13 +391,24 @@ class TestWaitingForIt:
         assert heard[0].kind == sessions.STATUS
         assert heard[0].text == "Waiting for the cache update…"
 
-        threading.Timer(0.05, done.set).start()
+        threading.Timer(0.05, update.done.set).start()
         with pytest.raises(StopIteration):
             next(walker)
         assert answer["went"] is True
+        assert not update.cancel.is_set()
+
+    def test_a_reply_takes_the_place_of_one_still_waiting_for_its_turn(self):
+        """It reads the same reply in its own prompt, so nothing is waited for
+        twice -- and it says nothing about a cache update it is not waiting for."""
+        update = pending_update("Ada/one", reading=False)
+
+        steps = list(cache_update.wait("Ada/one", sessions.Cancellation()))
+
+        assert steps == []
+        assert update.cancel.is_set()
 
     def test_a_stopped_reply_stops_waiting(self):
-        self.blocked("Ada/one")
+        pending_update("Ada/one")
         cancel = sessions.Cancellation()
         cancel.cancel()
 
@@ -405,10 +421,11 @@ class TestWaitingForIt:
             next(walker)
         assert stopped.value.value is False
 
-    def test_another_conversation_does_not_wait(self):
-        self.blocked("Ada/one")
+    def test_another_conversation_neither_waits_nor_stops_it(self):
+        update = pending_update("Ada/one", reading=False)
 
         assert list(cache_update.wait("Ada/two", sessions.Cancellation())) == []
+        assert not update.cancel.is_set()
 
     def test_the_reply_waits_before_it_asks_for_the_card(self, monkeypatch):
         order = []
@@ -508,36 +525,46 @@ class TestContinues:
 
 
 class Warm:
-    def __init__(self, client=None):
-        self.client = client
+    """The runtime's ``warm_client``: the given clients in turn, the last for ever."""
+
+    def __init__(self, *clients):
+        self.clients = list(clients) or [None]
         self.asked = []
 
     def warm_client(self, needs_vision=False):
         self.asked.append(needs_vision)
-        return self.client
+        return self.clients.pop(0) if len(self.clients) > 1 else self.clients[0]
 
 
 class Client:
     base_url, api_key = "http://127.0.0.1:1", "k"
 
-    def __init__(self):
+    def __init__(self, update=None):
         self.streamed = []
+        self.update = update
+        self.reading = []
 
     def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
                             cancel=None, **kwargs):
+        if self.update is not None:
+            self.reading.append(self.update.reading)
         self.streamed.append((conversation, messages, max_tokens, kwargs))
         return "x"
 
 
 @pytest.fixture
 def real_update(monkeypatch):
-    """The update as written, with llama-server and the runtime replaced."""
+    """The update as written, with llama-server and the runtime replaced and the
+    language model's own wait made quick: nothing on the card, at first."""
+    import mc_broker
+
     monkeypatch.setattr(cache_update, "_update", TestTheUpdate.original)
     monkeypatch.setattr(cache_update, "continues", lambda client, messages: True)
-    import mc_llm_runtime
-
-    monkeypatch.setattr(mc_llm_runtime, "_stands_down_for_the_image_job",
-                        lambda configuration: False)
+    monkeypatch.setattr(sessions, "WAIT_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(sessions._Gpu, "_domain",
+                        lambda self: mc_broker.UNKNOWN_CUDA_EXECUTION)
+    monkeypatch.setattr(sessions._Gpu, "_blocked_by_the_image_job",
+                        staticmethod(lambda domain: False))
     monkeypatch.setattr(sessions._Gpu, "_blocked_by_a_guest",
                         staticmethod(lambda domain, ours: ""))
     return monkeypatch
@@ -546,6 +573,18 @@ def real_update(monkeypatch):
 def request_for(conversation="Ada/one"):
     return sessions.ChatRequest(messages=list(ENDING), max_tokens=1, seed=3,
                                 conversation=conversation)
+
+
+def busy_for(answers):
+    """A check that answers each of ``answers`` in turn, then the last for ever,
+    counting how often it was asked."""
+    asked = []
+
+    def check(*_args):
+        asked.append(True)
+        return answers[min(len(asked), len(answers)) - 1]
+
+    return check, asked
 
 
 class TestTheUpdate:
@@ -559,65 +598,121 @@ class TestTheUpdate:
         client = Client()
         self.resolve(real_update, Warm(client))
 
-        said = cache_update._update(request_for())
+        said = cache_update._update(request_for(), cache_update._Update())
 
         assert said.startswith("the cache update read the last reply again")
         conversation, messages, max_tokens, kwargs = client.streamed[-1]
         assert (conversation, messages, max_tokens) == ("Ada/one", ENDING, 1)
         assert "save" not in kwargs
 
-    def test_it_starts_no_server(self, real_update):
+    def test_it_starts_no_server_and_waits_for_no_turn_without_one(self, real_update):
+        """With no server there is no cache to update; the next message starts
+        one and reads the conversation as it would without an emotion. And it
+        does not queue for the card for nothing."""
         runtime = Warm(None)
         self.resolve(real_update, runtime)
+        busy, asked = busy_for([True, True, False])
+        real_update.setattr(sessions._Gpu, "_blocked_by_the_image_job", staticmethod(busy))
 
-        assert cache_update._update(request_for()) == ""
+        assert cache_update._update(request_for(), cache_update._Update()) == ""
         assert runtime.asked == [False]
+        assert asked == []
 
-    def test_it_gives_way_to_the_image_job(self, real_update):
-        import mc_llm_runtime
+    def test_it_waits_for_the_image_job_as_a_reply_does(self, real_update):
+        update = cache_update._Update()
+        client = Client(update)
+        self.resolve(real_update, Warm(client))
+        busy, asked = busy_for([True, True, True, False])
+        real_update.setattr(sessions._Gpu, "_blocked_by_the_image_job", staticmethod(busy))
 
+        said = cache_update._update(request_for(), update)
+
+        assert len(asked) >= 4
+        assert said.startswith("the cache update read the last reply again")
+        assert len(client.streamed) == 1
+        assert client.reading == [True], "reading only once its turn had come"
+
+    def test_it_waits_for_a_voice_box_render_as_a_reply_does(self, real_update):
         client = Client()
         self.resolve(real_update, Warm(client))
-        real_update.setattr(mc_llm_runtime, "_stands_down_for_the_image_job",
-                            lambda configuration: True)
+        busy, asked = busy_for(["a Voice Box render", "a Voice Box render", ""])
+        real_update.setattr(sessions._Gpu, "_blocked_by_a_guest", staticmethod(busy))
 
-        said = cache_update._update(request_for())
+        said = cache_update._update(request_for(), cache_update._Update())
 
-        assert "gave way to the image generation" in said
-        assert client.streamed == []
+        assert len(asked) >= 3
+        assert said.startswith("the cache update read the last reply again")
+        assert len(client.streamed) == 1
 
-    def test_it_reads_nothing_where_the_template_would_not_resume(self, real_update):
-        client = Client()
-        self.resolve(real_update, Warm(client))
-        real_update.setattr(cache_update, "continues", lambda client, messages: False)
-
-        assert cache_update._update(request_for()) == ""
-        assert client.streamed == []
-
-    def test_it_never_waits_behind_the_language_model(self, real_update):
+    def test_it_waits_behind_the_language_model_rather_than_giving_up(self, real_update):
         import mc_broker
 
         client = Client()
         self.resolve(real_update, Warm(client))
-        held, release = threading.Event(), threading.Event()
+        held = threading.Event()
 
         def holder():
             with mc_broker.workload(mc_broker.FAMILY_LLM, "a conversation reply"):
                 held.set()
-                release.wait(5)
+                time.sleep(0.3)
 
         worker = threading.Thread(target=holder, daemon=True)
         worker.start()
         assert held.wait(5)
-        real_update.setattr(cache_update, "LOCK_WAIT", 0.05)
-        try:
-            said = cache_update._update(request_for())
-        finally:
-            release.set()
-            worker.join(5)
+        began = time.monotonic()
+        said = cache_update._update(request_for(), cache_update._Update())
+        took = time.monotonic() - began
+        worker.join(5)
 
-        assert "found the language model busy" in said
+        assert took >= 0.2
+        assert said.startswith("the cache update read the last reply again")
+        assert len(client.streamed) == 1
+
+    def test_a_message_that_takes_its_place_stops_it_while_it_waits(self, real_update):
+        client = Client()
+        self.resolve(real_update, Warm(client))
+        busy, _ = busy_for([True])
+        real_update.setattr(sessions._Gpu, "_blocked_by_the_image_job", staticmethod(busy))
+        update = pending_update("Ada/one", reading=False)
+        answer = {}
+        worker = threading.Thread(
+            target=lambda: answer.setdefault("said", cache_update._update(request_for(), update)),
+            daemon=True)
+        worker.start()
+        time.sleep(0.1)
+
+        steps = list(cache_update.wait("Ada/one", sessions.Cancellation()))
+        worker.join(5)
+
+        assert steps == []
+        assert answer["said"] == ""
         assert client.streamed == []
+
+    def test_a_server_gone_while_it_waited_is_not_started_again(self, real_update):
+        client = Client()
+        runtime = Warm(client, None)
+        self.resolve(real_update, runtime)
+
+        assert cache_update._update(request_for(), cache_update._Update()) == ""
+        assert client.streamed == []
+        assert len(runtime.asked) == 2
+
+    def test_on_any_other_template_the_reply_is_read_as_a_past_one(self, real_update):
+        """Gemma 4's own template, or any that writes the newest reply
+        differently: the reply finished, a placeholder message after it, and
+        no saved slot -- it would hold the placeholder."""
+        client = Client()
+        self.resolve(real_update, Warm(client))
+        real_update.setattr(cache_update, "continues", lambda client, messages: False)
+
+        said = cache_update._update(request_for(), cache_update._Update())
+
+        conversation, messages, max_tokens, kwargs = client.streamed[-1]
+        assert messages == ENDING + [{"role": "user", "content": cache_update.PROBE}]
+        assert (conversation, max_tokens) == ("Ada/one", 1)
+        assert kwargs.get("save") is False
+        assert said.startswith("the cache update read the last reply again")
+        assert "as a past reply" in said
 
     def test_it_holds_the_card_under_its_own_name(self, real_update):
         import mc_broker
@@ -632,13 +727,14 @@ class TestTheUpdate:
 
         self.resolve(real_update, Warm(Watching()))
 
-        cache_update._update(request_for())
+        cache_update._update(request_for(), cache_update._Update())
 
         assert seen == ["the cache update"]
 
     def test_schedule_says_when_it_starts_and_ends(self, thread, monkeypatch):
         release = threading.Event()
-        monkeypatch.setattr(cache_update, "_update", lambda request: release.wait(5) and "")
+        monkeypatch.setattr(cache_update, "_update",
+                            lambda request, update: release.wait(5) and "")
         published = []
         monkeypatch.setattr(service, "publish",
                             lambda kind, key=None, **payload: published.append((kind, payload)))
@@ -654,7 +750,7 @@ class TestTheUpdate:
         assert updates == [{"updating": True}, {"updating": False}]
 
     def test_a_failure_still_ends_it(self, thread, monkeypatch):
-        def broken(request):
+        def broken(request, update):
             raise RuntimeError("no")
 
         monkeypatch.setattr(cache_update, "_update", broken)
@@ -800,10 +896,8 @@ class TestTheTabSaysTheCacheIsUpdating:
         assert list(self.statuses("Ada", thread.identifier)) == [gr.update()]
 
     def test_quietly_while_it_runs_and_ready_after(self, thread):
-        done = threading.Event()
-        with cache_update._guard:
-            cache_update._pending[name_of(thread)] = done
-        threading.Timer(0.3, done.set).start()
+        update = pending_update(name_of(thread))
+        threading.Timer(0.3, update.done.set).start()
 
         said = list(self.statuses("Ada", thread.identifier))
 
@@ -815,16 +909,14 @@ class TestTheTabSaysTheCacheIsUpdating:
         import gradio as gr
         import mc_llm_chat_panel
 
-        done = threading.Event()
-        with cache_update._guard:
-            cache_update._pending[name_of(thread)] = done
+        update = pending_update(name_of(thread))
         replying = iter([False, True])
         monkeypatch.setattr(mc_llm_chat_panel, "_replying",
                             lambda who, identifier: next(replying, True))
         try:
             said = list(self.statuses("Ada", thread.identifier))
         finally:
-            done.set()
+            update.done.set()
 
         assert "Updating cache…" in said[0]
         assert said[-1] == gr.update()

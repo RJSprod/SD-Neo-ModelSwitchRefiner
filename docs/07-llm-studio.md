@@ -4396,13 +4396,13 @@ a server with a projector loaded (this extension's default) and for any context
 that cannot shift (a hybrid like Qwen 3.5), and the reply's cached entries were
 computed with the line in view, so its memory of the reply would stay biased.
 
-- **Only where it helps.** A continued reply has to render exactly as the same
+- **Only where it helps** (replaced in §40.5: it reads on every template now). A continued reply has to render exactly as the same
   reply does as a past turn, or the update reads for nothing. Before reading,
   llama-server renders both (`/apply-template`, with the request's own template
   fields) and the update goes ahead only when the continued request is the start
   of the followed one (`continues`). Gemma 4's own template fails that -- the
   asymmetry `mc_llm_template` patches -- and with the patch on it passes.
-- **Nothing started, nothing waited on.** `Runtime.warm_client` hands back the
+- **Nothing started, nothing waited on** (the waiting replaced in §40.5: it waits its turn as a reply does). `Runtime.warm_client` hands back the
   server already up from the settings in force, or nothing; an image job on its
   card or a speech guest's turn stands it down; it takes the language model's
   lock as background work under the name *the cache update* with two seconds'
@@ -4447,3 +4447,49 @@ emotion (the match should run through the end of the last reply) and the
 console's *the cache update read the last reply again in …* line. Both views
 were drawn in Chromium (the flyout on the layout test page, the tab on a stand-in
 with the real stylesheet and script); not on a real Gradio 4.40 page.
+
+### 40.5 The cache update follows the language model's rules (after #310)
+
+The user, reading the README's account of when the update did nothing: "It
+should never skip for other AI models, I mean, it just needs to follow the rules
+of the LLM studio LLM. If my LLM doesn't skip, than the cache step should not."
+Three things had made it do nothing, and two of them were not the language
+model's rules:
+
+- **It gave way** to an image job on its card or a Voice Box render, and gave up
+  on the language model's lock after two seconds, where a reply waits its turn.
+  Now it takes the card through a reply's own acquisition
+  (`mc_llm_sessions._Gpu`, under the name *the cache update*), waiting as long as
+  a reply would. The one thing that stops it is a message in the same
+  conversation sent while it is still waiting for its turn: that message takes
+  its place (`wait` stops it and goes ahead without a word), because it reads
+  the same reply as part of its own prompt -- a message sent once it is reading
+  waits for it, as before. Each update is an `_Update` (done, reading, the
+  stop), and it is marked reading only once it holds the card and the server is
+  still the one that wrote the reply.
+- **It did nothing on a template that renders a continued reply differently
+  from a past one** -- Gemma 4's own, and others that write the newest reply
+  differently from older ones. Now it reads there too, in a second form: the
+  reply finished, followed by a placeholder message of yours (`PROBE`). Every
+  template renders a past reply the same way in that request and in the next
+  one, and b10621 breaks a prompt's processing at the start of the last user
+  message to keep a context checkpoint there for a model that cannot roll back
+  freely (`server-context.cpp`: "break at the last user message", for a
+  recurrent or hybrid context and a sliding window without the full cache), so
+  the next prompt resumes where its own words begin. The first form stays where
+  it renders the same (`continues`), because its slot is the one a restart can
+  restore exactly; the second's slot is not saved (`save=False`), since it holds
+  the placeholder, and the last saved file stays. A render that fails reads as
+  "not the same", so the second form is the fallback rather than nothing.
+- **No server** stays: the server that wrote the reply was unloaded, evicted or
+  replaced with other settings, its cache is gone and nothing is left to
+  update; the next message reads the conversation as it would without an
+  emotion. It is asked before the wait, so nothing queues for the card for
+  nothing, and again once the card is held.
+
+Tests: the waits driven through `_Gpu`'s own checks (an image job and a Voice
+Box render that clear after a few polls, the lock held by another workload), the
+take-over, a server gone while it waited, the second form's request and its
+unsaved slot. Nine mutations each fail a test; two survived a first pass (a
+measurement taken after the holder's thread had been joined, and a test of the
+no-server case that the second check also caught) and the tests were tightened.
