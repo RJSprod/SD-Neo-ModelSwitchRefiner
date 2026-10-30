@@ -52,6 +52,7 @@ import mc_plan_panel
 import mc_presets
 import mc_profile_state
 import mc_progress
+import mc_prompt_padding
 import mc_references
 import mc_styles
 import mc_theme
@@ -336,6 +337,7 @@ shared.options_templates.update(
                 "undoes before its first step"
             ),
             **mc_batch_once.settings(shared),
+            **mc_prompt_padding.settings(shared),
             mc_memory.OPT_PIN_ENCODERS: shared.OptionInfo(
                 True,
                 "Keep Stage 1's text encoder and VAE in VRAM during Stage 2",
@@ -4349,6 +4351,12 @@ def _on_script_unloaded():
         except Exception:
             errors.report(f"Model Chain: failed to stop {name}", exc_info=True)
     mc_memory.release_all()
+    # Forge's own prompt stacking back, so a reload wraps the host's function
+    # and not this one's wrapper of it.
+    try:
+        mc_prompt_padding.uninstall()
+    except Exception:
+        errors.report("Model Chain: failed to put back Forge's prompt stacking", exc_info=True)
     # The LLM lives in another process, so releasing our own references would
     # leave it running and holding VRAM after the extension has gone. It is
     # stopped first, and the residency register cleared after, so a reload
@@ -4401,6 +4409,11 @@ try:
     # with the setting on, stood down after a Forge update, re-pinned by the
     # switch (mc_batch_once).
     script_callbacks.on_app_started(mc_batch_once.on_app_started)
+    # A batch's prompts of different lengths padded to the longest, as Forge
+    # did before 2026-10-30, instead of repeated up to a common multiple of
+    # their lengths, which ran a wildcard batch out of memory on Krea 2
+    # (mc_prompt_padding). Before any generation can run.
+    script_callbacks.on_app_started(mc_prompt_padding.on_app_started)
     # The first sampling step of every pass: the host has read its batch flag
     # by then, so the override puts it back there.
     if hasattr(script_callbacks, "on_cfg_denoiser"):

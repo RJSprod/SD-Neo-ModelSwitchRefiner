@@ -592,6 +592,9 @@ what it says of itself were rewritten for readability.
 - **Count each image once in Forge's VRAM request at CFG 1** (default **on**,
   pinned to the Forge build it was turned on with) — see
   [Counting each image once at CFG 1](#counting-each-image-once-at-cfg-1).
+- **Pad a batch's prompts to the longest, as Forge did before October 30**
+  (default **on**) — see
+  [A batch's prompts of different lengths](#a-batchs-prompts-of-different-lengths).
 - **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
   see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
 - **Use leftover VRAM to keep Stage 2 warm between generations** (default on,
@@ -1625,6 +1628,56 @@ Model Chain: Forge is neo 2.31 @ ffffffffff now, not the neo 2.30 @ 1a2b3c4d5e t
 and the sampler's own line reads `(a 2x16x1x128x128 latent, each image counted
 once)` while it is in force. The extension's reading of the request follows the
 host's flag either way, so it always says what the host will actually ask.
+
+##### A batch's prompts of different lengths
+
+Before every sampling step Forge stacks the conditioning of every image in the
+batch into one tensor. When the images' prompts differ in length — a wildcard
+picked per image does that — they have to be made one length first. Until
+2026-10-30 Forge Neo padded the shorter ones to the longest with copies of their
+last token. Its commit `49bc706` ("batching") repeats every prompt whole
+instead, up to the least common multiple of all the lengths, with no limit. For
+CLIP's 77-token chunks that multiple stays small. Krea 2's text encoder gives
+every token 12 layers × 2560 float32 values (120 KiB), unpadded, and two prompts
+a few tokens apart become tens of thousands of tokens each:
+
+| Prompt lengths | Padded (before 2026-10-30) | Repeated (Forge since) |
+|---|---|---|
+| 250 and 254 tokens | 254 each, 0.06 GB for a batch of two | 31,750 each, 7.3 GB |
+| 300 and 301 tokens | 301 each, 0.07 GB | 90,300 each, 20.7 GB |
+
+Forge builds that in system RAM and moves it onto the card beside the model,
+which then has to attend over all of it. Every wildcard batch above one ran a
+24 GB card out of memory, and the same batch without the wildcard worked.
+
+**Pad a batch's prompts to the longest, as Forge did before October 30**, under
+Settings → Model Chain, default **on**, puts the old padding back. Forge's
+`stack_conds` is wrapped: a call whose prompts differ only in length gets the
+old code's result exactly, and every other call, including every batch whose
+prompts are one length, is Forge's own. Off leaves Forge's repeat. The switch is
+read on every call, so a change applies from the next sampling step.
+
+It is not pinned to a Forge build the way counting each image once is: a pin
+would turn it off at every Forge update and bring the error back until the
+switch was turned off and on again. It is tied to the host by what the host
+does instead. At every start Forge's function is asked what it makes of a
+3-token and a 5-token tensor: 15 tokens back is the repeat this was written
+against, 5 is the padding it puts back (a Forge that pads again, or caps the
+repeat, is padded exactly as before), and any other answer leaves Forge's
+function alone, with a warning in the log that the padding is off on that build.
+
+The log:
+
+```
+Model Chain: Forge repeats a batch's prompts of different lengths up to a common
+             multiple of their lengths; they are padded to the longest instead, as
+             Forge did before 2026-10-30
+Model Chain: a batch's prompts were 250 and 254 tokens long and were padded to 254,
+             as Forge did before 2026-10-30; Forge's own stacking would have repeated
+             each to 31,750 tokens, 7.3 GB for the batch
+```
+
+The second line is said once a session for each set of lengths.
 
 ##### What the pass really used
 
