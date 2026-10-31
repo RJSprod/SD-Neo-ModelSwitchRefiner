@@ -1,18 +1,40 @@
-"""Character Emotion: a short line that starts the character's next reply.
+"""Character Emotion: how the character feels, steering its replies one of two ways.
 
-Oobabooga's *character bias*, brought across. The line -- ``*I am so happy*``
--- is put on the wire as the opening of the character's turn, after the
-conversation and after your message, and the model writes its reply as if it
-had already begun with it. llama-server continues an assistant message that
-ends the request (b10621 does by default), and sends the line back at the
-front of the reply, which :class:`Unechoed` takes off as the reply streams
-(``mc_llm_sessions``), so the line is never in a reply, never on screen,
-never spoken and never saved: the history holds the reply alone, and the next
-turn sees the reply alone. That is also why the character never starts
-copying the line. Text in asterisks the model writes itself is its reply and
-stays.
+Oobabooga's *character bias*, brought across, with a switch between two roads
+(:func:`mode`, one choice for every thread):
 
-Two things are kept, in one file in the LLM data folder:
+* **The system prompt** (:data:`SYSTEM`, the default). The line is put at the
+  end of the thread's system prompt, in one shape for every character
+  (:func:`system_note`): the character's own prompt, override or built, stays
+  as it is in the editor, and every request in the thread -- Continue included
+  -- is sent with the two together. The reply is written from the feeling
+  rather than after it, so it starts as a reply starts. The front of every
+  prompt is the same while the emotion is, so llama-server keeps the
+  conversation cached from one message to the next; a change of emotion
+  changes the front, and sets the conversation being read again in the
+  background at once (``mc_llm_conversation_ops.rewarm``,
+  :mod:`mc_llm_cache_update`).
+* **The start of the reply** (:data:`PREFILL`), Oobabooga's own way: its
+  ``bot_prefix_modifier`` writes the line after the character's turn opening,
+  so the model reads it as the first words of its own reply and the page shows
+  only what follows. Here the line is a trailing assistant message for Send,
+  Regenerate and Send again after a message of yours -- never Continue --
+  ending on an empty line (:func:`opening`), which llama-server continues and
+  sends back at the front of the reply, where :class:`Unechoed` takes it off;
+  the user found such replies starting "like there is hidden response that's
+  been cropped out", which is why the system prompt became the default, and
+  asked to keep both. The cache disagrees with
+  the next prompt from the line onward, so the reply is read again in the
+  background after it is saved.
+
+Switching between them changes the front of every thread that has an emotion,
+and the thread the switch is made in is read again at once.
+
+Replies saved while the line leaked into them were cleaned once at start-up
+(:func:`clean_saved_replies`). :class:`Unechoed` and :func:`without` serve the
+start-of-reply way and Start reply with (:mod:`mc_llm_start_with`).
+
+Three things are kept, in one file in the LLM data folder:
 
 * **The list**: one for every character and thread, Oobabooga's five until it
   is changed (:data:`DEFAULTS`). Lines are added and deleted from the
@@ -20,6 +42,7 @@ Two things are kept, in one file in the LLM data folder:
 * **Each thread's choice**: by character and thread, empty for Off. A new
   thread has none, so it starts Off; a branch is given its source's
   (:func:`carry`); a deleted thread's is forgotten (:func:`forget`).
+* **How they steer**: :data:`SYSTEM` or :data:`PREFILL`, for every thread.
 
 The choice is kept here and not in the conversation's own file, because a
 write to that file is a new revision of the conversation: the other window's
@@ -58,6 +81,23 @@ prompt, and belongs in the character."""
 MAX_COUNT = 50
 """Lines in the list. Enough for any taste, few enough to scroll through."""
 
+SYSTEM = "system"
+"""The way a thread's emotion steers: at the end of the thread's system prompt,
+the same for every request in it (:func:`system_note`). The default."""
+
+PREFILL = "prefill"
+"""Oobabooga's way: the line written after the character's turn opening, as the
+first words of a new reply, and taken off what comes back (:class:`Unechoed`)."""
+
+BREAK = "\n\n"
+"""What follows the line at the start of a reply (:data:`PREFILL`, :func:`opening`):
+an empty line, so the reply -- or a start of yours -- begins on a line of its own
+and not straight after the line's last character. Oobabooga's modifier ends on a
+space; the user asked for the empty line. Hidden with the line."""
+
+MODES = (SYSTEM, PREFILL)
+"""One choice for every thread, kept with the list."""
+
 _lock = threading.Lock()
 
 
@@ -78,7 +118,7 @@ def clean(text) -> str:
 
 def _read() -> dict:
     """The file's contents, or what an installation that never saved one has."""
-    found = {"emotions": list(DEFAULTS), "threads": {}}
+    found = {"emotions": list(DEFAULTS), "threads": {}, "mode": SYSTEM}
     where = path()
     if not where.is_file():
         return found
@@ -102,6 +142,8 @@ def _read() -> dict:
     if isinstance(threads, dict):
         found["threads"] = {str(key): clean(value) for key, value in threads.items()
                             if isinstance(key, str) and clean(value)}
+    if data.get("mode") in MODES:
+        found["mode"] = data["mode"]
     return found
 
 
@@ -109,7 +151,8 @@ def _write(data: dict) -> None:
     from prompt_master.core.config import atomic_write_json
 
     atomic_write_json(path(), {"version": VERSION, "emotions": list(data["emotions"]),
-                               "threads": dict(data["threads"])})
+                               "threads": dict(data["threads"]),
+                               "mode": data.get("mode", SYSTEM)})
 
 
 def _thread_key(character, thread_id) -> str:
@@ -158,6 +201,27 @@ def remove(text) -> list[str]:
                                if value != line}
             _write(data)
         return list(data["emotions"])
+
+
+# -- how it steers -------------------------------------------------------------- #
+
+
+def mode() -> str:
+    """How every thread's emotion steers: :data:`SYSTEM` or :data:`PREFILL`."""
+    with _lock:
+        return _read()["mode"]
+
+
+def set_mode(chosen) -> str:
+    """Choose how every thread's emotion steers. Returns the mode kept."""
+    if chosen not in MODES:
+        raise Refused("An emotion steers from the system prompt or as the start of the reply.")
+    with _lock:
+        data = _read()
+        if data["mode"] != chosen:
+            data["mode"] = chosen
+            _write(data)
+    return chosen
 
 
 # -- each thread's choice ------------------------------------------------------ #
@@ -215,7 +279,39 @@ def forget(character, thread_id) -> None:
         logger.debug("Model Chain: could not forget a deleted thread's emotion", exc_info=True)
 
 
+# -- the system prompt ------------------------------------------------------------ #
+
+
+def system_note(line, name, you="you") -> str:
+    """What the thread's system prompt ends with while ``line`` is its emotion.
+
+    One shape for every character and every line, so the character's own prompt
+    -- its override, or the one built from its Context -- is never edited and
+    reads the same in the editor: this is put after it on the wire
+    (``prompt.build``'s ``system_extra``), for every request in the thread.
+    ``{{char}}`` and ``{{user}}`` in the line are the character's and yours, as
+    everywhere else in a prompt.
+    """
+    from prompt_master.chat.prompt import substitute
+
+    who = str(name or "").strip() or "the character"
+    feeling = substitute(clean(line), who, str(you or "you"))
+    if not feeling:
+        return ""
+    return (f"[Current emotion]\n"
+            f"{who} feels this right now, in {who}'s own words: {feeling}\n"
+            f"Let it colour {who}'s tone, words and actions in every reply until it "
+            f"changes. Do not quote this note, and do not say that you were told how to feel.")
+
+
 # -- the reply ------------------------------------------------------------------ #
+
+
+def opening(line) -> str:
+    """The start of a new reply under :data:`PREFILL`: the line, then an empty
+    line (:data:`BREAK`); ``""`` for Off. A start of yours follows it as it is."""
+    line = clean(line)
+    return line + BREAK if line else ""
 
 
 class Unechoed:
@@ -226,10 +322,13 @@ class Unechoed:
     line out of the first piece it streams only for a request marked as a
     continuation, which nothing in its chat endpoint marks. So the reply comes
     back as the line, then what the model wrote after it. The pieces are held
-    while they could still be the line; the line and the space after it are
-    dropped when they are there, and anything else passes as it came: a reply
-    that opens with an action of its own in asterisks, the line written again
-    further on. Only the very front is compared.
+    while they could still be the line; the line and the spaces and line breaks
+    after it are dropped when they are there, and anything else passes as it
+    came: a reply that opens with an action of its own in asterisks, the line
+    written again further on. Only the very front is compared, and exactly:
+    what was sent is the emotion's line, its empty line (:func:`opening`) and a
+    start of yours, whose own line breaks are its own, so nothing inside it is
+    folded.
 
     ``trim`` false keeps the space after the line: the line ends on words the
     caller shows as the reply's start (:mod:`mc_llm_start_with`), and what the
@@ -237,7 +336,7 @@ class Unechoed:
     """
 
     def __init__(self, line: str, trim: bool = True):
-        self.line = clean(line)
+        self.line = str(line or "").strip()
         self.trim = trim
         self._held = ""
         self._settled = not self.line
@@ -273,7 +372,7 @@ class Unechoed:
 
 def without(line, text, trim: bool = True) -> str:
     """``text`` with ``line`` taken off its front, as :class:`Unechoed` takes it."""
-    line, text = clean(line), str(text or "")
+    line, text = str(line or "").strip(), str(text or "")
     front = text.lstrip()
     if line and front.startswith(line):
         rest = front[len(line):]
@@ -402,6 +501,7 @@ def _clean_thread(store, key, lines) -> int:
     return count
 
 
-__all__ = ["CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT", "MAX_LENGTH",
-           "Refused", "Unechoed", "add", "carry", "choose", "clean", "clean_saved_replies",
-           "for_thread", "forget", "listed", "path", "remove", "without"]
+__all__ = ["BREAK", "CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT",
+           "MAX_LENGTH", "MODES", "PREFILL", "Refused", "SYSTEM", "Unechoed", "add", "carry",
+           "choose", "clean", "clean_saved_replies", "for_thread", "forget", "listed", "mode",
+           "opening", "path", "remove", "set_mode", "system_note", "without"]

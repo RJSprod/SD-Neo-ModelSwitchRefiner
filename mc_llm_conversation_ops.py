@@ -774,19 +774,28 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
 
     every = _every_picture()
     context_size = _context_size()
+    # The thread's emotion steers one of two ways (mc_llm_emotions): at the end
+    # of its system prompt, for every request in it -- Continue too -- so the
+    # front of the prompt, and llama-server's cache of it, stays the same from
+    # one message to the next; or as the start of a new reply, Oobabooga's way.
+    emotion = _emotion_of(key)
+    steer = _emotion_mode()
     wire = build(character, persona, _with_pictures(list(history), every),
                  context_size=context_size, reply_tokens=tokens, instruction=instruction,
-                 every_picture=every)
-    emotion = _emotion_for(key, target_kind, wire)
+                 every_picture=every,
+                 system_extra=_emotion_note(emotion, character, persona, steer))
     # Read from the thread the command names: a Regenerate that lands in a
     # branch spends the start written where it was pressed.
     start = _start_for(envelope.conversation, target_kind, wire)
-    prefill = " ".join(part for part in (emotion, start) if part)
+    fresh = _fresh_reply(target_kind, wire)
+    line = _emotion_opening(emotion) if steer == _PREFILL and fresh else ""
+    prefill = line + start
     if prefill:
         # The start of the character's turn: llama-server carries on from it
         # and sends it back at the front of the reply, where it is taken off
-        # (mc_llm_sessions). The emotion is never in the reply; a start of
-        # yours is put back as its first words (``opening``).
+        # (mc_llm_sessions). The emotion's line and the empty line after it are
+        # never in the reply; a start of yours is put back as its first words
+        # (``opening``).
         wire.append({"role": "assistant", "content": prefill})
     request = sessions.ChatRequest(
         messages=wire,
@@ -810,22 +819,32 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
             "request": request, "character": character,
             "persona": persona, "persisted": persisted, "prefix": prefix,
             "result_revision": result_revision,
-            # What the cache update after a reply with an emotion rebuilds the
-            # conversation from: the same history, window and pictures.
-            "emotion": emotion, "history": list(history), "every_picture": every,
+            # What the cache update after a reply started from your words
+            # rebuilds the conversation from: the same history, window,
+            # pictures and system prompt.
+            "emotion": emotion, "emotion_mode": steer, "history": list(history), "every_picture": every,
             "context_size": context_size, "reply_tokens": tokens}
+
+
+def _fresh_reply(target_kind: str, wire) -> bool:
+    """Whether this request makes a new reply after a message of yours: the only
+    kind that may start from a line on the wire. Send, Regenerate and Send again
+    make one; Continue carries on a reply already written (Oobabooga's rule too);
+    and llama-server refuses two assistant messages at the end of a request,
+    which a thread whose last message of yours was deleted would otherwise send."""
+    if target_kind not in (APPEND, VERSION):
+        return False
+    return bool(wire) and isinstance(wire[-1], dict) and wire[-1].get("role") == "user"
 
 
 def _start_for(key: Key, target_kind: str, wire) -> str:
     """The words this reply starts with (Start reply with), or ``""``.
 
-    The emotion's rule: a new reply after a message of yours, never Continue.
-    Read, not spent: a command refused after this is no reply, and the start
-    stays for the next one (:func:`_spend_start`).
+    Only a fresh reply (:func:`_fresh_reply`). Read, not spent: a command
+    refused after this is no reply, and the start stays for the next one
+    (:func:`_spend_start`).
     """
-    if target_kind not in (APPEND, VERSION):
-        return ""
-    if not wire or not isinstance(wire[-1], dict) or wire[-1].get("role") != "user":
+    if not _fresh_reply(target_kind, wire):
         return ""
     try:
         import mc_llm_start_with
@@ -851,19 +870,17 @@ def _spend_start(store, key: Key, start: str) -> None:
         logger.debug("Model Chain: could not say a reply start was spent", exc_info=True)
 
 
-def _emotion_for(key: Key, target_kind: str, wire) -> str:
-    """The line this reply starts with, or ``""``.
+def _emotion_opening(emotion: str) -> str:
+    """The emotion as the start of a new reply: its line, then an empty line, so
+    what follows -- the reply, or a start of yours -- begins on a line of its own
+    (``mc_llm_emotions.opening``)."""
+    import mc_llm_emotions
 
-    Only a new reply has one -- Send, Regenerate and Send again, the two target
-    kinds that make one -- never Continue, which carries on a reply already
-    written (Oobabooga's rule too). And only after a message of yours:
-    llama-server refuses two assistant messages at the end of a request, which
-    a thread whose last message of yours was deleted would otherwise send.
-    """
-    if target_kind not in (APPEND, VERSION):
-        return ""
-    if not wire or not isinstance(wire[-1], dict) or wire[-1].get("role") != "user":
-        return ""
+    return mc_llm_emotions.opening(emotion)
+
+
+def _emotion_of(key: Key) -> str:
+    """The thread's emotion, ``""`` for Off -- and Off when it cannot be read."""
     try:
         import mc_llm_emotions
 
@@ -873,10 +890,79 @@ def _emotion_for(key: Key, target_kind: str, wire) -> str:
         return ""
 
 
-# --------------------------------------------------------------------------- #
-# Execution
-# --------------------------------------------------------------------------- #
+_SYSTEM, _PREFILL = "system", "prefill"
+"""``mc_llm_emotions.SYSTEM`` and ``PREFILL``, spelt here for the hot path."""
 
+
+def _emotion_mode() -> str:
+    """How every thread's emotion steers now; the system prompt when it cannot be read."""
+    try:
+        import mc_llm_emotions
+
+        return mc_llm_emotions.mode()
+    except Exception:
+        logger.debug("Model Chain: could not read how emotions steer", exc_info=True)
+        return _SYSTEM
+
+
+def _emotion_note(emotion: str, character, persona, steer: str = _SYSTEM) -> str:
+    """What the system prompt ends with for ``emotion``: ``""`` for none, and for
+    an emotion that steers as the start of the reply instead."""
+    if not emotion or steer != _SYSTEM:
+        return ""
+    import mc_llm_emotions
+
+    return mc_llm_emotions.system_note(emotion, character.name, persona.display)
+
+
+def rewarm(key: Key) -> bool:
+    """Read the thread's conversation again in the background, under the system
+    prompt it has now: after its emotion or the way emotions steer changed, the
+    front of every later prompt did, and the next message would otherwise read
+    the whole conversation before its first word (mc_llm_cache_update). Only on
+    a server that is running -- with none there is no cache to keep. Never
+    raises."""
+    try:
+        import mc_llm_cache_update
+
+        if not mc_llm_cache_update.warm():
+            return False
+        return mc_llm_cache_update.schedule(key, lambda: _thread_request(key))
+    except Exception:
+        logger.debug("Model Chain: could not start the cache update", exc_info=True)
+        return False
+
+
+def _thread_request(key: Key):
+    """The thread as it stands, as its next prompt will begin: what the cache
+    update after a change of emotion reads. ``None`` for a thread with nothing in
+    it yet. Built when the update's turn comes, so a reply that was being
+    written meanwhile is in it."""
+    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
+                                               DEFAULT_TOP_P)
+    from prompt_master.chat.prompt import build, needs_vision
+
+    import mc_llm_conversation_service as service
+    import mc_llm_sessions as sessions
+
+    conversation, _ = store_module.read(service.chats(), key)
+    if not conversation.messages:
+        return None
+    character = _character(key.character)
+    persona = _persona()
+    every = _every_picture()
+    wire = build(character, persona, _with_pictures(list(conversation.messages), every),
+                 context_size=_context_size(),
+                 reply_tokens=_whole(None, character.max_reply_tokens,
+                                     DEFAULT_MAX_REPLY_TOKENS),
+                 every_picture=every,
+                 system_extra=_emotion_note(_emotion_of(key), character, persona,
+                                            _emotion_mode()))
+    return sessions.ChatRequest(
+        messages=wire, needs_vision=needs_vision(wire), max_tokens=1, seed=0,
+        temperature=_fraction(None, character.temperature, DEFAULT_TEMPERATURE),
+        top_p=_fraction(None, character.top_p, DEFAULT_TOP_P),
+        conversation=service.conversation_name(key))
 
 def _execute(operation: Operation, plan: dict) -> None:
     """The reply, on a thread of its own. Never raises into anything.
@@ -1031,15 +1117,15 @@ def _finish(operation: Operation, plan: dict, streamed: str, outcome: str,
 def _update_cache_after(operation: Operation, plan: dict, whole: str) -> None:
     """After a reply started from a line on the wire, read it again as it was saved.
 
-    llama-server's cache holds the conversation as the reply was written:
-    with the emotion's line before it. The next turn's prompt has the reply
-    alone in that place, so without this the next message would read the whole
-    reply again before its first word. :mod:`mc_llm_cache_update` reads it now,
-    in the background, while the reply is being read on screen. A start of
-    yours alone (:mod:`mc_llm_start_with`) is in the saved reply, so its cache
-    already agrees up to the words the model was handed and took over; it is
-    read again too, which costs a token where they agree and makes good
-    whatever was read differently where the model's words joined yours.
+    An emotion that steers as the start of the reply (mc_llm_emotions.PREFILL)
+    leaves llama-server's cache holding its line before the reply, which the
+    next prompt does not have: without this the next message would read the
+    whole reply again before its first word. Words of yours
+    (:mod:`mc_llm_start_with`) are in the saved reply, so the cache already
+    agrees up to them; it is read again all the same, which costs a token where
+    they agree and makes good whatever was read differently where the model's
+    words joined yours. An emotion in the system prompt needs nothing: the
+    prompt is the same for the next message.
     """
     if not plan.get("prefilled"):
         return
@@ -1064,7 +1150,10 @@ def _cache_request(plan: dict, whole: str):
     history = list(plan.get("history") or []) + [Message(role=ASSISTANT, versions=[whole])]
     wire = build(plan["character"], plan["persona"], _with_pictures(history, every),
                  context_size=plan.get("context_size") or _context_size(),
-                 reply_tokens=plan.get("reply_tokens") or 512, every_picture=every)
+                 reply_tokens=plan.get("reply_tokens") or 512, every_picture=every,
+                 system_extra=_emotion_note(plan.get("emotion") or "", plan["character"],
+                                            plan["persona"],
+                                            plan.get("emotion_mode") or _SYSTEM))
     asked = plan["request"]
     return sessions.ChatRequest(messages=wire, needs_vision=needs_vision(wire),
                                 temperature=asked.temperature, top_p=asked.top_p,

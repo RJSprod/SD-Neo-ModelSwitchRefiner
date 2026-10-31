@@ -1958,6 +1958,23 @@ class TestTheEmotionPicker:
                                     {"do": "delete", "line": "*I am so happy*"}]
         assert found["fieldEvents"] == ["input"] * 3
 
+    def test_the_way_it_steers_is_nominated_by_its_name(self):
+        found = emotion("""
+            const ways = new El("div");
+            ways.className = "mc-llm-emotion-modes";
+            const prefill = new El("button");
+            prefill.className = "mc-llm-emotion-mode";
+            prefill.setAttribute("data-emotion-mode", "prefill");
+            ways.appendChild(prefill);
+            picker.appendChild(ways);
+            pressChip();
+            onDocument("click", prefill);
+            out.open = openNow();
+        """)
+
+        assert found["presses"] == [{"do": "mode", "line": "prefill"}]
+        assert found["open"] is True
+
     def test_the_character_sheet_s_rows_are_answered_the_same_way(self):
         found = emotion("""
             onDocument("click", sheetSad.choice);
