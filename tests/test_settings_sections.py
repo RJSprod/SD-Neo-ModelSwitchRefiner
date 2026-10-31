@@ -21,6 +21,7 @@ import mc_llm_studio
 import mc_memory
 import mc_plan
 import mc_progress
+import mc_prompt_padding
 import mc_turns
 import mc_wangp
 
@@ -58,6 +59,7 @@ class TestTheSections:
         (mc_memory.OPT_PRELOAD, "SETTINGS_SECTION"),
         (mc_memory.OPT_RESTORE_ENCODERS, "SETTINGS_SECTION"),
         (mc_batch_once.OPT_ENABLED, "SETTINGS_SECTION"),
+        (mc_prompt_padding.OPT_ENABLED, "SETTINGS_SECTION"),
         (mc_memory.OPT_VRAM_RESERVE, "SETTINGS_SECTION"),
         (mc_progress.OPT_PROGRESS, "PROGRESS_SECTION"),
         (mc_llm_studio.OPT_ENABLE, "LLM_SECTION"),
