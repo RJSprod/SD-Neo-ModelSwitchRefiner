@@ -565,6 +565,193 @@ class TestTheCacheUpdateIsAskedFor:
 
 
 # --------------------------------------------------------------------------- #
+# The switch between the two ways
+# --------------------------------------------------------------------------- #
+
+
+def steer(conversation, mode, operation_id="mode-1"):
+    body = envelope(service.SET_EMOTION_MODE, conversation, revision=None,
+                    payload={"emotion_mode": mode}, operation_id=operation_id)
+    return service.submit(body)
+
+
+def own_prompt():
+    from prompt_master.chat.prompt import system_text
+
+    return system_text(ops._character("Ada"), ops._persona())
+
+
+class TestTheSwitch:
+    def test_the_system_prompt_is_the_default_and_the_way_is_kept_with_the_list(self, store):
+        assert emotions.mode() == emotions.SYSTEM
+
+        emotions.set_mode(emotions.PREFILL)
+        emotions.add("*I am so calm*")
+
+        assert emotions.mode() == emotions.PREFILL
+
+    def test_an_unknown_way_is_refused(self, store):
+        with pytest.raises(emotions.Refused):
+            emotions.set_mode("sideways")
+        assert emotions.mode() == emotions.SYSTEM
+
+    def test_the_command_needs_no_revision_moves_none_and_the_snapshot_says_it(
+            self, chats, thread):
+        before = chats.load("Ada", thread.identifier).revision
+
+        answer = steer(thread, "prefill")
+
+        assert answer["ok"] and answer["emotion_mode"] == "prefill"
+        assert chats.load("Ada", thread.identifier).revision == before
+        assert service.snapshot("Ada", thread.identifier)["emotion_mode"] == "prefill"
+
+    def test_a_way_it_does_not_know_is_said(self, thread):
+        outcome = steer(thread, "sideways")
+
+        assert outcome["ok"] is False
+        assert outcome["error"]["code"] == service.INVALID_INPUT
+
+
+class TestTheStartOfTheReplyWay:
+    """Oobabooga's own: the line as the first words of a new reply, the system
+    prompt the character's own, the line never in what comes back."""
+
+    @pytest.fixture(autouse=True)
+    def oobabooga(self, store):
+        emotions.set_mode(emotions.PREFILL)
+
+    def test_a_new_reply_starts_from_the_line_under_the_character_s_own_prompt(
+            self, thread, monkeypatch):
+        asked = asking(monkeypatch)
+        choose(thread, HAPPY)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert asked[-1].messages[-2] == {"role": "user", "content": "Hi."}
+        assert asked[-1].prefilled is True
+        assert system_of(asked[-1]) == own_prompt()
+
+    def test_regenerate_and_send_again_start_from_it_and_continue_does_not(
+            self, chats, thread, monkeypatch):
+        asked = asking(monkeypatch)
+        choose(thread, HAPPY)
+        last = len(thread.messages) - 1
+
+        run("regenerate", thread, index=last, operation_id="again-1")
+        run("resend_from_user", thread, index=0, operation_id="resend-1")
+        run("continue", thread, index=last, operation_id="more-1")
+
+        assert asked[0].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert asked[1].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert asked[2].messages[-1]["role"] == "user"
+        assert asked[2].prefilled is False
+        assert all(HAPPY not in str(message.get("content")) for message in asked[2].messages)
+
+    def test_never_after_a_reply(self, chats, monkeypatch):
+        """llama-server refuses two assistant messages at the end of a request,
+        which a thread whose last message of yours was deleted would send."""
+        from prompt_master.chat.history import ASSISTANT, USER
+
+        found = chats.new("Ada")
+        found.append(USER, "hello")
+        found.append(ASSISTANT, "first")
+        found.append(ASSISTANT, "second")
+        chats.save(found)
+        asked = asking(monkeypatch)
+        choose(found, HAPPY)
+
+        run("regenerate", found, index=2, operation_id="again-1")
+
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": "first"}
+        assert asked[-1].prefilled is False
+
+    def test_the_line_never_reaches_the_reply(self, chats, thread, serving):
+        server = Echoing([" Oh,", " hello!"])
+        serving(server)
+        choose(thread, HAPPY)
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert server.asked[-1][-1] == {"role": "assistant", "content": HAPPY}
+        patches = [event["payload"].get("text", "") for event in subscriber.since(cursor)[0]
+                   if event["kind"] == service.REPLY_PATCH]
+        assert patches and all(HAPPY not in text for text in patches)
+        assert chats.load("Ada", thread.identifier).messages[-1].text == "Oh, hello!"
+
+    def test_with_a_start_of_yours_both_start_the_turn_and_only_your_words_are_kept(
+            self, chats, thread, serving):
+        import mc_llm_start_with
+
+        server = Echoing([", see?"])
+        serving(server)
+        choose(thread, HAPPY)
+        mc_llm_start_with.write("Ada", thread.identifier, "The color is blue")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert server.asked[-1][-1] == {"role": "assistant",
+                                        "content": HAPPY + " The color is blue"}
+        assert chats.load("Ada", thread.identifier).messages[-1].text == \
+            "The color is blue, see?"
+
+    def test_the_reply_is_read_again_after_it_is_saved(self, thread, monkeypatch, updates):
+        asking(monkeypatch, pieces=(" Oh,", " hello!"))
+        choose(thread, HAPPY)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert settled()
+        request = updates[-1]
+        assert request.messages[-1] == {"role": "assistant", "content": "Oh, hello!"}
+        assert all(HAPPY not in str(message.get("content")) for message in request.messages)
+        assert system_of(request) == own_prompt()
+
+    def test_a_change_of_emotion_reads_nothing_until_the_next_reply(self, thread, updates,
+                                                                    running):
+        choose(thread, HAPPY)
+
+        assert settled()
+        assert updates == []
+
+
+class TestSwitchingReadsTheThreadAgain:
+    def test_with_an_emotion_on_the_thread_is_read_under_its_new_front(self, thread, updates,
+                                                                       running):
+        choose(thread, HAPPY)
+        assert settled()
+        updates.clear()
+
+        steer(thread, "prefill")
+        assert settled()
+        assert len(updates) == 1
+        assert system_of(updates[-1]) == own_prompt()
+
+        steer(thread, "system", operation_id="mode-2")
+        assert settled()
+        assert len(updates) == 2
+        assert system_of(updates[-1]).endswith(note())
+
+    def test_without_an_emotion_nothing_is_read(self, thread, updates, running):
+        steer(thread, "prefill")
+
+        assert settled()
+        assert updates == []
+
+    def test_choosing_the_way_it_already_is_reads_nothing(self, thread, updates, running):
+        choose(thread, HAPPY)
+        assert settled()
+        updates.clear()
+
+        steer(thread, "system")
+
+        assert settled()
+        assert updates == []
+
+
+# --------------------------------------------------------------------------- #
 # Waiting for it
 # --------------------------------------------------------------------------- #
 
@@ -1243,9 +1430,10 @@ class TestTheTab:
         choose(thread, HAPPY)
 
         drawn = panel._emotion_rows("Ada", thread.identifier)
+        listed = drawn[drawn.index('class="mc-llm-emotion-list"'):]
 
         assert drawn.count('class="mc-llm-emotion-choice"') == 1 + len(emotions.DEFAULTS)
-        assert drawn.count('aria-checked="true"') == 1
+        assert listed.count('aria-checked="true"') == 1
         assert f'aria-checked="true" data-emotion="{HAPPY}"' in drawn
         assert drawn.count('class="mc-llm-emotion-delete"') == len(emotions.DEFAULTS)
 
@@ -1262,6 +1450,41 @@ class TestTheTab:
 
         assert "<b>" not in drawn
         assert "&lt;b&gt;&quot;bold&quot;&lt;/b&gt;" in drawn
+
+    def test_the_two_ways_head_the_rows_with_the_current_one_checked(self, store):
+        emotions.set_mode(emotions.PREFILL)
+
+        drawn = self.panel()._emotion_rows("Ada", "t")
+
+        assert drawn.index('class="mc-llm-emotion-modes"') < drawn.index('class="mc-llm-emotion-list"')
+        assert 'aria-checked="false" data-emotion-mode="system">System prompt' in drawn
+        assert 'aria-checked="true" data-emotion-mode="prefill">Starts the reply' in drawn
+
+    def test_a_press_on_a_way_switches_it_through_the_service(self, thread, monkeypatch):
+        import mc_llm_conversation_ops as ops_module
+
+        choose(thread, HAPPY)
+        read = []
+        monkeypatch.setattr(ops_module, "rewarm", lambda key: read.append(key) or True)
+
+        drawn = self.panel()._emotion_pressed("Ada", thread.identifier,
+                                              '{"do": "mode", "line": "prefill"}')
+
+        assert emotions.mode() == emotions.PREFILL
+        assert 'aria-checked="true" data-emotion-mode="prefill"' in drawn[0]
+        assert [key.thread_id for key in read] == [thread.identifier]
+
+    def test_with_no_thread_open_a_way_is_switched_all_the_same(self, store):
+        self.panel()._emotion_pressed("", "", '{"do": "mode", "line": "prefill"}')
+
+        assert emotions.mode() == emotions.PREFILL
+
+    def test_a_way_it_does_not_know_is_said(self, thread):
+        drawn = self.panel()._emotion_pressed("Ada", thread.identifier,
+                                              '{"do": "mode", "line": "sideways"}')
+
+        assert emotions.mode() == emotions.SYSTEM
+        assert "system prompt or as the start of the reply" in drawn[-1]
 
     def test_a_press_chooses_through_the_service(self, thread):
         panel = self.panel()

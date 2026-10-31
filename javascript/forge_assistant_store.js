@@ -1294,6 +1294,15 @@
         return this.send(envelope);
     };
 
+    /** How every thread's emotion steers: "system" (the end of the thread's
+     *  system prompt) or "prefill" (the start of the reply). Named against the
+     *  open thread, which the server reads again when its front changed. */
+    Store.prototype.setEmotionMode = function (mode) {
+        const envelope = this.envelope("set_emotion_mode", {expected_revision: null});
+        envelope.payload = {emotion_mode: String(mode || "")};
+        return this.send(envelope);
+    };
+
     /** The words the open thread's next reply starts with, or "" for none:
      *  kept beside the thread as the emotion is, so no revision is asked. */
     Store.prototype.setStartWith = function (text) {

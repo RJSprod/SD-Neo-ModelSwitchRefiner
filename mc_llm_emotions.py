@@ -1,32 +1,39 @@
-"""Character Emotion: how the character feels, in the thread's system prompt.
+"""Character Emotion: how the character feels, steering its replies one of two ways.
 
-Oobabooga's *character bias*, brought across -- by another road. Oobabooga's
-``bot_prefix_modifier`` writes the line (``*I am so happy*``) after the
-character's turn opening, so the model reads it as the first words of its own
-reply and the page shows only what follows; this extension did the same with a
-prefill until the user found the replies starting "like there is hidden
-response that's been cropped out" -- which there was. Now the line is put at
-the end of the thread's system prompt, in one shape for every character
-(:func:`system_note`): the character's own prompt, override or built, stays as
-it is in the editor, and every request in the thread is sent with the two
-together. The reply is written from the feeling rather than after it, so it
-starts as a reply starts, and nothing is ever taken off it.
+Oobabooga's *character bias*, brought across, with a switch between two roads
+(:func:`mode`, one choice for every thread):
 
-The system prompt is the front of every request, so it is the same for every
-request in the thread while the emotion stays the same -- every reply,
-Continue included -- and llama-server's prompt cache keeps the whole
-conversation from one message to the next. A change of emotion changes the
-front, and the next message would read the whole conversation again: the
-change sets that reading going in the background at once
-(``mc_llm_conversation_ops.rewarm``, :mod:`mc_llm_cache_update`).
+* **The system prompt** (:data:`SYSTEM`, the default). The line is put at the
+  end of the thread's system prompt, in one shape for every character
+  (:func:`system_note`): the character's own prompt, override or built, stays
+  as it is in the editor, and every request in the thread -- Continue included
+  -- is sent with the two together. The reply is written from the feeling
+  rather than after it, so it starts as a reply starts. The front of every
+  prompt is the same while the emotion is, so llama-server keeps the
+  conversation cached from one message to the next; a change of emotion
+  changes the front, and sets the conversation being read again in the
+  background at once (``mc_llm_conversation_ops.rewarm``,
+  :mod:`mc_llm_cache_update`).
+* **The start of the reply** (:data:`PREFILL`), Oobabooga's own way: its
+  ``bot_prefix_modifier`` writes the line after the character's turn opening,
+  so the model reads it as the first words of its own reply and the page shows
+  only what follows. Here the line is a trailing assistant message for Send,
+  Regenerate and Send again after a message of yours -- never Continue -- which
+  llama-server continues and sends back at the front of the reply, where
+  :class:`Unechoed` takes it off; the user found such replies starting "like
+  there is hidden response that's been cropped out", which is why the system
+  prompt became the default, and asked to keep both. The cache disagrees with
+  the next prompt from the line onward, so the reply is read again in the
+  background after it is saved.
 
-Replies written while the line was a prefill began with llama-server's copy of
-it, until :class:`Unechoed` took it off the stream; those saved before that
-were cleaned once at start-up (:func:`clean_saved_replies`). :class:`Unechoed`
-and :func:`without` are kept for Start reply with (:mod:`mc_llm_start_with`),
-which is a prefill on purpose.
+Switching between them changes the front of every thread that has an emotion,
+and the thread the switch is made in is read again at once.
 
-Two things are kept, in one file in the LLM data folder:
+Replies saved while the line leaked into them were cleaned once at start-up
+(:func:`clean_saved_replies`). :class:`Unechoed` and :func:`without` serve the
+start-of-reply way and Start reply with (:mod:`mc_llm_start_with`).
+
+Three things are kept, in one file in the LLM data folder:
 
 * **The list**: one for every character and thread, Oobabooga's five until it
   is changed (:data:`DEFAULTS`). Lines are added and deleted from the
@@ -34,6 +41,7 @@ Two things are kept, in one file in the LLM data folder:
 * **Each thread's choice**: by character and thread, empty for Off. A new
   thread has none, so it starts Off; a branch is given its source's
   (:func:`carry`); a deleted thread's is forgotten (:func:`forget`).
+* **How they steer**: :data:`SYSTEM` or :data:`PREFILL`, for every thread.
 
 The choice is kept here and not in the conversation's own file, because a
 write to that file is a new revision of the conversation: the other window's
@@ -72,6 +80,17 @@ prompt, and belongs in the character."""
 MAX_COUNT = 50
 """Lines in the list. Enough for any taste, few enough to scroll through."""
 
+SYSTEM = "system"
+"""The way a thread's emotion steers: at the end of the thread's system prompt,
+the same for every request in it (:func:`system_note`). The default."""
+
+PREFILL = "prefill"
+"""Oobabooga's way: the line written after the character's turn opening, as the
+first words of a new reply, and taken off what comes back (:class:`Unechoed`)."""
+
+MODES = (SYSTEM, PREFILL)
+"""One choice for every thread, kept with the list."""
+
 _lock = threading.Lock()
 
 
@@ -92,7 +111,7 @@ def clean(text) -> str:
 
 def _read() -> dict:
     """The file's contents, or what an installation that never saved one has."""
-    found = {"emotions": list(DEFAULTS), "threads": {}}
+    found = {"emotions": list(DEFAULTS), "threads": {}, "mode": SYSTEM}
     where = path()
     if not where.is_file():
         return found
@@ -116,6 +135,8 @@ def _read() -> dict:
     if isinstance(threads, dict):
         found["threads"] = {str(key): clean(value) for key, value in threads.items()
                             if isinstance(key, str) and clean(value)}
+    if data.get("mode") in MODES:
+        found["mode"] = data["mode"]
     return found
 
 
@@ -123,7 +144,8 @@ def _write(data: dict) -> None:
     from prompt_master.core.config import atomic_write_json
 
     atomic_write_json(path(), {"version": VERSION, "emotions": list(data["emotions"]),
-                               "threads": dict(data["threads"])})
+                               "threads": dict(data["threads"]),
+                               "mode": data.get("mode", SYSTEM)})
 
 
 def _thread_key(character, thread_id) -> str:
@@ -172,6 +194,27 @@ def remove(text) -> list[str]:
                                if value != line}
             _write(data)
         return list(data["emotions"])
+
+
+# -- how it steers -------------------------------------------------------------- #
+
+
+def mode() -> str:
+    """How every thread's emotion steers: :data:`SYSTEM` or :data:`PREFILL`."""
+    with _lock:
+        return _read()["mode"]
+
+
+def set_mode(chosen) -> str:
+    """Choose how every thread's emotion steers. Returns the mode kept."""
+    if chosen not in MODES:
+        raise Refused("An emotion steers from the system prompt or as the start of the reply.")
+    with _lock:
+        data = _read()
+        if data["mode"] != chosen:
+            data["mode"] = chosen
+            _write(data)
+    return chosen
 
 
 # -- each thread's choice ------------------------------------------------------ #
@@ -442,5 +485,6 @@ def _clean_thread(store, key, lines) -> int:
 
 
 __all__ = ["CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT", "MAX_LENGTH",
-           "Refused", "Unechoed", "add", "carry", "choose", "clean", "clean_saved_replies",
-           "for_thread", "forget", "listed", "path", "remove", "system_note", "without"]
+           "MODES", "PREFILL", "Refused", "SYSTEM", "Unechoed", "add", "carry", "choose",
+           "clean", "clean_saved_replies", "for_thread", "forget", "listed", "mode", "path",
+           "remove", "set_mode", "system_note", "without"]

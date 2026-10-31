@@ -2614,6 +2614,36 @@
     gap: 0.25em;
 }
 
+/* How every thread's emotion steers: two halves of one switch above the list. */
+#mc-llm-studio .mc-llm-emotion-modes {
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 8px;
+    display: flex;
+    gap: 2px;
+    margin-bottom: 0.4em;
+    padding: 2px;
+}
+
+#mc-llm-studio .mc-llm-emotion-mode {
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: var(--body-text-color-subdued, inherit);
+    cursor: pointer;
+    flex: 1 1 0;
+    font: inherit;
+    font-size: 0.85em;
+    min-height: 2.2em;
+    padding: 0 0.5em;
+}
+
+#mc-llm-studio .mc-llm-emotion-mode[aria-checked="true"] {
+    background: transparent;
+    background: color-mix(in srgb, var(--color-accent, #3b82f6) 16%, transparent);
+    color: var(--body-text-color, inherit);
+    font-weight: 600;
+}
+
 #mc-llm-studio .mc-llm-emotion-row {
     align-items: center;
     border: 1px solid var(--border-color-primary, #374151);

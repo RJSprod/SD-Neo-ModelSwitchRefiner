@@ -111,6 +111,11 @@ SET_EMOTION = "set_emotion"
 for Off, put at the end of the thread's system prompt. A setting kept beside the
 thread rather than a write to it, so it asks for no revision and changes none; a
 change reads the conversation again in the background under the new prompt."""
+SET_EMOTION_MODE = "set_emotion_mode"
+"""How every thread's emotion steers (:mod:`mc_llm_emotions`): ``system``, at the
+end of the thread's system prompt, or ``prefill``, as the start of the reply.
+Named against a thread, which is read again in the background when its front
+changed; it asks for no revision and changes none."""
 SET_START_WITH = "set_start_with"
 """The words this thread's next reply starts with (:mod:`mc_llm_start_with`), or
 empty for none. Kept beside the thread as the emotion is, so it asks for no
@@ -119,7 +124,7 @@ revision and changes none; the reply that starts from it spends it."""
 ACTIONS = (CREATE_THREAD, SEND, EDIT_MESSAGE, REGENERATE, CONTINUE, RESEND_FROM_USER,
            BRANCH, SELECT_VERSION, DROP_VERSION, DELETE_MESSAGE, DELETE_FROM,
            RENAME_THREAD, SET_RESPONSE_PREFIX, DELETE_THREAD, RESTORE_TO_DRAFT, STOP,
-           SET_EMOTION, SET_START_WITH)
+           SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE)
 """Every command, and nothing else is one.
 
 Adding to this tuple is a compatible change; renaming anything in it is not,
@@ -349,7 +354,7 @@ def _expected(raw, action: str):
     which is the behaviour this whole module replaced.
     """
     if raw is None:
-        if action in (CREATE_THREAD, STOP, SET_EMOTION, SET_START_WITH):
+        if action in (CREATE_THREAD, STOP, SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE):
             return None
         raise Refused(INVALID_INPUT, "expected_revision is required.")
     if not isinstance(raw, dict):
@@ -405,6 +410,8 @@ def _payload(raw, action: str) -> dict:
         found["prefix"] = _text(raw.get("prefix"), "prefix", 16 * 1024)
     if "emotion" in raw:
         found["emotion"] = _text(raw.get("emotion"), "emotion", 4 * 1024)
+    if "emotion_mode" in raw:
+        found["emotion_mode"] = _text(raw.get("emotion_mode"), "emotion_mode", 64)
     if "start_with" in raw:
         found["start_with"] = _text(raw.get("start_with"), "start_with", 16 * 1024)
     if "confirm_count" in raw:
@@ -679,6 +686,8 @@ def _dispatch(envelope: Envelope, scope: str) -> dict:
         return _set_emotion(envelope)
     if envelope.action == SET_START_WITH:
         return _set_start_with(envelope)
+    if envelope.action == SET_EMOTION_MODE:
+        return _set_emotion_mode(envelope)
     if envelope.action in GENERATING:
         import mc_llm_conversation_ops as ops
 
@@ -928,15 +937,43 @@ def _set_emotion(envelope: Envelope) -> dict:
     except mc_llm_emotions.Refused as refusal:
         raise Refused(INVALID_INPUT, str(refusal))
     revision = store_module.token_of(conversation, raw)
-    if chosen != before:
+    if chosen != before and mc_llm_emotions.mode() == mc_llm_emotions.SYSTEM:
         # The thread's system prompt ends with its emotion, so a change is a new
         # front for every later prompt: read the conversation again under it
-        # now, in the background, rather than at the next message.
+        # now, in the background, rather than at the next message. As the start
+        # of the reply it changes nothing until the next reply is written.
         import mc_llm_conversation_ops as ops
 
         ops.rewarm(key)
     publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="emotion")
     return _accepted(envelope, key, revision, extra={"emotion": chosen})
+
+
+def _set_emotion_mode(envelope: Envelope) -> dict:
+    """Choose how every thread's emotion steers. Writes nothing in the thread.
+
+    A thread with an emotion has a new front either way -- the note at the end
+    of its system prompt comes or goes -- so the thread the switch is made in
+    is read again in the background at once. Others are read in full at their
+    next message.
+    """
+    import mc_llm_emotions
+
+    store = chats()
+    key = envelope.conversation
+    conversation, raw = store_module.read(store, key)
+    before = mc_llm_emotions.mode()
+    try:
+        chosen = mc_llm_emotions.set_mode(envelope.payload.get("emotion_mode"))
+    except mc_llm_emotions.Refused as refusal:
+        raise Refused(INVALID_INPUT, str(refusal))
+    revision = store_module.token_of(conversation, raw)
+    if chosen != before and mc_llm_emotions.for_thread(key.character, key.thread_id):
+        import mc_llm_conversation_ops as ops
+
+        ops.rewarm(key)
+    publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="emotion_mode")
+    return _accepted(envelope, key, revision, extra={"emotion_mode": chosen})
 
 
 def _set_start_with(envelope: Envelope) -> dict:
@@ -1073,6 +1110,7 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
         "cache_update": _cache_updating(key),
     }
     found["emotions"] = _emotions()
+    found["emotion_mode"] = _emotion_mode()
     found["messages"] = [_message_view(index, message)
                          for index, message in enumerate(conversation.messages)]
 
@@ -1108,6 +1146,17 @@ def _start_of(key: Key) -> str:
     except Exception:
         logger.debug("Model Chain: could not read a thread's reply start", exc_info=True)
         return ""
+
+
+def _emotion_mode() -> str:
+    """How every thread's emotion steers; the system prompt when it cannot be read."""
+    try:
+        import mc_llm_emotions
+
+        return mc_llm_emotions.mode()
+    except Exception:
+        logger.debug("Model Chain: could not read how emotions steer", exc_info=True)
+        return "system"
 
 
 def _emotions() -> list:

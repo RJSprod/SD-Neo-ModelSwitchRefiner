@@ -4652,6 +4652,46 @@ had ended, which also showed the replaced update announcing an end it did not
 own -- fixed with `replaced`. Not run against a real llama-server or on the
 user's machine.
 
+### 40.9 Both ways, behind a switch (after #314's first commit)
+
+The user, once the system prompt was built: "I would like to have a toggle that
+allows me to switch between the two ways of emotion bias. This new way and the
+old way."
+
+**One switch for every thread**, kept with the list in `emotions.json`
+(`mc_llm_emotions.mode()`, `set_mode()`; `SYSTEM`, the default, and `PREFILL`),
+at the top of the Emotion picker in both views: two halves of one control in
+LLM Studio (`_emotion_modes`, nominated as `{"do": "mode", "line": ...}` through
+the picker's hidden box), and a *How it steers* group of two radio entries at
+the end of the flyout's Emotion submenu (`emotionModeRow`,
+`Store.setEmotionMode`). The command is `set_emotion_mode` against no revision,
+named against a thread; the snapshot carries `emotion_mode`.
+
+- **System prompt**: section 40.8 as it stands.
+- **Starts the reply**: #313's prefill brought back -- the line as a trailing
+  assistant message for a fresh reply only (`_fresh_reply`: Send, Regenerate,
+  Send again after a message of yours; never Continue, never after a reply),
+  joined before a start of yours when there is one, taken off the stream by
+  `Unechoed` (with `trim` on for the line alone, off once your words follow),
+  the reply's slot unsaved, and the conversation read again after the reply is
+  saved (`_update_cache_after` on `prefilled`). The system prompt is then the
+  character's own (`_emotion_note` answers nothing for this way), and a change
+  of emotion reads nothing at once (`_set_emotion` rewarms only under
+  `SYSTEM`).
+- **Switching** with an emotion on changes the front of every thread that has
+  one: the thread named is read again at once (`_set_emotion_mode` rewarms it
+  when the way changed and the thread has an emotion), the others at their next
+  message. `_cache_request` and `_thread_request` build under the way the plan
+  or the moment has, so the background read agrees with the next prompt.
+
+Tests: the switch (the default, kept with the list, an unknown way refused,
+the command and the snapshot), the start-of-reply way (the line under the
+character's own prompt; Regenerate and Send again yes, Continue no; never after
+a reply; the line never in the reply through the real runtime; a start of yours
+after the line; the read after the reply; no read on a change), the switch's
+reads (with an emotion, without, the same way again), and both views' controls.
+Twenty mutations each fail a test. Drawn in Chromium.
+
 ## 41. Start reply with (31 October 2026)
 
 The ask: "There is the ability to set the beginning of the LLM response ... it's

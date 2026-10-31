@@ -1510,7 +1510,7 @@
     const EMOTION_AT = "mc-llm-chat-emotion-at";
     const EMOTION_NOW = "mc-llm-chat-emotion-now";
     const EMOTION_OPEN = "mc-llm-emotion-open";
-    const EMOTION_ROWS = ".mc-llm-emotion-choice, .mc-llm-emotion-delete";
+    const EMOTION_ROWS = ".mc-llm-emotion-choice, .mc-llm-emotion-delete, .mc-llm-emotion-mode";
     let emotionWired = false;
 
     function emotionOpen() {
@@ -1556,7 +1556,11 @@
         if (!target || typeof target.closest !== "function") return;
         const row = target.closest(EMOTION_ROWS);
         if (row) {
-            if (!row.disabled) {
+            if (row.disabled) return;
+            if (row.classList.contains("mc-llm-emotion-mode")) {
+                // The way every thread's emotion steers: system prompt or prefill.
+                nominateEmotion("mode", row.getAttribute("data-emotion-mode") || "");
+            } else {
                 nominateEmotion(row.classList.contains("mc-llm-emotion-delete") ? "delete"
                     : "choose", row.getAttribute("data-emotion") || "");
             }

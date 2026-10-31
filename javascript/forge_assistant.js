@@ -4577,7 +4577,43 @@
                        this.groupLabel(shown.title ? "Emotion · " + shown.title : "Emotion")];
         [""].concat(lines).forEach((line) => items.push(this.emotionRow(line, line === chosen)));
         items.push(this.emotionAdder());
+        // How every thread's emotion steers: one choice for all of them.
+        const steering = String(snapshot.emotion_mode || "system");
+        items.push(this.groupLabel("How it steers"));
+        EMOTION_MODES.forEach(([mode, label]) => {
+            items.push(this.emotionModeRow(mode, label, mode === steering));
+        });
         return items;
+    };
+
+    const EMOTION_MODES = [["system", "System prompt"], ["prefill", "Starts the reply"]];
+
+    Shell.prototype.emotionModeRow = function (mode, label, on) {
+        const row = element("button", "forge-assistant-menu-item forge-assistant-emotion-mode",
+                            label);
+        row.type = "button";
+        row.setAttribute("role", "menuitemradio");
+        row.setAttribute("aria-checked", String(!!on));
+        row.dataset.emotionMode = mode;
+        row.addEventListener("click", () => this.chooseEmotionMode(mode));
+        return row;
+    };
+
+    Shell.prototype.chooseEmotionMode = function (mode) {
+        // Checked at once; the snapshot the answer brings says it for good.
+        const menu = this.nodes.menu;
+        if (menu && menu.querySelectorAll) {
+            menu.querySelectorAll(".forge-assistant-emotion-mode").forEach((row) => {
+                row.setAttribute("aria-checked", String(row.dataset.emotionMode === mode));
+            });
+        }
+        return this.store.setEmotionMode(mode).then((outcome) => {
+            if (outcome && !outcome.ok) {
+                this.tell((outcome.error && outcome.error.message)
+                    || "That could not be changed.", "warn");
+            }
+            return this.store.refresh();
+        }).then(() => this.redrawEmotion());
     };
 
     Shell.prototype.emotionRow = function (line, on) {

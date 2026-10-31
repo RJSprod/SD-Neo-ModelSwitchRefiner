@@ -1533,8 +1533,35 @@ def _emotion_rows(who, identifier) -> str:
     usable = bool(who and identifier)
     rows = [_emotion_row("", "Off", chosen == "", usable)]
     rows += [_emotion_row(line, line, chosen == line, usable) for line in lines]
-    return (f'<div class="{ui.PREFIX}-emotion-list" role="radiogroup" aria-label="Emotion">'
+    return (_emotion_modes()
+            + f'<div class="{ui.PREFIX}-emotion-list" role="radiogroup" aria-label="Emotion">'
             + "".join(rows) + "</div>")
+
+
+EMOTION_MODES = (("system", "System prompt"), ("prefill", "Starts the reply"))
+"""How every thread's emotion steers (mc_llm_emotions.MODES), as the picker
+names them: at the end of the thread's system prompt, or as the first words of
+a new reply, Oobabooga's way."""
+
+
+def _emotion_modes() -> str:
+    """The switch between the two ways, above the list: one choice for every
+    thread, nominated as ``{"do": "mode", "line": ...}`` (:func:`_emotion_pressed`)."""
+    try:
+        import mc_llm_emotions
+
+        current = mc_llm_emotions.mode()
+    except Exception:
+        logger.debug("Model Chain: could not read how emotions steer", exc_info=True)
+        current = "system"
+    prefix = ui.PREFIX
+    buttons = "".join(
+        f'<button type="button" class="{prefix}-emotion-mode" role="radio" '
+        f'aria-checked="{"true" if mode == current else "false"}" '
+        f'data-emotion-mode="{mode}">{label}</button>'
+        for mode, label in EMOTION_MODES)
+    return (f'<div class="{prefix}-emotion-modes" role="radiogroup" '
+            f'aria-label="How the emotion steers">{buttons}</div>')
 
 
 def _emotion_row(line: str, label: str, on: bool, usable: bool) -> str:
@@ -1568,8 +1595,27 @@ def _emotion_choose(who, identifier, line: str) -> tuple[str, str]:
     return ("", "") if outcome.get("ok") else _refused(outcome)
 
 
+def _emotion_steer(who, identifier, chosen) -> tuple[str, str]:
+    """Choose how every thread's emotion steers. Through the service when a thread
+    is open, so it is read again in the background under its new front; straight
+    to the store when none is, since there is then nothing to read."""
+    import mc_llm_conversation_service as service
+    import mc_llm_emotions
+
+    if who and identifier:
+        outcome = _command(service.SET_EMOTION_MODE, who, identifier,
+                           payload={"emotion_mode": str(chosen or "")})
+        return ("", "") if outcome.get("ok") else _refused(outcome)
+    try:
+        mc_llm_emotions.set_mode(chosen)
+    except mc_llm_emotions.Refused as refusal:
+        return str(refusal), "warn"
+    return "", ""
+
+
 def _emotion_pressed(who, identifier, nomination) -> tuple:
-    """A row of either list was pressed: choose its line (or Off), or delete it.
+    """A row of either list was pressed: choose its line (or Off), or delete it --
+    or one of the two ways it steers was.
 
     The nomination names the line by its words, not its place, so a list that
     changed in the other window meanwhile cannot turn a press on one line into
@@ -1583,8 +1629,11 @@ def _emotion_pressed(who, identifier, nomination) -> tuple:
         asked = json.loads(nomination or "{}")
     except ValueError:
         asked = {}
-    if not isinstance(asked, dict) or asked.get("do") not in ("choose", "delete"):
+    if not isinstance(asked, dict) or asked.get("do") not in ("choose", "delete", "mode"):
         return _emotion_view(who, identifier) + (gr.update(),)
+    if asked["do"] == "mode":
+        note, kind = _emotion_steer(who, identifier, asked.get("line"))
+        return _emotion_view(who, identifier) + (ui.notice(note, kind) if note else gr.update(),)
     line = mc_llm_emotions.clean(asked.get("line"))
     note, kind = "", "info"
     if asked["do"] == "delete":
