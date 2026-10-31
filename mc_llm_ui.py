@@ -236,7 +236,7 @@ def working(text: str, kind: str = "info") -> str:
 def updating(text: str) -> str:
     """A quiet line for work going on behind a finished one.
 
-    The cache update after a reply written with an emotion: nothing waits on it,
+    The cache update after a change of emotion: nothing waits on it,
     so it is not :func:`working`'s busy line with its bar -- the info line, with
     a slow dot in front that the stylesheet pulses.
     """

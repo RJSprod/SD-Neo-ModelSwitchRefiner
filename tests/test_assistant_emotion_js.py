@@ -202,6 +202,68 @@ class TestTheSubmenu:
                          "expanded": "true", "only": True}
 
 
+class TestHowItSteers:
+    def test_the_submenu_ends_with_the_two_ways_and_the_current_one_checked(self):
+        found = menu("""
+            view.conversation.emotion_mode = "prefill";
+            shell.showMenu("emotion");
+            const all = menu.children;
+            const modes = all.filter((c) => (c.className || "").indexOf("forge-assistant-emotion-mode") >= 0);
+            const first = all.indexOf(modes[0]);
+            console.log(JSON.stringify({
+                heading: all[first - 1].textContent,
+                modes: modes.map((m) => [m.textContent, m.getAttribute("role"),
+                                         m.getAttribute("aria-checked"), m.dataset.emotionMode]),
+                last: all[all.length - 1].textContent}));
+        """)
+
+        assert found["heading"] == "How it steers"
+        assert found["modes"] == [["System prompt", "menuitemradio", "false", "system"],
+                                  ["Starts the reply", "menuitemradio", "true", "prefill"]]
+        assert found["last"] == "Cancel"
+
+    def test_with_no_word_from_the_server_the_system_prompt_is_checked(self):
+        found = menu("""
+            shell.showMenu("emotion");
+            const modes = menu.children.filter((c) => (c.className || "").indexOf("forge-assistant-emotion-mode") >= 0);
+            console.log(JSON.stringify(modes.map((m) => m.getAttribute("aria-checked"))));
+        """)
+
+        assert found == ["true", "false"]
+
+    def test_choosing_one_sends_it_checks_it_at_once_and_reads_the_thread_again(self):
+        found = menu("""
+            shell.store.setEmotionMode = (mode) => { sent.push(["mode", mode]);
+                                                     return Promise.resolve({ok: true}); };
+            menu.querySelectorAll = (selector) => menu.children.filter(
+                (c) => (c.className || "").indexOf(selector.replace(/^\\./, "")) >= 0);
+            shell.showMenu("emotion");
+            const modes = menu.children.filter((c) => (c.className || "").indexOf("forge-assistant-emotion-mode") >= 0);
+            modes[1].handlers.click.forEach((fn) => fn());
+            const checked = modes.map((m) => m.getAttribute("aria-checked"));
+            await settle();
+            console.log(JSON.stringify({sent, checked}));
+        """)
+
+        assert found["checked"] == ["false", "true"]
+        assert found["sent"][0] == ["mode", "prefill"]
+        assert ["refresh"] in found["sent"]
+
+    def test_a_refusal_is_said(self):
+        found = menu("""
+            shell.store.setEmotionMode = () => Promise.resolve({ok: false,
+                error: {message: "An emotion steers from the system prompt or as the start of the reply."}});
+            shell.showMenu("emotion");
+            const modes = menu.children.filter((c) => (c.className || "").indexOf("forge-assistant-emotion-mode") >= 0);
+            modes[1].handlers.click.forEach((fn) => fn());
+            await settle();
+            console.log(JSON.stringify({told}));
+        """)
+
+        assert found["told"] == [["An emotion steers from the system prompt or as the start "
+                                  "of the reply.", "warn"]]
+
+
 PILL = """
 const pill = document.createElement("button");
 const word = document.createElement("span");
@@ -303,6 +365,20 @@ class TestTheStore:
         """, sources=("store",))
 
         assert found == [["set_emotion", None, {"emotion": HAPPY},
+                          {"character": "Ada", "thread_id": "t1"}]]
+
+    def test_the_way_it_steers_is_sent_against_no_revision(self):
+        found = run("""
+            const store = new NS.Store();
+            store.selection = {character: "Ada", thread: "t1", epoch: "x"};
+            const sent = [];
+            store.send = (envelope) => { sent.push(envelope); return Promise.resolve({ok: true}); };
+            store.setEmotionMode("prefill");
+            console.log(JSON.stringify(sent.map((e) => [e.action, e.expected_revision,
+                                                        e.payload, e.conversation])));
+        """, sources=("store",))
+
+        assert found == [["set_emotion_mode", None, {"emotion_mode": "prefill"},
                           {"character": "Ada", "thread_id": "t1"}]]
 
     def test_the_list_is_changed_through_its_own_route(self):

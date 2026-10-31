@@ -1294,6 +1294,15 @@
         return this.send(envelope);
     };
 
+    /** How every thread's emotion steers: "system" (the end of the thread's
+     *  system prompt) or "prefill" (the start of the reply). Named against the
+     *  open thread, which the server reads again when its front changed. */
+    Store.prototype.setEmotionMode = function (mode) {
+        const envelope = this.envelope("set_emotion_mode", {expected_revision: null});
+        envelope.payload = {emotion_mode: String(mode || "")};
+        return this.send(envelope);
+    };
+
     /** The words the open thread's next reply starts with, or "" for none:
      *  kept beside the thread as the emotion is, so no revision is asked. */
     Store.prototype.setStartWith = function (text) {
@@ -1312,8 +1321,8 @@
         });
     };
 
-    /** Whether the open thread's last reply is being read again: the cache
-     *  update after a reply written with an emotion. From the snapshot, and
+    /** Whether the open thread is being read again: the cache update after
+     *  a change of emotion or a reply started from your words. From the snapshot, and
      *  from the feed's `cache_update` while it lasts. */
     Store.prototype.updatingCache = function () {
         const key = conversationKey(this.selection.character, this.selection.thread);

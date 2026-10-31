@@ -129,7 +129,8 @@ def greeting_text(character: Character, persona: Persona) -> str:
 
 def build(character: Character, persona: Persona, messages: list[Message],
           context_size: int = 8192, reply_tokens: int = 512,
-          instruction: str | None = None, every_picture: bool = False) -> list[dict[str, Any]]:
+          instruction: str | None = None, every_picture: bool = False,
+          system_extra: str = "") -> list[dict[str, Any]]:
     """The request body's ``messages``, trimmed to fit.
 
     ``instruction`` is appended as a final user turn when the caller wants
@@ -138,8 +139,14 @@ def build(character: Character, persona: Persona, messages: list[Message],
 
     ``every_picture`` sends every picture in the window as a still rather than
     the newest alone; see :func:`stills_carried`.
+
+    ``system_extra`` is put after the system message, a blank line between:
+    what the thread adds to the character's own prompt (its emotion), counted
+    in the budget like the rest of it and never written into the character.
     """
     system = system_text(character, persona)
+    if system_extra.strip():
+        system = f"{system}\n\n{system_extra.strip()}"
     budget = _budget(context_size, reply_tokens, system, instruction or "")
     kept = _fit(messages, budget, every_picture)
     with_images = _limit_images(kept, every_picture)
