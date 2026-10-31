@@ -1679,6 +1679,24 @@ Model Chain: a batch's prompts were 250 and 254 tokens long and were padded to 2
 
 The second line is said once a session for each set of lengths.
 
+**Once Forge Neo fixes this itself, the padding is retired.** It exists only
+because of Forge's `49bc706`. Forge has fixed it when its own stacking no longer
+repeats a batch's prompts past four times the shortest: it pads them again,
+caps the repeat as its cond/uncond batching does, or batches them some other
+bounded way. The start of the log then says so in place of the first line
+above:
+
+```
+Model Chain: Forge pads a batch's prompts of different lengths itself on this build,
+             so the extension's padding changes nothing here; once Forge Neo's own
+             releases do this again, the padding can be retired
+```
+
+or warns that Forge's answer was not one this extension knows, which means
+Forge changed the function and its new code is to be read. To confirm, turn the
+switch off and generate a wildcard batch above one; if it fits, the padding is
+removed from the extension in the next round.
+
 ##### What the pass really used
 
 Whether Forge's allowance is a good bet is a question only a measurement

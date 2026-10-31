@@ -45,6 +45,21 @@ The log says what the probe found when the wrapper goes in, and the first time
 each set of lengths is padded in a session it says the lengths, what they were
 padded to and, under the uncapped repeat, what the host would have built.
 Token counts and sizes only: no prompt reaches the log.
+
+To be retired once Forge Neo fixes this itself, at the user's word ("if forge
+neo fixes this loading, then we can deprecate our fix"). Forge has fixed it
+when its own stacking no longer repeats a batch's prompts past four times the
+shortest: it pads again, or caps the repeat as its cond/uncond batching does,
+or batches them some other bounded way. The probe tells: on such a build the
+start says "Forge pads a batch's prompts of different lengths itself on this
+build" instead of the repeat line, or warns that the answer was not
+recognised, and then the new code is read. Confirm with the switch off and a
+wildcard batch above one on Krea 2, then remove this module, its four places
+in ``scripts/model_chain.py`` (the import, the setting, the start hook and the
+unload), its test file and row in ``tests/test_settings_sections.py``, and the
+README's section, and move CLAUDE.md's trap to the superseded table.
+CLAUDE.md, "Forge repeats a batch's prompts up to a common multiple of their
+lengths", and handoff 61 are the record.
 """
 
 from __future__ import annotations
@@ -227,9 +242,13 @@ def on_app_started(_demo=None, _app=None) -> None:
                 "prompt with neither the padding nor the repeat this extension was checked "
                 "against, so the padding of a batch's prompts is off on this Forge build")
             return
-        if _host != REPEATS:
-            return
-        if enabled():
+        # Installed means the probe answered one of the two it knows.
+        if _host == PADS:
+            logger.info(
+                "Model Chain: Forge pads a batch's prompts of different lengths itself on "
+                "this build, so the extension's padding changes nothing here; once Forge "
+                "Neo's own releases do this again, the padding can be retired")
+        elif enabled():
             logger.info(
                 "Model Chain: Forge repeats a batch's prompts of different lengths up to a "
                 "common multiple of their lengths; they are padded to the longest instead, "

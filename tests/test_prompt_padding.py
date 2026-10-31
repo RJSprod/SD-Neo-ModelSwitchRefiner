@@ -419,6 +419,7 @@ class TestTheLog:
         [line] = [m for m in caplog.messages if "common multiple" in m]
         assert "padded to the longest instead" in line
         assert mc_prompt_padding.FORGE_CHANGE in line
+        assert not [m for m in caplog.messages if "can be retired" in m]
 
     def test_the_start_says_the_switch_is_off(self, today, host, caplog):
         switched_off(host)
@@ -428,11 +429,15 @@ class TestTheLog:
         [line] = [m for m in caplog.messages if "common multiple" in m]
         assert "switch is off" in line
 
-    def test_an_old_forge_says_nothing_at_the_start(self, before, caplog):
+    def test_a_forge_that_pads_itself_is_said_to_need_no_padding(self, before, caplog):
+        """Forge before 49bc706, or a Forge Neo that has fixed it: the start says
+        the extension's padding changes nothing and can be retired."""
         with caplog.at_level(logging.INFO, logger="model_chain"):
             mc_prompt_padding.on_app_started()
 
         assert not [m for m in caplog.messages if "common multiple" in m]
+        [line] = [m for m in caplog.messages if "can be retired" in m]
+        assert "pads a batch's prompts of different lengths itself" in line
         assert getattr(before.stack_conds, "__wrapped__", None) is not None
 
     def test_a_padded_batch_is_said_once_for_each_set_of_lengths(self, today, caplog):
