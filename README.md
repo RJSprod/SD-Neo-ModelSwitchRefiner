@@ -3800,24 +3800,40 @@ covering the screen.
 ### A thread's emotion
 
 Oobabooga's *character bias*, for every conversation: a short line such as
-`*I am so happy*` that the character's next reply **starts from**, so the reply
-is written in that state. The line is never in the reply — not on screen, not
-read aloud, not copied or sent to the Voice Box, not saved — and never in what
-the character is shown of the conversation afterwards, so it is not copied into
-later replies either, and turning it off leaves nothing behind.
+`*I am so happy*` that tells the character how it feels, so its replies are
+written in that state. It is added **at the end of the thread's system prompt**,
+in one shape for every character:
+
+```
+[Current emotion]
+Aria feels this right now, in Aria's own words: *I am so happy*
+Let it colour Aria's tone, words and actions in every reply until it changes. Do not quote this note, and do not say that you were told how to feel.
+```
+
+The character's own system prompt — its override, or the one built from its
+Context and your persona — stays exactly as it is in **System prompt…** and the
+character editor; the thread's requests are sent with the two together. The
+line is never in a reply, so a reply starts as a reply starts. (Oobabooga writes
+the line after the character's turn opening instead, so the model reads it as
+the first words of its own reply and the page shows only what follows; this
+extension did the same until replies began "like there is hidden response
+that's been cropped out" — which there was.)
 
 - **Per thread.** Each thread has its own, chosen in LLM Studio or the Forge
   Assistant; a **new thread starts Off**, a **branch keeps** its thread's, and a
   deleted thread's is forgotten. It is a setting kept beside the thread rather
   than a change to it, so choosing one moves no revision: the other window's
   next message still goes, and a reply streaming meanwhile still saves.
+- **Every reply in the thread**: Send, Regenerate, Send again from here and
+  Continue, from the next one on, until it is changed or turned Off.
 - **One list**, shared by every character and thread, starting with Oobabooga's
   five (`*I am so happy*`, `*sad*`, `*excited*`, `*bored*`, `*angry*`). A line
   is added from the box under the list — Enter adds it and chooses it for the
   thread — and deleted with the bin beside it. **Deleting a line that threads
   are using turns those threads Off**, for good: adding the same line back does
   not turn them on again. A line is one line of up to 200 characters, fifty at
-  most. Kept in `emotions.json` under the LLM data root.
+  most; `{{char}}` and `{{user}}` in it are the character's name and yours.
+  Kept in `emotions.json` under the LLM data root.
 - **Where:** in LLM Studio, the **Emotion** chip between Character and You — its
   dot is hollow while the thread has none and filled while it has one — opens a
   small picker under the bar, put away by a press anywhere else or Escape; the
@@ -3825,62 +3841,57 @@ later replies either, and turning it off leaves nothing behind.
   Assistant, the **⋯** menu's Chat group has **Emotion ›** with the line that is
   on, and while one is on a pill in the composer's row says its word
   (*● happy*) and opens it in one tap.
-- **Which replies:** Send, Regenerate and Send again from here start from it;
-  **Continue does not**, since it carries on a reply already written. A change
-  takes effect from the next reply.
-- **Only the line is taken out.** llama-server sends the line back at the front
-  of the reply it continues, so the line, and the space after it, is taken off
-  the front as the reply streams, before anything shows, speaks or saves it.
-  Nothing else is touched: text in asterisks the character writes itself —
-  *\*smiles\**, an action, even the same words further on — is its reply and
-  stays, at the start of a reply or anywhere in it.
-- **Replies saved before that was fixed** began with the line, because
-  llama-server's copy of it was saved with them. Once, the first time the
-  extension starts after the fix, every reply in a thread written since
-  emotions shipped (30 October 2026) that starts with a line from the list, or
-  one of Oobabooga's five, has it taken off with the space after it — every
-  version of the reply — and the console says how many. A reply the character
-  really started with such a line is cleaned too: there is no telling it from a
-  copy. It never runs again (`emotion-cleanup.json` under the LLM data root
-  records it).
+- **Replies saved while the line started them** (the first build, before it
+  was taken off the stream) began with it. Once, the first time the extension
+  started after that was fixed, every reply in a thread written since emotions
+  shipped (30 October 2026) that starts with a line from the list, or one of
+  Oobabooga's five, had it taken off with the space after it — every version of
+  the reply — and the console said how many. A reply the character really
+  started with such a line was cleaned too: there is no telling it from a copy.
+  It never runs again (`emotion-cleanup.json` under the LLM data root records
+  it).
 
-**The cache update.** llama-server keeps the conversation as it was read, so
-after a reply written with an emotion its cache holds the line and then the
-reply, while every later prompt has the reply alone in that place; the next
-message would read the whole last reply again before its first word — a few
-seconds on the Intel GPU. So the moment such a reply is saved, it is **read
-again in the background**: the status line says *Updating cache…* quietly, with
-a slow dot and no bar, and then *Ready.* Send stays Send.
+**The cache.** The system prompt is the front of every prompt, so while the
+emotion stays the same the front is the same from one message to the next, and
+llama-server keeps the whole conversation cached: a message reads only what is
+new, as it would with no emotion at all. **A change** — another line, or Off —
+is a new front, after which the next message would read the whole conversation
+again before its first word (on the Intel GPU, 25 to 90 tokens a second, a long
+thread is minutes). So the moment the emotion changes, the conversation is
+**read again in the background** under the new prompt, while you type: the
+status line says *Updating cache…* quietly, with a slow dot and no bar, and then
+*Ready.* Send stays Send.
 
 - **It follows the language model's own rules, whatever the model.** It waits
   its turn exactly as a reply does — for an image generation on the model's
   card, a Voice Box render or another language-model job — and never gives up
-  because the card is busy. It needs the server that wrote the reply: if that
-  server was unloaded, evicted or restarted with other settings meanwhile, its
-  cache is gone, nothing is left to update, and the next message reads the
-  conversation as it would without an emotion. It never starts a server.
+  because the card is busy. It is built when its turn comes, so a reply being
+  written meanwhile is in what it reads. It needs a server that is running:
+  with none there is no cache to keep, and the next message reads the
+  conversation as it would anyway. It never starts a server.
 - **Every chat template.** Where the template writes a reply the model is still
   writing the same way as an older one — Gemma 4 with *Keep Gemma's thought
   marker* on, the default — the update reads the conversation ending on the
-  reply. Everywhere else, Gemma 4's own template among them, it reads the reply
-  as an older reply followed by a placeholder message of yours, which every
-  template writes the same way the next message will; llama-server keeps a
-  resume point at the start of your last message for models that cannot roll
+  last reply. Everywhere else, Gemma 4's own template among them, it reads that
+  reply as an older reply followed by a placeholder message of yours, which
+  every template writes the same way the next message will; llama-server keeps
+  a resume point at the start of your last message for models that cannot roll
   their cache back freely, so the next message resumes exactly where its words
-  begin.
+  begin. A thread that ends on a message of yours is read as it is.
 - **A message sent meanwhile.** If the update is already reading, the message
   says **Waiting for the cache update…** in its progress, as the busy line, and
   starts the moment it is done. If the update is still waiting for its turn,
-  the message takes its place: it reads the same reply in its own prompt, so
-  nothing is waited for twice.
-- **The saved prompt cache.** The reply's own is not kept (it holds the line).
-  The update's is, in the first form, so a restart resumes as it would without
-  an emotion; in the second it is not (it holds the placeholder), and the last
-  one saved stays.
-
-On a llama-server older than the pinned build, which may not continue a reply
-it is handed, the line reaches the model as a reply of its own and the effect
-is weaker; nothing fails.
+  the message takes its place: it reads the same conversation in its own prompt,
+  so nothing is waited for twice.
+- **Changing it again** while an update waits for its turn replaces that
+  update; while one is reading, it reads once more when it is done, with the
+  newest emotion.
+- **Deleting a line** turns the threads using it Off without reading any of them
+  again: the next message in each reads its conversation under the character's
+  own prompt.
+- **The saved prompt cache.** The update's is kept in the first form, so a
+  restart resumes under the thread's prompt; in the second it is not (it holds
+  the placeholder), and the last one saved stays.
 
 ### Start reply with
 
@@ -3904,9 +3915,9 @@ model wrote after them is kept exactly as it wrote it (a comma straight after
   emotion; a Regenerate that lands in a branch uses the words written in the
   thread you pressed it in. **Continue does not**, and leaves them for the next
   reply.
-- **With an emotion on**, both start the turn — the emotion's line, then your
-  words — and only your words are in the reply. (Oobabooga drops the bias for
-  such a reply; here the emotion keeps steering it.)
+- **With an emotion on**, the emotion steers from the thread's system prompt and
+  your words start the turn; the model carries on from both. (Oobabooga drops
+  the bias for such a reply; here the emotion keeps steering it.)
 - **Where:** in LLM Studio, the **Start with** chip beside Emotion — its dot
   filled while words are kept — opens a small box under the bar: the words,
   **Clear** and **Set** (Enter sets, Shift+Enter is a new line; a press
@@ -3915,7 +3926,7 @@ model wrote after them is kept exactly as it wrote it (a comma straight after
   opens the same box in the conversation's place.
 - **The cache.** The words are in the saved reply, so llama-server's cache
   already agrees with the next prompt up to them; the reply is read again in
-  the background all the same (*Updating cache…*, as after an emotion), which
+  the background all the same (*Updating cache…*, as after a change of emotion), which
   costs a token where they agree and makes good whatever was read differently
   where the model's words joined yours.
 

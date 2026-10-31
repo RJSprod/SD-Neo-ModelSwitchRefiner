@@ -39,7 +39,7 @@ def updates(monkeypatch):
     cache_update.reset()
     asked = []
     monkeypatch.setattr(cache_update, "_update",
-                        lambda request, update: asked.append(request) or "")
+                        lambda build, update: asked.append(build()) or "")
     yield asked
     cache_update.reset()
 
@@ -230,19 +230,47 @@ class TestEachThreadsChoice:
 # --------------------------------------------------------------------------- #
 
 
+def system_of(request) -> str:
+    assert request.messages[0]["role"] == "system"
+    return request.messages[0]["content"]
+
+
+def note(line=HAPPY):
+    return emotions.system_note(line, "Ada", ops._persona().display)
+
+
 class TestTheWire:
-    def test_a_new_reply_starts_from_the_emotion(self, thread, monkeypatch):
+    def test_the_emotion_ends_the_system_prompt_and_nothing_starts_the_reply(
+            self, thread, monkeypatch):
+        """Not Oobabooga's prefill, which the user found starting every reply "like
+        there is hidden response that's been cropped out": the thread's system
+        prompt, the character's own and then the emotion."""
         asked = asking(monkeypatch)
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-0")
+        plain = system_of(asked[-1])
         choose(thread, HAPPY)
 
         run("send", thread, payload={"text": "Did you finish the painting?"},
             operation_id="send-1")
 
-        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
-        assert asked[-1].messages[-2]["role"] == "user"
-        assert asked[-1].prefilled is True
+        assert system_of(asked[-1]) == plain + "\n\n" + note()
+        assert asked[-1].messages[-1] == {"role": "user",
+                                          "content": "Did you finish the painting?"}
+        assert asked[-1].prefilled is False
+        assert all(HAPPY not in str(message.get("content"))
+                   for message in asked[-1].messages[1:])
 
-    def test_the_reply_is_saved_without_it(self, chats, thread, monkeypatch):
+    def test_the_note_has_one_shape_for_every_character_and_line(self):
+        found = emotions.system_note(HAPPY, "Ada", "Sam")
+
+        assert found.startswith("[Current emotion]\n")
+        assert "Ada feels this right now, in Ada's own words: *I am so happy*" in found
+        assert "Do not quote this note" in found
+        assert emotions.system_note("", "Ada") == ""
+        assert "*Ada is so glad Sam came*" in emotions.system_note(
+            "*{{char}} is so glad {{user}} came*", "Ada", "Sam")
+
+    def test_the_reply_is_saved_as_written(self, chats, thread, monkeypatch):
         asking(monkeypatch, pieces=(" Oh,", " hello!"))
         choose(thread, HAPPY)
 
@@ -252,57 +280,48 @@ class TestTheWire:
         assert saved.messages[-1].text == "Oh, hello!"
         assert all(HAPPY not in message.text for message in saved.messages)
 
-    def test_regenerate_starts_from_it_too(self, thread, monkeypatch):
+    def test_every_request_in_the_thread_has_the_same_system_prompt(self, chats, thread,
+                                                                     monkeypatch):
+        """Send, Regenerate, Continue and Send again from here: one front for the
+        whole thread, so llama-server keeps the conversation cached from one
+        message to the next, and nothing is read again until the emotion changes."""
         asked = asking(monkeypatch)
         choose(thread, HAPPY)
 
-        run("regenerate", thread, index=len(thread.messages) - 1, operation_id="again-1")
-
-        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
-
-    def test_send_again_from_here_starts_from_it_too(self, thread, monkeypatch):
-        asked = asking(monkeypatch)
-        choose(thread, HAPPY)
-
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+        last = len(chats.load("Ada", thread.identifier).messages) - 1
+        run("regenerate", thread, index=last, operation_id="again-1")
+        run("continue", thread, index=last, operation_id="more-1")
         run("resend_from_user", thread, index=0, operation_id="resend-1")
 
-        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert len(asked) == 4
+        assert {system_of(request) for request in asked} == {system_of(asked[0])}
+        assert system_of(asked[0]).endswith(note())
+        assert not any(request.prefilled for request in asked)
 
-    def test_continue_does_not(self, thread, monkeypatch):
-        asked = asking(monkeypatch)
-        choose(thread, HAPPY)
+    def test_off_is_the_character_s_own_prompt_exactly(self, thread, monkeypatch):
+        from prompt_master.chat.prompt import system_text
 
-        run("continue", thread, index=len(thread.messages) - 1, operation_id="more-1")
-
-        assert asked[-1].messages[-1]["role"] == "user"
-        assert all(message.get("content") != HAPPY for message in asked[-1].messages)
-        assert asked[-1].prefilled is False
-
-    def test_off_sends_the_request_as_it_always_was(self, thread, monkeypatch):
         asked = asking(monkeypatch)
 
         run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
 
+        assert system_of(asked[-1]) == system_text(ops._character("Ada"), ops._persona())
         assert asked[-1].messages[-1] == {"role": "user", "content": "Hi."}
         assert asked[-1].prefilled is False
 
-    def test_never_after_a_reply(self, chats, monkeypatch):
-        """llama-server refuses two assistant messages at the end of a request,
-        which a thread whose last message of yours was deleted would send."""
-        from prompt_master.chat.history import ASSISTANT, USER
-
-        found = chats.new("Ada")
-        found.append(USER, "hello")
-        found.append(ASSISTANT, "first")
-        found.append(ASSISTANT, "second")
-        chats.save(found)
+    def test_a_character_s_own_prompt_stays_as_written_with_the_note_after_it(
+            self, thread, monkeypatch):
+        """The system prompt the user sees or overrides stays as it is: the
+        emotion is added on the wire, never written into the character."""
+        service.set_system_prompt("Ada", "You are {{char}}, a harbour pilot.")
         asked = asking(monkeypatch)
-        choose(found, HAPPY)
+        choose(thread, HAPPY)
 
-        run("regenerate", found, index=2, operation_id="again-1")
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
 
-        assert asked[-1].messages[-1] == {"role": "assistant", "content": "first"}
-        assert asked[-1].prefilled is False
+        assert system_of(asked[-1]) == "You are Ada, a harbour pilot.\n\n" + note()
+        assert service.system_prompt("Ada")["text"] == "You are {{char}}, a harbour pilot."
 
 
 # --------------------------------------------------------------------------- #
@@ -311,17 +330,24 @@ class TestTheWire:
 
 
 class Echoing:
-    """llama-server b10621 continuing a reply from a line: the line comes back at
-    the front of the first piece, then what the model wrote. ``stop`` is pressed
-    before the piece at ``after``."""
+    """llama-server b10621 continuing a reply from a line: the request's last
+    assistant message, if it ends on one, comes back at the front of the first
+    piece, then what the model wrote (``pieces``). ``echo`` false is a server that
+    sends back only what the model wrote. ``stop`` is pressed before the piece at
+    ``after``."""
 
-    def __init__(self, pieces, stop=None, after=None):
-        self.pieces, self.stop, self.after = list(pieces), stop, after
+    def __init__(self, pieces, stop=None, after=None, echo=True):
+        self.pieces, self.stop, self.after, self.echo = list(pieces), stop, after, echo
+        self.asked = []
 
     def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
                             cancel=None, **kwargs):
+        self.asked.append(messages)
+        pieces = list(self.pieces)
+        if self.echo and pieces and messages and messages[-1].get("role") == "assistant":
+            pieces[0] = messages[-1]["content"] + pieces[0]
         sent = []
-        for index, piece in enumerate(self.pieces):
+        for index, piece in enumerate(pieces):
             if index == self.after:
                 self.stop.cancel()
                 break
@@ -407,7 +433,7 @@ class TestTheLineIsTakenOffTheFront:
 
 class TestTheLineIsNotInTheReply:
     def test_it_is_never_streamed_and_the_reply_ends_without_it(self, serving):
-        serving(Echoing([HAPPY + " Oh,", " hello!"]))
+        serving(Echoing([" Oh,", " hello!"]))
 
         chunks, last = streamed(from_the_line())
 
@@ -416,7 +442,7 @@ class TestTheLineIsNotInTheReply:
 
     def test_a_stopped_reply_keeps_what_was_written_without_it(self, serving):
         stop = sessions.Cancellation()
-        serving(Echoing([HAPPY + " Oh,", " hello!"], stop=stop, after=1))
+        serving(Echoing([" Oh,", " hello!"], stop=stop, after=1))
 
         chunks, last = streamed(from_the_line(), stop)
 
@@ -424,7 +450,7 @@ class TestTheLineIsNotInTheReply:
         assert (last.kind, last.text) == (sessions.CANCELLED, "Oh,")
 
     def test_words_still_held_when_the_reply_ends_are_streamed_then(self, serving):
-        serving(Echoing(["*I am"]))
+        serving(Echoing(["*I am"], echo=False))
 
         chunks, last = streamed(from_the_line())
 
@@ -432,7 +458,7 @@ class TestTheLineIsNotInTheReply:
         assert last.text == "*I am"
 
     def test_any_other_request_streams_exactly_as_it_came(self, serving):
-        serving(Echoing([HAPPY + " Oh,", " hello!"]))
+        serving(Echoing([HAPPY + " Oh,", " hello!"], echo=False))
         ending_on_yours = sessions.ChatRequest(messages=[{"role": "user", "content": "Hi."}],
                                                conversation="Ada/one")
         not_from_a_line = sessions.ChatRequest(messages=from_the_line().messages,
@@ -444,8 +470,10 @@ class TestTheLineIsNotInTheReply:
             assert chunks == [HAPPY + " Oh,", " hello!"]
             assert last.text == HAPPY + " Oh, hello!"
 
-    def test_the_thread_shows_and_saves_the_reply_alone(self, chats, thread, serving):
-        serving(Echoing([HAPPY + " Oh,", " *smiles*", " hello!"]))
+    def test_with_an_emotion_on_the_reply_streams_and_saves_as_the_model_wrote_it(
+            self, chats, thread, serving):
+        server = Echoing([" Oh,", " *smiles*", " hello!"])
+        serving(server)
         choose(thread, HAPPY)
         cursor = feed.cursor()
         subscriber = feed.subscribe("page-1")
@@ -455,6 +483,7 @@ class TestTheLineIsNotInTheReply:
         patches = [event["payload"].get("text", "") for event in subscriber.since(cursor)[0]
                    if event["kind"] == service.REPLY_PATCH]
         assert patches and all(HAPPY not in text for text in patches)
+        assert server.asked[-1][-1]["role"] == "user"
         saved = chats.load("Ada", thread.identifier)
         assert saved.messages[-1].text == "Oh, *smiles* hello!"
 
@@ -464,24 +493,60 @@ class TestTheLineIsNotInTheReply:
 # --------------------------------------------------------------------------- #
 
 
-class TestTheCacheUpdateIsAskedFor:
-    def test_after_a_reply_with_an_emotion_it_ends_on_the_saved_reply(self, thread,
-                                                                      monkeypatch, updates):
-        asking(monkeypatch, pieces=(" Oh,", " hello!"))
-        choose(thread, HAPPY)
+@pytest.fixture
+def running(monkeypatch):
+    """A server is running: a change of emotion has a cache to keep."""
+    monkeypatch.setattr(cache_update, "warm", lambda: True)
 
-        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+class TestTheCacheUpdateIsAskedFor:
+    def test_a_change_of_emotion_reads_the_thread_again_under_its_new_system_prompt(
+            self, thread, updates, running):
+        choose(thread, HAPPY)
 
         assert settled()
         request = updates[-1]
-        assert request.messages[-1] == {"role": "assistant", "content": "Oh, hello!"}
-        assert request.messages[-2] == {"role": "user", "content": "Hi."}
-        assert all(message.get("content") != HAPPY for message in request.messages)
+        assert system_of(request).endswith(note())
+        assert request.messages[-1] == {"role": "assistant", "content": "reply 2"}
         assert request.max_tokens == 1
         assert request.prefilled is False
         assert request.conversation == name_of(thread)
 
-    def test_without_an_emotion_none_is_asked_for(self, thread, monkeypatch, updates):
+    def test_off_reads_it_again_under_the_character_s_own(self, thread, updates, running):
+        choose(thread, HAPPY)
+        assert settled()
+
+        choose(thread, "", operation_id="emotion-2")
+
+        assert settled()
+        assert len(updates) == 2
+        assert "[Current emotion]" not in system_of(updates[-1])
+
+    def test_the_same_emotion_again_reads_nothing(self, thread, updates, running):
+        choose(thread, HAPPY)
+        assert settled()
+
+        choose(thread, HAPPY, operation_id="emotion-2")
+
+        assert settled()
+        assert len(updates) == 1
+
+    def test_without_a_server_running_nothing_is_asked_for(self, thread, updates, monkeypatch):
+        monkeypatch.setattr(cache_update, "warm", lambda: False)
+
+        choose(thread, HAPPY)
+
+        assert settled()
+        assert updates == []
+        assert not cache_update.pending(name_of(thread))
+
+    def test_a_reply_written_with_an_emotion_needs_none(self, thread, monkeypatch, updates,
+                                                        running):
+        """Once the thread's system prompt has the emotion it stays the same for
+        every message, so a reply leaves nothing to read again."""
+        choose(thread, HAPPY)
+        assert settled()
+        updates.clear()
         asking(monkeypatch)
 
         run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
@@ -489,27 +554,14 @@ class TestTheCacheUpdateIsAskedFor:
         assert settled()
         assert updates == []
 
-    def test_it_is_running_before_the_reply_is_announced_as_over(self, thread, monkeypatch):
-        """So a page that reads the conversation at the reply's end finds it
-        running, and keeps listening for its own end."""
-        release = threading.Event()
-        monkeypatch.setattr(cache_update, "_update",
-                            lambda request, update: release.wait(5) and "")
-        asking(monkeypatch)
-        choose(thread, HAPPY)
-        cursor = feed.cursor()
-        subscriber = feed.subscribe("page-1")
+    def test_a_thread_with_nothing_in_it_has_nothing_to_read(self, chats, updates, running):
+        found = chats.new("Ada")
+        chats.save(found)
 
-        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
-        try:
-            assert cache_update.pending(name_of(thread))
-            assert service.snapshot("Ada", thread.identifier)["conversation"]["cache_update"]
-            kinds = [event["kind"] for event in subscriber.since(cursor)[0]]
-            assert kinds.index(service.CACHE_UPDATE) < kinds.index(service.OPERATION_TERMINAL)
-        finally:
-            release.set()
+        choose(found, HAPPY)
+
         assert settled()
-        assert not service.snapshot("Ada", thread.identifier)["conversation"]["cache_update"]
+        assert updates == [None]
 
 
 # --------------------------------------------------------------------------- #
@@ -752,9 +804,9 @@ class TestTheUpdate:
         client = Client()
         self.resolve(real_update, Warm(client))
 
-        said = cache_update._update(request_for(), cache_update._Update())
+        said = cache_update._update(request_for, cache_update._Update())
 
-        assert said.startswith("the cache update read the last reply again")
+        assert said.startswith("the cache update read the conversation again")
         conversation, messages, max_tokens, kwargs = client.streamed[-1]
         assert (conversation, messages, max_tokens) == ("Ada/one", ENDING, 1)
         assert "save" not in kwargs
@@ -768,7 +820,7 @@ class TestTheUpdate:
         busy, asked = busy_for([True, True, False])
         real_update.setattr(sessions._Gpu, "_blocked_by_the_image_job", staticmethod(busy))
 
-        assert cache_update._update(request_for(), cache_update._Update()) == ""
+        assert cache_update._update(request_for, cache_update._Update()) == ""
         assert runtime.asked == [False]
         assert asked == []
 
@@ -779,10 +831,10 @@ class TestTheUpdate:
         busy, asked = busy_for([True, True, True, False])
         real_update.setattr(sessions._Gpu, "_blocked_by_the_image_job", staticmethod(busy))
 
-        said = cache_update._update(request_for(), update)
+        said = cache_update._update(request_for, update)
 
         assert len(asked) >= 4
-        assert said.startswith("the cache update read the last reply again")
+        assert said.startswith("the cache update read the conversation again")
         assert len(client.streamed) == 1
         assert client.reading == [True], "reading only once its turn had come"
 
@@ -792,10 +844,10 @@ class TestTheUpdate:
         busy, asked = busy_for(["a Voice Box render", "a Voice Box render", ""])
         real_update.setattr(sessions._Gpu, "_blocked_by_a_guest", staticmethod(busy))
 
-        said = cache_update._update(request_for(), cache_update._Update())
+        said = cache_update._update(request_for, cache_update._Update())
 
         assert len(asked) >= 3
-        assert said.startswith("the cache update read the last reply again")
+        assert said.startswith("the cache update read the conversation again")
         assert len(client.streamed) == 1
 
     def test_it_waits_behind_the_language_model_rather_than_giving_up(self, real_update):
@@ -814,12 +866,12 @@ class TestTheUpdate:
         worker.start()
         assert held.wait(5)
         began = time.monotonic()
-        said = cache_update._update(request_for(), cache_update._Update())
+        said = cache_update._update(request_for, cache_update._Update())
         took = time.monotonic() - began
         worker.join(5)
 
         assert took >= 0.2
-        assert said.startswith("the cache update read the last reply again")
+        assert said.startswith("the cache update read the conversation again")
         assert len(client.streamed) == 1
 
     def test_a_message_that_takes_its_place_stops_it_while_it_waits(self, real_update):
@@ -830,7 +882,7 @@ class TestTheUpdate:
         update = pending_update("Ada/one", reading=False)
         answer = {}
         worker = threading.Thread(
-            target=lambda: answer.setdefault("said", cache_update._update(request_for(), update)),
+            target=lambda: answer.setdefault("said", cache_update._update(request_for, update)),
             daemon=True)
         worker.start()
         time.sleep(0.1)
@@ -847,7 +899,7 @@ class TestTheUpdate:
         runtime = Warm(client, None)
         self.resolve(real_update, runtime)
 
-        assert cache_update._update(request_for(), cache_update._Update()) == ""
+        assert cache_update._update(request_for, cache_update._Update()) == ""
         assert client.streamed == []
         assert len(runtime.asked) == 2
 
@@ -859,14 +911,61 @@ class TestTheUpdate:
         self.resolve(real_update, Warm(client))
         real_update.setattr(cache_update, "continues", lambda client, messages: False)
 
-        said = cache_update._update(request_for(), cache_update._Update())
+        said = cache_update._update(request_for, cache_update._Update())
 
         conversation, messages, max_tokens, kwargs = client.streamed[-1]
         assert messages == ENDING + [{"role": "user", "content": cache_update.PROBE}]
         assert (conversation, max_tokens) == ("Ada/one", 1)
         assert kwargs.get("save") is False
-        assert said.startswith("the cache update read the last reply again")
-        assert "as a past reply" in said
+        assert said.startswith("the cache update read the conversation again")
+        assert "the last reply as a past one" in said
+
+    def test_it_builds_its_request_only_once_its_turn_has_come(self, real_update):
+        """So a reply being written while it waited is in what it reads, and the
+        emotion is the one the thread has by then."""
+        client = Client()
+        self.resolve(real_update, Warm(client))
+        busy, asked = busy_for([True, True, True, False])
+        real_update.setattr(sessions._Gpu, "_blocked_by_the_image_job", staticmethod(busy))
+        seen = []
+
+        def build():
+            seen.append(len(asked))
+            return request_for()
+
+        cache_update._update(build, cache_update._Update())
+
+        assert seen and seen[0] >= 4
+        assert len(client.streamed) == 1
+
+    def test_nothing_to_read_reads_nothing(self, real_update):
+        client = Client()
+        self.resolve(real_update, Warm(client))
+
+        assert cache_update._update(lambda: None, cache_update._Update()) == ""
+        assert client.streamed == []
+
+    def test_a_thread_that_ends_on_your_message_is_sent_as_it_is_and_kept_unsaved(
+            self, real_update):
+        client = Client()
+        self.resolve(real_update, Warm(client))
+
+        def asked_anyway(client, messages):
+            raise AssertionError("there is no reply to compare")
+
+        real_update.setattr(cache_update, "continues", asked_anyway)
+        ending = ENDING[:2]
+
+        said = cache_update._update(
+            lambda: sessions.ChatRequest(messages=list(ending), max_tokens=1,
+                                         conversation="Ada/one"),
+            cache_update._Update())
+
+        conversation, messages, max_tokens, kwargs = client.streamed[-1]
+        assert messages == ending
+        assert kwargs.get("save") is False
+        assert said.startswith("the cache update read the conversation again")
+        assert "as a past one" not in said
 
     def test_it_holds_the_card_under_its_own_name(self, real_update):
         import mc_broker
@@ -881,14 +980,14 @@ class TestTheUpdate:
 
         self.resolve(real_update, Warm(Watching()))
 
-        cache_update._update(request_for(), cache_update._Update())
+        cache_update._update(request_for, cache_update._Update())
 
         assert seen == ["the cache update"]
 
     def test_schedule_says_when_it_starts_and_ends(self, thread, monkeypatch):
         release = threading.Event()
         monkeypatch.setattr(cache_update, "_update",
-                            lambda request, update: release.wait(5) and "")
+                            lambda build, update: release.wait(5) and "")
         published = []
         monkeypatch.setattr(service, "publish",
                             lambda kind, key=None, **payload: published.append((kind, payload)))
@@ -896,15 +995,75 @@ class TestTheUpdate:
 
         assert cache_update.schedule(key, lambda: request_for(name_of(thread))) is True
         assert cache_update.pending(name_of(thread))
-        assert cache_update.schedule(key, lambda: request_for(name_of(thread))) is False
         release.set()
 
         assert settled()
         updates = [payload for kind, payload in published if kind == service.CACHE_UPDATE]
         assert updates == [{"updating": True}, {"updating": False}]
 
+    def test_another_change_while_one_waits_for_its_turn_takes_its_place(self, thread,
+                                                                         monkeypatch):
+        waiting, release, built = threading.Event(), threading.Event(), []
+
+        def update_(build, update):
+            if not waiting.is_set():
+                waiting.set()
+                release.wait(5)
+            if update.cancel.is_set():
+                return ""
+            built.append(build())
+            return ""
+
+        monkeypatch.setattr(cache_update, "_update", update_)
+        published = []
+        monkeypatch.setattr(service, "publish",
+                            lambda kind, key=None, **payload: published.append((kind, payload)))
+        key = store_module.key_of(thread)
+        cache_update.schedule(key, lambda: "first")
+        assert waiting.wait(5)
+        with cache_update._guard:
+            first = cache_update._pending[name_of(thread)]
+
+        assert cache_update.schedule(key, lambda: "second") is True
+        release.set()
+
+        assert settled()
+        assert first.done.wait(5)
+        assert first.cancel.is_set()
+        assert built == ["second"]
+        updates = [payload for kind, payload in published if kind == service.CACHE_UPDATE]
+        assert updates == [{"updating": True}, {"updating": True}, {"updating": False}]
+
+    def test_another_change_while_one_reads_has_it_read_once_more(self, thread, monkeypatch):
+        reading, release, built = threading.Event(), threading.Event(), []
+
+        def update_(build, update):
+            with cache_update._guard:
+                update.reading = True
+            if not built and not reading.is_set():
+                reading.set()
+                release.wait(5)
+            built.append(build())
+            return ""
+
+        monkeypatch.setattr(cache_update, "_update", update_)
+        published = []
+        monkeypatch.setattr(service, "publish",
+                            lambda kind, key=None, **payload: published.append((kind, payload)))
+        key = store_module.key_of(thread)
+        cache_update.schedule(key, lambda: "first")
+        assert reading.wait(5)
+
+        assert cache_update.schedule(key, lambda: "second") is False
+        release.set()
+
+        assert settled()
+        assert built == ["first", "second"]
+        updates = [payload for kind, payload in published if kind == service.CACHE_UPDATE]
+        assert updates == [{"updating": True}, {"updating": False}]
+
     def test_a_failure_still_ends_it(self, thread, monkeypatch):
-        def broken(request, update):
+        def broken(build, update):
             raise RuntimeError("no")
 
         monkeypatch.setattr(cache_update, "_update", broken)

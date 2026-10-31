@@ -790,12 +790,20 @@ def build() -> dict:
     for opening in (to_emotion, to_character):
         opening.click(fn=_emotion_view, inputs=[character, thread_state],
                       outputs=emotions_drawn, queue=False)
-    emotion_now.click(fn=_emotion_pressed, inputs=[character, thread_state, emotion_at],
-                      outputs=emotions_drawn + [status], queue=False)
+    # A change of emotion is a new end to the thread's system prompt, and the
+    # conversation is read again under it in the background at once
+    # (mc_llm_cache_update): the status line says so quietly until it is done,
+    # as it does after a run.
+    chosen = emotion_now.click(fn=_emotion_pressed, inputs=[character, thread_state, emotion_at],
+                               outputs=emotions_drawn + [status], queue=False)
+    chosen.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
+                show_progress="hidden")
     for box, button in ((emotion_new, emotion_add), (emotion_sheet_new, emotion_sheet_add)):
         for event in (button.click, box.submit):
-            event(fn=_emotion_added, inputs=[character, thread_state, box],
-                  outputs=emotions_drawn + [status, box], queue=False)
+            added = event(fn=_emotion_added, inputs=[character, thread_state, box],
+                          outputs=emotions_drawn + [status, box], queue=False)
+            added.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
+                       show_progress="hidden")
     # -- the start of the next reply --------------------------------------- #
     #
     # The box, its heading and the bar's heading (whose mark fills the chip's
@@ -1024,8 +1032,8 @@ def build() -> dict:
         run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
                  inputs=[character, search], outputs=[threads])
         settled = run.then(fn=_settle, inputs=[character, thread_state], outputs=view)
-        # After the view is read back, and on its own: a reply written with an
-        # emotion is read again in the background (mc_llm_cache_update), and
+        # After the view is read back, and on its own: a reply started from
+        # your words is read again in the background (mc_llm_cache_update), and
         # the status line says so quietly until it is done. Its own event, so
         # Send is never held behind it -- a message sent meanwhile says it is
         # waiting, from its own run.
@@ -1649,7 +1657,7 @@ def _start_written(who, identifier, text) -> tuple:
 
 
 def _cache_status(who, identifier):
-    """The status line while the last reply is read again, and Ready after.
+    """The status line while the conversation is read again, and Ready after.
 
     Quiet -- the info line with a slow dot, no bar -- because nothing waits on
     it unless a message is sent meanwhile, and that message's own run says

@@ -22,8 +22,8 @@ import mc_llm_conversation_service as service
 import mc_llm_emotions as emotions
 import mc_llm_sessions as sessions
 import mc_llm_start_with as start_with
-from test_character_emotion import (HAPPY, Echoing, asking, choose, serving,  # noqa: F401
-                                    updates)
+from test_character_emotion import (HAPPY, Echoing, asking, choose, note,  # noqa: F401
+                                    serving, settled, system_of, updates)
 from test_conversation_ops import chats, run, store, thread  # noqa: F401 (fixtures)
 from test_conversation_service import envelope
 
@@ -152,15 +152,18 @@ class TestTheNextReply:
         assert asked[-1].messages[-1]["role"] == "user"
         assert asked[-1].prefilled is False and asked[-1].start_with == ""
 
-    def test_with_an_emotion_on_both_start_the_turn_and_only_the_words_are_kept(
+    def test_with_an_emotion_on_it_steers_from_the_system_prompt_and_the_words_start_the_turn(
             self, chats, thread, monkeypatch):
+        """The emotion first, in the thread's system prompt, then the words as the
+        turn's start: the model carries on from both."""
         asked = asking(monkeypatch, pieces=(", see?",))
         choose(thread, HAPPY)
         write(thread, BLUE)
 
         run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
 
-        assert asked[-1].messages[-1] == {"role": "assistant", "content": f"{HAPPY} {BLUE}"}
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": BLUE}
+        assert system_of(asked[-1]).endswith(note())
         assert chats.load("Ada", thread.identifier).messages[-1].text == \
             "The color is blue, see?"
 
@@ -241,6 +244,49 @@ class TestTheNextReply:
         assert updates[0].messages[-1] == {"role": "assistant",
                                            "content": "The color is blue."}
 
+    def test_the_update_after_it_reads_under_the_thread_s_system_prompt(self, thread,
+                                                                         monkeypatch, updates):
+        """With an emotion on: the same front as the reply's and every later
+        message's, or the update would leave the next message reading it all."""
+        asked = asking(monkeypatch, pieces=(".",))
+        choose(thread, HAPPY)
+        write(thread, BLUE)
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert settled()
+        read = [request for request in updates if request is not None]
+        assert read and system_of(read[-1]) == system_of(asked[-1])
+        assert system_of(read[-1]).endswith(note())
+
+    def test_the_update_is_running_before_the_reply_is_announced_as_over(self, thread,
+                                                                        monkeypatch):
+        """So a page that reads the conversation at the reply's end finds it
+        running, and keeps listening for its own end."""
+        import threading
+
+        import mc_llm_cache_update as cache_update
+
+        release = threading.Event()
+        monkeypatch.setattr(cache_update, "_update",
+                            lambda build, update: release.wait(5) and "")
+        asking(monkeypatch)
+        write(thread, BLUE)
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+        try:
+            name = f"Ada/{thread.identifier}"
+            assert cache_update.pending(name)
+            assert service.snapshot("Ada", thread.identifier)["conversation"]["cache_update"]
+            kinds = [event["kind"] for event in subscriber.since(cursor)[0]]
+            assert kinds.index(service.CACHE_UPDATE) < kinds.index(service.OPERATION_TERMINAL)
+        finally:
+            release.set()
+        assert settled()
+        assert not service.snapshot("Ada", thread.identifier)["conversation"]["cache_update"]
+
     def test_it_is_spoken_as_the_reply_s_first_words(self, thread, monkeypatch):
         import mc_voice_ui
 
@@ -272,7 +318,7 @@ class TestTheNextReply:
 class TestThroughTheRuntime:
     def test_the_words_sent_back_are_put_back_once_and_the_rest_kept_as_written(
             self, chats, thread, serving):
-        serving(Echoing([BLUE + " because", " I said so."]))
+        serving(Echoing([" because", " I said so."]))
         write(thread, BLUE)
 
         run("send", thread, payload={"text": "Why?"}, operation_id="send-1")
@@ -280,8 +326,8 @@ class TestThroughTheRuntime:
         assert chats.load("Ada", thread.identifier).messages[-1].text == \
             "The color is blue because I said so."
 
-    def test_with_an_emotion_only_the_emotion_is_left_out(self, chats, thread, serving):
-        serving(Echoing([f"{HAPPY} {BLUE},", " see?"]))
+    def test_with_an_emotion_on_only_the_words_are_put_back(self, chats, thread, serving):
+        serving(Echoing([",", " see?"]))
         choose(thread, HAPPY)
         write(thread, BLUE)
 
@@ -291,7 +337,7 @@ class TestThroughTheRuntime:
             "The color is blue, see?"
 
     def test_the_stream_keeps_the_model_s_first_space(self, serving):
-        serving(Echoing([BLUE + " because", " I said so."]))
+        serving(Echoing([" because", " I said so."]))
         request = sessions.ChatRequest(
             messages=[{"role": "user", "content": "Why?"},
                       {"role": "assistant", "content": BLUE}],

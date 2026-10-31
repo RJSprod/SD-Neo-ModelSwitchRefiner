@@ -1312,8 +1312,8 @@
         });
     };
 
-    /** Whether the open thread's last reply is being read again: the cache
-     *  update after a reply written with an emotion. From the snapshot, and
+    /** Whether the open thread is being read again: the cache update after
+     *  a change of emotion or a reply started from your words. From the snapshot, and
      *  from the feed's `cache_update` while it lasts. */
     Store.prototype.updatingCache = function () {
         const key = conversationKey(this.selection.character, this.selection.thread);

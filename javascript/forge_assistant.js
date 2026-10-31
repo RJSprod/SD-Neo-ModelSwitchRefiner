@@ -7070,8 +7070,9 @@
             this.say(this.told.text, this.told.kind);
             return;
         }
-        // The last reply, written with an emotion, being read again in the
-        // background. Quiet: nothing waits on it until a message is sent, and
+        // The conversation being read again in the background, after a change
+        // of emotion or a reply started from your words. Quiet: nothing waits
+        // on it until a message is sent, and
         // that message's own progress then says it is waiting for it.
         if (view.cacheUpdate && view.selection.thread) {
             this.say("Updating cache…", "updating");

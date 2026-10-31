@@ -668,12 +668,12 @@ class ChatRequest:
     and the first reply after a restart has that slot read back before it.
     Empty is the old behaviour exactly."""
     prefilled: bool = False
-    """Whether the request ends on the start of the reply -- the thread's
-    emotion (:mod:`mc_llm_emotions`). llama-server sends the line back at the
-    front of the reply, and :func:`_conversation` takes it off before a piece
-    is yielded. Its slot is not saved: what it holds is the line before the
-    reply, which no later prompt has. The cache update after it saves the
-    conversation as it is (:mod:`mc_llm_cache_update`)."""
+    """Whether the request ends on the start of the reply -- words of yours
+    (:mod:`mc_llm_start_with`). llama-server sends them back at the front of the
+    reply, and :func:`_conversation` takes them off before a piece is yielded;
+    the caller puts them back as the reply's first words. Its slot is not saved;
+    the cache update after it saves the conversation as it is
+    (:mod:`mc_llm_cache_update`)."""
     start_with: str = ""
     """The words of yours the reply begins with (:mod:`mc_llm_start_with`), the
     end of the prefilled line. The caller shows them as the reply's start, so

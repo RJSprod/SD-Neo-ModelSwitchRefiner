@@ -4356,6 +4356,11 @@ with "some indication somewhere that is subtle" that the cache is being updated
 after a send, and the wait said in the progress area when a message is sent
 before that is done.
 
+**Superseded in part by 40.8**: the emotion is no longer a prefill of the reply
+but the end of the thread's system prompt, and the cache update runs after a
+change of emotion rather than after every reply. 40.1 to 40.6 describe the
+prefill as built and are kept as the record of why it was replaced.
+
 ### 40.1 What Oobabooga does, and what it costs here
 
 Its `extensions/character_bias/script.py` implements `bot_prefix_modifier`, and
@@ -4563,6 +4568,90 @@ next start. A reply the character really started with a listed line cannot be
 told from a copy and is cleaned too, which the user was told before asking for
 it. Seven tests; nine mutations each fail one.
 
+### 40.8 The emotion in the thread's system prompt (after #313)
+
+The user, after #313 merged: "Although the emotion string is now gone, it just
+doesn't work like Oobabooga. In Oobabooga, when i set an emotion, the LLM does
+not treat it like the first part of the response ... Right now, the replies are
+starting in a weird way like there is hidden response thats been cropped out.
+And that is because there is! ... maybe it needs to be something that appends to
+the system prompt in a uniform way ... so that way it stays hidden ... the
+system prompt that i see or override stay as is, but the real system prompt that
+gets used for the thread is the most recent concatenation." And, while it was
+being built: "Once the concatenated system prompt is applied, it doesn't need to
+be reapplied unless it changes."
+
+**What Oobabooga does, read again from its source.** `generate_chat_prompt`'s
+`make_prompt` renders the messages with the generation prompt and then, in chat
+and chat-instruct mode and never for Continue or Impersonate, does
+`prompt += apply_extensions('bot_prefix', "", state)`; `character_bias`'s
+`bot_prefix_modifier` answers `f'{string} {bias} '` -- the line with a space on
+each side, after the character's turn opening. So Oobabooga *is* a prefill: the
+model reads the line as the first words of its own turn, and the page shows
+what was generated after it (`reply.lstrip(' ')`). The user's reading of the
+mechanism was mistaken; their reading of the result was not, and the cropped
+start is inherent in a prefill: a model carries the line on as a sentence (in
+Oobabooga's chat mode the prompt is a transcript, `Aria: *I am so happy* `,
+where an action in asterisks is a whole beat, and the trailing space makes the
+next token a new word; neither holds inside Gemma 4's turn after an empty thought
+block). So the user's own design was built.
+
+**What is built.**
+
+- `mc_llm_emotions.system_note(line, name, you)`: one shape for every line and
+  character -- a `[Current emotion]` heading, *"{name} feels this right now, in
+  {name}'s own words: {line}"*, and a sentence that lets it colour tone, words
+  and actions until it changes and asks the model not to quote it.
+  `{{char}}`/`{{user}}` in the line are substituted as everywhere else.
+- `prompt.build(..., system_extra=)`: put after the character's system text, a
+  blank line between, counted in the budget. The character's own prompt (its
+  override or the built one) is never edited: `system_prompt` and the editor
+  show it as before.
+- `mc_llm_conversation_ops._capture` builds every request in the thread with the
+  thread's emotion as `system_extra` -- Send, Regenerate, Send again **and
+  Continue**, which the prefill skipped -- so the system prompt is the same for
+  every request while the emotion is, and llama-server keeps the conversation
+  cached from one message to the next (the user's "it doesn't need to be
+  reapplied unless it changes"). The prefill is Start reply with's alone
+  (section 41), and a reply written with an emotion schedules no cache update.
+- **A change of emotion reads the conversation again in the background**: the
+  service's `set_emotion`, when the line actually changes (Off included), calls
+  `ops.rewarm`, which schedules `mc_llm_cache_update` on a running server only
+  (`warm()`), with `_thread_request` -- the stored conversation under the
+  thread's prompt as it now stands, ending on its last message, `None` for an
+  empty thread.
+- `mc_llm_cache_update` builds its request **once its turn has come** (`_update`
+  takes `build`), so a reply written while it waited is in it; a conversation
+  that ends on a message of yours is sent as it is with `save=False`; a second
+  change while one waits for its turn **replaces** it (the replaced one is
+  cancelled and says nothing to the pages), and one while it reads has it
+  **read once more** with the newest build (`again`). The console line says
+  *read the conversation again*.
+- LLM Studio chains `_cache_status` after choosing or adding an emotion, so the
+  status line says *Updating cache…* until it is done; the flyout already opens
+  its feed for a snapshot with `cache_update` (`review` after `refresh`).
+- Deleting a line turns its threads Off without reading any of them again.
+
+**The cost moved, not removed.** A change of emotion makes the next prompt's
+front new, which is a whole read of the conversation; it now happens when the
+change is made rather than at the next message, and a message sent while it is
+still reading waits for it, said in its progress.
+
+Tests: the wire's in `tests/test_character_emotion.py` translated -- the system
+prompt ends with the note and nothing starts the reply, every request in the
+thread has one system prompt, Off is the character's own exactly, an override
+stays as written; the cache update's -- a change reads under the new prompt, Off
+too, the same line again and no server read nothing, a reply needs none, an
+empty thread has nothing, the request built after the wait, a thread ending on
+your message, a replacement and a read once more; the stand-in server echoes the
+request's own prefill, as b10621 does. In `tests/test_start_reply_with.py`, an
+emotion with a start is the system prompt and the words, and the update after
+such a reply reads under the same prompt. Nineteen mutations each fail a test;
+two survived a first pass because the test settled before the replaced update
+had ended, which also showed the replaced update announcing an end it did not
+own -- fixed with `replaced`. Not run against a real llama-server or on the
+user's machine.
+
 ## 41. Start reply with (31 October 2026)
 
 The ask: "There is the ability to set the beginning of the LLM response ... it's
@@ -4590,10 +4679,11 @@ combines the two; here they combine (below).
 - **`set_start_with`** on the service, against no revision and moving none, as
   `set_emotion`; `start_with` on the snapshot's conversation.
 - **The request** (`mc_llm_conversation_ops._capture`): for Send, Regenerate
-  and Send again after a message of yours (the emotion's rule, `_start_for`),
+  and Send again after a message of yours (`_start_for`),
   read from the thread the command names, so a Regenerate that lands in a branch
-  uses the start written where it was pressed. The prefill is the emotion's line
-  and the start, joined by a space; `ChatRequest.start_with` says the request
+  uses the start written where it was pressed. The prefill was the emotion's
+  line and the start, joined by a space; since 40.8 it is the start alone, the
+  emotion being in the system prompt; `ChatRequest.start_with` says the request
   ends on words of yours. The start is spent after the operation is accepted
   (`_spend_start`), never while planning, so a refused command keeps it, and a
   `conversation_changed` tells both views.

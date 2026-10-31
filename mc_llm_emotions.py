@@ -1,16 +1,30 @@
-"""Character Emotion: a short line that starts the character's next reply.
+"""Character Emotion: how the character feels, in the thread's system prompt.
 
-Oobabooga's *character bias*, brought across. The line -- ``*I am so happy*``
--- is put on the wire as the opening of the character's turn, after the
-conversation and after your message, and the model writes its reply as if it
-had already begun with it. llama-server continues an assistant message that
-ends the request (b10621 does by default), and sends the line back at the
-front of the reply, which :class:`Unechoed` takes off as the reply streams
-(``mc_llm_sessions``), so the line is never in a reply, never on screen,
-never spoken and never saved: the history holds the reply alone, and the next
-turn sees the reply alone. That is also why the character never starts
-copying the line. Text in asterisks the model writes itself is its reply and
-stays.
+Oobabooga's *character bias*, brought across -- by another road. Oobabooga's
+``bot_prefix_modifier`` writes the line (``*I am so happy*``) after the
+character's turn opening, so the model reads it as the first words of its own
+reply and the page shows only what follows; this extension did the same with a
+prefill until the user found the replies starting "like there is hidden
+response that's been cropped out" -- which there was. Now the line is put at
+the end of the thread's system prompt, in one shape for every character
+(:func:`system_note`): the character's own prompt, override or built, stays as
+it is in the editor, and every request in the thread is sent with the two
+together. The reply is written from the feeling rather than after it, so it
+starts as a reply starts, and nothing is ever taken off it.
+
+The system prompt is the front of every request, so it is the same for every
+request in the thread while the emotion stays the same -- every reply,
+Continue included -- and llama-server's prompt cache keeps the whole
+conversation from one message to the next. A change of emotion changes the
+front, and the next message would read the whole conversation again: the
+change sets that reading going in the background at once
+(``mc_llm_conversation_ops.rewarm``, :mod:`mc_llm_cache_update`).
+
+Replies written while the line was a prefill began with llama-server's copy of
+it, until :class:`Unechoed` took it off the stream; those saved before that
+were cleaned once at start-up (:func:`clean_saved_replies`). :class:`Unechoed`
+and :func:`without` are kept for Start reply with (:mod:`mc_llm_start_with`),
+which is a prefill on purpose.
 
 Two things are kept, in one file in the LLM data folder:
 
@@ -215,6 +229,31 @@ def forget(character, thread_id) -> None:
         logger.debug("Model Chain: could not forget a deleted thread's emotion", exc_info=True)
 
 
+# -- the system prompt ------------------------------------------------------------ #
+
+
+def system_note(line, name, you="you") -> str:
+    """What the thread's system prompt ends with while ``line`` is its emotion.
+
+    One shape for every character and every line, so the character's own prompt
+    -- its override, or the one built from its Context -- is never edited and
+    reads the same in the editor: this is put after it on the wire
+    (``prompt.build``'s ``system_extra``), for every request in the thread.
+    ``{{char}}`` and ``{{user}}`` in the line are the character's and yours, as
+    everywhere else in a prompt.
+    """
+    from prompt_master.chat.prompt import substitute
+
+    who = str(name or "").strip() or "the character"
+    feeling = substitute(clean(line), who, str(you or "you"))
+    if not feeling:
+        return ""
+    return (f"[Current emotion]\n"
+            f"{who} feels this right now, in {who}'s own words: {feeling}\n"
+            f"Let it colour {who}'s tone, words and actions in every reply until it "
+            f"changes. Do not quote this note, and do not say that you were told how to feel.")
+
+
 # -- the reply ------------------------------------------------------------------ #
 
 
@@ -404,4 +443,4 @@ def _clean_thread(store, key, lines) -> int:
 
 __all__ = ["CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT", "MAX_LENGTH",
            "Refused", "Unechoed", "add", "carry", "choose", "clean", "clean_saved_replies",
-           "for_thread", "forget", "listed", "path", "remove", "without"]
+           "for_thread", "forget", "listed", "path", "remove", "system_note", "without"]

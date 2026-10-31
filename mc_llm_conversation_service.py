@@ -108,8 +108,9 @@ RESTORE_TO_DRAFT = "restore_to_draft"
 STOP = "stop"
 SET_EMOTION = "set_emotion"
 """This thread's emotion (:mod:`mc_llm_emotions`): a line from the list, or empty
-for Off. A setting kept beside the thread rather than a write to it, so it asks
-for no revision and changes none."""
+for Off, put at the end of the thread's system prompt. A setting kept beside the
+thread rather than a write to it, so it asks for no revision and changes none; a
+change reads the conversation again in the background under the new prompt."""
 SET_START_WITH = "set_start_with"
 """The words this thread's next reply starts with (:mod:`mc_llm_start_with`), or
 empty for none. Kept beside the thread as the emotion is, so it asks for no
@@ -920,12 +921,20 @@ def _set_emotion(envelope: Envelope) -> dict:
     store = chats()
     key = envelope.conversation
     conversation, raw = store_module.read(store, key)
+    before = mc_llm_emotions.for_thread(key.character, key.thread_id)
     try:
         chosen = mc_llm_emotions.choose(key.character, key.thread_id,
                                         envelope.payload.get("emotion") or "")
     except mc_llm_emotions.Refused as refusal:
         raise Refused(INVALID_INPUT, str(refusal))
     revision = store_module.token_of(conversation, raw)
+    if chosen != before:
+        # The thread's system prompt ends with its emotion, so a change is a new
+        # front for every later prompt: read the conversation again under it
+        # now, in the background, rather than at the next message.
+        import mc_llm_conversation_ops as ops
+
+        ops.rewarm(key)
     publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="emotion")
     return _accepted(envelope, key, revision, extra={"emotion": chosen})
 
@@ -1378,8 +1387,9 @@ SPEECH_STATE = "speech_state"
 RESET_REQUIRED = "reset_required"
 CAPABILITIES_CHANGED = "capabilities_changed"
 CACHE_UPDATE = "cache_update"
-"""The last reply being read again after a reply written with an emotion, or
-done: ``updating`` true, then false (:mod:`mc_llm_cache_update`)."""
+"""The conversation being read again in the background -- after a change of
+emotion, or a reply started from your words -- or done: ``updating`` true, then
+false (:mod:`mc_llm_cache_update`)."""
 
 KINDS = (SNAPSHOT, CONVERSATION_CHANGED, THREAD_CREATED, THREAD_DELETED, CHARACTER_CHANGED,
          MODE_CHANGED, OPERATION_ACCEPTED, OPERATION_PHASE, REPLY_PATCH, OPERATION_TERMINAL,
