@@ -1294,6 +1294,14 @@
         return this.send(envelope);
     };
 
+    /** The words the open thread's next reply starts with, or "" for none:
+     *  kept beside the thread as the emotion is, so no revision is asked. */
+    Store.prototype.setStartWith = function (text) {
+        const envelope = this.envelope("set_start_with", {expected_revision: null});
+        envelope.payload = {start_with: String(text || "")};
+        return this.send(envelope);
+    };
+
     /** Add a line to the shared list (`{add: line}`) or delete one
      *  (`{remove: line}`). Answers with the list as it now is. */
     Store.prototype.changeEmotions = function (change) {

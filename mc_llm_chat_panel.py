@@ -284,6 +284,11 @@ def build() -> dict:
                 to_emotion = gr.Button("Emotion", size="sm", scale=0, min_width=0,
                                        elem_id=ui.ident("chat", "to-emotion"),
                                        elem_classes=ui.classes("chip-button", "emotion-chip"))
+                # The words the next reply starts with (mc_llm_start_with): the
+                # emotion's chip, dot and box under the bar, for one reply.
+                to_start = gr.Button("Start with", size="sm", scale=0, min_width=0,
+                                     elem_id=ui.ident("chat", "to-start"),
+                                     elem_classes=ui.classes("chip-button", "start-chip"))
                 to_persona = gr.Button("You", size="sm", scale=0, min_width=0,
                                        elem_id=ui.ident("chat", "to-persona"),
                                        elem_classes=ui.classes("chip-button"))
@@ -317,6 +322,23 @@ def build() -> dict:
                                              placeholder="*I am so nervous*",
                                              elem_id=ui.ident("chat", "emotion-new"))
                     emotion_add = gr.Button("Add", size="sm", scale=0, min_width=64)
+
+            # The Start with box, the same way: opened and put away by the
+            # browser, what it holds and every change Python's.
+            with gr.Column(elem_id=ui.ident("chat", "start"),
+                           elem_classes=ui.classes("start-picker")):
+                start_title = gr.HTML(_start_title(opened),
+                                      elem_classes=ui.classes("emotion-title"))
+                start_text = gr.Textbox(value=_start_of(who, getattr(opened, "identifier", "")),
+                                        label=None, show_label=False, container=False,
+                                        lines=1, max_lines=4, placeholder="The color is blue",
+                                        elem_id=ui.ident("chat", "start-text"))
+                with gr.Row(elem_classes=ui.classes("start-actions")):
+                    start_clear = gr.Button("Clear", size="sm", scale=0, min_width=72,
+                                            elem_id=ui.ident("chat", "start-clear"))
+                    start_set = gr.Button("Set", size="sm", scale=0, min_width=72,
+                                          variant="primary",
+                                          elem_id=ui.ident("chat", "start-set"))
 
             # No height= at all. The height is the space the tab has, worked
             # out in the browser and applied in style.css -- a number here
@@ -774,6 +796,20 @@ def build() -> dict:
         for event in (button.click, box.submit):
             event(fn=_emotion_added, inputs=[character, thread_state, box],
                   outputs=emotions_drawn + [status, box], queue=False)
+    # -- the start of the next reply --------------------------------------- #
+    #
+    # The box, its heading and the bar's heading (whose mark fills the chip's
+    # dot) together; the reply that starts from it is drawn with the heading
+    # again by every run's settle, which empties the dot.
+    starts_drawn = [start_title, start_text, header]
+    to_start.click(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
+                   queue=False)
+    for event in (start_set.click, start_text.submit):
+        event(fn=_start_written, inputs=[character, thread_state, start_text],
+              outputs=starts_drawn + [status], queue=False)
+    start_clear.click(fn=lambda who, identifier: _start_written(who, identifier, ""),
+                      inputs=[character, thread_state], outputs=starts_drawn + [status],
+                      queue=False)
     to_persona.click(fn=_open_persona,
                      outputs=screens + [persona_name, persona_description, persona_face],
                      queue=False)
@@ -1432,8 +1468,10 @@ def _heading(who: str | None, conversation) -> str:
     title = getattr(conversation, "title", None) or "No thread"
     # Read by the stylesheet: the Emotion chip's dot is filled while the
     # thread has one. Here because every view is drawn with this heading.
-    on = "on" if _emotion_of(person, getattr(conversation, "identifier", "")) else "off"
-    return (f'<div class="{ui.PREFIX}-heading" data-emotion="{on}">'
+    identifier = getattr(conversation, "identifier", "")
+    on = "on" if _emotion_of(person, identifier) else "off"
+    start = "on" if _start_of(person, identifier) else "off"
+    return (f'<div class="{ui.PREFIX}-heading" data-emotion="{on}" data-start="{start}">'
             f'<span class="{ui.PREFIX}-heading-who">{ui.escape(person)}</span>'
             f'<span class="{ui.PREFIX}-heading-thread">{ui.escape(title)}</span>'
             f'</div>')
@@ -1559,6 +1597,55 @@ def _emotion_added(who, identifier, text) -> tuple:
         return _emotion_view(who, identifier) + (ui.notice(str(refusal), "warn"), gr.update())
     note, kind = _emotion_choose(who, identifier, mc_llm_emotions.clean(text))
     return _emotion_view(who, identifier) + (ui.notice(note, kind) if note else gr.update(), "")
+
+
+# --------------------------------------------------------------------------- #
+# The start of the next reply
+# --------------------------------------------------------------------------- #
+
+
+def _start_of(who, identifier) -> str:
+    """The words the thread's next reply starts with, ``""`` for none."""
+    if not who or not identifier:
+        return ""
+    try:
+        import mc_llm_start_with
+
+        return mc_llm_start_with.for_thread(who, identifier)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's reply start", exc_info=True)
+        return ""
+
+
+def _start_title(conversation) -> str:
+    title = getattr(conversation, "title", None) or "No thread"
+    return (f'<div class="{ui.PREFIX}-emotion-heading">Start the next reply with · '
+            f'{ui.escape(title)}</div>')
+
+
+def _start_view(who, identifier) -> tuple:
+    """The box with what is kept, its heading and the bar's: everything that shows it."""
+    conversation = _load(who, identifier) if who and identifier else None
+    return (_start_title(conversation), _start_of(who, identifier),
+            _heading(who, conversation))
+
+
+def _start_written(who, identifier, text) -> tuple:
+    """Keep ``text`` as the start of the thread's next reply, or clear it with ``""``."""
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        return _start_view(who, identifier) + (
+            ui.notice("Choose a character and a thread first.", "warn"),)
+    outcome = _command(service.SET_START_WITH, who, identifier,
+                       payload={"start_with": text or ""})
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        title, _, heading = _start_view(who, identifier)
+        return title, gr.update(), heading, ui.notice(note, kind)
+    note = ("The next reply starts with your words." if outcome.get("start_with")
+            else "The next reply starts freely.")
+    return _start_view(who, identifier) + (ui.notice(note),)
 
 
 def _cache_status(who, identifier):

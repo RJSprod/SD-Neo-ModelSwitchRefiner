@@ -3834,6 +3834,15 @@ later replies either, and turning it off leaves nothing behind.
   Nothing else is touched: text in asterisks the character writes itself —
   *\*smiles\**, an action, even the same words further on — is its reply and
   stays, at the start of a reply or anywhere in it.
+- **Replies saved before that was fixed** began with the line, because
+  llama-server's copy of it was saved with them. Once, the first time the
+  extension starts after the fix, every reply in a thread written since
+  emotions shipped (30 October 2026) that starts with a line from the list, or
+  one of Oobabooga's five, has it taken off with the space after it — every
+  version of the reply — and the console says how many. A reply the character
+  really started with such a line is cleaned too: there is no telling it from a
+  copy. It never runs again (`emotion-cleanup.json` under the LLM data root
+  records it).
 
 **The cache update.** llama-server keeps the conversation as it was read, so
 after a reply written with an emotion its cache holds the line and then the
@@ -3872,6 +3881,47 @@ a slow dot and no bar, and then *Ready.* Send stays Send.
 On a llama-server older than the pinned build, which may not continue a reply
 it is handed, the line reaches the model as a reply of its own and the effect
 is weaker; nothing fails.
+
+### Start reply with
+
+Oobabooga's *Start reply with*, for **the very next reply**: you write its first
+words — *The color is blue* — and ask *What color are my red shoes?*; the reply
+**begins with exactly those words** and the model has to carry on from them,
+making whatever sense of them its character and system prompt allow. The words
+are the reply's own: shown, read aloud and saved as its beginning, and what the
+model wrote after them is kept exactly as it wrote it (a comma straight after
+*blue*, or a space and a word).
+
+- **Once.** The reply that starts from the words spends them, the moment it is
+  accepted, and the thread's next reply starts freely again. Words written
+  while that reply is on its way are new and are kept for the one after. A
+  message that is refused — another window changed the thread, no vision
+  model for a picture — spends nothing.
+- **Per thread.** Kept beside the thread as its emotion is (`start_with.json`
+  under the LLM data root), so writing them moves no revision. A new thread has
+  none; a deleted thread's are forgotten; a branch does not carry them.
+- **Which replies:** Send, Regenerate and Send again from here, as with an
+  emotion; a Regenerate that lands in a branch uses the words written in the
+  thread you pressed it in. **Continue does not**, and leaves them for the next
+  reply.
+- **With an emotion on**, both start the turn — the emotion's line, then your
+  words — and only your words are in the reply. (Oobabooga drops the bias for
+  such a reply; here the emotion keeps steering it.)
+- **Where:** in LLM Studio, the **Start with** chip beside Emotion — its dot
+  filled while words are kept — opens a small box under the bar: the words,
+  **Clear** and **Set** (Enter sets, Shift+Enter is a new line; a press
+  elsewhere or Escape puts it away). In the Forge Assistant, the **T** button
+  in the composer's row, beside the others, is lit while words are kept and
+  opens the same box in the conversation's place.
+- **The cache.** The words are in the saved reply, so llama-server's cache
+  already agrees with the next prompt up to them; the reply is read again in
+  the background all the same (*Updating cache…*, as after an emotion), which
+  costs a token where they agree and makes good whatever was read differently
+  where the model's words joined yours.
+
+The conversation file's own `response_prefix` — a start for *every* reply,
+vendored from the standalone application — is a different thing and is still
+not used.
 
 ### While it is working
 

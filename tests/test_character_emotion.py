@@ -921,6 +921,115 @@ class TestTheUpdate:
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# The one-time cleanup of the line saved with replies before it was taken off
+# --------------------------------------------------------------------------- #
+
+
+def leaked(chats, replies, asks=None, character="Ada"):
+    """A thread whose replies were saved as they arrived before the line was taken off."""
+    from prompt_master.chat.history import ASSISTANT, USER
+
+    found = chats.new(character)
+    for index, reply in enumerate(replies):
+        found.append(USER, (asks or {}).get(index, f"ask {index}"))
+        versions = reply if isinstance(reply, list) else [reply]
+        found.append(ASSISTANT, versions[0])
+        for version in versions[1:]:
+            found.messages[-1].add_version(version)
+    chats.save(found)
+    return found
+
+
+def last_written(chats, conversation, when):
+    """Say the thread was last written at ``when``, as the file would."""
+    from prompt_master.core.config import atomic_write_json, read_json
+
+    where = chats.path_for(conversation.character, conversation.identifier)
+    data = read_json(where)
+    data["updated"] = when
+    atomic_write_json(where, data)
+
+
+class TestTheOneTimeCleanup:
+    def test_a_saved_reply_loses_the_line_and_the_space_after_it_in_every_version(
+            self, chats, store):
+        found = leaked(chats, [[HAPPY + " Oh, hello!", "*I am so sad*\n\nFine, thanks."],
+                               "*smiles* No line here."],
+                       asks={0: HAPPY + " a message of yours"})
+        before = chats.load("Ada", found.identifier).revision
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        assert emotions.clean_saved_replies(chats) == 2
+
+        saved = chats.load("Ada", found.identifier)
+        assert saved.messages[1].versions == ["Oh, hello!", "Fine, thanks."]
+        assert saved.messages[3].text == "*smiles* No line here."
+        assert saved.messages[0].text == HAPPY + " a message of yours"
+        assert saved.revision == before + 1
+        kinds = [event["kind"] for event in subscriber.since(cursor)[0]]
+        assert service.CONVERSATION_CHANGED in kinds
+
+    def test_it_runs_once_and_never_again(self, chats, store):
+        leaked(chats, [HAPPY + " Oh, hello!"])
+        assert emotions.clean_saved_replies(chats) == 1
+        assert (store / emotions.CLEANUP_FILE).is_file()
+
+        later = leaked(chats, [HAPPY + " written after the fix, on purpose"])
+
+        assert emotions.clean_saved_replies(chats) == 0
+        assert chats.load("Ada", later.identifier).messages[1].text.startswith(HAPPY)
+
+    def test_a_line_the_user_added_is_cleaned_too(self, chats, store):
+        emotions.add("*I am so grumpy*")
+        found = leaked(chats, ["*I am so grumpy* What now?"])
+
+        emotions.clean_saved_replies(chats)
+
+        assert chats.load("Ada", found.identifier).messages[1].text == "What now?"
+
+    def test_a_thread_last_written_before_emotions_shipped_is_left_alone(self, chats, store):
+        found = leaked(chats, [HAPPY + " from a time before there were emotions"])
+        last_written(chats, found, emotions.LEAK_BEGAN - 1)
+
+        assert emotions.clean_saved_replies(chats) == 0
+        assert chats.load("Ada", found.identifier).messages[1].text.startswith(HAPPY)
+
+    def test_with_no_chats_folder_there_is_nothing_to_clean_and_it_is_recorded(
+            self, chats, store):
+        assert not chats.directory.exists()
+
+        assert emotions.clean_saved_replies(chats) == 0
+        assert (store / emotions.CLEANUP_FILE).is_file()
+
+    def test_a_folder_that_cannot_be_read_is_looked_at_next_time(self, chats, store,
+                                                                monkeypatch):
+        found = leaked(chats, [HAPPY + " Oh, hello!"])
+
+        def unreadable(store, since):
+            raise OSError("not mounted")
+            yield  # pragma: no cover
+
+        with monkeypatch.context() as patched:
+            patched.setattr(emotions, "_threads_since", unreadable)
+            assert emotions.clean_saved_replies(chats) == 0
+        assert not (store / emotions.CLEANUP_FILE).exists()
+
+        assert emotions.clean_saved_replies(chats) == 1
+        assert chats.load("Ada", found.identifier).messages[1].text == "Oh, hello!"
+
+    def test_the_extension_runs_it_when_it_starts(self, chats, store, monkeypatch):
+        import mc_llm_conversation_startup as startup
+
+        found = leaked(chats, [HAPPY + " Oh, hello!"])
+        monkeypatch.setattr(startup, "_done", False)
+
+        startup.on_app_started()
+
+        assert chats.load("Ada", found.identifier).messages[1].text == "Oh, hello!"
+
+
 class TestTheRoute:
     def test_it_reads_the_list(self, store):
         payload, status = api.emotions()

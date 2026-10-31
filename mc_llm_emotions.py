@@ -230,10 +230,15 @@ class Unechoed:
     dropped when they are there, and anything else passes as it came: a reply
     that opens with an action of its own in asterisks, the line written again
     further on. Only the very front is compared.
+
+    ``trim`` false keeps the space after the line: the line ends on words the
+    caller shows as the reply's start (:mod:`mc_llm_start_with`), and what the
+    model wrote after them is carried on from them exactly as it was written.
     """
 
-    def __init__(self, line: str):
+    def __init__(self, line: str, trim: bool = True):
         self.line = clean(line)
+        self.trim = trim
         self._held = ""
         self._settled = not self.line
         self._trimming = False
@@ -253,8 +258,10 @@ class Unechoed:
         held, self._held = self._held, ""
         if not front.startswith(self.line):
             return held
-        rest = front[len(self.line):].lstrip()
-        self._trimming = not rest
+        rest = front[len(self.line):]
+        if self.trim:
+            rest = rest.lstrip()
+            self._trimming = not rest
         return rest
 
     def finish(self) -> str:
@@ -264,15 +271,137 @@ class Unechoed:
         return held
 
 
-def without(line, text) -> str:
+def without(line, text, trim: bool = True) -> str:
     """``text`` with ``line`` taken off its front, as :class:`Unechoed` takes it."""
     line, text = clean(line), str(text or "")
     front = text.lstrip()
     if line and front.startswith(line):
-        return front[len(line):].lstrip()
+        rest = front[len(line):]
+        return rest.lstrip() if trim else rest
     return text
 
 
-__all__ = ["DEFAULTS", "FILE_NAME", "MAX_COUNT", "MAX_LENGTH", "Refused", "Unechoed", "add",
-           "carry", "choose", "clean", "for_thread", "forget", "listed", "path", "remove",
-           "without"]
+# -- the one-time cleanup ------------------------------------------------------- #
+
+
+CLEANUP_FILE = "emotion-cleanup.json"
+"""Under the LLM data root: written when the cleanup has run, so it runs once."""
+
+LEAK_BEGAN = 1793318400.0
+"""2026-10-30 00:00 UTC, the day the first build with emotions shipped (#310).
+No reply before it was started from a line, so no thread last written before it
+is looked at."""
+
+
+def clean_saved_replies(store) -> int:
+    """Once: take a listed line off the front of the saved replies that start with one.
+
+    Until :class:`Unechoed`, llama-server's echo of the line was saved as the
+    start of every reply written with an emotion, and the history then showed
+    the model its own replies opening with the line. Every reply in a thread
+    written since emotions shipped is read; a version that starts with a line
+    from the list, or with one of Oobabooga's five, has it taken off with the
+    space after it (:func:`without`), through the guarded store, so the
+    revision moves and a page is told. A reply the character really started
+    with such a line cannot be told from an echo and is cleaned too, which is
+    why this runs once and never again: the record is written when a pass ends,
+    or at once when there is no chats folder (nothing was ever saved, so nothing
+    leaked), and not when the folder is there and cannot be read, which is
+    looked at again next time. Returns how many versions were cleaned. Never
+    raises.
+    """
+    try:
+        import mc_llm_paths
+
+        record = mc_llm_paths.data_root() / CLEANUP_FILE
+        if record.is_file():
+            return 0
+        lines = sorted({*listed(), *DEFAULTS}, key=len, reverse=True)
+        folder = Path(store.directory)
+        keys = list(_threads_since(store, LEAK_BEGAN)) if folder.exists() else []
+    except Exception:
+        logger.debug("Model Chain: could not look for emotion lines in saved replies",
+                     exc_info=True)
+        return 0
+    cleaned = sum(_clean_thread(store, key, lines) for key in keys)
+    try:
+        from prompt_master.core.config import atomic_write_json
+
+        atomic_write_json(record, {"version": 1, "cleaned": cleaned})
+    except Exception:
+        logger.debug("Model Chain: could not record the emotion cleanup", exc_info=True)
+    if cleaned:
+        logger.info("Model Chain: took an emotion's line off the front of %d saved "
+                    "reply/replies, once", cleaned)
+    return cleaned
+
+
+def _threads_since(store, since: float):
+    """The key of every saved thread last written at or after ``since``."""
+    from prompt_master.core.config import read_json
+
+    import mc_llm_conversation_store as store_module
+
+    for folder in sorted(Path(store.directory).iterdir()):
+        if not folder.is_dir():
+            continue
+        for found in sorted(folder.glob("*.json")):
+            if found.name.startswith("."):
+                continue
+            try:
+                data = read_json(found)
+                character, identifier = str(data["character"]), str(data["id"])
+                written = float(data.get("updated", 0.0) or 0.0)
+            except Exception:
+                continue
+            if character and identifier and written >= since:
+                yield store_module.Key(character=character, thread_id=identifier)
+
+
+def _without_any(lines, text: str) -> str:
+    for line in lines:
+        kept = without(line, text)
+        if kept != text:
+            return kept
+    return text
+
+
+def _clean_thread(store, key, lines) -> int:
+    """How many of this thread's reply versions lost a line; 0 when it is left alone."""
+    from prompt_master.chat.history import ASSISTANT
+
+    import mc_llm_conversation_service as service
+    import mc_llm_conversation_store as store_module
+
+    count = 0
+
+    def change(copy):
+        nonlocal count
+        count = 0
+        for message in copy.messages:
+            if message.role != ASSISTANT:
+                continue
+            for index, version in enumerate(message.versions):
+                kept = _without_any(lines, version)
+                if kept != version:
+                    message.versions[index] = kept
+                    count += 1
+        return None if count else False
+
+    try:
+        committed = store_module.transaction(store, key, store_module.UNCHECKED, change)
+    except Exception:
+        logger.debug("Model Chain: could not clean a thread's saved replies", exc_info=True)
+        return 0
+    if not committed.written:
+        return 0
+    try:
+        service.publish(service.CONVERSATION_CHANGED, key, revision=committed.revision)
+    except Exception:
+        logger.debug("Model Chain: could not announce a cleaned thread", exc_info=True)
+    return count
+
+
+__all__ = ["CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT", "MAX_LENGTH",
+           "Refused", "Unechoed", "add", "carry", "choose", "clean", "clean_saved_replies",
+           "for_thread", "forget", "listed", "path", "remove", "without"]

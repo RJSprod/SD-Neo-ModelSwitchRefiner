@@ -674,6 +674,11 @@ class ChatRequest:
     is yielded. Its slot is not saved: what it holds is the line before the
     reply, which no later prompt has. The cache update after it saves the
     conversation as it is (:mod:`mc_llm_cache_update`)."""
+    start_with: str = ""
+    """The words of yours the reply begins with (:mod:`mc_llm_start_with`), the
+    end of the prefilled line. The caller shows them as the reply's start, so
+    what streams is the rest exactly as the model wrote it, its first space
+    included."""
 
 
 def _prefill(request: ChatRequest) -> str:
@@ -738,11 +743,12 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
         # llama-server sends a prefilled reply back with its line at the front;
         # the line is taken off here, before anything shows, speaks or saves it.
         line = _prefill(request)
+        trim = not request.start_with
         unechoed = None
         if line:
             import mc_llm_emotions
 
-            unechoed = mc_llm_emotions.Unechoed(line)
+            unechoed = mc_llm_emotions.Unechoed(line, trim=trim)
         for chunk, result in _streamed(work, when_done=gpu.release):
             if chunk is None:
                 text = result or ""
@@ -756,7 +762,7 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
             held = unechoed.finish()
             if held:
                 yield Event(CHUNK, held)
-            text = mc_llm_emotions.without(line, text)
+            text = mc_llm_emotions.without(line, text, trim=trim)
 
         if cancel.is_set():
             # Not an error and not a discard: what was streamed before the stop

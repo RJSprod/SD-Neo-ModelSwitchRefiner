@@ -1120,6 +1120,14 @@
         const emotionWordNode = element("span", "forge-assistant-emotion-word");
         emotion.appendChild(element("span", "forge-assistant-emotion-dot"));
         emotion.appendChild(emotionWordNode);
+        // Start with: the words the next reply begins with. Always on the row
+        // and lit while a start is kept (`renderStart`); a tap opens its box.
+        const start = element("button", "forge-assistant-icon-button forge-assistant-start");
+        start.type = "button";
+        start.innerHTML = START_GLYPH;
+        start.setAttribute("aria-pressed", "false");
+        start.setAttribute("aria-label", "Start the next reply with…");
+        start.title = "Start the next reply with…";
         const send = iconButton("forge-assistant-send", SEND_GLYPH, "Send");
         const stop = iconButton("forge-assistant-stop", STOP_GLYPH, "Stop the reply");
         stop.hidden = true;
@@ -1131,6 +1139,7 @@
         toolbar.appendChild(dictate);
         toolbar.appendChild(readAloud);
         toolbar.appendChild(emotion);
+        toolbar.appendChild(start);
         toolbar.appendChild(send);
         toolbar.appendChild(stop);
         composer.appendChild(chip);
@@ -1139,9 +1148,10 @@
         composer.appendChild(filePicker);
         body.appendChild(composer);
         emotion.addEventListener("click", () => this.openEmotion());
+        start.addEventListener("click", () => this.openStart());
         Object.assign(this.nodes, {composer, chip, input, toolbar, attach, dictate,
-                                   readAloud, emotion, emotionWord: emotionWordNode, send, stop,
-                                   filePicker});
+                                   readAloud, emotion, emotionWord: emotionWordNode, start,
+                                   send, stop, filePicker});
 
         const handle = element("div", "forge-assistant-resize");
         handle.setAttribute("role", "separator");
@@ -4210,7 +4220,8 @@
         menu.dataset.which = which;
         const items = which === "workspaces" ? this.workspaceItems()
             : (which === "threads" ? this.threadItems()
-                : (which === "emotion" ? this.emotionItems() : this.utilityItems()));
+                : (which === "emotion" ? this.emotionItems()
+                    : (which === "start" ? this.startItems() : this.utilityItems())));
         items.forEach((item) => menu.appendChild(item));
         menu.appendChild(this.cancelItem());
         menu.hidden = false;
@@ -4683,6 +4694,108 @@
         const label = on ? "Emotion: " + on : "Emotion: Off";
         pill.setAttribute("aria-label", label);
         pill.title = label;
+    };
+
+    // -- the start of the next reply ---------------------------------------- //
+    //
+    // Oobabooga's Start reply with, for one reply: the words the thread's next
+    // reply begins with, shown, spoken and saved as its own, the model carrying
+    // on from them (the server's mc_llm_start_with). The reply that starts from
+    // them spends them, so the button goes dark again on its own.
+
+    const START_GLYPH = '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" '
+        + 'focusable="false" fill="none" stroke="currentColor" stroke-width="2" '
+        + 'stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/>'
+        + '<path d="M9 20h6"/><path d="M12 4v16"/></svg>';
+
+    function shownStart(view) {
+        const shown = (view && view.conversation && view.conversation.conversation) || {};
+        return String(shown.start_with || "");
+    }
+
+    /** The box: the words, then Clear and Set. In the conversation's place, as
+     *  every menu is, so typing in it takes nothing from the panel's size. */
+    Shell.prototype.startItems = function () {
+        const view = this.store.snapshot();
+        const shown = (view.conversation || {}).conversation || {};
+        const items = [this.groupLabel(shown.title ? "Start the next reply with · " + shown.title
+            : "Start the next reply with")];
+        const box = element("div", "forge-assistant-start-box");
+        const input = element("textarea", "forge-assistant-start-input");
+        input.rows = 2;
+        input.maxLength = 2000;
+        input.placeholder = "The color is blue";
+        input.setAttribute("aria-label", "Start the next reply with");
+        input.value = shownStart(view);
+        const actions = element("div", "forge-assistant-start-actions");
+        const clear = element("button", "forge-assistant-start-clear", "Clear");
+        clear.type = "button";
+        const set = element("button", "forge-assistant-start-set", "Set");
+        set.type = "button";
+        clear.addEventListener("click", () => this.writeStart(""));
+        set.addEventListener("click", () => this.writeStart(input.value));
+        input.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" || event.shiftKey) return;
+            event.preventDefault();
+            this.writeStart(input.value);
+        });
+        actions.appendChild(clear);
+        actions.appendChild(set);
+        box.appendChild(input);
+        box.appendChild(actions);
+        items.push(box);
+        return items;
+    };
+
+    /** The box, from the toolbar's button, with the words focused. */
+    Shell.prototype.openStart = function () {
+        if (!this.store.snapshot().selection.thread) {
+            this.tell("Choose a conversation first.", "warn");
+            return;
+        }
+        const menu = this.nodes.menu;
+        menu.dataset.owner = "utilities";
+        this.showMenu("start");
+        this.nodes.utilities.setAttribute("aria-expanded", "true");
+        this.host.openOnly(this.menuHandle);
+        const input = menu.querySelector && menu.querySelector(".forge-assistant-start-input");
+        if (input && typeof input.focus === "function") input.focus();
+    };
+
+    /** Keep ``text`` as the start of the next reply, or clear it with "". The
+     *  box closes and the message box has the keyboard again. */
+    Shell.prototype.writeStart = function (text) {
+        const words = String(text || "").trim();
+        return this.store.setStartWith(words).then((outcome) => {
+            if (outcome && !outcome.ok) {
+                this.tell((outcome.error && outcome.error.message)
+                    || "That start could not be kept.", "warn");
+                return outcome;
+            }
+            this.closeMenu();
+            if (this.nodes.input && typeof this.nodes.input.focus === "function") {
+                this.nodes.input.focus();
+            }
+            return this.store.refresh();
+        }).catch((error) => this.tell(error.message || "That start could not be kept.",
+                                      "warn"));
+    };
+
+    /** The button: lit while the thread's next reply has a start, its words
+     *  in the title. */
+    Shell.prototype.renderStart = function (view) {
+        const button = this.nodes.start;
+        if (!button) return;
+        const words = view.selection.thread ? shownStart(view) : "";
+        // Every render calls this, a streamed reply once a frame: written only
+        // when it changed.
+        if (button.dataset.words === words) return;
+        button.dataset.words = words;
+        button.setAttribute("aria-pressed", String(!!words));
+        const label = words ? "The next reply starts with: " + words
+            : "Start the next reply with…";
+        button.setAttribute("aria-label", label);
+        button.title = label;
     };
 
     /** Warm LoRA / Cold LoRA: two radio entries, the current one checked.
@@ -5880,6 +5993,7 @@
         this.renderAutoAttach();
         this.renderReadAloud(view);
         this.renderEmotion(view);
+        this.renderStart(view);
         this.renderTranscript(view);
         this.renderStatus(view);
         nodes.send.disabled = !this.canSend(view);

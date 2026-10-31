@@ -390,7 +390,10 @@ Recorded so it is a decision rather than an oversight:
   the first words of a reply and have the model carry on from them
   (`prompt.prefix_instruction`, `Conversation.response_prefix`); the storage and
   the instruction are both vendored and unused here. It is a composer feature
-  rather than a per-message one and was left for a later pass.
+  rather than a per-message one and was left for a later pass. (Section 41's
+  *Start reply with* is the user's version of it: for the next reply only,
+  kept beside the thread, and put on the wire as a prefill rather than asked
+  for by an instruction. Both vendored pieces are still unused.)
 
 
 ## 6a. The containment rule, and what it costs
@@ -4541,3 +4544,90 @@ that echoes as b10621 does, the stream, the done and stopped texts, a request
 that is not a prefill left alone, and a thread's reply patches and saved reply.
 Fourteen mutations each fail a test. Not run against a real llama-server or on
 the user's machine.
+
+### 40.7 The line saved with replies before 40.6, taken off once
+
+The user, told that replies saved before 40.6 keep the line: "yes, add the
+one-time cleanup too". `mc_llm_emotions.clean_saved_replies`, run by
+`mc_llm_conversation_startup` with its other start-up jobs: every saved thread
+last written on or after `LEAK_BEGAN` (2026-10-30 00:00 UTC, the day #310
+shipped; a thread written before cannot hold a reply started from a line) is
+read, and every version of every reply that starts with a line from the list or
+one of Oobabooga's five has it taken off by `without`'s rule, longest line
+first, through the guarded store's `transaction` (the revision moves, a
+`conversation_changed` is published). The record, `emotion-cleanup.json` under
+the LLM data root, is written when a pass ends, or at once when there is no
+chats folder (nothing was ever saved, so a fresh install after the fix never
+cleans anything); a folder that is there and cannot be read is looked at again
+next start. A reply the character really started with a listed line cannot be
+told from a copy and is cleaned too, which the user was told before asking for
+it. Seven tests; nine mutations each fail one.
+
+## 41. Start reply with (31 October 2026)
+
+The ask: "There is the ability to set the beginning of the LLM response ... it's
+not an emotion applied to every response. It's the ability to set the very next
+response beginning ... I could set the beginning response to be the color is
+blue. And then I can ask the LLM, what color are my red shoes? And it would be
+forced to start off with the color is blue ... I'm thinking it could be a button
+next to the others."
+
+Oobabooga's `generate_chat_reply_wrapper` turns a non-Continue generation with
+`start_with` set into a Continue of a reply whose text is the start: the start
+is shown at once and the reply is the start plus what follows, kept in the
+history. Its field persists until cleared; here, at the user's word, it is
+spent by the next reply. Its bias is skipped under Continue, so Oobabooga never
+combines the two; here they combine (below).
+
+### 41.1 What is built
+
+- **`mc_llm_start_with`**: the start per thread in `start_with.json` beside
+  `emotions.json`, for the emotion's reason (a write to the conversation file
+  is a revision); `write` (ends trimmed, line breaks kept, 2000 characters at
+  most), `spend` (clears only the start it is given, so one written while the
+  reply is on its way stays), `forget` on a deleted thread. A branch does not
+  carry it.
+- **`set_start_with`** on the service, against no revision and moving none, as
+  `set_emotion`; `start_with` on the snapshot's conversation.
+- **The request** (`mc_llm_conversation_ops._capture`): for Send, Regenerate
+  and Send again after a message of yours (the emotion's rule, `_start_for`),
+  read from the thread the command names, so a Regenerate that lands in a branch
+  uses the start written where it was pressed. The prefill is the emotion's line
+  and the start, joined by a space; `ChatRequest.start_with` says the request
+  ends on words of yours. The start is spent after the operation is accepted
+  (`_spend_start`), never while planning, so a refused command keeps it, and a
+  `conversation_changed` tells both views.
+- **The reply** (`_execute`, `_finish`): the start is the operation's `opening`
+  with `fresh_opening`, so the stream is appended to it with no space put in,
+  it is the first text the speech turn is given (and `begin_speech` is told no
+  opening), and the turn completes with the whole reply. `mc_llm_sessions` takes
+  the prefill off the stream as in 40.6 with `trim` off, so the model's first
+  space is kept. The cache update runs after any prefilled reply
+  (`plan["prefilled"]`): where only a start was sent the cache already agrees up
+  to it, and the read costs a token there and makes good a tokenisation that
+  differs where the model's words join the start.
+- **LLM Studio**: a **Start with** chip beside Emotion with the emotion's dot
+  (`data-start` on the heading, redrawn by every run's settle, so it empties
+  once the reply spends it), and a box under the bar (`mc-llm-chat-start`):
+  the words, Clear and Set; `llm_studio.js` opens it with the words focused and
+  puts it away on Set, Clear, Enter, a press elsewhere or Escape.
+- **The flyout**: a **T** button in the composer's row before Send, lit
+  (`aria-pressed`) and titled with the words while they are kept; a tap opens
+  the same box in the conversation's place (`showMenu("start")`), Set, Enter and
+  Clear close it and give the message box the keyboard. No ⋯ entry: the button
+  is always on the row.
+
+### 41.2 Checked, and not
+
+Tests: `tests/test_start_reply_with.py` (the store, the command, the next reply
+through the service with the runtime replaced -- the words and what follows,
+spent once, the next reply free, with an emotion, Regenerate in place and in a
+branch, Continue, two refusals, the cache update, speech -- and through the real
+runtime with a client that echoes as b10621 does, and the tab's handlers),
+`tests/test_assistant_start_js.py` and `TestTheStartBox` in
+`tests/test_llm_studio_js.py`. Twenty-eight mutations each fail a test; two
+that survived were the two boxes closing each other, which the page's click
+listeners already do, and were removed. Both views drawn in Chromium (the flyout
+on the layout test page, the tab on a stand-in with the real stylesheet and
+script). Not run against a real llama-server, a real Gradio 4.40 page or on the
+user's machine.
