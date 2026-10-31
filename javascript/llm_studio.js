@@ -1585,6 +1585,93 @@
         });
     }
 
+    // -- the start of the next reply -------------------------------------- //
+
+    // The emotion's box, for one reply: the chip opens it under the bar with
+    // the words in the box focused, and Set, Clear, Enter, a press elsewhere
+    // or Escape put it away. A press on either chip is a press outside the
+    // other's box, so only one of the two is ever open. What is kept is Python's
+    // (mc_llm_chat_panel._start_written); the reply that starts from it
+    // spends it, and the next settle empties the chip's dot.
+    const START_CHIP = "mc-llm-chat-to-start";
+    const START_PICKER = "mc-llm-chat-start";
+    const START_TEXT = "mc-llm-chat-start-text";
+    const START_DONE = ["mc-llm-chat-start-set", "mc-llm-chat-start-clear"];
+    const START_OPEN = "mc-llm-start-open";
+    let startWired = false;
+
+    function startOpen() {
+        const picker = byId(START_PICKER);
+        return !!picker && picker.classList.contains(START_OPEN);
+    }
+
+    function startField() {
+        const box = byId(START_TEXT);
+        if (!box) return null;
+        return box.tagName === "TEXTAREA" || box.tagName === "INPUT"
+            ? box : box.querySelector("textarea, input");
+    }
+
+    function showStart(open) {
+        const picker = byId(START_PICKER);
+        if (!picker) return false;
+        const chip = clickable(START_CHIP);
+        if (open && chip) placeEmotion(picker, chip);
+        picker.classList.toggle(START_OPEN, !!open);
+        if (chip) chip.setAttribute("aria-expanded", String(!!open));
+        if (open) {
+            const field = startField();
+            if (field && typeof field.focus === "function") {
+                window.setTimeout(function () { field.focus(); }, 0);
+            }
+        }
+        return true;
+    }
+
+    function onStartClick(event) {
+        if (!startOpen()) return;
+        const target = event.target;
+        if (!target || typeof target.closest !== "function") return;
+        for (const id of START_DONE) {
+            const done = byId(id);
+            if (done && done.contains(target)) {
+                // After Gradio has read the box: its own click runs first.
+                window.setTimeout(function () { showStart(false); }, 0);
+                return;
+            }
+        }
+        const picker = byId(START_PICKER);
+        const chip = clickable(START_CHIP);
+        if ((picker && picker.contains(target)) || (chip && chip.contains(target))) return;
+        showStart(false);
+    }
+
+    function onStartKey(event) {
+        if (!startOpen()) return;
+        if (event.key === "Escape") {
+            showStart(false);
+            return;
+        }
+        const field = startField();
+        if (event.key === "Enter" && !event.shiftKey && field && event.target === field) {
+            window.setTimeout(function () { showStart(false); }, 0);
+        }
+    }
+
+    function wireStart() {
+        const chip = clickable(START_CHIP);
+        if (chip && chip.dataset.mcLlmStart !== "1") {
+            chip.dataset.mcLlmStart = "1";
+            chip.setAttribute("aria-haspopup", "dialog");
+            chip.setAttribute("aria-expanded", "false");
+            chip.addEventListener("click", function () { showStart(!startOpen()); });
+        }
+        if (startWired) return;
+        startWired = true;
+        document.addEventListener("click", onStartClick);
+        document.addEventListener("keydown", onStartKey);
+    }
+
     function attempt(what, run) {
         try {
             run();
@@ -1602,6 +1689,7 @@
         attempt("keep the sheets in view", wireSheets);
         attempt("edit in a dialog", wireEditor);
         attempt("wire the emotion picker", wireEmotion);
+        attempt("wire the reply start", wireStart);
         attempt("count the seconds", function () { watchActivity(); tick(); });
         attempt("fit the workspace", function () { watchWindow(); fit(); });
     }

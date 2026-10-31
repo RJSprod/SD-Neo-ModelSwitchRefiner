@@ -2546,12 +2546,14 @@
    it, which every view is drawn with (`data-emotion`). The picker hangs under
    the bar, over the conversation and taking none of its room, and is drawn
    only while llm_studio.js holds it open. The same rows sit in the Character
-   sheet. */
+   sheet. Start with -- the words of the next reply's start -- is drawn the
+   same way, its dot read off the heading's `data-start`. */
 #mc-llm-studio .mc-llm-chat-stage {
     position: relative;
 }
 
-#mc-llm-studio .mc-llm-emotion-chip::before {
+#mc-llm-studio .mc-llm-emotion-chip::before,
+#mc-llm-studio .mc-llm-start-chip::before {
     border: 1.5px solid currentColor;
     border-radius: 50%;
     box-sizing: border-box;
@@ -2564,13 +2566,15 @@
     width: 0.6em;
 }
 
-#mc-llm-studio .mc-llm-chat-header:has(.mc-llm-heading[data-emotion="on"]) .mc-llm-emotion-chip::before {
+#mc-llm-studio .mc-llm-chat-header:has(.mc-llm-heading[data-emotion="on"]) .mc-llm-emotion-chip::before,
+#mc-llm-studio .mc-llm-chat-header:has(.mc-llm-heading[data-start="on"]) .mc-llm-start-chip::before {
     background: var(--color-accent, currentColor);
     border-color: var(--color-accent, currentColor);
     opacity: 1;
 }
 
-#mc-llm-studio .mc-llm-emotion-picker {
+#mc-llm-studio .mc-llm-emotion-picker,
+#mc-llm-studio .mc-llm-start-picker {
     background: var(--background-fill-primary, var(--body-background-fill, #111827));
     border: 1px solid var(--border-color-primary, #374151);
     border-radius: 10px;
@@ -2587,7 +2591,8 @@
     z-index: 4;
 }
 
-#mc-llm-studio .mc-llm-emotion-picker:not(.mc-llm-emotion-open) {
+#mc-llm-studio .mc-llm-emotion-picker:not(.mc-llm-emotion-open),
+#mc-llm-studio .mc-llm-start-picker:not(.mc-llm-start-open) {
     display: none !important;
 }
 
@@ -2682,6 +2687,15 @@
     flex-wrap: nowrap !important;
     gap: 0.4em;
     margin-top: 0.3em;
+}
+
+/* Start with: the emotion's box holding the words of the next reply's start,
+   then Clear and Set at its end. */
+#mc-llm-studio .mc-llm-start-actions {
+    flex-wrap: nowrap !important;
+    gap: 0.4em;
+    justify-content: flex-end;
+    margin-top: 0.4em;
 }
 
 /* The cache update after a reply with an emotion: the quiet line, with a slow
@@ -9061,6 +9075,62 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Start with: the toolbar's button, lit while the next reply has a start, and
+   its box in the conversation's place -- the words, then Clear and Set. */
+.forge-assistant-start svg {
+    display: block;
+}
+
+.forge-assistant-start[aria-pressed="true"] {
+    background: transparent;
+    background: color-mix(in srgb, var(--color-accent, #2563eb) 18%, transparent);
+    color: var(--color-accent, #2563eb);
+}
+
+.forge-assistant-start-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+}
+
+.forge-assistant-start-input {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    box-sizing: border-box;
+    color: inherit;
+    font: inherit;
+    line-height: 1.45;
+    min-height: 4.2em;
+    padding: 0.5em 0.6em;
+    resize: vertical;
+    width: 100%;
+}
+
+.forge-assistant-start-actions {
+    display: flex;
+    gap: 0.4em;
+    justify-content: flex-end;
+}
+
+.forge-assistant-start-clear,
+.forge-assistant-start-set {
+    background: transparent;
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    min-height: 2.4em;
+    padding: 0 1em;
+}
+
+.forge-assistant-start-set {
+    border-color: var(--color-accent, #2563eb);
+    color: var(--color-accent, #2563eb);
 }
 
 /* The cache update after a reply with an emotion: the quiet line, with a slow

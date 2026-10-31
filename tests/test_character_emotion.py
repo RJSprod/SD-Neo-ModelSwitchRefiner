@@ -306,6 +306,160 @@ class TestTheWire:
 
 
 # --------------------------------------------------------------------------- #
+# The line llama-server sends back
+# --------------------------------------------------------------------------- #
+
+
+class Echoing:
+    """llama-server b10621 continuing a reply from a line: the line comes back at
+    the front of the first piece, then what the model wrote. ``stop`` is pressed
+    before the piece at ``after``."""
+
+    def __init__(self, pieces, stop=None, after=None):
+        self.pieces, self.stop, self.after = list(pieces), stop, after
+
+    def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
+                            cancel=None, **kwargs):
+        sent = []
+        for index, piece in enumerate(self.pieces):
+            if index == self.after:
+                self.stop.cancel()
+                break
+            sent.append(piece)
+            on_text(piece)
+        return "".join(sent)
+
+
+@pytest.fixture
+def serving(monkeypatch):
+    """The real reply runtime, with its card always free and ``client`` its server."""
+    def acquire(self):
+        return True
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(sessions._Gpu, "acquire", acquire)
+    monkeypatch.setattr(sessions, "_preparing", lambda role="": "Preparing…")
+    monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
+
+    def serve(client):
+        monkeypatch.setattr(sessions, "_client", lambda *args, **kwargs: client)
+
+    return serve
+
+
+def from_the_line(line=HAPPY):
+    return sessions.ChatRequest(messages=[{"role": "user", "content": "Hi."},
+                                          {"role": "assistant", "content": line}],
+                                conversation="Ada/one", prefilled=True)
+
+
+def streamed(request, cancel=None):
+    events = list(sessions._conversation(request, cancel or sessions.Cancellation()))
+    return [event.text for event in events if event.kind == sessions.CHUNK], events[-1]
+
+
+def shown(pieces, line=HAPPY) -> list:
+    reply = emotions.Unechoed(line)
+    out = [reply.feed(piece) for piece in pieces]
+    out.append(reply.finish())
+    return out
+
+
+SAMPLES = (HAPPY + " Oh, hello!", HAPPY + "\n\n*smiles* Oh, hello!", "  " + HAPPY + "Oh,",
+           HAPPY + " " + HAPPY, " Oh, hello!", "*smiles* Oh, hello!", "*I am so sad* Oh.",
+           "Oh, " + HAPPY, "*I am", "*I am so happy", HAPPY, "  ")
+
+
+class TestTheLineIsTakenOffTheFront:
+    def test_sent_back_with_the_first_words_it_is_dropped_with_the_space_after_it(self):
+        assert "".join(shown([HAPPY + " Oh,", " hello!"])) == "Oh, hello!"
+        assert emotions.without(HAPPY, HAPPY + " Oh, hello!") == "Oh, hello!"
+
+    def test_pieces_are_held_only_while_they_could_still_be_the_line(self):
+        assert shown(["*I am so", " happy*", "\n\n", "Oh,", " hello!"]) == \
+            ["", "", "", "Oh,", " hello!", ""]
+        assert shown(["*smi", "les* Oh,"]) == ["*smi", "les* Oh,", ""]
+
+    def test_the_models_own_asterisks_are_its_reply(self):
+        for reply in ("*smiles* Oh, hello!", "*I am so sad* Oh.", "Oh, " + HAPPY,
+                      "Oh, *I am so happy* too."):
+            assert "".join(shown([reply])) == reply
+            assert emotions.without(HAPPY, reply) == reply
+        assert emotions.without(HAPPY, HAPPY + "\n\n*smiles* Oh!") == "*smiles* Oh!"
+        assert emotions.without(HAPPY, HAPPY + " " + HAPPY) == HAPPY
+
+    def test_a_reply_without_the_line_passes_exactly_as_it_came(self):
+        assert shown([" Oh,", " hello!"]) == [" Oh,", " hello!", ""]
+        assert emotions.without(HAPPY, " Oh, hello!") == " Oh, hello!"
+
+    def test_a_reply_that_ends_while_it_could_still_be_the_line_is_kept(self):
+        assert "".join(shown(["*I am"])) == "*I am"
+        assert emotions.without(HAPPY, "*I am") == "*I am"
+
+    @pytest.mark.parametrize("sample", SAMPLES)
+    def test_however_the_pieces_fall_the_stream_says_what_the_whole_does(self, sample):
+        whole = emotions.without(HAPPY, sample)
+        for cut in range(len(sample) + 1):
+            for second in range(cut, len(sample) + 1):
+                pieces = [sample[:cut], sample[cut:second], sample[second:]]
+                assert "".join(shown(pieces)) == whole, pieces
+
+
+class TestTheLineIsNotInTheReply:
+    def test_it_is_never_streamed_and_the_reply_ends_without_it(self, serving):
+        serving(Echoing([HAPPY + " Oh,", " hello!"]))
+
+        chunks, last = streamed(from_the_line())
+
+        assert chunks == ["Oh,", " hello!"]
+        assert (last.kind, last.text) == (sessions.DONE, "Oh, hello!")
+
+    def test_a_stopped_reply_keeps_what_was_written_without_it(self, serving):
+        stop = sessions.Cancellation()
+        serving(Echoing([HAPPY + " Oh,", " hello!"], stop=stop, after=1))
+
+        chunks, last = streamed(from_the_line(), stop)
+
+        assert chunks == ["Oh,"]
+        assert (last.kind, last.text) == (sessions.CANCELLED, "Oh,")
+
+    def test_words_still_held_when_the_reply_ends_are_streamed_then(self, serving):
+        serving(Echoing(["*I am"]))
+
+        chunks, last = streamed(from_the_line())
+
+        assert chunks == ["*I am"]
+        assert last.text == "*I am"
+
+    def test_any_other_request_streams_exactly_as_it_came(self, serving):
+        serving(Echoing([HAPPY + " Oh,", " hello!"]))
+        ending_on_yours = sessions.ChatRequest(messages=[{"role": "user", "content": "Hi."}],
+                                               conversation="Ada/one")
+        not_from_a_line = sessions.ChatRequest(messages=from_the_line().messages,
+                                               conversation="Ada/one")
+
+        for request in (ending_on_yours, not_from_a_line):
+            chunks, last = streamed(request)
+
+            assert chunks == [HAPPY + " Oh,", " hello!"]
+            assert last.text == HAPPY + " Oh, hello!"
+
+    def test_the_thread_shows_and_saves_the_reply_alone(self, chats, thread, serving):
+        serving(Echoing([HAPPY + " Oh,", " *smiles*", " hello!"]))
+        choose(thread, HAPPY)
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        patches = [event["payload"].get("text", "") for event in subscriber.since(cursor)[0]
+                   if event["kind"] == service.REPLY_PATCH]
+        assert patches and all(HAPPY not in text for text in patches)
+        saved = chats.load("Ada", thread.identifier)
+        assert saved.messages[-1].text == "Oh, *smiles* hello!"
+
+
+# --------------------------------------------------------------------------- #
 # The cache update is asked for
 # --------------------------------------------------------------------------- #
 
@@ -765,6 +919,115 @@ class TestTheUpdate:
 # --------------------------------------------------------------------------- #
 # The route
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# The one-time cleanup of the line saved with replies before it was taken off
+# --------------------------------------------------------------------------- #
+
+
+def leaked(chats, replies, asks=None, character="Ada"):
+    """A thread whose replies were saved as they arrived before the line was taken off."""
+    from prompt_master.chat.history import ASSISTANT, USER
+
+    found = chats.new(character)
+    for index, reply in enumerate(replies):
+        found.append(USER, (asks or {}).get(index, f"ask {index}"))
+        versions = reply if isinstance(reply, list) else [reply]
+        found.append(ASSISTANT, versions[0])
+        for version in versions[1:]:
+            found.messages[-1].add_version(version)
+    chats.save(found)
+    return found
+
+
+def last_written(chats, conversation, when):
+    """Say the thread was last written at ``when``, as the file would."""
+    from prompt_master.core.config import atomic_write_json, read_json
+
+    where = chats.path_for(conversation.character, conversation.identifier)
+    data = read_json(where)
+    data["updated"] = when
+    atomic_write_json(where, data)
+
+
+class TestTheOneTimeCleanup:
+    def test_a_saved_reply_loses_the_line_and_the_space_after_it_in_every_version(
+            self, chats, store):
+        found = leaked(chats, [[HAPPY + " Oh, hello!", "*I am so sad*\n\nFine, thanks."],
+                               "*smiles* No line here."],
+                       asks={0: HAPPY + " a message of yours"})
+        before = chats.load("Ada", found.identifier).revision
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        assert emotions.clean_saved_replies(chats) == 2
+
+        saved = chats.load("Ada", found.identifier)
+        assert saved.messages[1].versions == ["Oh, hello!", "Fine, thanks."]
+        assert saved.messages[3].text == "*smiles* No line here."
+        assert saved.messages[0].text == HAPPY + " a message of yours"
+        assert saved.revision == before + 1
+        kinds = [event["kind"] for event in subscriber.since(cursor)[0]]
+        assert service.CONVERSATION_CHANGED in kinds
+
+    def test_it_runs_once_and_never_again(self, chats, store):
+        leaked(chats, [HAPPY + " Oh, hello!"])
+        assert emotions.clean_saved_replies(chats) == 1
+        assert (store / emotions.CLEANUP_FILE).is_file()
+
+        later = leaked(chats, [HAPPY + " written after the fix, on purpose"])
+
+        assert emotions.clean_saved_replies(chats) == 0
+        assert chats.load("Ada", later.identifier).messages[1].text.startswith(HAPPY)
+
+    def test_a_line_the_user_added_is_cleaned_too(self, chats, store):
+        emotions.add("*I am so grumpy*")
+        found = leaked(chats, ["*I am so grumpy* What now?"])
+
+        emotions.clean_saved_replies(chats)
+
+        assert chats.load("Ada", found.identifier).messages[1].text == "What now?"
+
+    def test_a_thread_last_written_before_emotions_shipped_is_left_alone(self, chats, store):
+        found = leaked(chats, [HAPPY + " from a time before there were emotions"])
+        last_written(chats, found, emotions.LEAK_BEGAN - 1)
+
+        assert emotions.clean_saved_replies(chats) == 0
+        assert chats.load("Ada", found.identifier).messages[1].text.startswith(HAPPY)
+
+    def test_with_no_chats_folder_there_is_nothing_to_clean_and_it_is_recorded(
+            self, chats, store):
+        assert not chats.directory.exists()
+
+        assert emotions.clean_saved_replies(chats) == 0
+        assert (store / emotions.CLEANUP_FILE).is_file()
+
+    def test_a_folder_that_cannot_be_read_is_looked_at_next_time(self, chats, store,
+                                                                monkeypatch):
+        found = leaked(chats, [HAPPY + " Oh, hello!"])
+
+        def unreadable(store, since):
+            raise OSError("not mounted")
+            yield  # pragma: no cover
+
+        with monkeypatch.context() as patched:
+            patched.setattr(emotions, "_threads_since", unreadable)
+            assert emotions.clean_saved_replies(chats) == 0
+        assert not (store / emotions.CLEANUP_FILE).exists()
+
+        assert emotions.clean_saved_replies(chats) == 1
+        assert chats.load("Ada", found.identifier).messages[1].text == "Oh, hello!"
+
+    def test_the_extension_runs_it_when_it_starts(self, chats, store, monkeypatch):
+        import mc_llm_conversation_startup as startup
+
+        found = leaked(chats, [HAPPY + " Oh, hello!"])
+        monkeypatch.setattr(startup, "_done", False)
+
+        startup.on_app_started()
+
+        assert chats.load("Ada", found.identifier).messages[1].text == "Oh, hello!"
 
 
 class TestTheRoute:

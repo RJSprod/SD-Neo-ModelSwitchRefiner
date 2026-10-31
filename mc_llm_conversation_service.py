@@ -110,11 +110,15 @@ SET_EMOTION = "set_emotion"
 """This thread's emotion (:mod:`mc_llm_emotions`): a line from the list, or empty
 for Off. A setting kept beside the thread rather than a write to it, so it asks
 for no revision and changes none."""
+SET_START_WITH = "set_start_with"
+"""The words this thread's next reply starts with (:mod:`mc_llm_start_with`), or
+empty for none. Kept beside the thread as the emotion is, so it asks for no
+revision and changes none; the reply that starts from it spends it."""
 
 ACTIONS = (CREATE_THREAD, SEND, EDIT_MESSAGE, REGENERATE, CONTINUE, RESEND_FROM_USER,
            BRANCH, SELECT_VERSION, DROP_VERSION, DELETE_MESSAGE, DELETE_FROM,
            RENAME_THREAD, SET_RESPONSE_PREFIX, DELETE_THREAD, RESTORE_TO_DRAFT, STOP,
-           SET_EMOTION)
+           SET_EMOTION, SET_START_WITH)
 """Every command, and nothing else is one.
 
 Adding to this tuple is a compatible change; renaming anything in it is not,
@@ -344,7 +348,7 @@ def _expected(raw, action: str):
     which is the behaviour this whole module replaced.
     """
     if raw is None:
-        if action in (CREATE_THREAD, STOP, SET_EMOTION):
+        if action in (CREATE_THREAD, STOP, SET_EMOTION, SET_START_WITH):
             return None
         raise Refused(INVALID_INPUT, "expected_revision is required.")
     if not isinstance(raw, dict):
@@ -400,6 +404,8 @@ def _payload(raw, action: str) -> dict:
         found["prefix"] = _text(raw.get("prefix"), "prefix", 16 * 1024)
     if "emotion" in raw:
         found["emotion"] = _text(raw.get("emotion"), "emotion", 4 * 1024)
+    if "start_with" in raw:
+        found["start_with"] = _text(raw.get("start_with"), "start_with", 16 * 1024)
     if "confirm_count" in raw:
         count = raw.get("confirm_count")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -670,6 +676,8 @@ def _dispatch(envelope: Envelope, scope: str) -> dict:
         return _branch(envelope)
     if envelope.action == SET_EMOTION:
         return _set_emotion(envelope)
+    if envelope.action == SET_START_WITH:
+        return _set_start_with(envelope)
     if envelope.action in GENERATING:
         import mc_llm_conversation_ops as ops
 
@@ -892,8 +900,10 @@ def _delete_thread(envelope: Envelope) -> dict:
                       issued_at=envelope.issued_at, payload_digest=envelope.digest())
     store_module.remove(store, key, envelope.expected_revision, receipt=receipt)
     import mc_llm_emotions
+    import mc_llm_start_with
 
     mc_llm_emotions.forget(key.character, key.thread_id)
+    mc_llm_start_with.forget(key.character, key.thread_id)
     publish(THREAD_DELETED, key)
     return _accepted(envelope, key, 0)
 
@@ -918,6 +928,24 @@ def _set_emotion(envelope: Envelope) -> dict:
     revision = store_module.token_of(conversation, raw)
     publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="emotion")
     return _accepted(envelope, key, revision, extra={"emotion": chosen})
+
+
+def _set_start_with(envelope: Envelope) -> dict:
+    """Write the start of this thread's next reply, or clear it. Writes nothing in
+    the thread, and answers its revision back unchanged, as the emotion does."""
+    import mc_llm_start_with
+
+    store = chats()
+    key = envelope.conversation
+    conversation, raw = store_module.read(store, key)
+    try:
+        kept = mc_llm_start_with.write(key.character, key.thread_id,
+                                       envelope.payload.get("start_with") or "")
+    except mc_llm_start_with.Refused as refusal:
+        raise Refused(INVALID_INPUT, str(refusal))
+    revision = store_module.token_of(conversation, raw)
+    publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="start_with")
+    return _accepted(envelope, key, revision, extra={"start_with": kept})
 
 
 def _branch(envelope: Envelope) -> dict:
@@ -1032,6 +1060,7 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
         "updated": conversation.updated,
         "damaged": bool(conversation.damaged),
         "emotion": _emotion_of(key),
+        "start_with": _start_of(key),
         "cache_update": _cache_updating(key),
     }
     found["emotions"] = _emotions()
@@ -1058,6 +1087,17 @@ def _emotion_of(key: Key) -> str:
         return mc_llm_emotions.for_thread(key.character, key.thread_id)
     except Exception:
         logger.debug("Model Chain: could not read a thread's emotion", exc_info=True)
+        return ""
+
+
+def _start_of(key: Key) -> str:
+    """The start of this thread's next reply, ``""`` for none or when it cannot be read."""
+    try:
+        import mc_llm_start_with
+
+        return mc_llm_start_with.for_thread(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read a thread's reply start", exc_info=True)
         return ""
 
 

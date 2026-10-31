@@ -1996,3 +1996,106 @@ class TestTheEmotionPicker:
         script = SCRIPT.read_text(encoding="utf-8")
         for name in ("to-emotion", "emotion", "emotion-at", "emotion-now"):
             assert f'"{ui.ident("chat", name)}"' in script, name
+
+
+# -- the start of the next reply --------------------------------------------- #
+
+START_PAGE = EMOTION_PAGE + """
+const startChip = element("button", "mc-llm-chat-to-start");
+const startPicker = element("div", "mc-llm-chat-start");
+const startBox = element("div", "mc-llm-chat-start-text");
+const startField = new El("textarea");
+let focused = 0;
+startField.focus = () => { focused += 1; };
+startBox.appendChild(startField);
+startPicker.appendChild(startBox);
+const setButton = element("button", "mc-llm-chat-start-set");
+const clearButton = element("button", "mc-llm-chat-start-clear");
+startPicker.appendChild(setButton);
+startPicker.appendChild(clearButton);
+function pressStart() {
+    startChip.dispatchEvent({type: "click", bubbles: true, target: startChip});
+    onDocument("click", startChip);
+}
+function startNow() { return startPicker.classList.contains("mc-llm-start-open"); }
+"""
+
+
+def start(rehearsal: str) -> dict:
+    return row([("assistant", "reply 0")], rehearsal, setup=START_PAGE)
+
+
+class TestTheStartBox:
+    def test_the_chip_opens_it_with_the_words_focused_and_presses_it_away(self):
+        found = start("""
+            out.before = startNow();
+            pressStart();
+            out.opened = startNow();
+            out.expanded = startChip.getAttribute("aria-expanded");
+            out.focused = focused;
+            pressStart();
+            out.closed = startNow();
+        """)
+
+        assert found["before"] is False
+        assert found["opened"] is True and found["expanded"] == "true"
+        assert found["focused"] == 1
+        assert found["closed"] is False
+
+    def test_set_clear_enter_a_press_elsewhere_and_escape_put_it_away(self):
+        found = start("""
+            const seen = [];
+            function after(what, how) { pressStart(); how(); seen.push([what, startNow()]); }
+            after("set", () => onDocument("click", setButton));
+            after("clear", () => onDocument("click", clearButton));
+            after("enter", () => onDocument("keydown", startField, {key: "Enter"}));
+            after("outside", () => onDocument("click", outside));
+            after("escape", () => onDocument("keydown", outside, {key: "Escape"}));
+            out.seen = seen;
+        """)
+
+        assert found["seen"] == [["set", False], ["clear", False], ["enter", False],
+                                 ["outside", False], ["escape", False]]
+
+    def test_typing_in_it_and_a_new_line_keep_it_open(self):
+        found = start("""
+            pressStart();
+            onDocument("click", startField);
+            onDocument("keydown", startField, {key: "a"});
+            onDocument("keydown", startField, {key: "Enter", shiftKey: true});
+            out.open = startNow();
+        """)
+
+        assert found["open"] is True
+
+    def test_only_one_of_the_emotion_and_the_start_is_open(self):
+        found = start("""
+            pressChip();
+            pressStart();
+            out.afterStart = [openNow(), startNow()];
+            pressChip();
+            out.afterEmotion = [openNow(), startNow()];
+        """)
+
+        assert found["afterStart"] == [False, True]
+        assert found["afterEmotion"] == [True, False]
+
+    def test_wiring_again_listens_once(self):
+        found = start("""
+            rewire(); rewire();
+            pressStart();
+            out.open = startNow();
+        """)
+
+        assert found["open"] is True
+
+    def test_the_ids_are_the_panel_s(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import mc_llm_ui as ui
+
+        script = SCRIPT.read_text(encoding="utf-8")
+        for name in ("to-start", "start", "start-text", "start-set", "start-clear"):
+            assert f'"{ui.ident("chat", name)}"' in script, name

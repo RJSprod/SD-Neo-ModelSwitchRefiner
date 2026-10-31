@@ -390,7 +390,10 @@ Recorded so it is a decision rather than an oversight:
   the first words of a reply and have the model carry on from them
   (`prompt.prefix_instruction`, `Conversation.response_prefix`); the storage and
   the instruction are both vendored and unused here. It is a composer feature
-  rather than a per-message one and was left for a later pass.
+  rather than a per-message one and was left for a later pass. (Section 41's
+  *Start reply with* is the user's version of it: for the next reply only,
+  kept beside the thread, and put on the wire as a prefill rather than asked
+  for by an instruction. Both vendored pieces are still unused.)
 
 
 ## 6a. The containment rule, and what it costs
@@ -4364,10 +4367,10 @@ nowhere in the history. That is reproduced exactly (`mc_llm_emotions`,
 message, which llama-server b10621 continues rather than closes
 (`continue_final_message = AUTO` in `server-common.cpp`, on unless
 `--no-prefill-assistant`), rendering Gemma 4's turn as `<|turn>model\n<|channel>
-thought\n<channel|>` and then the line -- the opening an ordinary reply gets --
-and not echoing the prefill in the stream (`task_result_state` initialises its
-message from the continuation when `echo` is off). Reasoning is off on every
-conversation request, so nothing lands in a thought block. The note in
+thought\n<channel|>` and then the line -- the opening an ordinary reply gets.
+It does send the line back, at the front of the reply's first piece, which
+the user's first run showed (section 40.6); it is taken off here. Reasoning is
+off on every conversation request, so nothing lands in a thought block. The note in
 `prompt_master/chat/prompt.py` that the endpoint "closes the assistant turn" is
 about older builds.
 
@@ -4439,8 +4442,8 @@ the line back does not revive it.
 ### 40.4 Checked, and not
 
 Read against llama.cpp b10621's own `server-common.cpp`, `server-task.cpp` and
-`common/chat.cpp` (continuation, Gemma 4's generation prompt, the prefill not
-echoed), and against Oobabooga's current `character_bias` and `chat.py`. Not run
+`common/chat.cpp` (continuation, Gemma 4's generation prompt; the prefill's
+echo was misread, section 40.6), and against Oobabooga's current `character_bias` and `chat.py`. Not run
 against a real llama-server or on the user's machine; the first things to look
 at there are llama-server's `checking sim` lines on the turn after a reply with an
 emotion (the match should run through the end of the last reply) and the
@@ -4493,3 +4496,138 @@ take-over, a server gone while it waited, the second form's request and its
 unsaved slot. Nine mutations each fail a test; two survived a first pass (a
 measurement taken after the holder's thread had been joined, and a test of the
 no-server case that the second check also caught) and the tests were tightened.
+
+### 40.6 The line is taken off the front of the reply (after #311)
+
+The user's first run: "every reply is starting with the emotion string. So if it
+is *I am happy* I am seeing *I am happy* start the reply. This not how it worked
+in Oobabooga. Your fix should not remove support of asterix enclosed text, I
+still need that, but the emotion string should not be in the response."
+
+Section 40.1 had read b10621 as leaving the prefill out of the stream, and it
+does not. Under a content continuation its chat code puts the line at the end
+of the *generation prompt* (`common_chat_params_init_gemma4` and every other
+format: `generation_prompt += ... + msg.render_content()`), and every parse of
+the reply is a parse of the generation prompt plus what the model wrote
+(`common_chat_peg_parse`'s `effective_input`), so the line is part of the
+message's content from the first token. `task_result_state` would start its
+message from an empty parse, leaving the line out of the first delta, only when
+`chat_parser_params.is_continuation` is true; `common/chat.h` defaults it to
+false, its constructor from `common_chat_params` copies the format and the
+generation prompt alone, and nothing in `server-common.cpp`,
+`server-context.cpp` or `server-task.cpp` sets it. So the first piece streamed
+is the line, then the model's first token, and the client joined them.
+
+Oobabooga never had this to undo: its prompt is a raw text completion that ends
+on the line, and the reply is only the tokens generated after it, with leading
+spaces stripped (`chat.py`). The same is done here, in the stream:
+`mc_llm_emotions.Unechoed` holds the reply's first pieces while they could still
+be the line (leading whitespace aside), drops the line and the whitespace after
+it when it is there, and lets everything else through as it came -- a reply
+that opens with an action of its own in asterisks diverges from the line at its
+second character and is shown at once. Only the very front is compared, so the
+character's own asterisks, the same words written later and every other reply
+are untouched. `mc_llm_sessions._conversation` applies it to a prefilled request
+alone (`_prefill`: the request is marked and ends on an assistant message), to
+every piece before it is yielded and to the finished or stopped text with
+`without`, the same rule over the whole string; so the reply patch, the speech
+turn, the checkpoint and the saved reply never see the line. Continue and the
+written opening of a reply are not prefills (each ends on an instruction of
+yours) and are not touched. Replies saved before this keep the line they were
+saved with; editing or regenerating them is the user's.
+
+Tests: the rule over every way three pieces can fall for twelve samples (the
+stream says what the whole does), pieces held only while they could be the line,
+the model's own asterisks kept, a reply without the line passed exactly, words
+still held at the end streamed then, and, through the real runtime with a client
+that echoes as b10621 does, the stream, the done and stopped texts, a request
+that is not a prefill left alone, and a thread's reply patches and saved reply.
+Fourteen mutations each fail a test. Not run against a real llama-server or on
+the user's machine.
+
+### 40.7 The line saved with replies before 40.6, taken off once
+
+The user, told that replies saved before 40.6 keep the line: "yes, add the
+one-time cleanup too". `mc_llm_emotions.clean_saved_replies`, run by
+`mc_llm_conversation_startup` with its other start-up jobs: every saved thread
+last written on or after `LEAK_BEGAN` (2026-10-30 00:00 UTC, the day #310
+shipped; a thread written before cannot hold a reply started from a line) is
+read, and every version of every reply that starts with a line from the list or
+one of Oobabooga's five has it taken off by `without`'s rule, longest line
+first, through the guarded store's `transaction` (the revision moves, a
+`conversation_changed` is published). The record, `emotion-cleanup.json` under
+the LLM data root, is written when a pass ends, or at once when there is no
+chats folder (nothing was ever saved, so a fresh install after the fix never
+cleans anything); a folder that is there and cannot be read is looked at again
+next start. A reply the character really started with a listed line cannot be
+told from a copy and is cleaned too, which the user was told before asking for
+it. Seven tests; nine mutations each fail one.
+
+## 41. Start reply with (31 October 2026)
+
+The ask: "There is the ability to set the beginning of the LLM response ... it's
+not an emotion applied to every response. It's the ability to set the very next
+response beginning ... I could set the beginning response to be the color is
+blue. And then I can ask the LLM, what color are my red shoes? And it would be
+forced to start off with the color is blue ... I'm thinking it could be a button
+next to the others."
+
+Oobabooga's `generate_chat_reply_wrapper` turns a non-Continue generation with
+`start_with` set into a Continue of a reply whose text is the start: the start
+is shown at once and the reply is the start plus what follows, kept in the
+history. Its field persists until cleared; here, at the user's word, it is
+spent by the next reply. Its bias is skipped under Continue, so Oobabooga never
+combines the two; here they combine (below).
+
+### 41.1 What is built
+
+- **`mc_llm_start_with`**: the start per thread in `start_with.json` beside
+  `emotions.json`, for the emotion's reason (a write to the conversation file
+  is a revision); `write` (ends trimmed, line breaks kept, 2000 characters at
+  most), `spend` (clears only the start it is given, so one written while the
+  reply is on its way stays), `forget` on a deleted thread. A branch does not
+  carry it.
+- **`set_start_with`** on the service, against no revision and moving none, as
+  `set_emotion`; `start_with` on the snapshot's conversation.
+- **The request** (`mc_llm_conversation_ops._capture`): for Send, Regenerate
+  and Send again after a message of yours (the emotion's rule, `_start_for`),
+  read from the thread the command names, so a Regenerate that lands in a branch
+  uses the start written where it was pressed. The prefill is the emotion's line
+  and the start, joined by a space; `ChatRequest.start_with` says the request
+  ends on words of yours. The start is spent after the operation is accepted
+  (`_spend_start`), never while planning, so a refused command keeps it, and a
+  `conversation_changed` tells both views.
+- **The reply** (`_execute`, `_finish`): the start is the operation's `opening`
+  with `fresh_opening`, so the stream is appended to it with no space put in,
+  it is the first text the speech turn is given (and `begin_speech` is told no
+  opening), and the turn completes with the whole reply. `mc_llm_sessions` takes
+  the prefill off the stream as in 40.6 with `trim` off, so the model's first
+  space is kept. The cache update runs after any prefilled reply
+  (`plan["prefilled"]`): where only a start was sent the cache already agrees up
+  to it, and the read costs a token there and makes good a tokenisation that
+  differs where the model's words join the start.
+- **LLM Studio**: a **Start with** chip beside Emotion with the emotion's dot
+  (`data-start` on the heading, redrawn by every run's settle, so it empties
+  once the reply spends it), and a box under the bar (`mc-llm-chat-start`):
+  the words, Clear and Set; `llm_studio.js` opens it with the words focused and
+  puts it away on Set, Clear, Enter, a press elsewhere or Escape.
+- **The flyout**: a **T** button in the composer's row before Send, lit
+  (`aria-pressed`) and titled with the words while they are kept; a tap opens
+  the same box in the conversation's place (`showMenu("start")`), Set, Enter and
+  Clear close it and give the message box the keyboard. No ⋯ entry: the button
+  is always on the row.
+
+### 41.2 Checked, and not
+
+Tests: `tests/test_start_reply_with.py` (the store, the command, the next reply
+through the service with the runtime replaced -- the words and what follows,
+spent once, the next reply free, with an emotion, Regenerate in place and in a
+branch, Continue, two refusals, the cache update, speech -- and through the real
+runtime with a client that echoes as b10621 does, and the tab's handlers),
+`tests/test_assistant_start_js.py` and `TestTheStartBox` in
+`tests/test_llm_studio_js.py`. Twenty-eight mutations each fail a test; two
+that survived were the two boxes closing each other, which the page's click
+listeners already do, and were removed. Both views drawn in Chromium (the flyout
+on the layout test page, the tab on a stand-in with the real stylesheet and
+script). Not run against a real llama-server, a real Gradio 4.40 page or on the
+user's machine.

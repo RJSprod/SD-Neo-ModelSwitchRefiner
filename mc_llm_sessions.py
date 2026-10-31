@@ -669,9 +669,27 @@ class ChatRequest:
     Empty is the old behaviour exactly."""
     prefilled: bool = False
     """Whether the request ends on the start of the reply -- the thread's
-    emotion (:mod:`mc_llm_emotions`). Its slot is not saved: what it holds is
-    the line before the reply, which no later prompt has. The cache update
-    after it saves the conversation as it is (:mod:`mc_llm_cache_update`)."""
+    emotion (:mod:`mc_llm_emotions`). llama-server sends the line back at the
+    front of the reply, and :func:`_conversation` takes it off before a piece
+    is yielded. Its slot is not saved: what it holds is the line before the
+    reply, which no later prompt has. The cache update after it saves the
+    conversation as it is (:mod:`mc_llm_cache_update`)."""
+    start_with: str = ""
+    """The words of yours the reply begins with (:mod:`mc_llm_start_with`), the
+    end of the prefilled line. The caller shows them as the reply's start, so
+    what streams is the rest exactly as the model wrote it, its first space
+    included."""
+
+
+def _prefill(request: ChatRequest) -> str:
+    """The line a prefilled request ends on, or ``""`` for any other request."""
+    if not request.prefilled or not request.messages:
+        return ""
+    last = request.messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return ""
+    content = last.get("content")
+    return content.strip() if isinstance(content, str) else ""
 
 
 def _conversation(request: ChatRequest, cancel: Cancellation):
@@ -722,11 +740,29 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
                                           request.seed, on_text, cancel.event,
                                           temperature=request.temperature,
                                           top_p=request.top_p)
+        # llama-server sends a prefilled reply back with its line at the front;
+        # the line is taken off here, before anything shows, speaks or saves it.
+        line = _prefill(request)
+        trim = not request.start_with
+        unechoed = None
+        if line:
+            import mc_llm_emotions
+
+            unechoed = mc_llm_emotions.Unechoed(line, trim=trim)
         for chunk, result in _streamed(work, when_done=gpu.release):
-            if chunk is not None:
+            if chunk is None:
+                text = result or ""
+            elif unechoed is None:
                 yield Event(CHUNK, chunk)
             else:
-                text = result or ""
+                shown = unechoed.feed(chunk)
+                if shown:
+                    yield Event(CHUNK, shown)
+        if unechoed is not None:
+            held = unechoed.finish()
+            if held:
+                yield Event(CHUNK, held)
+            text = mc_llm_emotions.without(line, text, trim=trim)
 
         if cancel.is_set():
             # Not an error and not a discard: what was streamed before the stop

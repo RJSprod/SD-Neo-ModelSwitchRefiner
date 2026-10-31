@@ -214,6 +214,11 @@ class Operation:
     target_version: int = 0
     accepted_revision: object = None
     opening: str = ""
+    fresh_opening: bool = False
+    """Whether ``opening`` was written for this reply -- Start reply with
+    (:mod:`mc_llm_start_with`) -- rather than a reply already written that a
+    continuation extends: shown, spoken and saved as the reply's beginning, and
+    carried on from exactly as the model wrote, with no space put in."""
     page_id: str = ""
     voice_wanted: bool = False
     phase: str = ACCEPTED
@@ -442,7 +447,9 @@ def begin(envelope, scope: str) -> dict:
                           target_version=plan["target_version"],
                           accepted_revision=plan["accepted_revision"],
                           accepted_fingerprint=_fingerprint(store, plan["key"]),
-                          opening=plan["opening"], page_id=envelope.page_id,
+                          opening=plan["opening"],
+                          fresh_opening=bool(plan.get("start_with")),
+                          page_id=envelope.page_id,
                           voice_wanted=bool(envelope.payload.get("voice", True)),
                           request=plan["request"])
 
@@ -463,9 +470,10 @@ def begin(envelope, scope: str) -> dict:
         import mc_voice_ui
 
         try:
-            operation.turn = mc_voice_ui.begin_speech(character=plan["character"],
-                                                      persona=plan["persona"],
-                                                      opening=plan["opening"])
+            # A start of yours is the reply's own first words, spoken with it.
+            operation.turn = mc_voice_ui.begin_speech(
+                character=plan["character"], persona=plan["persona"],
+                opening="" if operation.fresh_opening else plan["opening"])
         except Exception:
             logger.debug("Model Chain: could not begin speech for this reply", exc_info=True)
     operation.speech_turn_id = getattr(operation.turn, "id", "") or ""
@@ -476,6 +484,8 @@ def begin(envelope, scope: str) -> dict:
     _publish(operation, service.OPERATION_ACCEPTED, force=True, phase=ACCEPTED,
              status=operation.status_text, revision=plan["result_revision"] or None,
              target_index=operation.target_index, target_kind=operation.target_kind)
+    if plan.get("start_with"):
+        _spend_start(store, envelope.conversation, plan["start_with"])
 
     thread = threading.Thread(target=_execute, args=(operation, plan),
                               name=f"mc-conversation-{operation.operation_id[:8]}",
@@ -768,14 +778,21 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
                  context_size=context_size, reply_tokens=tokens, instruction=instruction,
                  every_picture=every)
     emotion = _emotion_for(key, target_kind, wire)
-    if emotion:
-        # The start of the character's turn: llama-server carries on from it and
-        # sends back only what follows, so the reply never holds it.
-        wire.append({"role": "assistant", "content": emotion})
+    # Read from the thread the command names: a Regenerate that lands in a
+    # branch spends the start written where it was pressed.
+    start = _start_for(envelope.conversation, target_kind, wire)
+    prefill = " ".join(part for part in (emotion, start) if part)
+    if prefill:
+        # The start of the character's turn: llama-server carries on from it
+        # and sends it back at the front of the reply, where it is taken off
+        # (mc_llm_sessions). The emotion is never in the reply; a start of
+        # yours is put back as its first words (``opening``).
+        wire.append({"role": "assistant", "content": prefill})
     request = sessions.ChatRequest(
         messages=wire,
         conversation=service.conversation_name(key),
-        prefilled=bool(emotion),
+        prefilled=bool(prefill),
+        start_with=start,
         needs_vision=needs_vision(wire),
         temperature=_fraction(settings.get("temperature"), character.temperature,
                               DEFAULT_TEMPERATURE),
@@ -789,13 +806,49 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
                               "image cannot be sent to it.")
     return {"key": key, "target_index": target_index, "target_kind": target_kind,
             "target_version": target_version, "accepted_revision": accepted_revision,
-            "opening": opening, "request": request, "character": character,
+            "opening": opening or start, "start_with": start, "prefilled": bool(prefill),
+            "request": request, "character": character,
             "persona": persona, "persisted": persisted, "prefix": prefix,
             "result_revision": result_revision,
             # What the cache update after a reply with an emotion rebuilds the
             # conversation from: the same history, window and pictures.
             "emotion": emotion, "history": list(history), "every_picture": every,
             "context_size": context_size, "reply_tokens": tokens}
+
+
+def _start_for(key: Key, target_kind: str, wire) -> str:
+    """The words this reply starts with (Start reply with), or ``""``.
+
+    The emotion's rule: a new reply after a message of yours, never Continue.
+    Read, not spent: a command refused after this is no reply, and the start
+    stays for the next one (:func:`_spend_start`).
+    """
+    if target_kind not in (APPEND, VERSION):
+        return ""
+    if not wire or not isinstance(wire[-1], dict) or wire[-1].get("role") != "user":
+        return ""
+    try:
+        import mc_llm_start_with
+
+        return mc_llm_start_with.for_thread(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's reply start", exc_info=True)
+        return ""
+
+
+def _spend_start(store, key: Key, start: str) -> None:
+    """The reply that starts from ``start`` is under way: the thread has none now.
+    The pages are told, so the button empties in both views."""
+    import mc_llm_conversation_service as service
+    import mc_llm_start_with
+
+    if not mc_llm_start_with.spend(key.character, key.thread_id, start):
+        return
+    try:
+        service.publish(service.CONVERSATION_CHANGED, key,
+                        revision=store_module.token(store, key), kind_detail="start_with")
+    except Exception:
+        logger.debug("Model Chain: could not say a reply start was spent", exc_info=True)
 
 
 def _emotion_for(key: Key, target_kind: str, wire) -> str:
@@ -838,11 +891,17 @@ def _execute(operation: Operation, plan: dict) -> None:
 
     opening = operation.opening
     streamed = opening
-    join_space = bool(opening) and not opening[-1].isspace()
+    join_space = bool(opening) and not operation.fresh_opening and not opening[-1].isspace()
     last_checkpoint = 0.0
     failure = ""
 
     turn = operation.turn
+
+    if turn is not None and operation.fresh_opening:
+        try:
+            turn.add_text(opening)
+        except Exception:
+            logger.debug("Model Chain: could not queue speech", exc_info=True)
 
     _advance(operation, WAITING)
     try:
@@ -918,7 +977,8 @@ def _finish(operation: Operation, plan: dict, streamed: str, outcome: str,
 
     if outcome == COMPLETED and turn is not None:
         try:
-            turn.complete(_spoken_tail(whole, operation.opening))
+            turn.complete(_spoken_tail(whole, "" if operation.fresh_opening
+                                       else operation.opening))
         except Exception:
             logger.debug("Model Chain: could not finish the speech turn", exc_info=True)
     elif turn is not None:
@@ -969,15 +1029,19 @@ def _finish(operation: Operation, plan: dict, streamed: str, outcome: str,
 
 
 def _update_cache_after(operation: Operation, plan: dict, whole: str) -> None:
-    """After a reply written with an emotion, read it again without one.
+    """After a reply started from a line on the wire, read it again as it was saved.
 
     llama-server's cache holds the conversation as the reply was written:
     with the emotion's line before it. The next turn's prompt has the reply
     alone in that place, so without this the next message would read the whole
     reply again before its first word. :mod:`mc_llm_cache_update` reads it now,
-    in the background, while the reply is being read on screen.
+    in the background, while the reply is being read on screen. A start of
+    yours alone (:mod:`mc_llm_start_with`) is in the saved reply, so its cache
+    already agrees up to the words the model was handed and took over; it is
+    read again too, which costs a token where they agree and makes good
+    whatever was read differently where the model's words joined yours.
     """
-    if not plan.get("emotion"):
+    if not plan.get("prefilled"):
         return
     try:
         import mc_llm_cache_update
