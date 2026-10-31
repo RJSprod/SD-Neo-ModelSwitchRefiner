@@ -4364,10 +4364,10 @@ nowhere in the history. That is reproduced exactly (`mc_llm_emotions`,
 message, which llama-server b10621 continues rather than closes
 (`continue_final_message = AUTO` in `server-common.cpp`, on unless
 `--no-prefill-assistant`), rendering Gemma 4's turn as `<|turn>model\n<|channel>
-thought\n<channel|>` and then the line -- the opening an ordinary reply gets --
-and not echoing the prefill in the stream (`task_result_state` initialises its
-message from the continuation when `echo` is off). Reasoning is off on every
-conversation request, so nothing lands in a thought block. The note in
+thought\n<channel|>` and then the line -- the opening an ordinary reply gets.
+It does send the line back, at the front of the reply's first piece, which
+the user's first run showed (section 40.6); it is taken off here. Reasoning is
+off on every conversation request, so nothing lands in a thought block. The note in
 `prompt_master/chat/prompt.py` that the endpoint "closes the assistant turn" is
 about older builds.
 
@@ -4439,8 +4439,8 @@ the line back does not revive it.
 ### 40.4 Checked, and not
 
 Read against llama.cpp b10621's own `server-common.cpp`, `server-task.cpp` and
-`common/chat.cpp` (continuation, Gemma 4's generation prompt, the prefill not
-echoed), and against Oobabooga's current `character_bias` and `chat.py`. Not run
+`common/chat.cpp` (continuation, Gemma 4's generation prompt; the prefill's
+echo was misread, section 40.6), and against Oobabooga's current `character_bias` and `chat.py`. Not run
 against a real llama-server or on the user's machine; the first things to look
 at there are llama-server's `checking sim` lines on the turn after a reply with an
 emotion (the match should run through the end of the last reply) and the
@@ -4493,3 +4493,51 @@ take-over, a server gone while it waited, the second form's request and its
 unsaved slot. Nine mutations each fail a test; two survived a first pass (a
 measurement taken after the holder's thread had been joined, and a test of the
 no-server case that the second check also caught) and the tests were tightened.
+
+### 40.6 The line is taken off the front of the reply (after #311)
+
+The user's first run: "every reply is starting with the emotion string. So if it
+is *I am happy* I am seeing *I am happy* start the reply. This not how it worked
+in Oobabooga. Your fix should not remove support of asterix enclosed text, I
+still need that, but the emotion string should not be in the response."
+
+Section 40.1 had read b10621 as leaving the prefill out of the stream, and it
+does not. Under a content continuation its chat code puts the line at the end
+of the *generation prompt* (`common_chat_params_init_gemma4` and every other
+format: `generation_prompt += ... + msg.render_content()`), and every parse of
+the reply is a parse of the generation prompt plus what the model wrote
+(`common_chat_peg_parse`'s `effective_input`), so the line is part of the
+message's content from the first token. `task_result_state` would start its
+message from an empty parse, leaving the line out of the first delta, only when
+`chat_parser_params.is_continuation` is true; `common/chat.h` defaults it to
+false, its constructor from `common_chat_params` copies the format and the
+generation prompt alone, and nothing in `server-common.cpp`,
+`server-context.cpp` or `server-task.cpp` sets it. So the first piece streamed
+is the line, then the model's first token, and the client joined them.
+
+Oobabooga never had this to undo: its prompt is a raw text completion that ends
+on the line, and the reply is only the tokens generated after it, with leading
+spaces stripped (`chat.py`). The same is done here, in the stream:
+`mc_llm_emotions.Unechoed` holds the reply's first pieces while they could still
+be the line (leading whitespace aside), drops the line and the whitespace after
+it when it is there, and lets everything else through as it came -- a reply
+that opens with an action of its own in asterisks diverges from the line at its
+second character and is shown at once. Only the very front is compared, so the
+character's own asterisks, the same words written later and every other reply
+are untouched. `mc_llm_sessions._conversation` applies it to a prefilled request
+alone (`_prefill`: the request is marked and ends on an assistant message), to
+every piece before it is yielded and to the finished or stopped text with
+`without`, the same rule over the whole string; so the reply patch, the speech
+turn, the checkpoint and the saved reply never see the line. Continue and the
+written opening of a reply are not prefills (each ends on an instruction of
+yours) and are not touched. Replies saved before this keep the line they were
+saved with; editing or regenerating them is the user's.
+
+Tests: the rule over every way three pieces can fall for twelve samples (the
+stream says what the whole does), pieces held only while they could be the line,
+the model's own asterisks kept, a reply without the line passed exactly, words
+still held at the end streamed then, and, through the real runtime with a client
+that echoes as b10621 does, the stream, the done and stopped texts, a request
+that is not a prefill left alone, and a thread's reply patches and saved reply.
+Fourteen mutations each fail a test. Not run against a real llama-server or on
+the user's machine.

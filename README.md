@@ -3828,6 +3828,12 @@ later replies either, and turning it off leaves nothing behind.
 - **Which replies:** Send, Regenerate and Send again from here start from it;
   **Continue does not**, since it carries on a reply already written. A change
   takes effect from the next reply.
+- **Only the line is taken out.** llama-server sends the line back at the front
+  of the reply it continues, so the line, and the space after it, is taken off
+  the front as the reply streams, before anything shows, speaks or saves it.
+  Nothing else is touched: text in asterisks the character writes itself —
+  *\*smiles\**, an action, even the same words further on — is its reply and
+  stays, at the start of a reply or anywhere in it.
 
 **The cache update.** llama-server keeps the conversation as it was read, so
 after a reply written with an emotion its cache holds the line and then the

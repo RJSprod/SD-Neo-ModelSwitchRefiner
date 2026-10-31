@@ -4,10 +4,13 @@ Oobabooga's *character bias*, brought across. The line -- ``*I am so happy*``
 -- is put on the wire as the opening of the character's turn, after the
 conversation and after your message, and the model writes its reply as if it
 had already begun with it. llama-server continues an assistant message that
-ends the request (b10621 does by default) and sends back only what it wrote,
-so the line is never in a reply, never on screen, never spoken and never
-saved: the history holds the reply alone, and the next turn sees the reply
-alone. That is also why the character never starts copying the line.
+ends the request (b10621 does by default), and sends the line back at the
+front of the reply, which :class:`Unechoed` takes off as the reply streams
+(``mc_llm_sessions``), so the line is never in a reply, never on screen,
+never spoken and never saved: the history holds the reply alone, and the next
+turn sees the reply alone. That is also why the character never starts
+copying the line. Text in asterisks the model writes itself is its reply and
+stays.
 
 Two things are kept, in one file in the LLM data folder:
 
@@ -212,5 +215,64 @@ def forget(character, thread_id) -> None:
         logger.debug("Model Chain: could not forget a deleted thread's emotion", exc_info=True)
 
 
-__all__ = ["DEFAULTS", "FILE_NAME", "MAX_COUNT", "MAX_LENGTH", "Refused", "add", "carry",
-           "choose", "clean", "for_thread", "forget", "listed", "path", "remove"]
+# -- the reply ------------------------------------------------------------------ #
+
+
+class Unechoed:
+    """A reply streamed from a line, with the line taken off its front.
+
+    llama-server b10621 reads a continued reply from the start of the turn --
+    the generation prompt it parses with ends on the line -- and leaves the
+    line out of the first piece it streams only for a request marked as a
+    continuation, which nothing in its chat endpoint marks. So the reply comes
+    back as the line, then what the model wrote after it. The pieces are held
+    while they could still be the line; the line and the space after it are
+    dropped when they are there, and anything else passes as it came: a reply
+    that opens with an action of its own in asterisks, the line written again
+    further on. Only the very front is compared.
+    """
+
+    def __init__(self, line: str):
+        self.line = clean(line)
+        self._held = ""
+        self._settled = not self.line
+        self._trimming = False
+
+    def feed(self, text: str) -> str:
+        """What of ``text`` is shown now; ``""`` while it is held or dropped."""
+        if self._settled:
+            if self._trimming:
+                text = text.lstrip()
+                self._trimming = not text
+            return text
+        self._held += text
+        front = self._held.lstrip()
+        if not front or (len(front) < len(self.line) and self.line.startswith(front)):
+            return ""
+        self._settled = True
+        held, self._held = self._held, ""
+        if not front.startswith(self.line):
+            return held
+        rest = front[len(self.line):].lstrip()
+        self._trimming = not rest
+        return rest
+
+    def finish(self) -> str:
+        """What was still held when the reply ended: the model's, not the line."""
+        held, self._held = self._held, ""
+        self._settled = True
+        return held
+
+
+def without(line, text) -> str:
+    """``text`` with ``line`` taken off its front, as :class:`Unechoed` takes it."""
+    line, text = clean(line), str(text or "")
+    front = text.lstrip()
+    if line and front.startswith(line):
+        return front[len(line):].lstrip()
+    return text
+
+
+__all__ = ["DEFAULTS", "FILE_NAME", "MAX_COUNT", "MAX_LENGTH", "Refused", "Unechoed", "add",
+           "carry", "choose", "clean", "for_thread", "forget", "listed", "path", "remove",
+           "without"]
