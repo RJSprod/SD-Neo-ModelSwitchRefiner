@@ -336,12 +336,37 @@ class TestThroughTheRuntime:
         assert chats.load("Ada", thread.identifier).messages[-1].text == \
             "The color is blue, see?"
 
+    def test_words_on_two_lines_are_put_back_once_with_their_line_break(
+            self, chats, thread, serving):
+        serving(Echoing([" because", " I said so."]))
+        write(thread, "Well.\nThe color is blue")
+
+        run("send", thread, payload={"text": "Why?"}, operation_id="send-1")
+
+        assert chats.load("Ada", thread.identifier).messages[-1].text == \
+            "Well.\nThe color is blue because I said so."
+
     def test_the_stream_keeps_the_model_s_first_space(self, serving):
         serving(Echoing([" because", " I said so."]))
         request = sessions.ChatRequest(
             messages=[{"role": "user", "content": "Why?"},
                       {"role": "assistant", "content": BLUE}],
             conversation="Ada/one", prefilled=True, start_with=BLUE)
+
+        events = list(sessions._conversation(request, sessions.Cancellation()))
+
+        assert [event.text for event in events if event.kind == sessions.CHUNK] == \
+            [" because", " I said so."]
+        assert events[-1].text == " because I said so."
+
+
+    def test_the_emotion_s_line_and_words_on_two_lines_end_as_the_model_s_alone(self, serving):
+        sent = HAPPY + "\n\nWell.\nThe color is blue"
+        serving(Echoing([" because", " I said so."]))
+        request = sessions.ChatRequest(
+            messages=[{"role": "user", "content": "Why?"},
+                      {"role": "assistant", "content": sent}],
+            conversation="Ada/one", prefilled=True, start_with="Well.\nThe color is blue")
 
         events = list(sessions._conversation(request, sessions.Cancellation()))
 

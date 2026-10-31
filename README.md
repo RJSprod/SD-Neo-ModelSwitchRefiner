@@ -3809,11 +3809,12 @@ thread:
   thread's system prompt**, so the reply is written *from* the feeling and
   starts as a reply starts.
 - **Starts the reply** — Oobabooga's own way: the line is written after the
-  character's turn opening, so the model reads it as the first words of its own
-  reply and carries on from it; the page shows only what follows, and the line
-  is taken off what comes back. Replies can begin like the rest of a sentence
-  whose first words were cut away — the reason the system prompt became the
-  default.
+  character's turn opening, followed by an **empty line**, so the model reads it
+  as the first words of its own reply and carries on from it on a line of its
+  own (or from your **Start reply with** words, which follow the empty line);
+  the page shows only what follows, and the line and the empty line are taken
+  off what comes back. Replies can begin like the rest of a sentence whose first
+  words were cut away — the reason the system prompt became the default.
 
 In the system prompt it is added in one shape for every character:
 
@@ -3936,9 +3937,10 @@ model wrote after them is kept exactly as it wrote it (a comma straight after
   thread you pressed it in. **Continue does not**, and leaves them for the next
   reply.
 - **With an emotion on**, the emotion steers from the thread's system prompt and
-  your words start the turn — or, set to start the reply, its line and then your
-  words start the turn; either way the model carries on from both, and only
-  your words are in the reply. (Oobabooga drops the bias for such a reply; here
+  your words start the turn — or, set to start the reply, its line, an empty
+  line and then your words start the turn; either way the model carries on from
+  both, and only your words are in the reply. Words on more than one line keep
+  their line breaks. (Oobabooga drops the bias for such a reply; here
   the emotion keeps steering it.)
 - **Where:** in LLM Studio, the **Start with** chip beside Emotion — its dot
   filled while words are kept — opens a small box under the bar: the words,

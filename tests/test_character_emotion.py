@@ -396,6 +396,18 @@ SAMPLES = (HAPPY + " Oh, hello!", HAPPY + "\n\n*smiles* Oh, hello!", "  " + HAPP
            "Oh, " + HAPPY, "*I am", "*I am so happy", HAPPY, "  ")
 
 
+class TestTheOpening:
+    def test_the_line_is_followed_by_an_empty_line(self):
+        assert emotions.opening(HAPPY) == HAPPY + "\n\n"
+        assert emotions.opening("  " + HAPPY + " ") == HAPPY + "\n\n"
+        assert emotions.BREAK == "\n\n"
+
+    def test_off_opens_with_nothing(self):
+        assert emotions.opening("") == ""
+        assert emotions.opening("   ") == ""
+        assert emotions.opening(None) == ""
+
+
 class TestTheLineIsTakenOffTheFront:
     def test_sent_back_with_the_first_words_it_is_dropped_with_the_space_after_it(self):
         assert "".join(shown([HAPPY + " Oh,", " hello!"])) == "Oh, hello!"
@@ -413,6 +425,22 @@ class TestTheLineIsTakenOffTheFront:
             assert emotions.without(HAPPY, reply) == reply
         assert emotions.without(HAPPY, HAPPY + "\n\n*smiles* Oh!") == "*smiles* Oh!"
         assert emotions.without(HAPPY, HAPPY + " " + HAPPY) == HAPPY
+
+    def test_the_empty_line_after_it_goes_with_it(self):
+        assert "".join(shown([HAPPY + "\n\nOh,", " hello!"])) == "Oh, hello!"
+        assert shown([HAPPY, "\n", "\n", "Oh,"]) == ["", "", "", "Oh,", ""]
+        assert emotions.without(HAPPY, HAPPY + "\n\nOh, hello!") == "Oh, hello!"
+
+    def test_a_line_with_breaks_inside_it_is_compared_exactly_not_folded(self):
+        """A start of yours keeps its line breaks, so the line sent is matched as
+        it is: the emotion, its empty line, then your words."""
+        sent = HAPPY + "\n\nDear Ada,\nThe color is blue"
+        reply = emotions.Unechoed(sent, trim=False)
+        assert [reply.feed(HAPPY + "\n"), reply.feed("\nDear Ada,\nThe color"),
+                reply.feed(" is blue today."), reply.finish()] == ["", "", " today.", ""]
+        assert emotions.without(sent, sent + " today.", trim=False) == " today."
+        folded = HAPPY + " Dear Ada, The color is blue today."
+        assert emotions.without(sent, folded, trim=False) == folded
 
     def test_a_reply_without_the_line_passes_exactly_as_it_came(self):
         assert shown([" Oh,", " hello!"]) == [" Oh,", " hello!", ""]
@@ -627,7 +655,7 @@ class TestTheStartOfTheReplyWay:
 
         run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
 
-        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert asked[-1].messages[-1] == {"role": "assistant", "content": HAPPY + "\n\n"}
         assert asked[-1].messages[-2] == {"role": "user", "content": "Hi."}
         assert asked[-1].prefilled is True
         assert system_of(asked[-1]) == own_prompt()
@@ -642,8 +670,8 @@ class TestTheStartOfTheReplyWay:
         run("resend_from_user", thread, index=0, operation_id="resend-1")
         run("continue", thread, index=last, operation_id="more-1")
 
-        assert asked[0].messages[-1] == {"role": "assistant", "content": HAPPY}
-        assert asked[1].messages[-1] == {"role": "assistant", "content": HAPPY}
+        assert asked[0].messages[-1] == {"role": "assistant", "content": HAPPY + "\n\n"}
+        assert asked[1].messages[-1] == {"role": "assistant", "content": HAPPY + "\n\n"}
         assert asked[2].messages[-1]["role"] == "user"
         assert asked[2].prefilled is False
         assert all(HAPPY not in str(message.get("content")) for message in asked[2].messages)
@@ -675,10 +703,29 @@ class TestTheStartOfTheReplyWay:
 
         run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
 
-        assert server.asked[-1][-1] == {"role": "assistant", "content": HAPPY}
+        assert server.asked[-1][-1] == {"role": "assistant", "content": HAPPY + "\n\n"}
         patches = [event["payload"].get("text", "") for event in subscriber.since(cursor)[0]
                    if event["kind"] == service.REPLY_PATCH]
         assert patches and all(HAPPY not in text for text in patches)
+        assert chats.load("Ada", thread.identifier).messages[-1].text == "Oh, hello!"
+
+    def test_the_turn_starts_with_the_line_and_an_empty_line_and_both_stay_hidden(
+            self, chats, thread, serving):
+        """The user's word: the reply starts on a line of its own, after an empty
+        one, and none of it shows -- however the server cuts its first pieces."""
+        server = Echoing([HAPPY, "\n", "\nOh,", " hello!"], echo=False)
+        serving(server)
+        choose(thread, HAPPY)
+        cursor = feed.cursor()
+        subscriber = feed.subscribe("page-1")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert server.asked[-1][-1]["content"].endswith(HAPPY + "\n\n")
+        patches = [event["payload"].get("text", "") for event in subscriber.since(cursor)[0]
+                   if event["kind"] == service.REPLY_PATCH]
+        assert patches and all(HAPPY not in text and not text.startswith("\n")
+                               for text in patches)
         assert chats.load("Ada", thread.identifier).messages[-1].text == "Oh, hello!"
 
     def test_with_a_start_of_yours_both_start_the_turn_and_only_your_words_are_kept(
@@ -693,9 +740,24 @@ class TestTheStartOfTheReplyWay:
         run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
 
         assert server.asked[-1][-1] == {"role": "assistant",
-                                        "content": HAPPY + " The color is blue"}
+                                        "content": HAPPY + "\n\nThe color is blue"}
         assert chats.load("Ada", thread.identifier).messages[-1].text == \
             "The color is blue, see?"
+
+    def test_a_start_with_line_breaks_of_its_own_keeps_them_and_hides_only_the_line(
+            self, chats, thread, serving):
+        import mc_llm_start_with
+
+        server = Echoing([" today."])
+        serving(server)
+        choose(thread, HAPPY)
+        mc_llm_start_with.write("Ada", thread.identifier, "Dear Ada,\nThe color is blue")
+
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+
+        assert server.asked[-1][-1]["content"] == HAPPY + "\n\nDear Ada,\nThe color is blue"
+        assert chats.load("Ada", thread.identifier).messages[-1].text == \
+            "Dear Ada,\nThe color is blue today."
 
     def test_the_reply_is_read_again_after_it_is_saved(self, thread, monkeypatch, updates):
         asking(monkeypatch, pieces=(" Oh,", " hello!"))

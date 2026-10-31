@@ -787,13 +787,15 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
     # Read from the thread the command names: a Regenerate that lands in a
     # branch spends the start written where it was pressed.
     start = _start_for(envelope.conversation, target_kind, wire)
-    line = emotion if steer == _PREFILL and _fresh_reply(target_kind, wire) else ""
-    prefill = " ".join(part for part in (line, start) if part)
+    fresh = _fresh_reply(target_kind, wire)
+    line = _emotion_opening(emotion) if steer == _PREFILL and fresh else ""
+    prefill = line + start
     if prefill:
         # The start of the character's turn: llama-server carries on from it
         # and sends it back at the front of the reply, where it is taken off
-        # (mc_llm_sessions). The emotion's line is never in the reply; a start
-        # of yours is put back as its first words (``opening``).
+        # (mc_llm_sessions). The emotion's line and the empty line after it are
+        # never in the reply; a start of yours is put back as its first words
+        # (``opening``).
         wire.append({"role": "assistant", "content": prefill})
     request = sessions.ChatRequest(
         messages=wire,
@@ -866,6 +868,15 @@ def _spend_start(store, key: Key, start: str) -> None:
                         revision=store_module.token(store, key), kind_detail="start_with")
     except Exception:
         logger.debug("Model Chain: could not say a reply start was spent", exc_info=True)
+
+
+def _emotion_opening(emotion: str) -> str:
+    """The emotion as the start of a new reply: its line, then an empty line, so
+    what follows -- the reply, or a start of yours -- begins on a line of its own
+    (``mc_llm_emotions.opening``)."""
+    import mc_llm_emotions
+
+    return mc_llm_emotions.opening(emotion)
 
 
 def _emotion_of(key: Key) -> str:

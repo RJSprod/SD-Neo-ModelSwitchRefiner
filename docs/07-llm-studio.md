@@ -4671,7 +4671,8 @@ named against a thread; the snapshot carries `emotion_mode`.
 - **Starts the reply**: #313's prefill brought back -- the line as a trailing
   assistant message for a fresh reply only (`_fresh_reply`: Send, Regenerate,
   Send again after a message of yours; never Continue, never after a reply),
-  joined before a start of yours when there is one, taken off the stream by
+  followed by an empty line and a start of yours when there is one (below),
+  taken off the stream by
   `Unechoed` (with `trim` on for the line alone, off once your words follow),
   the reply's slot unsaved, and the conversation read again after the reply is
   saved (`_update_cache_after` on `prefilled`). The system prompt is then the
@@ -4691,6 +4692,31 @@ a reply; the line never in the reply through the real runtime; a start of yours
 after the line; the read after the reply; no read on a change), the switch's
 reads (with an emotion, without, the same way again), and both views' controls.
 Twenty mutations each fail a test. Drawn in Chromium.
+
+**Then an empty line after the line.** The user: "when emotion is set to
+(hidden) prepend text instead of editing system prompt, let's make that
+prepended text end in a new line ... so the reply (or start with...) starts on
+a new line and not directly after the last character of the emotion bias", and
+then "Make it a double new actually, so there is a one empty line gap that is
+there. All of that should then be hidden". Under `PREFILL` the turn now starts
+`mc_llm_emotions.opening(line)`: the line and `BREAK`, `"\n\n"` -- where
+Oobabooga's `bot_prefix_modifier` ends on a space -- with a start of yours
+written straight after it (`prefill = line + start`; no space put in). Read
+again in llama.cpp b10621's `common_chat.cpp`: the continued message's content
+is appended to the generation prompt as it is (`render_content`), every
+template but StepFun's leaving its whitespace alone, so the empty line reaches
+the model. What comes back is the line, the empty line, your words if any and
+the model's; `Unechoed` and `without` take the first two off (the line alone:
+the whitespace after it with `trim` on) or all three (your words put back as
+the reply's first). Found on the way: both compared the line **folded to one
+line** (`clean`), so a start of yours with a line break inside it -- possible
+since §41, whose box keeps its lines -- never matched its echo and the reply
+came back with your words twice, under either way. They compare the line as it
+was sent now, its ends trimmed. Tests: the opening (the empty line, Off opens
+with nothing), the wire for Send, Regenerate and Send again, the server cutting
+the line and the empty line into pieces of their own, a start with a line
+break of its own after the line and alone, through the panel and through the
+runtime. Eight mutations each fail a test.
 
 ## 41. Start reply with (31 October 2026)
 

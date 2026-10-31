@@ -18,11 +18,12 @@ Oobabooga's *character bias*, brought across, with a switch between two roads
   ``bot_prefix_modifier`` writes the line after the character's turn opening,
   so the model reads it as the first words of its own reply and the page shows
   only what follows. Here the line is a trailing assistant message for Send,
-  Regenerate and Send again after a message of yours -- never Continue -- which
-  llama-server continues and sends back at the front of the reply, where
-  :class:`Unechoed` takes it off; the user found such replies starting "like
-  there is hidden response that's been cropped out", which is why the system
-  prompt became the default, and asked to keep both. The cache disagrees with
+  Regenerate and Send again after a message of yours -- never Continue --
+  ending on an empty line (:func:`opening`), which llama-server continues and
+  sends back at the front of the reply, where :class:`Unechoed` takes it off;
+  the user found such replies starting "like there is hidden response that's
+  been cropped out", which is why the system prompt became the default, and
+  asked to keep both. The cache disagrees with
   the next prompt from the line onward, so the reply is read again in the
   background after it is saved.
 
@@ -87,6 +88,12 @@ the same for every request in it (:func:`system_note`). The default."""
 PREFILL = "prefill"
 """Oobabooga's way: the line written after the character's turn opening, as the
 first words of a new reply, and taken off what comes back (:class:`Unechoed`)."""
+
+BREAK = "\n\n"
+"""What follows the line at the start of a reply (:data:`PREFILL`, :func:`opening`):
+an empty line, so the reply -- or a start of yours -- begins on a line of its own
+and not straight after the line's last character. Oobabooga's modifier ends on a
+space; the user asked for the empty line. Hidden with the line."""
 
 MODES = (SYSTEM, PREFILL)
 """One choice for every thread, kept with the list."""
@@ -300,6 +307,13 @@ def system_note(line, name, you="you") -> str:
 # -- the reply ------------------------------------------------------------------ #
 
 
+def opening(line) -> str:
+    """The start of a new reply under :data:`PREFILL`: the line, then an empty
+    line (:data:`BREAK`); ``""`` for Off. A start of yours follows it as it is."""
+    line = clean(line)
+    return line + BREAK if line else ""
+
+
 class Unechoed:
     """A reply streamed from a line, with the line taken off its front.
 
@@ -308,10 +322,13 @@ class Unechoed:
     line out of the first piece it streams only for a request marked as a
     continuation, which nothing in its chat endpoint marks. So the reply comes
     back as the line, then what the model wrote after it. The pieces are held
-    while they could still be the line; the line and the space after it are
-    dropped when they are there, and anything else passes as it came: a reply
-    that opens with an action of its own in asterisks, the line written again
-    further on. Only the very front is compared.
+    while they could still be the line; the line and the spaces and line breaks
+    after it are dropped when they are there, and anything else passes as it
+    came: a reply that opens with an action of its own in asterisks, the line
+    written again further on. Only the very front is compared, and exactly:
+    what was sent is the emotion's line, its empty line (:func:`opening`) and a
+    start of yours, whose own line breaks are its own, so nothing inside it is
+    folded.
 
     ``trim`` false keeps the space after the line: the line ends on words the
     caller shows as the reply's start (:mod:`mc_llm_start_with`), and what the
@@ -319,7 +336,7 @@ class Unechoed:
     """
 
     def __init__(self, line: str, trim: bool = True):
-        self.line = clean(line)
+        self.line = str(line or "").strip()
         self.trim = trim
         self._held = ""
         self._settled = not self.line
@@ -355,7 +372,7 @@ class Unechoed:
 
 def without(line, text, trim: bool = True) -> str:
     """``text`` with ``line`` taken off its front, as :class:`Unechoed` takes it."""
-    line, text = clean(line), str(text or "")
+    line, text = str(line or "").strip(), str(text or "")
     front = text.lstrip()
     if line and front.startswith(line):
         rest = front[len(line):]
@@ -484,7 +501,7 @@ def _clean_thread(store, key, lines) -> int:
     return count
 
 
-__all__ = ["CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT", "MAX_LENGTH",
-           "MODES", "PREFILL", "Refused", "SYSTEM", "Unechoed", "add", "carry", "choose",
-           "clean", "clean_saved_replies", "for_thread", "forget", "listed", "mode", "path",
-           "remove", "set_mode", "system_note", "without"]
+__all__ = ["BREAK", "CLEANUP_FILE", "DEFAULTS", "FILE_NAME", "LEAK_BEGAN", "MAX_COUNT",
+           "MAX_LENGTH", "MODES", "PREFILL", "Refused", "SYSTEM", "Unechoed", "add", "carry",
+           "choose", "clean", "clean_saved_replies", "for_thread", "forget", "listed", "mode",
+           "opening", "path", "remove", "set_mode", "system_note", "without"]
