@@ -296,7 +296,10 @@ class TestTheResizeHandle:
         assert found["framed"] > 0
 
     def test_a_finger_on_the_edge_is_a_resize_and_not_a_pan(self):
-        rule = stylesheet().split(".forge-assistant-resize {", 1)[1].split("}", 1)[0]
+        # The strip's own rule, at the start of its line: a rule that only
+        # moves it -- a panel with its buttons down one side, docs/22 §3.47 --
+        # also ends in its class.
+        rule = stylesheet().split("\n.forge-assistant-resize {", 1)[1].split("}", 1)[0]
 
         assert "touch-action: none" in rule
 

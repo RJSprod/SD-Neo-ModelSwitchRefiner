@@ -2650,10 +2650,10 @@
         // Outside to Close, the workspace button with the conversation. Each
         // comes and goes by its `hidden`, which is what is heard; the panel's
         // own size does not change for it, so its observer above hears nothing.
+        // Placing again where nothing moved changes nothing, so a header along
+        // the top is placed again too rather than asked about.
         if (typeof MutationObserver === "function") {
-            const buttons = new MutationObserver(() => {
-                if (this.state.panelRail) this.place();
-            });
+            const buttons = new MutationObserver(() => this.place());
             buttons.observe(nodes.header, {attributes: true, attributeFilter: ["hidden"], subtree: true});
             this.disposers.push(() => buttons.disconnect());
         }

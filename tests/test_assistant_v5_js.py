@@ -233,6 +233,7 @@ class TestTheMenuIsGrouped:
             ["BUTTON", "menuitemcheckbox", "Free Float"],
             ["BUTTON", "menuitemcheckbox", "Tab Bar in Focus"],
             ["BUTTON", "menuitemcheckbox", "Tap Outside to Close"],
+            ["BUTTON", "menuitem", "Transpose View"],
             ["BUTTON", "menuitem", "Customize…"],
             ["DIV", "presentation", "Models"],
             ["BUTTON", "menuitemradio", "Warm LoRA"],

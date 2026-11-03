@@ -4179,8 +4179,13 @@ docked column, the dock's slot — is laid out differently. Two things follow:
   so the shell writes the panel's least height (`fitRail`,
   `--forge-assistant-rail-min`): the buttons shown, the grip's least height,
   the gaps, the rail's padding and the panel's borders, measured at every
-  placement, written only when it changes, and nothing measured at all on a
-  panel that never had a rail.
+  placement (`placeNow`), written only when it changes, and nothing measured
+  without a rail. The buttons come and go with nobody placing the panel -- ▶
+  and 🎛 with the workspace, ✕ with Tap Outside to Close, the workspace
+  button with the conversation -- and the panel's own size does not change
+  for it, so a MutationObserver on the header hears their `hidden` and places
+  the panel again (a placement where nothing moved changes nothing, so a
+  header along the top is placed again too rather than asked about).
 - A floating panel holds its header in place as it grows (`floatHold`, §3.30).
   The header is the whole rail now, so it holds its thin side — the rail's
   width, where the header row held its height — or the panel would be held
@@ -4206,7 +4211,8 @@ wide buttons; both drawers beside the rail from the top, the extra networks in
 focus mode too; in focus mode the kept rail and the workspace beside it, hidden
 off its side, and top → left → right → top with focus on; the panel's rail on
 either side with the column at the panel's top, the grip dragging it, a short
-panel as tall as its rail, the edge strip and the corner beside it, the memory
+panel as tall as its rail and still as tall after a switch of workspace that
+adds ▶ and 🎛 to it, the edge strip and the corner beside it, the memory
 reading down the grip; the menu's place, its choices and checks, the choices
 kept in the browser and on the root before the UI is built, and the tab bar's
 choices greyed without the theme. `tests/test_assistant_transpose_js.py`
@@ -4217,7 +4223,15 @@ height and its writes, `floatHold`, the submenu. `tests/test_assistant_focus_js.
 while hidden or peeking, a railed root over a bar along the top, a change of
 side said once, and leaving taking every mark off.
 `tests/test_lora_viewer_js.py`: the viewer beside a rail on either side, the
-rail still answering. __MUTATIONS__ Not run on the user's machine, in a Gecko
+rail still answering. Seventy-three mutations each fail a test. Six survived a
+first pass: three tests were tightened (the accent's offsets read exactly
+rather than as a substring, a change of side alone in focus mode, and a switch
+of workspace that adds buttons to a short panel -- which found the rail's
+least height left stale until something placed the panel, hence the observer
+above), and three rules that changed nothing were removed (the rail's own
+`::before`, already none on an icon bar; a width for its buttons, which the
+header's buttons already have; an early return before a measurement that is
+already gated). Not run on the user's machine, in a Gecko
 build or beside Mini Paint NEO's WanGP frame.
 
 ## 4. Deliberate deviations
