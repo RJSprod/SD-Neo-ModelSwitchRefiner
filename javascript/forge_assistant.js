@@ -5277,6 +5277,9 @@
         if (NS.systemEditor && NS.systemEditor.isOpen()) return;
         // The message editor's Escape is its own too: it cancels the edit.
         if (window.mcMessageEditor && window.mcMessageEditor.isOpen()) return;
+        // And the LoRA viewer's, which cancels it (model_chain_lora_viewer.js
+        // takes Escape on the window first; this is the same answer if not).
+        if (window.mcLoraViewer && window.mcLoraViewer.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,

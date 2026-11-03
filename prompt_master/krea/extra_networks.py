@@ -130,6 +130,35 @@ def protect(text) -> str:
     return "".join(kept)
 
 
+def last(text) -> str:
+    """``text`` with every extra-network tag moved to its end, in the order they had.
+
+    For an image's *saved* prompt, and only that: the ``Prompt:`` line Forge
+    writes is the finished string :func:`protect` and the literal restore built,
+    with every tag in front, and the user reads it back in PNG Info wanting the
+    tags after the words (``mc_saved_prompt``). What it changes is where the
+    tags sit in that text, never what a paste of it generates: pasting either
+    form back, :func:`protect` lifts the same tags in the same order and the
+    parse tidies the same words, so Stage 1 is given the same string from both.
+    The words are tidied the way the parse tidies them, which is what keeps that
+    true; ``tests/test_saved_prompt.py`` holds it over a spread of prompts.
+
+    Returns the source string itself when there is nothing to move, and also
+    when moving could change what a paste generates: a line that still holds
+    ``[[`` (its commands would be read in a new order) and one with a tag right
+    after a ``+`` or ``-`` (pasted, that tag is read as a placed command).
+    """
+    source = str(text or "")
+    tags = [match.group(0) for match in _TAG.finditer(source)]
+    if not tags or literals.OPEN in source:
+        return source
+    for match in _TAG.finditer(source):
+        if match.start() > 0 and source[match.start() - 1] in literals._SIGNS:
+            return source
+    body = literals._tidy(_TAG.sub("", source))
+    return literals.join([body, *tags])
+
+
 def count(text) -> int:
     """How many tags :func:`protect` would wrap. For a log line, and for tests.
 

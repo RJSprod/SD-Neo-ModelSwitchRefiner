@@ -1054,8 +1054,10 @@ def chain(host, style_store, monkeypatch, image_factory):
         return types.SimpleNamespace(images=[image], index_of_first_image=0)
 
     monkeypatch.setattr(model_chain, "process_images", fake_process_images)
+    # Through Forge's module: the chain calls ``processing.create_infotext``,
+    # the function mc_saved_prompt wraps, rather than a name imported from it.
     monkeypatch.setattr(
-        model_chain, "create_infotext",
+        model_chain.processing, "create_infotext",
         lambda p, prompts, seeds, subseeds, index=None, **kw: f"infotext#{index} seed={seeds[index]}",
     )
 

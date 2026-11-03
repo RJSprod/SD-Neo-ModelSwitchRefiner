@@ -25,6 +25,7 @@ import mc_assistant_settings
 import mc_batch_once
 import mc_broker
 import mc_gallery_quadrant
+import mc_lora_viewer
 import mc_hint
 import mc_infotext
 import mc_literal_report
@@ -53,6 +54,7 @@ import mc_presets
 import mc_profile_state
 import mc_progress
 import mc_prompt_padding
+import mc_saved_prompt
 import mc_references
 import mc_styles
 import mc_theme
@@ -93,7 +95,6 @@ import mc_voice_ui
 from modules import errors, images, processing, scripts, shared
 from modules.processing import (
     StableDiffusionProcessingImg2Img,
-    create_infotext,
     process_images,
 )
 from modules.shared import opts, state
@@ -3443,9 +3444,12 @@ class ScriptModelChain(scripts.Script):
 
         # Build every Stage 2 infotext now, while Model A is still loaded:
         # create_infotext reads live model attributes, and after the switch
-        # those would describe Model B.
+        # those would describe Model B. Called through Forge's module, not a
+        # name imported from it, so it is the function mc_saved_prompt wraps:
+        # these become the chained images' saved text.
         infotexts = [
-            create_infotext(p, processed.all_prompts, processed.all_seeds, processed.all_subseeds, index=i)
+            processing.create_infotext(p, processed.all_prompts, processed.all_seeds,
+                                       processed.all_subseeds, index=i)
             for i in range(len(stage1_images))
         ]
 
@@ -4357,6 +4361,11 @@ def _on_script_unloaded():
         mc_prompt_padding.uninstall()
     except Exception:
         errors.report("Model Chain: failed to put back Forge's prompt stacking", exc_info=True)
+    # Forge's own infotext writer back, for the same reason (mc_saved_prompt).
+    try:
+        mc_saved_prompt.uninstall()
+    except Exception:
+        errors.report("Model Chain: failed to put back Forge's create_infotext", exc_info=True)
     # The LLM lives in another process, so releasing our own references would
     # leave it running and holding VRAM after the extension has gone. It is
     # stopped first, and the residency register cleared after, so a reload
@@ -4414,6 +4423,9 @@ try:
     # their lengths, which ran a wildcard batch out of memory on Krea 2
     # (mc_prompt_padding). Before any generation can run.
     script_callbacks.on_app_started(mc_prompt_padding.on_app_started)
+    # LoRA tags at the end of an image's saved prompt, where this extension
+    # had put them in front (mc_saved_prompt). Before any generation can run.
+    script_callbacks.on_app_started(mc_saved_prompt.on_app_started)
     # The first sampling step of every pass: the host has read its batch flag
     # by then, so the override puts it back there.
     if hasattr(script_callbacks, "on_cfg_denoiser"):
@@ -4421,6 +4433,9 @@ try:
     script_callbacks.on_app_started(mc_literal_report.install)
     # The Gallery Quadrant's save route: the top-left zone's copy into a folder.
     script_callbacks.on_app_started(mc_gallery_quadrant.install)
+    # The LoRA viewer's details: a picture and trigger words for each LoRA in
+    # the prompt (mc_lora_viewer; the viewer is javascript/model_chain_lora_viewer.js).
+    script_callbacks.on_app_started(mc_lora_viewer.install)
     # The Voice Chat browser routes. Registered here rather than at import for
     # the reason every other route in this file is: there is no FastAPI app to
     # add anything to until the host has one.
