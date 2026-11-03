@@ -42,6 +42,16 @@
     const BAR_ATTRIBUTE = "data-forge-assistant-focus-bar";
     const BAR_MODES = ["shown", "hidden", "peek"];
     const TOP_PROPERTY = "--forge-assistant-focus-top";
+    // The kept bar as a rail down one side (the shell's Transpose View, docs/22
+    // §3.47): the root says the tab bar is one (RAIL_ATTRIBUTE, written by the
+    // shell, laid out by the Model Chain theme), the body says the kept bar is
+    // that rail (FOCUS_RAIL_ATTRIBUTE), and the workspace starts at the window's
+    // top beside it, inset by the rail's width (SIDE_PROPERTY) while it shows.
+    // A rule of its own in the stylesheet, so the focus root's rule -- which
+    // Mini Paint NEO's browser check carries a copy of -- is unchanged.
+    const RAIL_ATTRIBUTE = "data-forge-assistant-rail";
+    const FOCUS_RAIL_ATTRIBUTE = "data-forge-assistant-focus-rail";
+    const SIDE_PROPERTY = "--forge-assistant-focus-side";
     // Chrome of somebody else's that goes with the kept bar -- the Model Chain
     // theme's quick settings drawer, which the bar's button opens -- left in
     // the layout by the rule that takes the rest out. It draws itself.
@@ -207,12 +217,29 @@
         return found;
     }
 
+    /** The side a kept bar runs down when it is a rail: the root names the
+     *  side, and the bar's own box -- taller than it is wide -- says the
+     *  stylesheet has made it one. "" for a bar along the top. */
+    function railSide(bar) {
+        const html = document.documentElement;
+        const side = html && html.getAttribute ? html.getAttribute(RAIL_ATTRIBUTE) : null;
+        if (side !== "left" && side !== "right") return "";
+        try {
+            const box = bar.getBoundingClientRect();
+            return (box.height || 0) > (box.width || 0) ? side : "";
+        } catch (error) {
+            return "";
+        }
+    }
+
     function clearBar(context) {
         if (context.bar && context.bar.classList) context.bar.classList.remove(BAR_CLASS);
         context.bar = null;
         const body = document.body;
         if (!body) return;
         if (body.hasAttribute(BAR_ATTRIBUTE)) body.removeAttribute(BAR_ATTRIBUTE);
+        if (body.hasAttribute(FOCUS_RAIL_ATTRIBUTE)) body.removeAttribute(FOCUS_RAIL_ATTRIBUTE);
+        if (body.style && body.style.getPropertyValue(SIDE_PROPERTY)) body.style.removeProperty(SIDE_PROPERTY);
         if (body.style && body.style.getPropertyValue(TOP_PROPERTY)) body.style.removeProperty(TOP_PROPERTY);
     }
 
@@ -569,19 +596,46 @@
         const body = document.body;
         if (!context || !context.bar || !body) return false;
         if (body.getAttribute(BAR_ATTRIBUTE) !== this.barMode) body.setAttribute(BAR_ATTRIBUTE, this.barMode);
+        // A rail down one side leaves the workspace the window's top and
+        // takes its own width off that side; a bar along the top takes its
+        // height off the top. Either only while it shows.
+        const side = railSide(context.bar);
         let top = 0;
+        let inset = 0;
         if (this.barMode === "shown") {
             try {
                 const box = context.bar.getBoundingClientRect();
-                top = Math.max(0, Math.round((box.top || 0) + (box.height || 0)));
+                const width = (document.documentElement && document.documentElement.clientWidth)
+                    || window.innerWidth || 0;
+                if (side === "left") inset = Math.max(0, Math.round(box.right || 0));
+                else if (side === "right") inset = Math.max(0, Math.round(width - (box.left || 0)));
+                else top = Math.max(0, Math.round((box.top || 0) + (box.height || 0)));
             } catch (error) {
                 top = 0;
+                inset = 0;
             }
         }
+        let moved = false;
+        if (side) {
+            if (body.getAttribute(FOCUS_RAIL_ATTRIBUTE) !== side) {
+                body.setAttribute(FOCUS_RAIL_ATTRIBUTE, side);
+                moved = true;
+            }
+        } else if (body.hasAttribute(FOCUS_RAIL_ATTRIBUTE)) {
+            body.removeAttribute(FOCUS_RAIL_ATTRIBUTE);
+            moved = true;
+        }
+        const sideValue = inset + "px";
+        if (body.style.getPropertyValue(SIDE_PROPERTY) !== sideValue) {
+            body.style.setProperty(SIDE_PROPERTY, sideValue);
+            moved = true;
+        }
         const value = top + "px";
-        if (body.style.getPropertyValue(TOP_PROPERTY) === value) return false;
-        body.style.setProperty(TOP_PROPERTY, value);
-        return true;
+        if (body.style.getPropertyValue(TOP_PROPERTY) !== value) {
+            body.style.setProperty(TOP_PROPERTY, value);
+            moved = true;
+        }
+        return moved;
     };
 
     /** Shown, hidden or peeking: kept across focus going off and on, because

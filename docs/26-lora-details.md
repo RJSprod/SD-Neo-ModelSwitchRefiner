@@ -251,3 +251,67 @@ block's `width: auto`) got its assertion.
 - The gallery column's cards grid is `auto-fill` at 13.5 rem; the Gradio
   `Image` of the selected prompt is capped at 24 em. Neither was tuned on the
   user's screen.
+
+---
+
+## 8. The LoRA viewer, and LoRA tags at the end of the saved prompt (2026-11-03)
+
+Two asks, one pull request, after a mockup the user approved (artifact *LoRA
+Viewer Mockup*): "when a image we created is read back from .png info, all the
+lora are at the front of the prompt, i want the lora to always be at the end";
+and a button beside the four in the prompt tool row that opens "a lora viewer
+... mostly full page (below tab bar)": every LoRA in the prompt and either
+Literal box, its picture, its name, its trigger words as pills that copy, a
+slider from -5 to 5 in steps of 0.05 the width of the view with a box for a
+value outside it, scrolling, Cancel and Apply; "compact and mobile friendly",
+round-cornered pictures, thin rows, a slider a finger can use. Asked "did I
+forget anything?", the mockup added what is listed in 8.2; the user kept all of
+it, answered **no** to a long press that would add a trigger to the prompt
+(pills copy, nothing else), and took the upright sliders for the icon.
+
+### 8.1 Decisions
+
+| Question | Decision |
+|---|---|
+| Why the tags were in front | This extension's doing: `extra_networks.protect` brackets every bare tag in the Txt2Img prompt and `literals.restore` puts the payloads in front of the finished prompt, on every generation, Creative on or off; the saved `Prompt:` line is that string |
+| Where they move | In the **saved text only**. Moving them in what Forge is given would change the whitespace an LLM text encoder may read, and so images from old seeds; the saved text costs nothing to move, and a paste of it lifts the tags in front again, so it generates what a paste of the old order did (`tests/test_saved_prompt.py` holds that over 2,500 generated prompts) |
+| How | `mc_saved_prompt` wraps Forge's `processing.create_infotext` at app start and puts it back on unload, like `mc_prompt_padding`. Forge builds its text exactly as before (its `Hires prompt` comparison included, which reads the prompt as Forge has it); only the head of the result is replaced, and only when the result starts with the prompt Forge put there. Model Chain's Stage 2 infotexts call the function through Forge's module now, not a name imported from it |
+| Which images | Only a generation the Krea hook lifted a tag in (`_mark_lifted`, a mark on `p`): Img2Img has nothing that lifts a tag back, so moving its tags would change what a paste generates |
+| The viewer's data | The browser reads the tags (names and weights on screen at once); one `GET` per opening answers pictures and trigger words for all of them, with an 8 s deadline. Found as Forge's `load_networks` finds a LoRA (alias, or the file's name for an ambiguous alias, one rescan for a name not known yet); the card is `create_item(name, enable_filter=False)`; the triggers are LoRA Details' library, then Forge's activation text split at commas; never a file hashed |
+| Its place on the page | `document.body`, fixed, under whatever tab bar is on screen, on the shared dialog layer (2000), announced with `minipaint:overlay`; Escape taken on the window's capture phase, before Forge's interrupt and the assistant's focus exit (and a guard in the assistant's `documentKey`, as for the message editor) |
+| Its colours | The page theme's Gradio variables, so it follows the theme in use; the three that mean something are Gradio's orange, yellow and green (a negative weight, a LoRA not on disk, a trigger already in the prompt), each with a fallback, because every section of `style.css` after the first mention of LLM Studio is held to the host's variables by two tests |
+
+### 8.2 What the mockup added
+
+The bin (undoable until Apply), ↺ per row and Reset all, − and + at the
+slider's ends with hold-to-repeat, a vertical swipe that never moves a slider
+(`touch-action: pan-y` on the track, a finger's drag decided by its first
+6 px), the value above the knob while dragging, a hollow knob past ±5 and an
+orange one below 0, the tick on a trigger already in the prompt, **+N** for the
+pills that do not fit, the amber row for a tag that names no LoRA, the picture's
+fallbacks, two rows for a LoRA in two boxes, a tag with named weights shown
+fixed, Escape as Cancel, a tap outside that does nothing, a change of tab as
+Cancel, and the assistant's panel stepping aside.
+
+### 8.3 Tests
+
+`tests/test_saved_prompt.py` (the move, the paste invariant, the wrapper
+against a copy of Forge's `create_infotext` with its `Hires prompt` callable,
+the hook's mark), `tests/test_lora_viewer.py` (the lookup, the card, the
+triggers, the pictures, never hashing, the route as a plain handler; its real
+FastAPI test also ran under Forge Neo's pins, FastAPI 0.127.1 and Pydantic
+2.10.6), and `tests/test_lora_viewer_js.py` (the script and its stylesheet
+section in Chromium on a Forge-shaped page, and the assistant's guard in node).
+`tests/test_orchestration.py`'s chained-infotext test, its fixture translated
+to patch Forge's module, holds the Stage 2 call. Fifty-six mutations, each
+reverting one decision, each failed a test.
+
+### 8.4 Open
+
+- Neither has run on the user's machine. The viewer's pictures are Forge's
+  `thumb` URLs and LoRA Details' thumbnails, checked against stand-ins of both.
+- `inputmode="decimal"` brings up a keyboard without a minus sign on some
+  phones; a negative weight past -5 is then typed with the slider at -5 and
+  the box's number changed, or from a full keyboard.
+- The saved text of an image made before this change keeps its tags in front;
+  it pastes and generates as before.

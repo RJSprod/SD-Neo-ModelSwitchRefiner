@@ -899,6 +899,110 @@ class TestTheWorkspacesOwnTabBar:
         assert found == {"kept": False, "hidden": False, "mode": None, "top": None}
 
 
+RAIL_BAR = OWN_BAR + """
+// The Forge Assistant's Transpose View says on the root that the tab bar runs
+// down one side; the Model Chain theme's stylesheet makes it a strip the
+// window's height, 48 px wide. The window is 1280 wide.
+documentElement.clientWidth = 1280;
+const railOn = (side) => {
+    documentElement.setAttribute("data-forge-assistant-rail", side);
+    bar.box = side === "left" ? {left: 0, top: 0, width: 48, height: 800, right: 48}
+                              : {left: 1232, top: 0, width: 48, height: 800, right: 1280};
+};
+const railOff = () => {
+    documentElement.removeAttribute("data-forge-assistant-rail");
+    bar.box = {width: 1264, height: 44};
+};
+const sides = () => Object.assign(marks(), {
+    side: document.body.getAttribute("data-forge-assistant-focus-rail"),
+    inset: document.body.style.getPropertyValue("--forge-assistant-focus-side") || null,
+});
+"""
+
+
+class TestTheKeptBarAsARail:
+    """Transpose View in focus mode (docs/22 §3.47): "i DO want this
+    functionality in focus mode as well". The kept bar is the rail, the
+    window's height down its side, and the workspace starts at the window's
+    top beside it."""
+
+    def test_down_the_left_or_right_the_workspace_is_inset_by_its_width_and_not_from_the_top(self):
+        found = run(RAIL_BAR + """
+            const out = {};
+            railOn("left");
+            focus.enter("tab_txt2img", HOST);
+            out.left = sides();
+            focus.exit();
+            railOn("right");
+            focus.enter("tab_txt2img", HOST);
+            out.right = sides();
+            console.log(JSON.stringify(out));
+        """)
+
+        assert found["left"] == {"kept": True, "hidden": False, "mode": "shown", "top": "0px",
+                                 "side": "left", "inset": "48px"}
+        assert found["right"]["side"] == "right" and found["right"]["inset"] == "48px"
+        assert found["right"]["top"] == "0px"
+
+    def test_hidden_or_peeking_it_takes_nothing_off_the_side_and_stays_a_rail(self):
+        found = run(RAIL_BAR + """
+            railOn("left");
+            focus.enter("tab_txt2img", HOST);
+            const out = {};
+            ["hidden", "peek", "shown"].forEach((mode) => { focus.setBar(mode); out[mode] = sides(); });
+            console.log(JSON.stringify(out));
+        """)
+
+        for mode in ("hidden", "peek"):
+            assert found[mode]["side"] == "left", "it still goes off, or peeks in, from its side"
+            assert found[mode]["inset"] == "0px" and found[mode]["top"] == "0px", mode
+        assert found["shown"]["inset"] == "48px"
+
+    def test_a_bar_still_along_the_top_is_not_a_rail_whatever_the_root_says(self):
+        """The root names a side, but the bar is wider than it is tall: the
+        theme that lays the rail out is off, and Forge's own bar is along the
+        top. The workspace starts under it, as it always did."""
+        found = run(RAIL_BAR + """
+            documentElement.setAttribute("data-forge-assistant-rail", "left");
+            focus.enter("tab_txt2img", HOST);
+            console.log(JSON.stringify(sides()));
+        """)
+
+        assert found["side"] is None and found["inset"] == "0px" and found["top"] == "44px"
+
+    def test_a_change_of_side_is_said_once_and_moves_the_fill_and_leaving_takes_it_all_off(self):
+        found = run(RAIL_BAR + """
+            focus.enter("tab_txt2img", HOST);
+            const out = {along: sides()};
+            railOn("right");
+            out.moved = focus.placeBar();
+            out.again = focus.placeBar();
+            out.railed = sides();
+            railOn("left");
+            out.across = focus.placeBar();
+            out.left = sides();
+            railOn("right");
+            focus.placeBar();
+            railOff();
+            out.back = focus.placeBar();
+            out.top = sides();
+            railOn("left");
+            focus.placeBar();
+            focus.exit();
+            out.gone = sides();
+            console.log(JSON.stringify(out));
+        """)
+
+        assert found["along"]["side"] is None and found["along"]["top"] == "44px"
+        assert found["moved"] is True and found["again"] is False
+        assert found["railed"]["side"] == "right" and found["railed"]["top"] == "0px"
+        assert found["across"] is True, "right to left: the same width and top, only the side changed"
+        assert found["left"]["side"] == "left" and found["left"]["inset"] == "48px"
+        assert found["back"] is True and found["top"]["side"] is None and found["top"]["top"] == "44px"
+        assert found["gone"] == {"kept": False, "hidden": False, "mode": None, "top": None,
+                                 "side": None, "inset": None}
+
+
 class TestSuperFocus:
     """Super focus (docs/22 §3.39) is one class beside focus's on the focused
     panel, `forge-assistant-wangp-studio`: what Mini Paint NEO's WanGP tab

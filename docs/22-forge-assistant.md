@@ -4076,6 +4076,164 @@ the moment after the release, and the panel stays closed; a drag of the
 panel's header brings it and leaves the panel open. Four mutations each fail a
 test. Not run on the user's machine or in a Gecko build.
 
+## 3.47 Transpose View: the tab bar and the panel's buttons down a side (2026-11-03)
+
+Asked for once the LoRA viewer was in its pull request:
+
+> "lets add a new mode in flyout menu "..." menu that is called "transpose
+> view". it should me the tab bar of webui render on a slim strip on the left
+> of screen, all of its now buttons, separated between tabs and other stuff.
+> 2. Same on flyot menu buttons which are currently top row, lets transpose
+> those to a slim strip on the left of the flyout, including the drag
+> handle! ... in both cases the top of the view should be minimally padded
+> content. also need an option to choose right side for either of these
+> independently."
+
+and then: "i DO want this functionality in focus mode as well."
+
+**The menu.** **Transpose View ›** is the last switch of the ⋯ menu's Panel
+group, after Tap Outside to Close, and opens a submenu (`showMenu("transpose")`,
+`transposeItems`): **Back**, then *Tab Bar* and *Panel Buttons*, each with
+**Top**, **Left** and **Right** as `menuitemradio` rows (`railChoice`), the one
+in force checked. A choice closes the menu and says what it did on the status
+line. The two are kept apart in this browser
+(`localStorage["forge-assistant-transpose:" + basePath]`, `{tabs, panel}`, each
+`"top"`, `"left"` or `"right"`; `_restoreTranspose` reads anything else as the
+top). Every choice starts at the top.
+
+**The tab bar as a rail.** The bar is Forge's own `#tabs > .tab-nav`, which the
+Model Chain theme already draws as its header (docs/24 §0), so the rail is that
+header laid out again rather than a second bar: the shell writes the side on
+the document's root (`data-forge-assistant-rail`), the theme's stylesheet lays
+the strip out from it, and nothing is moved in the DOM, so Forge's
+direct-child selector, Mini Paint's `showTab` and the assistant's host find the
+bar where they always did. The Tab Bar choices therefore wait for the theme:
+without `data-mc-theme="on"` Left and Right are greyed with a sentence saying
+why.
+
+- **A 48 px strip** (`--mc-theme-rail`), fixed down the window's whole height,
+  its tabs stacked from the top with the selected tab's accent on the side that
+  faces the page. A rail is always icons — a name does not fit across 48 px —
+  so `installTabIcons` draws them whatever *Tab names* says (`rail()`), and
+  puts the names back when the rail goes and the setting says names.
+- **The other buttons apart.** The header's own buttons (quick settings, extra
+  networks, light and dark, the theme's settings; `.mc-theme-actions`) stand
+  at the strip's foot (`margin-top: auto`), sticky there with a line above
+  them, the tabs scrolling under them where they do not fit. The title is not
+  drawn, and nothing of the bar's ground is drawn beside the rail: the icon
+  bar's side strips, its shadows that reach across the page's side padding
+  along the top, are none (its `::before` is none already, a rail being
+  icons).
+- **The page from the window's top.** `--mc-theme-header` is 0 under a rail, so
+  everything held under the bar — the quick settings drawer, the extra
+  networks drawer, the results column's hold — starts at the top, and the page
+  is padded by the rail's width on its side plus its own 8 px. The quick
+  settings drawer opens beside a rail on the left, the extra networks drawer
+  beside one on the right (also in focus mode, where its own rules put it at
+  the window's edge); the column layout of the extra networks keeps it in the
+  page's flow and needs nothing.
+- **Scrolling down.** The selected tab is brought into view along the rail
+  (`revealDown`: the least scroll that shows it whole, clear of the buttons at
+  the foot), only when the selection changes, as along the top, and again
+  once when the rail comes or goes (`header.revealed` is reset on a change of
+  axis). The wheel is the rail's own: `wheelTabs`, which turns a vertical
+  wheel into a sideways scroll of the icon bar, stands down on a rail, also
+  when a theme's rule on every button (Lobe's `min-width: fit-content
+  !important`) gives the rail a sideways overflow it clips.
+- **Before the UI is built.** The shell is built at `onUiLoaded`, after Gradio
+  has drawn the bar; the side is said on the root at the document's
+  `DOMContentLoaded` too (`earlyTranspose`, from the same record), so a page
+  whose bar is a rail never draws it along the top first.
+- **The LoRA viewer** (docs/26 §8) covers the page beside a bar taller than it
+  is wide (`chrome()`: `--mc-lv-left`, `--mc-lv-right`), not under it, and its
+  scrim leaves the rail to its presses.
+
+**In focus mode** (§3.37) the kept bar is the rail. `placeBar` asks whether the
+kept bar is one (`railSide`: the root names a side and the bar's box is taller
+than it is wide, so a root that says *left* over Forge's own bar along the top
+— the theme off — changes nothing) and, while it shows, writes its width on
+the body (`--forge-assistant-focus-side`) with the side
+(`data-forge-assistant-focus-rail`) and a top of 0. Rules of their own put the
+kept bar down its side (top and bottom 0, `!important` like focus's own), hide
+it off its own side (`translateX`), and inset the focus root by the property on
+that side. The focus root's own rule, which Mini Paint NEO's
+`tests/browser_intercept.py` carries a copy of (`FOCUS_STAND_IN_CSS`), is
+unchanged, and Mini Paint's `fitFrame()` measures the frame's height from its
+column's top to the panel's bottom, which a rail does not change. Hidden or
+peeking, the workspace takes the window and the rail comes in over its edge,
+as the bar comes in over the top. A change of side with focus on is measured
+again at once (`applyTranspose` asks `focus.setBar(focus.barMode)`): left to
+right resizes nothing, so the bar's ResizeObserver would never hear it.
+
+**The panel's buttons as a rail.** The shell writes the side on the panel
+(`data-rail`). The header — the workspace button, Chat, 🎛, ⋯, ▶, the grip and
+✕ — is laid absolutely down that side, 44 px wide and the panel's height
+(`--forge-assistant-rail-width`), its buttons 36 px and stacked, the grip
+taking what is left (at least 3.5 em), the memory reading written down it
+(`writing-mode: vertical-rl`). Every other part of the panel is still a row
+of its one column, starting at the panel's top beside the rail, so nothing
+else about the panel — the conversation's height, a menu in its place, the
+docked column, the dock's slot — is laid out differently. Two things follow:
+
+- A rail beside the column cannot make the panel tall enough for its buttons,
+  so the shell writes the panel's least height (`fitRail`,
+  `--forge-assistant-rail-min`): the buttons shown, the grip's least height,
+  the gaps, the rail's padding and the panel's borders, measured at every
+  placement (`placeNow`), written only when it changes, and nothing measured
+  without a rail. The buttons come and go with nobody placing the panel -- ▶
+  and 🎛 with the workspace, ✕ with Tap Outside to Close, the workspace
+  button with the conversation -- and the panel's own size does not change
+  for it, so a MutationObserver on the header hears their `hidden` and places
+  the panel again (a placement where nothing moved changes nothing, so a
+  header along the top is placed again too rather than asked about).
+- A floating panel holds its header in place as it grows (`floatHold`, §3.30).
+  The header is the whole rail now, so it holds its thin side — the rail's
+  width, where the header row held its height — or the panel would be held
+  whole, like the launcher.
+
+The grip is the header's in every way: one to four presses on it, a drag by it
+(the panel moves by a transform under the drag, §3.36), the hidden tab bar
+peeking for it (§3.46). The corner (§3.41) and the left edge's strip sit beside
+a rail on their side, and the strip runs the panel's whole height. A change of
+side places the panel again, for its new shape; a change of the tab bar's side
+does not.
+
+### Verified
+
+`tests/test_transpose_layout.py` (Chromium, the theme's Forge-shaped page with
+the assistant's scripts): the rail down either side — 48 px, the window's
+height, the tabs stacked from the top as icons whatever *Tab names* says and
+back to names along the top, the buttons at the foot under a line and staying
+there while the tabs scroll, the accent facing the page, no ground; the page
+from the window's top beside it; the selected tab found down the rail, also
+one chosen along the top first; the wheel scrolling the rail under a theme's
+wide buttons; both drawers beside the rail from the top, the extra networks in
+focus mode too; in focus mode the kept rail and the workspace beside it, hidden
+off its side, and top → left → right → top with focus on; the panel's rail on
+either side with the column at the panel's top, the grip dragging it, a short
+panel as tall as its rail and still as tall after a switch of workspace that
+adds ▶ and 🎛 to it, the edge strip and the corner beside it, the memory
+reading down the grip; the menu's place, its choices and checks, the choices
+kept in the browser and on the root before the UI is built, and the tab bar's
+choices greyed without the theme. `tests/test_assistant_transpose_js.py`
+(node): the stored record read back, every choice saved beside the other,
+the root, the panel, the theme and focus touched only on a change, the least
+height and its writes, `floatHold`, the submenu. `tests/test_assistant_focus_js.py`
+(node, `TestTheKeptBarAsARail`): the inset on either side, nothing taken off
+while hidden or peeking, a railed root over a bar along the top, a change of
+side said once, and leaving taking every mark off.
+`tests/test_lora_viewer_js.py`: the viewer beside a rail on either side, the
+rail still answering. Seventy-three mutations each fail a test. Six survived a
+first pass: three tests were tightened (the accent's offsets read exactly
+rather than as a substring, a change of side alone in focus mode, and a switch
+of workspace that adds buttons to a short panel -- which found the rail's
+least height left stale until something placed the panel, hence the observer
+above), and three rules that changed nothing were removed (the rail's own
+`::before`, already none on an icon bar; a width for its buttons, which the
+header's buttons already have; an early return before a measurement that is
+already gated). Not run on the user's machine, in a Gecko
+build or beside Mini Paint NEO's WanGP frame.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

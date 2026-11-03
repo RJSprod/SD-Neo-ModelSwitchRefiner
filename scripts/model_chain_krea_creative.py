@@ -91,6 +91,7 @@ import mc_pipeline_panel
 import mc_plan
 import mc_krea_pipeline
 import mc_profile_state
+import mc_saved_prompt
 import mc_spatial
 import mc_spatial_profiles
 from modules import errors, scripts
@@ -313,6 +314,25 @@ def _protected_prompt(p) -> str:
                 found, "" if found == 1 else "s",
                 "was" if found == 1 else "were")
     return guarded
+
+
+def _mark_lifted(p, parsed) -> None:
+    """Mark ``p`` when a payload this hook puts back holds an extra-network tag.
+
+    Every such payload reaches Stage 1 in front of the finished prompt (or after
+    it, for Negative Literal and ``-[[...]]``), and the image's saved prompt is
+    that string. The mark is what tells :mod:`mc_saved_prompt` to move the tags
+    to the end of the saved text: only a prompt this hook lifted tags in is
+    rewritten, because only here does a paste of the text lift them back.
+    """
+    from prompt_master.krea import extra_networks
+
+    try:
+        if any(extra_networks.present(command.payload)
+               for command in getattr(parsed, "commands", ())):
+            mc_saved_prompt.mark(p)
+    except Exception:
+        logger.debug("Model Chain: could not mark the saved prompt", exc_info=True)
 
 
 def _settings_for(values) -> dict:
@@ -3045,6 +3065,7 @@ class ScriptKreaCreative(scripts.Script):
         parsed = literals.merge(
             literals.parse(_protected_prompt(p)), before, after)
         self._record_literal_fields(p, before, after)
+        _mark_lifted(p, parsed)
         layout = self._layout(p, args)
         creative = bool(enabled)
         neutralize = _neutralize_for(args)

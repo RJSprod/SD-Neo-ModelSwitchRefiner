@@ -135,8 +135,13 @@ def _short_hash_candidates(item: dict) -> list[str]:
     return [candidate for candidate in candidates if candidate]
 
 
-def _resolve_sha256(filename: str) -> tuple[str, bool]:
-    """Return ``(sha256, computed_now)``; honours the two hashing settings."""
+def _resolve_sha256(filename: str, hash_files: bool = True) -> tuple[str, bool]:
+    """Return ``(sha256, computed_now)``; honours the two hashing settings.
+
+    ``hash_files`` false answers from the hash cache alone, whatever the
+    settings say: the LoRA viewer asks for several LoRAs at once and must never
+    read a whole file to answer.
+    """
     if not filename or not opt("model_chain_lora_hash_lookup", True):
         return "", False
 
@@ -144,7 +149,7 @@ def _resolve_sha256(filename: str) -> tuple[str, bool]:
     if cached:
         return cached, False
 
-    if not opt("model_chain_lora_hash_on_open", True):
+    if not hash_files or not opt("model_chain_lora_hash_on_open", True):
         return "", False
 
     value = mc_lora_hashing.sha256_file(filename) or ""
@@ -197,12 +202,18 @@ def _fetch_plan(filename: str, records) -> dict:
     return {"folder": folder, "label": label + "/", "retry": bool(records)}
 
 
-def gather(page, name: str) -> dict:
-    """Everything the dialog needs for one card, as plain data."""
-    item = (page.items.get(name, {}) if page is not None else {}) or {}
+def gather(page, name: str, *, item: dict | None = None, hash_files: bool = True) -> dict:
+    """Everything the dialog needs for one card, as plain data.
+
+    ``item`` is the page's card when the caller already has it (the LoRA
+    viewer makes it with ``create_item``, since a page not yet shown has no
+    items); ``hash_files`` false never hashes a file, see :func:`_resolve_sha256`.
+    """
+    if item is None:
+        item = (page.items.get(name, {}) if page is not None else {}) or {}
     filename = item.get("filename") or ""
 
-    sha256, computed = _resolve_sha256(filename)
+    sha256, computed = _resolve_sha256(filename, hash_files)
     short_hashes = _short_hash_candidates(item)
     rel_paths = _relative_candidates(filename)
 

@@ -534,6 +534,35 @@ that held the bar out of focus mode translated to hold it with the bar
 hidden, and to measure it kept. Mutations are listed in docs/22 §3.37 and
 the commit. Not run on the user's machine or in a Gecko build.
 
+**The bar down one side (2026-11-03).** The Forge Assistant's *Transpose View*
+(docs/22 §3.47): "the tab bar of webui render on a slim strip on the left of
+screen, all of its now buttons, separated between tabs and other stuff ... the
+top of the view should be minimally padded content ... an option to choose
+right side", and in focus mode as well. The assistant writes the side on the
+root (`data-forge-assistant-rail`, `left` or `right`), and this theme lays its
+header out from it — the same bar, moved by nothing:
+
+- a **48 px strip** (`--mc-theme-rail`) fixed down the window's height on that
+  side, the tabs stacked from the top, the selected tab's accent on the side
+  that faces the page; `--mc-theme-header` is 0, so the drawers and the
+  results column's hold start at the window's top, and the page is padded by
+  the rail's width on its side plus its own 8 px;
+- **always icons** on a rail (`rail()` in `installTabIcons`), whatever *Tab
+  names* says, and back to names when the rail goes and the setting says
+  names;
+- the header's own buttons (`.mc-theme-actions`) **apart at the strip's
+  foot**, sticky there under a line, the tabs scrolling under them; no title,
+  and none of the icon bar's side strips (its shadows) beside the rail;
+- the selected tab brought into view **down** the rail (`revealDown`), once
+  per change of selection and once when the axis changes; the wheel left to
+  the rail (`wheelTabs` stands down);
+- the **quick settings drawer** beside a rail on the left, the **extra
+  networks drawer** beside one on the right, on the page and in focus mode;
+  the column layout needs nothing.
+
+Focus mode keeps the rail as the kept bar, the workspace beside it from the
+top (the assistant's rules; docs/22 §3.47). Tests: `tests/test_transpose_layout.py`.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own

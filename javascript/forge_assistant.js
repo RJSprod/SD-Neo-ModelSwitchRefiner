@@ -170,6 +170,16 @@
     // over, and gives way again. Mini Paint NEO publishes it for its Send to
     // WanGP popup; see `yieldTo`.
     const FOREIGN_OVERLAY = "minipaint:overlay";
+    // Transpose View (docs/22 §3.47): the WebUI's tab bar as a rail down the
+    // window's left or right side, and the panel's own row of buttons as a
+    // rail down the panel's, each chosen apart from the ⋯ menu and kept in this
+    // browser. The tab bar's side is said on the document's root, where the
+    // Model Chain theme's stylesheet lays the bar out (and focus mode keeps it);
+    // the panel's on the panel.
+    const RAIL_SIDES = ["left", "right"];
+    const RAIL_ATTRIBUTE = "data-forge-assistant-rail";
+    const PANEL_RAIL_ATTRIBUTE = "data-rail";
+    const RAIL_MIN_PROPERTY = "--forge-assistant-rail-min";
     // Voice Box and Voice Chat share the speaker and the microphone through this
     // event (docs/23-voice-box.md section 8); the flyout only listens.
     const AUDIO_FOCUS = "mc:audio-focus";
@@ -588,6 +598,7 @@
         this._restoreSendToGenerate();
         this._restoreFocusBar();
         this._restoreTapToClose();
+        this._restoreTranspose();
         this.peekTimer = 0;
         // Super focus, while it is on: the workspace it is on; and whether it
         // is kept for the WanGP tab while focus lasts. See "Super Focused".
@@ -808,6 +819,34 @@
         try {
             window.localStorage.setItem(this._tapToCloseKey(), this.state.tapToClose ? "on" : "off");
         } catch (error) { /* memory only; the switch still works */ }
+    };
+
+    // Transpose View, the same way: both sides in one record, along the top
+    // until chosen otherwise.
+    function railSide(value) {
+        return RAIL_SIDES.indexOf(value) === -1 ? "" : value;
+    }
+
+    Shell.prototype._transposeKey = function () {
+        return "forge-assistant-transpose:" + (NS.basePath() || "/");
+    };
+
+    Shell.prototype._restoreTranspose = function () {
+        let found = null;
+        try {
+            found = JSON.parse(window.localStorage.getItem(this._transposeKey()) || "null");
+        } catch (error) {
+            found = null;
+        }
+        this.state.tabRail = railSide(found && found.tabs);
+        this.state.panelRail = railSide(found && found.panel);
+    };
+
+    Shell.prototype._saveTranspose = function () {
+        try {
+            window.localStorage.setItem(this._transposeKey(), JSON.stringify({
+                tabs: this.state.tabRail || "top", panel: this.state.panelRail || "top"}));
+        } catch (error) { /* memory only; the choice still works */ }
     };
 
     Shell.prototype._save = function () {
@@ -1182,6 +1221,7 @@
         this.disposers.push(this.host.registerMenu(this.menuHandle));
         this.applyConversationHeight();
         this.applyMinimize();
+        this.applyTranspose();
         this.applyChat();
     };
 
@@ -1561,6 +1601,7 @@
         // ResizeObserver hears -- would write its width, its cap and its
         // place back over the drag's.
         if (this.drag && this.drag.moved) return;
+        this.fitRail();
         this.placePanel();
         this.syncDock();
     };
@@ -1685,7 +1726,11 @@
         if (!node || node !== this.nodes.panel) return 0;
         const header = this.nodes.header;
         const box = header && header.getBoundingClientRect ? header.getBoundingClientRect() : null;
-        return box && box.height > 0 ? box.height : 0;
+        if (!box || !(box.height > 0)) return 0;
+        // Its thin side: the row's height, or, down one side of the panel
+        // (Transpose View), the rail's width -- a rail is the panel's whole
+        // height, and holding all of it would hold the whole panel.
+        return box.width > 0 ? Math.min(box.width, box.height) : box.height;
     };
 
     // -- drag -------------------------------------------------------------- //
@@ -2598,6 +2643,19 @@
             const watched = new ResizeObserver(() => this.resized());
             watched.observe(nodes.panel);
             this.disposers.push(() => watched.disconnect());
+        }
+        // A panel with its buttons down one side (Transpose View) is as tall
+        // as they are (`fitRail`, from `placeNow`), and they come and go with
+        // nobody placing the panel: ▶ and 🎛 with the workspace, ✕ with Tap
+        // Outside to Close, the workspace button with the conversation. Each
+        // comes and goes by its `hidden`, which is what is heard; the panel's
+        // own size does not change for it, so its observer above hears nothing.
+        // Placing again where nothing moved changes nothing, so a header along
+        // the top is placed again too rather than asked about.
+        if (typeof MutationObserver === "function") {
+            const buttons = new MutationObserver(() => this.place());
+            buttons.observe(nodes.header, {attributes: true, attributeFilter: ["hidden"], subtree: true});
+            this.disposers.push(() => buttons.disconnect());
         }
         // Nobody is mid-gesture across a hidden page or an unfocused window,
         // and a release that happened while we were not looking is never
@@ -4221,7 +4279,8 @@
         const items = which === "workspaces" ? this.workspaceItems()
             : (which === "threads" ? this.threadItems()
                 : (which === "emotion" ? this.emotionItems()
-                    : (which === "start" ? this.startItems() : this.utilityItems())));
+                    : (which === "start" ? this.startItems()
+                        : (which === "transpose" ? this.transposeItems() : this.utilityItems()))));
         items.forEach((item) => menu.appendChild(item));
         menu.appendChild(this.cancelItem());
         menu.hidden = false;
@@ -4453,7 +4512,7 @@
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
         items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem(),
-                   this.tapToCloseItem());
+                   this.tapToCloseItem(), this.transposeItem());
         if (NS.look) items.push(this.customizeItem());
         const utilities = this.host.listUtilities();
         // Models: where the loaded LoRA's originals live, then whatever the
@@ -4955,6 +5014,165 @@
         return item;
     };
 
+    // -- Transpose View ------------------------------------------------------ //
+    //
+    // Asked for: "a new mode in flyout menu "..." menu that is called
+    // "transpose view". it should me the tab bar of webui render on a slim
+    // strip on the left of screen, all of its [icon] buttons, separated
+    // between tabs and other stuff. Same on flyout menu buttons ... transpose
+    // those to a slim strip on the left of the flyout, including the drag
+    // handle ... in both cases the top of the view should be minimally padded
+    // content. also need an option to choose right side for either of these
+    // independently", and "i DO want this functionality in focus mode as
+    // well". Two choices, each Top, Left or Right. The tab bar is drawn by the
+    // Model Chain theme, so its choice waits for the theme to be on.
+
+    /** Into the Transpose View submenu. */
+    Shell.prototype.transposeItem = function () {
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-submenu forge-assistant-transpose",
+                             "Transpose View");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "menu");
+        item.title = "Put the tab bar, or the panel's buttons, down the left or the right side";
+        item.addEventListener("click", () => this.showMenu("transpose"));
+        return item;
+    };
+
+    /** The submenu: the tab bar's side and the panel buttons' side, each one
+     *  of three, the current one checked. */
+    Shell.prototype.transposeItems = function () {
+        const themed = !!(document.documentElement
+                          && document.documentElement.getAttribute("data-mc-theme") === "on");
+        const sides = [["", "Top"], ["left", "Left"], ["right", "Right"]];
+        const items = [this.backItem(), this.groupLabel("Tab Bar")];
+        sides.forEach(([side, label]) => items.push(
+            this.railChoice("tabs", side, label, !themed && side !== "")));
+        items.push(this.groupLabel("Panel Buttons"));
+        sides.forEach(([side, label]) => items.push(this.railChoice("panel", side, label, false)));
+        return items;
+    };
+
+    Shell.prototype.railChoice = function (which, side, label, disabled) {
+        const current = which === "tabs" ? this.state.tabRail : this.state.panelRail;
+        const item = element("button", "forge-assistant-menu-item forge-assistant-rail-choice", label);
+        item.type = "button";
+        // One of three, like a radio: it reports which is on.
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", String((current || "") === side));
+        item.dataset.rail = which;
+        item.dataset.side = side || "top";
+        item.disabled = !!disabled;
+        item.title = disabled
+            ? "Needs the Model Chain theme (Settings \u2192 Model Chain: Theme), which draws the tab bar"
+            : (which === "tabs"
+                ? (side ? "The tab bar down the window's " + side + " side" : "The tab bar along the top")
+                : (side ? "The panel's buttons down its " + side + " side" : "The panel's buttons along its top"));
+        item.addEventListener("click", () => {
+            this.closeMenu();
+            if (which === "tabs") this.setTabRail(side);
+            else this.setPanelRail(side);
+        });
+        return item;
+    };
+
+    Shell.prototype.setTabRail = function (side) {
+        this.state.tabRail = railSide(side);
+        this._saveTranspose();
+        this.applyTranspose();
+        this.tell(this.state.tabRail
+            ? "The tab bar runs down the window's " + this.state.tabRail + " side."
+            : "The tab bar runs along the top.", "info");
+        return this.state.tabRail;
+    };
+
+    Shell.prototype.setPanelRail = function (side) {
+        this.state.panelRail = railSide(side);
+        this._saveTranspose();
+        this.applyTranspose();
+        this.tell(this.state.panelRail
+            ? "The panel's buttons run down its " + this.state.panelRail + " side."
+            : "The panel's buttons run along its top.", "info");
+        return this.state.panelRail;
+    };
+
+    /** Both choices, said where the stylesheet reads them: the tab bar's side
+     *  on the document's root, the panel's on the panel. The theme draws its
+     *  bar again at once (the tabs become icons on a rail), focus mode places
+     *  the bar it keeps again, and the panel is placed again for its new
+     *  shape. Written only when they change. */
+    Shell.prototype.applyTranspose = function () {
+        const html = document.documentElement;
+        const tabs = this.state.tabRail || "";
+        let changed = false;
+        if (html && html.getAttribute) {
+            if ((html.getAttribute(RAIL_ATTRIBUTE) || "") !== tabs) {
+                if (tabs) html.setAttribute(RAIL_ATTRIBUTE, tabs);
+                else html.removeAttribute(RAIL_ATTRIBUTE);
+                changed = true;
+            }
+        }
+        const panel = this.nodes && this.nodes.panel;
+        const side = this.state.panelRail || "";
+        let reshaped = false;
+        if (panel && panel.getAttribute && (panel.getAttribute(PANEL_RAIL_ATTRIBUTE) || "") !== side) {
+            if (side) panel.setAttribute(PANEL_RAIL_ATTRIBUTE, side);
+            else panel.removeAttribute(PANEL_RAIL_ATTRIBUTE);
+            reshaped = true;
+        }
+        if (changed) {
+            try {
+                if (window.mcTheme && typeof window.mcTheme.apply === "function") window.mcTheme.apply();
+            } catch (error) { /* the theme draws itself at the page's next update */ }
+            try {
+                if (this.focus && typeof this.focus.isActive === "function" && this.focus.isActive()
+                    && typeof this.focus.setBar === "function") {
+                    this.focus.setBar(this.focus.barMode);
+                }
+            } catch (error) { /* focus measures its bar again on the next resize */ }
+        }
+        // Placed again for its new shape, which measures the rail too.
+        if (reshaped) this.place();
+    };
+
+    /** A panel with its buttons down one side is at least as tall as they
+     *  are. The rail is laid beside the panel's column, not in it -- every
+     *  other part of the panel is a row of that column, and stays one -- so
+     *  the panel cannot size itself to the rail; its least height is written
+     *  instead, measured from the buttons the rail shows, the grip's least
+     *  height and the rail's own padding. Measured only while there is a
+     *  rail, and written only when it changes, so a panel that never had one
+     *  is never written on. */
+    Shell.prototype.fitRail = function () {
+        const panel = this.nodes && this.nodes.panel;
+        const header = this.nodes && this.nodes.header;
+        if (!panel || !header || !panel.style || typeof panel.style.setProperty !== "function") return;
+        let value = "";
+        if (this.state.panelRail && typeof window.getComputedStyle === "function") {
+            const style = window.getComputedStyle(header);
+            let need = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+            let shown = 0;
+            Array.prototype.forEach.call(header.children || [], (child) => {
+                if (child.hidden) return;
+                const own = window.getComputedStyle(child);
+                if (own.display === "none") return;
+                shown += 1;
+                need += child === this.nodes.grip
+                    ? (parseFloat(own.minHeight) || 0)
+                    : child.getBoundingClientRect().height;
+            });
+            need += Math.max(0, shown - 1) * (parseFloat(style.rowGap) || 0);
+            const frame = window.getComputedStyle(panel);
+            need += (parseFloat(frame.borderTopWidth) || 0) + (parseFloat(frame.borderBottomWidth) || 0);
+            value = Math.ceil(need) + "px";
+        }
+        if (value === (this._railMin || "")) return;
+        this._railMin = value;
+        if (value) panel.style.setProperty(RAIL_MIN_PROPERTY, value);
+        else panel.style.removeProperty(RAIL_MIN_PROPERTY);
+    };
+
     Shell.prototype.setTapToClose = function (on) {
         this.state.tapToClose = !!on;
         this.outsidePress = null;
@@ -5277,6 +5495,9 @@
         if (NS.systemEditor && NS.systemEditor.isOpen()) return;
         // The message editor's Escape is its own too: it cancels the edit.
         if (window.mcMessageEditor && window.mcMessageEditor.isOpen()) return;
+        // And the LoRA viewer's, which cancels it (model_chain_lora_viewer.js
+        // takes Escape on the window first; this is the same answer if not).
+        if (window.mcLoraViewer && window.mcLoraViewer.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,
@@ -7267,6 +7488,28 @@
     NS.Shell = Shell;
     NS.mount = mount;
     NS.viewport = viewport;
+    NS.railSide = railSide;
+    NS.RAIL_ATTRIBUTE = RAIL_ATTRIBUTE;
+
+    // The tab bar's side before Gradio draws the bar, so a page whose tab bar
+    // is a rail (Transpose View) never draws it along the top first: every
+    // script has loaded by the document's DOMContentLoaded, the store's
+    // `basePath` with them, and the app draws after it. The shell says it
+    // again when it is built.
+    function earlyTranspose() {
+        try {
+            const html = document.documentElement;
+            if (!html || html.hasAttribute(RAIL_ATTRIBUTE) || typeof NS.basePath !== "function") return;
+            const found = JSON.parse(window.localStorage.getItem(
+                "forge-assistant-transpose:" + (NS.basePath() || "/")) || "null");
+            const side = railSide(found && found.tabs);
+            if (side) html.setAttribute(RAIL_ATTRIBUTE, side);
+        } catch (error) { /* the shell says it when it is built */ }
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", earlyTranspose);
+    }
 
     if (typeof onUiLoaded === "function") {
         onUiLoaded(() => {

@@ -2000,6 +2000,31 @@ Values containing commas, colons or newlines are quoted by the host's own
 `infotext_utils.quote()` and unquoted on parse, which is what keeps
 `<lora:name:weight>` tags intact across the round trip.
 
+**LoRA tags are saved at the end of the prompt.** On Txt2Img every LoRA tag in
+the prompt and the two Literal boxes reaches Forge *in front of* the finished
+prompt (see *Literal prompts* below), and the `Prompt:` line Forge saves is that
+string, so every image used to read back in PNG Info with its LoRAs first. Since
+2026-11-03 the saved text has them at the end, after the words, in the order
+they had; `<lyco:…>` and `<hypernet:…>` tags move the same way:
+
+```
+Forge is given:   <lora:realfilter:0.85> <lora:detail:-0.5> portrait of a woman, blue hat
+the image saves:  portrait of a woman, blue hat <lora:realfilter:0.85> <lora:detail:-0.5>
+```
+
+Only the saved text changes (`mc_saved_prompt` wraps Forge's
+`processing.create_infotext` and rewrites the head of what it returns). The
+picture is made from the prompt Forge was given, exactly as before, and a paste
+of the saved text on Txt2Img gives Forge the same prompt as a paste of the old
+order did, because the tags are moved in front again before Forge reads it. The
+PNG's text, the text under the gallery, `params.txt` (what Forge's paste button
+reads when the prompt box is empty), a grid's text and a chained image's text
+all carry the new order; `Krea Source Prompt` and the two Literal keys stay as
+you typed them. Img2Img has nothing that moves its tags, so they stay where you
+typed them. A saved line that still holds a `[[` command, or a tag right after a
+`+` or `-`, is left as it is, because pasted back those would be read in a
+different order.
+
 ### Why a switch is slow, and what to check
 
 Read the console. Every transition is now logged, for example:
@@ -2385,6 +2410,9 @@ a stylish editorial portrait in an elegant restaurant
 the writer sees:   a stylish editorial portrait in an elegant restaurant
 Krea 2 is given:   <lora:krea2_edit:1> A richly written scene … __lighting_wildcard__
 ```
+
+The image *saves* its prompt with the LoRA tags moved to the end, after the
+words; see *Infotext*.
 
 | Syntax | Where the payload goes |
 | --- | --- |
@@ -4203,6 +4231,38 @@ launcher still does what it always did (the panel opens after its 300 ms);
 two presses still go back and three still turn focus off. Super Focused has no
 tab bar at all, whatever this setting says, and no tap brings it.
 
+**Transpose View.** **Transpose View ›**, in the **⋯** menu's Panel group,
+holds two choices, each **Top** (as it always was), **Left** or **Right**, each
+chosen apart from the other and remembered in this browser:
+
+- **Tab Bar** — the WebUI's tab bar as a slim strip, 48 px wide, down the left
+  or right side of the window. The tabs are icons on it, stacked from the top,
+  whatever the theme's *Tab names* setting says (a tab's name is its tooltip),
+  and the theme's own buttons — quick settings, extra networks, light and
+  dark, the theme's settings — stand apart at the strip's foot, a line above
+  them. The page starts at the window's top beside the strip, with nothing
+  above it but its own 8 px. Where the tabs do not all fit, the strip scrolls
+  down under a finger or the wheel, the tabs sliding under the buttons at its
+  foot, and a tab chosen from anywhere is brought into view on it. The quick
+  settings open beside a strip on the left and the extra networks beside one
+  on the right, both from the window's top, and the LoRA viewer covers the
+  page beside the strip. **In focus mode** the kept tab bar is the strip: the
+  workspace fills the window beside it, from the top; with *Tab Bar in Focus*
+  off it is hidden off its own side, and a tap or a drag of the launcher or
+  the panel's header brings it in over the workspace's edge for four seconds,
+  as along the top. The strip is the Model Chain theme's bar laid out again,
+  so these choices wait for the theme to be on (*Settings → Model Chain:
+  Theme*); without it they are greyed.
+- **Panel Buttons** — the open panel's header as a slim strip, 44 px wide,
+  down the panel's left or right side: the workspace, **Chat**, 🎛, **⋯**, ▶
+  and **✕** stacked from the top, and under them the grip — the space you drag
+  the panel by, with the memory reading written down it — taking the rest of
+  the strip. Everything else in the panel (the conversation, the composer, a
+  menu, a docked column) starts at the panel's top beside it. The strip is
+  the header in every way: the same presses on its grip, a drag by it, and
+  the corner and the left edge that resize the panel sit beside it. A panel
+  is never shorter than its strip.
+
 **Collapsed, the panel is a tab bar.** Under the header it lists every
 workspace this installation has, one press each — a tab bar you can put
 wherever you want one, in focus mode as much as out of it. Pressing one
@@ -4383,7 +4443,7 @@ entries act on, and a **Cancel**:
 | --- | --- |
 | **Chat**, headed by the character's name | **New chat**, **Threads ›**, **Emotion ›** (the thread's emotion; *A thread's emotion*, above), **System prompt…** |
 | **Composer** | **Auto Attach**, **Send to Generate** |
-| **Panel** | **Free Float**, **Tab Bar in Focus**, **Customize…** |
+| **Panel** | **Free Float**, **Tab Bar in Focus**, **Tap Outside to Close**, **Transpose View ›**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
 
 A menu opens inside the panel, in the conversation's place — or the workspace
@@ -7269,6 +7329,14 @@ one second.
   swipe that the bar cannot take (past its first tab, say) is not the
   browser's Back: the page holds its root's sideways overscroll at none, as
   the Voice Box does while it is on screen.
+- **The bar down one side.** The Forge Assistant's *Transpose View* (its **⋯**
+  menu; see *Transpose View* under the Forge Assistant) lays this bar out as a
+  48 px strip down the window's left or right side: the tabs as icons whatever
+  *Tab names* says, stacked from the top and scrolling down where they do not
+  fit, the bar's own buttons at the strip's foot under a line, no title, and
+  the page beside it from the window's top. Everything held under the bar
+  (the drawers, the results column's hold) starts at the window's top
+  instead. It is still Forge's own strip, moved by nothing.
 - **Generate above the gallery, the prompt boxes at the top of the settings
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
   compact prompt-box styles both handled. The results column stays where it
@@ -7785,6 +7853,70 @@ when the UI Preset changes** (on).
     last_used.json         the key and folder of the last fetch, owner-only
 ```
 
+## LoRA Viewer
+
+Every LoRA in the prompt, with its picture, its trigger words and a slider for
+its weight, behind one button at the end of the prompt tool row: the upright
+sliders after Forge's Apply Styles, on Txt2Img and Img2Img. Pressed, it covers
+the page under the tab bar — or beside it, when the Forge Assistant's
+*Transpose View* has put the bar down one side — (centred, and no wider than
+880 px, on a wide screen) with one thin row for each `<lora:…>` or `<lyco:…>` tag in the Prompt
+and, on Txt2Img, the two Literal boxes, in the order they are on screen:
+
+- **The picture** is the LoRA's own card picture from Forge's LoRA browser;
+  without one, the first Civitai example picture LoRA Details has downloaded;
+  without either, its initials. Round corners, 44 px.
+- **The name** is the tag's, beside the box it is in: Prompt, Literal + or
+  Literal −. The same LoRA in two boxes is two rows.
+- **Trigger words** are pills: LoRA Details' Civitai words first, then Forge's
+  own activation text for the LoRA split at its commas, none twice. A tap
+  copies one. A word already in the prompt has a tick; a tag's own name does
+  not count, and neither does a word inside a longer one. What does not fit
+  the row's one line folds into **+N**, which opens the row.
+- **The weight** is a box that takes any number, and a slider from −5 to 5 in
+  steps of 0.05 across the row, with − and + at its ends that move it one step
+  and repeat while held (on a phone a step is under 2 px of finger travel).
+  Past ±5, typed in the box, the knob sits hollow at the end of the slider; a
+  negative weight draws orange. A focused slider takes the arrow keys (0.05),
+  Page Up and Page Down (0.5), Home and End.
+- **↺** beside a changed weight puts back the one it opened with; **Reset all**
+  in the header does every row. The bin marks a LoRA to be taken out of its
+  box; pressed again, it stays.
+- A tag that names no LoRA in your LoRA folders, looked up the way Forge looks
+  one up when it loads it (after one rescan of the folders, as Forge does), says
+  **Not in your LoRA folders** in amber; its weight can still be changed and it
+  can still be removed.
+- A tag that sets its weights by name, `<lora:x:te=0.5:unet=0.8>`, shows
+  **named** and its slider is off, since a slider of the first weight could not
+  change it. A tag's second weight, `<lora:x:0.8:0.5>`, is kept as typed; the
+  slider is the first.
+
+**Apply** writes each changed weight into its tag where the tag is, takes out
+the tags marked for removal (and closes the gap: one space between words, no
+doubled comma), and changes nothing else in the boxes. Each box it changed gets
+the input event Forge's own controls send, so Generate sends what is on screen,
+and a Literal box is saved as when you leave it. A box whose text changed while
+the viewer was open is left alone, and the page says so. **Cancel**, **Escape**
+and a change of tab close it with nothing changed. A tap outside does nothing,
+so a stray tap cannot throw your changes away.
+
+On a phone, swiping up and down scrolls the list and never moves a slider: a
+slider moves on a sideways drag, a tap on its track or a drag of its knob, and
+while it is dragged its value shows above the knob, clear of the finger.
+
+The names and weights are read in the browser the moment it opens. The pictures
+and trigger words come from `GET /model-chain/lora-viewer/details?name=…`
+(`mc_lora_viewer.py`), one request for all of them with an eight-second limit;
+after it, the rows work without them and **Try again** asks once more. Opening
+it never hashes a LoRA file: the library is asked with a cached hash, the file's
+path and its name. The route is a plain handler, which FastAPI runs on its
+thread pool, so the files it reads hold up no other request. The viewer draws on
+the dialog layer Mini Paint NEO's popup and the Forge Assistant share
+(`--minipaint-dialog-layer`, 2000), says so with the `minipaint:overlay` event
+(the assistant puts its panel away for it), and takes Escape before Forge's own,
+which would interrupt a running generation, and the assistant's, which would
+leave focus mode.
+
 ## Layout
 
 ```
@@ -7816,10 +7948,13 @@ mc_lora_jobs.py       the background jobs: a fetch, a hash run, image downloads
 mc_lora_last_used.py  the key and the folder of the last fetch
 mc_lora_render.py     every HTML fragment of the dialog and the tab
 mc_lora_tab.py        the LoRA Details tab: library, folders, images, fetch, jobs
+mc_lora_viewer.py     the LoRA viewer's route: a picture and trigger words per LoRA
 mc_extra_networks_folders.py     folder assignments per UI Preset and network page
 mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
 mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons
 mc_infotext.py        infotext write + paste-field registration
+mc_saved_prompt.py    LoRA tags at the end of an image's saved prompt: Forge's
+                      create_infotext, wrapped
 mc_presets.py         named Stage 2 configurations
 mc_spatial_profiles.py     named Spatial layouts
 mc_progress.py        whole-job progress model + measured timings
@@ -7954,7 +8089,8 @@ prompt_master/models/managed_profiles.py  the hidden per-backbone quality profil
 scripts/model_chain.py                Script class, UI, orchestration
 scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
 scripts/model_chain_turns.py          the card's turn gate, on txt2img and img2img
-style.css             progress-bar appearance, LLM Studio, the Image Pipeline, the LoRA dialog
+style.css             progress-bar appearance, LLM Studio, the Image Pipeline, the LoRA dialog,
+                      the LoRA viewer
 javascript/           the settings-to-CSS layer, LLM Studio polish, the pipeline,
                       the two spatial canvases, Voice Chat's capture and playback
 javascript/forge_assistant.js        the panel: docking, transcript, composer
@@ -7964,6 +8100,7 @@ javascript/forge_assistant_focus.js  workspace focus, as a reversible transactio
 javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
 javascript/model_chain_night.js      the quieter night mode's one attribute
 javascript/model_chain_lora_details.js  the LoRA dialog's chips, clipboard, cards and preset watcher
+javascript/model_chain_lora_viewer.js   the LoRA viewer: the tool-row button and the dialog
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension
