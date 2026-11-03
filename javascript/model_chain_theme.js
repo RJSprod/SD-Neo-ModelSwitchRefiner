@@ -103,6 +103,12 @@
     const TAB_ICON_CLASS = "mc-theme-tab-icon";   // a tab button drawn as its icon
     const TAB_GLYPH_CLASS = "mc-theme-tab-glyph"; // the icon inside it
     const MONOGRAM_ATTRIBUTE = "data-mc-theme-monogram"; // the letters of a tab with no icon
+    // The tab bar as a rail down one side of the window: the Forge Assistant's
+    // Transpose View (its ⋯ menu) says which side on the document's root, and
+    // the stylesheet lays the bar out from it. A rail is always the tabs as
+    // icons -- a name does not fit across a strip that slim -- and scrolls
+    // down rather than across.
+    const RAIL_ATTRIBUTE = "data-forge-assistant-rail";
     const SETTINGS_SECTION = "Model Chain: Theme";
     const QUICK_ID = "mc-theme-quick";
     const FOCUS_KEEP_CLASS = "forge-assistant-focus-keep"; // the Forge Assistant's: left in the layout by its focus mode
@@ -590,7 +596,25 @@
         const selected = buttons.find((button) => button.classList.contains("selected")) || null;
         if (!selected || selected === header.revealed) return;
         header.revealed = selected;
-        reveal(header.strip, selected, header.actions);
+        if (rail()) revealDown(header.strip, selected, header.actions);
+        else reveal(header.strip, selected, header.actions);
+    }
+
+    /** The same for a rail: scrolls it the least that shows `button` whole,
+     *  clear of the header's buttons, which stay at the rail's foot over the
+     *  tabs. */
+    function revealDown(strip, button, actions) {
+        const box = strip.getBoundingClientRect();
+        const target = button.getBoundingClientRect();
+        let bottom = box.bottom;
+        if (actions && actions.isConnected) {
+            const covered = actions.getBoundingClientRect();
+            if (covered.height > 0 && covered.top < bottom) bottom = Math.max(box.top, covered.top);
+        }
+        let shift = 0;
+        if (target.bottom > bottom) shift = target.bottom - bottom + HEADER_GAP_PX;
+        else if (target.top < box.top) shift = target.top - box.top - HEADER_GAP_PX;
+        if (shift) strip.scrollTop += shift;
     }
 
     /** Scrolls the bar the least that shows `button` whole, clear of the
@@ -616,7 +640,8 @@
      *  bar scrolls, and the wheel is the page's. */
     function wheelTabs(event) {
         const header = state.header;
-        if (!header || !header.icons || event.ctrlKey) return;
+        // A rail scrolls down under the wheel by itself.
+        if (!header || !header.icons || event.ctrlKey || rail()) return;
         if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
         const strip = header.strip;
         const room = strip.scrollWidth - strip.clientWidth;
@@ -707,8 +732,21 @@
         return (words[0][0] + words[1][0]).toUpperCase();
     }
 
+    /** "left" or "right" while the tab bar is a rail, "" while it runs
+     *  along the top. */
+    function rail() {
+        const side = root().getAttribute(RAIL_ATTRIBUTE);
+        return side === "left" || side === "right" ? side : "";
+    }
+
     function installTabIcons(strip, config) {
-        if (config.labels !== "icons") {
+        const side = rail();
+        if (state.header && state.header.rail !== side) {
+            // The selected tab is brought into view again along the new axis.
+            state.header.rail = side;
+            state.header.revealed = null;
+        }
+        if (config.labels !== "icons" && !side) {
             restoreTabIcons();
             if (root().hasAttribute(TABS_ATTRIBUTE)) root().removeAttribute(TABS_ATTRIBUTE);
             if (state.header) state.header.icons = false;
@@ -2552,7 +2590,7 @@
     window.mcTheme = {
         OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
-        tabId, monogram, TAB_ICONS, TABS_ATTRIBUTE, TAB_ICON_CLASS, MONOGRAM_ATTRIBUTE,
+        tabId, monogram, TAB_ICONS, TABS_ATTRIBUTE, TAB_ICON_CLASS, MONOGRAM_ATTRIBUTE, RAIL_ATTRIBUTE, rail,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS, perRowRange, perRowNearest, explainCards, setPerRow, setTitles,
         NETWORKS_COLUMNS, NETWORKS_UNTITLED_CLASS, QUICK_TAP_PX,

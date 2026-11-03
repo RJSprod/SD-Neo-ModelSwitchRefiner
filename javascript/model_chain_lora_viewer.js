@@ -846,25 +846,38 @@
 
     // -- placement ----------------------------------------------------------------
 
-    // The viewer starts under whatever tab bar is on screen: the theme's sticky
-    // header, the bar focus mode keeps, or Forge's own when the page is at its top.
-    function barBottom() {
+    // The viewer starts under whatever tab bar is on screen -- the theme's
+    // sticky header, the bar focus mode keeps, or Forge's own when the page is
+    // at its top -- and beside it when the bar is a rail down one side of the
+    // window (the assistant's Transpose View): a box taller than it is wide.
+    function chrome() {
+        const out = {top: 0, left: 0, right: 0};
         const bar = document.querySelector("#tabs > .tab-nav") || app().querySelector(".tab-nav");
-        if (!bar) return 0;
+        if (!bar) return out;
         const rect = bar.getBoundingClientRect();
-        if (rect.height <= 0 || rect.bottom <= 0 || rect.top >= window.innerHeight / 2) return 0;
-        return Math.round(rect.bottom);
+        if (rect.width <= 0 || rect.height <= 0) return out;
+        if (rect.height > rect.width) {
+            const width = document.documentElement.clientWidth || window.innerWidth;
+            if (rect.left + rect.width / 2 < width / 2) out.left = Math.max(0, Math.round(rect.right));
+            else out.right = Math.max(0, Math.round(width - rect.left));
+            return out;
+        }
+        if (rect.bottom <= 0 || rect.top >= window.innerHeight / 2) return out;
+        out.top = Math.round(rect.bottom);
+        return out;
     }
 
     function measure() {
         const nodes = state.nodes;
         if (!nodes || !state.open) return;
-        const bar = barBottom();
+        const bar = chrome();
         const view = window.visualViewport;
         let hidden = 0;
         if (view) hidden = Math.max(0, window.innerHeight - (view.offsetTop + view.height));
         const root = document.documentElement;
-        root.style.setProperty("--mc-lv-top", bar + "px");
+        root.style.setProperty("--mc-lv-top", bar.top + "px");
+        root.style.setProperty("--mc-lv-left", bar.left + "px");
+        root.style.setProperty("--mc-lv-right", bar.right + "px");
         root.style.setProperty("--mc-lv-keyboard", Math.round(hidden) + "px");
         const active = document.activeElement;
         if (hidden && active && nodes.dialog.contains(active) && active.scrollIntoView) {

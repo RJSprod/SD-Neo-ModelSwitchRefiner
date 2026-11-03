@@ -725,6 +725,37 @@ class TestPlacement:
         finally:
             close_page(page, served)
 
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_beside_a_tab_bar_that_runs_down_one_side_and_the_bar_still_answers(self, browser, side):
+        """The Forge Assistant's Transpose View puts the tab bar down the
+        window's left or right side (the theme lays it out, docs/22 §3.47):
+        the viewer then starts at the window's top, beside the rail rather than
+        over it or under a bar that is not there."""
+        other = "right" if side == "left" else "left"
+        rail = (f"#tabs > .tab-nav {{ position: fixed; top: 0; bottom: 0; {side}: 0; {other}: auto; "
+                "width: 48px; height: auto; flex-direction: column; border-bottom: 0; }"
+                "#tabs > .tab-nav button { width: 40px; height: 40px; }")
+        page, served = open_page(browser, width=390, height=800, theme_css=rail)
+        try:
+            open_viewer(page)
+            found = page.evaluate("""() => {
+                const box = document.querySelector('.mc-lv').getBoundingClientRect();
+                const bar = document.querySelector('#tabs > .tab-nav').getBoundingClientRect();
+                const at = document.elementFromPoint(bar.left + bar.width / 2, 20);
+                return {top: box.top, left: box.left, right: box.right,
+                        barLeft: bar.left, barRight: bar.right,
+                        barAnswers: !!(at && at.closest('.tab-nav')), width: innerWidth};
+            }""")
+            assert found["top"] == 8, "no bar above it"
+            if side == "left":
+                assert found["barRight"] == 48 and found["left"] == 48 + 8 and found["right"] == found["width"] - 8
+            else:
+                assert found["barLeft"] == found["width"] - 48
+                assert found["left"] == 8 and found["right"] == found["width"] - 48 - 8
+            assert found["barAnswers"] is True
+        finally:
+            close_page(page, served)
+
     def test_on_a_wide_window_it_is_centred_and_no_wider_than_880(self, browser):
         page, served = open_page(browser, width=1600, height=900)
         try:

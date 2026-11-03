@@ -1036,6 +1036,109 @@
     letter-spacing: 0.02em;
 }
 
+/* -- the tab bar as a rail ----------------------------------------------------- */
+
+/* The Forge Assistant's Transpose View (its ⋯ menu, docs/22 §3.47): the tab
+   bar as a slim rail down the window's left or right side, written on the
+   root (`data-forge-assistant-rail`), with the page beside it starting at the
+   window's top under no bar at all. The tabs are icons on a rail whatever the
+   tab names setting says (the script draws them), stacked from the top and
+   scrolling down where they do not fit; the header's own buttons stand at the
+   rail's foot, a line above them, over the tabs that scroll under them. The
+   bar is still Forge's own strip, moved by nothing: only its layout changes,
+   so Forge's direct-child selector and the assistant's host still find it.
+   Everything held under the bar reads `--mc-theme-header`, which is none
+   here. Later in the file than the icon bar's rules, which these override at
+   the same weight -- the side strips it paints as shadows among them; its
+   `::before` ground is none already. */
+:root[data-mc-theme="on"][data-forge-assistant-rail] {
+    --mc-theme-header: 0px;
+    --mc-theme-rail: 48px;
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail] #tabs > .tab-nav {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: auto;
+    flex-direction: column;
+    align-items: center;
+    width: var(--mc-theme-rail);
+    height: auto;
+    min-height: 0;
+    margin: 0;
+    padding: 4px 0 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
+    border-bottom: 0;
+    border-right: 1px solid var(--border-color-primary);
+    box-shadow: none;
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] #tabs > .tab-nav {
+    left: auto;
+    right: 0;
+    border-right: 0;
+    border-left: 1px solid var(--border-color-primary);
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail] .mc-theme-title {
+    display: none;
+}
+
+/* The selected tab's accent along the side that faces the page. */
+:root[data-mc-theme="on"][data-forge-assistant-rail="left"] #tabs > .tab-nav > button[role="tab"].selected {
+    box-shadow: inset -2px 0 0 var(--color-accent);
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] #tabs > .tab-nav > button[role="tab"].selected {
+    box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* The other buttons -- quick settings, extra networks, light and dark, the
+   theme's settings -- apart from the tabs: at the rail's foot, a line above
+   them, the ground fading in over the tabs that scroll under them. */
+:root[data-mc-theme="on"][data-forge-assistant-rail] .mc-theme-actions {
+    position: sticky;
+    bottom: 0;
+    right: auto;
+    z-index: 1;
+    flex-direction: column;
+    gap: 4px;
+    margin: auto 0 0;
+    padding: 6px 0;
+    border-top: 1px solid var(--border-color-primary);
+    background: var(--body-background-fill);
+    box-shadow: 0 -12px 12px -4px var(--body-background-fill);
+}
+
+/* The page beside the rail, and the quick settings drawer, which opens from
+   the window's left edge, beside a rail on that side. */
+:root[data-mc-theme="on"][data-forge-assistant-rail="left"] .gradio-container.app {
+    padding-left: calc(var(--mc-theme-rail) + var(--mc-theme-page-pad));
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] .gradio-container.app {
+    padding-right: calc(var(--mc-theme-rail) + var(--mc-theme-page-pad));
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="left"] .mc-theme-drawer {
+    left: var(--mc-theme-rail);
+}
+
+/* And the extra networks drawer, which opens over the page's right edge,
+   beside a rail on that side -- on the page and in focus mode, where its own
+   rules put it at the window's edge again. The column layout keeps it in the
+   page's flow, beside the generation UI, and needs nothing. */
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] .mc-theme-networks,
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] .mc-theme-networks-open > .mc-theme-networks-page.mc-theme-networks-shown,
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] body.forge-assistant-focused .mc-theme-networks-host.mc-theme-networks-open > .mc-theme-networks,
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] body.forge-assistant-focused .mc-theme-networks-host.mc-theme-networks-open > .mc-theme-networks-page.mc-theme-networks-shown {
+    right: var(--mc-theme-rail);
+}
+
 /* -- the quick settings drawer ------------------------------------------- */
 
 :root[data-mc-theme="on"] .mc-theme-drawer {
@@ -8399,6 +8502,82 @@
     opacity: 0.5;
 }
 
+/* Transpose View (docs/22 §3.47): the header laid down one side of the panel
+   instead of across its top -- a strip the panel's height, its buttons stacked
+   from the top, the grip (the drag handle, the memory reading written down it)
+   taking what is left, the ✕ at its foot -- and every other part of the panel,
+   still one column, starting at the panel's top beside it. Absolutely placed,
+   so the column is the column it always was; the script writes the least
+   height the strip's buttons need (`--forge-assistant-rail-min`), since the
+   panel cannot size itself to something beside its column. The corner and the
+   edge strip move off the rail. */
+.forge-assistant-panel[data-rail] {
+    --forge-assistant-rail-width: 44px;
+    min-height: var(--forge-assistant-rail-min, 0px);
+}
+
+.forge-assistant-panel[data-rail="left"] {
+    padding-left: var(--forge-assistant-rail-width);
+}
+
+.forge-assistant-panel[data-rail="right"] {
+    padding-right: var(--forge-assistant-rail-width);
+}
+
+.forge-assistant-panel[data-rail] > .forge-assistant-header {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 1;
+    box-sizing: border-box;
+    width: var(--forge-assistant-rail-width);
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.3em;
+    padding: 0.3em 0;
+    border-bottom: 0;
+    border-right: 1px solid var(--border-color-primary);
+    overflow: hidden;
+}
+
+.forge-assistant-panel[data-rail="right"] > .forge-assistant-header {
+    left: auto;
+    right: 0;
+    border-right: 0;
+    border-left: 1px solid var(--border-color-primary);
+}
+
+.forge-assistant-panel[data-rail] .forge-assistant-grip {
+    flex: 1 1 0%;
+    align-self: stretch;
+    min-width: 0;
+    min-height: 3.5em;
+}
+
+.forge-assistant-panel[data-rail] .forge-assistant-memory {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    white-space: nowrap;
+}
+
+.forge-assistant-panel[data-rail] > .forge-assistant-resize {
+    top: 0;
+}
+
+.forge-assistant-panel[data-rail="left"] > .forge-assistant-resize {
+    left: var(--forge-assistant-rail-width);
+}
+
+.forge-assistant-panel[data-rail="left"][data-corner$="left"] > .forge-assistant-corner {
+    left: var(--forge-assistant-rail-width);
+}
+
+.forge-assistant-panel[data-rail="right"][data-corner$="right"] > .forge-assistant-corner {
+    right: var(--forge-assistant-rail-width);
+}
+
 .forge-assistant-icon-button,
 .forge-assistant-nav-button,
 .forge-assistant-action,
@@ -9506,6 +9685,45 @@ body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-ass
        reach. */
     overscroll-behavior: contain !important;
     background: var(--body-background-fill, var(--background-fill-primary, #101010)) !important;
+}
+
+/* The kept bar as a rail (Transpose View, docs/22 §3.47): when the tab bar
+   runs down one side of the window (`data-forge-assistant-rail` on the root,
+   the Model Chain theme's layout), focus keeps it there, the window's height,
+   rather than along the top, and the workspace starts at the window's top
+   beside it: the script says the kept bar is the rail on the body
+   (`data-forge-assistant-focus-rail`) and writes its width while it shows
+   (`--forge-assistant-focus-side`). Hidden, it goes off its own side; peeking,
+   it is over the workspace's edge. Rules of their own, so the focus root's rule
+   above stays as Mini Paint NEO's browser check carries it. */
+:root[data-mc-theme="on"][data-forge-assistant-rail="left"] body.forge-assistant-focused .forge-assistant-focus-bar {
+    top: 0 !important;
+    right: auto !important;
+    bottom: 0 !important;
+    left: 0 !important;
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] body.forge-assistant-focused .forge-assistant-focus-bar {
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: auto !important;
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="left"] body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-assistant-focus-bar {
+    transform: translateX(calc(-100% - 2px)) !important;
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] body.forge-assistant-focused[data-forge-assistant-focus-bar="hidden"] .forge-assistant-focus-bar {
+    transform: translateX(calc(100% + 2px)) !important;
+}
+
+body.forge-assistant-focused[data-forge-assistant-focus-rail="left"] .forge-assistant-focus-root {
+    left: var(--forge-assistant-focus-side, 0px) !important;
+}
+
+body.forge-assistant-focused[data-forge-assistant-focus-rail="right"] .forge-assistant-focus-root {
+    right: var(--forge-assistant-focus-side, 0px) !important;
 }
 
 /* The gallery fills the view (forge_assistant_layout.js, `Fill`).
@@ -11002,8 +11220,8 @@ details.mc-lora-more[open] > summary {
 
 .mc-lv-scrim {
     position: fixed;
-    left: 0;
-    right: 0;
+    left: var(--mc-lv-left, 0px);
+    right: var(--mc-lv-right, 0px);
     bottom: 0;
     top: var(--mc-lv-top, 0px);
     z-index: var(--mc-lv-layer);
@@ -11017,10 +11235,11 @@ details.mc-lora-more[open] > summary {
     z-index: calc(var(--mc-lv-layer) + 1);
     top: calc(var(--mc-lv-top, 0px) + 8px);
     bottom: calc(8px + max(var(--mc-lv-keyboard, 0px), env(safe-area-inset-bottom, 0px)));
-    left: 0;
-    right: 0;
+    left: var(--mc-lv-left, 0px);
+    right: var(--mc-lv-right, 0px);
     margin: 0 auto;
-    width: min(880px, calc(100% - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+    width: min(880px, calc(100% - var(--mc-lv-left, 0px) - var(--mc-lv-right, 0px) - 16px
+                           - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
     box-sizing: border-box;
     display: flex;
     flex-direction: column;

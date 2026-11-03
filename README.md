@@ -4231,6 +4231,38 @@ launcher still does what it always did (the panel opens after its 300 ms);
 two presses still go back and three still turn focus off. Super Focused has no
 tab bar at all, whatever this setting says, and no tap brings it.
 
+**Transpose View.** **Transpose View ›**, in the **⋯** menu's Panel group,
+holds two choices, each **Top** (as it always was), **Left** or **Right**, each
+chosen apart from the other and remembered in this browser:
+
+- **Tab Bar** — the WebUI's tab bar as a slim strip, 48 px wide, down the left
+  or right side of the window. The tabs are icons on it, stacked from the top,
+  whatever the theme's *Tab names* setting says (a tab's name is its tooltip),
+  and the theme's own buttons — quick settings, extra networks, light and
+  dark, the theme's settings — stand apart at the strip's foot, a line above
+  them. The page starts at the window's top beside the strip, with nothing
+  above it but its own 8 px. Where the tabs do not all fit, the strip scrolls
+  down under a finger or the wheel, the tabs sliding under the buttons at its
+  foot, and a tab chosen from anywhere is brought into view on it. The quick
+  settings open beside a strip on the left and the extra networks beside one
+  on the right, both from the window's top, and the LoRA viewer covers the
+  page beside the strip. **In focus mode** the kept tab bar is the strip: the
+  workspace fills the window beside it, from the top; with *Tab Bar in Focus*
+  off it is hidden off its own side, and a tap or a drag of the launcher or
+  the panel's header brings it in over the workspace's edge for four seconds,
+  as along the top. The strip is the Model Chain theme's bar laid out again,
+  so these choices wait for the theme to be on (*Settings → Model Chain:
+  Theme*); without it they are greyed.
+- **Panel Buttons** — the open panel's header as a slim strip, 44 px wide,
+  down the panel's left or right side: the workspace, **Chat**, 🎛, **⋯**, ▶
+  and **✕** stacked from the top, and under them the grip — the space you drag
+  the panel by, with the memory reading written down it — taking the rest of
+  the strip. Everything else in the panel (the conversation, the composer, a
+  menu, a docked column) starts at the panel's top beside it. The strip is
+  the header in every way: the same presses on its grip, a drag by it, and
+  the corner and the left edge that resize the panel sit beside it. A panel
+  is never shorter than its strip.
+
 **Collapsed, the panel is a tab bar.** Under the header it lists every
 workspace this installation has, one press each — a tab bar you can put
 wherever you want one, in focus mode as much as out of it. Pressing one
@@ -4411,7 +4443,7 @@ entries act on, and a **Cancel**:
 | --- | --- |
 | **Chat**, headed by the character's name | **New chat**, **Threads ›**, **Emotion ›** (the thread's emotion; *A thread's emotion*, above), **System prompt…** |
 | **Composer** | **Auto Attach**, **Send to Generate** |
-| **Panel** | **Free Float**, **Tab Bar in Focus**, **Customize…** |
+| **Panel** | **Free Float**, **Tab Bar in Focus**, **Tap Outside to Close**, **Transpose View ›**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
 
 A menu opens inside the panel, in the conversation's place — or the workspace
@@ -7297,6 +7329,14 @@ one second.
   swipe that the bar cannot take (past its first tab, say) is not the
   browser's Back: the page holds its root's sideways overscroll at none, as
   the Voice Box does while it is on screen.
+- **The bar down one side.** The Forge Assistant's *Transpose View* (its **⋯**
+  menu; see *Transpose View* under the Forge Assistant) lays this bar out as a
+  48 px strip down the window's left or right side: the tabs as icons whatever
+  *Tab names* says, stacked from the top and scrolling down where they do not
+  fit, the bar's own buttons at the strip's foot under a line, no title, and
+  the page beside it from the window's top. Everything held under the bar
+  (the drawers, the results column's hold) starts at the window's top
+  instead. It is still Forge's own strip, moved by nothing.
 - **Generate above the gallery, the prompt boxes at the top of the settings
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
   compact prompt-box styles both handled. The results column stays where it
@@ -7818,8 +7858,9 @@ when the UI Preset changes** (on).
 Every LoRA in the prompt, with its picture, its trigger words and a slider for
 its weight, behind one button at the end of the prompt tool row: the upright
 sliders after Forge's Apply Styles, on Txt2Img and Img2Img. Pressed, it covers
-the page under the tab bar (centred, and no wider than 880 px, on a wide
-screen) with one thin row for each `<lora:…>` or `<lyco:…>` tag in the Prompt
+the page under the tab bar — or beside it, when the Forge Assistant's
+*Transpose View* has put the bar down one side — (centred, and no wider than
+880 px, on a wide screen) with one thin row for each `<lora:…>` or `<lyco:…>` tag in the Prompt
 and, on Txt2Img, the two Literal boxes, in the order they are on screen:
 
 - **The picture** is the LoRA's own card picture from Forge's LoRA browser;
