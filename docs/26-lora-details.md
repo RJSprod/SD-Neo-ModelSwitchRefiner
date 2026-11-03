@@ -279,7 +279,7 @@ it, answered **no** to a long press that would add a trigger to the prompt
 | Which images | Only a generation the Krea hook lifted a tag in (`_mark_lifted`, a mark on `p`): Img2Img has nothing that lifts a tag back, so moving its tags would change what a paste generates |
 | The viewer's data | The browser reads the tags (names and weights on screen at once); one `GET` per opening answers pictures and trigger words for all of them, with an 8 s deadline. Found as Forge's `load_networks` finds a LoRA (alias, or the file's name for an ambiguous alias, one rescan for a name not known yet); the card is `create_item(name, enable_filter=False)`; the triggers are LoRA Details' library, then Forge's activation text split at commas; never a file hashed |
 | Its place on the page | `document.body`, fixed, under whatever tab bar is on screen, on the shared dialog layer (2000), announced with `minipaint:overlay`; Escape taken on the window's capture phase, before Forge's interrupt and the assistant's focus exit (and a guard in the assistant's `documentKey`, as for the message editor) |
-| Its colours | The page theme's Gradio variables, so it follows the theme in use; three of its own for what they mean (orange for a negative weight, amber for a LoRA not on disk, green for a trigger already in the prompt) |
+| Its colours | The page theme's Gradio variables, so it follows the theme in use; the three that mean something are Gradio's orange, yellow and green (a negative weight, a LoRA not on disk, a trigger already in the prompt), each with a fallback, because every section of `style.css` after the first mention of LLM Studio is held to the host's variables by two tests |
 
 ### 8.2 What the mockup added
 

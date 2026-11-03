@@ -10962,10 +10962,11 @@ details.mc-lora-more[open] > summary {
    javascript/model_chain_lora_viewer.js: a button after Forge's Apply Styles,
    and a dialog under the tab bar on the dialog layer Mini Paint NEO's popup and
    the assistant's panel share (2000; everything the assistant draws is below
-   it). Its colours are the page theme's own variables, so it follows whichever
-   theme is in use, by day and by night; the three colours that mean something
-   (a negative weight, a LoRA not on disk, a trigger already in the prompt) are
-   its own. Sizes a finger needs are pixels: 34 px buttons, a 40 px slider,
+   it). Every colour is one of the page theme's variables, so it follows
+   whichever theme is in use, by day and by night; the three that mean
+   something (a negative weight, a LoRA not on disk, a trigger already in the
+   prompt) are Gradio's orange, yellow and green, each with a fallback. Sizes a
+   finger needs are pixels: 34 px buttons, a 40 px slider,
    28 px pills. Every `display` below would beat the browser's rule for
    [hidden], so the section says what [hidden] means for its own nodes. */
 
@@ -10985,9 +10986,10 @@ details.mc-lora-more[open] > summary {
     --mc-lv-subdued: var(--body-text-color-subdued, #8c8c8c);
     --mc-lv-button: var(--button-secondary-background-fill, #1a1a1a);
     --mc-lv-button-hover: var(--button-secondary-background-fill-hover, #262626);
-    --mc-lv-negative: #f76b15;
-    --mc-lv-missing: #f5a524;
-    --mc-lv-present: #30a46c;
+    --mc-lv-negative: var(--color-orange-500, #f76b15);
+    --mc-lv-missing: var(--color-yellow-500, #f5a524);
+    --mc-lv-present: var(--color-green-500, #30a46c);
+    --mc-lv-shadow: var(--shadow-drop-lg, 0 8px 24px rgba(0, 0, 0, 0.55));
     --mc-lv-layer: var(--minipaint-dialog-layer, 2000);
 }
 
@@ -11005,7 +11007,7 @@ details.mc-lora-more[open] > summary {
     bottom: 0;
     top: var(--mc-lv-top, 0px);
     z-index: var(--mc-lv-layer);
-    background: rgba(0, 0, 0, 0.55);
+    background: color-mix(in srgb, #000000 55%, transparent);
     touch-action: none;
     overscroll-behavior: contain;
 }
@@ -11028,7 +11030,7 @@ details.mc-lora-more[open] > summary {
     color: var(--mc-lv-text);
     border: 1px solid var(--mc-lv-line);
     border-radius: 14px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    box-shadow: var(--mc-lv-shadow);
     font-family: var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
     font-size: 14px;
     line-height: 1.4;
@@ -11423,7 +11425,7 @@ details.mc-lora-more[open] > summary {
 }
 
 .mc-lv-weight[data-bad] {
-    border-color: #d93025;
+    border-color: var(--error-border-color, var(--color-red-500, #d93025));
 }
 
 .mc-lv-slide {
@@ -11605,7 +11607,7 @@ details.mc-lora-more[open] > summary {
     font-size: 13px;
     line-height: 1.35;
     text-align: center;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--mc-lv-shadow);
 }
 
 @media (prefers-reduced-motion: reduce) {
