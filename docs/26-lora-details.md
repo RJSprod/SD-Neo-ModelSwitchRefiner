@@ -315,3 +315,43 @@ reverting one decision, each failed a test.
   the box's number changed, or from a full keyboard.
 - The saved text of an image made before this change keeps its tags in front;
   it pastes and generates as before.
+
+### 8.5 Opaque, and adding a LoRA from the viewer (2026-11-04)
+
+Asked: "please make its background opaque, right now it's transparent and I
+see what's being it when it's open. I would also like the ability to add lora
+from this view, but only for the model type I have in the preset. This should
+work the same way as the extra networks panel. What ever lora folder I have
+assigned should be the source for adding. I should be able to add one at a
+time, and see a suggested auto complete when I am typing in a lora name much
+like how extra networks work. Please keep it compact, mobile friendly, and
+bound to the visible display area."
+
+| Question | Decision |
+|---|---|
+| Why it was see-through | Forge Neo's own `style.css` ("general gradio fixes") says `--block-background-fill: transparent` on `:root` and `.dark`, and the viewer's surface was that variable. The test page had given it a colour, which is why no test saw it; the page now carries Forge's rule. The surface is the page's ground, `--background-fill-primary` |
+| Where the names come from | `GET /model-chain/lora-viewer/names` (`listing`): Forge's `networks.available_networks`, kept to the active preset's folders by `mc_extra_networks_filter.active_rules` on the LoRA page and `item_allowed` -- the extra networks panel's own filter, so nothing assigned is every LoRA unless the strict reading is on, and the filter's switch turns both off. Names only, no file read, sorted, at most 20,000 |
+| The tag's name | `get_alias()`, as a card press writes it (the alias, or the file's name when Forge prefers it or the alias is ambiguous); the suggestion shows the file's name and the tag's when they differ, and matches either |
+| The weight | The card's *Preferred weight* (Forge's user metadata, 0 being none), answered by the details route as `weight`; without one Forge's `extra_networks_default_multiplier`, read off the page's `opts`. A weight the hand moved before the details arrived is kept |
+| Where it goes | The end of the Prompt box, after Forge's `extra_networks_add_text_separator` (none at the start of an empty box or after a space), on Apply -- the saved prompt keeps LoRA tags at the end (8.1) -- never a Literal box |
+| Matching | Forge's browser search: every word typed somewhere in the name or the tag; the names that start with what was typed first, then those with a word that does, then the rest, each alphabetically; eight at most |
+| One at a time, compact, bound | One box under the title (38 px, 16 px text so a phone does not zoom), its list inside the dialog under it as a flex item capped at 45 % of the viewer and scrolling, the rows giving way; never a popup over the window's edge. A choice empties the box for the next |
+| Already in the prompt | Marked *In the prompt*; chosen, the row it has is shown (scrolled to, flashed), not added twice |
+| The keys | ↑ ↓ round the list, Enter adds the one chosen or the first, Escape puts the list away, then what was typed, before it closes the viewer (taken on the window's capture phase as before) |
+| No live connection | One request with an 8 s deadline, when the box is first used in a viewer; failed or late, the list says so and typing again asks again. The details of an added row are one more request of its own, so the full load's Try again does not cut it short |
+
+Tests: `tests/test_lora_viewer.py` (the listing: every LoRA without folders,
+only the preset's with and without subfolders, nothing under the strict
+reading, the tag's name, the browser's rules asked of the LoRA page, no file
+read; the preferred weight and 0 as none; the names route as a plain handler,
+its failure as a sentence, a details route already there; and a real FastAPI
+app answering it, run under FastAPI 0.112.2) and
+`tests/test_lora_viewer_js.py` (Chromium, on a page carrying Forge's
+transparent block fill: the viewer opaque; the suggestions and their order,
+listed once; a chosen one at its preferred weight written at the Prompt's end
+by Apply; Forge's default multiplier and separator; one already in the prompt
+shown, not added; the keys and Escape; nothing matching naming the preset; a
+new row taken back and Reset all; the names' deadline; on a phone the list
+inside the viewer and the window, and a tap adding). Not run on the user's
+machine; the user's own folder assignments and Forge's real LoRA registry were
+stood in for.

@@ -134,7 +134,7 @@ class TestFound:
     def test_a_typo_is_not_found_and_carries_nothing(self, library):
         answer = mc_lora_viewer.details(["typo"], networks=registry(), page=Page({}))
         assert answer == {"loras": [{"name": "typo", "found": False, "picture": "",
-                                     "title": "", "triggers": []}]}
+                                     "title": "", "triggers": [], "weight": None}]}
 
     def test_names_are_answered_once_each_in_the_order_asked(self, library):
         networks = registry(Network("a"), Network("b"))
@@ -218,6 +218,113 @@ class TestPicture:
         assert row["picture"] == ""
 
 
+class TestThePreferredWeight:
+    """A press on a card writes its Preferred weight into the tag; the viewer's
+    add box does the same, from this."""
+
+    def test_the_cards_preferred_weight_is_answered(self, library):
+        networks = registry(Network("rf"))
+        found = card("rf")
+        found["user_metadata"]["preferred weight"] = 0.65
+        (row,) = mc_lora_viewer.details(["rf"], networks=networks, page=Page({"rf": found}))["loras"]
+        assert row["weight"] == 0.65
+
+    @pytest.mark.parametrize("value", [0, 0.0, "", None, "lots"])
+    def test_none_is_none_as_forge_reads_it(self, library, value):
+        """Forge writes the default multiplier for a weight of 0, so 0 is none."""
+        networks = registry(Network("rf"))
+        found = card("rf")
+        found["user_metadata"]["preferred weight"] = value
+        (row,) = mc_lora_viewer.details(["rf"], networks=networks, page=Page({"rf": found}))["loras"]
+        assert row["weight"] is None
+
+
+class Aliased(Network):
+    """A LoRA on disk as Forge has it: its tag name is ``get_alias()``."""
+
+    def __init__(self, name, alias=None, filename=None, prefer_file=False):
+        super().__init__(name, alias=alias, filename=filename)
+        self.prefer_file = prefer_file
+
+    def get_alias(self):
+        return self.name if self.prefer_file else self.alias
+
+
+class TestTheAddBoxsNames:
+    """The names the add box suggests: every LoRA Forge knows, kept to the
+    active UI Preset's folders as the LoRA browser keeps its cards."""
+
+    @pytest.fixture
+    def preset(self, monkeypatch):
+        import mc_extra_networks_folders
+
+        monkeypatch.setattr(mc_extra_networks_folders, "current_preset", lambda: "xl")
+
+    def networks(self):
+        return registry(Aliased("Zebra", filename="/loras/xl/Zebra.safetensors"),
+                        Aliased("apple_v2_final", alias="apple", filename="/loras/xl/styles/apple.safetensors"),
+                        Aliased("old_sd15", filename="/loras/sd/old_sd15.safetensors"),
+                        Aliased("Mango", filename="/loras/xl/Mango.safetensors"))
+
+    def test_nothing_assigned_lists_every_lora_sorted_by_name(self, preset):
+        answer = mc_lora_viewer.listing(networks=self.networks(), rules=None)
+        assert [one["name"] for one in answer["loras"]] == ["apple_v2_final", "Mango", "old_sd15", "Zebra"]
+        assert answer["preset"] == "xl" and answer["filtered"] is False
+
+    def test_only_the_presets_folders(self, preset):
+        import mc_extra_networks_folders
+
+        rules = [mc_extra_networks_folders.Rule("/loras/xl", subfolders=False)]
+        answer = mc_lora_viewer.listing(networks=self.networks(), rules=rules)
+        assert [one["name"] for one in answer["loras"]] == ["Mango", "Zebra"], "not sd, not a subfolder"
+        assert answer["filtered"] is True
+        rules = [mc_extra_networks_folders.Rule("/loras/xl", subfolders=True)]
+        answer = mc_lora_viewer.listing(networks=self.networks(), rules=rules)
+        assert [one["name"] for one in answer["loras"]] == ["apple_v2_final", "Mango", "Zebra"]
+
+    def test_strict_with_nothing_assigned_lists_nothing(self, preset):
+        assert mc_lora_viewer.listing(networks=self.networks(), rules=[])["loras"] == []
+
+    def test_each_has_the_name_a_card_writes_into_its_tag(self, preset):
+        networks = registry(Aliased("apple_v2_final", alias="apple"),
+                            Aliased("pear_v1", alias="pear", prefer_file=True), Network("plain", alias="pa"))
+        tags = {one["name"]: one["tag"] for one in mc_lora_viewer.listing(networks=networks, rules=None)["loras"]}
+        assert tags == {"apple_v2_final": "apple", "pear_v1": "pear_v1", "plain": "pa"}
+
+    def test_the_rules_are_the_browsers(self, preset, monkeypatch):
+        """Asked of the LoRA page as the browser's filter asks, so a preset's
+        folders, the strict reading and the switch that turns it off are one
+        answer for both."""
+        import mc_extra_networks_filter
+        import mc_extra_networks_folders
+
+        asked = []
+
+        def active_rules(page):
+            asked.append(page)
+            return [mc_extra_networks_folders.Rule("/loras/sd")]
+
+        monkeypatch.setattr(mc_extra_networks_filter, "active_rules", active_rules)
+        page = Page({})
+        answer = mc_lora_viewer.listing(networks=self.networks(), page=page)
+        assert asked == [page]
+        assert [one["name"] for one in answer["loras"]] == ["old_sd15"]
+
+    def test_without_forge_there_is_nothing_to_add(self, preset, monkeypatch):
+        monkeypatch.setattr(mc_lora_viewer, "forge_networks", lambda: None)
+        answer = mc_lora_viewer.listing(rules=None)
+        assert answer["loras"] == []
+
+    def test_no_file_is_read(self, preset, monkeypatch):
+        """Names only: a folder of thousands answers at once."""
+        def never(*args, **kwargs):
+            raise AssertionError("the listing read a file")
+
+        monkeypatch.setattr("builtins.open", never)
+        networks = registry(*[Aliased(f"n{i}", filename=f"/loras/xl/n{i}.safetensors") for i in range(500)])
+        assert len(mc_lora_viewer.listing(networks=networks, rules=None)["loras"]) == 500
+
+
 class TestTheRoute:
     class App:
         def __init__(self, paths=()):
@@ -260,7 +367,7 @@ class TestTheRoute:
         assert mc_lora_viewer.install(None, app) is True
         assert mc_lora_viewer.install(None, app) is True
         assert [(path, methods) for path, _handler, methods in app.handlers] == \
-            [(mc_lora_viewer.ROUTE, ["GET"])]
+            [(mc_lora_viewer.ROUTE, ["GET"]), (mc_lora_viewer.NAMES_ROUTE, ["GET"])]
         assert mc_lora_viewer.install(None, object()) is False
 
     def test_the_handler_is_a_plain_function_so_it_runs_on_the_thread_pool(self,
@@ -286,6 +393,38 @@ class TestTheRoute:
         response = handler(types.SimpleNamespace(query_params=query))
         assert seen == [["a", "b"]]
         assert getattr(response, "status_code", 200) == 200
+
+    def test_the_names_handler_answers_the_listing(self, with_fastapi, monkeypatch):
+        monkeypatch.setattr(mc_lora_viewer, "listing",
+                            lambda: {"loras": [{"name": "a", "tag": "a"}], "preset": "xl", "filtered": True})
+        app = self.App()
+        mc_lora_viewer.install(None, app)
+        (handler,) = [found for path, found, _methods in app.handlers if path == mc_lora_viewer.NAMES_ROUTE]
+        assert not inspect.iscoroutinefunction(handler)
+        response = handler()
+        assert getattr(response, "status_code", 200) == 200
+        body = getattr(response, "content", None)
+        if body is None:
+            import json
+
+            body = json.loads(response.body)
+        assert body["loras"] == [{"name": "a", "tag": "a"}]
+
+    def test_a_names_failure_is_a_sentence_too(self, with_fastapi, monkeypatch):
+        def boom():
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(mc_lora_viewer, "listing", boom)
+        app = self.App()
+        mc_lora_viewer.install(None, app)
+        (handler,) = [found for path, found, _methods in app.handlers if path == mc_lora_viewer.NAMES_ROUTE]
+        assert handler().status_code == 500
+
+    def test_a_route_already_there_is_not_added_again(self, with_fastapi):
+        """A page loaded before the update has the details route only."""
+        app = self.App(paths=[mc_lora_viewer.ROUTE])
+        assert mc_lora_viewer.install(None, app) is True
+        assert [path for path, _handler, _methods in app.handlers] == [mc_lora_viewer.NAMES_ROUTE]
 
     def test_a_failure_is_a_sentence_not_a_traceback(self, with_fastapi, monkeypatch):
         def boom(names):
@@ -315,3 +454,20 @@ class TestTheRoute:
         assert answer.status_code == 200, answer.text
         assert [row["found"] for row in answer.json()["loras"]] == [True, False]
         assert answer.headers["cache-control"] == "no-store"
+
+
+def test_a_real_fastapi_app_answers_the_names(monkeypatch):
+    """The add box's GET on a real FastAPI app: a plain handler with no
+    parameters, answered with the listing and never cached."""
+    fastapi = pytest.importorskip("fastapi")
+    testclient = pytest.importorskip("fastapi.testclient")
+    app = fastapi.FastAPI()
+    assert mc_lora_viewer.install(None, app) is True
+    networks = registry(Aliased("apple_v2_final", alias="apple"), Aliased("Mango"))
+    original = mc_lora_viewer.listing
+    monkeypatch.setattr(mc_lora_viewer, "listing", lambda: original(networks=networks, rules=None))
+    answer = testclient.TestClient(app).get(mc_lora_viewer.NAMES_ROUTE)
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["loras"] == [{"name": "apple_v2_final", "tag": "apple"},
+                                      {"name": "Mango", "tag": "Mango"}]
+    assert answer.headers["cache-control"] == "no-store"

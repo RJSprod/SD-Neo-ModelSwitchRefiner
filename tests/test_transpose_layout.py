@@ -325,6 +325,172 @@ class TestTheRailInFocusMode:
 
 
 # --------------------------------------------------------------------------- #
+# The panel and the launcher beside the tab rail
+# --------------------------------------------------------------------------- #
+
+BOXES = """() => {
+    const box = (node) => {
+        if (!node || node.hidden) return null;
+        const r = node.getBoundingClientRect();
+        return {left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height};
+    };
+    return {panel: box(document.querySelector('.forge-assistant-panel')),
+            launcher: box(document.querySelector('.forge-assistant-launcher')),
+            corner: box(document.querySelector('.forge-assistant-corner')),
+            where: document.querySelector('.forge-assistant-panel').getAttribute('data-corner'),
+            width: document.documentElement.clientWidth, height: innerHeight};
+}"""
+
+GAP = 24           # the panel's gap from an edge on a wide window (forge_assistant.js, WIDE_GAP)
+
+
+def anchored(page, panel, launcher=None):
+    page.evaluate("""([panel, launcher]) => {
+        const shell = forgeAssistant.shell;
+        shell.state.panelAnchor = panel;
+        shell.state.anchorOverride = launcher || panel;
+        shell.placeNow();
+    }""", [panel, launcher])
+    settle(page, 4)
+
+
+class TestThePanelBesideTheTabRail:
+    """"The flyout menu is not properly handling the side tab bar either, lets
+    make sure it does not get overlapped or render underneath side tab bar,
+    only beside. I am able to resize it to beneath." The rail's width is room
+    taken off its side of the window, as the safe-area insets are."""
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_on_the_rails_side_the_panel_and_the_launcher_stand_beside_it(self, browser, side):
+        page = focus_page(browser, width=1280, height=800)
+        anchored(page, "top-" + side)
+        transposed(page, tabs=side)
+        open_panel(page)
+        opened = page.evaluate(BOXES)
+        page.evaluate("forgeAssistant.shell.close()")
+        settle(page, 6)
+        closed = page.evaluate(BOXES)
+        page.close()
+
+        width = opened["width"]
+        for box in (opened["panel"], closed["launcher"]):
+            if side == "left":
+                assert box["left"] == RAIL + GAP
+            else:
+                # Placed at a whole pixel; a launcher's width is not one.
+                assert abs(box["right"] - (width - RAIL - GAP)) < 1
+
+    def test_the_corner_cannot_take_it_under_the_rail(self, browser):
+        """Along the right with the rail on the left, the corner is on the
+        panel's left; dragged to the window's edge it widens the panel only as
+        far as the rail."""
+        page = focus_page(browser, width=900, height=800)
+        anchored(page, "top-right")
+        transposed(page, tabs="left")
+        open_panel(page)
+        before = page.evaluate(BOXES)
+        corner = before["corner"]
+        x, y = corner["left"] + 3, corner["top"] + corner["height"] - 3
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(2, y, steps=8)
+        page.mouse.up()
+        settle(page, 6)
+        after = page.evaluate(BOXES)
+        page.close()
+
+        assert before["where"].endswith("left")
+        assert after["panel"]["width"] > before["panel"]["width"] + 100, "it did widen"
+        assert after["panel"]["left"] >= RAIL, "never under the rail"
+        assert after["panel"]["right"] == before["panel"]["right"]
+
+    def test_the_edge_strip_cannot_either(self, browser):
+        page = focus_page(browser, width=900, height=800)
+        anchored(page, "top-right")
+        transposed(page, tabs="left")
+        open_panel(page)
+        strip = page.evaluate("""() => { const r = document.querySelector('.forge-assistant-resize')
+            .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }""")
+        page.mouse.move(strip["x"], strip["y"])
+        page.mouse.down()
+        page.mouse.move(1, strip["y"], steps=8)
+        page.mouse.up()
+        settle(page, 6)
+        after = page.evaluate(BOXES)
+        page.close()
+
+        assert after["panel"]["left"] >= RAIL
+
+    def test_a_drag_against_the_rail_stops_beside_it(self, browser):
+        page = focus_page(browser, width=1280, height=800)
+        page.evaluate("forgeAssistant.shell.setFreeFloat(true)")
+        transposed(page, tabs="left")
+        open_panel(page)
+        grip = page.evaluate("""() => { const r = document.querySelector('.forge-assistant-grip')
+            .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }""")
+        page.mouse.move(grip["x"], grip["y"])
+        page.mouse.down()
+        page.mouse.move(grip["x"] - 2000, grip["y"], steps=10)
+        moving = page.evaluate(BOXES)
+        page.mouse.up()
+        settle(page, 6)
+        let_go = page.evaluate(BOXES)
+        page.close()
+
+        assert moving["panel"]["left"] == RAIL + GAP, "drawn beside it under the hand"
+        assert let_go["panel"]["left"] == RAIL + GAP, "and put down there"
+
+    def test_the_rail_coming_and_going_moves_the_panel_beside_it_and_back(self, browser):
+        page = focus_page(browser, width=1280, height=800)
+        anchored(page, "bottom-left")
+        open_panel(page)
+        along = page.evaluate(BOXES)
+        transposed(page, tabs="left")
+        beside = page.evaluate(BOXES)
+        transposed(page, tabs="right")
+        across = page.evaluate(BOXES)
+        transposed(page, tabs="")
+        back = page.evaluate(BOXES)
+        page.close()
+
+        assert along["panel"]["left"] == GAP
+        assert beside["panel"]["left"] == RAIL + GAP, "placed again, with nothing else asking"
+        assert across["panel"]["left"] == GAP
+        assert back["panel"]["left"] == GAP
+
+    def test_in_focus_mode_beside_the_kept_rail_and_at_the_edge_while_it_is_hidden(self, browser):
+        page = focus_page(browser, width=1280, height=800)
+        anchored(page, "top-left")
+        transposed(page, tabs="left")
+        enter_focus(page)
+        open_panel(page)
+        shown = page.evaluate(BOXES)
+        page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+        settle(page, 6)
+        hidden = page.evaluate(BOXES)
+        page.close()
+
+        assert shown["panel"]["left"] == RAIL + GAP
+        assert hidden["panel"]["left"] == GAP, "the workspace has the window, and so does the panel"
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_the_phones_sheet_stands_beside_it(self, browser, side):
+        page = focus_page(browser, width=390, height=760)
+        transposed(page, tabs=side)
+        open_panel(page)
+        found = page.evaluate(BOXES)
+        sheet = page.evaluate("document.querySelector('.forge-assistant-panel')"
+                              ".classList.contains('forge-assistant-sheet')")
+        page.close()
+
+        assert sheet is True
+        if side == "left":
+            assert found["panel"]["left"] == RAIL and found["panel"]["right"] == found["width"]
+        else:
+            assert found["panel"]["left"] == 0 and found["panel"]["right"] == found["width"] - RAIL
+
+
+# --------------------------------------------------------------------------- #
 # The panel's buttons
 # --------------------------------------------------------------------------- #
 
@@ -378,7 +544,13 @@ class TestThePanelsButtonsAsARail:
         page.close()
 
         assert grip["height"] > grip["width"] and grip["width"] <= PANEL_RAIL
-        assert grip["top"] > found["buttons"][-1]["bottom"] - 1, "under the buttons"
+        # Bottom-justified, at the user's word ("when set to side instead of
+        # top, to be bottom justified"): the grip first, from the rail's top,
+        # and the buttons stacked at its foot.
+        header = found["header"]
+        assert grip["top"] - header["top"] <= 8, "the grip first, at the rail's top"
+        assert grip["bottom"] <= found["buttons"][0]["top"] + 1, "above the buttons"
+        assert header["bottom"] - found["buttons"][-1]["bottom"] <= 8, "the buttons at the rail's foot"
         assert moving["panel"]["left"] == found["panel"]["left"] - 120, "dragged by the rail's grip"
         assert moving["panel"]["top"] == found["panel"]["top"] - 80
 

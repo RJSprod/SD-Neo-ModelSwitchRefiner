@@ -2349,6 +2349,58 @@ def test_the_play_button_presses_the_tabs_own_generate(browser):
         page.close()
 
 
+def test_a_right_click_on_the_put_away_launcher_is_the_play_button(browser):
+    """"when fly out menu is in button state minimized, then a right click
+    should invoke generate": the launcher's context menu presses the tab's
+    Generate, the browser's own menu is not shown, the panel stays away, and a
+    left press still opens it."""
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        page.evaluate("""() => { window.menus = [];
+            window.addEventListener("contextmenu", (e) => window.menus.push(e.defaultPrevented)); }""")
+        settle(page)
+        assert page.evaluate("forgeAssistant.shell.state.panelOpen") is False
+        page.click(".forge-assistant-launcher", button="right")
+        settle(page)
+        found = page.evaluate("""() => ({menus: window.menus, open: forgeAssistant.shell.state.panelOpen,
+            said: document.querySelector('.forge-assistant-launcher').getAttribute('data-generated'),
+            outline: getComputedStyle(document.querySelector('.forge-assistant-launcher')).outlineStyle})""")
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 1, "img2img": 0}
+        assert found == {"menus": [True], "open": False, "said": "done", "outline": "solid"}
+        page.click(".forge-assistant-launcher")
+        page.wait_for_function("forgeAssistant.shell.state.panelOpen === true", timeout=3000)
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 1, "img2img": 0}, "a left press opens"
+    finally:
+        page.close()
+
+
+def test_a_fingers_long_press_on_the_launcher_generates_nothing(browser):
+    """A finger held on the launcher is a drag beginning: its context menu --
+    the browser's own after a long press, or a plain mouse event from a
+    browser that sends one -- is not a right click."""
+    context, page = open_phone(browser, free_float=False)
+    try:
+        page.evaluate("forgeAssistant.shell.close()")
+        page.evaluate("""() => { window.pressed = 0; document.getElementById('txt2img_generate')
+            .addEventListener('click', () => { window.pressed += 1; }); }""")
+        settle(page)
+        box = page.evaluate("""() => { const r = document.querySelector('.forge-assistant-launcher')
+            .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }""")
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Input.dispatchTouchEvent",
+                 {"type": "touchStart", "touchPoints": [{"x": box["x"], "y": box["y"]}]})
+        page.wait_for_timeout(900)
+        page.evaluate("""() => document.querySelector('.forge-assistant-launcher')
+            .dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}))""")
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        cdp.detach()
+        settle(page)
+        assert page.evaluate("window.pressed") == 0
+        assert page.get_attribute(".forge-assistant-launcher", "data-generated") is None
+    finally:
+        context.close()
+
+
 CORNER_BOX = """() => {
     const r = document.getElementById("forge-assistant-panel").getBoundingClientRect();
     const c = document.querySelector(".forge-assistant-corner").getBoundingClientRect();

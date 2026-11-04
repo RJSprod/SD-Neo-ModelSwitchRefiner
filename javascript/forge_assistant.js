@@ -203,6 +203,10 @@
     const GENERATE_GLYPH = "\u25b6\ufe0e";  // a play triangle, text style
     const GENERATE_LABEL = "Generate in WanGP";
     const GENERATE_SHOWN = 3000;
+    // A right click on the launcher is ▶ (`launcherMenu`), but not the
+    // context menu of a finger's or a pen's long press: within this long of
+    // one going down on the launcher, its context menu is that press's.
+    const LONG_PRESS_MS = 2000;
     // The same ▶ on Txt2Img and Img2Img, asked for beside the docked settings:
     // "for the flyout menu in both the text to image and image to image, I
     // would like to have a play button, just like I do for WAN2GP, and its
@@ -238,15 +242,68 @@
                     || window.innerHeight || 0};
     }
 
+    // The tab bar down a side of the window (Transpose View, §3.47), which
+    // the launcher and the panel stand beside and never go under. Asked for:
+    // "The flyout menu is not properly handling the side tab bar either,
+    // lets make sure it does not get overlapped or render underneath side tab
+    // bar, only beside. I am able to resize it to beneath." So the rail's
+    // width is room taken off its side of the window, as the safe-area
+    // insets are: every placement, drag, cut and resize already keeps inside
+    // those (`anchorPoint`, `floatPoint`, `dragRoom`, `visibleCap`,
+    // `ownWidth`), and the phone's sheet is written beside it too.
+    //
+    // On the page, the theme's rail is Forge's own `#tabs > .tab-nav` laid
+    // down a side, found by the side the root names and by its box -- taller
+    // than it is wide and on that edge -- so a root that names a side over a
+    // bar along the top (the theme off) takes nothing. In focus mode it is
+    // what focus says it took off the workspace (`--forge-assistant-focus-side`
+    // on the body), which is the rail's width while it shows and nothing
+    // while it is hidden or peeking: the panel stands beside the workspace,
+    // and a bar that peeks comes in over both as a bar along the top does.
+    const RAIL_BAR = "#tabs > .tab-nav";
+    const FOCUS_BODY_CLASS = "forge-assistant-focused";
+    const FOCUS_RAIL_ATTRIBUTE = "data-forge-assistant-focus-rail";
+    const FOCUS_SIDE_PROPERTY = "--forge-assistant-focus-side";
+
+    /** The rail's room on each side of the visible window, in pixels: 0 on
+     *  a side without one. */
+    function besideRail(view) {
+        const room = {left: 0, right: 0};
+        try {
+            const body = document.body;
+            if (body && body.classList && body.classList.contains(FOCUS_BODY_CLASS)) {
+                const side = body.getAttribute(FOCUS_RAIL_ATTRIBUTE);
+                const width = parseFloat(body.style && body.style.getPropertyValue(FOCUS_SIDE_PROPERTY)) || 0;
+                if ((side === "left" || side === "right") && width > 0) room[side] = Math.round(width);
+                return room;
+            }
+            const html = document.documentElement;
+            const side = html && html.getAttribute ? html.getAttribute(RAIL_ATTRIBUTE) : null;
+            if (side !== "left" && side !== "right") return room;
+            const bar = document.querySelector(RAIL_BAR);
+            if (!bar || !bar.getBoundingClientRect) return room;
+            const box = bar.getBoundingClientRect();
+            if (!(box.width > 0) || !(box.height > box.width)) return room;
+            const seen = view || viewport();
+            if (side === "left" && box.left <= seen.left + 1) {
+                room.left = Math.max(0, Math.round(box.right - seen.left));
+            } else if (side === "right" && box.right >= seen.left + seen.width - 1) {
+                room.right = Math.max(0, Math.round(seen.left + seen.width - box.left));
+            }
+        } catch (error) { /* a page without the bar: nothing to stand beside */ }
+        return room;
+    }
+
     function insets() {
+        const rail = besideRail();
         const probe = document.getElementById(ROOT_ID);
-        if (!probe || !window.getComputedStyle) return {top: 0, right: 0, bottom: 0, left: 0};
+        if (!probe || !window.getComputedStyle) return {top: 0, right: rail.right, bottom: 0, left: rail.left};
         const style = window.getComputedStyle(probe);
         const read = (name) => parseFloat(style.getPropertyValue(name)) || 0;
         return {top: read("--forge-assistant-inset-top"),
-                right: read("--forge-assistant-inset-right"),
+                right: read("--forge-assistant-inset-right") + rail.right,
                 bottom: read("--forge-assistant-inset-bottom"),
-                left: read("--forge-assistant-inset-left")};
+                left: read("--forge-assistant-inset-left") + rail.left};
     }
 
     function gapFor(view) {
@@ -265,7 +322,10 @@
         let x;
         if (horizontal === "left") x = view.left + pad.left + gap;
         else if (horizontal === "right") x = view.left + view.width - pad.right - gap - width;
-        else x = view.left + (view.width - width) / 2;
+        // Centred in the room the insets leave, which is the window's middle
+        // when they are the same on both sides -- and beside a rail when one
+        // takes a side.
+        else x = view.left + pad.left + (view.width - pad.left - pad.right - width) / 2;
         const y = vertical === "top"
             ? view.top + pad.top + gap
             : view.top + view.height - pad.bottom - gap - height;
@@ -1607,10 +1667,55 @@
     };
 
     /** The panel's own width in `view`: the one chosen by the corner or the
-     *  edge, or the nominal one, inside the bounds and the window. */
-    Shell.prototype.ownWidth = function (view) {
+     *  edge, or the nominal one, inside the bounds and the window -- less
+     *  what the insets take off its sides (`pad`), a tab bar down a side
+     *  among them, so no width the corner or the edge asks for reaches
+     *  under it -- and less the gap on both sides, which is the room every
+     *  placement keeps it inside (`anchorPoint`, `floatPoint`): wider than
+     *  that, a panel at its widest ran past its gap on the side the corner
+     *  holds, and that edge moved under a hand that was not moving it. */
+    Shell.prototype.ownWidth = function (view, pad) {
+        const taken = pad ? (pad.left || 0) + (pad.right || 0) : 0;
         return Math.min(Math.max(this.state.panelWidth || NOMINAL_WIDTH, MIN_WIDTH),
-                        Math.min(MAX_WIDTH, view.width - 32));
+                        Math.min(MAX_WIDTH, view.width - Math.max(32, gapFor(view) * 2) - taken));
+    };
+
+    /** The rail's room written on the root for the stylesheet -- the phone's
+     *  sheet, which is laid out from the stylesheet and not placed, stands
+     *  beside it -- and kept to tell a change of it. Written only when it
+     *  changes. */
+    Shell.prototype.writeBeside = function (rail) {
+        const root = this.nodes && this.nodes.root;
+        const key = rail.left + "," + rail.right;
+        if (this.besideWritten === key) return;
+        this.besideWritten = key;
+        if (!root || !root.style || typeof root.style.setProperty !== "function") return;
+        ["left", "right"].forEach((side) => {
+            const name = "--forge-assistant-beside-" + side;
+            if (rail[side] > 0) root.style.setProperty(name, rail[side] + "px");
+            else root.style.removeProperty(name);
+        });
+    };
+
+    /** Placed again when the rail comes, goes, changes side or is hidden in
+     *  focus mode: heard as the attributes that say so, on the document's
+     *  root and the body, and acted on only when the room it takes changed. */
+    Shell.prototype.watchBeside = function () {
+        if (typeof MutationObserver !== "function") return;
+        const heard = () => {
+            const rail = besideRail();
+            if (rail.left + "," + rail.right !== this.besideWritten) this.place();
+        };
+        const watch = new MutationObserver(heard);
+        if (document.documentElement) {
+            watch.observe(document.documentElement, {attributes: true,
+                attributeFilter: [RAIL_ATTRIBUTE, "data-mc-theme"]});
+        }
+        if (document.body) {
+            watch.observe(document.body, {attributes: true,
+                attributeFilter: ["class", "style", FOCUS_RAIL_ATTRIBUTE]});
+        }
+        this.disposers.push(() => watch.disconnect());
     };
 
     Shell.prototype.placePanel = function () {
@@ -1620,6 +1725,10 @@
         const node = open ? this.nodes.panel : this.nodes.launcher;
         const view = viewport();
         const narrow = view.width < NARROW_VIEWPORT;
+        // Everything below keeps inside the insets, a tab bar down a side
+        // among them; the sheet reads the rail's room off the root.
+        const pad = insets();
+        this.writeBeside(besideRail(view));
         // The place of the one on screen: the sheet takes its half from it.
         root.setAttribute("data-anchor", this.anchor(node));
         root.classList.toggle("forge-assistant-narrow", narrow);
@@ -1667,12 +1776,11 @@
             // for. It scrolls instead -- see `startStrip`.
             // A floating panel cut at an edge by a drag keeps the width it was
             // cut to (`fitWidth`), never more than its own.
-            const own = this.ownWidth(view);
+            const own = this.ownWidth(view, pad);
             const fit = this.state.freeFloat && this.state.fitWidth > 0
                 ? Math.min(own, this.state.fitWidth) : own;
             node.style.width = Math.round(fit) + "px";
         }
-        const pad = insets();
         if (open) {
             // Never taller than what can be seen. The stylesheet's cap is the
             // window's height, and on a phone that is the height with the
@@ -2038,7 +2146,7 @@
         if (drag.own === undefined) {
             drag.sheet = !!(drag.node.classList && drag.node.classList.contains("forge-assistant-sheet"));
             drag.cap = visibleCap(view, drag.inset);
-            const width = drag.sheet ? drag.width : this.ownWidth(view);
+            const width = drag.sheet ? drag.width : this.ownWidth(view, drag.inset);
             let height = drag.height;
             if (!drag.sheet && (this.state.fitWidth > 0 || this.state.fitHeight > 0)) {
                 // Cut by the last drag: its own size, measured once.
@@ -2558,6 +2666,12 @@
         this.on(nodes.workspaces, "scroll", () => this.markOverflow());
 
         this.on(nodes.launcher, "click", (event) => this.launcherClick(event));
+        // A right click on the launcher is ▶ (`launcherMenu`); the kind of
+        // press before it says whether it was one.
+        this.on(nodes.launcher, "pointerdown", (event) => {
+            this.launcherPress = {type: event.pointerType || "", at: Date.now()};
+        }, true);
+        this.on(nodes.launcher, "contextmenu", (event) => this.launcherMenu(event));
         this.on(nodes.minimize, "click", () => this.close());
         this.on(nodes.chat, "click", () => this.toggleChat());
         this.on(nodes.settings, "click", () => this.toggleDock());
@@ -2657,6 +2771,9 @@
             buttons.observe(nodes.header, {attributes: true, attributeFilter: ["hidden"], subtree: true});
             this.disposers.push(() => buttons.disconnect());
         }
+        // A tab bar down a side, which the launcher and the panel stand
+        // beside (`besideRail`).
+        this.watchBeside();
         // Nobody is mid-gesture across a hidden page or an unfocused window,
         // and a release that happened while we were not looking is never
         // coming. Coming back, the shell is checked over as well as the
@@ -2997,6 +3114,69 @@
         const failed = this._generateFailed;
         this._generateFailed = "";
         this.showGenerated(failed || said, !failed, WANGP_WORKSPACE);
+    };
+
+    // A right click on the launcher is ▶. Asked for: "the play /generate
+    // button for text to image, image to image, and wan2gp works well, I want
+    // to make a shortcut to this function, so when fly out menu is in button
+    // state minimized, then a right click should invoke generate." So with
+    // the panel put away, the launcher's context menu -- a mouse's right
+    // button, or the keyboard's menu key on it -- presses what ▶ would press
+    // on this workspace (`pressGenerate`), and the browser's own menu is not
+    // shown. Where ▶ has nothing to press (another workspace, Txt2Img
+    // without its Generate on the page) the browser's menu is left alone.
+    // Not a finger's or a pen's long press, which is how a drag of the
+    // launcher begins: a touchscreen's context menu arrives while the finger
+    // is still down. The answer shows on the launcher for GENERATE_SHOWN --
+    // the accent while WanGP is asked, green for taken, red for refused, the
+    // words as its tooltip -- since the status line is in the panel.
+
+    Shell.prototype.launcherMenu = function (event) {
+        if (!event || this.state.panelOpen) return false;
+        const press = this.launcherPress;
+        const held = event.pointerType === "touch" || event.pointerType === "pen"
+            || !!(press && (press.type === "touch" || press.type === "pen")
+                  && Date.now() - press.at < LONG_PRESS_MS);
+        if (held) return false;
+        this.applyGenerate();
+        const button = this.nodes && this.nodes.generate;
+        if (!button || button.hidden) return false;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        if (button.disabled) {
+            const why = button.title || "Nothing to generate yet.";
+            this.tell(why, "warn");
+            this.showOnLauncher("failed", why);
+            return true;
+        }
+        const workspace = this.currentWorkspace();
+        this.showOnLauncher("busy", "Generating\u2026", true);
+        Promise.resolve(this.pressGenerate()).then((found) => {
+            const ok = !!(found && found.ok);
+            let said = (found && found.message) || "";
+            if (workspace === WANGP_WORKSPACE) {
+                said = ok ? (found.status === "started" ? "Generating in WanGP."
+                    : "Added to WanGP's queue.") : (said || "WanGP did not take it.");
+            }
+            this.showOnLauncher(ok ? "done" : "failed", said || (ok ? "Generating." : "Not generated."));
+        });
+        return true;
+    };
+
+    /** The launcher says what its right click did, for GENERATE_SHOWN (or
+     *  until the answer, while `waiting`), the words as its tooltip, its own
+     *  title put back after. */
+    Shell.prototype.showOnLauncher = function (state, said, waiting) {
+        const launcher = this.nodes && this.nodes.launcher;
+        if (!launcher || !launcher.dataset) return;
+        window.clearTimeout(this._launcherShown);
+        if (launcher.dataset.generated === undefined) this._launcherTitle = launcher.title;
+        launcher.dataset.generated = state;
+        launcher.title = said;
+        if (waiting) return;
+        this._launcherShown = window.setTimeout(() => {
+            delete launcher.dataset.generated;
+            launcher.title = this._launcherTitle || "";
+        }, GENERATE_SHOWN);
     };
 
     /** The last answer on the button for GENERATE_SHOWN -- green taken, red
@@ -7477,6 +7657,7 @@
     NS.nearestAnchor = nearestAnchor;
     NS.fitBox = fitBox;
     NS.dragRoom = dragRoom;
+    NS.besideRail = besideRail;
     NS.renderMarkdown = renderMarkdown;
     NS.promptFrom = promptFrom;
     NS.showingPicture = showingPicture;
