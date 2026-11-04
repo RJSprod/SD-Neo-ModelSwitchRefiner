@@ -10,6 +10,22 @@
 // tag is, takes out the tags marked for removal, and leaves every other
 // character of the prompt as it was.
 //
+// Adding one
+// ----------
+// A box under the title adds a LoRA, one at a time: "the ability to add lora
+// from this view, but only for the model type I have in the preset. This should
+// work the same way as the extra networks panel. What ever lora folder I have
+// assigned should be the source for adding ... see a suggested auto complete
+// when I am typing in a lora name". The names come from the extension's second
+// route (mc_lora_viewer.py, `listing`), kept to the folders assigned to the
+// active UI Preset as the LoRA browser keeps its cards, listed once a viewer
+// when the box is first used, with a deadline. What is typed is matched as
+// Forge's own browser search matches -- every word somewhere in the name --
+// the names that start with it first. A choice is a new row, at the card's
+// own weight (its Preferred weight, else Forge's default multiplier), written
+// at the end of the Prompt box on Apply after Forge's separator, as a press on
+// the card writes it; a LoRA already in the prompt is shown, not added twice.
+//
 // What it reads and writes
 // ------------------------
 // The tags are read here, from the boxes, the moment the viewer opens, so the
@@ -47,6 +63,8 @@
 
     const VERSION = 1;
     const ROUTE = "/model-chain/lora-viewer/details";
+    const NAMES_ROUTE = "/model-chain/lora-viewer/names";
+    const SUGGESTIONS = 8;   // the most names the add box shows at once
     const DEADLINE_MS = 8000;
     const MIN = -5;
     const MAX = 5;
@@ -92,6 +110,7 @@
         "minus": '<path d="M5 12h14"/>',
         "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
         "triangle-alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+        "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
     };
 
     function icon(name) {
@@ -231,6 +250,10 @@
     const state = {
         tab: "", boxes: [], rows: [], open: false, button: null, request: null,
         timer: 0, observer: null, toastTimer: 0, nodes: null, listening: false,
+        // The add box: the names it suggests from (listed once a viewer), the
+        // request listing them, the suggestions shown and the one chosen by
+        // the arrow keys, and the requests for the details of added rows.
+        names: null, namesRequest: null, shown: [], active: -1, extra: [],
     };
 
     function build() {
@@ -251,6 +274,15 @@
             + '<span class="mc-lv-count"></span></div>'
             + '<button type="button" class="mc-lv-text mc-lv-reset-all" hidden>'
             + icon("rotate-ccw") + "<span>Reset all</span></button>"
+            + "</div>"
+            + '<div class="mc-lv-add">'
+            + '<label class="mc-lv-add-field">' + icon("search")
+            + '<input class="mc-lv-add-input" type="text" role="combobox" aria-autocomplete="list" '
+            + 'aria-expanded="false" aria-controls="mc-lora-viewer-suggestions" '
+            + 'aria-label="Add a LoRA from this preset\'s folders" placeholder="Add a LoRA\u2026" '
+            + 'autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done"></label>'
+            + '<div class="mc-lv-suggest" id="mc-lora-viewer-suggestions" role="listbox" '
+            + 'aria-label="LoRAs" hidden></div>'
             + "</div>"
             + '<div class="mc-lv-status" hidden><span></span>'
             + '<button type="button" class="mc-lv-text mc-lv-retry"><span>Try again</span></button></div>'
@@ -274,6 +306,8 @@
             statusText: dialog.querySelector(".mc-lv-status span"),
             retry: dialog.querySelector(".mc-lv-retry"),
             list: dialog.querySelector(".mc-lv-list"),
+            add: dialog.querySelector(".mc-lv-add-input"),
+            suggest: dialog.querySelector(".mc-lv-suggest"),
             cancel: dialog.querySelector(".mc-lv-button-cancel"),
             apply: dialog.querySelector(".mc-lv-button-apply"),
         };
@@ -281,6 +315,7 @@
         nodes.apply.addEventListener("click", function () { close(true); });
         nodes.resetAll.addEventListener("click", resetAll);
         nodes.retry.addEventListener("click", function () { loadDetails(); });
+        bindAdd(nodes);
         dialog.addEventListener("keydown", trapTab);
         // The page under the scrim does not scroll while the viewer is open.
         scrim.addEventListener("wheel", function (event) { event.preventDefault(); }, {passive: false});
@@ -297,7 +332,7 @@
             empty.appendChild(make("b", "", state.tab === "img2img"
                 ? "No LoRAs in the prompt."
                 : "No LoRAs in the prompt or the Literal boxes."));
-            empty.appendChild(make("span", "", "Add one from the LoRA browser, then open this again."));
+            empty.appendChild(make("span", "", "Add one with the box above."));
             nodes.list.appendChild(empty);
         } else {
             const fragment = document.createDocumentFragment();
@@ -352,7 +387,8 @@
         };
         row.el.name.textContent = row.name;
         row.el.name.title = row.name;
-        row.el.box.textContent = row.box.label;
+        row.el.box.textContent = row.added ? "New in " + row.box.label : row.box.label;
+        if (row.added) node.setAttribute("data-added", "");
         row.el.weight.setAttribute("aria-label", "Weight of " + row.name);
         row.el.track.setAttribute("aria-label", "Weight of " + row.name);
         row.el.reset.setAttribute("aria-label", "Back to " + fmt(row.orig));
@@ -394,8 +430,12 @@
         el.reset.hidden = !changed || row.removed;
     }
 
+    // An added row is a change until it is taken back; any other row once its
+    // weight moved or it is marked for removal.
     function changes() {
-        return state.rows.filter(function (row) { return row.removed || !same(row.weight, row.orig); });
+        return state.rows.filter(function (row) {
+            return row.added ? !row.removed : (row.removed || !same(row.weight, row.orig));
+        });
     }
 
     function tally() {
@@ -408,6 +448,7 @@
 
     function setWeight(row, value) {
         if (row.fixed || !Number.isFinite(value)) return;
+        row.touched = true;
         row.weight = Number(value.toFixed(4));
         paint(row);
         tally();
@@ -425,13 +466,30 @@
         const button = row.el.remove;
         button.innerHTML = icon(row.removed ? "undo-2" : "trash");
         button.setAttribute("aria-pressed", row.removed ? "true" : "false");
+        if (row.added) {
+            button.setAttribute("aria-label", row.removed ? "Add " + row.name + " after all"
+                : "Do not add " + row.name);
+            button.title = row.removed ? "Add it after all" : "Do not add it";
+            return;
+        }
         button.setAttribute("aria-label", row.removed
             ? "Keep " + row.name
             : "Remove " + row.name + " from " + row.box.label);
         button.title = row.removed ? "Keep it" : "Remove from " + row.box.label + " on Apply";
     }
 
+    // Every change undone: the weights back, nothing marked, nothing added.
     function resetAll() {
+        if (state.rows.some(function (row) { return row.added; })) {
+            state.rows = state.rows.filter(function (row) { return !row.added; });
+            state.rows.forEach(function (row) {
+                row.weight = row.orig;
+                row.removed = false;
+            });
+            renderRows();
+            fill(state.filled || [], state.rows);
+            return;
+        }
         state.rows.forEach(function (row) {
             row.weight = row.orig;
             row.removed = false;
@@ -586,15 +644,21 @@
 
     // -- pictures and trigger words ------------------------------------------------
 
-    function loadDetails() {
+    // The pictures, trigger words and preferred weights of every row -- or,
+    // for rows added in the viewer, of those (`only`), on a request of their
+    // own that the next full load does not cut short.
+    function loadDetails(only) {
+        const rows = only || state.rows;
         const names = [];
-        state.rows.forEach(function (row) {
+        rows.forEach(function (row) {
             if (names.indexOf(row.name) === -1) names.push(row.name);
         });
-        if (state.request) state.request.abort();
-        state.nodes.status.hidden = true;
+        if (!only) {
+            if (state.request) state.request.abort();
+            state.nodes.status.hidden = true;
+        }
         if (!names.length) return;
-        state.rows.forEach(function (row) {
+        rows.forEach(function (row) {
             if (row.el && row.el.row.hasAttribute("data-unloaded")) {
                 row.el.row.removeAttribute("data-unloaded");
                 row.el.pills.innerHTML = '<span class="mc-lv-skeleton"></span><span class="mc-lv-skeleton mc-lv-wide"></span>';
@@ -602,7 +666,15 @@
         });
         const controller = typeof AbortController === "function" ? new AbortController() : null;
         const request = {abort: function () { if (controller) controller.abort(); }, done: false};
-        state.request = request;
+        if (only) state.extra.push(request);
+        else state.request = request;
+        const current = function () {
+            return state.open && (only ? state.extra.indexOf(request) !== -1 : state.request === request);
+        };
+        const settle = function () {
+            if (only) state.extra = state.extra.filter(function (one) { return one !== request; });
+            else state.request = null;
+        };
         const deadline = setTimeout(function () { request.timedOut = true; request.abort(); }, DEADLINE_MS);
         const query = names.map(function (name) { return "name=" + encodeURIComponent(name); }).join("&");
         fetch(ROUTE + "?" + query, {
@@ -613,26 +685,28 @@
             return response.json();
         }).then(function (body) {
             clearTimeout(deadline);
-            if (state.request !== request || !state.open) return;
-            state.request = null;
-            fill(body && Array.isArray(body.loras) ? body.loras : []);
+            if (!current()) return;
+            settle();
+            const loras = body && Array.isArray(body.loras) ? body.loras : [];
+            state.filled = (state.filled || []).concat(loras);
+            fill(loras, rows);
         }).catch(function (error) {
             clearTimeout(deadline);
-            if (state.request !== request || !state.open) return;
-            state.request = null;
+            if (!current()) return;
+            settle();
             unloaded(request.timedOut
                 ? "Pictures and trigger words did not arrive in time."
-                : "Pictures and trigger words could not be loaded.");
+                : "Pictures and trigger words could not be loaded.", rows);
             if (!request.timedOut && error && error.name !== "AbortError") {
                 console.warn("Model Chain: the LoRA viewer's details failed", error);
             }
         });
     }
 
-    function unloaded(message) {
+    function unloaded(message, rows) {
         state.nodes.statusText.textContent = message;
         state.nodes.status.hidden = false;
-        state.rows.forEach(function (row) {
+        (rows || state.rows).forEach(function (row) {
             if (!row.el) return;
             row.el.row.setAttribute("data-unloaded", "");
             row.el.thumb.textContent = "";
@@ -642,14 +716,22 @@
         });
     }
 
-    function fill(loras) {
+    function fill(loras, rows) {
         const byName = {};
         loras.forEach(function (lora) { if (lora && lora.name) byName[lora.name] = lora; });
         const words = wordsOf(state.boxes);
-        state.rows.forEach(function (row) {
+        (rows || state.rows).forEach(function (row) {
             const el = row.el;
             if (!el) return;
             const lora = byName[row.name] || {found: true, picture: "", triggers: [], title: ""};
+            // An added row takes the card's Preferred weight, as a press on the
+            // card would write it, unless it has been moved since.
+            if (row.added && !row.touched && typeof lora.weight === "number" && Number.isFinite(lora.weight)
+                && !same(lora.weight, row.weight)) {
+                row.weight = row.orig = Number(lora.weight.toFixed(4));
+                paint(row);
+                tally();
+            }
             el.thumb.textContent = "";
             el.pills.textContent = "";
             el.pills.removeAttribute("data-open");
@@ -673,7 +755,7 @@
                 el.pills.appendChild(pill(String(word), inPrompt(words, word)));
             });
         });
-        state.rows.forEach(fold);
+        (rows || state.rows).forEach(fold);
     }
 
     function drawPicture(holder, picture, name) {
@@ -819,13 +901,19 @@
                 return;
             }
             let text = box.text;
-            byBox[id].sort(function (a, b) { return b.start - a.start; }).forEach(function (row) {
-                if (row.removed) {
-                    text = cut(text, row.start, row.end);
-                } else {
-                    text = text.slice(0, row.start) + "<" + row.kind + ":" + row.rawName + ":"
-                        + fmt(row.weight) + row.tail + ">" + text.slice(row.end);
-                }
+            byBox[id].filter(function (row) { return !row.added; })
+                .sort(function (a, b) { return b.start - a.start; }).forEach(function (row) {
+                    if (row.removed) {
+                        text = cut(text, row.start, row.end);
+                    } else {
+                        text = text.slice(0, row.start) + "<" + row.kind + ":" + row.rawName + ":"
+                            + fmt(row.weight) + row.tail + ">" + text.slice(row.end);
+                    }
+                });
+            // Added ones at the end, in the order they were added, after
+            // Forge's separator, as a press on a card adds one.
+            byBox[id].filter(function (row) { return row.added; }).forEach(function (row) {
+                text = appended(text, "<" + row.kind + ":" + row.rawName + ":" + fmt(row.weight) + ">");
             });
             field.value = text;
             send(field, box.literal);
@@ -836,12 +924,303 @@
         }
     }
 
+    // Forge's separator between the prompt and a tag a card adds
+    // (`extra_networks_add_text_separator`, a space unless changed); none at
+    // the start of an empty box or after a space or a line already there.
+    function appended(text, tag) {
+        if (!text) return tag;
+        let separator = " ";
+        try {
+            if (window.opts && typeof window.opts.extra_networks_add_text_separator === "string") {
+                separator = window.opts.extra_networks_add_text_separator;
+            }
+        } catch (error) {
+            separator = " ";
+        }
+        return /\s$/.test(text) ? text + tag : text + separator + tag;
+    }
+
     function toast(message) {
         const node = state.nodes.toast;
         node.textContent = message;
         node.hidden = false;
         clearTimeout(state.toastTimer);
         state.toastTimer = setTimeout(function () { node.hidden = true; }, TOAST_MS);
+    }
+
+    // -- adding one ----------------------------------------------------------------
+
+    function bindAdd(nodes) {
+        const input = nodes.add;
+        input.addEventListener("focus", function () { listNames(); });
+        input.addEventListener("input", function () {
+            state.active = -1;
+            listNames();
+            showSuggestions();
+        });
+        input.addEventListener("keydown", function (event) {
+            const count = state.shown.length;
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                if (nodes.suggest.hidden) showSuggestions();
+                if (!state.shown.length) return;
+                event.preventDefault();
+                const step = event.key === "ArrowDown" ? 1 : -1;
+                state.active = state.active < 0
+                    ? (step > 0 ? 0 : state.shown.length - 1)
+                    : (state.active + step + state.shown.length) % state.shown.length;
+                markActive();
+            } else if (event.key === "Enter") {
+                event.preventDefault();
+                if (!count) return;
+                addLora(state.shown[state.active >= 0 ? state.active : 0]);
+            }
+        });
+        input.addEventListener("blur", function () {
+            // After a press on a suggestion has been heard (it keeps the focus
+            // here while it is pressed; this is the box being left).
+            setTimeout(function () {
+                if (document.activeElement !== input) hideSuggestions();
+            }, 0);
+        });
+        // A press on a suggestion keeps the keyboard where it is, and adds it.
+        nodes.suggest.addEventListener("pointerdown", function (event) { event.preventDefault(); });
+        nodes.suggest.addEventListener("mousedown", function (event) { event.preventDefault(); });
+        nodes.suggest.addEventListener("click", function (event) {
+            const option = event.target && event.target.closest ? event.target.closest(".mc-lv-option") : null;
+            if (!option) return;
+            const lora = state.shown[Number(option.getAttribute("data-index"))];
+            if (lora) addLora(lora);
+        });
+    }
+
+    // The names, once a viewer: listed when the box is first used, with a
+    // deadline, and shown as soon as they arrive.
+    function listNames() {
+        if (state.names || state.namesRequest) return;
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const request = {abort: function () { if (controller) controller.abort(); }};
+        state.namesRequest = request;
+        const deadline = setTimeout(function () { request.timedOut = true; request.abort(); }, DEADLINE_MS);
+        fetch(NAMES_ROUTE, {
+            method: "GET", credentials: "same-origin", cache: "no-store",
+            headers: {"Accept": "application/json"}, signal: controller ? controller.signal : undefined,
+        }).then(function (response) {
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            return response.json();
+        }).then(function (body) {
+            clearTimeout(deadline);
+            if (state.namesRequest !== request || !state.open) return;
+            state.namesRequest = null;
+            state.names = {
+                loras: (body && Array.isArray(body.loras) ? body.loras : []).filter(function (one) {
+                    return one && typeof one.name === "string" && one.name;
+                }),
+                preset: String((body && body.preset) || ""),
+                filtered: !!(body && body.filtered),
+            };
+            showSuggestions();
+        }).catch(function (error) {
+            clearTimeout(deadline);
+            if (state.namesRequest !== request || !state.open) return;
+            state.namesRequest = null;
+            state.names = {failed: request.timedOut
+                ? "Your LoRAs did not arrive in time. Type again to try again."
+                : "Your LoRAs could not be listed. Type again to try again.", loras: []};
+            if (!request.timedOut && error && error.name !== "AbortError") {
+                console.warn("Model Chain: the LoRA viewer's list of LoRAs failed", error);
+            }
+            showSuggestions();
+        });
+    }
+
+    // Forge's browser search: every word typed somewhere in the name (or the
+    // tag's name). Those whose name starts with what was typed first, then
+    // those with a word that does, then the rest, each alphabetically.
+    function matches(loras, query) {
+        const typed = String(query || "").trim().toLowerCase();
+        const words = typed.split(/\s+/).filter(Boolean);
+        if (!words.length) return [];
+        const found = [];
+        loras.forEach(function (lora) {
+            const name = lora.name.toLowerCase();
+            const hay = name + " " + String(lora.tag || "").toLowerCase();
+            for (let i = 0; i < words.length; i += 1) {
+                if (hay.indexOf(words[i]) === -1) return;
+            }
+            const rank = name.indexOf(typed) === 0 ? 0
+                : (name.split(/[_\-\s.()\[\]]+/).some(function (part) { return part.indexOf(words[0]) === 0; }) ? 1 : 2);
+            found.push({lora: lora, rank: rank});
+        });
+        found.sort(function (a, b) {
+            return a.rank - b.rank || (a.lora.name.toLowerCase() < b.lora.name.toLowerCase() ? -1
+                : (a.lora.name.toLowerCase() > b.lora.name.toLowerCase() ? 1 : 0));
+        });
+        return found.slice(0, SUGGESTIONS).map(function (one) { return one.lora; });
+    }
+
+    // The prompt box's row of a LoRA, if it has one that stays.
+    function rowOf(lora) {
+        const keys = [String(lora.tag || "").toLowerCase(), String(lora.name || "").toLowerCase()];
+        const prompt = promptBox();
+        for (let i = 0; i < state.rows.length; i += 1) {
+            const row = state.rows[i];
+            if (row.removed || (prompt && row.box !== prompt)) continue;
+            if (keys.indexOf(row.name.toLowerCase()) !== -1) return row;
+        }
+        return null;
+    }
+
+    function promptBox() {
+        const id = TABS[state.tab] ? TABS[state.tab].boxes[0].id : "";
+        for (let i = 0; i < state.boxes.length; i += 1) {
+            if (state.boxes[i].id === id) return state.boxes[i];
+        }
+        return null;
+    }
+
+    function note(text) {
+        state.nodes.suggest.textContent = "";
+        state.nodes.suggest.appendChild(make("div", "mc-lv-suggest-note", text));
+        state.nodes.suggest.hidden = false;
+        state.nodes.add.setAttribute("aria-expanded", "false");
+        state.nodes.add.removeAttribute("aria-activedescendant");
+    }
+
+    function showSuggestions() {
+        const nodes = state.nodes;
+        if (!nodes || !state.open) return;
+        const typed = nodes.add.value.trim();
+        state.shown = [];
+        if (!typed || document.activeElement !== nodes.add) {
+            hideSuggestions();
+            return;
+        }
+        if (!state.names) {
+            note("Listing your LoRAs\u2026");
+            return;
+        }
+        if (state.names.failed) {
+            const failed = state.names.failed;
+            state.names = null;   // typed again, it lists them again
+            note(failed);
+            return;
+        }
+        state.shown = matches(state.names.loras, typed);
+        if (!state.shown.length) {
+            note(state.names.filtered && state.names.preset
+                ? "No LoRA matches \u201c" + typed + "\u201d in the " + state.names.preset + " preset's folders."
+                : "No LoRA matches \u201c" + typed + "\u201d.");
+            return;
+        }
+        nodes.suggest.textContent = "";
+        state.shown.forEach(function (lora, index) {
+            const option = make("div", "mc-lv-option");
+            option.id = "mc-lv-option-" + index;
+            option.setAttribute("role", "option");
+            option.setAttribute("data-index", String(index));
+            const here = rowOf(lora);
+            if (here) option.setAttribute("data-in", "");
+            const name = make("span", "mc-lv-option-name", lora.name);
+            option.appendChild(name);
+            if (lora.tag && lora.tag !== lora.name) option.appendChild(make("span", "mc-lv-option-tag", lora.tag));
+            if (here) {
+                const mark = make("span", "mc-lv-option-in");
+                mark.innerHTML = icon("check");
+                mark.appendChild(make("span", "", "In the prompt"));
+                option.appendChild(mark);
+            }
+            option.title = here ? lora.name + " is in the prompt already" : "Add " + lora.name;
+            nodes.suggest.appendChild(option);
+        });
+        nodes.suggest.hidden = false;
+        nodes.add.setAttribute("aria-expanded", "true");
+        if (state.active >= state.shown.length) state.active = -1;
+        markActive();
+    }
+
+    function hideSuggestions() {
+        state.shown = [];
+        state.active = -1;
+        const nodes = state.nodes;
+        if (!nodes) return;
+        nodes.suggest.hidden = true;
+        nodes.suggest.textContent = "";
+        nodes.add.setAttribute("aria-expanded", "false");
+        nodes.add.removeAttribute("aria-activedescendant");
+    }
+
+    function markActive() {
+        const nodes = state.nodes;
+        const options = nodes.suggest.querySelectorAll(".mc-lv-option");
+        Array.prototype.forEach.call(options, function (option, index) {
+            option.setAttribute("aria-selected", index === state.active ? "true" : "false");
+        });
+        const active = state.active >= 0 ? options[state.active] : null;
+        if (active) {
+            nodes.add.setAttribute("aria-activedescendant", active.id);
+            if (active.scrollIntoView) active.scrollIntoView({block: "nearest"});
+        } else {
+            nodes.add.removeAttribute("aria-activedescendant");
+        }
+    }
+
+    // Forge's default weight for a tag a card adds without a preferred one.
+    function defaultWeight() {
+        try {
+            const value = Number(window.opts && window.opts.extra_networks_default_multiplier);
+            if (Number.isFinite(value) && value !== 0) return value;
+        } catch (error) {
+            /* Forge's options are not on this page */
+        }
+        return 1;
+    }
+
+    // One LoRA chosen: a new row for the Prompt box, or the row it has already
+    // shown. The box is emptied for the next one.
+    function addLora(lora) {
+        const nodes = state.nodes;
+        if (!lora || !nodes) return;
+        nodes.add.value = "";
+        hideSuggestions();
+        const here = rowOf(lora);
+        if (here) {
+            flash(here);
+            return;
+        }
+        const box = promptBox();
+        if (!box) {
+            toast("There is no Prompt box on this tab to add it to.");
+            return;
+        }
+        const tag = String(lora.tag || lora.name);
+        const weight = defaultWeight();
+        const row = {
+            box: box, start: -1, end: -1, kind: "lora", rawName: tag, name: tag,
+            weight: weight, orig: weight, tail: "", fixed: false,
+            removed: false, editing: false, el: null, added: true, touched: false,
+        };
+        const first = !state.rows.length;
+        state.rows.push(row);
+        if (first) {
+            renderRows();
+        } else {
+            nodes.list.appendChild(rowNode(row, state.rows.length - 1));
+            const count = state.rows.length;
+            nodes.count.textContent = count + " in this prompt";
+            tally();
+        }
+        if (row.el && row.el.row.scrollIntoView) row.el.row.scrollIntoView({block: "nearest"});
+        loadDetails([row]);
+    }
+
+    function flash(row) {
+        if (!row.el) return;
+        if (row.el.row.scrollIntoView) row.el.row.scrollIntoView({block: "nearest"});
+        row.el.row.setAttribute("data-flash", "");
+        clearTimeout(row.flashTimer);
+        row.flashTimer = setTimeout(function () {
+            if (row.el) row.el.row.removeAttribute("data-flash");
+        }, 1200);
     }
 
     // -- placement ----------------------------------------------------------------
@@ -898,6 +1277,13 @@
         event.preventDefault();
         event.stopPropagation();
         if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+        // The add box's suggestions go first, and then what was typed.
+        const add = state.nodes && state.nodes.add;
+        if (add && document.activeElement === add && (!state.nodes.suggest.hidden || add.value)) {
+            if (!state.nodes.suggest.hidden) hideSuggestions();
+            else add.value = "";
+            return;
+        }
         close(false);
     }
 
@@ -974,6 +1360,8 @@
         state.tab = tab;
         state.boxes = boxesOf(tab);
         state.rows = readRows(state.boxes);
+        state.filled = [];
+        state.names = null;
         state.button = byId("mc-lora-viewer-" + tab);
         state.open = true;
         renderRows();
@@ -1002,6 +1390,16 @@
             state.request = null;
             request.abort();
         }
+        state.extra.splice(0).forEach(function (request) { request.abort(); });
+        if (state.namesRequest) {
+            const listing = state.namesRequest;
+            state.namesRequest = null;
+            listing.abort();
+        }
+        state.names = null;
+        state.filled = [];
+        state.nodes.add.value = "";
+        hideSuggestions();
         state.open = false;
         listen(false);
         if (state.observer) state.observer.disconnect();

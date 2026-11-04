@@ -355,3 +355,130 @@ def test_wangps_line_is_not_painted_on_another_tabs_button():
     assert found["during"] == {"state": "", "count": ""}
     assert found["back"] == {"state": "busy", "count": "2", "label": "Generate in WanGP"}
     assert found["calls"] == 3 and found["done"] == "done"
+
+
+# The launcher's right click is ▶. Asked for: "the play /generate button for
+# text to image, image to image, and wan2gp works well, I want to make a
+# shortcut to this function, so when fly out menu is in button state
+# minimized, then a right click should invoke generate."
+
+LAUNCHER = """
+function putAway(world) {
+    world.shell.state.panelOpen = false;
+    world.shell.nodes.launcher = element("forge-assistant-launcher", "BUTTON");
+    world.shell.nodes.launcher.title = "Forge Assistant";
+    return world.shell.nodes.launcher;
+}
+function rightClick(extra) {
+    return Object.assign({pointerType: "mouse", prevented: false,
+                          preventDefault() { this.prevented = true; }}, extra || {});
+}
+const runTimers = () => { const due = timers.filter((t) => t.live); due.forEach((t) => { t.live = false; t.fn(); }); };
+"""
+
+
+def test_a_right_click_on_the_put_away_launcher_presses_the_tabs_generate():
+    found = run(WORLD + FORGE + LAUNCHER + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        const launcher = putAway(world);
+        const event = rightClick();
+        const taken = world.shell.launcherMenu(event);
+        await settle();
+        const said = {state: launcher.dataset.generated, title: launcher.title};
+        runTimers();
+        console.log(JSON.stringify({taken, prevented: event.prevented, clicks: tab.generate.clicks || 0,
+                                    said, after: [launcher.dataset.generated === undefined, launcher.title],
+                                    told: world.shell.told}));
+    """)
+
+    assert found["taken"] is True and found["prevented"] is True, "the browser's menu is not shown"
+    assert found["clicks"] == 1
+    assert found["said"] == {"state": "done", "title": "Generating in Txt2img."}
+    assert found["after"] == [True, "Forge Assistant"], "its own title back after GENERATE_SHOWN"
+    assert found["told"] == [["Generating in Txt2img.", "info"]]
+
+
+def test_on_the_wangp_tab_it_presses_wangps_generate():
+    found = run(WORLD + LAUNCHER + """
+        const world = generateShell("tab_wangp");
+        const launcher = putAway(world);
+        world.bridge.answer = {ok: true, status: "queued"};
+        world.shell.launcherMenu(rightClick());
+        const during = launcher.dataset.generated;
+        await settle(); await settle(); await settle();
+        console.log(JSON.stringify({calls: world.bridge.calls, during,
+                                    state: launcher.dataset.generated, title: launcher.title}));
+    """)
+
+    assert found == {"calls": 1, "during": "busy", "state": "done", "title": "Added to WanGP's queue."}
+
+
+def test_a_refused_press_is_said_on_the_launcher():
+    found = run(WORLD + FORGE + LAUNCHER + """
+        const tab = forgeTab("img2img");
+        tab.interrupt.style.display = "block";
+        const world = generateShell("tab_img2img", null);
+        const launcher = putAway(world);
+        world.shell.launcherMenu(rightClick());
+        await settle();
+        const busy = {state: launcher.dataset.generated, title: launcher.title, clicks: tab.generate.clicks || 0};
+        const wangp = generateShell("tab_wangp");
+        const away = putAway(wangp);
+        wangp.bridge.ready = false;
+        const event = rightClick();
+        wangp.shell.launcherMenu(event);
+        console.log(JSON.stringify({busy, notLoaded: {state: away.dataset.generated, title: away.title,
+                                                      prevented: event.prevented, calls: wangp.bridge.calls}}));
+    """)
+
+    assert found["busy"] == {"state": "failed", "title": "Img2img is already generating.", "clicks": 0}
+    assert found["notLoaded"] == {"state": "failed", "title": "WanGP is not loaded yet",
+                                  "prevented": True, "calls": 0}
+
+
+def test_the_browsers_menu_where_there_is_nothing_to_generate_or_the_panel_is_open():
+    found = run(WORLD + FORGE + LAUNCHER + """
+        forgeTab("txt2img");
+        const elsewhere = generateShell("tab_settings", null);
+        putAway(elsewhere);
+        const one = rightClick();
+        const a = elsewhere.shell.launcherMenu(one);
+        const tab = forgeTab("img2img");
+        const open = generateShell("tab_img2img", null);
+        putAway(open);
+        open.shell.state.panelOpen = true;
+        const two = rightClick();
+        const b = open.shell.launcherMenu(two);
+        await settle();
+        console.log(JSON.stringify({elsewhere: [a, one.prevented], open: [b, two.prevented, tab.generate.clicks || 0]}));
+    """)
+
+    assert found == {"elsewhere": [False, False], "open": [False, False, 0]}
+
+
+def test_a_fingers_long_press_is_a_drag_beginning_not_a_right_click():
+    """A touchscreen's context menu comes while the finger is still down, and
+    a finger held on the launcher is how a drag of it begins."""
+    found = run(WORLD + FORGE + LAUNCHER + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        putAway(world);
+        const touch = rightClick({pointerType: "touch"});
+        const pen = rightClick({pointerType: "pen"});
+        const results = [world.shell.launcherMenu(touch), world.shell.launcherMenu(pen)];
+        // A browser whose context menu is a plain mouse event: the press before it says.
+        world.shell.launcherPress = {type: "touch", at: Date.now()};
+        const older = rightClick({pointerType: undefined});
+        results.push(world.shell.launcherMenu(older));
+        // The keyboard's menu key long after a tap is a right click.
+        world.shell.launcherPress = {type: "touch", at: Date.now() - 5000};
+        const key = rightClick({pointerType: ""});
+        results.push(world.shell.launcherMenu(key));
+        await settle();
+        console.log(JSON.stringify({results, prevented: [touch.prevented, pen.prevented, older.prevented, key.prevented],
+                                    clicks: tab.generate.clicks || 0}));
+    """)
+
+    assert found == {"results": [False, False, False, True], "prevented": [False, False, False, True],
+                     "clicks": 1}

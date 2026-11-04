@@ -4134,6 +4134,15 @@ with the settings docked in the panel or not. While the tab is already
 generating, Forge covers its Generate with Interrupt and Skip and the **▶**
 does not press it either: it says *Txt2img is already generating.* (red for
 three seconds, and on the status line) and does nothing. It never locks.
+**A right click on the launcher**, with the panel put away, is the same **▶**
+for the workspace you are on — Txt2Img's or Img2Img's Generate, WanGP's on the
+WanGP tab — without opening the panel; the browser's own menu is not shown,
+and the launcher says how it went for three seconds with an outline (the
+accent while WanGP is asked, green taken, red refused, the words as its
+tooltip). The keyboard's menu key on the focused launcher does the same.
+Where there is nothing to generate the browser's menu is left alone, and a
+finger's long press is not a right click: it is how a drag of the launcher
+begins.
 **✕** puts the panel back to the
 launcher, at the launcher's own place; pressing the launcher brings the panel
 back at its own. Both
@@ -4252,12 +4261,20 @@ chosen apart from the other and remembered in this browser:
   the panel's header brings it in over the workspace's edge for four seconds,
   as along the top. The strip is the Model Chain theme's bar laid out again,
   so these choices wait for the theme to be on (*Settings → Model Chain:
-  Theme*); without it they are greyed.
+  Theme*); without it they are greyed. **The launcher and the panel stand
+  beside the strip, never under it**: its width is taken off its side of the
+  window as a phone's safe-area insets are, so a resting place on that side
+  is beside it, a drag stops against it, the corner and the left edge widen
+  the panel only as far as it, the phone's sheet starts beside it, and a
+  panel already open moves beside it when the strip comes and back when it
+  goes. In focus mode the same holds while the strip shows; hidden (or
+  peeking for a moment) it takes nothing, as the workspace beside it does.
 - **Panel Buttons** — the open panel's header as a slim strip, 44 px wide,
-  down the panel's left or right side: the workspace, **Chat**, 🎛, **⋯**, ▶
-  and **✕** stacked from the top, and under them the grip — the space you drag
-  the panel by, with the memory reading written down it — taking the rest of
-  the strip. Everything else in the panel (the conversation, the composer, a
+  down the panel's left or right side: the grip first, at the strip's top —
+  the space you drag the panel by, with the memory reading written down it —
+  taking the rest of the strip, and the workspace, **Chat**, 🎛, **⋯**, ▶ and
+  **✕** stacked at its foot, bottom-justified, in the order the keyboard
+  meets them. Everything else in the panel (the conversation, the composer, a
   menu, a docked column) starts at the panel's top beside it. The strip is
   the header in every way: the same presses on its grip, a drag by it, and
   the corner and the left edge that resize the panel sit beside it. A panel
@@ -7891,9 +7908,28 @@ and, on Txt2Img, the two Literal boxes, in the order they are on screen:
   change it. A tag's second weight, `<lora:x:0.8:0.5>`, is kept as typed; the
   slider is the first.
 
+**Add a LoRA…**, the box under the title, adds one at a time. Typing in it
+suggests the LoRAs of the folders assigned to the UI Preset you are on — the
+ones the extra networks panel shows you for it (*Model Chain: LoRA folders*;
+nothing assigned is every LoRA, unless the strict reading is on) — matched as
+that panel's search matches, every word typed somewhere in the name, the names
+that start with it first, eight at most. ↑ and ↓ choose, **Enter** or a tap
+adds, **Escape** puts the list away (and then what was typed) before it closes
+the viewer. The list is inside the viewer under the box, never over the edge
+of the window, and scrolls there. A LoRA already in the prompt is marked
+*In the prompt* and is pointed to rather than added twice. An added LoRA is a
+new row marked **New in Prompt**, with its picture and trigger words, at the
+card's own *Preferred weight*, or Forge's default multiplier without one, as a
+press on its card would write it; its bin takes it back, and **Reset all**
+takes out every added one. The names come from
+`GET /model-chain/lora-viewer/names`, once a viewer, when the box is first
+used, with an eight-second limit; no file is read for them.
+
 **Apply** writes each changed weight into its tag where the tag is, takes out
 the tags marked for removal (and closes the gap: one space between words, no
-doubled comma), and changes nothing else in the boxes. Each box it changed gets
+doubled comma), adds each new LoRA at the end of the Prompt, after Forge's
+separator (*extra_networks_add_text_separator*, a space), and changes nothing
+else in the boxes. Each box it changed gets
 the input event Forge's own controls send, so Generate sends what is on screen,
 and a Literal box is saved as when you leave it. A box whose text changed while
 the viewer was open is left alone, and the page says so. **Cancel**, **Escape**
@@ -7903,6 +7939,10 @@ so a stray tap cannot throw your changes away.
 On a phone, swiping up and down scrolls the list and never moves a slider: a
 slider moves on a sideways drag, a tap on its track or a drag of its knob, and
 while it is dragged its value shows above the knob, clear of the finger.
+
+The viewer is opaque: it is painted with the page's own ground
+(`--background-fill-primary`), not a block's, because Forge Neo's own
+stylesheet makes every block's fill transparent.
 
 The names and weights are read in the browser the moment it opens. The pictures
 and trigger words come from `GET /model-chain/lora-viewer/details?name=…`
@@ -7948,7 +7988,8 @@ mc_lora_jobs.py       the background jobs: a fetch, a hash run, image downloads
 mc_lora_last_used.py  the key and the folder of the last fetch
 mc_lora_render.py     every HTML fragment of the dialog and the tab
 mc_lora_tab.py        the LoRA Details tab: library, folders, images, fetch, jobs
-mc_lora_viewer.py     the LoRA viewer's route: a picture and trigger words per LoRA
+mc_lora_viewer.py     the LoRA viewer's routes: a picture, trigger words and preferred weight per LoRA;
+                      the add box's names, kept to the UI Preset's LoRA folders
 mc_extra_networks_folders.py     folder assignments per UI Preset and network page
 mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
 mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons

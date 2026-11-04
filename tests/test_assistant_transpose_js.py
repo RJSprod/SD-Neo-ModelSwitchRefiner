@@ -289,3 +289,74 @@ def test_the_names_are_shared_with_the_theme_and_focus():
         text = (root / script).read_text(encoding="utf-8")
         assert re.search(r'RAIL_ATTRIBUTE = "data-forge-assistant-rail";', text), script
     assert json.dumps(found["name"])[1:-1] in (root.parent / "style.css").read_text(encoding="utf-8")
+
+
+# The panel and the launcher stand beside a tab bar down a side, never under
+# it: "lets make sure it does not get overlapped or render underneath side tab
+# bar, only beside. I am able to resize it to beneath." Measured where every
+# placement reads its room (`insets`), from the bar on the page or from what
+# focus took off the workspace.
+
+BESIDE = """
+function railed(side, box, focus) {
+    document.documentElement = {clientWidth: 1280, clientHeight: 800,
+        getAttribute: (name) => (name === "data-forge-assistant-rail" ? side : null)};
+    const bar = {getBoundingClientRect: () => box};
+    document.querySelector = (selector) => (selector === "#tabs > .tab-nav" ? bar : null);
+    const body = element("body");
+    body.style.setProperty = function (name, value) { this[name] = value; };
+    body.style.getPropertyValue = function (name) { return this[name] || ""; };
+    if (focus) {
+        body.classList.add("forge-assistant-focused");
+        if (focus.side) body.setAttribute("data-forge-assistant-focus-rail", focus.side);
+        body.style.setProperty("--forge-assistant-focus-side", focus.width + "px");
+    }
+    document.body = body;
+    return NS.besideRail();
+}
+"""
+
+
+def test_the_rails_room_is_its_width_on_its_side_and_nothing_for_a_bar_along_the_top():
+    found = run(WORLD + BESIDE + """
+        const tall = (left, width) => ({left, right: left + width, top: 0, bottom: 800, width, height: 800});
+        console.log(JSON.stringify({
+            left: railed("left", tall(0, 48)),
+            right: railed("right", tall(1232, 48)),
+            along: railed("left", {left: 0, right: 1280, top: 0, bottom: 44, width: 1280, height: 44}),
+            none: railed(null, tall(0, 48)),
+            away: railed("left", tall(600, 48)),
+            focused: railed("left", tall(0, 48), {side: "left", width: 48}),
+            hidden: railed("left", tall(-48, 48), {side: "left", width: 0}),
+            // Peeking, the bar is on screen and focus took nothing for it.
+            peeking: railed("left", tall(0, 48), {side: "left", width: 0}),
+            alongInFocus: railed(null, tall(0, 48), {width: 0}),
+        }));
+    """)
+
+    assert found["left"] == {"left": 48, "right": 0}
+    assert found["right"] == {"left": 0, "right": 48}
+    assert found["along"] == {"left": 0, "right": 0}, "the root names a side, the bar runs along the top"
+    assert found["none"] == {"left": 0, "right": 0}
+    assert found["away"] == {"left": 0, "right": 0}, "not on that edge"
+    assert found["focused"] == {"left": 48, "right": 0}, "what focus took off the workspace"
+    assert found["hidden"] == {"left": 0, "right": 0}, "hidden it takes nothing"
+    assert found["peeking"] == {"left": 0, "right": 0}, "nor peeking: it comes in over the panel"
+    assert found["alongInFocus"] == {"left": 0, "right": 0}
+
+
+def test_a_centred_box_is_centred_in_the_room_the_insets_leave():
+    found = run(WORLD + """
+        const view = {left: 0, top: 0, width: 1280, height: 800};
+        console.log(JSON.stringify({
+            plain: NS.anchorPoint("top-center", {width: 400, height: 300}, view, null).left,
+            beside: NS.anchorPoint("top-center", {width: 400, height: 300}, view,
+                                   {top: 0, right: 0, bottom: 0, left: 48}).left,
+            narrow: NS.anchorPoint("bottom-center", {width: 1200, height: 300}, view,
+                                   {top: 0, right: 48, bottom: 0, left: 0}),
+        }));
+    """)
+
+    assert found["plain"] == 440, "the window's middle without insets"
+    assert found["beside"] == 48 + (1280 - 48 - 400) / 2
+    assert found["narrow"]["left"] == 24 and found["narrow"]["left"] + found["narrow"]["width"] == 1280 - 48 - 24

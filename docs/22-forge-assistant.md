@@ -4170,7 +4170,8 @@ right resizes nothing, so the bar's ResizeObserver would never hear it.
 ✕ — is laid absolutely down that side, 44 px wide and the panel's height
 (`--forge-assistant-rail-width`), its buttons 36 px and stacked, the grip
 taking what is left (at least 3.5 em), the memory reading written down it
-(`writing-mode: vertical-rl`). Every other part of the panel is still a row
+(`writing-mode: vertical-rl`). Since §3.48 the grip is drawn first and the
+buttons stand at the strip's foot. Every other part of the panel is still a row
 of its one column, starting at the panel's top beside the rail, so nothing
 else about the panel — the conversation's height, a menu in its place, the
 docked column, the dock's slot — is laid out differently. Two things follow:
@@ -4196,7 +4197,7 @@ The grip is the header's in every way: one to four presses on it, a drag by it
 peeking for it (§3.46). The corner (§3.41) and the left edge's strip sit beside
 a rail on their side, and the strip runs the panel's whole height. A change of
 side places the panel again, for its new shape; a change of the tab bar's side
-does not.
+did not, until §3.48 made the tab rail room the panel stands beside.
 
 ### Verified
 
@@ -4233,6 +4234,106 @@ above), and three rules that changed nothing were removed (the rail's own
 header's buttons already have; an early return before a measurement that is
 already gated). Not run on the user's machine, in a Gecko
 build or beside Mini Paint NEO's WanGP frame.
+
+## 3.48 Beside the tab rail, buttons at the rail's foot, and a right click that generates (2026-11-04)
+
+Three asks in one message, once Mini Paint NEO's Clipboard views stood beside
+the rail:
+
+> "The flyout menu is not properly handling the side tab bar either, lets
+> make sure it does not get overlapped or render underneath side tab bar,
+> only beside. I am able to resize it to beneath."
+
+> "I would like the flyout menu buttons, when set to side instead of top, to
+> be bottom justified."
+
+> "the play /generate button for text to image, image to image, and wan2gp
+> works well, I want to make a shortcut to this function, so when fly out
+> menu is in button state minimized, then a right click should invoke
+> generate."
+
+**Beside the rail.** Every placement of the launcher and the panel already
+kept inside one room -- the window less the safe-area insets and the gap
+(`anchorPoint`, `floatPoint`, `dragRoom`, `visibleCap`) -- and none of it knew
+the rail, so a resting place on the rail's side, a drag and the corner's or
+the edge's width all reached under it (the rail is at 940, under the panel's
+1200: "underneath" was the panel over it). Now the rail's width is part of
+`insets()` on its side (`besideRail`):
+
+- On the page it is Forge's `#tabs > .tab-nav` while the root names a side
+  (`data-forge-assistant-rail`) and the bar's box says it is a rail -- taller
+  than it is wide, on that edge of the visible window -- so a root that names
+  a side over a bar along the top (the theme off) takes nothing.
+- In focus mode it is what focus took off the workspace
+  (`--forge-assistant-focus-side` with `data-forge-assistant-focus-rail` on the
+  body, §3.47): the rail's width while it shows, nothing while it is hidden or
+  peeking. A peek comes in over the panel as it comes in over the workspace,
+  and moving the panel for four seconds every time the launcher is tapped
+  would be the jump the peek exists to avoid.
+- `ownWidth` takes the insets off the most the corner and the edge may make
+  the panel, and keeps it inside the gap on both sides: it was the window
+  less 32, which on a window at least 640 wide is 16 px more than the room,
+  so a panel at its widest ran past its gap on the side the corner holds, and
+  that edge moved under a hand that was not moving it (found by the corner's
+  new test).
+- A centred anchor is centred in the room the insets leave, which is the
+  window's middle when they are equal.
+- The phone's sheet is laid out by the stylesheet, not placed, so the shell
+  writes the rail's room on the root (`--forge-assistant-beside-left`,
+  `-right`; `writeBeside`, only on a change) and the sheet's left and right
+  are those, its width `auto`.
+- Nothing else places the panel when the rail comes, goes or changes side, or
+  focus hides it, so a MutationObserver hears the attributes that say so --
+  the root's rail side and `data-mc-theme`, the body's class, style and focus
+  rail (`watchBeside`) -- and places the panel only when the rail's room
+  changed.
+
+**Buttons at the rail's foot.** On a panel rail the grip is drawn first
+(`order: -1` on `.forge-assistant-grip` under `[data-rail]`) and its slack
+pushes the buttons to the strip's foot. Nothing moves in the DOM, and the grip
+takes no focus, so the keyboard meets the buttons in the order they are drawn,
+top to bottom; ✕, when it shows, is still last. Along the top nothing changes.
+
+**A right click on the launcher.** With the panel put away, the launcher's
+`contextmenu` -- a mouse's right button, or the keyboard's menu key on it --
+is ▶ for the workspace on screen (`launcherMenu`, `pressGenerate`): Txt2Img's
+or Img2Img's own Generate, WanGP's through `minipaintWanGP.generate()`. The
+browser's own menu is not shown. Where ▶ has nothing to press (another
+workspace, a generation tab without its Generate on the page) the event is
+left alone and the browser's menu shows; where ▶ is there but greyed (WanGP
+not loaded) the menu is not shown and the launcher says why. A finger's or a
+pen's long press is not a right click: a touchscreen's context menu arrives
+while the finger is still down, which is how a drag of the launcher begins,
+so a context menu whose own `pointerType` is touch or pen, or that follows a
+touch or pen press on the launcher within two seconds (`LONG_PRESS_MS`, for a
+browser whose context menu is a plain mouse event), is left alone. The answer
+is on the launcher for three seconds (`showOnLauncher`, `data-generated`: an
+outline in the accent while WanGP is asked, green taken, red refused, the
+words as its tooltip, its own title put back after), because the status line
+is in the panel.
+
+### Verified
+
+`tests/test_transpose_layout.py` (Chromium, `TestThePanelBesideTheTabRail`):
+the panel and the launcher at a resting place on the rail's side stand beside
+it, left and right; the corner and the edge strip dragged to the window's edge
+widen the panel only as far as the rail, the held edge staying where it was; a
+floating panel dragged past the rail stops beside it under the hand and where
+it is let go; the rail coming, crossing and going moves an open panel beside
+it and back; in focus mode beside the kept rail and at the window's edge while
+it is hidden; the phone's sheet beside a rail on either side. The grip first
+and the buttons at the foot (`TestThePanelsButtonsAsARail`, translated from
+"under the buttons"). `tests/test_assistant_transpose_js.py` (node): the rail's
+room on either side, nothing for a bar along the top, a bar away from its
+edge, a hidden or peeking bar in focus mode; a centred box in the room.
+`tests/test_assistant_generate_js.py` (node): the right click presses the
+tab's Generate and says so on the launcher, WanGP's on the WanGP tab, a
+refused press and WanGP not loaded said on the launcher, the browser's menu
+left alone with nothing to generate or the panel open, and a long press left
+alone. `tests/test_assistant_layout.py` (Chromium): a real right click on the
+launcher generates once, the browser's menu prevented, the panel still away,
+and a left press still opens it. Not run on the user's machine or in a Gecko
+build.
 
 ## 4. Deliberate deviations
 

@@ -51,8 +51,33 @@ DETAILS = {
     "paper_texture": {"found": True, "picture": "", "title": "", "triggers": ["paper"]},
 }
 
+# The names the add box is given, as the names route answers them: the active
+# preset's folders already applied on the server.
+NAMES = [
+    {"name": "add_detail_xl", "tag": "add_detail_xl"},
+    {"name": "Analog Film", "tag": "analog_film"},
+    {"name": "detail_slider", "tag": "detail_slider"},
+    {"name": "realfilter_v2_final", "tag": "realfilter_v2"},
+    {"name": "soft_light_detail", "tag": "soft_light_detail"},
+    {"name": "zoom_blur", "tag": "zoom_blur"},
+]
+DETAILS.update({
+    "add_detail_xl": {"found": True, "picture": "/pictures/add.png", "title": "", "triggers": ["detailed"],
+                      "weight": 0.6},
+    "analog_film": {"found": True, "picture": "", "title": "", "triggers": ["analog"]},
+    "detail_slider": {"found": True, "picture": "", "title": "", "triggers": []},
+    "zoom_blur": {"found": True, "picture": "", "title": "", "triggers": []},
+})
+
+# Forge Neo's own stylesheet ("general gradio fixes") says the block fill is
+# transparent, on :root and .dark both; a page that gave it a colour hid a
+# viewer that showed the page through.
+FORGE_CSS = """
+:root, .dark { --block-background-fill: transparent; }
+"""
+
 HOST_CSS = """
-:root { --block-background-fill: #0d0d0d; --background-fill-primary: #000; --border-color-primary: #262626;
+:root { --background-fill-primary: #000; --border-color-primary: #262626;
         --body-text-color: #e6e6e6; --body-text-color-subdued: #8c8c8c; --input-background-fill: #161616;
         --button-secondary-background-fill: #1a1a1a; --button-secondary-background-fill-hover: #262626;
         --color-accent: #ffffff; }
@@ -78,7 +103,7 @@ def page_html(theme_css: str = "") -> str:
         <span class="green-dot"></span>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{HOST_CSS}{theme_css}</style>
+<style>{HOST_CSS}{FORGE_CSS}{theme_css}</style>
 <link rel="stylesheet" href="/style.css">
 </head><body class="dark">
 <script>
@@ -159,6 +184,8 @@ class Served:
         self.hold = False
         self.held = []
         self.status = 200
+        self.listed = 0
+        self.hold_names = False
 
     def __call__(self, route):
         request = route.request
@@ -183,6 +210,13 @@ class Served:
                                                        "triggers": []}), name=name)
                               for name in names]}
             route.fulfill(status=self.status, content_type="application/json", body=json.dumps(body))
+        elif path == mc_lora_viewer.NAMES_ROUTE:
+            self.listed += 1
+            if self.hold_names:
+                self.held.append(route)
+                return
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"loras": NAMES, "preset": "xl", "filtered": True}))
         else:
             route.fulfill(status=404, body="")
 
@@ -243,6 +277,17 @@ def row(page, index):
 
 def weight_of(page, index):
     return row(page, index).locator(".mc-lv-weight").input_value()
+
+
+SUGGESTED = """() => [...document.querySelectorAll('.mc-lv-suggest .mc-lv-option')].map((o) => ({
+    name: o.querySelector('.mc-lv-option-name').textContent,
+    tag: (o.querySelector('.mc-lv-option-tag') || {}).textContent || '',
+    in: o.hasAttribute('data-in'), selected: o.getAttribute('aria-selected') === 'true',
+}))"""
+
+
+def typed(page, text):
+    page.fill(".mc-lv-add-input", text)
 
 
 # --------------------------------------------------------------------------- #
@@ -849,3 +894,212 @@ def test_the_assistant_leaves_escape_to_an_open_viewer():
     """, sources=("shell", "host"))
     assert found["whileOpen"] == []
     assert found["afterwards"] != [], "closed, the panel's Escape is its own again"
+
+
+# --------------------------------------------------------------------------- #
+# Opaque, and adding one
+# --------------------------------------------------------------------------- #
+
+
+class TestOpaque:
+    def test_the_viewer_hides_the_page_under_it_on_forges_own_variables(self, browser):
+        """"please make its background opaque, right now it's transparent and I
+        see what's behind it when it's open": painted from the page's ground,
+        not from Forge's transparent block fill."""
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            found = page.evaluate("""() => {
+                const alpha = (node) => {
+                    const colour = getComputedStyle(node).backgroundColor;
+                    const parts = colour.match(/[\\d.]+/g).map(Number);
+                    return colour.startsWith('rgba') ? parts[3] : 1;
+                };
+                return {block: getComputedStyle(document.body).getPropertyValue('--block-background-fill').trim(),
+                        dialog: alpha(document.querySelector('.mc-lv'))};
+            }""")
+            assert found["block"] == "transparent", "the page carries Forge's rule"
+            assert found["dialog"] == 1
+        finally:
+            close_page(page, served)
+
+
+class TestAddingOne:
+    def test_typing_suggests_names_the_ones_that_start_with_it_first(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            assert served.listed == 0, "nothing listed before the box is used"
+            typed(page, "det")
+            page.wait_for_selector(".mc-lv-option")
+            assert [o["name"] for o in page.evaluate(SUGGESTED)] == \
+                ["detail_slider", "add_detail_xl", "soft_light_detail"]
+            typed(page, "det sl")
+            assert [o["name"] for o in page.evaluate(SUGGESTED)] == ["detail_slider"], "every word"
+            typed(page, "analog_f")
+            assert page.evaluate(SUGGESTED) == [{"name": "Analog Film", "tag": "analog_film",
+                                                 "in": False, "selected": False}], "by its tag's name too"
+            assert served.listed == 1, "listed once a viewer"
+        finally:
+            close_page(page, served)
+
+    def test_one_chosen_is_a_new_row_at_its_preferred_weight_written_at_the_prompts_end(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            typed(page, "add")
+            page.wait_for_selector(".mc-lv-option")
+            page.click(".mc-lv-option")
+            page.wait_for_function("document.querySelectorAll('.mc-lv-row').length === 6")
+            page.wait_for_function("!document.querySelector('.mc-lv .mc-lv-skeleton')")
+            last = page.evaluate(ROWS)[-1]
+            assert (last["name"], last["box"], last["weight"]) == ("add_detail_xl", "New in Prompt", "0.6")
+            assert last["picture"].endswith("/pictures/add.png")
+            assert served.asked[-1] == ["add_detail_xl"], "its details alone"
+            assert page.input_value(".mc-lv-add-input") == "", "empty for the next one"
+            assert page.locator(".mc-lv-count").text_content() == "6 in this prompt"
+            assert page.locator(".mc-lv-button-apply").text_content() == "Apply 1 change"
+            page.click(".mc-lv-button-apply")
+            boxes = page.evaluate(BOXES)
+            assert boxes == {"prompt": PROMPT + " <lora:add_detail_xl:0.6>",
+                             "positive": LITERAL_POSITIVE, "negative": LITERAL_NEGATIVE}
+            # The add box's own typing is the viewer's; the page's boxes hear one.
+            assert [one for one in page.evaluate("window.inputs") if one != "mc-lora-viewer"] == \
+                ["txt2img_prompt"]
+        finally:
+            close_page(page, served)
+
+    def test_without_a_preferred_weight_forges_default_and_separator(self, browser):
+        page, served = open_page(browser)
+        try:
+            page.evaluate("""() => { window.opts = {extra_networks_default_multiplier: 0.8,
+                                                    extra_networks_add_text_separator: ", "}; }""")
+            open_viewer(page, "img2img")
+            typed(page, "zoom")
+            page.wait_for_selector(".mc-lv-option")
+            page.press(".mc-lv-add-input", "Enter")
+            page.wait_for_function("document.querySelectorAll('.mc-lv-row').length === 2")
+            assert weight_of(page, 1) == "0.8"
+            row(page, 1).locator(".mc-lv-step").nth(1).click()        # 0.8 -> 0.85
+            page.click(".mc-lv-button-apply")
+            assert page.evaluate("document.querySelector('#img2img_prompt textarea').value") == \
+                IMG2IMG_PROMPT + ", <lora:zoom_blur:0.85>"
+        finally:
+            close_page(page, served)
+
+    def test_one_already_in_the_prompt_is_shown_not_added_twice(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            typed(page, "realfilter")
+            page.wait_for_selector(".mc-lv-option")
+            assert page.evaluate(SUGGESTED) == [{"name": "realfilter_v2_final", "tag": "realfilter_v2",
+                                                 "in": True, "selected": False}]
+            page.click(".mc-lv-option")
+            assert page.locator(".mc-lv-row").count() == 5
+            assert row(page, 0).get_attribute("data-flash") is not None
+            assert page.locator(".mc-lv-button-apply").text_content() == "Apply"
+        finally:
+            close_page(page, served)
+
+    def test_the_keys_choose_and_escape_puts_the_list_away_before_the_viewer(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            typed(page, "det")
+            page.wait_for_selector(".mc-lv-option")
+            page.press(".mc-lv-add-input", "ArrowDown")
+            page.press(".mc-lv-add-input", "ArrowDown")
+            assert [o["selected"] for o in page.evaluate(SUGGESTED)] == [False, True, False]
+            assert page.get_attribute(".mc-lv-add-input", "aria-activedescendant") == "mc-lv-option-1"
+            page.press(".mc-lv-add-input", "ArrowUp")
+            page.press(".mc-lv-add-input", "ArrowUp")
+            assert [o["selected"] for o in page.evaluate(SUGGESTED)] == [False, False, True], "round"
+            page.press(".mc-lv-add-input", "Escape")
+            assert page.locator(".mc-lv-suggest").is_hidden() and page.locator(".mc-lv").is_visible()
+            assert page.input_value(".mc-lv-add-input") == "det"
+            page.press(".mc-lv-add-input", "Escape")
+            assert page.input_value(".mc-lv-add-input") == "" and page.locator(".mc-lv").is_visible()
+            page.press(".mc-lv-add-input", "Escape")
+            assert page.locator(".mc-lv").is_hidden()
+            assert page.evaluate("window.forgeEscapes") == 0
+        finally:
+            close_page(page, served)
+
+    def test_nothing_matching_says_so_naming_the_preset(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            typed(page, "qqq")
+            page.wait_for_selector(".mc-lv-suggest-note")
+            assert page.locator(".mc-lv-suggest-note").text_content() == \
+                "No LoRA matches \u201cqqq\u201d in the xl preset's folders."
+            page.press(".mc-lv-add-input", "Enter")
+            assert page.locator(".mc-lv-row").count() == 5
+        finally:
+            close_page(page, served)
+
+    def test_a_new_row_can_be_taken_back_and_reset_all_takes_it_out(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            typed(page, "zoom")
+            page.wait_for_selector(".mc-lv-option")
+            page.press(".mc-lv-add-input", "Enter")
+            page.wait_for_function("document.querySelectorAll('.mc-lv-row').length === 6")
+            row(page, 5).locator(".mc-lv-remove").click()
+            assert page.locator(".mc-lv-button-apply").text_content() == "Apply"
+            row(page, 5).locator(".mc-lv-remove").click()
+            assert page.locator(".mc-lv-button-apply").text_content() == "Apply 1 change"
+            page.click(".mc-lv-reset-all")
+            assert page.locator(".mc-lv-row").count() == 5
+            page.click(".mc-lv-button-apply")
+            assert page.evaluate(BOXES)["prompt"] == PROMPT
+        finally:
+            close_page(page, served)
+
+    def test_the_names_request_has_a_deadline(self, browser):
+        page, served = open_page(browser, clock=True)
+        served.hold_names = True
+        try:
+            open_viewer(page, wait_for_details=False)
+            typed(page, "det")
+            assert page.locator(".mc-lv-suggest-note").text_content() == "Listing your LoRAs\u2026"
+            page.clock.run_for(9000)
+            page.wait_for_function("document.querySelector('.mc-lv-suggest-note') && "
+                                   "document.querySelector('.mc-lv-suggest-note').textContent.includes('in time')")
+            served.hold_names = False
+            typed(page, "deta")
+            page.wait_for_selector(".mc-lv-option")
+            assert served.listed == 2, "typed again, listed again"
+        finally:
+            close_page(page, served)
+
+    def test_on_a_phone_the_list_is_inside_the_viewer_and_the_window(self, browser):
+        page, served = open_page(browser, width=390, height=640, touch=True)
+        try:
+            open_viewer(page)
+            page.tap(".mc-lv-add-input")
+            page.keyboard.type("d")
+            page.wait_for_selector(".mc-lv-option")
+            found = page.evaluate("""() => {
+                const box = (n) => n.getBoundingClientRect();
+                const dialog = box(document.querySelector('.mc-lv'));
+                const list = box(document.querySelector('.mc-lv-suggest'));
+                const field = box(document.querySelector('.mc-lv-add-field'));
+                const options = [...document.querySelectorAll('.mc-lv-option')].map(box);
+                return {dialog: {top: dialog.top, bottom: dialog.bottom, left: dialog.left, right: dialog.right},
+                        list: {top: list.top, bottom: list.bottom, left: list.left, right: list.right},
+                        field: field.height, option: options[0].height, count: options.length,
+                        width: innerWidth, height: innerHeight,
+                        wide: document.documentElement.scrollWidth};
+            }""")
+            assert found["list"]["top"] >= found["dialog"]["top"] and found["list"]["bottom"] <= found["dialog"]["bottom"]
+            assert found["list"]["left"] >= found["dialog"]["left"] and found["list"]["right"] <= found["dialog"]["right"]
+            assert found["dialog"]["bottom"] <= found["height"] and found["wide"] <= found["width"]
+            assert found["count"] == 3 and found["field"] <= 40 and found["option"] >= 36
+            page.tap(".mc-lv-option >> nth=2")
+            page.wait_for_function("document.querySelectorAll('.mc-lv-row').length === 6")
+            assert page.evaluate(ROWS)[-1]["name"] == "soft_light_detail"
+        finally:
+            close_page(page, served)

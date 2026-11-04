@@ -20,6 +20,14 @@ It never hashes a file (a viewer of five LoRAs could otherwise read gigabytes
 to open) and never writes anything; the answer reaches only the page that
 asked, and a failure's log line names no LoRA and no path.
 
+A second route, :data:`NAMES_ROUTE`, lists the LoRAs the viewer's *Add a LoRA*
+box suggests from: every LoRA Forge knows, kept to the folders assigned to the
+active UI Preset exactly as the extra-network browser keeps its cards
+(``mc_extra_networks_filter.active_rules``: nothing assigned shows everything,
+unless the strict reading is on), each with the name its tag is written with
+(Forge's ``get_alias()``, as a card press writes it). Names only: no file is
+read, so a folder of thousands answers at once.
+
 A plain ``def`` handler, not ``async def``: the work reads files (user metadata,
 the library's CSVs, a thumbnail), and FastAPI runs a plain handler on its thread
 pool, where a coroutine would hold up every other request on the event loop.
@@ -42,6 +50,9 @@ except Exception:  # pragma: no cover - a host without FastAPI
     JSONResponse = None  # type: ignore
 
 ROUTE = "/model-chain/lora-viewer/details"
+NAMES_ROUTE = "/model-chain/lora-viewer/names"
+MAX_LISTED = 20000
+"""The most names the add box is given: more than any folder of LoRAs holds."""
 MAX_NAMES = 64
 MAX_NAME_LENGTH = 256
 PICTURE_SIZE = 128
@@ -149,7 +160,7 @@ def fallback_picture(details: dict) -> str:
 def describe(name: str, entry, page) -> dict:
     """One LoRA's answer. Never raises: what cannot be read is left out."""
     answer = {"name": name, "found": entry is not None, "picture": "", "title": "",
-              "triggers": []}
+              "triggers": [], "weight": None}
     if entry is None:
         return answer
     disk_name = str(getattr(entry, "name", "") or name)
@@ -163,6 +174,7 @@ def describe(name: str, entry, page) -> dict:
     if not item:
         item = {"name": disk_name, "filename": str(getattr(entry, "filename", "") or "")}
     answer["picture"] = str(item.get("preview") or "")
+    answer["weight"] = preferred_weight(item)
     try:
         import mc_lora_details
 
@@ -178,6 +190,16 @@ def describe(name: str, entry, page) -> dict:
     if not answer["picture"]:
         answer["picture"] = fallback_picture(details)
     return answer
+
+
+def preferred_weight(item) -> float | None:
+    """The card's *Preferred weight* (Forge's user metadata), which a press on
+    the card writes into the tag; None when it has none (0 is none to Forge)."""
+    try:
+        value = float((item.get("user_metadata") or {}).get("preferred weight") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return value if value else None
 
 
 def details(names, *, networks=None, page=None) -> dict:
@@ -196,6 +218,65 @@ def details(names, *, networks=None, page=None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# The add box's names
+# --------------------------------------------------------------------------- #
+
+
+def tag_name(entry, name: str) -> str:
+    """The name a card press writes into the tag: the alias, or the file's name
+    where Forge prefers it or the alias is ambiguous (``get_alias``)."""
+    try:
+        found = entry.get_alias()
+    except Exception:
+        found = getattr(entry, "alias", "") or ""
+    return str(found or name)
+
+
+def preset_rules(page):
+    """The active preset's folders for the LoRA page, read as the browser reads
+    them: None shows everything, an empty list nothing."""
+    try:
+        import mc_extra_networks_filter
+
+        return mc_extra_networks_filter.active_rules(page if page is not None else "lora")
+    except Exception:
+        logger.debug("Model Chain: the LoRA viewer could not read the preset's folders",
+                     exc_info=True)
+        return None
+
+
+def listing(*, networks=None, page=None, rules=False) -> dict:
+    """The add box's names: ``{"loras": [{"name", "tag"}], "preset", "filtered"}``,
+    sorted by name, the LoRAs outside the preset's folders left out.
+
+    ``rules`` is the preset's folders when a caller has them (a test); left at
+    False they are read as the browser reads them."""
+    import mc_extra_networks_folders
+    import mc_extra_networks_filter
+
+    networks = networks if networks is not None else forge_networks()
+    if rules is False:
+        rules = preset_rules(page if page is not None else lora_page())
+    preset = ""
+    try:
+        preset = mc_extra_networks_folders.current_preset()
+    except Exception:
+        preset = ""
+    answer = {"loras": [], "preset": preset, "filtered": rules is not None}
+    if networks is None:
+        return answer
+    found = []
+    for name, entry in list((getattr(networks, "available_networks", None) or {}).items()):
+        filename = str(getattr(entry, "filename", "") or "")
+        if rules is not None and not mc_extra_networks_filter.item_allowed({"filename": filename}, rules):
+            continue
+        found.append({"name": str(name), "tag": tag_name(entry, str(name))})
+    found.sort(key=lambda one: (one["name"].casefold(), one["name"]))
+    answer["loras"] = found[:MAX_LISTED]
+    return answer
+
+
+# --------------------------------------------------------------------------- #
 # The route
 # --------------------------------------------------------------------------- #
 
@@ -205,9 +286,9 @@ def install(_demo=None, app=None) -> bool:
     idempotent: a UI reload calls it again."""
     if app is None or not hasattr(app, "add_api_route"):
         return False
-    for existing in getattr(app, "routes", []):
-        if getattr(existing, "path", None) == ROUTE:
-            return True
+    paths = {getattr(existing, "path", None) for existing in getattr(app, "routes", [])}
+    if ROUTE in paths and NAMES_ROUTE in paths:
+        return True
     if Request is None or JSONResponse is None:
         logger.debug("Model Chain: the LoRA viewer has no FastAPI to register its route on")
         return False
@@ -221,9 +302,20 @@ def install(_demo=None, app=None) -> bool:
             return JSONResponse({"loras": [], "error": "The details could not be read; "
                                  "the log says why."}, status_code=500)
 
+    def lora_viewer_names():
+        try:
+            return JSONResponse(listing(), headers={"Cache-Control": "no-store"})
+        except Exception:
+            logger.warning("Model Chain: the LoRA viewer's list of LoRAs failed", exc_info=True)
+            return JSONResponse({"loras": [], "error": "Your LoRAs could not be listed; "
+                                 "the log says why."}, status_code=500)
+
     try:
-        app.add_api_route(ROUTE, lora_viewer_details, methods=["GET"])
+        if ROUTE not in paths:
+            app.add_api_route(ROUTE, lora_viewer_details, methods=["GET"])
+        if NAMES_ROUTE not in paths:
+            app.add_api_route(NAMES_ROUTE, lora_viewer_names, methods=["GET"])
     except Exception:
-        logger.debug("Model Chain: could not register the LoRA viewer's route", exc_info=True)
+        logger.debug("Model Chain: could not register the LoRA viewer's routes", exc_info=True)
         return False
     return True

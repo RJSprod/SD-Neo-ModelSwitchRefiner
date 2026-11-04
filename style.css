@@ -8503,9 +8503,10 @@
 }
 
 /* Transpose View (docs/22 §3.47): the header laid down one side of the panel
-   instead of across its top -- a strip the panel's height, its buttons stacked
-   from the top, the grip (the drag handle, the memory reading written down it)
-   taking what is left, the ✕ at its foot -- and every other part of the panel,
+   instead of across its top -- a strip the panel's height, the grip (the drag
+   handle, the memory reading written down it) first and taking what is left,
+   its buttons at its foot, bottom-justified at the user's word, the ✕ last --
+   and every other part of the panel,
    still one column, starting at the panel's top beside it. Absolutely placed,
    so the column is the column it always was; the script writes the least
    height the strip's buttons need (`--forge-assistant-rail-min`), since the
@@ -8549,7 +8550,13 @@
     border-left: 1px solid var(--border-color-primary);
 }
 
+/* Bottom-justified: "I would like the flyout menu buttons, when set to side
+   instead of top, to be bottom justified." The grip is drawn first, at the
+   strip's top, and its slack pushes the buttons down to the foot; nothing is
+   moved in the DOM, and the grip takes no focus, so the keyboard meets the
+   buttons in the order it always did, which is the order they are drawn. */
 .forge-assistant-panel[data-rail] .forge-assistant-grip {
+    order: -1;
     flex: 1 1 0%;
     align-self: stretch;
     min-width: 0;
@@ -8639,6 +8646,21 @@
 .forge-assistant-generate[data-state="failed"] {
     border-color: var(--color-red-500, #ef4444);
     box-shadow: inset 0 0 0 1px var(--color-red-500, #ef4444);
+}
+
+/* The launcher's right click is the same Generate (`launcherMenu`), and says
+   its answer on the launcher, as an outline that leaves its look alone. */
+.forge-assistant-launcher[data-generated] {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: 2px;
+}
+
+.forge-assistant-launcher[data-generated="done"] {
+    outline-color: var(--color-green-500, #22c55e);
+}
+
+.forge-assistant-launcher[data-generated="failed"] {
+    outline-color: var(--color-red-500, #ef4444);
 }
 
 /* Presses still in line, counted on the button's corner. */
@@ -9540,11 +9562,13 @@
    genuinely modal -- dialog semantics, contained focus, inert background --
    because a non-modal sheet on a phone is a sheet the page scrolls behind. */
 @media (max-width: 639px) {
+    /* Beside a tab bar down a side (Transpose View), never under it: the
+       shell writes the room the rail takes (`--forge-assistant-beside-*`). */
     #forge-assistant-root .forge-assistant-sheet {
-        left: 0;
-        right: 0;
-        width: 100%;
-        max-width: 100%;
+        left: var(--forge-assistant-beside-left, 0px);
+        right: var(--forge-assistant-beside-right, 0px);
+        width: auto;
+        max-width: none;
         max-height: calc(100% - var(--forge-assistant-inset-top)
                               - var(--forge-assistant-inset-bottom));
         border-radius: var(--radius-lg, 10px) var(--radius-lg, 10px) 0 0;
@@ -11197,7 +11221,11 @@ details.mc-lora-more[open] > summary {
 .mc-lv,
 .mc-lv-scrim,
 .mc-lv-toast {
-    --mc-lv-surface: var(--block-background-fill, var(--background-fill-primary, #0d0d0d));
+    /* The page's own ground, not a block's: Forge Neo's stylesheet says
+       `--block-background-fill: transparent` on :root and .dark ("general
+       gradio fixes"), and a viewer painted from it showed the page through
+       ("please make its background opaque, right now it's transparent"). */
+    --mc-lv-surface: var(--background-fill-primary, var(--body-background-fill, #0d0d0d));
     --mc-lv-field: var(--input-background-fill, #161616);
     --mc-lv-line: var(--border-color-primary, #2b2b2b);
     --mc-lv-text: var(--body-text-color, #e6e6e6);
@@ -11325,6 +11353,151 @@ details.mc-lora-more[open] > summary {
 .mc-lv-text .mc-lv-icon {
     width: 15px;
     height: 15px;
+}
+
+/* -- the add box: a LoRA of this preset's folders, one at a time ------------- */
+
+.mc-lv-add {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    max-height: 45%;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--mc-lv-line);
+}
+
+.mc-lv-add-field {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 38px;
+    margin: 0;
+    padding: 0 10px;
+    border: 1px solid var(--mc-lv-line);
+    border-radius: 10px;
+    background: var(--mc-lv-field);
+    color: var(--mc-lv-subdued);
+    cursor: text;
+}
+
+.mc-lv-add-field .mc-lv-icon {
+    width: 16px;
+    height: 16px;
+}
+
+.mc-lv .mc-lv-add-input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--mc-lv-text);
+    font: inherit;
+    font-size: 16px;
+    box-shadow: none;
+}
+
+/* The field shows the keyboard is in it, round as it is; the box inside it
+   draws no square outline of its own. */
+.mc-lv-add-field:focus-within {
+    border-color: var(--mc-lv-text);
+    box-shadow: 0 0 0 1px var(--mc-lv-text);
+}
+
+.mc-lv .mc-lv-add-input:focus,
+.mc-lv .mc-lv-add-input:focus-visible {
+    outline: none;
+}
+
+/* Inside the dialog and under the box, never a popup over the edge of the
+   window: it takes the room it needs up to its cap and scrolls, and the
+   list of rows gives way under it. */
+.mc-lv-suggest {
+    flex: 0 1 auto;
+    min-height: 0;
+    margin-top: 6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--mc-lv-line);
+    border-radius: 10px;
+    background: var(--mc-lv-surface);
+}
+
+.mc-lv-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--mc-lv-line);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.mc-lv-option:last-child {
+    border-bottom: 0;
+}
+
+.mc-lv-option:hover,
+.mc-lv-option[aria-selected="true"] {
+    background: var(--mc-lv-button-hover);
+}
+
+.mc-lv-option-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mc-lv-option-tag {
+    flex: 1 1 0%;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--mc-lv-subdued);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mc-lv-option-in {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--mc-lv-present);
+}
+
+.mc-lv-option-in .mc-lv-icon {
+    width: 13px;
+    height: 13px;
+}
+
+.mc-lv-suggest-note {
+    padding: 10px 12px;
+    font-size: 13px;
+    color: var(--mc-lv-subdued);
+}
+
+/* A row the add box made, and one it pointed to instead of adding twice. */
+.mc-lv-row[data-added] .mc-lv-box {
+    border-color: var(--mc-lv-present);
+    color: var(--mc-lv-present);
+}
+
+.mc-lv-row[data-flash] {
+    background: color-mix(in srgb, var(--mc-lv-present) 14%, var(--mc-lv-surface));
 }
 
 .mc-lv-status {
