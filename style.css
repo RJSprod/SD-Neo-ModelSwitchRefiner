@@ -11477,6 +11477,36 @@ details.mc-lora-more[open] > summary {
     -webkit-user-select: none;
 }
 
+/* A suggestion's picture, beside its name: the LoRA's own, its initials, or a
+   shimmer while it is asked for. */
+.mc-lv-option-thumb {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--mc-lv-button);
+}
+
+.mc-lv-option-thumb img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.mc-lv-option-thumb .mc-lv-skeleton {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+}
+
+.mc-lv-option-thumb .mc-lv-initials {
+    font-size: 11px;
+}
+
 .mc-lv-option:last-child {
     border-bottom: 0;
 }
@@ -11631,6 +11661,42 @@ details.mc-lora-more[open] > summary {
     display: grid;
     place-items: center;
     background: var(--mc-lv-button);
+}
+
+/* The picture is a button: it opens the card's description, Forge's own
+   editor for it. A small badge in its corner says so. A theme's
+   `min-width: fit-content` on every button leaves it its size: its picture is
+   the button's width, not its own. */
+.mc-lv .mc-lv-thumb {
+    position: relative;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    cursor: default;
+}
+
+.mc-lv .mc-lv-thumb[data-describable] {
+    cursor: pointer;
+}
+
+.mc-lv-thumb-badge {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--mc-lv-surface);
+    color: var(--mc-lv-text);
+    box-shadow: 0 0 0 1px var(--mc-lv-line);
+    pointer-events: none;
+}
+
+.mc-lv .mc-lv-thumb-badge .mc-lv-icon {
+    width: 12px;
+    height: 12px;
 }
 
 .mc-lv-thumb img {

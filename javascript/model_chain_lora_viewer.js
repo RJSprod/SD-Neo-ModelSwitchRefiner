@@ -25,6 +25,25 @@
 // own weight (its Preferred weight, else Forge's default multiplier), written
 // at the end of the Prompt box on Apply after Forge's separator, as a press on
 // the card writes it; a LoRA already in the prompt is shown, not added twice.
+// Each suggestion shows the LoRA's picture: "I need to see the image next to
+// the lora name in that list". The names come without pictures, so a folder
+// of thousands lists at once; the pictures of the names shown are asked of
+// the details route a moment after the typing stops, one request with a
+// deadline at a time, and kept for the viewer's life, so a name seen once is
+// drawn at once after that and a LoRA added from the list needs no request
+// of its own.
+//
+// Its description
+// ---------------
+// A row's picture is a button that opens the card's description -- Forge's
+// own editor for it, the one the LoRA browser's edit button opens (its
+// `extraNetworksEditUserMetadata`), with LoRA Details' library rows in it:
+// "the ability to get to the extra network content description by our new
+// lora menu". Forge draws it on its global popup, under the viewer's layer, so
+// the viewer steps aside while it is open, keeping every change made in it,
+// and comes back when Forge puts the popup away (Save, Cancel, its backdrop,
+// Escape), the row's details asked again since its activation text or
+// Preferred weight may have changed.
 //
 // What it reads and writes
 // ------------------------
@@ -65,6 +84,8 @@
     const ROUTE = "/model-chain/lora-viewer/details";
     const NAMES_ROUTE = "/model-chain/lora-viewer/names";
     const SUGGESTIONS = 8;   // the most names the add box shows at once
+    const PICTURES_WAIT_MS = 150;   // after the last key, before the shown names' pictures are asked
+    const EDITOR = "_lora_edit_user_metadata";   // Forge's description editor: "<tab>" + EDITOR
     const DEADLINE_MS = 8000;
     const MIN = -5;
     const MAX = 5;
@@ -111,6 +132,7 @@
         "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
         "triangle-alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
         "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+        "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
     };
 
     function icon(name) {
@@ -254,6 +276,11 @@
         // request listing them, the suggestions shown and the one chosen by
         // the arrow keys, and the requests for the details of added rows.
         names: null, namesRequest: null, shown: [], active: -1, extra: [],
+        // What the details route answered for a name, kept for the viewer's
+        // life: the suggestions' pictures, and an added row's details.
+        known: {}, picturing: null, picturesTimer: 0,
+        // Stepped aside for Forge's description editor, and its watch.
+        aside: false, popupWatch: null,
     };
 
     function build() {
@@ -352,7 +379,7 @@
             ticks += '<span class="mc-lv-tick' + (k === 5 ? " mc-lv-zero" : "") + '" style="--p:' + (k / 10) + '"></span>';
         }
         node.innerHTML =
-            '<div class="mc-lv-thumb"><span class="mc-lv-skeleton"></span></div>'
+            '<button type="button" class="mc-lv-thumb" disabled><span class="mc-lv-skeleton"></span></button>'
             + '<div class="mc-lv-main"><div class="mc-lv-line"><span class="mc-lv-name"></span>'
             + '<span class="mc-lv-box"></span></div>'
             + '<div class="mc-lv-pills"><span class="mc-lv-skeleton"></span>'
@@ -629,6 +656,8 @@
             }
         });
 
+        el.thumb.addEventListener("click", function () { openDescription(row); });
+
         el.reset.addEventListener("click", function () {
             setWeight(row, row.orig);
             el.track.focus({preventScroll: true});
@@ -746,6 +775,8 @@
                 return;
             }
             drawPicture(el.thumb, lora.picture, row.name);
+            row.card = String(lora.card || "");
+            describable(row);
             const triggers = Array.isArray(lora.triggers) ? lora.triggers : [];
             if (!triggers.length) {
                 el.pills.appendChild(make("span", "mc-lv-note", "No trigger words"));
@@ -768,8 +799,7 @@
         image.decoding = "async";
         image.draggable = false;
         image.addEventListener("error", function () {
-            holder.textContent = "";
-            holder.appendChild(make("span", "mc-lv-initials", initials(name)));
+            if (image.parentNode) image.parentNode.replaceChild(make("span", "mc-lv-initials", initials(name)), image);
         });
         image.src = picture;
         holder.appendChild(image);
@@ -1120,6 +1150,10 @@
             option.setAttribute("data-index", String(index));
             const here = rowOf(lora);
             if (here) option.setAttribute("data-in", "");
+            const thumb = make("span", "mc-lv-option-thumb");
+            thumb.setAttribute("data-for", lora.tag || lora.name);
+            paintThumb(thumb, lora.name);
+            option.appendChild(thumb);
             const name = make("span", "mc-lv-option-name", lora.name);
             option.appendChild(name);
             if (lora.tag && lora.tag !== lora.name) option.appendChild(make("span", "mc-lv-option-tag", lora.tag));
@@ -1136,6 +1170,7 @@
         nodes.add.setAttribute("aria-expanded", "true");
         if (state.active >= state.shown.length) state.active = -1;
         markActive();
+        askPictures();
     }
 
     function hideSuggestions() {
@@ -1210,8 +1245,186 @@
             tally();
         }
         if (row.el && row.el.row.scrollIntoView) row.el.row.scrollIntoView({block: "nearest"});
-        loadDetails([row]);
+        // Its details came with its picture in the list, most likely.
+        const known = state.known[tag];
+        if (known && !known.failed) fill([known], [row]);
+        else loadDetails([row]);
     }
+
+    // -- the suggestions' pictures --------------------------------------------------
+
+    /** A suggestion's picture: the LoRA's when it is known, its initials when
+     *  it has none, a shimmer while it is asked for. */
+    function paintThumb(thumb, name) {
+        const known = state.known[thumb.getAttribute("data-for")];
+        const want = !known ? "waiting" : (known.picture ? "picture:" + known.picture : "initials");
+        if (thumb.getAttribute("data-drawn") === want) return;
+        thumb.setAttribute("data-drawn", want);
+        thumb.textContent = "";
+        if (!known) {
+            thumb.appendChild(make("span", "mc-lv-skeleton"));
+            return;
+        }
+        drawPicture(thumb, known.picture, name);
+    }
+
+    function repaintThumbs() {
+        const nodes = state.nodes;
+        if (!nodes) return;
+        Array.prototype.forEach.call(nodes.suggest.querySelectorAll(".mc-lv-option-thumb"), function (thumb) {
+            const lora = state.shown[Number(thumb.parentNode.getAttribute("data-index"))];
+            paintThumb(thumb, lora ? lora.name : thumb.getAttribute("data-for"));
+        });
+    }
+
+    /** The shown names' pictures, once the typing has paused. */
+    function askPictures() {
+        clearTimeout(state.picturesTimer);
+        state.picturesTimer = setTimeout(fetchPictures, PICTURES_WAIT_MS);
+    }
+
+    /** One request at a time, with a deadline, for the shown names not known
+     *  yet; when it answers, the names shown by then are asked for in turn. */
+    function fetchPictures() {
+        if (!state.open || state.picturing) return;
+        const wanted = [];
+        state.shown.forEach(function (lora) {
+            const key = lora.tag || lora.name;
+            if (!Object.prototype.hasOwnProperty.call(state.known, key) && wanted.indexOf(key) === -1) wanted.push(key);
+        });
+        if (!wanted.length) return;
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const request = {abort: function () { if (controller) controller.abort(); }};
+        state.picturing = request;
+        const deadline = setTimeout(function () { request.timedOut = true; request.abort(); }, DEADLINE_MS);
+        const query = wanted.map(function (name) { return "name=" + encodeURIComponent(name); }).join("&");
+        const done = function (loras, failed) {
+            clearTimeout(deadline);
+            if (state.picturing !== request || !state.open) return;
+            state.picturing = null;
+            loras.forEach(function (lora) { if (lora && lora.name) state.known[lora.name] = lora; });
+            // A name the answer left out, or a request that failed, is drawn
+            // as its initials and not asked again in this viewer.
+            wanted.forEach(function (key) {
+                if (!Object.prototype.hasOwnProperty.call(state.known, key)) {
+                    state.known[key] = {name: key, found: true, picture: "", triggers: [], failed: !!failed};
+                }
+            });
+            repaintThumbs();
+            fetchPictures();
+        };
+        fetch(ROUTE + "?" + query, {
+            method: "GET", credentials: "same-origin", cache: "no-store",
+            headers: {"Accept": "application/json"}, signal: controller ? controller.signal : undefined,
+        }).then(function (response) {
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            return response.json();
+        }).then(function (body) {
+            done(body && Array.isArray(body.loras) ? body.loras : [], false);
+        }).catch(function (error) {
+            if (!request.timedOut && error && error.name !== "AbortError") {
+                console.warn("Model Chain: the LoRA viewer's pictures failed", error);
+            }
+            done([], true);
+        });
+    }
+
+    // -- a LoRA's description -------------------------------------------------------
+
+    /** Forge's description editor for a tab's LoRA cards, when the page has it. */
+    function editorOn(tab) {
+        return typeof window.extraNetworksEditUserMetadata === "function" && !!byId(tab + EDITOR);
+    }
+
+    /** A row's picture opens its card's description, once the card is known
+     *  and Forge's editor is on the page. */
+    function describable(row) {
+        const thumb = row.el && row.el.thumb;
+        if (!thumb) return;
+        const can = !!row.card && editorOn(state.tab);
+        thumb.disabled = !can;
+        thumb.toggleAttribute("data-describable", can);
+        thumb.setAttribute("aria-label", can ? "Description of " + row.name : row.name);
+        thumb.title = can ? "Description and details" : "";
+        let badge = thumb.querySelector(".mc-lv-thumb-badge");
+        if (can && !badge) {
+            badge = make("span", "mc-lv-thumb-badge");
+            badge.innerHTML = icon("info");
+            thumb.appendChild(badge);
+        } else if (!can && badge) {
+            badge.remove();
+        }
+    }
+
+    /** What a press on a card's edit button hands Forge: Forge reads the
+     *  card's name off the pressed element's grandparent (`data-name`). */
+    function cardEvent(card) {
+        const named = document.createElement("div");
+        named.setAttribute("data-name", card);
+        const middle = document.createElement("div");
+        const target = document.createElement("span");
+        named.appendChild(middle);
+        middle.appendChild(target);
+        return {target: target, currentTarget: target, stopPropagation: function () {}, preventDefault: function () {}};
+    }
+
+    function forgePopup() {
+        const found = document.querySelector(".global-popup");
+        return found && found.isConnected && found.style.display !== "none" ? found : null;
+    }
+
+    function stepAside(on) {
+        state.aside = !!on;
+        state.nodes.scrim.hidden = !!on;
+        state.nodes.dialog.hidden = !!on;
+        if (on) hideSuggestions();
+    }
+
+    function openDescription(row) {
+        if (!state.open || state.aside || !row.card) return;
+        if (!editorOn(state.tab)) {
+            toast("Forge's description editor for LoRAs is not on this page.");
+            return;
+        }
+        stepAside(true);
+        try {
+            window.extraNetworksEditUserMetadata(cardEvent(row.card), state.tab, "lora", row.card);
+        } catch (error) {
+            console.warn("Model Chain: the LoRA viewer could not open a description", error);
+        }
+        const shown = forgePopup();
+        if (!shown) {
+            stepAside(false);
+            toast("The description could not be opened.");
+            return;
+        }
+        if (state.popupWatch) state.popupWatch.disconnect();
+        const watch = new MutationObserver(function () {
+            if (forgePopup() === shown) return;
+            // A viewer closed meanwhile (a change of tab) disconnected this.
+            watch.disconnect();
+            if (state.popupWatch === watch) state.popupWatch = null;
+            backFromDescription(row);
+        });
+        state.popupWatch = watch;
+        watch.observe(shown, {attributes: true, attributeFilter: ["style"]});
+    }
+
+    /** Forge put its editor away: the viewer as it was, and the details of the
+     *  LoRA described asked again. */
+    function backFromDescription(row) {
+        stepAside(false);
+        measure();
+        const same = state.rows.filter(function (one) { return one.card === row.card || one.name === row.name; });
+        same.forEach(function (one) { delete state.known[one.name]; });
+        loadDetails(same);
+        try {
+            if (row.el && document.body.contains(row.el.thumb)) row.el.thumb.focus({preventScroll: true});
+        } catch (error) {
+            /* focus is a courtesy */
+        }
+    }
+
 
     function flash(row) {
         if (!row.el) return;
@@ -1271,7 +1484,8 @@
     // -- open and close -------------------------------------------------------------
 
     function onKey(event) {
-        if (!state.open || event.key !== "Escape") return;
+        // Stepped aside, Escape is Forge's: it puts its description editor away.
+        if (!state.open || state.aside || event.key !== "Escape") return;
         // Before Forge's Escape (it interrupts a generation) and the assistant's
         // (it leaves focus mode): this one is the viewer's.
         event.preventDefault();
@@ -1362,6 +1576,7 @@
         state.rows = readRows(state.boxes);
         state.filled = [];
         state.names = null;
+        state.known = {};
         state.button = byId("mc-lora-viewer-" + tab);
         state.open = true;
         renderRows();
@@ -1400,6 +1615,16 @@
         state.filled = [];
         state.nodes.add.value = "";
         hideSuggestions();
+        clearTimeout(state.picturesTimer);
+        if (state.picturing) {
+            const pictures = state.picturing;
+            state.picturing = null;
+            pictures.abort();
+        }
+        state.known = {};
+        if (state.popupWatch) state.popupWatch.disconnect();
+        state.popupWatch = null;
+        state.aside = false;
         state.open = false;
         listen(false);
         if (state.observer) state.observer.disconnect();

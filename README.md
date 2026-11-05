@@ -7896,7 +7896,15 @@ and, on Txt2Img, the two Literal boxes, in the order they are on screen:
 
 - **The picture** is the LoRA's own card picture from Forge's LoRA browser;
   without one, the first Civitai example picture LoRA Details has downloaded;
-  without either, its initials. Round corners, 44 px.
+  without either, its initials. Round corners, 44 px. **A press on it opens
+  the LoRA's description** — Forge's own editor for its card, the one the
+  LoRA browser's edit button opens, with its description, notes, activation
+  text, Preferred weight and LoRA Details' library rows (a small ⓘ in the
+  picture's corner says it can). The viewer steps aside while it is open,
+  keeping every change made in it, and comes back when the editor is put
+  away — Save, Cancel, its backdrop or Escape — with that LoRA's trigger
+  words read again. A LoRA not in your folders, or a page without Forge's
+  editor, has no description to open.
 - **The name** is the tag's, beside the box it is in: Prompt, Literal + or
   Literal −. The same LoRA in two boxes is two rows.
 - **Trigger words** are pills: LoRA Details' Civitai words first, then Forge's
@@ -7927,7 +7935,8 @@ suggests the LoRAs of the folders assigned to the UI Preset you are on — the
 ones the extra networks panel shows you for it (*Model Chain: LoRA folders*;
 nothing assigned is every LoRA, unless the strict reading is on) — matched as
 that panel's search matches, every word typed somewhere in the name, the names
-that start with it first, eight at most. ↑ and ↓ choose, **Enter** or a tap
+that start with it first, eight at most, **each with its picture beside it**
+(its initials without one, a shimmer while it is fetched). ↑ and ↓ choose, **Enter** or a tap
 adds, **Escape** puts the list away (and then what was typed) before it closes
 the viewer. The list is inside the viewer under the box, never over the edge
 of the window, and scrolls there. A LoRA already in the prompt is marked
@@ -7937,7 +7946,11 @@ card's own *Preferred weight*, or Forge's default multiplier without one, as a
 press on its card would write it; its bin takes it back, and **Reset all**
 takes out every added one. The names come from
 `GET /model-chain/lora-viewer/names`, once a viewer, when the box is first
-used, with an eight-second limit; no file is read for them.
+used, with an eight-second limit; no file is read for them. The pictures of
+the names shown are asked of the details route a moment after the typing
+stops, one request at a time with the same limit, and kept while the viewer
+is open: a name seen once is drawn at once after that, and a LoRA added from
+the list brings its picture, trigger words and weight with it.
 
 **Apply** writes each changed weight into its tag where the tag is, takes out
 the tags marked for removal (and closes the gap: one space between words, no

@@ -134,7 +134,7 @@ class TestFound:
     def test_a_typo_is_not_found_and_carries_nothing(self, library):
         answer = mc_lora_viewer.details(["typo"], networks=registry(), page=Page({}))
         assert answer == {"loras": [{"name": "typo", "found": False, "picture": "",
-                                     "title": "", "triggers": [], "weight": None}]}
+                                     "title": "", "triggers": [], "weight": None, "card": ""}]}
 
     def test_names_are_answered_once_each_in_the_order_asked(self, library):
         networks = registry(Network("a"), Network("b"))
@@ -216,6 +216,15 @@ class TestPicture:
         (row,) = mc_lora_viewer.details(["rf"], networks=networks,
                                         page=Page({"rf": card("rf", preview=None)}))["loras"]
         assert row["picture"] == ""
+
+
+class TestTheCard:
+    def test_the_card_is_named_by_its_file_where_the_tag_names_its_alias(self, library):
+        """Forge's description editor is opened by the card's own name."""
+        networks = registry(Network("realfilter_v2_final", alias="realfilter_v2"))
+        page = Page({"realfilter_v2_final": card("realfilter_v2_final")})
+        (row,) = mc_lora_viewer.details(["realfilter_v2"], networks=networks, page=page)["loras"]
+        assert row["card"] == "realfilter_v2_final"
 
 
 class TestThePreferredWeight:
