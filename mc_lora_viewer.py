@@ -14,7 +14,9 @@ all of them in one request:
   preview), else the first Civitai example LoRA Details has downloaded, as a
   small ``data:`` URI, else none;
 * its trigger words: LoRA Details' Civitai library first, then Forge's own
-  activation text for the LoRA split at commas, with no word twice.
+  activation text for the LoRA split at commas, with no word twice;
+* its card's name, which the viewer opens Forge's description editor for the
+  card by, and its Preferred weight.
 
 It never hashes a file (a viewer of five LoRAs could otherwise read gigabytes
 to open) and never writes anything; the answer reaches only the page that
@@ -160,10 +162,14 @@ def fallback_picture(details: dict) -> str:
 def describe(name: str, entry, page) -> dict:
     """One LoRA's answer. Never raises: what cannot be read is left out."""
     answer = {"name": name, "found": entry is not None, "picture": "", "title": "",
-              "triggers": [], "weight": None}
+              "triggers": [], "weight": None, "card": ""}
     if entry is None:
         return answer
     disk_name = str(getattr(entry, "name", "") or name)
+    # The card's own name, which Forge's description editor for it is opened
+    # by (`extraNetworksEditUserMetadata` reads a card's `data-name`): the
+    # file's name, where the tag may carry the alias.
+    answer["card"] = disk_name
     item = None
     if page is not None and hasattr(page, "create_item"):
         try:

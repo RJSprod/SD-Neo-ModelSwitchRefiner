@@ -40,6 +40,7 @@ IMG2IMG_PROMPT = "a watercolour fox <lora:paper_texture:0.6>"
 
 DETAILS = {
     "realfilter_v2": {"found": True, "picture": "/pictures/realfilter.png", "title": "RealFilter",
+                      "card": "realfilter_v2_final",
                       "triggers": ["realfilter", "film still", "35mm photograph",
                                    "natural skin texture", "muted colors"]},
     "contrast_slider": {"found": True, "picture": "", "title": "", "triggers": []},
@@ -94,6 +95,86 @@ body { margin: 0; background: #000; color: #e6e6e6; font: 14px sans-serif; }
 """
 
 
+# Forge Neo's own popup and description editor (javascript/extraNetworks.js),
+# as it is: the editor is opened by a card's name read off the pressed
+# element's grandparent, drawn on a popup appended to `.main`, and put away by
+# its backdrop, its Cancel and Save, and Escape on the window.
+FORGE_POPUP = """
+let globalPopup = null;
+let globalPopupInner = null;
+function closePopup() {
+    if (!globalPopup) return;
+    globalPopup.style.display = "none";
+}
+function popup(contents) {
+    if (!globalPopup) {
+        globalPopup = document.createElement("div");
+        globalPopup.classList.add("global-popup");
+        let close = document.createElement("div");
+        close.classList.add("global-popup-close");
+        close.addEventListener("click", closePopup);
+        close.title = "Close";
+        globalPopup.appendChild(close);
+        globalPopupInner = document.createElement("div");
+        globalPopupInner.classList.add("global-popup-inner");
+        globalPopup.appendChild(globalPopupInner);
+        gradioApp().querySelector(".main").appendChild(globalPopup);
+    }
+    globalPopupInner.innerHTML = "";
+    globalPopupInner.appendChild(contents);
+    globalPopup.style.display = "flex";
+}
+let extraPageUserMetadataEditors = {};
+function extraNetworksEditUserMetadata(event, tabname, extraPage) {
+    let id = tabname + "_" + extraPage + "_edit_user_metadata";
+    let editor = extraPageUserMetadataEditors[id];
+    if (!editor) {
+        editor = {};
+        editor.page = gradioApp().getElementById(id);
+        editor.nameTextarea = gradioApp().querySelector("#" + id + "_name" + " textarea");
+        editor.button = gradioApp().querySelector("#" + id + "_button");
+        extraPageUserMetadataEditors[id] = editor;
+    }
+    let cardName = event.target.parentElement.parentElement.getAttribute("data-name");
+    if (cardName == null) {
+        cardName = event.target.parentElement.parentElement.parentElement.getAttribute("data-name");
+    }
+    editor.nameTextarea.value = cardName;
+    updateInput(editor.nameTextarea);
+    editor.button.click();
+    popup(editor.page);
+    event.stopPropagation();
+}
+window.addEventListener("keydown", function (event) {
+    if (event.key == "Escape") {
+        closePopup();
+    }
+});
+"""
+
+FORGE_POPUP_CSS = """
+.global-popup { display: flex; position: fixed; z-index: 1001; left: 0; top: 0; width: 100%; height: 100%;
+                overflow: auto; }
+.global-popup-close { position: fixed; left: 0; top: 0; width: 100%; height: 100%;
+                      background-color: rgba(20, 20, 20, 0.95); }
+.global-popup-inner { display: inline-block; margin: auto; padding: 2em; z-index: 1001; max-height: 90%;
+                      max-width: 90%; position: relative; background: #111; }
+"""
+
+
+def editor_html(tab: str) -> str:
+    """A tab's description editor for LoRA cards, as Forge builds it hidden in
+    the page: the name box and the button its script presses, and Cancel and
+    Save, each of which puts the popup away (`_js="closePopup"`)."""
+    id_ = f"{tab}_lora_edit_user_metadata"
+    return (f'<div id="{id_}" class="edit-user-metadata" style="display: none">'
+            f'<div id="{id_}_name"><textarea></textarea></div>'
+            f'<button id="{id_}_button" onclick="window.edited.push(document.querySelector('
+            f"'#{id_}_name textarea').value); this.parentElement.style.display = 'block'\">open</button>"
+            f'<button class="cancel" onclick="closePopup()">Cancel</button>'
+            f'<button class="save" onclick="closePopup()">Save</button></div>')
+
+
 def page_html(theme_css: str = "") -> str:
     tools = """
         <button id="{p}paste" class="lg secondary gradio-button tool svelte-cmf5ev">&#x2199;&#xfe0f;</button>
@@ -103,11 +184,20 @@ def page_html(theme_css: str = "") -> str:
         <span class="green-dot"></span>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{HOST_CSS}{FORGE_CSS}{theme_css}</style>
+<style>{HOST_CSS}{FORGE_CSS}{FORGE_POPUP_CSS}{theme_css}</style>
 <link rel="stylesheet" href="/style.css">
 </head><body class="dark">
 <script>
-function gradioApp() {{ return document.querySelector("gradio-app") || document; }}
+// Forge Neo's own (script.js): <gradio-app>, with getElementById patched
+// through to the document, which Forge's description editor reads by.
+function gradioApp() {{
+    const elems = document.getElementsByTagName("gradio-app");
+    const elem = elems.length == 0 ? document : elems[0];
+    if (elem !== document) {{
+        elem.getElementById = function (id) {{ return document.getElementById(id); }};
+    }}
+    return elem.shadowRoot ? elem.shadowRoot : elem;
+}}
 const hooks = {{loaded: [], after: []}};
 function onUiLoaded(fn) {{ hooks.loaded.push(fn); }}
 function onAfterUiUpdate(fn) {{ hooks.after.push(fn); }}
@@ -117,6 +207,8 @@ function updateInput(target) {{
     target.dispatchEvent(event);
 }}
 window.inputs = []; window.blurs = []; window.overlays = []; window.forgeEscapes = 0; window.copied = [];
+window.edited = [];
+{FORGE_POPUP}
 document.addEventListener("input", (e) => window.inputs.push(e.target.closest("[id]").id), true);
 document.addEventListener("blur", (e) => {{
     if (e.target && e.target.closest && e.target.closest(".block")) window.blurs.push(e.target.closest("[id]").id);
@@ -126,6 +218,8 @@ document.addEventListener("keydown", (e) => {{ if (e.key === "Escape") window.fo
 document.addEventListener("minipaint:overlay", (e) => window.overlays.push(e.detail));
 </script>
 <gradio-app>
+<div class="main">
+{editor_html("txt2img")}{editor_html("img2img")}
 <div id="tabs" class="tabs">
   <div class="tab-nav"><button id="nav-txt2img">Txt2img</button><button id="nav-img2img">Img2img</button></div>
   <div id="tab_txt2img" class="tabitem">
@@ -139,6 +233,7 @@ document.addEventListener("minipaint:overlay", (e) => window.overlays.push(e.det
     <div id="img2img_prompt" class="block"><textarea>{IMG2IMG_PROMPT}</textarea></div>
     <div id="img2img_tools" class="row">{tools.format(p="i2i_", tab="img2img")}</div>
   </div>
+</div>
 </div>
 </gradio-app>
 <script src="/javascript/model_chain_lora_viewer.js"></script>
@@ -175,6 +270,14 @@ PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108020000009
                     "0000000c4944415408d763f8cfc0f01f0005000201e221bc330000000049454e44ae426082")
 
 
+def answer(name):
+    """The details route's answer for a name: the card is the file's name,
+    which is the tag's own unless DETAILS names another."""
+    found = dict(DETAILS.get(name, {"found": True, "picture": "", "title": "", "triggers": []}), name=name)
+    found.setdefault("card", name if found.get("found") else "")
+    return found
+
+
 class Served:
     """The page, the stylesheet, the script, the pictures and the route."""
 
@@ -186,6 +289,7 @@ class Served:
         self.status = 200
         self.listed = 0
         self.hold_names = False
+        self.omit = set()
 
     def __call__(self, route):
         request = route.request
@@ -206,9 +310,7 @@ class Served:
             if self.hold:
                 self.held.append(route)
                 return
-            body = {"loras": [dict(DETAILS.get(name, {"found": True, "picture": "", "title": "",
-                                                       "triggers": []}), name=name)
-                              for name in names]}
+            body = {"loras": [answer(name) for name in names if name not in self.omit]}
             route.fulfill(status=self.status, content_type="application/json", body=json.dumps(body))
         elif path == mc_lora_viewer.NAMES_ROUTE:
             self.listed += 1
@@ -1103,3 +1205,227 @@ class TestAddingOne:
             assert page.evaluate(ROWS)[-1]["name"] == "soft_light_detail"
         finally:
             close_page(page, served)
+
+
+# --------------------------------------------------------------------------- #
+# A LoRA's description, and the suggestions' pictures
+# --------------------------------------------------------------------------- #
+
+POPUP = """() => {
+    const popup = document.querySelector('.global-popup');
+    const editor = document.getElementById('txt2img_lora_edit_user_metadata');
+    return {shown: !!popup && popup.style.display !== 'none',
+            holds: !!popup && popup.contains(editor),
+            name: document.querySelector('#txt2img_lora_edit_user_metadata_name textarea').value,
+            viewer: !document.querySelector('.mc-lv').hidden, scrim: !document.querySelector('.mc-lv-scrim').hidden,
+            edited: window.edited.slice(), focused: document.activeElement && document.activeElement.className};
+}"""
+
+
+class TestTheDescription:
+    """"I want the ability to get to the extra network content description by
+    our new lora menu": a row's picture opens Forge's own description editor
+    for its card, and the viewer steps aside until Forge puts it away."""
+
+    def test_a_rows_picture_opens_its_cards_description_by_the_cards_own_name(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-step").nth(1).click()          # 0.85 -> 0.9, kept through it
+            thumb = row(page, 0).locator(".mc-lv-thumb")
+            marks = {"disabled": thumb.is_disabled(), "label": thumb.get_attribute("aria-label"),
+                     "badge": thumb.locator(".mc-lv-thumb-badge svg").count()}
+            thumb.click()
+            opened = page.evaluate(POPUP)
+            asked = len(served.asked)
+            page.keyboard.press("Escape")
+            page.wait_for_selector(".mc-lv:not([hidden])")
+            page.wait_for_function("!document.querySelector('.mc-lv .mc-lv-skeleton')")
+            back = page.evaluate(POPUP)
+            again = served.asked[asked:]
+            weight = weight_of(page, 0)
+        finally:
+            close_page(page, served)
+
+        assert marks == {"disabled": False, "label": "Description of realfilter_v2", "badge": 1}
+        assert opened["shown"] and opened["holds"], "Forge's editor on Forge's popup"
+        assert opened["name"] == "realfilter_v2_final" and opened["edited"] == ["realfilter_v2_final"], \
+            "opened by the card's own name, the file's, where the tag carries its alias"
+        assert opened["viewer"] is False and opened["scrim"] is False, "stepped aside, under nothing"
+        assert back["shown"] is False and back["viewer"] is True, "Escape was Forge's, and the viewer came back"
+        assert again == [["realfilter_v2"]], "its details asked again"
+        assert weight == "0.9", "the change made before is still there"
+        assert back["focused"] and "mc-lv-thumb" in back["focused"]
+
+    @pytest.mark.parametrize("way", [".global-popup .save", ".global-popup .cancel", ".global-popup-close"])
+    def test_save_cancel_and_the_backdrop_bring_it_back_too(self, browser, way):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            row(page, 1).locator(".mc-lv-thumb").click()
+            assert page.evaluate(POPUP)["shown"] is True
+            page.click(way, position={"x": 5, "y": 5} if way == ".global-popup-close" else None)
+            page.wait_for_selector(".mc-lv:not([hidden])")
+            found = page.evaluate(POPUP)
+        finally:
+            close_page(page, served)
+
+        assert found["shown"] is False and found["viewer"] is True
+
+    def test_escape_while_it_is_open_is_forges_not_the_viewers(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-thumb").click()
+            page.keyboard.press("Escape")
+            page.wait_for_selector(".mc-lv:not([hidden])")
+            open_after = page.evaluate("window.mcLoraViewer.isOpen()")
+        finally:
+            close_page(page, served)
+
+        assert open_after is True, "the first Escape closed Forge's editor, not the viewer"
+
+    def test_a_lora_not_on_disk_or_a_page_without_the_editor_has_no_description(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            missing = row(page, 2).locator(".mc-lv-thumb")
+            gone = {"disabled": missing.is_disabled(), "badge": missing.locator(".mc-lv-thumb-badge").count()}
+            page.click(".mc-lv-button-cancel")
+            page.evaluate("document.getElementById('txt2img_lora_edit_user_metadata').remove()")
+            open_viewer(page)
+            plain = row(page, 0).locator(".mc-lv-thumb")
+            none = {"disabled": plain.is_disabled(), "badge": plain.locator(".mc-lv-thumb-badge").count()}
+        finally:
+            close_page(page, served)
+
+        assert gone == {"disabled": True, "badge": 0}
+        assert none == {"disabled": True, "badge": 0}
+
+    def test_a_row_whose_card_is_not_known_has_no_description(self, browser):
+        """An answer that leaves a name out gives its row no card to open."""
+        page, served = open_page(browser)
+        served.omit = {"contrast_slider"}
+        try:
+            open_viewer(page)
+            thumb = row(page, 1).locator(".mc-lv-thumb")
+            found = {"disabled": thumb.is_disabled(), "badge": thumb.locator(".mc-lv-thumb-badge").count()}
+        finally:
+            close_page(page, served)
+
+        assert found == {"disabled": True, "badge": 0}
+
+    def test_a_change_of_tab_while_it_is_open_cancels_the_viewer(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-step").nth(1).click()
+            row(page, 0).locator(".mc-lv-thumb").click()
+            page.evaluate("""() => { document.getElementById('tab_txt2img').style.display = 'none';
+                                     document.getElementById('tab_img2img').style.display = 'block'; }""")
+            page.wait_for_function("!window.mcLoraViewer.isOpen()")
+            page.evaluate("closePopup()")
+            page.wait_for_timeout(100)
+            found = page.evaluate(POPUP)
+            prompt = page.evaluate(BOXES)["prompt"]
+        finally:
+            close_page(page, served)
+
+        assert found["viewer"] is False, "Forge putting its editor away later brings back no viewer"
+        assert prompt == PROMPT, "nothing applied"
+
+    def test_a_themes_button_rule_does_not_widen_the_picture(self, browser):
+        page, served = open_page(browser, width=1200, theme_css="button { min-width: fit-content !important; }")
+        try:
+            open_viewer(page)
+            box = row(page, 0).locator(".mc-lv-thumb").bounding_box()
+        finally:
+            close_page(page, served)
+
+        assert box["width"] == 44 and box["height"] == 44
+
+
+SUGGESTED_PICTURES = """() => [...document.querySelectorAll('.mc-lv-suggest .mc-lv-option')].map((o) => {
+    const thumb = o.querySelector('.mc-lv-option-thumb');
+    const img = thumb && thumb.querySelector('img');
+    return {name: o.querySelector('.mc-lv-option-name').textContent, first: o.firstElementChild === thumb,
+            picture: img ? img.getAttribute('src') : '',
+            initials: (thumb && thumb.querySelector('.mc-lv-initials') || {}).textContent || '',
+            waiting: !!(thumb && thumb.querySelector('.mc-lv-skeleton')),
+            box: thumb ? (({width, height}) => ({width, height}))(thumb.getBoundingClientRect()) : null};
+})"""
+
+
+class TestTheSuggestionsPictures:
+    """"Please show the images of the lora as well in the predictive typing
+    area. I need to see the image next to the lora name in that list.\""""
+
+    def test_each_suggestion_shows_its_loras_picture_beside_its_name(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            before = len(served.asked)
+            typed(page, "det")
+            page.wait_for_selector(".mc-lv-option")
+            first = page.evaluate(SUGGESTED_PICTURES)
+            page.wait_for_function("""() => ![...document.querySelectorAll('.mc-lv-option-thumb')]
+                .some((t) => t.querySelector('.mc-lv-skeleton'))""")
+            drawn = page.evaluate(SUGGESTED_PICTURES)
+            asked = served.asked[before:]
+            typed(page, "deta")
+            page.wait_for_timeout(400)
+            again = served.asked[before:]
+        finally:
+            close_page(page, served)
+
+        assert [one["waiting"] for one in first] == [True, True, True], "a shimmer while asked for"
+        assert all(one["first"] for one in drawn), "the picture before the name"
+        pictures = {one["name"]: (one["picture"], one["initials"]) for one in drawn}
+        assert pictures["add_detail_xl"] == ("/pictures/add.png", "")
+        assert pictures["detail_slider"] == ("", "DS"), "its initials without one"
+        assert asked == [["detail_slider", "add_detail_xl", "soft_light_detail"]], "one request for the names shown"
+        assert again == asked, "a name seen once is not asked again"
+        assert all(one["box"] == {"width": 32, "height": 32} for one in drawn)
+
+    def test_a_lora_added_from_the_list_needs_no_request_of_its_own(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            typed(page, "add")
+            page.wait_for_selector(".mc-lv-option img")
+            asked = len(served.asked)
+            page.press(".mc-lv-add-input", "Enter")
+            page.wait_for_function("document.querySelectorAll('.mc-lv-row').length === 6")
+            last = page.evaluate(ROWS)[-1]
+            after = len(served.asked)
+            thumb = row(page, 5).locator(".mc-lv-thumb")
+            describable = not thumb.is_disabled()
+        finally:
+            close_page(page, served)
+
+        assert after == asked
+        assert last["picture"].endswith("/pictures/add.png") and last["weight"] == "0.6"
+        assert describable, "an added LoRA's description is a press away too"
+
+    def test_the_pictures_request_has_a_deadline_and_is_not_repeated(self, browser):
+        page, served = open_page(browser, clock=True)
+        try:
+            open_viewer(page, wait_for_details=False)
+            served.hold = True
+            typed(page, "det")
+            page.clock.run_for(200)
+            page.clock.run_for(9000)
+            page.wait_for_function("""() => document.querySelectorAll('.mc-lv-option-thumb .mc-lv-initials').length === 3""")
+            held = len(served.held)
+            served.hold = False
+            typed(page, "deta")
+            page.clock.run_for(400)
+            page.wait_for_timeout(200)
+            found = page.evaluate(SUGGESTED_PICTURES)
+            asked = [names for names in served.asked if "add_detail_xl" in names]
+        finally:
+            close_page(page, served)
+
+        assert held >= 1
+        assert [one["initials"] for one in found] == ["DS", "AD", "SL"]
+        assert len(asked) == 1, "a name that did not arrive in time is not asked again in this viewer"

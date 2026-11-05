@@ -355,3 +355,37 @@ new row taken back and Reset all; the names' deadline; on a phone the list
 inside the viewer and the window, and a tap adding). Not run on the user's
 machine; the user's own folder assignments and Forge's real LoRA registry were
 stood in for.
+
+### 8.6 The description from the viewer, and pictures in the list (2026-11-05)
+
+Asked: "I want the ability to get to the extra network content description by
+our new lora menu. Also, Please show the images of the lora as well in the
+predictive typing area. I need to see the image next to the lora name in that
+list."
+
+| Question | Decision |
+|---|---|
+| Which description | Forge's own **user metadata editor** for the card -- the one its LoRA browser's edit button opens, with the description, notes, activation text and Preferred weight, and, since 51, LoRA Details' library rows, laid out the width of the window. Nothing of ours to keep in step with it |
+| How it is opened | Forge Neo's `extraNetworksEditUserMetadata(event, tabname, extraPage)`, which reads the card's name off the pressed element's **grandparent** (`data-name`): the viewer hands it a small detached element whose grandparent carries the card's name (`cardEvent`), and the card's name is the file's (`card` in the details answer, `entry.name`), where the tag may carry the alias. Offered only when the page has the editor for the tab (`<tab>_lora_edit_user_metadata`) and the function, and the row's card is known |
+| Where it is pressed | The row's **picture**, a button now (`.mc-lv-thumb`, a small ⓘ badge in its corner): a separate button would have taken a phone row's name. Disabled for a LoRA not on disk, a row whose card the answer did not give, or a page without the editor |
+| The layers | Forge's global popup is at 1001, under the viewer's 2000, so the viewer **steps aside** (`stepAside`: dialog and scrim hidden, everything in it kept) and a MutationObserver on the popup's `style` brings it back when Forge sets `display: none` -- Save and Cancel (`_js="closePopup"`), its backdrop, and Escape, which is Forge's while the viewer is aside (the viewer's own capture-phase Escape stands down). Back, it is measured again, the LoRA's details are asked again (its activation text or Preferred weight may have changed) and its picture takes the focus. A change of tab while aside cancels the viewer as before, and its close disconnects the watch |
+| The pictures in the list | The names route stays names only (a folder of thousands at once); the **details route** is asked for the names shown, 150 ms after the typing stops, one request with the 8 s deadline at a time, the names shown by then asked in turn (`askPictures`, `fetchPictures`). What it answers is kept for the viewer's life (`known`): a name seen once is drawn at once, a name the answer left out or a request that failed is drawn as its initials and not asked again in that viewer, and a LoRA added from the list fills its row from it with no request of its own |
+| The list's row | A 32 px picture before the name (`.mc-lv-option-thumb`): the LoRA's picture, its initials without one, a shimmer while asked for; drawn again only when what it shows changed (`data-drawn`) |
+
+Tests: `tests/test_lora_viewer.py` (the card named by the file's name where the
+tag carries the alias) and `tests/test_lora_viewer_js.py`, whose page now
+carries Forge Neo's own `gradioApp`, `popup`, `closePopup`,
+`extraNetworksEditUserMetadata` and its window Escape, with a description
+editor per tab (`TestTheDescription`: opened by the card's own name on Forge's
+popup with the viewer aside, a change made before kept, Escape Forge's, Save,
+Cancel and the backdrop bringing it back with the details asked again and the
+focus on the picture, nothing to open for a LoRA not on disk, a row with no
+card or a page without the editor, a change of tab while aside, a theme's
+button rule; `TestTheSuggestionsPictures`: the picture first in each
+suggestion, its initials without one, a shimmer first, one request for the
+names shown and none again, 32 px, an added LoRA with no request of its own,
+the deadline and no retry). Twenty-four mutations each fail a test; three
+survived a first pass -- a size hold against a theme's button rule and a
+guard behind a watch `close` already disconnects were taken out as changing
+nothing, and a test of a row with no card was added. Not run on the user's
+machine; Forge's real editor and its LoRA cards were stood in for.
