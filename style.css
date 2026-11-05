@@ -855,6 +855,43 @@
     font-weight: 600;
 }
 
+/* The tabs in the order the user dragged them into: the script writes one
+   `order` a tab (its `mc-theme-tab-order` stylesheet, keyed on the panel each
+   button shows, since Gradio makes the buttons again on every change of
+   tab). The header's own buttons stay after every tab, whatever order the
+   tabs are in; the title, first in the bar and given no order, stays first. */
+:root[data-mc-theme="on"] #tabs > .tab-nav > .mc-theme-actions {
+    order: 100000;
+}
+
+/* While every tab shows, a drag along the bar reorders them: a finger's
+   move along the bar is the bar's, across it still the page's. Down a rail,
+   the other way round. */
+:root[data-mc-theme="on"] #tabs > .tab-nav.mc-theme-tabs-movable > button[role="tab"] {
+    touch-action: pan-y;
+}
+
+:root[data-mc-theme="on"][data-forge-assistant-rail] #tabs > .tab-nav.mc-theme-tabs-movable > button[role="tab"] {
+    touch-action: pan-x;
+}
+
+/* Under a drag: nothing selected by the hand's travel, and the tab it holds
+   above the others, lifted, following it. */
+:root[data-mc-theme="on"] #tabs > .tab-nav.mc-theme-tabs-dragging {
+    cursor: grabbing;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+:root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"].mc-theme-tab-dragged {
+    position: relative;
+    z-index: 2;
+    cursor: grabbing;
+    color: var(--body-text-color);
+    background: var(--background-fill-secondary);
+    box-shadow: var(--shadow-drop-lg), inset 0 0 0 1px var(--border-color-primary);
+}
+
 /* A tab the bar has no room for lives in the menu under the ellipsis. The
    button alone is named, never the bar: focus mode's own rule is that no
    stylesheet hides a tab bar by name, and this hides one tab of it. */

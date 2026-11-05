@@ -563,6 +563,76 @@ header out from it — the same bar, moved by nothing:
 Focus mode keeps the rail as the kept bar, the workspace beside it from the
 top (the assistant's rules; docs/22 §3.47). Tests: `tests/test_transpose_layout.py`.
 
+**The tabs in your order, and LoRA Details' icon (2026-11-05).** "I notice my
+self wanting to switch between tabs a lot, and re order them. Lets make the
+tab bar capable of changing order. So, and only when all tabs are shown (when
+we detect that screen is wide or tall enough in side bar mode to show all the
+tab icons), then only then will drag to re order be default. if i try to
+drag, it should live let me drop to re order, and remember the setting. Also,
+now that lora details is native to this repo, make its icon the correct one
+instead of letters."
+
+- **Nothing is moved.** Gradio 4.40 makes a tab's button again on every change
+  of tab (its Tabs.svelte, CLAUDE.md's trap), so a button moved under its
+  keyed list would be put back, or somewhere else, on the next one. The order
+  is a stylesheet the script writes (`<style id="mc-theme-tab-order">`,
+  `orderRules`): one rule a tab, keyed on the panel its button shows
+  (`aria-controls`, or its `<panel>-button` id), giving it a flex `order`,
+  under `data-mc-theme="on"`. A new button meets it before it is painted,
+  along the top, down a rail and on the bar focus mode keeps. The DOM's order
+  -- what Forge's scripts, Mini Paint's `showTab` and the Forge Assistant's
+  workspace list read -- is Forge's own, and so is the keyboard's Tab order
+  through the bar. The header's own buttons stay after every tab
+  (`order: 100000`); the title, first in the bar and given no order, stays
+  first.
+- **Kept in this browser** (`localStorage["mc-theme-tab-order"]`, the panels'
+  ids). Read against the tabs there are (`arranged`): a saved tab in its
+  saved place, a tab added since beside the one before it in Forge's own
+  order (first when none is), one gone forgotten, a repeat once. Nothing saved
+  is no stylesheet at all.
+- **Only while every tab shows** (`everyTabShows`): along the top, an icon bar
+  that does not scroll, or names with nothing in the menu under the
+  ellipsis; down a rail, one that does not scroll. A bar that scrolls is a
+  bar a finger scrolls; a folded tab cannot be dragged. Under the names the
+  tabs that fold are now the last ones *drawn* (`fit` plans in `drawnOrder`).
+- **The drag** (`pressTab`, `moveTabDrag`, `followTabDrag`, `endTabDrag`): a
+  press is a tap until it has moved 6 px along the bar (`TAB_DRAG_PX`); a move
+  across it first is the page's. Then the bar takes the pointer
+  (`setPointerCapture`, so the click that ends the drag lands on the bar and
+  chooses no tab), the tab follows the hand, lifted above the others
+  (`mc-theme-tab-dragged`), and the others make room as its middle passes
+  theirs, the stylesheet rewritten as it does. Let go, the order is saved;
+  Escape, a cancel or the bar going away puts back the order it began with.
+  A finger's press is captured by the icon it landed on, and taking the
+  capture onto the bar makes that one say it lost it -- only the bar's own
+  lost capture is a cancel (a finger's drag was cancelled at once until it
+  was).
+- **A finger.** While a drag can reorder, the bar says so before a finger
+  lands (`mc-theme-tabs-movable`, written at every fit): its tabs take
+  `touch-action: pan-y` along the top, so a sideways move is the bar's and an
+  up-and-down one still scrolls the page, and `pan-x` down a rail.
+- **LoRA Details' icon.** The table keyed the open book on the standalone
+  extension's tab id, `extended_lora_details`; carried in (handoff 51), the
+  tab is `model_chain_lora_details` (`mc_lora_tab.TAB_ID`) and was drawn as
+  its letters. The book is keyed on that id now, and the test of the user's
+  tabs reads it from the module.
+
+Tests: `TestTheTabsOrder` (node: the merge, the rules, the header's buttons
+last), `TestReorderingTheTabs` (Chromium: a mouse drag live, under the hand,
+saved, through a change of tab and a reload, the drop choosing nothing; a tap
+still choosing; a press across the bar first; Escape; a bar that scrolls;
+the names folding the last drawn and holding still while one is folded; a
+finger along the bar and across it) and `TestReorderingDownARail`
+(`tests/test_transpose_layout.py`: a rail tall enough, a short one, a finger
+on a phone's rail with the page still, the order on focus mode's kept bar).
+Twenty-eight mutations each fail a test; two survived a first pass (the
+pointer capture, and passing a neighbour's start for its middle) and the
+main drag test was rewritten to drag an unselected tab and to look at 75 px.
+Three things that changed nothing were taken out: a rule giving the title an
+order, a listener swallowing the drop's click (the capture already sends it
+to the bar), and a guard in `fit` no drag reaches. Not run on the user's
+machine or in a Gecko build.
+
 The pieces, and where they are:
 
 - `mc_theme.py` — the **palette as a Gradio theme object** (the host's own

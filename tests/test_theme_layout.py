@@ -71,7 +71,7 @@ ORIGIN = "http://forge-theme.test"
 TABS = [("tab_txt2img", "txt2img"), ("tab_img2img", "img2img"), ("tab_minipaint_clipboard", "Clipboard"),
         ("tab_wangp", "WanGP"), ("tab_llm_studio", "LLM Studio"), ("tab_mc_voice_box", "Voice Box"),
         ("tab_minipaint", "Mini Paint"), ("tab_pnginfo", "PNG Info"),
-        ("tab_extended_lora_details", "Extended LoRA Details"), ("tab_extras", "Extras"),
+        ("tab_model_chain_lora_details", "LoRA Details"), ("tab_extras", "Extras"),
         ("tab_modelmerger", "Checkpoint Merger"), ("tab_train", "Train"),
         ("tab_settings", "Settings"), ("tab_extensions", "Extensions")]
 
@@ -3802,3 +3802,198 @@ class TestAtPhoneWidth:
         assert found["height"] == 56
         assert found["hidden"]
         page.close()
+
+
+# -- the tabs' order --------------------------------------------------------- #
+
+DRAWN = """() => [...document.querySelectorAll('#tabs > .tab-nav > button[role="tab"]')]
+    .filter((b) => getComputedStyle(b).display !== 'none')
+    .map((b) => ({key: b.getAttribute('aria-controls'), box: b.getBoundingClientRect()}))
+    .sort((a, b) => (a.box.left - b.box.left) || (a.box.top - b.box.top)).map((e) => e.key)"""
+
+BAR_STATE = """() => {
+    const nav = document.querySelector('#tabs > .tab-nav');
+    const tabs = [...nav.querySelectorAll(':scope > button[role="tab"]')].map((b) => b.getBoundingClientRect());
+    const box = (node) => node.getBoundingClientRect();
+    return {movable: nav.classList.contains('mc-theme-tabs-movable'),
+            saved: localStorage.getItem('mc-theme-tab-order'),
+            title: box(nav.querySelector('.mc-theme-title')), actions: box(nav.querySelector('.mc-theme-actions')),
+            firstTab: Math.min(...tabs.map((r) => r.left)), lastTab: Math.max(...tabs.map((r) => r.right)),
+            touch: getComputedStyle(nav.querySelector(':scope > button[role="tab"]')).touchAction,
+            scrolled: nav.scrollLeft, pressed: window.pressed.slice()};
+}"""
+
+
+def centre_of(page, tab):
+    return page.evaluate("""(id) => { const r = document.getElementById(id + '-button').getBoundingClientRect();
+                                      return [r.left + r.width / 2, r.top + r.height / 2]; }""", tab)
+
+
+def drag_tab(page, tab, dx, dy=0, steps=10, release=True):
+    x, y = centre_of(page, tab)
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + dx, y + dy, steps=steps)
+    if release:
+        page.mouse.up()
+        settle(page, 4)
+
+
+class TestReorderingTheTabs:
+    """"make the tab bar capable of changing order. So, and only when all tabs
+    are shown ... then only then will drag to re order be default. if i try to
+    drag, it should live let me drop to re order, and remember the setting.\""""
+
+    def test_a_drag_along_the_bar_reorders_the_tabs_live_and_the_order_is_kept(self, browser):
+        """Img2img, not the selected tab, so the drop's click would choose it
+        if it reached it. The others make room as its middle passes theirs:
+        at 75 px it has passed the next tab's middle (44 px on) and not the
+        one after (88 px on)."""
+        page = icon_page(browser, width=1600, height=900)
+        before = page.evaluate(DRAWN)
+        state = page.evaluate(BAR_STATE)
+        start = centre_of(page, "tab_img2img")
+        drag_tab(page, "tab_img2img", 75, release=False)
+        one = page.evaluate(DRAWN)
+        held = centre_of(page, "tab_img2img")
+        page.mouse.move(start[0] + 100, start[1], steps=3)
+        two = page.evaluate(DRAWN)
+        page.mouse.up()
+        settle(page, 4)
+        dropped = page.evaluate(DRAWN)
+        after = page.evaluate(BAR_STATE)
+        # A change of tab, which Gradio answers by making both buttons again.
+        page.click("#tab_wangp-button")
+        settle(page, 4)
+        changed_tab = page.evaluate(DRAWN)
+        # And the page loaded again in the same browser.
+        context = page.context
+        again = open_page(browser, ICONS, context=context)
+        settle(again, 6)
+        reloaded = again.evaluate(DRAWN)
+        context.close()
+
+        expected = [before[0], before[2], before[3], before[1]] + before[4:]
+        assert state["movable"] is True and state["saved"] is None
+        assert state["touch"] == "pan-y", "a finger's move along the bar is the bar's"
+        assert one[:4] == [before[0], before[2], before[1], before[3]], "past one middle, not two"
+        assert abs(held[0] - (start[0] + 75)) <= 1 and held[1] == start[1], "the tab under the hand"
+        assert two == expected, "the others made room under the hand"
+        assert dropped == expected
+        assert after["pressed"] == [], "the drop chose no tab"
+        assert json.loads(after["saved"]) == expected
+        assert after["title"]["right"] <= after["firstTab"] and after["actions"]["left"] >= after["lastTab"]
+        assert changed_tab == expected, "Gradio's new buttons meet the order before they are painted"
+        assert reloaded == expected
+
+    def test_a_tap_still_chooses_its_tab(self, browser):
+        page = icon_page(browser, width=1600, height=900)
+        drag_tab(page, "tab_img2img", 3)
+        page.click("#tab_img2img-button")
+        settle(page)
+        found = page.evaluate(BAR_STATE)
+        page.close()
+
+        assert "tab_img2img-button" in found["pressed"]
+        assert found["saved"] is None
+
+    def test_a_press_that_goes_across_the_bar_first_is_not_a_drag(self, browser):
+        page = icon_page(browser, width=1600, height=900)
+        before = page.evaluate(DRAWN)
+        x, y = centre_of(page, "tab_txt2img")
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 40, steps=4)
+        page.mouse.move(x + 120, y + 40, steps=6)
+        page.mouse.up()
+        settle(page, 4)
+        found = page.evaluate(DRAWN)
+        state = page.evaluate(BAR_STATE)
+        page.close()
+
+        assert found == before and state["saved"] is None
+
+    def test_escape_puts_the_order_back(self, browser):
+        page = icon_page(browser, width=1600, height=900)
+        before = page.evaluate(DRAWN)
+        drag_tab(page, "tab_txt2img", 140, release=False)
+        moved = page.evaluate(DRAWN)
+        page.keyboard.press("Escape")
+        page.mouse.up()
+        settle(page, 4)
+        found = page.evaluate(DRAWN)
+        state = page.evaluate(BAR_STATE)
+        page.close()
+
+        assert moved != before
+        assert found == before and state["saved"] is None and state["pressed"] == []
+
+    def test_a_bar_that_scrolls_is_scrolled_not_reordered(self, browser):
+        page = icon_page(browser, width=700, height=900)
+        before = page.evaluate(DRAWN)
+        state = page.evaluate(BAR_STATE)
+        drag_tab(page, "tab_img2img", 120)
+        found = page.evaluate(DRAWN)
+        after = page.evaluate(BAR_STATE)
+        page.close()
+
+        assert state["movable"] is False and state["touch"] == "auto"
+        assert found == before and after["saved"] is None
+
+    def test_with_names_the_tabs_reorder_only_while_none_is_in_the_menu(self, browser):
+        """Under the names the tabs that do not fit fold into the menu under
+        the ellipsis -- the last ones drawn, in the order the user chose."""
+        page = open_page(browser, {"model_chain_theme_tab_labels": "as_forge"}, width=2400, height=900)
+        settle(page, 6)
+        wide = page.evaluate(BAR_STATE)
+        names = page.evaluate(DRAWN)
+        # Extensions, the last tab, dragged to the front.
+        drag_tab(page, "tab_extensions", -2400, steps=30)
+        dropped = page.evaluate(DRAWN)
+        page.set_viewport_size({"width": 900, "height": 900})
+        settle(page, 8)
+        narrow = page.evaluate(BAR_STATE)
+        shown = page.evaluate(DRAWN)
+        folded = page.evaluate("""() => [...document.querySelectorAll('#tabs > .tab-nav > button.mc-theme-overflow')]
+            .map((b) => b.getAttribute('aria-controls'))""")
+        drag_tab(page, "tab_txt2img", 120)
+        held = page.evaluate(DRAWN)
+        page.close()
+
+        assert wide["movable"] is True
+        assert dropped[0] == "tab_extensions" and dropped[1:] == names[:-1]
+        assert narrow["movable"] is False and folded
+        assert shown[0] == "tab_extensions", "the first drawn is shown"
+        assert set(folded) == set(dropped[len(shown):]), "the last drawn fold"
+        assert held == shown, "nothing reorders while a tab is in the menu"
+
+    def test_a_finger_along_the_bar_reorders_and_up_or_down_still_scrolls_the_page(self, browser):
+        page = icon_page(browser, width=1600, height=900, touch=True)
+        before = page.evaluate(DRAWN)
+        client = page.context.new_cdp_session(page)
+
+        def finger(tab, dx, dy):
+            x, y = centre_of(page, tab)
+            client.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+            for step in range(1, 13):
+                page.wait_for_timeout(16)
+                client.send("Input.dispatchTouchEvent",
+                            {"type": "touchMove", "touchPoints": [{"x": x + dx * step / 12, "y": y + dy * step / 12}]})
+            page.wait_for_timeout(120)
+            client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            page.wait_for_timeout(600)
+            settle(page, 4)
+
+        finger("tab_txt2img", 100, 0)
+        along = page.evaluate(DRAWN)
+        scrolled = page.evaluate("window.scrollY")
+        finger("tab_wangp", 0, -300)
+        across = page.evaluate(DRAWN)
+        moved = page.evaluate("window.scrollY")
+        state = page.evaluate(BAR_STATE)
+        page.context.close()
+
+        assert along == [before[1], before[2], before[0]] + before[3:]
+        assert across == along, "a swipe across the bar reorders nothing"
+        assert moved > scrolled, "and scrolls the page"
+        assert state["pressed"] == []
