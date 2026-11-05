@@ -746,3 +746,112 @@ class TestTheMenu:
         panel = [item for item in choices if item["rail"] == "panel"]
         assert [item["disabled"] for item in tabs] == [False, True, True]
         assert not any(item["disabled"] for item in panel)
+
+
+# --------------------------------------------------------------------------- #
+# The tabs reordered down a rail
+# --------------------------------------------------------------------------- #
+
+RAIL_ORDER = """() => [...document.querySelectorAll('#tabs > .tab-nav > button[role="tab"]')]
+    .map((b) => ({key: b.getAttribute('aria-controls'), top: b.getBoundingClientRect().top}))
+    .sort((a, b) => a.top - b.top).map((e) => e.key)"""
+
+RAIL_STATE = """() => {
+    const nav = document.querySelector('#tabs > .tab-nav');
+    return {movable: nav.classList.contains('mc-theme-tabs-movable'),
+            touch: getComputedStyle(nav.querySelector(':scope > button[role="tab"]')).touchAction,
+            saved: localStorage.getItem('mc-theme-tab-order'), scrollY: window.scrollY,
+            railScroll: nav.scrollTop, pressed: window.pressed.slice()};
+}"""
+
+
+def tab_centre(page, tab):
+    return page.evaluate("""(id) => { const r = document.getElementById(id + '-button').getBoundingClientRect();
+                                      return [r.left + r.width / 2, r.top + r.height / 2]; }""", tab)
+
+
+class TestReorderingDownARail:
+    """Down a rail tall enough for every tab, a drag up or down reorders them;
+    a rail that scrolls is scrolled."""
+
+    def test_a_rail_tall_enough_reorders_up_and_down(self, browser):
+        page = focus_page(browser, width=1280, height=900)
+        transposed(page, tabs="left")
+        before = page.evaluate(RAIL_ORDER)
+        state = page.evaluate(RAIL_STATE)
+        x, y = tab_centre(page, "tab_txt2img")
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 90, steps=10)
+        page.mouse.up()
+        settle(page, 4)
+        found = page.evaluate(RAIL_ORDER)
+        after = page.evaluate(RAIL_STATE)
+        page.close()
+
+        assert state["movable"] is True and state["touch"] == "pan-x"
+        assert found == [before[1], before[2], before[0]] + before[3:]
+        assert after["pressed"] == [] and after["saved"]
+
+    def test_a_short_rail_scrolls_and_does_not_reorder(self, browser):
+        page = focus_page(browser, width=1280, height=480)
+        transposed(page, tabs="left")
+        before = page.evaluate(RAIL_ORDER)
+        state = page.evaluate(RAIL_STATE)
+        x, y = tab_centre(page, "tab_img2img")
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 90, steps=10)
+        page.mouse.up()
+        settle(page, 4)
+        found = page.evaluate(RAIL_ORDER)
+        page.close()
+
+        assert state["movable"] is False and state["touch"] == "auto"
+        assert found == before
+
+    def test_a_finger_down_a_phones_rail_reorders_and_the_page_stays(self, browser):
+        page = open_page(browser, ICONS, width=390, height=844, touch=True, assistant=USER_CSS_WHOLE)
+        settle(page, 6)
+        transposed(page, tabs="left")
+        page.evaluate("window.scrollTo(0, 200)")
+        settle(page)
+        before = page.evaluate(RAIL_ORDER)
+        state = page.evaluate(RAIL_STATE)
+        x, y = tab_centre(page, "tab_img2img")
+        client = page.context.new_cdp_session(page)
+        client.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+        for step in range(1, 13):
+            page.wait_for_timeout(16)
+            client.send("Input.dispatchTouchEvent",
+                        {"type": "touchMove", "touchPoints": [{"x": x, "y": y + 100 * step / 12}]})
+        page.wait_for_timeout(120)
+        client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        client.detach()
+        settle(page, 6)
+        found = page.evaluate(RAIL_ORDER)
+        after = page.evaluate(RAIL_STATE)
+        page.context.close()
+
+        assert state["movable"] is True
+        assert found != before and found.index("tab_img2img") > before.index("tab_img2img")
+        assert after["scrollY"] == state["scrollY"], "the page did not scroll under the finger"
+        assert after["pressed"] == [], "the drop chose no tab"
+
+    def test_the_order_holds_on_the_bar_focus_mode_keeps(self, browser):
+        page = focus_page(browser, width=1280, height=900)
+        transposed(page, tabs="left")
+        x, y = tab_centre(page, "tab_txt2img")
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 90, steps=10)
+        page.mouse.up()
+        settle(page, 4)
+        chosen = page.evaluate(RAIL_ORDER)
+        enter_focus(page)
+        focused = page.evaluate(RAIL_ORDER)
+        kept = page.evaluate("document.querySelector('#tabs > .tab-nav').classList.contains('forge-assistant-focus-bar')")
+        page.close()
+
+        assert kept is True
+        assert focused == chosen and chosen[2] == "tab_txt2img"

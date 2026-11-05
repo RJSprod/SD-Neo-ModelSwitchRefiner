@@ -92,6 +92,12 @@
     const CACHE = "mc-theme";                     // the last config, for the first paint
     const QUICK_STATE = "mc-theme-quick";         // "open" | "closed", per browser
     const NETWORKS_STATE = "mc-theme-networks";   // the same, for the right-hand drawer
+    const TAB_ORDER_STATE = "mc-theme-tab-order"; // the tabs' order, their panels' ids, per browser
+    const TAB_ORDER_STYLE = "mc-theme-tab-order"; // the <style> that lays the tabs out in it
+    const MOVABLE_CLASS = "mc-theme-tabs-movable";  // on the bar while every tab shows: a drag reorders
+    const DRAGGING_CLASS = "mc-theme-tabs-dragging"; // on the bar while a tab is dragged
+    const DRAGGED_CLASS = "mc-theme-tab-dragged";   // on the tab dragged
+    const TAB_DRAG_PX = 6;                          // along the bar, before a press is a drag
     const NETWORKS_ID = "mc-theme-networks";          // the id prefix of a tab's drawer head
     const NETWORKS_NAV_CLASS = "mc-theme-networks-nav";   // Forge's extra-network tab strip, out of the way
     const NETWORKS_SHOWN_CLASS = "mc-theme-networks-shown"; // the one page the drawer shows
@@ -180,7 +186,10 @@
         minipaint: "palette",                   // the brush is Send to inpaint
         minipaint_clipboard: "clipboard",       // the one with a list is Apply styles
         wangp: "clapperboard",
-        extended_lora_details: "book-open-text",
+        // LoRA Details, carried in from its own extension (handoff 51) under
+        // this repository's id (mc_lora_tab.TAB_ID); the standalone's own id,
+        // `extended_lora_details`, is no longer the user's tab.
+        model_chain_lora_details: "book-open-text",
         settings: "settings",                   // the header's Theme settings gave up the gear for it
         extensions: "puzzle",
     };
@@ -378,6 +387,8 @@
         unload: null,       // the beforeunload handler while asked for
         wired: false,
         fitPending: false,
+        tabOrder: null,     // the tabs' panel ids in the order they are drawn, once the user has chosen one
+        tabDrag: null,      // {pointerId, button, key, axis, x, y, live, before, grab, slot}
         lastLobe: false,
     };
 
@@ -470,6 +481,7 @@
             });
             settings.addEventListener("click", openSettings);
             strip.addEventListener("wheel", wheelTabs, {passive: false});
+            strip.addEventListener("pointerdown", pressTab);
             header = state.header = {strip, title, actions, more, menu, quickToggle, networksToggle,
                                      icons: false, revealed: null, watcher: watchTabs(strip)};
         }
@@ -508,6 +520,9 @@
         if (!header) return;
         header.strip.classList.remove(BAR_CLASS);
         header.strip.removeEventListener("wheel", wheelTabs, {passive: false});
+        header.strip.removeEventListener("pointerdown", pressTab);
+        endTabDrag(null, true);
+        header.strip.classList.remove(MOVABLE_CLASS);
         if (header.watcher) header.watcher.disconnect();
         tabButtons(header.strip).forEach((button) => button.classList.remove(OVERFLOW_CLASS));
         if (header.title.parentElement) header.title.parentElement.removeChild(header.title);
@@ -540,9 +555,11 @@
         const header = state.header;
         if (!header || !header.strip.isConnected) return;
         const strip = header.strip;
-        const buttons = tabButtons(strip);
+        // In the order they are drawn, which the user may have changed: the
+        // ones that fold into the menu are the last ones on the bar.
+        const buttons = drawnOrder(tabButtons(strip));
         if (!buttons.length) return;
-        if (header.icons) { fitIcons(header, buttons); return; }
+        if (header.icons) { fitIcons(header, buttons); markMovable(header); return; }
         header.revealed = null;
         // Every button shown for the measurement: a hidden one has no width.
         buttons.forEach((button) => setClass(button, OVERFLOW_CLASS, false));
@@ -558,6 +575,7 @@
         result.hidden.forEach((i) => setClass(buttons[i], OVERFLOW_CLASS, true));
         show(header.more, result.hidden.length > 0);
         if (result.hidden.length === 0) show(header.menu, false);
+        markMovable(header);
         // The menu is rebuilt only when what it would hold changed: the same
         // buttons under the same names. Emptying and refilling it on every
         // fit was a child-list change Forge answered with the next
@@ -659,6 +677,233 @@
         state.fitPending = true;
         const run = function () { state.fitPending = false; attempt("fit the tab bar", fit); };
         if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
+    }
+
+    // -- the tabs' order ---------------------------------------------------------- //
+    //
+    // Asked for: "make the tab bar capable of changing order. So, and only
+    // when all tabs are shown (when we detect that screen is wide or tall
+    // enough in side bar mode to show all the tab icons), then only then will
+    // drag to re order be default. if i try to drag, it should live let me
+    // drop to re order, and remember the setting."
+    //
+    // Nothing is moved: Gradio 4.40 throws a tab's button away and makes it
+    // again on every change of tab (Tabs.svelte, CLAUDE.md's trap), and a
+    // button moved under its keyed list would be put back, or put somewhere
+    // else, on the next one. The order is a stylesheet instead -- one rule a
+    // tab, keyed on the panel its button controls, giving it a flex `order`
+    // -- which a new button meets before it is painted, along the top and
+    // down a rail alike, in focus mode's kept bar too. The DOM's order, which
+    // Forge's scripts and the Forge Assistant's workspace list read, is
+    // Forge's own. The title stands before every tab and the header's own
+    // buttons after them (style.css). The order is kept in this browser
+    // (TAB_ORDER_STATE): a tab added since is put where Forge has it, beside
+    // the tab that comes before it there, and a tab gone is forgotten.
+    //
+    // A drag reorders only while every tab shows: along the top, a bar that
+    // does not scroll and holds nothing in the menu under the ellipsis; down
+    // a rail, one that does not scroll. A bar that scrolls is a bar a finger
+    // scrolls, and a tab folded into the menu cannot be dragged. While a
+    // drag can reorder, the tabs say so to the browser (MOVABLE_CLASS: a
+    // finger's sideways move along the top, its up-and-down along a rail, is
+    // the page's no longer); the press is a tap until it has moved
+    // TAB_DRAG_PX along the bar, and a move across it first is left to the
+    // page. Under a drag the tab follows the hand and the others make room
+    // as it passes their middles; let go, the order is kept; Escape, a
+    // cancel or the bar going away puts back the order it began with. The
+    // bar holds the pointer from the drag's start (`setPointerCapture`), so
+    // the click that ends it lands on the bar and chooses no tab.
+
+    /** A tab's key: the id of the panel its button shows. */
+    function panelOf(button) {
+        return button.getAttribute("aria-controls") || String(button.id || "").replace(/-button$/, "");
+    }
+
+    /** `keys` (the tabs as Forge has them) in the order `saved` gives them:
+     *  every saved tab still there in its saved place, and every tab not in
+     *  it after the tab that comes before it in Forge's own order (first,
+     *  when nothing does). Pure, so the node tests hold it. */
+    function arranged(keys, saved) {
+        const here = keys.filter(Boolean);
+        if (!Array.isArray(saved) || !saved.length) return here.slice();
+        const kept = saved.filter((key, i) => here.indexOf(key) !== -1 && saved.indexOf(key) === i);
+        here.forEach((key, i) => {
+            if (kept.indexOf(key) !== -1) return;
+            let at = 0;
+            for (let back = i - 1; back >= 0; back -= 1) {
+                const before = kept.indexOf(here[back]);
+                if (before !== -1) { at = before + 1; break; }
+            }
+            kept.splice(at, 0, key);
+        });
+        return kept;
+    }
+
+    /** The stylesheet that draws the tabs in `order`, or "" for Forge's own. */
+    function orderRules(order) {
+        if (!order || !order.length) return "";
+        return order.map((key, i) => {
+            const quoted = JSON.stringify(key);
+            const button = JSON.stringify(key + "-button");
+            return ':root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"]:is([aria-controls=' + quoted
+                + "], [id=" + button + "]) { order: " + (i + 1) + "; }";
+        }).join("\n");
+    }
+
+    function savedOrder() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(TAB_ORDER_STATE) || "null");
+            return Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string" && key) : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function rememberOrder(order) {
+        try { localStorage.setItem(TAB_ORDER_STATE, JSON.stringify(order)); } catch (error) { /* a private window */ }
+    }
+
+    /** The order on the page: the stylesheet written only when it changes. */
+    function drawOrder(order) {
+        state.tabOrder = order && order.length ? order.slice() : null;
+        const text = orderRules(state.tabOrder);
+        let sheet = document.getElementById(TAB_ORDER_STYLE);
+        if (!text) {
+            if (sheet && sheet.parentNode) sheet.parentNode.removeChild(sheet);
+            return;
+        }
+        if (!sheet) {
+            sheet = document.createElement("style");
+            sheet.id = TAB_ORDER_STYLE;
+            (document.head || document.documentElement).appendChild(sheet);
+        }
+        if (sheet.textContent !== text) sheet.textContent = text;
+    }
+
+    /** The saved order, with the tabs on the bar now, drawn. Nothing while
+     *  nothing has been saved: Forge's order is no stylesheet at all. */
+    function installOrder(strip) {
+        if (state.tabDrag && state.tabDrag.live) return;
+        const saved = savedOrder();
+        if (!saved) { drawOrder(null); return; }
+        drawOrder(arranged(tabButtons(strip).map(panelOf), saved));
+    }
+
+    /** `buttons` in the order they are drawn. */
+    function drawnOrder(buttons) {
+        const order = state.tabOrder;
+        if (!order) return buttons.slice();
+        const place = (button) => {
+            const at = order.indexOf(panelOf(button));
+            return at === -1 ? -1 : at;
+        };
+        return buttons.map((button, i) => ({button, i, at: place(button)}))
+            .sort((a, b) => a.at - b.at || a.i - b.i)
+            .map((entry) => entry.button);
+    }
+
+    /** Every tab on the bar, nothing scrolled off it or folded into the
+     *  menu under the ellipsis. */
+    function everyTabShows(header) {
+        const strip = header.strip;
+        if (!header.icons) return !!header.more.hidden;
+        if (rail()) return strip.scrollHeight <= strip.clientHeight + 1;
+        return strip.scrollWidth <= strip.clientWidth + 1;
+    }
+
+    /** The bar says, before a finger lands, whether a drag along it is its
+     *  own: the touch-action that leaves the page the other way (style.css). */
+    function markMovable(header) {
+        setClass(header.strip, MOVABLE_CLASS, everyTabShows(header));
+    }
+
+    function pressTab(event) {
+        const header = state.header;
+        if (!header || state.tabDrag || !event.isPrimary) return;
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        const button = event.target && event.target.closest ? event.target.closest('button[role="tab"]') : null;
+        if (!button || button.parentElement !== header.strip) return;
+        if (!everyTabShows(header)) return;
+        state.tabDrag = {pointerId: event.pointerId, button, key: panelOf(button), axis: rail() ? "y" : "x",
+                         x: event.clientX, y: event.clientY, live: false, before: null, grab: 0, slot: null};
+    }
+
+    function moveTabDrag(event) {
+        const drag = state.tabDrag;
+        const header = state.header;
+        if (!drag || !header || event.pointerId !== drag.pointerId) return;
+        const along = drag.axis === "x" ? event.clientX - drag.x : event.clientY - drag.y;
+        const across = drag.axis === "x" ? event.clientY - drag.y : event.clientX - drag.x;
+        if (!drag.live) {
+            // Across the bar first, it was the page's.
+            if (Math.abs(across) > TAB_DRAG_PX && Math.abs(across) > Math.abs(along)) { state.tabDrag = null; return; }
+            if (Math.abs(along) <= TAB_DRAG_PX) return;
+            startTabDrag(drag, header);
+        }
+        followTabDrag(drag, header, drag.axis === "x" ? event.clientX : event.clientY);
+    }
+
+    function startTabDrag(drag, header) {
+        const strip = header.strip;
+        const buttons = drawnOrder(tabButtons(strip));
+        drag.before = state.tabOrder ? state.tabOrder.slice() : null;
+        // Every tab given its place now, so the others can make room.
+        if (!state.tabOrder) drawOrder(buttons.map(panelOf));
+        const box = drag.button.getBoundingClientRect();
+        drag.grab = (drag.axis === "x" ? drag.x - box.left : drag.y - box.top);
+        drag.live = true;
+        setClass(strip, DRAGGING_CLASS, true);
+        setClass(drag.button, DRAGGED_CLASS, true);
+        // The bar holds the pointer: the drop's click lands on it, not a tab.
+        try { strip.setPointerCapture(drag.pointerId); } catch (error) { /* a pointer already gone */ }
+    }
+
+    /** The tab under the hand at `at`, the others in the order its middle
+     *  has passed theirs. */
+    function followTabDrag(drag, header, at) {
+        const strip = header.strip;
+        const dragged = drag.button;
+        const others = drawnOrder(tabButtons(strip)).filter((button) => button !== dragged);
+        const size = drag.axis === "x" ? dragged.offsetWidth : dragged.offsetHeight;
+        const middle = at - drag.grab + size / 2;
+        const passed = others.filter((button) => {
+            const box = button.getBoundingClientRect();
+            return (drag.axis === "x" ? box.left + box.width / 2 : box.top + box.height / 2) < middle;
+        }).length;
+        const order = others.map(panelOf);
+        order.splice(passed, 0, drag.key);
+        const was = state.tabOrder || [];
+        if (order.join("\n") !== was.join("\n")) {
+            drawOrder(order);
+            drag.slot = null;
+        }
+        if (drag.slot === null) {
+            dragged.style.transform = "";
+            const box = dragged.getBoundingClientRect();
+            drag.slot = drag.axis === "x" ? box.left : box.top;
+        }
+        const shift = Math.round(at - drag.grab - drag.slot);
+        dragged.style.transform = drag.axis === "x" ? "translateX(" + shift + "px)" : "translateY(" + shift + "px)";
+    }
+
+    /** Let go (`event`), or cancelled: the order kept or put back. */
+    function endTabDrag(event, cancelled) {
+        const drag = state.tabDrag;
+        if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+        // Cleared first: the capture released below sends a
+        // lostpointercapture that must find nothing to end.
+        state.tabDrag = null;
+        if (!drag.live) return;
+        const header = state.header;
+        drag.button.style.transform = "";
+        setClass(drag.button, DRAGGED_CLASS, false);
+        if (header) {
+            setClass(header.strip, DRAGGING_CLASS, false);
+            try { header.strip.releasePointerCapture(drag.pointerId); } catch (error) { /* never held */ }
+        }
+        if (cancelled) drawOrder(drag.before);
+        else if (state.tabOrder) rememberOrder(state.tabOrder);
+        scheduleFit();
     }
 
     // -- the tab names ---------------------------------------------------------- //
@@ -2471,6 +2716,7 @@
         if (strip) {
             attempt("install the header", function () { installHeader(strip, config); });
             attempt("name the tabs", function () { installLabels(strip, config); });
+            attempt("order the tabs", function () { installOrder(strip); });
         }
         attempt("lay out the split view", function () { installSplit(config); });
         attempt("order the page's scrolling", function () { installScroll(config); });
@@ -2546,8 +2792,26 @@
         document.addEventListener("click", function (event) {
             attempt("put the quick settings away", function () { tapOutsideQuick(event); });
         }, true);
+        // A tab dragged along the bar (`pressTab` on the bar starts it).
+        window.addEventListener("pointermove", function (event) {
+            attempt("move a tab", function () { moveTabDrag(event); });
+        });
+        window.addEventListener("pointerup", function (event) {
+            attempt("put a tab down", function () { endTabDrag(event, false); });
+        });
+        window.addEventListener("pointercancel", function (event) {
+            attempt("put a tab back", function () { endTabDrag(event, true); });
+        });
+        // Only the bar's own capture lost: a finger's press is captured by
+        // the element it landed on (the icon inside the tab), and taking the
+        // capture onto the bar makes that one say it lost it.
+        window.addEventListener("lostpointercapture", function (event) {
+            if (!state.header || event.target !== state.header.strip) return;
+            attempt("put a tab back", function () { endTabDrag(event, true); });
+        }, true);
         document.addEventListener("keydown", function (event) {
             if (event.key !== "Escape") return;
+            if (state.tabDrag && state.tabDrag.live) { endTabDrag(null, true); return; }
             if (state.header && !state.header.menu.hidden) { closeMenu(); return; }
             if (state.quick && !state.quick.hidden) { setQuick(false); rememberQuick(false); return; }
             if (state.networks && state.networks.open) { setNetworks(false); rememberNetworks(false); }
@@ -2590,7 +2854,7 @@
     window.mcTheme = {
         OPTION, DEFAULTS, ATTRIBUTE, PROMPTS_ATTRIBUTE, OVERFLOW_CLASS, QUICK_ID, NETWORKS_ID,
         normalise, spaced, plan, iconFor, plain, nextThemeUrl, fontUrl, apply, fit, lobeRoot,
-        tabId, monogram, TAB_ICONS, TABS_ATTRIBUTE, TAB_ICON_CLASS, MONOGRAM_ATTRIBUTE, RAIL_ATTRIBUTE, rail,
+        tabId, monogram, TAB_ICONS, TABS_ATTRIBUTE, arranged, orderRules, TAB_ORDER_STATE, MOVABLE_CLASS, TAB_ICON_CLASS, MONOGRAM_ATTRIBUTE, RAIL_ATTRIBUTE, rail,
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS, perRowRange, perRowNearest, explainCards, setPerRow, setTitles,
         NETWORKS_COLUMNS, NETWORKS_UNTITLED_CLASS, QUICK_TAP_PX,

@@ -7337,8 +7337,8 @@ one second.
   img2img draws the same), Extras **upscale**, PNG Info a **scan with a
   magnifier**, Checkpoint Merger **two lines merging**, LLM Studio a
   **bot**, Voice Box a **waveform**, Mini Paint a **palette**, Clipboard a
-  **clipboard**, WanGP a **clapperboard**, Extended LoRA Details an **open
-  book**, Settings the **gear**, Extensions a **puzzle piece**. A tab the
+  **clipboard**, WanGP a **clapperboard**, LoRA Details an **open book**
+  (by the id it has had since it was carried in here), Settings the **gear**, Extensions a **puzzle piece**. A tab the
   theme has no icon for — another extension's — shows its first two letters
   (ADetailer reads AD). The name stays in each button, at no size, so
   Forge's scripts and Mini Paint's, which find a tab by its text, and a
@@ -7354,6 +7354,20 @@ one second.
   the page beside it from the window's top. Everything held under the bar
   (the drawers, the results column's hold) starts at the window's top
   instead. It is still Forge's own strip, moved by nothing.
+- **The tabs in your order.** While every tab shows — along the top, the
+  icons with no scrolling or the names with nothing under the **⋯**; down a
+  rail, nothing scrolling — drag a tab along the bar (or, on a rail, up and
+  down) and the others make room as it passes them; let go and the order is
+  kept in this browser, through a change of tab, a reload and focus mode. A
+  press is still a tap until it has moved a few pixels along the bar, a move
+  across the bar is the page's (a finger scrolls the page up and down from
+  the bar as before), and Escape while dragging puts the order back. A bar
+  that scrolls is scrolled, not reordered, and under the names the tabs that
+  fold under the **⋯** are the last ones in your order. A tab added since
+  takes its place beside the tab before it in Forge's order. Nothing on the
+  page is moved — the order is a stylesheet keyed on each tab's panel, so
+  Forge's scripts, the keyboard's Tab order and the Forge Assistant's
+  workspace list keep Forge's own.
 - **Generate above the gallery, the prompt boxes at the top of the settings
   column** — the split view — in Txt2Img and Img2Img, with the classic and the
   compact prompt-box styles both handled. The results column stays where it

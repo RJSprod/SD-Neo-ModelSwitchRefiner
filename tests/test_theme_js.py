@@ -136,15 +136,17 @@ class TestTheTabsAsIcons:
     def test_every_one_of_the_users_tabs_has_an_icon_of_its_own(self):
         """Forge Neo's own tabs (modules/ui.py) and the extensions' by their
         `on_ui_tabs` ids: this repository's read from its modules, Mini Paint
-        NEO's (`minipaint`, `minipaint_clipboard`, `wangp`) and Extended LoRA
-        Details' as those repositories register them."""
+        NEO's (`minipaint`, `minipaint_clipboard`, `wangp`) as that repository
+        registers them. LoRA Details is this repository's since it was carried
+        in, under its own id: keyed by the standalone's, it was drawn as
+        letters."""
         found = run("out.icons = T.TAB_ICONS; out.glyphs = T.glyphs;")
         own = {re.search(r'^TAB_ID = "([a-z_]+)"', (ROOT / name).read_text(encoding="utf-8"), re.M).group(1)
-               for name in ("mc_llm_studio.py", "mc_voice_box_ui.py")}
+               for name in ("mc_llm_studio.py", "mc_voice_box_ui.py", "mc_lora_tab.py")}
         forge = {"txt2img", "img2img", "extras", "pnginfo", "modelmerger", "settings", "extensions"}
-        others = {"minipaint", "minipaint_clipboard", "wangp", "extended_lora_details"}
+        others = {"minipaint", "minipaint_clipboard", "wangp"}
 
-        assert own == {"llm_studio", "mc_voice_box"}
+        assert own == {"llm_studio", "mc_voice_box", "model_chain_lora_details"}
         assert set(found["icons"]) == forge | own | others
         assert set(found["icons"].values()) <= set(found["glyphs"])
         assert len(set(found["icons"].values())) == len(found["icons"]), "no two tabs share an icon"
@@ -676,3 +678,45 @@ class TestTheStylesheetSection:
                                       ("data-mc-theme-icon", "mcThemeIcon")):
             assert script_name in script, script_name
             assert css_name in css, css_name
+
+
+class TestTheTabsOrder:
+    """The order the user dragged the tabs into, kept in this browser and
+    drawn as a stylesheet: a tab added since stands where Forge has it, one
+    gone is forgotten."""
+
+    def test_the_saved_order_with_a_new_tab_beside_its_neighbour_and_a_gone_one_forgotten(self):
+        found = run("""out.cases = {
+            none: T.arranged(["a", "b", "c"], null),
+            empty: T.arranged(["a", "b", "c"], []),
+            saved: T.arranged(["a", "b", "c"], ["c", "a", "b"]),
+            added: T.arranged(["a", "b", "x", "c"], ["c", "a", "b"]),
+            first: T.arranged(["x", "a", "b"], ["b", "a"]),
+            gone: T.arranged(["a", "c"], ["c", "gone", "a"]),
+            twice: T.arranged(["a", "b"], ["b", "a", "b"]),
+        };""")
+
+        cases = found["cases"]
+        assert cases["none"] == ["a", "b", "c"] and cases["empty"] == ["a", "b", "c"]
+        assert cases["saved"] == ["c", "a", "b"]
+        assert cases["added"] == ["c", "a", "b", "x"], "after b, which comes before it in Forge's order"
+        assert cases["first"] == ["x", "b", "a"], "nothing before it: first"
+        assert cases["gone"] == ["c", "a"]
+        assert cases["twice"] == ["b", "a"]
+
+    def test_one_rule_a_tab_keyed_on_its_panel_under_the_theme(self):
+        found = run("""out.rules = T.orderRules(["tab_img2img", "tab_txt2img"]);
+                       out.none = T.orderRules(null); out.empty = T.orderRules([]);""")
+
+        rules = found["rules"].split("\n")
+        assert len(rules) == 2
+        assert rules[0] == (':root[data-mc-theme="on"] #tabs > .tab-nav > button[role="tab"]'
+                            ':is([aria-controls="tab_img2img"], [id="tab_img2img-button"]) { order: 1; }')
+        assert rules[1].endswith('[id="tab_txt2img-button"]) { order: 2; }')
+        assert found["none"] == "" and found["empty"] == ""
+
+    def test_the_headers_buttons_stay_last_whatever_the_order(self):
+        style = (ROOT / "style.css").read_text(encoding="utf-8")
+        actions = re.search(r"#tabs > \.tab-nav > \.mc-theme-actions \{\s*order: (\d+);", style)
+
+        assert actions and int(actions.group(1)) > 1000
