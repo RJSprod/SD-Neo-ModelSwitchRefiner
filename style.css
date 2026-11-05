@@ -3000,6 +3000,39 @@
                                                                  currentColor));
 }
 
+/* -- quoted words and typeset math -----------------------------------------
+   Asked for: "when text is in quotes like "this" i want it to be slightly more
+   highlight. I think oobabooga does well with formatting." Oobabooga wraps a
+   quotation in <q>, keeps the quote marks and colours the words -- a muted
+   blue by day, amber at night -- and so does this: mc_llm_format marks each
+   quote as <q class="mc-llm-quote"> with its own marks inside it, so the
+   browser's generated ones are switched off. The colours are Gradio's own
+   palette (--color-blue-600, --color-orange-300), defined on every Gradio
+   page whatever its theme, the nearest to Oobabooga's #3480be and #f5b031;
+   `.dark` is on the body under Gradio's night mode. Colour only, so a quote
+   in a heading or in bold is still the heading's or the bold's weight. */
+#mc-llm-studio .mc-llm-transcript q.mc-llm-quote {
+    color: var(--color-blue-600, currentColor);
+}
+
+.dark #mc-llm-studio .mc-llm-transcript q.mc-llm-quote {
+    color: var(--color-orange-300, currentColor);
+}
+
+#mc-llm-studio .mc-llm-transcript q.mc-llm-quote::before,
+#mc-llm-studio .mc-llm-transcript q.mc-llm-quote::after {
+    content: none;
+}
+
+/* A displayed formula wider than the bubble scrolls inside it, as KaTeX
+   advises, rather than widening the transcript; inline formulas wrap with the
+   line. KaTeX is Gradio's, typesetting what mc_llm_format hands it. */
+#mc-llm-studio .mc-llm-transcript .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.1em 0;
+}
+
 /* The faces themselves. Round, small, and never allowed to grow: an avatar
    that scaled with the bubble would be a portrait beside a one-word reply. */
 #mc-llm-studio .mc-llm-transcript .avatar-container {
@@ -8957,6 +8990,166 @@
     display: block;
     max-width: 100%;
     overflow-x: auto;
+}
+
+/* -- a message's words, as forge_assistant_markdown.js draws them -----------
+   Everything a model writes in Markdown, at a bubble's scale: the browser's
+   own margins are an em above and below every paragraph and heading, which in
+   a panel this size is more space than words. Headings step down from a fifth
+   larger than the text to the text's size; nothing is larger than that. */
+.forge-assistant-text > :first-child {
+    margin-top: 0;
+}
+
+.forge-assistant-text > :last-child {
+    margin-bottom: 0;
+}
+
+.forge-assistant-text p {
+    margin: 0.35em 0;
+}
+
+.forge-assistant-text h1,
+.forge-assistant-text h2,
+.forge-assistant-text h3,
+.forge-assistant-text h4,
+.forge-assistant-text h5,
+.forge-assistant-text h6 {
+    margin: 0.55em 0 0.25em;
+    font-weight: 600;
+    line-height: 1.25;
+}
+
+.forge-assistant-text h1 { font-size: 1.2em; }
+.forge-assistant-text h2 { font-size: 1.12em; }
+.forge-assistant-text h3 { font-size: 1.06em; }
+.forge-assistant-text h4,
+.forge-assistant-text h5,
+.forge-assistant-text h6 { font-size: 1em; }
+
+.forge-assistant-text ul,
+.forge-assistant-text ol {
+    margin: 0.35em 0;
+    padding-inline-start: 1.4em;
+}
+
+.forge-assistant-text li {
+    margin: 0.12em 0;
+}
+
+.forge-assistant-text li > p {
+    margin: 0.2em 0;
+}
+
+.forge-assistant-text li.forge-assistant-task {
+    list-style: none;
+}
+
+.forge-assistant-text .forge-assistant-check {
+    display: inline-block;
+    min-width: 1.1em;
+    margin-inline-start: -1.25em;
+}
+
+.forge-assistant-text blockquote {
+    margin: 0.4em 0;
+    padding: 0.05em 0 0.05em 0.7em;
+    border-inline-start: 3px solid var(--border-color-primary);
+    color: var(--body-text-color-subdued, inherit);
+}
+
+.forge-assistant-text hr {
+    margin: 0.6em 0;
+    border: 0;
+    border-top: 1px solid var(--border-color-primary);
+}
+
+.forge-assistant-text code {
+    padding: 0.05em 0.3em;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-primary);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.92em;
+}
+
+.forge-assistant-text .forge-assistant-code {
+    margin: 0.4em 0;
+    padding: 0.5em 0.65em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-primary);
+    white-space: pre;
+}
+
+.forge-assistant-text .forge-assistant-code code {
+    padding: 0;
+    background: none;
+}
+
+.forge-assistant-bubble table {
+    margin: 0.4em 0;
+    border-collapse: collapse;
+    font-size: 0.95em;
+}
+
+.forge-assistant-bubble th,
+.forge-assistant-bubble td {
+    padding: 0.2em 0.5em;
+    border: 1px solid var(--border-color-primary);
+    text-align: start;
+}
+
+.forge-assistant-bubble th {
+    background: var(--background-fill-primary);
+    font-weight: 600;
+}
+
+.forge-assistant-bubble th.forge-assistant-align-center,
+.forge-assistant-bubble td.forge-assistant-align-center { text-align: center; }
+.forge-assistant-bubble th.forge-assistant-align-right,
+.forge-assistant-bubble td.forge-assistant-align-right { text-align: end; }
+
+/* A quotation, as LLM Studio's transcript draws one (mc-llm-quote above):
+   Oobabooga's colours from Gradio's own palette, the quote marks the message's
+   own. */
+.forge-assistant-text q.forge-assistant-quote {
+    color: var(--color-blue-600, currentColor);
+}
+
+.dark .forge-assistant-text q.forge-assistant-quote {
+    color: var(--color-orange-300, currentColor);
+}
+
+.forge-assistant-text q.forge-assistant-quote::before,
+.forge-assistant-text q.forge-assistant-quote::after {
+    content: none;
+}
+
+/* A formula: typeset by the vendored KaTeX, and until that has loaded -- or
+   if it cannot -- the formula as it was written, in the code face, quieter
+   than the words around it. A displayed one wider than the bubble scrolls
+   inside it. */
+.forge-assistant-text .forge-assistant-math {
+    color: var(--body-text-color-subdued, inherit);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.92em;
+    white-space: pre-wrap;
+}
+
+.forge-assistant-text .forge-assistant-math-display {
+    display: block;
+    margin: 0.4em 0;
+}
+
+.forge-assistant-text .katex {
+    font-size: 1.1em;
+}
+
+.forge-assistant-text .katex-display {
+    margin: 0.45em 0;
+    padding: 0.1em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 
 .forge-assistant-actions {

@@ -32,12 +32,13 @@
 //
 // Markdown, and why it is written out here
 // ----------------------------------------
-// The transcript is rendered by this file rather than scraped from the tab's
-// `gr.Chatbot` -- scraping would tie the flyout to Gradio's internal DOM and
-// break on a theme. Rendering means sanitising, and sanitising means an
-// allow-list: text nodes, a few inline shapes, code, and links whose scheme is
-// http, https or mailto. There is no path here by which a reply can introduce
-// an element, an attribute or a URL scheme that was not written in this file.
+// The transcript is rendered by this extension rather than scraped from the
+// tab's `gr.Chatbot` -- scraping would tie the flyout to Gradio's internal DOM
+// and break on a theme. Rendering means sanitising, and sanitising means an
+// allow-list. The renderer is its own file, forge_assistant_markdown.js: every
+// element, attribute and URL scheme in what it returns is one written there,
+// and a formula is KaTeX's own drawing with `trust` off. There is no path by
+// which a reply can introduce anything else.
 
 (function () {
     "use strict";
@@ -494,55 +495,18 @@
         return best;
     }
 
-    // -- markdown ---------------------------------------------------------- //
+    // -- a message's words -------------------------------------------------- //
 
-    function escapeHtml(text) {
-        return String(text === undefined || text === null ? "" : text)
+    // Drawn by forge_assistant_markdown.js (`NS.renderMarkdown`): Markdown,
+    // math and quotes, by the same reading LLM Studio's transcript is given.
+    // That file loads after this one, so it is reached when a message is
+    // drawn, not before. Where it did not load, the words are text: escaped,
+    // their line breaks kept, and nothing made of them.
+    function drawWords(text) {
+        if (typeof NS.renderMarkdown === "function") return NS.renderMarkdown(text);
+        return "<p>" + String(text === undefined || text === null ? "" : text)
             .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-    }
-
-    function safeUrl(raw) {
-        const url = String(raw || "").trim();
-        // An allow-list of three schemes and nothing else. `javascript:`,
-        // `data:` and `vbscript:` are the obvious ones; the list is positive
-        // rather than negative because the next scheme somebody finds is one a
-        // blocklist has never heard of.
-        if (/^(https?:|mailto:)/i.test(url)) return url;
-        if (/^\//.test(url) && !/^\/\//.test(url)) return url;   // same-origin path
-        return "";
-    }
-
-    function renderMarkdown(text) {
-        // Escaped first, always. Everything below adds markup to text that can
-        // no longer contain any.
-        const source = escapeHtml(text);
-        const blocks = [];
-        // Fenced code, lifted out whole before anything inline is looked at, so
-        // a backtick block containing asterisks is not italicised.
-        let held = source.replace(/```([\s\S]*?)```/g, (match, body) => {
-            blocks.push(body.replace(/^\n/, ""));
-            return "\u0000CODE" + (blocks.length - 1) + "\u0000";
-        });
-        held = held
-            .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-            .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-            .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-            .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
-                const url = safeUrl(href);
-                if (!url) return label;
-                // A new tab without an opener: a link in a reply must not be
-                // able to reach back into this page.
-                return '<a href="' + escapeHtml(url) + '" target="_blank" '
-                    + 'rel="noopener noreferrer">' + label + "</a>";
-            });
-        held = held.split(/\n{2,}/).map((paragraph) => {
-            if (/^\u0000CODE\d+\u0000$/.test(paragraph.trim())) return paragraph;
-            return "<p>" + paragraph.replace(/\n/g, "<br>") + "</p>";
-        }).join("");
-        return held.replace(/\u0000CODE(\d+)\u0000/g, (match, index) =>
-            '<pre class="forge-assistant-code"><code>' + blocks[Number(index)]
-            + "</code></pre>");
+            .replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\n/g, "<br>") + "</p>";
     }
 
     // -- the shell --------------------------------------------------------- //
@@ -6724,7 +6688,7 @@
         node.dataset.index = String(row.index);
         node.style.maxWidth = this.settings.bubbleWidth + "%";
         const text = element("div", "forge-assistant-text");
-        text.innerHTML = renderMarkdown(row.text);
+        text.innerHTML = drawWords(row.text);
         node.appendChild(text);
         if (row.provisional) node.classList.add("forge-assistant-provisional");
         if (row.attachment) node.appendChild(this.figure(row.attachment));
@@ -6784,7 +6748,7 @@
 
     Shell.prototype.updateBubble = function (node, row) {
         const text = node.querySelector(".forge-assistant-text");
-        if (text) text.innerHTML = renderMarkdown(row.text);
+        if (text) text.innerHTML = drawWords(row.text);
         node.classList.toggle("forge-assistant-provisional", !!row.provisional);
     };
 
@@ -7658,13 +7622,11 @@
     NS.fitBox = fitBox;
     NS.dragRoom = dragRoom;
     NS.besideRail = besideRail;
-    NS.renderMarkdown = renderMarkdown;
     NS.promptFrom = promptFrom;
     NS.showingPicture = showingPicture;
     NS.fileNameOf = fileNameOf;
     NS.stageable = stageable;
     NS.keptFromPrompt = keptFromPrompt;
-    NS.safeUrl = safeUrl;
     NS.ANCHORS = ANCHORS;
     NS.Shell = Shell;
     NS.mount = mount;

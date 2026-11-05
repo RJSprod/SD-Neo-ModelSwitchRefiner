@@ -41,6 +41,9 @@ STORE = JAVASCRIPT / "forge_assistant_store.js"
 SYSTEM = JAVASCRIPT / "forge_assistant_system.js"
 EDITOR = JAVASCRIPT / "mc_message_editor.js"
 LAYOUT = JAVASCRIPT / "forge_assistant_layout.js"
+# The renderer of a message's words, its own file since the formatting round:
+# the shell reaches it when it draws, as `NS.renderMarkdown`.
+MARKDOWN = JAVASCRIPT / "forge_assistant_markdown.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 
@@ -181,7 +184,7 @@ def run(scenario: str, viewport=None, insets=None, sources=("shell",)) -> dict:
     capped at 128 KiB on Linux and the harness plus the sources is past that.
     """
     order = {"shell": SHELL, "host": HOST, "store": STORE, "look": LOOK, "system": SYSTEM,
-             "editor": EDITOR, "layout": LAYOUT}
+             "editor": EDITOR, "layout": LAYOUT, "markdown": MARKDOWN}
     body = "\n".join(order[name].read_text(encoding="utf-8") for name in sources)
     # The scalars first and the sources last, deliberately. The sources contain
     # the word VIEWPORT (in ``NARROW_VIEWPORT``), so substituting them first
@@ -355,6 +358,11 @@ class TestNearestAnchor:
                                       "bottom-left", "bottom-center", "bottom-right"}
 
 
+def render(scenario: str) -> dict:
+    """A scenario with the renderer loaded beside the shell, as Forge loads them."""
+    return run(scenario, sources=("shell", "markdown"))
+
+
 class TestTheMarkdownRenderer:
     """Text a language model wrote, turned into HTML this page inserts.
 
@@ -364,7 +372,7 @@ class TestTheMarkdownRenderer:
     """
 
     def test_html_in_a_reply_is_shown_rather_than_run(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({
                 out: NS.renderMarkdown("<script>alert(1)</script>"),
             }));
@@ -374,7 +382,7 @@ class TestTheMarkdownRenderer:
         assert "&lt;script&gt;" in found["out"]
 
     def test_an_image_tag_cannot_be_smuggled_in(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({
                 out: NS.renderMarkdown("<img src=x onerror=alert(1)>"),
             }));
@@ -387,7 +395,7 @@ class TestTheMarkdownRenderer:
                                         "vbscript:x", "JaVaScRiPt:alert(1)",
                                         " javascript:alert(1)"])
     def test_a_link_with_an_unsafe_scheme_loses_its_href(self, scheme):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({
                 out: NS.renderMarkdown("[click me](" + %s + ")"),
                 url: NS.safeUrl(%s),
@@ -403,7 +411,7 @@ class TestTheMarkdownRenderer:
                                      "mailto:someone@example.com",
                                      "/model-chain/conversation/v2/attachment/abc"])
     def test_a_safe_link_survives(self, url):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({out: NS.renderMarkdown("[go](" + %s + ")")}));
         """ % json.dumps(url))
 
@@ -413,14 +421,14 @@ class TestTheMarkdownRenderer:
         assert 'target="_blank"' in found["out"]
 
     def test_a_protocol_relative_url_is_not_treated_as_a_path(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({url: NS.safeUrl("//evil.example/x")}));
         """)
 
         assert found["url"] == ""
 
     def test_a_fenced_block_is_not_formatted_inside(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({
                 out: NS.renderMarkdown("```\\nnot **bold** here\\n```"),
             }));
@@ -430,7 +438,7 @@ class TestTheMarkdownRenderer:
         assert "<pre" in found["out"]
 
     def test_ordinary_formatting_still_works(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({
                 bold: NS.renderMarkdown("**loud**"),
                 italic: NS.renderMarkdown("a *quiet* word"),
@@ -447,7 +455,7 @@ class TestTheMarkdownRenderer:
         assert "<br>" in found["breaks"]
 
     def test_an_ampersand_is_escaped_once(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({out: NS.renderMarkdown("Tom & Jerry")}));
         """)
 
@@ -455,7 +463,7 @@ class TestTheMarkdownRenderer:
         assert "&amp;amp;" not in found["out"]
 
     def test_nothing_at_all_renders_to_nothing_dangerous(self):
-        found = run("""
+        found = render("""
             console.log(JSON.stringify({
                 empty: NS.renderMarkdown(""),
                 nothing: NS.renderMarkdown(null),
