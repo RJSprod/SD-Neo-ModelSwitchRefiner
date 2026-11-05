@@ -4787,3 +4787,109 @@ listeners already do, and were removed. Both views drawn in Chromium (the flyout
 on the layout test page, the tab on a stand-in with the real stylesheet and
 script). Not run against a real llama-server, a real Gradio 4.40 page or on the
 user's machine.
+
+## 42. How a message is drawn: math, quotes and Markdown (5 November 2026)
+
+The ask: "Sometimes gemma4 responds with syntax like "$\rightarrow$", i want for
+all of the syntax formats to be handled correctly. Also, when text is in quotes
+like "this" i want it to be slightly more highlight. I think oobabooga does well
+with formatting. Overall, let's make a formatting update so our webui extension
+catches the syntax and properly formats." For LLM Studio and the Forge
+Assistant's chat alike; the panel's half is docs/22 §3.49.
+
+### 42.1 What Oobabooga does, read from its source
+
+`modules/html_generator.py` wraps every quotation in `<q>` with its quote marks
+inside it (`replace_quotes`: straight, curly, guillemets, low-9, by lazy match
+across lines), and `css/main.css` colours it -- `.message q { color: #3480be }`,
+`.dark .message q { color: #f5b031 }` -- with `q::before, q::after { content: "" }`
+so the browser adds no marks of its own. Math is KaTeX's auto-render
+(`js/main.js`, `doSyntaxHighlighting`) with `$$`, `$`, `\(` and `\[`,
+`throwOnError` off, KaTeX vendored in its `css/katex` and `js/katex`; before
+Markdown, `*`, `_` and `|` inside LaTeX are swapped for placeholders.
+Oobabooga's `$` takes every pair, money included.
+
+### 42.2 What Gradio 4.40's Chatbot does, read from its bundle
+
+The Chatbot's `MarkdownCode` (in `templates/frontend/assets`, Gradio 4.40.0 as
+Forge Neo installs it; Forge Neo's `repair()` only drops keywords a component
+does not take, which is where `autoscroll` goes):
+
+- marked with GFM and `breaks` (a newline is a line break), Prism, code in
+  `div.code_wrap` with a copy button; then DOMPurify (`q`, `class`, `data-*`
+  and `hidden` survive it); KaTeX 0.16.10's auto-render in `afterUpdate`, on
+  the delimiters the component was built with -- `$$` alone by default, which is
+  why `$\rightarrow$` reached the screen as written.
+- Before marked, every pair of every delimiter is lifted out of the message --
+  **code included** -- and put back after marked as raw HTML, before DOMPurify.
+  A piece holding `<` or `&` is read as HTML when it is put back.
+- A block-level `latex` rule added to marked whose start is the first *left*
+  delimiter anywhere in the text: a lone left delimiter clips the paragraph
+  there, and marked joins the halves with a newline -- a line break, under
+  `breaks`.
+- marked's `del` is `/^(~~?)(?=[^\s~])([\s\S]*?[^\s~])\1(?=[^~]|$)/`: text
+  between two single tildes is struck out, so `3~4 hours and 5~6 days` was.
+- Server side, `Chatbot._postprocess_chat_message` runs `inspect.cleandoc` over
+  every string message (unchanged by this round).
+
+### 42.3 What is built
+
+- **`mc_llm_format.py`**, the reading: code first (fenced blocks at any
+  indentation, one left open running to the end; an indented block after a
+  blank line below flush prose that is not a list item; code spans), then the
+  pieces nothing may reach into (math, tags and autolinks, a link's address,
+  escapes), then quotes and lone tildes. The rules are in its docstring and the
+  README's *How a message is drawn*: `$…$` by Pandoc's rule (no space inside
+  either dollar, no digit after the closing one, the first unescaped `$` after
+  the opening one closes it, on one line, no backtick between), `$$…$$`,
+  `\(…\)`, `\[…\]`, standalone environments from KaTeX's list; no math across a
+  blank line; quotations of six pairs on one line, never across a table's `|`,
+  a straight mark opening only after a non-letter and closing only before one,
+  and a mark that can only open ending the search for a closer, so in
+  `"word"s here "ok"` the quotation is `"ok"`.
+- **`for_chatbot`**, applied by `mc_llm_chat_panel._body` to the copy of the
+  words the transcript draws, for every message of either role (the marker's
+  digest is taken from the words as saved; the picture is put before them
+  untouched): math between two pairs of invisible characters --
+  `U+2061 U+2063 … U+2063 U+2061` inline, `U+2062 U+2063 … U+2063 U+2062`
+  displayed, all default-ignorable, neither left one a prefix of the other --
+  with its text escaped for HTML; each quotation in `<q class="mc-llm-quote">`
+  around its own marks; each lone tilde as `\~`. Cached on the text (an LRU of
+  1024), because every yield of a streaming reply draws the whole thread again.
+- **The Chatbot** is built with `latex_delimiters=mc_llm_format.latex_delimiters()`
+  -- those two pairs and nothing else. Not `$`: Gradio would take every dollar on
+  the page, and a lone one would clip its paragraph. Not `\(` and `\[`: Gradio
+  lifts every pair out of code as well, and a regular expression in a code block
+  with `\(`, `\)` and a `<name>` between them lost its `<name>` to DOMPurify when
+  it was put back, and a lone `\(` in a sentence broke its line -- both seen on a
+  real Gradio 4.40 page built with `\(` as its delimiter (`(?P<n>\d+)` came out
+  `(?P\d+)`). Nobody types U+2061 to U+2063; where marked draws one as
+  text after all (math the reading found where marked decided on code), it is
+  drawn as nothing.
+- **`style.css`**: `q.mc-llm-quote` in `--color-blue-600` by day and
+  `--color-orange-300` under `.dark` -- Gradio's own palette, defined on every
+  Gradio page, the nearest to Oobabooga's -- the browser's marks switched off;
+  `.katex-display` scrolls inside the bubble.
+- **`llm_studio.js`**: `messageText` -- what Copy and Send to Voice Box take --
+  gives each typeset formula back as its TeX between dollars (`texBack`, from
+  KaTeX's `annotation`), as KaTeX's own copy-tex does; the text of the hidden
+  MathML copy and the drawing together read "→\rightarrow→".
+
+### 42.4 Checked, and not
+
+`tests/test_chat_format.py`: the shared table (`tests/fixtures/chat_format_cases.json`,
+45 cases) read by `mc_llm_format.describe` and by the panel's script under node;
+1500 seeded messages of every token the rules turn on read the same by both;
+what the Chatbot is given (both pairs, escaping, quotes, tildes, code and money
+untouched); the transcript drawn through the reading with the thread unchanged,
+the marker's key from the saved words, the Chatbot built with the two pairs.
+`tests/test_llm_studio_js.py`: Copy with two typeset formulas. And on real
+Gradio 4.40.0 in Chromium, `tests/live/llm_studio_format_live.py` (opt-in
+through `MC_GRADIO_PYTHON`, `tests/test_llm_studio_format_live.py`): every
+formula typeset by Gradio's KaTeX and none in error, money and a code block with
+`(?P<n>\d+)` exactly as written, the quotation blue by day and amber at night
+with its own marks, one tilde not struck and two struck, and Copy giving
+`$\rightarrow$` back. Mutations: each rule of the reading in both languages,
+the escaping, the tildes, the delimiters, the transform in `_body`, the Chatbot's
+keyword, the key, `texBack` and the quote colour each fail a test. Not run on
+the user's machine.

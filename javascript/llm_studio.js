@@ -494,6 +494,11 @@
     // The words of a message, for the clipboard and the Voice Box: the
     // bubble's text without the row, the marker and anything else this file
     // put in it. A copy is taken so nothing on screen moves.
+    //
+    // A formula is its TeX again, between the dollars it is usually written
+    // with ($…$, $$…$$ displayed), the way KaTeX's own copy-tex gives it: the
+    // typeset formula is a hidden MathML copy beside the drawing, and the text
+    // of the two together was "→\rightarrow→" where the message said one arrow.
     function messageText(bubble) {
         const copy = typeof bubble.cloneNode === "function" ? bubble.cloneNode(true) : null;
         if (copy && copy.querySelectorAll) {
@@ -504,10 +509,24 @@
                     stray.parentNode.removeChild(stray);
                 }
             }
+            texBack(copy);
             const text = typeof copy.innerText === "string" ? copy.innerText : copy.textContent;
             return String(text || "").trim();
         }
         return String(bubble.dataset && bubble.dataset.mcLlmText || bubble.textContent || "").trim();
+    }
+
+    function texBack(root) {
+        const maths = root.querySelectorAll(".katex");
+        for (let index = 0; index < maths.length; index += 1) {
+            const math = maths[index];
+            const note = math.querySelector('annotation[encoding="application/x-tex"]');
+            if (!note) continue;
+            const holder = math.parentNode;
+            const display = !!(holder && holder.classList && holder.classList.contains("katex-display"));
+            const tex = String(note.textContent || "");
+            (display ? holder : math).textContent = display ? "$$" + tex + "$$" : "$" + tex + "$";
+        }
     }
 
     // -- the row itself ------------------------------------------------------ //

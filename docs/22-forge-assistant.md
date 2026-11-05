@@ -4335,6 +4335,111 @@ launcher generates once, the browser's menu prevented, the panel still away,
 and a left press still opens it. Not run on the user's machine or in a Gecko
 build.
 
+## 3.49 Every Markdown shape, math and quotations, drawn as LLM Studio draws them (2026-11-05)
+
+The ask, for LLM Studio and the panel's chat alike: "Sometimes gemma4 responds
+with syntax like "$\rightarrow$", i want for all of the syntax formats to be
+handled correctly. Also, when text is in quotes like "this" i want it to be
+slightly more highlight. I think oobabooga does well with formatting." LLM
+Studio's half is docs/07 §42. The panel drew bold, italics, inline and fenced
+code, links and paragraphs; a heading, a list, a table, a block quote, a rule,
+a strikethrough, a formula or an entity reached the reader as the characters
+meant to make it, and Gemma's `*   ` bullets as literal asterisks.
+
+**Its own file.** The renderer is `javascript/forge_assistant_markdown.js`
+(`NS.renderMarkdown`, `NS.safeUrl`, `NS.describeMessage`), loaded after
+`forge_assistant.js`, which reaches it when it draws (`drawWords`) and draws
+plain escaped text where it did not load. The file's header is the safety
+argument: every element, attribute and URL scheme it returns is one it writes,
+and a formula is KaTeX's own drawing with `trust` off.
+
+**One reading, LLM Studio's.** Its first half is `mc_llm_format.py` in
+JavaScript, the same steps in the same order -- code lines, then the pieces
+nothing may reach into, then quotations -- held to the shared table of cases
+and to 1500 generated messages (`tests/test_chat_format.py`). As in Gradio's
+Chatbot, every formula is lifted out before the Markdown is read (a private-use
+placeholder) and put back after, so a formula's `*`, `_`, `|` and `\` are
+never Markdown's and a formula over several lines stays one; a quotation is two
+private-use marks around its own quote marks. A reply that contains one of
+those private-use characters has it replaced before anything is read.
+
+**Blocks** (CommonMark's shapes, marked's choices where they differ): ATX and
+setext headings; paragraphs whose newlines are line breaks (Gradio's `breaks`);
+lists nested by each item's content offset, numbered from their first number,
+loose with paragraphs where items are separated by a blank line, a numbered list
+interrupting a paragraph only from 1, task items drawn with ☐ and ☑ rather than
+inputs; block quotes holding blocks, with lazy continuation; rules; GFM tables
+with their alignment (as classes) and an escaped pipe; fenced code at any
+indentation, one left open running to the end; an indented block after a blank
+line below flush prose that is not a list item. A paragraph that is one
+displayed formula is drawn without a `<p>`.
+
+**Inlines**: CommonMark's emphasis algorithm (6.2) over a flat list -- flanking
+by Unicode punctuation and space, `_` not intraword, the rule of three -- and
+GFM's `~~` (one tilde is a tilde, as in LLM Studio since §42); code spans;
+links, a picture as a link to it (`🖼️` and its words; nothing in a reply makes
+the page fetch anything), autolinks, GFM's bare addresses with their trailing
+punctuation left out; numeric entities and the named ones a model writes (arrows, Greek, the
+mathematical signs, typographic quotes and dashes); escapes; and
+`<br>` and the bare inline tags of `TAG_NAMES` drawn again by the file. After
+emphasis, tags and quotations are paired among siblings so the HTML is always
+nested: an end that has no beginning in the same element is text (a tag) or
+not marked (a quotation), and where a tag and a quotation cross, the tag -- the
+formatting the model wrote -- is kept and the quotation not marked.
+
+**KaTeX, fetched when needed.** The vendored 0.16.10 (`vendor/katex`, MIT,
+the version Gradio 4.40 bundles; `mc_katex` serves the manifest's script,
+stylesheet and fonts at `/model-chain/katex/0.16.10/`, a year's cache, 404 for
+anything else). The first formula in the panel draws as it was written, in a
+quiet monospace with its TeX in `data-tex`, and asks for the stylesheet (a
+`<link>`) and the script; the script is fetched and run with a module of its
+own (`new Function("module", "exports", "define", …)`), because the bundle is
+UMD and on a page with an AMD loader it would register there and never be
+found. Once both are in, every waiting formula is typeset where it stands
+(`typesetPending`), and every message drawn after is typeset as it is drawn,
+each formula once (a cache of 400). `throwOnError` off, `strict` "ignore",
+`trust` off, `maxSize` 20 em. A failed fetch leaves the formulas as written,
+says so once on the console, and is asked for again after a minute.
+
+**Found by a seeded fuzz**: a bare address ran on into the placeholder of the
+formula drawn straight after it and carried it off into the `href` -- still an
+http link, but a wrong one. The address now stops at the file's own marks, and
+`safeUrl` refuses any address holding a control character or one of them. And
+by a mutation that survived: a tag opened inside a quotation was dropped when
+the quotation closed, losing its own text; the pairing above is the fix.
+
+**The stylesheet**: the shapes at a bubble's scale (headings from 1.2 em down to
+the text's size, compact lists, a block quote's edge, code on the panel's
+surface, table borders), quotations in Gradio's `--color-blue-600` by day and
+`--color-orange-300` under `.dark` with the browser's own marks switched off,
+the waiting formula's monospace, KaTeX at 1.1 em, a displayed formula scrolling
+inside the bubble.
+
+### Verified
+
+`tests/test_assistant_markdown_js.py` (node): every block and inline shape
+above; quotations in emphasis, around it, across it, against a tag and in a
+table cell; formulas waiting and typeset, every way of writing them, alone in
+a paragraph, in code, after a bare address, in a list's indented code; KaTeX
+with `trust` off making no link, class, style or picture a formula asks for and
+no box wider than 20 em; one typesetting per formula; the loader asking for the
+two files under the page's base path, nothing for a message without math, and a
+failure not asked for again at once; and 1500 seeded soups of Markdown, HTML,
+addresses and private-use marks, every element and attribute that comes out on
+the list and every address safe. The renderer's older tests in
+`tests/test_assistant_js.py` (`TestTheMarkdownRenderer`) load it beside the shell now.
+`tests/test_assistant_markdown_layout.py` (Chromium): the first formula fetches
+the stylesheet and the script once (and the fonts through the same route), every
+formula on screen is typeset where it stands and the next message at once; a
+quotation amber at night and blue by day with its own marks; a refused route
+leaves every formula as written with no page error; a wide formula scrolls
+inside its bubble. `tests/test_katex_route.py`: every vendored file against the
+manifest's digest, the version the same in the manifest, the module and the
+script, every font the stylesheet asks for first served, nothing else served,
+and the route on a real FastAPI app (FastAPI 0.112.2 and Forge Neo's 0.127.1).
+Forty-two mutations across both surfaces each fail a test. Not run on the
+user's machine or in a Gecko build.
+
 ## 4. Deliberate deviations
 
 **The panel offers a few message actions, not all of them** (§3.11, §3.19).

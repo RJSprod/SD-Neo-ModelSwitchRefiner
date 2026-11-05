@@ -3637,6 +3637,59 @@ each message is aligned to. An edge rather than a background wash — a tint
 strong enough to separate two speakers on a dark theme is a tint strong enough
 to be the loudest thing on a page whose job is to be read.
 
+### How a message is drawn
+
+LLM Studio's transcript and the Forge Assistant's panel draw a message the same
+way, yours and the character's alike: **Markdown** — headings, bold and
+italics, numbered, bulleted, nested and task lists, tables with their column
+alignment, block quotes, rules, `~~strikethrough~~`, code spans and code blocks,
+links — **math**, and **quotations**. What is saved is never touched: the thread
+keeps exactly what was written, and the model reads its own words back unchanged
+(its prompt cache depends on it). Only the copy on screen is drawn.
+
+**Math** is typeset by KaTeX, wherever it is written as:
+
+- `$…$` and `\(…\)` — in the line, as Gemma writes `$\rightarrow$`, `$x^2$`
+  or `$25^\circ$C`;
+- `$$…$$` and `\[…\]` — displayed on a line of its own;
+- an environment that stands on its own — `\begin{align}…\end{align}`,
+  `equation`, `gather`, `pmatrix`, `bmatrix`, `cases` and the rest KaTeX knows.
+
+A single `$` follows Pandoc's rule, which is what keeps money out of it: the
+opening `$` has no space after it, the closing one no space before it and no
+digit after it, and nothing comes between them but the formula, on one line. So
+`It costs $5 and $10`, `$1,000-$2,000` and `($5) vs ($6)` stay money, and `\$`
+is always a dollar sign. Nothing in code is math, and no formula crosses a blank
+line. A formula wider than the bubble scrolls inside it. **Copy** and **Send to
+Voice Box** give a typeset formula back as the TeX it was written in, between
+dollars.
+
+**Quotations** — `"…"`, `“…”`, `„…“`, `«…»`, `「…」` and `『…』` — are coloured
+the way Oobabooga colours them, the quote marks kept: blue by day, amber at
+night (Gradio's own `--color-blue-600` and `--color-orange-300`, so a theme can
+change them). A quotation is on one line and has words in it; it is never in
+code, in a formula, in a link's address or in a tag; `5" tall` is a measurement
+and `"word"s` is not a quotation; quotations do not nest, the outer one is the
+one coloured.
+
+**One tilde is a tilde**: `3~4 hours and 5~6 days` reads as written, and only
+`~~two~~` strikes through (Gradio's own Markdown struck out whatever lay between
+two single tildes).
+
+In LLM Studio this is Gradio's own Chatbot doing the drawing, given the message
+with its math between two pairs of invisible characters it is told are its LaTeX
+delimiters, so it is the KaTeX Gradio bundles (0.16.10) that typesets it; a `$`
+is never a delimiter to it, which is why money is safe there too. The panel
+draws its own HTML and typesets with the same version of KaTeX, kept in this
+extension (`vendor/katex`, MIT) and fetched from `/model-chain/katex/0.16.10/`
+only when a message in the panel first holds math — a page with none fetches
+nothing. Until it has arrived, or if it cannot, each formula is shown as it was
+written, in a quiet monospace. In the panel a picture in a reply is a link to
+it (nothing in a reply makes the page fetch anything), the few inline tags a
+model writes bare — `<br>`, `<b>`, `<i>`, `<u>`, `<sup>`, `<sub>`, `<mark>`,
+`<kbd>` and their like — are drawn, any other HTML is shown as text, and
+entities such as `&rarr;` are their characters.
+
 ### Characters
 
 **Character** in the Conversation menu is one screen: *Talking to* at the top,
@@ -8441,7 +8494,13 @@ viewport instead of the visual one, the gap before the safe-area inset — all
 look correct on a desktop. The Markdown renderer gets the most tests of
 anything here: it turns text a language model wrote into HTML this page inserts,
 which is the one place in the feature where a mistake is a scripting hole rather
-than a layout bug. And focus mode is tested by *leaving* it: every mark it put
+than a layout bug. It is `forge_assistant_markdown.js` now, with a file of its
+own: `test_assistant_markdown_js.py` draws every block and inline it knows,
+the math with the vendored KaTeX loaded the way the panel loads it, and feeds
+it seeded soups of Markdown, HTML, addresses and its own private marks to check
+that every element and attribute that comes out is one it writes;
+`test_chat_format.py` holds its reading of math and quotes to LLM Studio's on a
+shared table of cases and on generated messages. And focus mode is tested by *leaving* it: every mark it put
 on the page has to come off again, and an adapter that throws on the way out
 must not be able to trap somebody in a mode they cannot leave. The rule that
 hides the chrome is asserted against the stylesheet itself, because the class

@@ -1271,6 +1271,44 @@ class TestCopyAndTheVoiceBox:
         assert found["glyph"] == "✓", "the button says it did it"
         assert found["later"] == "⧉", "and goes back to being Copy"
 
+    def test_copy_gives_a_typeset_formula_back_as_its_tex(self):
+        """KaTeX draws a formula twice -- a hidden MathML copy beside the
+        drawing -- so the words of a typeset message read "→\\rightarrow→".
+        Copy, and the Voice Box with it, get the TeX between dollars, as
+        KaTeX's own copy-tex gives it, and the bubble on screen is untouched."""
+        found = row([("assistant", "placeholder")], setup=r"""
+            function math(tex, drawn) {
+                const katex = new El("span"); katex.className = "katex";
+                const mathml = new El("span"); mathml.className = "katex-mathml";
+                const shown = new El("mo"); shown.textContent = drawn;
+                const note = new El("annotation");
+                note.setAttribute("encoding", "application/x-tex");
+                note.textContent = tex;
+                mathml.appendChild(shown); mathml.appendChild(note);
+                const drawing = new El("span"); drawing.className = "katex-html";
+                drawing.textContent = drawn;
+                katex.appendChild(mathml); katex.appendChild(drawing);
+                return katex;
+            }
+            const part = (text) => { const node = new El("span"); node.textContent = text; return node; };
+            const words = bubbles[0].querySelector("p");
+            words.textContent = "";
+            words.appendChild(part("Then "));
+            words.appendChild(math("\\rightarrow", "→"));
+            words.appendChild(part(" and "));
+            const display = new El("span"); display.className = "katex-display";
+            display.appendChild(math("E=mc^2", "E=mc2"));
+            words.appendChild(display);
+            words.appendChild(part(" go"));
+        """, rehearsal="""
+            pressAction(bubbles[0], "copy");
+            await settle();
+            out.onScreen = bubbles[0].querySelectorAll(".katex").length;
+        """)
+
+        assert found["clipboard"] == ["Then $\\rightarrow$ and $$E=mc^2$$ go"]
+        assert found["onScreen"] == 2
+
     def test_send_renders_the_words_with_the_pages_voice_box_under_the_messages_key(self):
         found = row([("assistant", "Hello there.", {"key": "thread-1:abc123"})], """
             pressAction(bubbles[0], "vibe");

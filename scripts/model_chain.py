@@ -25,6 +25,7 @@ import mc_assistant_settings
 import mc_batch_once
 import mc_broker
 import mc_gallery_quadrant
+import mc_katex
 import mc_lora_viewer
 import mc_hint
 import mc_infotext
@@ -4436,6 +4437,9 @@ try:
     # The LoRA viewer's details: a picture and trigger words for each LoRA in
     # the prompt (mc_lora_viewer; the viewer is javascript/model_chain_lora_viewer.js).
     script_callbacks.on_app_started(mc_lora_viewer.install)
+    # The vendored KaTeX, for the Forge Assistant's panel to typeset math with
+    # the same version LLM Studio's Chatbot uses (mc_katex; vendor/katex).
+    script_callbacks.on_app_started(mc_katex.install)
     # The Voice Chat browser routes. Registered here rather than at import for
     # the reason every other route in this file is: there is no FastAPI app to
     # add anything to until the host has one.

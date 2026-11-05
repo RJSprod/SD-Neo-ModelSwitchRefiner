@@ -105,6 +105,7 @@ from pathlib import Path
 import gradio as gr
 
 import mc_llm_attachments
+import mc_llm_format
 import mc_llm_overlays
 import mc_llm_paths
 import mc_llm_runtime
@@ -361,6 +362,12 @@ def build() -> dict:
                 # end and put a reader who had scrolled up less than that back
                 # at the end with every chunk.
                 autoscroll=False,
+                # Math, by the Chatbot's own KaTeX: every piece the rules in
+                # mc_llm_format find -- $…$, $$…$$, \(…\), \[…\] and the
+                # environments -- reaches it between one of these two
+                # invisible pairs (:func:`_body`), and nothing else is a
+                # delimiter, so money and code never are.
+                latex_delimiters=mc_llm_format.latex_delimiters(),
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))
 
@@ -1440,8 +1447,12 @@ def _body(message, meta: str = "") -> str:
 
     An image the file for has gone answers with a sentence saying so, because a
     message that was sent with a picture is not the same message without one.
+
+    The words are drawn, not saved, by :func:`mc_llm_format.for_chatbot`: their
+    math put between the Chatbot's own delimiters, their quotes marked, a lone
+    tilde escaped -- and the thread keeps exactly what was written.
     """
-    body = message.text
+    body = mc_llm_format.for_chatbot(message.text)
     if getattr(message, "attached", False):
         shown = (mc_llm_attachments.markup(message.image_path, message.image_name)
                  if message.image_path

@@ -1,0 +1,416 @@
+[
+ {
+  "name": "gemma_arrow",
+  "text": "Then $\\rightarrow$ go",
+  "math": [
+   [
+    "\\rightarrow",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "money_pairs",
+  "text": "It costs $5 and $10 total",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "money_ranges",
+  "text": "From $1,000-$2,000 and ($5) vs ($6).",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "money_then_math",
+  "text": "$5 and $x$",
+  "math": [
+   [
+    "x",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "degrees_before_a_letter",
+  "text": "It is $25^\\circ$C today",
+  "math": [
+   [
+    "25^\\circ",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "inline_and_display_dollars",
+  "text": "Area $x^2$ and $$E = mc^2$$ here",
+  "math": [
+   [
+    "x^2",
+    false
+   ],
+   [
+    "E = mc^2",
+    true
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "display_over_lines",
+  "text": "Display:\n$$\n\\frac{a}{b}\n$$\nafter",
+  "math": [
+   [
+    "\n\\frac{a}{b}\n",
+    true
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "parens_and_brackets",
+  "text": "Inline \\(a < b\\) and \\[ \\sum_{i=1}^n i \\]",
+  "math": [
+   [
+    "a < b",
+    false
+   ],
+   [
+    " \\sum_{i=1}^n i ",
+    true
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "environment",
+  "text": "\\begin{align} a &= b \\\\ c &= d \\end{align}",
+  "math": [
+   [
+    "\\begin{align} a &= b \\\\ c &= d \\end{align}",
+    true
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "nested_environment",
+  "text": "\\begin{array}{c} \\begin{array}{c} x \\end{array} \\end{array}",
+  "math": [
+   [
+    "\\begin{array}{c} \\begin{array}{c} x \\end{array} \\end{array}",
+    true
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "unknown_environment",
+  "text": "\\begin{document} x \\end{document}",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "math_never_crosses_a_blank_line",
+  "text": "$$\na\n\nb\n$$",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "escaped_dollars",
+  "text": "Escaped \\$5 and \\$6",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "escaped_dollar_inside_math",
+  "text": "$a\\$b$",
+  "math": [
+   [
+    "a\\$b",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "space_after_the_opening_dollar",
+  "text": "a $ b$",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "space_before_the_closing_dollar",
+  "text": "a $b $c",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "digit_after_the_closing_dollar",
+  "text": "$a$1",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "backtick_inside_dollars",
+  "text": "$a `b` c$",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "inline_code",
+  "text": "`code $x$` and $y$",
+  "math": [
+   [
+    "y",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "double_backtick_code",
+  "text": "``a ` $x$ b`` and $y$",
+  "math": [
+   [
+    "y",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "fenced_code",
+  "text": "```python\nx = '$a$' \"q\"\n```\n\"quote\" $z$",
+  "math": [
+   [
+    "z",
+    false
+   ]
+  ],
+  "quotes": [
+   "\"quote\""
+  ]
+ },
+ {
+  "name": "indented_fence",
+  "text": "  ```\n  $code$\n  ```\n$m$",
+  "math": [
+   [
+    "m",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "tilde_fence",
+  "text": "~~~\n$a$\n~~~\n$b$",
+  "math": [
+   [
+    "b",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "unclosed_fence_runs_to_the_end",
+  "text": "```\n$a$ \"q\"",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "indented_code_block",
+  "text": "Para\n\n    indented $x$ code\n\n- item\n\n    continued $y$",
+  "math": [
+   [
+    "y",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "nested_list_math",
+  "text": "*   One\n    *   Nested $x^2$",
+  "math": [
+   [
+    "x^2",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "quotes",
+  "text": "She said \"hello there\" and left.",
+  "math": [],
+  "quotes": [
+   "\"hello there\""
+  ]
+ },
+ {
+  "name": "dialogue",
+  "text": "\"Hello,\" she said. \"How are you?\"",
+  "math": [],
+  "quotes": [
+   "\"Hello,\"",
+   "\"How are you?\""
+  ]
+ },
+ {
+  "name": "measurements_are_not_quotes",
+  "text": "It is 5\" tall and 6\" wide",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "a_letter_after_the_mark",
+  "text": "\"word\"s here \"ok\"",
+  "math": [],
+  "quotes": [
+   "\"ok\""
+  ]
+ },
+ {
+  "name": "nested_straight_quotes",
+  "text": "\"a \"b\" c\"",
+  "math": [],
+  "quotes": [
+   "\"b\""
+  ]
+ },
+ {
+  "name": "typographic_quotes",
+  "text": "“Curly” and „German“ and «French» and 「日本」 and 『二重』",
+  "math": [],
+  "quotes": [
+   "“Curly”",
+   "„German“",
+   "«French»",
+   "「日本」",
+   "『二重』"
+  ]
+ },
+ {
+  "name": "guillemets_with_spaces",
+  "text": "« Bonjour »",
+  "math": [],
+  "quotes": [
+   "« Bonjour »"
+  ]
+ },
+ {
+  "name": "outer_quote_wins",
+  "text": "“He said \"hi\" to me”",
+  "math": [],
+  "quotes": [
+   "“He said \"hi\" to me”"
+  ]
+ },
+ {
+  "name": "quotes_in_a_table",
+  "text": "| a | \"b\" |\n|---|---|\n| \"c | d\" | e |",
+  "math": [],
+  "quotes": [
+   "\"b\""
+  ]
+ },
+ {
+  "name": "no_quote_across_lines",
+  "text": "\"one\ntwo\"",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "quote_holding_code_and_math",
+  "text": "\"use `x` and $y$ here\"",
+  "math": [
+   [
+    "y",
+    false
+   ]
+  ],
+  "quotes": [
+   "\"use `x` and $y$ here\""
+  ]
+ },
+ {
+  "name": "display_math_ends_a_quote",
+  "text": "\"see $$x$$ here\"",
+  "math": [
+   [
+    "x",
+    true
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "link_title_is_not_a_quote",
+  "text": "[a](http://x.com \"title\") and \"real\"",
+  "math": [],
+  "quotes": [
+   "\"real\""
+  ]
+ },
+ {
+  "name": "link_address_is_not_math",
+  "text": "[a](http://x.com/$1$2) and $b$",
+  "math": [
+   [
+    "b",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "tag_attributes_are_not_quotes",
+  "text": "<span class=\"x\">\"in\"</span>",
+  "math": [],
+  "quotes": [
+   "\"in\""
+  ]
+ },
+ {
+  "name": "escaped_quotes",
+  "text": "\\\"not\\\" quoted",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "empty_quotes",
+  "text": "\"\" and \" \"",
+  "math": [],
+  "quotes": []
+ },
+ {
+  "name": "math_in_a_tag",
+  "text": "<b>$x$</b>",
+  "math": [
+   [
+    "x",
+    false
+   ]
+  ],
+  "quotes": []
+ },
+ {
+  "name": "carriage_returns",
+  "text": "a $x$\r\nb \"c\"\r\n",
+  "math": [
+   [
+    "x",
+    false
+   ]
+  ],
+  "quotes": [
+   "\"c\""
+  ]
+ }
+]
