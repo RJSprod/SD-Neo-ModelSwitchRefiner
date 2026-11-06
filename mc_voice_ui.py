@@ -206,7 +206,7 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         # already speaking affects the next turn, not half of the current one.
         active = engines.active()
         if not engines.installed(active):
-            _quietly(f"{engines.label(active)} is not installed")
+            _quietly(_not_installed(active))
             return None
         profiles = engines.profiles(active)
         try:
@@ -223,6 +223,9 @@ def begin_speech(character=None, persona=None, opening: str = ""):
             # has to keep reading like one.
             logger.debug("Model Chain: the voice could not be resolved", exc_info=True)
             _quietly(str(exc) or f"{engines.label(active)} has no voice to speak with")
+            return None
+        voice_id, entry = _speakable(active, voice_id, entry)
+        if entry is None:
             return None
         delivery = profiles.resolve(profile_of(character, active))
         found = turns.create(voice_id=voice_id, sid=int(entry.get("_sid") or 0),
@@ -243,6 +246,110 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         logger.warning("Model Chain: Voice Chat could not start speaking this reply",
                        exc_info=True)
         return None
+
+
+def _not_installed(engine: str) -> str:
+    """Why ``engine`` cannot speak, as the log line should say it.
+
+    *Not installed* was the only sentence, and for eleven days of the user's
+    log (2026-10-26 to 2026-11-06) it was not what was true: PocketTTS was on
+    disk from an earlier release and needed the Reinstall its card asked for.
+    An engine that knows it is stale says so in its own words.
+    """
+    import mc_voice_engines as engines
+
+    label = engines.label(engine)
+    try:
+        found = engines.adapter(engine).status()
+        stale = str(getattr(found, "stale_message", "") or "")
+        if getattr(found, "stale", False) and stale:
+            return stale
+    except Exception:
+        logger.debug("Model Chain: could not read why a voice engine is not ready",
+                     exc_info=True)
+    return f"{label} is not installed"
+
+
+def _speakable(engine: str, voice_id: str, entry) -> tuple:
+    """``(voice_id, entry)`` this reply can really be spoken in, or ``("", None)``.
+
+    A voice can resolve and still not be speakable: a saved PocketTTS voice
+    whose prepared state belongs to an earlier model or precision is in the
+    library -- it is the default, a character names it -- but the worker is
+    handed only the voices with a state for the model in force
+    (``mc_voice_pocket.catalog``), so a turn frozen onto it reached the worker
+    and was refused there: *That voice is not one PocketTTS has been given*,
+    every reply, while the panel's Test of the official voice played (the
+    user's log after their reinstall, 2026-11-06). The audition route has asked
+    :func:`mc_voice_api.unprepared_reason` since it was written; the reply did
+    not.
+
+    So the reply asks too, and a voice that cannot be spoken is treated the way
+    a deleted one is (:func:`begin_speech`): this engine's default when that can
+    be spoken, else the first of its voices that can, never another engine's --
+    and the log says once why, without the voice's name, which is the user's.
+    Nothing speakable at all is a reason the reply is not read, said the same
+    way.
+    """
+    if not api.unprepared_reason(entry):
+        return voice_id, entry
+    import mc_voice_engines as engines
+
+    label = engines.label(engine)
+    if (entry or {}).get("official"):
+        why = (f"the {label} voice asked for is not installed for the speech model now "
+               f"selected (install the official voices again in Settings → Voice Chat)")
+    elif (entry or {}).get("has_source"):
+        why = (f"the saved {label} voice asked for has no prepared data for the model "
+               f"and precision now selected (Rebuild it in Settings → Voice Chat; its "
+               f"recording is still there)")
+    else:
+        why = (f"the saved {label} voice asked for has no prepared data for the model now "
+               f"selected and its recording is gone, so it has to be made again")
+    for found_id, found in _ready_voices(engine, voice_id):
+        name = str(found.get("display_name") or "") if found.get("official") else ""
+        _quietly(f"{why}; replies are read in "
+                 + (f"the official voice {name}" if name else "another voice that is ready")
+                 + " until then", say="Voice is reading replies in another voice")
+        return found_id, found
+    _quietly(f"{why}, and {label} has no other voice that is ready")
+    return "", None
+
+
+def _ready_voices(engine: str, skip: str):
+    """Each of ``engine``'s voices that can be spoken now, its default first.
+
+    Resolved one at a time through the engine's own ``resolve``, so each carries
+    the handle its adapter gives it, and yielded lazily: the first is the one
+    used.
+    """
+    import mc_voice_engines as engines
+
+    tried = {str(skip or "")}
+    try:
+        default_id, default = engines.resolve("", engine)
+    except Exception:
+        default_id, default = "", None
+    if default is not None and default_id not in tried \
+            and not api.unprepared_reason(default):
+        yield default_id, default
+    tried.add(default_id)
+    try:
+        listed = list(engines.adapter(engine).entries())
+    except Exception:
+        logger.debug("Model Chain: could not list a voice engine's voices", exc_info=True)
+        return
+    for item in listed:
+        wanted = str((item or {}).get("id") or "")
+        if not wanted or wanted in tried or api.unprepared_reason(item):
+            continue
+        tried.add(wanted)
+        try:
+            found_id, found = engines.resolve(wanted, engine)
+        except Exception:
+            continue
+        if found is not None and not api.unprepared_reason(found):
+            yield found_id, found
 
 
 def _handle(engine: str, entry) -> object:
@@ -300,15 +407,19 @@ def profile_of(character, engine: str = "") -> dict:
         return {}
 
 
-def _quietly(reason: str) -> None:
+def _quietly(reason: str, say: str = "Voice is not reading replies aloud") -> None:
     """Say once, at most every ten minutes, why a reply was not read aloud.
+
+    Or, with ``say``, why it is being read some other way than asked
+    (:func:`_speakable`'s fallback voice).
 
     Throttled because it is on the path of every assistant turn and the reason
     does not change between them -- but said at all, because the alternative is
     the silence this function was added to end.
     """
     now = time.monotonic()
-    last = _quiet.get(reason)
+    key = f"{say}\n{reason}"
+    last = _quiet.get(key)
     # ``None`` rather than a zero default, which is not the same thing: on a
     # machine whose monotonic clock is still under ten minutes -- a WebUI
     # started shortly after boot -- "last said at zero" reads as "said
@@ -316,8 +427,8 @@ def _quietly(reason: str) -> None:
     # thrown away.
     if last is not None and now - last < 600.0:
         return
-    _quiet[reason] = now
-    logger.info("Model Chain: Voice is not reading replies aloud — %s", reason)
+    _quiet[key] = now
+    logger.info("Model Chain: %s — %s", say, reason)
 
 
 _quiet: dict = {}
@@ -919,6 +1030,95 @@ def _tier_card(entry: dict) -> str:
         + '</div>')
 
 
+VOICE_PAGES = (
+    ("engine", "Engine"),
+    ("voices", "Voices"),
+    ("dictation", "Dictation"),
+    ("pipeline", "Pipeline"),
+    ("setup", "Setup"),
+    ("all", "All"),
+)
+"""Settings -> Voice Chat, as pages: "The voice chat settings menu is a MESS. I
+want you to look at it and redesign this settings menu so its easier to
+navigate" (2026-11-06). It was one column three to six thousand pixels long --
+the access token, three engines, the speech-to-text tiers, the Voice Pipeline,
+every installer, the voices, the delivery, the cloning, then twenty stored
+options repeating what the panels above them set -- in the order they were
+added. Now a row of pages at the top shows one purpose at a time: which engine
+speaks, which voice and how, dictation, the pipeline, and setting up (the
+token, the runtime, every installer -- the recording cleanup's too -- and the folders). *All* is
+the old column,
+and Forge's settings search shows everything while it has text. Nothing is
+taken off the page or moved in it: ``javascript/voice_chat.js`` hides what is
+not on the page chosen, and remembers the choice in this browser."""
+
+DEFAULT_VOICE_PAGE = "engine"
+
+
+def option_pages() -> dict:
+    """Which page each of the section's own options is on, by its key.
+
+    Forge draws these itself, one block a key, under the two HTML rows, so the
+    browser is told where each belongs rather than guessing from a label.
+    ``tests/test_voice_settings_pages.py`` holds that every option the section
+    registers has a page, so one added later cannot fall off every page.
+    """
+    import mc_voice_clone
+    import mc_voice_device
+    import mc_voice_engines
+    import mc_voice_paths
+    import mc_voice_pipeline
+    import mc_voice_profile
+    import mc_voice_registry
+
+    return {
+        "model_chain_voice_voices": "voices",
+        mc_voice_engines.OPT_ENGINE: "engine",
+        state.OPT_AUTO_SPEAK: "engine",
+        mc_voice_registry.OPT_VOICE: "voices",
+        mc_voice_registry.OPT_TEST_TEXT: "voices",
+        mc_voice_profile.OPT_SPEED: "voices",
+        mc_voice_profile.OPT_PITCH: "voices",
+        mc_voice_profile.OPT_GAIN: "voices",
+        mc_voice_profile.OPT_PAUSE: "voices",
+        mc_voice_clone.OPT_ROOT: "voices",
+        state.OPT_AUTO_SEND: "dictation",
+        models.OPTIONS["stt"]: "dictation",
+        mc_voice_pipeline.OPT_ENABLED: "pipeline",
+        mc_voice_pipeline.OPT_DPDFNET: "pipeline",
+        mc_voice_pipeline.OPT_LAVASR: "pipeline",
+        mc_voice_pipeline.OPT_THREADS: "pipeline",
+        mc_voice_pipeline.OPT_DPDFNET_MODEL: "pipeline",
+        mc_voice_device.OPT_DEVICE_DPDFNET: "pipeline",
+        mc_voice_device.OPT_DEVICE_LAVASR: "pipeline",
+        mc_voice_paths.OPT_ROOT: "setup",
+    }
+
+
+def pages_nav_html() -> str:
+    """The row of pages at the top of Settings -> Voice Chat. See VOICE_PAGES."""
+    import json as _json
+
+    tabs = "".join(
+        f'<button type="button" role="tab" class="mc-voice-page-tab" '
+        f'data-mc-voice-page-tab="{name}" aria-selected="{"true" if name == DEFAULT_VOICE_PAGE else "false"}">'
+        f'{ui.escape(label)}</button>'
+        for name, label in VOICE_PAGES)
+    try:
+        mapping = option_pages()
+    except Exception:
+        logger.debug("Model Chain: could not map the Voice Chat options to pages", exc_info=True)
+        mapping = {}
+    return (f'<nav class="mc-voice-pages" role="tablist" aria-label="Voice Chat settings" '
+            f'data-mc-voice-default="{DEFAULT_VOICE_PAGE}" '
+            f"data-mc-voice-option-pages='{ui.escape(_json.dumps(mapping))}'>{tabs}</nav>")
+
+
+def _on_page(name: str, markup: str) -> str:
+    """``markup`` as a part of page ``name``: shown on that page and on All."""
+    return f'<div class="mc-voice-page-part" data-mc-voice-page="{name}">{markup}</div>'
+
+
 def settings_html() -> str:
     """The Voice Chat install row, as static HTML the browser makes live.
 
@@ -950,13 +1150,15 @@ def settings_html() -> str:
     parts = [f'<div class="mc-voice-settings" '
              f'data-mc-voice-key="{ui.escape(api.session_token())}" '
              f'data-mc-voice-engine-id="{ui.escape(active)}">',
-             # First on the page, and above every installer rather than beside
-             # one of them (section 5.2). There is one publisher and one token;
-             # somebody who has just been told a download needs an account
-             # should find the field without scrolling past three engines to a
-             # row that happens to own it.
-             credential_html(),
-             engine_selector_html()]
+             # The pages first: what the rest of the section is shown by.
+             pages_nav_html(),
+             # First on its page (Setup), above every installer rather than
+             # beside one of them (section 5.2). There is one publisher and
+             # one token; somebody who has just been told a download needs an
+             # account should find the field without scrolling past three
+             # engines to a row that happens to own it.
+             _on_page("setup", credential_html()),
+             _on_page("engine", engine_selector_html())]
 
     # The engine gets a row of its own with a button of its own. It used to be
     # a line of text, on the reasoning that it is an implementation detail of
@@ -969,6 +1171,7 @@ def settings_html() -> str:
     except Exception:
         logger.debug("Model Chain: could not describe the voice engine", exc_info=True)
         wheels = []
+    parts.append('<div class="mc-voice-page-part" data-mc-voice-page="setup">')
     parts.append(
         f'<div class="mc-voice-row" data-mc-voice-kind="runtime">'
         f'<div class="mc-voice-head">'
@@ -988,22 +1191,23 @@ def settings_html() -> str:
             "C:\\Users\\you\\Downloads\\voice-engine")
         + '</div>')
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
+    parts.append('</div>')
 
-    parts.append(_tier_row(found))
+    parts.append(_on_page("dictation", _tier_row(found)))
     # The Voice Pipeline's switches, beside the engine's own output controls
     # rather than inside an installer: they are heard rather than configured
     # (section 4.1). Its *installation* is a component below, like everything
     # else's.
-    parts.append(pipeline_html())
+    parts.append(_on_page("pipeline", pipeline_html()))
     # The compact overview and its single detail host. What used to be a column
     # of expanded installer blocks, one per engine, growing by one every time an
     # engine arrived (section 5.1).
-    parts.append(components_html())
+    parts.append(_on_page("setup", components_html()))
     # Before the engine's own panel, because cleaning a recording is not
     # speaking and has no opinion about which engine does it. It was inside the
     # engine branch once, which meant the row -- and the only way to install it
     # -- did not exist on Kokoro at all.
-    parts.append(cleanup_html())
+    parts.append(_on_page("setup", cleanup_html()))
 
     # Section 5: the inactive engines' operational settings are *absent*, not
     # collapsed. Only the selected engine's panel is rendered at all -- so a
@@ -1017,7 +1221,7 @@ def settings_html() -> str:
     # no entry in :data:`_ENGINE_PANELS` renders nothing, which is a surface
     # somebody notices, rather than another engine's, which is a surface nobody
     # does.
-    parts.append(_panel(_ENGINE_PANELS, active, "settings surface"))
+    parts.append(_on_page("engine", _panel(_ENGINE_PANELS, active, "settings surface")))
     parts.append("</div>")
     return "".join(parts)
 

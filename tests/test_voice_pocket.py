@@ -1616,3 +1616,195 @@ class TestTheShippedManifestIsCompleteEnoughToImport:
                 assert len(found) == 40 and found.strip("0123456789abcdef") == "", \
                     (key, found)
             assert entry["revision"] != entry["cloning_revision"]
+
+
+# --------------------------------------------------------------------------- #
+# A reinstall keeps its promise, and a reply never asks for an unprepared voice
+# --------------------------------------------------------------------------- #
+
+
+def _stale_saved_voice(spoken_wav, name="Test Voice") -> str:
+    """A saved voice whose prepared state belongs to an earlier model: what a
+    reinstall leaves every saved voice as, because the fingerprint moved."""
+    made = pocket.prepare_preview(name, spoken_wav(8.0, 24000))
+    kept = pocket.save_preview(made["token"])
+    identifier = pocket._uuid_of(kept["voice"]["id"])
+    for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+        state.unlink()
+    assert pocket.lookup(kept["voice"]["id"])["compatible"] is False
+    return kept["voice"]["id"]
+
+
+class TestAReinstallRebuildsWhatItKept:
+    """The user's log, 2026-11-06: Reinstall pressed under the sentence *your
+    saved voices are kept, and are rebuilt for the new model*; they were kept,
+    none was rebuilt, and every reply after it was refused by the worker."""
+
+    def test_reinstall_ends_by_rebuilding_the_saved_voices(self, host, cloning, worker,
+                                                           monkeypatch):
+        order = []
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            order.append("install") or pocket.status())
+        monkeypatch.setattr(pocket, "rebuild_saved",
+                            lambda on_status=None: order.append("rebuild") or 0)
+        pocket.reinstall()
+        assert order == ["install", "rebuild"]
+
+    def test_each_stale_saved_voice_is_rebuilt_and_said_by_count_not_name(
+            self, host, cloning, worker, spoken_wav, caplog):
+        import logging
+
+        first = _stale_saved_voice(spoken_wav, "Secret Name One")
+        second = _stale_saved_voice(spoken_wav, "Secret Name Two")
+        engines.select("pocket")
+        before = len(worker.prepared)
+        said = []
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert pocket.rebuild_saved(on_status=said.append) == 2
+        assert len(worker.prepared) == before + 2
+        assert pocket.lookup(first)["compatible"] is True
+        assert pocket.lookup(second)["compatible"] is True
+        assert any("Rebuilding saved voice 1 of 2" in line for line in said), said
+        logged = " ".join(record.getMessage() for record in caplog.records)
+        assert "Secret Name" not in logged + " ".join(said), \
+            "a saved voice's name reached the log"
+
+    def test_nothing_is_rebuilt_while_another_engine_is_selected(
+            self, host, cloning, worker, spoken_wav, caplog):
+        """The worker is started for the selected engine only, so the rebuild
+        waits for the voice library's button and the log says so."""
+        import logging
+
+        voice = _stale_saved_voice(spoken_wav)
+        engines.select("kokoro")
+        before = len(worker.prepared)
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert pocket.rebuild_saved() == 0
+        assert len(worker.prepared) == before
+        assert pocket.lookup(voice)["compatible"] is False
+        assert any("still need Rebuild" in record.getMessage() for record in caplog.records)
+
+    def test_a_second_press_is_refused_before_it_removes_anything(self, host, cloning,
+                                                                  worker, monkeypatch):
+        """Four presses within three milliseconds in the user's log, each
+        removing the tree before the install claim was taken."""
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            pocket.status())
+        runtime_root = paths.pocket_runtime_root()
+        assert runtime_root.exists()
+        assert pocket._reinstall_lock.acquire(blocking=False)
+        try:
+            with pytest.raises(pocket.PocketError) as raised:
+                pocket.reinstall()
+        finally:
+            pocket._reinstall_lock.release()
+        assert "already being reinstalled" in str(raised.value)
+        assert runtime_root.exists(), "a refused press removed the runtime"
+
+    def test_a_press_during_an_install_is_refused_before_it_removes_anything(
+            self, host, cloning, worker, monkeypatch):
+        monkeypatch.setattr(pocket, "_install",
+                            lambda on_status=None, on_progress=None, cloning=True:
+                            pocket.status())
+        monkeypatch.setitem(models._progress, pocket.KIND, {"running": True})
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.reinstall()
+        assert "already being installed" in str(raised.value)
+        assert paths.pocket_runtime_root().exists()
+
+
+class TestAReplyIsSpokenInAVoiceTheWorkerWasGiven:
+    """The worker is handed only voices with a state for the model in force
+    (:func:`mc_voice_pocket.catalog`); a reply frozen onto any other was
+    refused there, every time, with *That voice is not one PocketTTS has been
+    given*."""
+
+    @pytest.fixture
+    def speaking(self, monkeypatch):
+        import mc_voice_state
+        import mc_voice_turn
+
+        made = {}
+
+        def create(**values):
+            made.update(values)
+
+            class Turn:
+                id = "TURN"
+                base_chars = 0
+
+                def start(self):
+                    return None
+
+            return Turn()
+
+        monkeypatch.setattr(mc_voice_turn, "create", create)
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
+        return made
+
+    def test_a_stale_saved_default_falls_back_to_a_voice_that_is_ready(
+            self, host, cloning, worker, spoken_wav, speaking, caplog):
+        import logging
+
+        import mc_voice_ui
+
+        voice = _stale_saved_voice(spoken_wav, "Secret Name")
+        engines.select("pocket")
+        pocket.set_default(voice)
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert mc_voice_ui.begin_speech(character=None) is not None
+        assert speaking["voice_id"] == "pocket:official:alba"
+        assert speaking["handle"] == "pocket:official:alba"
+        assert speaking["handle"] in pocket.catalog(), "the worker was never given it"
+        logged = [record.getMessage() for record in caplog.records]
+        assert any("Voice is reading replies in another voice" in line
+                   and "Rebuild it" in line for line in logged), logged
+        assert not any("Secret Name" in line for line in logged)
+
+    def test_a_ready_saved_default_is_the_one_spoken(self, host, cloning, worker,
+                                                     spoken_wav, speaking):
+        import mc_voice_ui
+
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        voice = pocket.save_preview(made["token"])["voice"]["id"]
+        engines.select("pocket")
+        pocket.set_default(voice)
+        assert mc_voice_ui.begin_speech(character=None) is not None
+        assert speaking["handle"] == voice
+
+    def test_nothing_ready_at_all_is_a_reason_not_a_refused_turn(
+            self, host, cloning, worker, speaking, monkeypatch, caplog):
+        import logging
+
+        import mc_voice_api
+        import mc_voice_ui
+
+        engines.select("pocket")
+        monkeypatch.setattr(mc_voice_api, "unprepared_reason", lambda entry: "stale")
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert mc_voice_ui.begin_speech(character=None) is None
+        assert speaking == {}, "a turn was started on a voice the worker does not have"
+        assert any("no other voice that is ready" in record.getMessage()
+                   for record in caplog.records)
+
+    def test_a_stale_install_is_said_as_a_reinstall_not_as_not_installed(
+            self, host, installed, worker, speaking, monkeypatch, caplog):
+        import logging
+
+        import mc_voice_ui
+
+        engines.select("pocket")
+        root = paths.pocket_model_root("english")
+        (root / paths.INSTALLED_FILENAME).write_text(
+            json.dumps({"schema": 1, "id": "english", "revision": "older", "digests": {}}),
+            encoding="utf-8")
+        assert pocket.status().stale is True
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert mc_voice_ui.begin_speech(character=None) is None
+        logged = [record.getMessage() for record in caplog.records]
+        assert any("needs a reinstall" in line for line in logged), logged

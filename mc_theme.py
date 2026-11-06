@@ -507,10 +507,11 @@ def settings(shared) -> dict:
         ),
         OPT_SPLIT: OptionInfo(
             True,
-            "Generate above the gallery, prompts at the top of the settings column",
+            "Generate under the gallery's buttons, prompts at the top of the settings column",
         ).info(
             "the split view: the prompt boxes, the tool row and the styles row lead "
-            "the settings column, and Generate heads the gallery's panel on the right"
+            "the settings column, and Generate sits under the gallery and its buttons on "
+            "the right, where a thumb reaches it on a phone"
         ),
         OPT_SCROLL: OptionInfo(
             True,

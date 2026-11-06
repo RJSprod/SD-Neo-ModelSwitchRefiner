@@ -328,6 +328,8 @@ class ChatInfo:
     identifier: str
     title: str
     updated: float
+    pinned: bool = False
+    """Pinned as a favourite: listed before every thread that is not."""
 
 
 class ChatStore:
@@ -425,17 +427,68 @@ class ChatStore:
         return conversation
 
     def listing(self, character: str) -> list[ChatInfo]:
-        """The character's chats, most recently used first."""
+        """The character's chats: the pinned ones first, then the rest, each most recently used first.
+
+        A file whose name starts with a dot is the folder's own record, never a
+        chat: :data:`TOMBSTONES` and :data:`PINS` live beside the chats, and
+        ``glob("*.json")`` matches a dotfile -- so until 2026-11-06 every
+        folder a thread had been deleted from listed a phantom *New chat*
+        (``.tombstones``) among its threads.
+        """
+        pins = set(self.pinned(character))
         rows = []
         for path in self.folder(character).glob("*.json"):
+            if path.name.startswith("."):
+                continue
             try:
                 data = read_json(path)
             except (OSError, ValueError):
                 continue          # one unreadable chat must not hide the rest
-            rows.append(ChatInfo(identifier=str(data.get("id") or path.stem),
+            identifier = str(data.get("id") or path.stem)
+            rows.append(ChatInfo(identifier=identifier,
                                  title=str(data.get("title") or UNTITLED),
-                                 updated=float(data.get("updated", 0.0) or 0.0)))
-        return sorted(rows, key=lambda row: row.updated, reverse=True)
+                                 updated=float(data.get("updated", 0.0) or 0.0),
+                                 pinned=identifier in pins))
+        return sorted(rows, key=lambda row: (not row.pinned, -row.updated))
+
+    # -- pins ------------------------------------------------------------- #
+
+    PINS = ".pins.json"
+    """The character's pinned threads, by id: "I am able to PIN a thread as
+    favorite" (2026-11-06). Beside the chats rather than inside them, so
+    pinning writes no conversation -- a guarded write would bump its revision
+    and its recency, and refuse while a reply is being written -- and a folder
+    an older build of this extension opens is a folder of chats as it always
+    was."""
+
+    def pinned(self, character: str) -> list[str]:
+        """The ids pinned for ``character``, most recently pinned first."""
+        try:
+            data = read_json(self.folder(character) / self.PINS)
+        except (OSError, ValueError):
+            return []
+        found = data.get("pinned") if isinstance(data, dict) else None
+        if not isinstance(found, list):
+            return []
+        return [str(item) for item in found if isinstance(item, str) and item]
+
+    def set_pinned(self, character: str, identifier: str, on: bool) -> bool:
+        """Pin or unpin one thread. What it is now."""
+        wanted = str(identifier or "")
+        if not wanted:
+            raise ValueError("No thread to pin.")
+        kept = [item for item in self.pinned(character) if item != wanted]
+        if on:
+            kept.insert(0, wanted)
+        folder = self.folder(character)
+        folder.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(folder / self.PINS, {"pinned": kept})
+        return bool(on)
+
+    def toggle_pinned(self, character: str, identifier: str) -> bool:
+        """Pin a thread that is not pinned, unpin one that is. What it is now."""
+        return self.set_pinned(character, identifier,
+                               str(identifier or "") not in self.pinned(character))
 
     def delete(self, character: str, identifier: str) -> None:
         """Remove one chat, and write down that this id has been used.
@@ -455,6 +508,11 @@ class ChatStore:
             final = None
         path.unlink(missing_ok=True)
         self._entomb(character, identifier, final if isinstance(final, int) else 0)
+        if str(identifier) in self.pinned(character):
+            try:
+                self.set_pinned(character, identifier, False)
+            except OSError:
+                pass   # a pin to nothing is never listed: the listing reads the chats
 
     # -- tombstones ------------------------------------------------------- #
 

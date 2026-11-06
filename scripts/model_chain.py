@@ -4427,6 +4427,11 @@ try:
     # LoRA tags at the end of an image's saved prompt, where this extension
     # had put them in front (mc_saved_prompt). Before any generation can run.
     script_callbacks.on_app_started(mc_saved_prompt.on_app_started)
+    # And at the end of a recalled prompt too: PNG Info's Send to, a gallery's
+    # Send to and the paste button all read the image's text through Forge's
+    # paste, which hands its parameters to this first.
+    if hasattr(script_callbacks, "on_infotext_pasted"):
+        script_callbacks.on_infotext_pasted(mc_saved_prompt.on_infotext_pasted)
     # The first sampling step of every pass: the host has read its batch flag
     # by then, so the override puts it back there.
     if hasattr(script_callbacks, "on_cfg_denoiser"):

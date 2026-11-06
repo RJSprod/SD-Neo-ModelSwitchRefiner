@@ -1079,9 +1079,11 @@
    bar as a slim rail down the window's left or right side, written on the
    root (`data-forge-assistant-rail`), with the page beside it starting at the
    window's top under no bar at all. The tabs are icons on a rail whatever the
-   tab names setting says (the script draws them), stacked from the top and
-   scrolling down where they do not fit; the header's own buttons stand at the
-   rail's foot, a line above them, over the tabs that scroll under them. The
+   tab names setting says (the script draws them), stacked at the rail's foot,
+   just above the header's own buttons -- bottom-justified, where a thumb
+   reaches them on a phone (2026-11-06) -- and scrolling from the first where
+   they do not fit; the header's own buttons stand at the very foot, a line
+   above them, over the tabs that scroll under them. The
    bar is still Forge's own strip, moved by nothing: only its layout changes,
    so Forge's direct-child selector and the assistant's host still find it.
    Everything held under the bar reads `--mc-theme-header`, which is none
@@ -1144,11 +1146,38 @@
     z-index: 1;
     flex-direction: column;
     gap: 4px;
-    margin: auto 0 0;
+    margin: 0;
     padding: 6px 0;
     border-top: 1px solid var(--border-color-primary);
     background: var(--body-background-fill);
     box-shadow: 0 -12px 12px -4px var(--body-background-fill);
+}
+
+/* The tabs at the rail's foot: "I recently made the flyout buttons bottom
+   justified ... lets make the same for tab bar. It should be bottom justified,
+   so i can reach the button on mobile" (2026-11-06). The bar's own `::before`
+   -- the ground along the top, none on a rail -- is the room above the tabs: a
+   flex item drawn first (before every tab's `order`, which starts at 1) that
+   takes whatever height the tabs and the buttons leave, and gives all of it up
+   when they do not fit, so the rail still scrolls from its first tab.
+   `justify-content: flex-end` would put an overflow above the rail's top,
+   where no scroll reaches it. Nothing of a ground is drawn: static, no fill,
+   no line. */
+:root[data-mc-theme="on"][data-forge-assistant-rail] #tabs > .tab-nav::before {
+    content: "";
+    position: static;
+    display: block;
+    flex: 1 1 auto;
+    order: -1;
+    width: 100%;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    z-index: auto;
+    pointer-events: none;
 }
 
 /* The page beside the rail, and the quick settings drawer, which opens from
@@ -6333,6 +6362,61 @@
     margin: 0.4em 0 0.8em;
 }
 
+/* The section a page at a time (mc_voice_ui.VOICE_PAGES, voice_chat.js
+   `showVoicePage`): a row of pages at the top, one purpose shown. A part of
+   another page is hidden by a class, never moved: `!important` because Forge's
+   settings search writes an inline display on the section's blocks, and the
+   script shows every page while that search has text. On a narrow window the
+   row wraps rather than scrolling sideways: a swipe past the end of a sideways
+   scroller is the browser's Back (CLAUDE.md), and a page out of sight is a
+   page nobody finds. */
+.mc-voice-pages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35em;
+    margin: 0 0 0.2em;
+    padding: 0.25em;
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    background: var(--background-fill-secondary, transparent);
+}
+
+.mc-voice-page-tab {
+    flex: 0 0 auto;
+    min-height: 36px;
+    padding: 0.35em 0.9em;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md, 6px);
+    background: transparent;
+    color: var(--body-text-color-subdued, inherit);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.mc-voice-page-tab:hover,
+.mc-voice-page-tab:focus-visible {
+    color: var(--body-text-color, inherit);
+}
+
+.mc-voice-page-tab[aria-selected="true"] {
+    background: var(--background-fill-primary, transparent);
+    border-color: var(--border-color-primary, currentColor);
+    color: var(--body-text-color, inherit);
+    box-shadow: inset 0 -2px 0 var(--color-accent, currentColor);
+}
+
+.mc-voice-page-part {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6em;
+}
+
+.mc-voice-page-hidden {
+    display: none !important;
+}
+
 .mc-voice-runtime,
 .mc-voice-note {
     color: var(--body-text-color-subdued, inherit);
@@ -8928,6 +9012,14 @@
     color: var(--color-accent, #2563eb);
 }
 
+/* A thread pinned in LLM Studio's Threads (a favourite, listed first): the pin
+   is drawn here, not written in the button, which the host's theme would turn
+   into an icon with the title gone. Its aria-label says Pinned. */
+.forge-assistant-menu-item.forge-assistant-thread-pinned::before {
+    content: "\1F4CC\00A0";
+    content: "\1F4CC\00A0" / "";
+}
+
 .forge-assistant-conversation {
     display: flex;
     flex-direction: column;
@@ -10058,6 +10150,19 @@ body.forge-assistant-focused[data-forge-assistant-focus-rail="right"] .forge-ass
    to the gap; nothing collapses it. */
 #txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img,
 #img2img_results[data-forge-assistant-fill] #image_buttons_img2img {
+    margin-bottom: var(--forge-assistant-fill-after, 0px) !important;
+}
+
+/* With Generate under the gallery's buttons (the theme's split view since
+   2026-11-06) the last kept thing is Generate: the room is under it, and none
+   between the buttons and it. */
+#txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img:has(+ #txt2img_generate_box),
+#img2img_results[data-forge-assistant-fill] #image_buttons_img2img:has(+ #img2img_generate_box) {
+    margin-bottom: 0 !important;
+}
+
+#txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img + #txt2img_generate_box,
+#img2img_results[data-forge-assistant-fill] #image_buttons_img2img + #img2img_generate_box {
     margin-bottom: var(--forge-assistant-fill-after, 0px) !important;
 }
 
@@ -11431,8 +11536,9 @@ details.mc-lora-more[open] > summary {
 /* ==========================================================================
    Model Chain -- the LoRA viewer
    ==========================================================================
-   javascript/model_chain_lora_viewer.js: a button after Forge's Apply Styles,
-   and a dialog under the tab bar on the dialog layer Mini Paint NEO's popup and
+   javascript/model_chain_lora_viewer.js: a Lora Viewer button as wide as the
+   prompt boxes, under the Negative Prompt and above the Literal row, and a
+   dialog under the tab bar on the dialog layer Mini Paint NEO's popup and
    the assistant's panel share (2000; everything the assistant draws is below
    it). Every colour is one of the page theme's variables, so it follows
    whichever theme is in use, by day and by night; the three that mean
@@ -11446,6 +11552,38 @@ details.mc-lora-more[open] > summary {
     width: 18px;
     height: 18px;
     pointer-events: none;
+}
+
+/* The button's own line. Its holder sits directly after the Negative Prompt's
+   block inside Forge's negative prompt row -- a Gradio row, which wraps -- and
+   takes the whole line, so the button is as wide as the prompt boxes above it;
+   while CFG is 1 the Negative Prompt is put away and this is the line under the
+   Prompt. The Literal row follows it (model_chain_literals.js). */
+.mc-lv-launch {
+    display: flex;
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+.mc-lv-launch[hidden] {
+    display: none !important;
+}
+
+.mc-lv-launch > .mc-lv-open {
+    display: inline-flex;
+    flex: 1 1 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+}
+
+.mc-lv-open-label {
+    white-space: nowrap;
 }
 
 .mc-lv,

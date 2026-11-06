@@ -2025,6 +2025,17 @@ typed them. A saved line that still holds a `[[` command, or a tag right after a
 `+` or `-`, is left as it is, because pasted back those would be read in a
 different order.
 
+**And they come back at the end when you recall an image.** PNG Info's *Send to
+txt2img* / *Send to img2img*, a gallery's Send to that reads the image's own
+text, and the paste button all go through Forge's paste, which hands the parsed
+parameters to this extension before it fills a field (`on_infotext_pasted`).
+An image saved before 2026-11-03 — tags in front — is recalled with them after
+the words, in the order they had, the same move the saved text gets. On
+Txt2Img this changes nothing that is generated: the tags are lifted to the
+front again before Forge reads the prompt. Only an image whose own text says
+this extension lifted its tags (`Krea Literal Command Count`) is changed; an
+Img2Img image's or another tool's tags stay where they were typed.
+
 ### Why a switch is slow, and what to check
 
 Read the console. Every transition is now logged, for example:
@@ -3520,6 +3531,13 @@ which model, on which device, at what context, with a route on to Setup for the
 residency and the estimate. It is a sheet rather than a permanent row because
 everything a top bar takes is taken from the conversation under it.
 
+**A tap outside a sheet closes it** — the model sheet, the workspace chooser,
+Threads, Character, You and Voice alike (since 2026-11-06). The first tap
+outside does only that, as the Forge Assistant's Tap Outside to Close does:
+nothing under it is pressed. A scroll, a drag, a tap on the bars that open the
+sheets, in the Forge Assistant or in a dialog is left alone. On a phone a sheet
+covers the whole workspace, so the page around it is outside.
+
 The chooser lists every `.gguf` under your models folder — the **LLM models
 folder** setting, or `models/` inside the LLM data directory — walked a few
 levels deep so a `publisher/repo/model.gguf` layout is found, with vision
@@ -3747,6 +3765,23 @@ actually on the screen rather than the page's layout: on a phone showing a page
 wider than itself, the second is wider and taller than the glass, and an editor
 sized to it had its buttons off the edge. It follows the screen as it changes —
 a rotation, a phone's keyboard coming up — so the buttons stay in reach.
+
+### Favourite threads
+
+**Pin this thread** on Conversation's **Threads** screen pins the thread that is
+open as a favourite (since 2026-11-06); pressed again it reads **Unpin this
+thread**. Pinned threads are listed first, each with a 📌 in front of its title,
+most recently used first among themselves, and the rest follow as before; the
+search box matches the title, never the pin. The Forge Assistant's **⋯ → Threads**
+lists them first too, with the same pin drawn beside them. A pin is kept beside
+the chats (`.pins.json` in the character's folder), so pinning rewrites no
+conversation and changes nobody's order of recency, and deleting a thread takes
+its pin with it.
+
+The same change fixed a phantom in the list: deleting a thread writes a small
+record beside the chats, and every character a thread had been deleted from
+listed an extra *New chat* that was that record. The folder's own files are never
+listed now.
 
 ### Conversation, per message
 
@@ -4113,7 +4148,11 @@ has been pressed for three and no generation or reply is running, writes one
 load, naming the nodes whose contents changed most: where to look.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the launcher
-and the panel anywhere in the window, each where you put it. Turning it on
+and the panel anywhere in the window, each where you put it. It is two switches
+since 2026-11-06, one each: **Free Float Button** for the launcher and **Free
+Float Panel** for the open panel, so the button can float while the panel keeps
+to one of the six, or the other way round (a Free Float you had on before turns
+both on, so nothing moves on the update). Turning one on
 leaves both exactly where they are rather than moving them somewhere of its own
 choosing, and turning it off snaps each to the nearest of the six to where it
 was. It is remembered between sessions — not just this one,
@@ -4298,8 +4337,10 @@ holds two choices, each **Top** (as it always was), **Left** or **Right**, each
 chosen apart from the other and remembered in this browser:
 
 - **Tab Bar** — the WebUI's tab bar as a slim strip, 48 px wide, down the left
-  or right side of the window. The tabs are icons on it, stacked from the top,
-  whatever the theme's *Tab names* setting says (a tab's name is its tooltip),
+  or right side of the window. The tabs are icons on it, stacked at the strip's
+  foot just above its other buttons (bottom-justified since 2026-11-06, where a
+  thumb reaches them on a phone; they scroll from the first when they do not
+  fit), whatever the theme's *Tab names* setting says (a tab's name is its tooltip),
   and the theme's own buttons — quick settings, extra networks, light and
   dark, the theme's settings — stand apart at the strip's foot, a line above
   them. The page starts at the window's top beside the strip, with nothing
@@ -4513,7 +4554,7 @@ entries act on, and a **Cancel**:
 | --- | --- |
 | **Chat**, headed by the character's name | **New chat**, **Threads ›**, **Emotion ›** (the thread's emotion; *A thread's emotion*, above), **System prompt…** |
 | **Composer** | **Auto Attach**, **Send to Generate** |
-| **Panel** | **Free Float**, **Tab Bar in Focus**, **Tap Outside to Close**, **Transpose View ›**, **Customize…** |
+| **Panel** | **Free Float Button**, **Free Float Panel**, **Tab Bar in Focus**, **Tap Outside to Close**, **Transpose View ›**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
 
 A menu opens inside the panel, in the conversation's place — or the workspace
@@ -5967,6 +6008,17 @@ microphone settings.
 
 ### Setting it up
 
+**Settings → Voice Chat is a page at a time** (since 2026-11-06). A row of
+pages at its top shows one purpose: **Engine** — which engine speaks, its install
+and its own settings, and *Speak replies automatically*; **Voices** — the voice
+list, Test, the delivery sliders, cloning and the stored voice settings;
+**Dictation** — the speech-to-text qualities and *Automatically send
+dictation*; **Pipeline** — the Voice Pipeline and its stages; **Setup** — the
+access token, the voice runtime, every installer (the recording cleanup's too)
+and the folders. **All** is the whole section in one column, as it was. The page
+you chose is remembered in this browser, and while Forge's settings search has
+text every page is shown, so a match is never hidden on a page you are not on.
+
 **Settings → Voice Chat** has two downloads:
 
 | | |
@@ -6215,8 +6267,25 @@ that is stale): it stops the worker, removes the runtime, the model, the
 official voices and the staging area, and installs everything the manifest
 declares — the gated cloning weights too, when a token is saved. Custom voices
 are never touched: each keeps the recording it was made from, and its prepared
-states live under the model's fingerprint, so **Rebuild** in the voice library
-makes the new model's version from the recording you already gave it.
+states live under the model's fingerprint. The reinstall then **rebuilds each
+saved voice for the new model** from the recording you already gave it, one at
+a time, on the install's own row (*Rebuilding saved voice 1 of 2 for the new
+model…*) — when PocketTTS is the selected engine and its cloning weights are
+installed; otherwise, and for any voice whose rebuild fails, **Rebuild** in the
+voice library does the same for one voice. One reinstall runs at a time: a
+second press while one is running is refused before anything is removed.
+
+**A reply is never spoken in a voice PocketTTS was not given.** The worker is
+handed only the voices with prepared data for the model and precision in force,
+so a saved voice left stale — by a reinstall that could not rebuild it, or by a
+change of precision — used to be asked for anyway, and every reply failed in
+the worker (*That voice is not one PocketTTS has been given*) while Test on an
+official voice played. A reply now asks first, as Test always did: a voice that
+cannot be spoken is passed over for the default, or the first voice that is
+ready, and `model_chain.log` says once why — *Voice is reading replies in
+another voice — the saved PocketTTS voice asked for has no prepared data …
+(Rebuild it in Settings → Voice Chat …)*. A PocketTTS that needs a reinstall is
+logged as that, rather than as *not installed*.
 
 **Where the token comes from.** Paste it once under *Settings → Voice Chat →
 Access token* and Voice Chat keeps it for every gated download, for every
@@ -7402,8 +7471,8 @@ one second.
 - **The bar down one side.** The Forge Assistant's *Transpose View* (its **⋯**
   menu; see *Transpose View* under the Forge Assistant) lays this bar out as a
   48 px strip down the window's left or right side: the tabs as icons whatever
-  *Tab names* says, stacked from the top and scrolling down where they do not
-  fit, the bar's own buttons at the strip's foot under a line, no title, and
+  *Tab names* says, stacked at the strip's foot above the bar's own buttons
+  and scrolling from the first where they do not fit, the bar's own buttons at the strip's foot under a line, no title, and
   the page beside it from the window's top. Everything held under the bar
   (the drawers, the results column's hold) starts at the window's top
   instead. It is still Forge's own strip, moved by nothing.
@@ -7421,9 +7490,14 @@ one second.
   page is moved — the order is a stylesheet keyed on each tab's panel, so
   Forge's scripts, the keyboard's Tab order and the Forge Assistant's
   workspace list keep Forge's own.
-- **Generate above the gallery, the prompt boxes at the top of the settings
-  column** — the split view — in Txt2Img and Img2Img, with the classic and the
-  compact prompt-box styles both handled. The results column stays where it
+- **Generate under the gallery's buttons, the prompt boxes at the top of the
+  settings column** — the split view — in Txt2Img and Img2Img, with the classic
+  and the compact prompt-box styles both handled. Generate heads the gallery
+  until 2026-11-06; it is now the last thing in the results panel's kept part —
+  the progress bar while a run goes, the gallery, its buttons, then Generate —
+  where a thumb reaches it on a phone, and the Forge Assistant's fill keeps all
+  of them in view together. Forge's own mobile script moves Generate on a
+  resize; the theme puts it back under the buttons on the next frame. The results column stays where it
   rests while the settings scroll, a margin under the bar at least (the one
   scroller, below, says how). Generate is 44 px tall (Forge gives
   it a 4.5 em floor), the frames Gradio draws around every tab panel, one
@@ -7940,8 +8014,11 @@ when the UI Preset changes** (on).
 ## LoRA Viewer
 
 Every LoRA in the prompt, with its picture, its trigger words and a slider for
-its weight, behind one button at the end of the prompt tool row: the upright
-sliders after Forge's Apply Styles, on Txt2Img and Img2Img. Pressed, it covers
+its weight, behind one button named **Lora Viewer**, as wide as the prompt boxes,
+directly under the Negative Prompt on Txt2Img and Img2Img — under the Prompt
+while CFG is 1 and the Negative Prompt is put away — and above the Literal row
+(since 2026-11-06: it was the upright sliders after Forge's Apply Styles, at the
+top of the tool row and out of a thumb's reach on a phone). Pressed, it covers
 the page under the tab bar — or beside it, when the Forge Assistant's
 *Transpose View* has put the bar down one side — (centred, and no wider than
 880 px, on a wide screen) with one thin row for each `<lora:…>` or `<lyco:…>` tag in the Prompt
@@ -8075,7 +8152,8 @@ mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
 mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons
 mc_infotext.py        infotext write + paste-field registration
 mc_saved_prompt.py    LoRA tags at the end of an image's saved prompt: Forge's
-                      create_infotext, wrapped
+                      create_infotext, wrapped; and of a recalled one
+                      (on_infotext_pasted)
 mc_presets.py         named Stage 2 configurations
 mc_spatial_profiles.py     named Spatial layouts
 mc_progress.py        whole-job progress model + measured timings
@@ -8221,7 +8299,7 @@ javascript/forge_assistant_focus.js  workspace focus, as a reversible transactio
 javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
 javascript/model_chain_night.js      the quieter night mode's one attribute
 javascript/model_chain_lora_details.js  the LoRA dialog's chips, clipboard, cards and preset watcher
-javascript/model_chain_lora_viewer.js   the LoRA viewer: the tool-row button and the dialog
+javascript/model_chain_lora_viewer.js   the LoRA viewer: the Lora Viewer button under the prompt boxes and the dialog
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension

@@ -184,3 +184,139 @@ def test_a_layout_from_when_the_two_shared_one_place_gives_the_panel_that_place(
     assert found["now"] == {"launcher": ["top-right", {"x": 1, "y": 0}],
                             "panel": ["bottom-left", {"x": 0, "y": 1}]}
     assert found["alone"] == [None, None]
+
+
+# --------------------------------------------------------------------------- #
+# Free Float, one switch each (2026-11-06)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_button_floats_while_the_panel_stays_at_a_resting_place_and_the_reverse():
+    """"I would like for the flyout button and fly out menu to have
+    independent settings for free float." Each is placed by its own switch."""
+    found = run(PANEL + """
+        const where = (state) => {
+            sized(1280, 900);
+            const shell = panel({state});
+            shell.placeNow();
+            return placed(state.panelOpen ? shell.nodes.panel : shell.nodes.launcher);
+        };
+        const places = {floatAt: {x: 0, y: 1}, panelAt: {x: 0, y: 1},
+                        anchorOverride: "top-right", panelAnchor: "top-right"};
+        console.log(JSON.stringify({
+            launcherFloats: where(Object.assign({panelOpen: false, freeFloat: false,
+                                                 launcherFloat: true}, places)),
+            panelAnchored: where(Object.assign({panelOpen: true, freeFloat: false,
+                                                launcherFloat: true}, places)),
+            launcherAnchored: where(Object.assign({panelOpen: false, freeFloat: true,
+                                                   launcherFloat: false}, places)),
+            panelFloats: where(Object.assign({panelOpen: true, freeFloat: true,
+                                              launcherFloat: false}, places)),
+        }));
+    """, sources=("shell",))
+
+    # A free place of none across and all the way down is the bottom left;
+    # the anchor is the top right. The launcher is 140 by 44; the gap 24 px.
+    assert found["launcherFloats"] == {"left": "24px", "top": "832px"}
+    assert found["launcherAnchored"] == {"left": "1116px", "top": "24px"}
+    assert found["panelAnchored"]["top"] == "24px" and found["panelFloats"]["left"] == "24px"
+    assert found["panelFloats"]["top"] != "24px", "the floating panel is at its free place"
+
+
+def test_each_switch_turns_only_its_own_and_carries_only_its_own_place():
+    found = run(PANEL + """
+        sized(1280, 900);
+        const shell = panel({state: {panelOpen: false, freeFloat: false, launcherFloat: false,
+                                     anchorOverride: "top-left", panelAnchor: "bottom-right",
+                                     floatAt: null, panelAt: null}});
+        shell.setLauncherFloat(true);
+        const afterButton = {free: shell.state.freeFloat, launcher: shell.state.launcherFloat,
+                             floatAt: shell.state.floatAt, panelAt: shell.state.panelAt};
+        shell.setPanelFloat(true);
+        const afterPanel = {free: shell.state.freeFloat, launcher: shell.state.launcherFloat,
+                            panelAt: shell.state.panelAt};
+        shell.setLauncherFloat(false);
+        const buttonOff = {free: shell.state.freeFloat, launcher: shell.state.launcherFloat,
+                           anchor: shell.state.anchorOverride};
+        console.log(JSON.stringify({afterButton, afterPanel, buttonOff}));
+    """, sources=("shell",))
+
+    # The launcher, on screen, takes a free place where it is drawn (the
+    # harness draws it at 1100, 700: the bottom right); the panel is untouched.
+    after = found["afterButton"]
+    assert after["free"] is False and after["launcher"] is True and after["panelAt"] is None
+    assert after["floatAt"]["x"] > 0.9 and after["floatAt"]["y"] > 0.8, after
+    assert found["afterPanel"]["free"] is True and found["afterPanel"]["launcher"] is True
+    assert found["afterPanel"]["panelAt"] == {"x": 1, "y": 1}, "the panel's own, put away"
+    # Off again, the launcher goes to the resting place nearest where it is
+    # drawn, the bottom right; the panel's switch stays on.
+    assert found["buttonOff"] == {"free": True, "launcher": False, "anchor": "bottom-right"}
+
+
+def test_a_drag_writes_the_place_its_own_switch_says():
+    """The launcher floating and the panel anchored: a drag of the launcher
+    writes its free place; the panel's resting place is untouched."""
+    found = run(PANEL + """
+        sized(1280, 900);
+        const shell = panel({state: {panelOpen: false, freeFloat: false, launcherFloat: true,
+                                     panelAnchor: "bottom-left", panelAt: null,
+                                     anchorOverride: "top-left", floatAt: {x: 0, y: 0}}});
+        shell.preview = () => undefined;
+        shell.drag = {node: shell.nodes.launcher, pointerId: 1,
+                      startX: 94, startY: 46, offsetX: 70, offsetY: 22,
+                      startLeft: 24, startTop: 24, width: 140, height: 44,
+                      moved: false, anchor: "top-left", committed: false};
+        shell.moveDrag({pointerId: 1, clientX: 700, clientY: 450});
+        shell.endDrag({pointerId: 1}, false);
+        console.log(JSON.stringify({floatAt: shell.state.floatAt, anchor: shell.state.anchorOverride,
+                                    panel: [shell.state.panelAnchor, shell.state.panelAt]}));
+    """, sources=("shell",))
+
+    assert found["anchor"] == "top-left", "a floating launcher's drag chooses no resting place"
+    assert 0.3 < found["floatAt"]["x"] < 0.7 and 0.3 < found["floatAt"]["y"] < 0.7, found
+    assert found["panel"] == ["bottom-left", None]
+
+
+def test_a_free_float_saved_as_one_switch_comes_back_as_two_and_two_stay_two():
+    found = run(PANEL + """
+        NS.basePath = () => "/";
+        const local = {};
+        globalThis.localStorage = {getItem: (k) => (k in local ? local[k] : null),
+                                   setItem: (k, v) => { local[k] = String(v); }};
+        local["forge-assistant-float:/"] = JSON.stringify({freeFloat: true});
+        const old = panel({state: {freeFloat: false, launcherFloat: false}});
+        old._restoreFloat();
+        const saver = panel({state: {freeFloat: true, launcherFloat: false}});
+        saver._saveFloat();
+        const stored = JSON.parse(local["forge-assistant-float:/"]);
+        const now = panel({state: {freeFloat: false, launcherFloat: true}});
+        now._restoreFloat();
+        console.log(JSON.stringify({old: [old.state.freeFloat, old.state.launcherFloat],
+                                    stored: [stored.freeFloat, stored.launcherFloat],
+                                    now: [now.state.freeFloat, now.state.launcherFloat]}));
+    """, sources=("shell",))
+
+    assert found["old"] == [True, True], "one switch saved: both float, as they did"
+    assert found["stored"] == [True, False]
+    assert found["now"] == [True, False]
+
+
+def test_the_menu_has_a_switch_for_each_and_each_presses_its_own():
+    found = run(PANEL + """
+        sized(1280, 900);
+        const shell = panel({state: {panelOpen: true, freeFloat: false, launcherFloat: true}});
+        shell.closeMenu = () => {};
+        const button = shell.floatItem("launcher");
+        const panelItem = shell.floatItem("panel");
+        const labels = [[button.textContent, button.getAttribute("aria-checked")],
+                        [panelItem.textContent, panelItem.getAttribute("aria-checked")]];
+        panelItem.handlers.click.forEach((fn) => fn());
+        const pressedPanel = [shell.state.freeFloat, shell.state.launcherFloat];
+        button.handlers.click.forEach((fn) => fn());
+        const pressedButton = [shell.state.freeFloat, shell.state.launcherFloat];
+        console.log(JSON.stringify({labels, pressedPanel, pressedButton}));
+    """, sources=("shell",))
+
+    assert found["labels"] == [["Free Float Button", "true"], ["Free Float Panel", "false"]]
+    assert found["pressedPanel"] == [True, True]
+    assert found["pressedButton"] == [True, False]

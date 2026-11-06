@@ -311,7 +311,9 @@
     /** The part of the column kept in view, as it is drawn now: from the first
      *  of Generate's box (with Interrupt and Skip), the progress bar while a
      *  generation runs, the gallery's container and the gallery, down to the
-     *  bottom of the gallery's buttons. `anchor` is the one whose top is that
+     *  bottom of the gallery's buttons -- or of Generate, when it is drawn
+     *  under them (the Model Chain theme's split view since 2026-11-06:
+     *  "reachable on my phone display"), which makes it the last kept thing. `anchor` is the one whose top is that
      *  first top (the outermost, on a tie), and `leaves` are the things spaced
      *  evenly -- Generate, the progress bar, the gallery, the buttons -- in the
      *  order they are drawn. */
@@ -343,6 +345,13 @@
             leaves.push(buttons);
         } else {
             buttons = null;
+        }
+        if (generate) {
+            const under = generate.getBoundingClientRect();
+            if (under.top >= galleryBox.bottom - 0.5 && under.bottom > bottom + 0.5) {
+                bottom = under.bottom;
+                last = generate;
+            }
         }
         const tops = candidates.map((node) => node.getBoundingClientRect().top);
         const top = Math.min.apply(null, tops);
@@ -587,6 +596,10 @@
         // outermost box, short of what it shares with the thing before it,
         // that it is the first thing in -- and how far that moves the gallery.
         let moved = 0;
+        // And what moves under the gallery: Generate under its buttons is
+        // nudged to one space below them, and the kept part ends lower or
+        // higher by that much.
+        let movedBelow = 0;
         for (let index = 1; index < kept.leaves.length; index += 1) {
             const node = kept.leaves[index];
             if (node === kept.buttons) continue;
@@ -595,13 +608,14 @@
             const by = Math.max(space, reachOf(node)) - gap;
             const own = frameOf(node, commonAncestor(node, before));
             nudge(nudged.has(own) ? node : own, by);
-            if (Math.abs(by) >= 0.25 && node.getBoundingClientRect().top <= galleryBox.top + 0.5) {
-                moved += by;
-            }
+            if (Math.abs(by) < 0.25) continue;
+            const nodeTop = node.getBoundingClientRect().top;
+            if (nodeTop <= galleryBox.top + 0.5) moved += by;
+            else if (nodeTop >= galleryBox.bottom - 0.5) movedBelow += by;
         }
         const start = first + lift;
         const above = galleryBox.top - kept.top + moved;
-        const below = kept.bottom - galleryBox.bottom;
+        const below = kept.bottom - galleryBox.bottom + movedBelow;
         const fits = Math.floor(viewBottom - space - start - above - below);
         if (!(fits > 0)) return {height: null, reason: "no room"};
         const drawn = Math.max(FILL_FLOOR, fits);

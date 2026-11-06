@@ -3223,11 +3223,109 @@
         else if (!wanted && node.classList.contains(name)) node.classList.remove(name);
     }
 
+    // -- Settings -> Voice Chat, a page at a time ---------------------------- //
+
+    // "The voice chat settings menu is a MESS ... redesign this settings menu so
+    // its easier to navigate" (2026-11-06). The row of pages at the top of the
+    // section (mc_voice_ui.pages_nav_html) shows one purpose at a time: the
+    // parts of the install row by their `data-mc-voice-page`, and Forge's own
+    // option blocks under it by the key-to-page map the row carries. Nothing is
+    // moved or taken off the page -- what is not on the page chosen is hidden
+    // by a class -- so every wiring, poll and repaint below finds its nodes
+    // where it always did, and a row that waits to be on screen before it
+    // fetches (whenOnScreen) waits until its page is chosen. The choice is
+    // remembered in this browser; Forge's settings search shows everything
+    // while it has text, because a match on a page not chosen is a match
+    // nobody would see.
+    const PAGE_STORE = "mc-voice-settings-page";
+    const PAGE_HIDDEN = "mc-voice-page-hidden";
+    let pageSearchWired = false;
+
+    function pageNames(nav) {
+        return Array.prototype.map.call(nav.querySelectorAll("[data-mc-voice-page-tab]"),
+                                        function (tab) { return tab.getAttribute("data-mc-voice-page-tab"); });
+    }
+
+    function storedPage(nav) {
+        let page = "";
+        try { page = window.localStorage.getItem(PAGE_STORE) || ""; } catch (error) { page = ""; }
+        return pageNames(nav).indexOf(page) !== -1 ? page
+            : (nav.getAttribute("data-mc-voice-default") || "engine");
+    }
+
+    function settingsSearchBox() {
+        return document.querySelector("#settings_search input, #settings_search textarea");
+    }
+
+    function searchingSettings() {
+        const box = settingsSearchBox();
+        return !!(box && String(box.value || "").trim());
+    }
+
+    // The block Forge drew for an option: the child of the section's column
+    // that holds `setting_<key>`, so a block in a row of its own goes whole.
+    function optionBlock(key, column) {
+        const own = document.getElementById("setting_" + key);
+        if (!own || !column || !column.contains(own)) return own;
+        let node = own;
+        while (node.parentElement && node.parentElement !== column) node = node.parentElement;
+        return node;
+    }
+
+    function showVoicePage(page) {
+        const nav = document.querySelector(".mc-voice-pages");
+        if (!nav) return false;
+        const chosen = pageNames(nav).indexOf(page) !== -1 ? page : storedPage(nav);
+        const shown = searchingSettings() ? "all" : chosen;
+        Array.prototype.forEach.call(nav.querySelectorAll("[data-mc-voice-page-tab]"), function (tab) {
+            const on = tab.getAttribute("data-mc-voice-page-tab") === chosen;
+            tab.setAttribute("aria-selected", String(on));
+            tab.classList.toggle("mc-voice-page-current", on);
+        });
+        const show = function (node, name) {
+            if (node && node.classList) node.classList.toggle(PAGE_HIDDEN, shown !== "all" && name !== shown);
+        };
+        Array.prototype.forEach.call(document.querySelectorAll(".mc-voice-page-part"), function (part) {
+            show(part, part.getAttribute("data-mc-voice-page"));
+        });
+        let map = {};
+        try {
+            map = JSON.parse(nav.getAttribute("data-mc-voice-option-pages") || "{}") || {};
+        } catch (error) {
+            map = {};
+        }
+        const column = nav.closest ? nav.closest("[id^='column_settings_']") : null;
+        Object.keys(map).forEach(function (key) { show(optionBlock(key, column), map[key]); });
+        return true;
+    }
+
+    function wirePages(holder) {
+        const nav = holder.querySelector(".mc-voice-pages");
+        if (!nav) return;
+        Array.prototype.forEach.call(nav.querySelectorAll("[data-mc-voice-page-tab]"), function (tab) {
+            tab.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                const page = tab.getAttribute("data-mc-voice-page-tab");
+                try { window.localStorage.setItem(PAGE_STORE, page); } catch (error) { /* this visit only */ }
+                showVoicePage(page);
+            });
+        });
+        if (!pageSearchWired) {
+            const box = settingsSearchBox();
+            if (box) {
+                pageSearchWired = true;
+                box.addEventListener("input", function () { showVoicePage(""); });
+            }
+        }
+        showVoicePage("");
+    }
+
     function wireSettings() {
         const holder = document.querySelector(".mc-voice-settings")
             || root().querySelector(".mc-voice-settings");
         if (!holder || holder.dataset.mcVoiceWired === "1") return;
         holder.dataset.mcVoiceWired = "1";
+        attempt("show the Voice Chat settings a page at a time", function () { wirePages(holder); });
 
         Array.prototype.forEach.call(
             holder.querySelectorAll("[data-mc-voice-install]"), function (button) {

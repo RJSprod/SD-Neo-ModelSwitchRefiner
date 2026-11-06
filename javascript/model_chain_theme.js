@@ -1117,16 +1117,53 @@
 
     // -- the split view ---------------------------------------------------------- //
 
+    // Generate's place in the split view: under the gallery's buttons since
+    // 2026-11-06 -- "move the "generate" button ... so that it appears below
+    // the image gallery buttons ... I just want to reorder it so the generate
+    // button is reachable on my phone display. Its hard to reach the top of the
+    // page". It heads the gallery's container on a page whose gallery has no
+    // buttons row. Still inside the results panel either way, so the row is
+    // not drawn while a progress bar runs, as before (style.css, "a generation
+    // in the results column"), and the Forge Assistant's fill keeps the bar,
+    // the gallery, its buttons and Generate in view together
+    // (forge_assistant_layout.js, keptBox).
+    function placeGenerate(name) {
+        const box = query("#" + name + "_generate_box");
+        if (!box) return;
+        const buttons = query("#image_buttons_" + name);
+        if (buttons && buttons.parentElement) {
+            if (buttons.nextElementSibling !== box) move(box, buttons.parentElement, buttons.nextSibling, "split");
+            return;
+        }
+        const container = query("#" + name + "_gallery_container");
+        if (container) prepend(box, container, "split");
+    }
+
     function installSplit(config) {
         if (!config.split) { restoreMoves(["split"]); return; }
         ["txt2img", "img2img"].forEach((name) => {
             const settings = query("#" + name + "_settings");
             const toprow = query("#" + name + "_toprow");
             if (settings && toprow && !settings.contains(toprow)) prepend(toprow, settings, "split");
-            const box = query("#" + name + "_generate_box");
-            const container = query("#" + name + "_gallery_container");
-            if (box && container) prepend(box, container, "split");
+            placeGenerate(name);
         });
+    }
+
+    // Forge's own mobile script (extensions-builtin/mobile) moves Generate on a
+    // resize that changes its answer to "is this a phone" -- to the top of the
+    // results column, or back beside the prompts -- whatever a theme had done
+    // with it, and no Gradio update follows to put it back. So the split view
+    // is laid out again on the next frame after a resize: the mobile script's
+    // listener has run by then, and a box already in its place moves nothing.
+    function scheduleSplit() {
+        if (state.splitPending) return;
+        state.splitPending = true;
+        const run = function () {
+            state.splitPending = false;
+            if (root().getAttribute(ATTRIBUTE) !== "on") return;
+            attempt("lay out the split view again", function () { installSplit(read()); });
+        };
+        if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
     }
 
     // -- one scroller for the page --------------------------------------------- //
@@ -2818,6 +2855,7 @@
         });
         window.addEventListener("resize", scheduleFit);
         window.addEventListener("resize", scheduleScroll);
+        window.addEventListener("resize", scheduleSplit);
         // What else changes what the columns are held against, with no
         // resize of the window to say so: a pinch, which changes the
         // visible viewport; the page shown again, from the browser's cache

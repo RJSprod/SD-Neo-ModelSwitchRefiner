@@ -3,7 +3,8 @@
 // Three jobs, all of them presentation, none of them able to change what a
 // generation produces:
 //
-//   1. Move the Literal Prompt row up under the native Negative Prompt.
+//   1. Move the Literal Prompt row up under the native Negative Prompt (and
+//      under the LoRA viewer's button, which has the line just below it).
 //   2. Put its two boxes into Forge's own "last prompt box you used" family,
 //      so the Extra Networks browser inserts into whichever of the four you
 //      touched last -- and offer them to Tag Autocomplete, if it is installed.
@@ -66,6 +67,7 @@
     };
 
     const COLLAPSED = "mc-literal-cfg-collapsed";
+    const UNDER_NEGATIVE = "data-mc-under-negative";
 
     function root() {
         const app = typeof gradioApp === "function" ? gradioApp() : document;
@@ -104,11 +106,22 @@
         const row = byId(IDS.row);
         const negative = byId(IDS.negativePrompt);
         if (!row || !negative || !negative.parentNode) return;
-        // Already immediately after the Negative Prompt: nothing to do, and
-        // checking is what makes this safe to run on every UI update.
-        if (row.previousElementSibling === negative) return;
+        // Under whatever another script keeps directly under the Negative
+        // Prompt and marks as doing so (`data-mc-under-negative`: the LoRA
+        // viewer's button, model_chain_lora_viewer.js), which goes between the
+        // prompt boxes and the Literal row. Anchoring on the Negative Prompt
+        // alone would move the row back above that element on the next update,
+        // and its script would move it back above the row on the one after -- a
+        // to-and-fro on every update. Found by the mark, never by a name: this
+        // file does not learn what the other one is for.
+        const next = negative.nextElementSibling;
+        const anchor = next && next !== row && next.hasAttribute
+            && next.hasAttribute(UNDER_NEGATIVE) ? next : negative;
+        // Already immediately after its anchor: nothing to do, and checking is
+        // what makes this safe to run on every UI update.
+        if (row.previousElementSibling === anchor) return;
         try {
-            negative.parentNode.insertBefore(row, negative.nextSibling);
+            anchor.parentNode.insertBefore(row, anchor.nextSibling);
         } catch (error) {
             // A theme that has restructured the toprow, or a Forge build that
             // renames the negative prompt. The row stays where Gradio put it,

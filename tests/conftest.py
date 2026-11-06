@@ -683,6 +683,9 @@ def _install_modules() -> None:
     script_callbacks.registered["cfg_denoiser"] = []
     script_callbacks.on_cfg_denoiser = lambda cb, **k: (
         script_callbacks.registered["cfg_denoiser"].append(cb))
+    script_callbacks.registered["infotext_pasted"] = []
+    script_callbacks.on_infotext_pasted = lambda cb, **k: (
+        script_callbacks.registered["infotext_pasted"].append(cb))
 
     modules.errors = errors
     modules.images = images

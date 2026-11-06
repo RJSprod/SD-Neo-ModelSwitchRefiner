@@ -215,8 +215,8 @@ def test_the_switch_is_in_the_panel_group_and_remembered_in_this_browser():
     """)
 
     panel = found["labels"].index("Panel")
-    assert found["labels"][panel:panel + 4] == ["Panel", "Free Float", "Tab Bar in Focus",
-                                                 "Tap Outside to Close"]
+    assert found["labels"][panel:panel + 5] == ["Panel", "Free Float Button", "Free Float Panel",
+                                                 "Tab Bar in Focus", "Tap Outside to Close"]
     assert found["before"] == "true" and found["role"] == "menuitemcheckbox"
     assert found["off"] == {"state": False, "stored": "off"}
     assert found["restored"] is False

@@ -575,6 +575,7 @@ MEASURE = """() => {
         img2imgSettingsFirst: q("#img2img_settings").firstElementChild.id,
         toprowParent: q("#txt2img_toprow").parentElement.id,
         boxParent: q("#txt2img_generate_box").parentElement.id,
+        generateAfter: (q("#txt2img_generate_box").previousElementSibling || {}).id || null,
         quickParent: q("#quicksettings").parentElement.id || q("#quicksettings").parentElement.className,
         drawer: q("#mc-theme-quick") ? {hidden: q("#mc-theme-quick").hidden,
                                        position: getComputedStyle(q("#mc-theme-quick")).position,
@@ -1517,16 +1518,39 @@ class TestTheBarInFocusMode:
 
 
 class TestTheSplitView:
-    def test_the_top_row_heads_the_settings_column_and_generate_heads_the_gallery(self, browser):
+    def test_the_top_row_heads_the_settings_column_and_generate_sits_under_the_gallerys_buttons(self, browser):
+        """Generate under the gallery's buttons since 2026-11-06: "move the
+        "generate" button ... so that it appears below the image gallery
+        buttons ... so the generate button is reachable on my phone display".
+        A page whose gallery has no buttons row -- this page's Img2Img -- has
+        it head the gallery's container, as before."""
         page = open_page(browser)
         found = page.evaluate(MEASURE)
 
         assert found["settingsFirst"] == "txt2img_toprow"
-        assert found["galleryFirst"] == "txt2img_generate_box"
+        assert found["boxParent"] == "txt2img_results_panel"
+        assert found["generateAfter"] == "image_buttons_txt2img"
+        assert found["galleryFirst"] != "txt2img_generate_box"
         assert found["img2imgSettingsFirst"] == "img2img_toprow"
         assert found["img2imgGalleryFirst"] == "img2img_generate_box"
         assert found["generateHeight"] >= 44
         page.close()
+
+    def test_after_forges_mobile_script_moves_it_generate_is_put_back_under_the_buttons(self, browser):
+        """Forge's mobile script moves Generate on a resize, to the top of the
+        results column on a phone, and no Gradio update follows."""
+        page = open_page(browser)
+        page.evaluate("""() => {
+            const box = document.querySelector('#txt2img_generate_box');
+            const results = document.querySelector('#txt2img_results');
+            results.insertBefore(box, results.firstElementChild);
+            window.dispatchEvent(new Event('resize'));
+        }""")
+        settle(page, 4)
+        found = page.evaluate(MEASURE)
+        page.close()
+
+        assert found["generateAfter"] == "image_buttons_txt2img", found
 
     def test_applying_again_moves_nothing_twice(self, browser):
         page = open_page(browser)
@@ -2753,13 +2777,32 @@ class TestWithTheForgeAssistant:
         assert found["marked"] is True and found["reason"] == "", found
         space = found["buttons"]["top"] - found["gallery"]["bottom"]
         assert 4 <= space <= 24, found
-        # The first kept thing is under the header, not under it: one space
-        # and the panel's padding below the bar's bottom edge.
-        assert found["generate"]["top"] >= found["header"]["bottom"] + space - 1, found
-        assert found["generate"]["top"] <= found["header"]["bottom"] + space + 24, found
-        assert abs(found["inner"] - found["buttons"]["bottom"] - space) <= 1, found
+        # The first kept thing -- the gallery's container, Generate being
+        # under the buttons since 2026-11-06 -- is under the header, not under
+        # it: one space and the panel's padding below the bar's bottom edge.
+        assert found["container"]["top"] >= found["header"]["bottom"] + space - 1, found
+        assert found["container"]["top"] <= found["header"]["bottom"] + space + 24, found
+        # Generate one space under the buttons, and one space over the view's
+        # bottom: the gallery, its buttons and Generate all in view.
+        assert abs(found["generate"]["top"] - found["buttons"]["bottom"] - space) <= 1, found
+        assert abs(found["inner"] - found["generate"]["bottom"] - space) <= 1, found
         assert found["gallery"]["height"] > 0.5 * found["inner"], found
         page.close()
+
+    def test_generate_under_the_buttons_is_one_space_under_them_whatever_its_own_margin(self, browser):
+        """A theme that gives Generate's row a margin of its own: the fill nudges
+        it to one space under the buttons and makes up the gallery for it, so
+        Generate still ends one space over the window's bottom."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE + (
+            " #txt2img_generate_box { margin-top: 30px; }"))
+        settle(page, 8)
+        found = page.evaluate(FILLED)
+        page.close()
+
+        assert found["marked"] is True and found["reason"] == "", found
+        space = found["buttons"]["top"] - found["gallery"]["bottom"]
+        assert abs(found["generate"]["top"] - found["buttons"]["bottom"] - space) <= 1, found
+        assert abs(found["inner"] - found["generate"]["bottom"] - space) <= 1, found
 
     def test_scrolling_keeps_the_column_in_view_under_the_bar_and_focus_mode_takes_the_whole_window(self, browser):
         """Normal mode: the settings scroll, the results column is held where
@@ -2778,7 +2821,7 @@ class TestWithTheForgeAssistant:
         assert page.evaluate("window.scrollY") == 600
         assert scrolled["generate"]["top"] >= scrolled["header"]["bottom"] + 4, scrolled
         assert abs(scrolled["generate"]["top"] - at_rest["generate"]["top"]) <= 0.5, "locked where it rests"
-        assert scrolled["buttons"]["bottom"] <= scrolled["inner"], scrolled
+        assert scrolled["generate"]["bottom"] <= scrolled["inner"], scrolled
         page.evaluate("window.scrollTo(0, 0)")
         settle(page, 4)
 
@@ -2795,8 +2838,8 @@ class TestWithTheForgeAssistant:
         assert root["top"] == 0, "the workspace is the window"
         assert focused["marked"] is True and focused["reason"] == "", focused
         space = focused["buttons"]["top"] - focused["gallery"]["bottom"]
-        assert abs(focused["generate"]["top"] - (root["top"] + space + 16)) <= 1, (focused, root)
-        assert abs(root["bottom"] - focused["buttons"]["bottom"] - space) <= 1, (focused, root)
+        assert abs(focused["container"]["top"] - (root["top"] + space + 16)) <= 1, (focused, root)
+        assert abs(root["bottom"] - focused["generate"]["bottom"] - space) <= 1, (focused, root)
         assert focused["gallery"]["height"] > at_rest["gallery"]["height"], "the header's room is the gallery's"
 
         page.evaluate("document.querySelector('.forge-assistant-focus-root').scrollTop = 600")
@@ -3584,15 +3627,17 @@ class TestAGenerationInTheResultsColumn:
         assert found["overlay"] is not None and found["overlay"]["top"] < found["bar"]["top"] - 30, found
         assert found["overlay"]["top"] >= found["header"]["bottom"] - 0.5, found
         assert found["covered"] is False, found
-        # One space between the bar and the gallery, the gallery's buttons where
-        # they were, and the gallery the taller for it.
+        # One space between the bar and the gallery; the gallery's buttons take
+        # the place at the bottom that Generate's row, under them since
+        # 2026-11-06, had at rest; and the gallery the taller for it.
         space = found["buttons"]["top"] - found["gallery"]["bottom"]
         assert abs(found["gallery"]["top"] - found["bar"]["bottom"] - space) <= 1, found
-        assert abs(found["buttons"]["bottom"] - rest["buttons"]["bottom"]) <= 1, (rest, found)
+        assert abs(found["buttons"]["bottom"] - rest["generate"]["bottom"]) <= 1, (rest, found)
         assert found["gallery"]["height"] > rest["gallery"]["height"] + 10, (rest, found)
         # Compact: the bar and its ooze take a fifth less than the row did.
-        before = rest["gallery"]["top"] - rest["header"]["bottom"]
-        now = found["gallery"]["top"] - found["header"]["bottom"]
+        before = rest["generate"]["bottom"] - rest["buttons"]["bottom"]
+        now = (found["gallery"]["top"] - found["header"]["bottom"]) - (
+            rest["gallery"]["top"] - rest["header"]["bottom"])
         assert now <= 0.8 * before, (before, now)
 
         # Scrolled, the column held under the bar: still clear of it.
@@ -3616,8 +3661,10 @@ class TestAGenerationInTheResultsColumn:
         shown = press(page, middle, (bar["top"] + bar["bottom"]) / 2)
         assert shown["generateDisplay"] != "none" and shown["interruptWidth"] > 0, shown
         assert shown["gallery"]["height"] < running["gallery"]["height"] - 30, (running, shown)
-        assert abs(shown["buttons"]["bottom"] - running["buttons"]["bottom"]) <= 1, (running, shown)
-        assert shown["generate"]["top"] >= shown["bar"]["bottom"], shown
+        # The row back under the gallery's buttons, in the place at the bottom
+        # the buttons had while it was away.
+        assert abs(shown["generate"]["bottom"] - running["buttons"]["bottom"]) <= 1, (running, shown)
+        assert shown["generate"]["top"] >= shown["buttons"]["bottom"], shown
 
         hidden = press(page, middle, bar["top"] - 20)
         assert hidden["generateDisplay"] == "none", hidden
@@ -3670,13 +3717,14 @@ class TestAGenerationInTheResultsColumn:
 
     def test_a_bar_with_nothing_above_it_sits_one_space_under_the_header(self, browser):
         """No ooze, no room: the panel one space under the header and the bar
-        at its padding, as Generate sits at rest."""
+        at its padding, as the gallery sits at rest (Generate is under its
+        buttons since 2026-11-06)."""
         page = running_page(browser, {"model_chain_style_theme": "Flat"})
         rest = page.evaluate(RUNNING)
         found = start(page)
 
         assert found["overlay"] is None and found["generateDisplay"] == "none", found
-        assert abs(found["bar"]["top"] - rest["generate"]["top"]) <= 1, (rest, found)
+        assert abs(found["bar"]["top"] - rest["gallery"]["top"]) <= 1, (rest, found)
         page.close()
 
     def test_under_focus_the_ooze_is_inside_the_workspace(self, browser):

@@ -1182,23 +1182,105 @@ def reinstall(on_status=None, on_progress=None) -> Status:
     model rather than losing anything (I-PKT-15). Nothing here asks which
     engine is selected, unlike :func:`uninstall`: PocketTTS being the selected
     engine is exactly when somebody presses this.
-    """
-    try:
-        import mc_voice_pocket_runtime as runtime
 
-        runtime.stop("PocketTTS is being reinstalled")
-    except Exception:
-        logger.debug("Model Chain: could not stop PocketTTS before reinstalling it",
-                     exc_info=True)
-    for root in (paths.pocket_runtime_root(), paths.pocket_models_root(),
-                 paths.pocket_official_root(), paths.pocket_staging_root(),
-                 paths.pocket_preview_root()):
-        if paths.pocket_inside(root):
-            shutil.rmtree(root, ignore_errors=True)
-    _manifest_cache_clear()
-    logger.info("Model Chain: PocketTTS's runtime, model and official voices were removed "
-                "for a reinstall; saved voices were kept")
-    return _install(on_status=on_status, on_progress=on_progress, cloning=True)
+    And then the saved voices are rebuilt for the new model
+    (:func:`rebuild_saved`), because the sentence that asks for this press says
+    they will be: *Press Reinstall — your saved voices are kept, and are rebuilt
+    for the new model.* The first reinstall on the user's machine (2026-11-06)
+    kept them and rebuilt none, so a default voice that was a saved one had no
+    state for the new model, the worker was never given it, and every reply was
+    refused -- "That voice is not one PocketTTS has been given" -- while an
+    audition of the official voice played.
+
+    One reinstall at a time, decided before anything is removed: the same log
+    shows four presses within three milliseconds, each removing the tree before
+    the install claim was taken. Those four landed before the first download;
+    a press arriving a minute later would have deleted the runtime out from
+    under the install that was building it.
+    """
+    if not _reinstall_lock.acquire(blocking=False):
+        raise PocketError("PocketTTS is already being reinstalled.")
+    try:
+        if (models.progress().get(KIND) or {}).get("running"):
+            raise PocketError("PocketTTS is already being installed.")
+        try:
+            import mc_voice_pocket_runtime as runtime
+
+            runtime.stop("PocketTTS is being reinstalled")
+        except Exception:
+            logger.debug("Model Chain: could not stop PocketTTS before reinstalling it",
+                         exc_info=True)
+        for root in (paths.pocket_runtime_root(), paths.pocket_models_root(),
+                     paths.pocket_official_root(), paths.pocket_staging_root(),
+                     paths.pocket_preview_root()):
+            if paths.pocket_inside(root):
+                shutil.rmtree(root, ignore_errors=True)
+        _manifest_cache_clear()
+        logger.info("Model Chain: PocketTTS's runtime, model and official voices were "
+                    "removed for a reinstall; saved voices were kept")
+        found = _install(on_status=on_status, on_progress=on_progress, cloning=True)
+        if rebuild_saved(on_status=on_status):
+            found = status()
+        return found
+    finally:
+        _reinstall_lock.release()
+
+
+_reinstall_lock = threading.Lock()
+"""Held for the whole of :func:`reinstall`, removal included.
+
+The install claim (``mc_voice_models._claim``) is taken inside
+:func:`_install`, after the removal, so it cannot stop a second press from
+removing what the first is installing; this can."""
+
+
+def rebuild_saved(on_status=None) -> int:
+    """Rebuild every saved voice the model in force has no state for. How many were.
+
+    What a reinstall promises, done at the end of it: each saved voice that kept
+    its recording is prepared again for the new model's fingerprint, the same
+    transaction as the voice library's **Rebuild** (:func:`rebuild`), one at a
+    time, said on the install's row as *Rebuilding saved voice 1 of 2 for the
+    new model…* -- a count and never a name, because the row's narration is
+    also the log's (handoff 47's rule). A voice that fails is left as stale as
+    it was, with its Rebuild button, and the others still run.
+
+    Pressed, never polled: it runs only from the Reinstall a person pressed,
+    which is the decision :func:`rebuild`'s docstring asks for (T-PKT-CLONE-11),
+    and only when it can -- PocketTTS speaking, the cloning weights installed,
+    and PocketTTS the selected engine, because the worker is not started for
+    any other (``mc_voice_pocket_runtime.ensure_started``). When it cannot, the
+    voice library's Rebuild is still there and says why.
+    """
+    stale = [entry for entry in custom() if not entry["compatible"] and entry["has_source"]]
+    if not stale:
+        return 0
+    found = status()
+    selected = engines.active() == ENGINE
+    if not (found.ready and found.cloning_ready and selected):
+        logger.info("Model Chain: %d saved PocketTTS voice(s) still need Rebuild in "
+                    "Settings → Voice Chat for the new model — the reinstall could not "
+                    "rebuild them, because %s", len(stale),
+                    "PocketTTS is not the selected engine" if not selected
+                    else "PocketTTS or its voice-cloning weights are not installed")
+        return 0
+    say = models._narrator(KIND, on_status)
+    done = 0
+    with models._claim(KIND, say, found.model_id):
+        for number, entry in enumerate(stale, 1):
+            say(f"Rebuilding saved voice {number} of {len(stale)} for the new model…")
+            try:
+                rebuild(entry["id"])
+                done += 1
+            except Exception as exc:
+                # The class and never the message: a refusal can name the voice,
+                # and the voice's name is the user's.
+                logger.warning("Model Chain: a saved PocketTTS voice could not be rebuilt "
+                               "for the new model (%s); Rebuild it in Settings → Voice "
+                               "Chat", exc.__class__.__name__)
+        say(f"PocketTTS installed — {done} of {len(stale)} saved voice(s) rebuilt for the "
+            f"new model.")
+    return done
 
 
 def _install(on_status=None, on_progress=None, cloning: bool = True) -> Status:
