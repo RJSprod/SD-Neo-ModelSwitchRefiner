@@ -4567,3 +4567,37 @@ downgrade, and test it on a copy.
 
 To roll back: check out the previous commit. There is no data migration to
 undo, no schema to revert, and no setting that has to be turned off first.
+
+## 3.50 Free Float, one switch for the button and one for the panel (2026-11-06)
+
+> "I would like for the flyout button and fly out menu to have independent
+> settings for free float"
+
+§3.44 gave the launcher and the panel a place each; Free Float was still one
+switch over both. Now each has its own: `freeFloat` is the panel's and
+`launcherFloat` the launcher's (`launcherFloats()`; a state built before there
+were two -- a test's, a hand-built one -- has the launcher follow the panel's).
+Everything that asks whether a node floats asks `floats(node)`: `placePanel`,
+the drag (`moveDrag`, `endDrag`) and `keepPlace`. What only a panel has -- the
+phone's sheet, the cut a drag to an edge leaves, the corner, the held edges of
+a resize -- reads the panel's switch, as before.
+
+**The menu.** The Panel group's one *Free Float* is two `menuitemcheckbox`
+rows, **Free Float Button** and **Free Float Panel** (`floatItem("launcher")`,
+`floatItem("panel")`), each pressing only its own (`setLauncherFloat`,
+`setPanelFloat`), each carrying only its own node where it is (`keepPlace`).
+`setFreeFloat(on)` keeps its meaning -- both together -- for the callers that
+had it.
+
+**Remembered.** The Free Float record gains `launcherFloat`; a record without
+it is one switch saved, and both float as they did (`_restoreFloat`), so
+nothing moves on the update.
+
+**Verified.** `tests/test_assistant_places_js.py`: the button floating while
+the panel is anchored and the reverse; each switch turning and carrying only
+its own; a drag writing what its own switch says; one switch saved coming back
+as two and two staying two; the two menu rows each pressing their own. The menu
+tests that named *Free Float* name the two rows. Mutations: the launcher
+reading the panel's switch, no migration, the menu setting both and the drag
+reading the panel's switch each fail a test. Not run on the user's machine.
+

@@ -570,9 +570,11 @@ class TestTheMenuSaysWhatIsOn:
 
         # In the menu's order: the Composer group's two, then Free Float,
         # Tab Bar in Focus and Tap Outside to Close in the Panel group.
+        # Free Float is two switches since 2026-11-06, the button's and the
+        # panel's; a state from before them has the button follow the panel's.
         assert found == [["Auto Attach", "false"], ["Send to Generate", "true"],
-                         ["Free Float", "true"], ["Tab Bar in Focus", "false"],
-                         ["Tap Outside to Close", "true"]]
+                         ["Free Float Button", "true"], ["Free Float Panel", "true"],
+                         ["Tab Bar in Focus", "false"], ["Tap Outside to Close", "true"]]
 
     def test_the_check_is_drawn_from_that_state(self):
         on = rule('.forge-assistant-menu-item[role="menuitemcheckbox"]'

@@ -667,8 +667,12 @@ class TestOpeningAndClosing:
         at."""
         shell = SHELL.read_text(encoding="utf-8")
 
-        assert "pinned" not in shell
+        # The header's pin was `state.pinned`, written by a `nodes.pin` button.
+        # A *thread* pinned in LLM Studio (2026-11-06) is another thing: a
+        # favourite the Threads menu marks, never a preference of the panel's.
+        assert "state.pinned" not in shell
         assert "nodes.pin" not in shell
+        assert "thread.pinned" in shell
 
 
 class TestTheUtilityMenu:
@@ -2824,7 +2828,7 @@ class TestFreeFloat:
                 {id: "l", label: "Unload LLM", enabled: true,
                  kind: "unload", scope: "llm"}];
             const items = shell.utilityItems();
-            const item = items.find((i) => i.textContent === "Free Float");
+            const item = items.find((i) => i.textContent === "Free Float Panel");
             console.log(JSON.stringify({
                 labels: items.map((i) => i.textContent),
                 checked: item.getAttribute("aria-checked"),
@@ -2834,7 +2838,8 @@ class TestFreeFloat:
 
         assert found["labels"] == ["Chat · Ada", "New chat", "Threads", "Emotion",
                                    "Composer", "Auto Attach", "Send to Generate",
-                                   "Panel", "Free Float", "Tab Bar in Focus",
+                                   "Panel", "Free Float Button", "Free Float Panel",
+                                   "Tab Bar in Focus",
                                    "Tap Outside to Close", "Transpose View", "Models",
                                    "Warm LoRA", "Cold LoRA",
                                    "Unload All Models", "Unload LLM"]
@@ -2847,7 +2852,7 @@ class TestFreeFloat:
             const shell = picker();
             shell.state.freeFloat = true;
             shell.host.listUtilities = () => [];
-            const item = shell.utilityItems().find((i) => i.textContent === "Free Float");
+            const item = shell.utilityItems().find((i) => i.textContent === "Free Float Panel");
             console.log(JSON.stringify({checked: item.getAttribute("aria-checked")}));
         """, sources=("shell",))
 

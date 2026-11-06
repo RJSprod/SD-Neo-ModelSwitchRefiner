@@ -4148,7 +4148,11 @@ has been pressed for three and no generation or reply is running, writes one
 load, naming the nodes whose contents changed most: where to look.
 
 **Free Float**, in the **⋯** menu, drops the six and lets you put the launcher
-and the panel anywhere in the window, each where you put it. Turning it on
+and the panel anywhere in the window, each where you put it. It is two switches
+since 2026-11-06, one each: **Free Float Button** for the launcher and **Free
+Float Panel** for the open panel, so the button can float while the panel keeps
+to one of the six, or the other way round (a Free Float you had on before turns
+both on, so nothing moves on the update). Turning one on
 leaves both exactly where they are rather than moving them somewhere of its own
 choosing, and turning it off snaps each to the nearest of the six to where it
 was. It is remembered between sessions — not just this one,
@@ -4550,7 +4554,7 @@ entries act on, and a **Cancel**:
 | --- | --- |
 | **Chat**, headed by the character's name | **New chat**, **Threads ›**, **Emotion ›** (the thread's emotion; *A thread's emotion*, above), **System prompt…** |
 | **Composer** | **Auto Attach**, **Send to Generate** |
-| **Panel** | **Free Float**, **Tab Bar in Focus**, **Tap Outside to Close**, **Transpose View ›**, **Customize…** |
+| **Panel** | **Free Float Button**, **Free Float Panel**, **Tab Bar in Focus**, **Tap Outside to Close**, **Transpose View ›**, **Customize…** |
 | **Models** | **Unload All Models**, **Unload LLM** |
 
 A menu opens inside the panel, in the conversation's place — or the workspace

@@ -553,7 +553,12 @@
             // it holds (`placeNames`, docs/22 §3.44).
             anchorOverride: null,
             panelAnchor: null,
+            // Free Float, the panel's (and, through setFreeFloat, both). The
+            // launcher has a switch of its own since 2026-11-06 ("the flyout
+            // button and fly out menu to have independent settings for free
+            // float"): `launcherFloat`, read through `floats(node)`.
             freeFloat: false,
+            launcherFloat: false,
             floatAt: null,
             panelAt: null,
             panelWidth: null,
@@ -740,6 +745,13 @@
             if (typeof found.freeFloat === "boolean") {
                 this.state.freeFloat = found.freeFloat;
             }
+            // The launcher's own switch, or -- remembered while the one Free
+            // Float moved both -- that one, so nothing moves on the update.
+            if (typeof found.launcherFloat === "boolean") {
+                this.state.launcherFloat = found.launcherFloat;
+            } else if (typeof found.freeFloat === "boolean") {
+                this.state.launcherFloat = found.freeFloat;
+            }
             const fraction = (at) => (at && typeof at.x === "number" && typeof at.y === "number"
                 ? {x: clamp01(at.x), y: clamp01(at.y)} : null);
             const at = fraction(found.floatAt);
@@ -757,8 +769,8 @@
     Shell.prototype._saveFloat = function () {
         try {
             window.localStorage.setItem(this._floatKey(), JSON.stringify(
-                {freeFloat: this.state.freeFloat, floatAt: this.state.floatAt,
-                 panelAt: this.state.panelAt}));
+                {freeFloat: this.state.freeFloat, launcherFloat: this.launcherFloats(),
+                 floatAt: this.state.floatAt, panelAt: this.state.panelAt}));
         } catch (error) { /* memory only; the panel still works */ }
     };
 
@@ -1769,7 +1781,7 @@
         // the launcher's (`placeNames`).
         const names = this.placeNames(node);
         let at;
-        if (this.state.freeFloat && this.state[names.at]) {
+        if (this.floats(node) && this.state[names.at]) {
             const hold = this.floatHold(node);
             at = floatPoint(this.state[names.at], box, view, pad, hold);
             // Resized while floating: the edges the hand is not moving stay
@@ -1790,6 +1802,20 @@
         }
         node.style.left = at.left + "px";
         node.style.top = at.top + "px";
+    };
+
+    /** Whether the launcher floats: its own switch, or -- for a state built
+     *  before there were two -- the panel's, as the one Free Float moved both. */
+    Shell.prototype.launcherFloats = function () {
+        const own = this.state.launcherFloat;
+        return typeof own === "boolean" ? own : !!this.state.freeFloat;
+    };
+
+    /** Whether `node` is placed by its free place rather than by one of the
+     *  six: the launcher by its switch, the panel by Free Float. */
+    Shell.prototype.floats = function (node) {
+        if (node && this.nodes && node === this.nodes.launcher) return this.launcherFloats();
+        return !!this.state.freeFloat;
     };
 
     /** What of a floated box keeps its place as the box changes height: the
@@ -2066,8 +2092,9 @@
             else this.shiftDock(left - drag.startLeft, top - drag.startTop);
         }
         // Free float has nothing to snap to, so there is nothing to preview
-        // and nothing to choose: where it is put is where it stays.
-        if (this.state.freeFloat) {
+        // and nothing to choose: where it is put is where it stays. The
+        // dragged node's own switch: the launcher's and the panel's are two.
+        if (this.floats(drag.node)) {
             if (drag.hold === undefined) drag.hold = this.floatHold(drag.node);
             drag.at = fractionOf({left, top, width: fit.width, height: fit.height},
                                  view, drag.inset, this.floatOf(drag.node), drag.hold);
@@ -2191,7 +2218,7 @@
             // Only the place of what was dragged: the launcher's and the
             // panel's are two, and moving one leaves the other where it is.
             const names = this.placeNames(drag.node);
-            if (this.state.freeFloat) {
+            if (this.floats(drag.node)) {
                 if (drag.at) {
                     this.state[names.at] = drag.at;
                     this._saveFloat();
@@ -4662,7 +4689,8 @@
         if (NS.systemEditor) items.push(this.systemPromptItem());
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
-        items.push(this.groupLabel("Panel"), this.floatItem(), this.focusBarItem(),
+        items.push(this.groupLabel("Panel"), this.floatItem("launcher"), this.floatItem("panel"),
+                   this.focusBarItem(),
                    this.tapToCloseItem(), this.transposeItem());
         if (NS.look) items.push(this.customizeItem());
         const utilities = this.host.listUtilities();
@@ -5105,22 +5133,30 @@
         });
     };
 
-    Shell.prototype.floatItem = function () {
-        const on = !!this.state.freeFloat;
+    /** Free Float, one switch each for the button and the panel since
+     *  2026-11-06: "I would like for the flyout button and fly out menu to
+     *  have independent settings for free float". `which` is "launcher" or
+     *  "panel". */
+    Shell.prototype.floatItem = function (which) {
+        const launcher = which === "launcher";
+        const on = launcher ? this.launcherFloats() : !!this.state.freeFloat;
+        const thing = launcher ? "button" : "panel";
         const item = element("button",
-                             "forge-assistant-menu-item forge-assistant-float",
-                             "Free Float");
+                             "forge-assistant-menu-item forge-assistant-float forge-assistant-float-"
+                             + (launcher ? "launcher" : "panel"),
+                             launcher ? "Free Float Button" : "Free Float Panel");
         item.type = "button";
         // A checkbox, not a command: it reports its state rather than only
         // acting, so a screen reader says whether the mode is on.
         item.setAttribute("role", "menuitemcheckbox");
         item.setAttribute("aria-checked", String(on));
         item.title = on
-            ? "Snap the panel back to one of the six resting places"
-            : "Put the panel anywhere in the window";
+            ? "Snap the " + thing + " back to one of the six resting places"
+            : "Put the " + thing + " anywhere in the window";
         item.addEventListener("click", () => {
             this.closeMenu();
-            this.setFreeFloat(!on);
+            if (launcher) this.setLauncherFloat(!on);
+            else this.setPanelFloat(!on);
         });
         return item;
     };
@@ -5518,9 +5554,14 @@
         return item;
     };
 
+    /** Free Float for both, the one switch it was until 2026-11-06: the
+     *  panel's and the launcher's set together. The menu has one of each now
+     *  (`setPanelFloat`, `setLauncherFloat`). */
     Shell.prototype.setFreeFloat = function (on) {
+        const launcherWas = this.launcherFloats();
         const was = this.state.freeFloat;
         this.state.freeFloat = !!on;
+        this.state.launcherFloat = !!on;
         // Anchored, every resting place has the room: no cut size.
         if (!this.state.freeFloat) {
             this.state.fitWidth = null;
@@ -5529,14 +5570,43 @@
         // The launcher and the panel each where they are, rather than
         // somewhere of the mode's own choosing: a mode that moves the thing
         // you were looking at is a mode people turn off again to find it.
-        if (was !== this.state.freeFloat) {
-            this.keepPlace(this.nodes.launcher);
-            this.keepPlace(this.nodes.panel);
-        }
+        if (launcherWas !== this.state.launcherFloat) this.keepPlace(this.nodes.launcher);
+        if (was !== this.state.freeFloat) this.keepPlace(this.nodes.panel);
         this._saveFloat();
         this._save();
         this.placeNow();
         return this.state.freeFloat;
+    };
+
+    /** Free Float for the panel alone: the launcher keeps its own switch. */
+    Shell.prototype.setPanelFloat = function (on) {
+        // A launcher still following the panel's switch is given its own
+        // first, so it does not move with this one.
+        if (typeof this.state.launcherFloat !== "boolean") {
+            this.state.launcherFloat = this.launcherFloats();
+        }
+        const was = this.state.freeFloat;
+        this.state.freeFloat = !!on;
+        if (!this.state.freeFloat) {
+            this.state.fitWidth = null;
+            this.state.fitHeight = null;
+        }
+        if (was !== this.state.freeFloat) this.keepPlace(this.nodes.panel);
+        this._saveFloat();
+        this._save();
+        this.placeNow();
+        return this.state.freeFloat;
+    };
+
+    /** Free Float for the launcher alone: the panel keeps its own switch. */
+    Shell.prototype.setLauncherFloat = function (on) {
+        const was = this.launcherFloats();
+        this.state.launcherFloat = !!on;
+        if (was !== this.state.launcherFloat) this.keepPlace(this.nodes.launcher);
+        this._saveFloat();
+        this._save();
+        this.placeNow();
+        return this.state.launcherFloat;
     };
 
     /** `node`'s own place carried into the mode just turned: turned on, a
@@ -5549,7 +5619,7 @@
         const box = shown && typeof node.getBoundingClientRect === "function"
             ? node.getBoundingClientRect() : null;
         const measured = box && box.width > 0 && box.height > 0 ? box : null;
-        if (this.state.freeFloat) {
+        if (this.floats(node)) {
             this.state[names.at] = measured
                 ? fractionOf(measured, viewport(), insets(), null, this.floatHold(node))
                 : anchorFraction(this.anchor(node));
