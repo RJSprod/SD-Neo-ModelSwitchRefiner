@@ -7479,9 +7479,14 @@ one second.
   page is moved — the order is a stylesheet keyed on each tab's panel, so
   Forge's scripts, the keyboard's Tab order and the Forge Assistant's
   workspace list keep Forge's own.
-- **Generate above the gallery, the prompt boxes at the top of the settings
-  column** — the split view — in Txt2Img and Img2Img, with the classic and the
-  compact prompt-box styles both handled. The results column stays where it
+- **Generate under the gallery's buttons, the prompt boxes at the top of the
+  settings column** — the split view — in Txt2Img and Img2Img, with the classic
+  and the compact prompt-box styles both handled. Generate heads the gallery
+  until 2026-11-06; it is now the last thing in the results panel's kept part —
+  the progress bar while a run goes, the gallery, its buttons, then Generate —
+  where a thumb reaches it on a phone, and the Forge Assistant's fill keeps all
+  of them in view together. Forge's own mobile script moves Generate on a
+  resize; the theme puts it back under the buttons on the next frame. The results column stays where it
   rests while the settings scroll, a margin under the bar at least (the one
   scroller, below, says how). Generate is 44 px tall (Forge gives
   it a 4.5 em floor), the frames Gradio draws around every tab panel, one

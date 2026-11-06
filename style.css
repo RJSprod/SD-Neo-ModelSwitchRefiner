@@ -10098,6 +10098,19 @@ body.forge-assistant-focused[data-forge-assistant-focus-rail="right"] .forge-ass
     margin-bottom: var(--forge-assistant-fill-after, 0px) !important;
 }
 
+/* With Generate under the gallery's buttons (the theme's split view since
+   2026-11-06) the last kept thing is Generate: the room is under it, and none
+   between the buttons and it. */
+#txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img:has(+ #txt2img_generate_box),
+#img2img_results[data-forge-assistant-fill] #image_buttons_img2img:has(+ #img2img_generate_box) {
+    margin-bottom: 0 !important;
+}
+
+#txt2img_results[data-forge-assistant-fill] #image_buttons_txt2img + #txt2img_generate_box,
+#img2img_results[data-forge-assistant-fill] #image_buttons_img2img + #img2img_generate_box {
+    margin-bottom: var(--forge-assistant-fill-after, 0px) !important;
+}
+
 /* Txt2Img's or Img2Img's settings column, docked in the panel (`Dock`, and
    the panel's third state in forge_assistant.js).
 

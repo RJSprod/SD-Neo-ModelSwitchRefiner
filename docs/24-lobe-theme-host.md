@@ -42,7 +42,7 @@ What that file says, and what became of each line:
 
 | Lobe setting | Value | Here |
 |---|---|---|
-| `layoutSplitPreview` | true | **Generate above the gallery, prompts at the top of the settings column** (`model_chain_theme_split`) |
+| `layoutSplitPreview` | true | **Generate under the gallery's buttons, prompts at the top of the settings column** (`model_chain_theme_split`; Generate headed the gallery until 2026-11-06) |
 | `enableSidebar`, `sidebarExpand`, `sidebarWidth` | true, false, 280 | **Quick settings** in a drawer, collapsed, 280 px (`model_chain_theme_quick`, `_quick_width`) |
 | `promptTextareaType` | resizable | **Resizable prompt boxes** (`model_chain_theme_prompts`) |
 | `svgIcon` | true | **Drawn icons** on the tool buttons (`model_chain_theme_icons`), buttons whose whole text is the emoji and nothing else |
@@ -1081,3 +1081,46 @@ imports, its mount, the inlined environment and the `dev` quirk.
 Not read: the sidebars', share, prompt-formatter and image-info features in
 detail (they move and decorate Forge's elements and need nothing from a host),
 the locales, the prompt library.
+
+## Generate under the gallery's buttons (2026-11-06)
+
+> "I would like to move the "generate" button that is in text to image and
+> image to image, so that it appears below the image gallery buttons. This
+> should not change how this content all fits into page, i still expect to see
+> the progress bar (when in progress), gallery, gallery buttons, and generate
+> button all in view of the screen, I just want to reorder it so the generate
+> button is reachable on my phone display. Its hard to reach the top of the
+> page"
+
+The split view puts `#<tab>_generate_box` directly after `#image_buttons_<tab>`
+in the results panel (`placeGenerate`; a page whose gallery has no buttons row
+keeps it at the head of the gallery's container). It stays inside the results
+panel, so the rule that does not draw its row while a progress bar runs holds
+as it did, and a press on the bar still brings the row back -- under the
+buttons now.
+
+**Fitted together.** The Forge Assistant's fill (docs/22 §3.33,
+`forge_assistant_layout.js`) kept from the first of Generate, the bar, the
+gallery's container and the gallery down to the buttons. `keptBox` now ends the
+kept part at the lowest kept thing -- Generate when it is under the buttons --
+and `measure` counts what it nudges under the gallery (`movedBelow`) as it
+counted what it nudged above it, so the gallery is what is left once the bar,
+the buttons and Generate each have their one space: on a 900 px window under
+the header, the gallery 96-796, its buttons 804-840, Generate 848-892. The room
+the fill leaves under the kept part (`--forge-assistant-fill-after`) is under
+Generate when Generate is last (style.css, `:has(+ #<tab>_generate_box)`).
+
+**Forge's mobile script.** It moves Generate on a resize that changes its
+answer to "is this a phone" -- to the top of the results column, or beside the
+prompts -- and no Gradio update follows. `scheduleSplit` lays the split view
+out again on the next frame after every resize.
+
+**Verified.** `tests/test_theme_layout.py`: Generate after the buttons in the
+results panel (the head of the gallery's container without a buttons row); put
+back after the mobile script moves it; the fill with the gallery's container
+first under the header and Generate one space under the buttons and one over
+the window's bottom, scrolled and in focus mode; a run's bar where the gallery
+sat at rest, the buttons taking Generate's place at the bottom while its row is
+away, and the row back under the buttons on a press. Not run on the user's
+phone.
+
