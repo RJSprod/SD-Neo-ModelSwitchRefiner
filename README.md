@@ -4309,8 +4309,10 @@ holds two choices, each **Top** (as it always was), **Left** or **Right**, each
 chosen apart from the other and remembered in this browser:
 
 - **Tab Bar** — the WebUI's tab bar as a slim strip, 48 px wide, down the left
-  or right side of the window. The tabs are icons on it, stacked from the top,
-  whatever the theme's *Tab names* setting says (a tab's name is its tooltip),
+  or right side of the window. The tabs are icons on it, stacked at the strip's
+  foot just above its other buttons (bottom-justified since 2026-11-06, where a
+  thumb reaches them on a phone; they scroll from the first when they do not
+  fit), whatever the theme's *Tab names* setting says (a tab's name is its tooltip),
   and the theme's own buttons — quick settings, extra networks, light and
   dark, the theme's settings — stand apart at the strip's foot, a line above
   them. The page starts at the window's top beside the strip, with nothing
@@ -7430,8 +7432,8 @@ one second.
 - **The bar down one side.** The Forge Assistant's *Transpose View* (its **⋯**
   menu; see *Transpose View* under the Forge Assistant) lays this bar out as a
   48 px strip down the window's left or right side: the tabs as icons whatever
-  *Tab names* says, stacked from the top and scrolling down where they do not
-  fit, the bar's own buttons at the strip's foot under a line, no title, and
+  *Tab names* says, stacked at the strip's foot above the bar's own buttons
+  and scrolling from the first where they do not fit, the bar's own buttons at the strip's foot under a line, no title, and
   the page beside it from the window's top. Everything held under the bar
   (the drawers, the results column's hold) starts at the window's top
   instead. It is still Forge's own strip, moved by nothing.

@@ -1079,9 +1079,11 @@
    bar as a slim rail down the window's left or right side, written on the
    root (`data-forge-assistant-rail`), with the page beside it starting at the
    window's top under no bar at all. The tabs are icons on a rail whatever the
-   tab names setting says (the script draws them), stacked from the top and
-   scrolling down where they do not fit; the header's own buttons stand at the
-   rail's foot, a line above them, over the tabs that scroll under them. The
+   tab names setting says (the script draws them), stacked at the rail's foot,
+   just above the header's own buttons -- bottom-justified, where a thumb
+   reaches them on a phone (2026-11-06) -- and scrolling from the first where
+   they do not fit; the header's own buttons stand at the very foot, a line
+   above them, over the tabs that scroll under them. The
    bar is still Forge's own strip, moved by nothing: only its layout changes,
    so Forge's direct-child selector and the assistant's host still find it.
    Everything held under the bar reads `--mc-theme-header`, which is none
@@ -1144,11 +1146,38 @@
     z-index: 1;
     flex-direction: column;
     gap: 4px;
-    margin: auto 0 0;
+    margin: 0;
     padding: 6px 0;
     border-top: 1px solid var(--border-color-primary);
     background: var(--body-background-fill);
     box-shadow: 0 -12px 12px -4px var(--body-background-fill);
+}
+
+/* The tabs at the rail's foot: "I recently made the flyout buttons bottom
+   justified ... lets make the same for tab bar. It should be bottom justified,
+   so i can reach the button on mobile" (2026-11-06). The bar's own `::before`
+   -- the ground along the top, none on a rail -- is the room above the tabs: a
+   flex item drawn first (before every tab's `order`, which starts at 1) that
+   takes whatever height the tabs and the buttons leave, and gives all of it up
+   when they do not fit, so the rail still scrolls from its first tab.
+   `justify-content: flex-end` would put an overflow above the rail's top,
+   where no scroll reaches it. Nothing of a ground is drawn: static, no fill,
+   no line. */
+:root[data-mc-theme="on"][data-forge-assistant-rail] #tabs > .tab-nav::before {
+    content: "";
+    position: static;
+    display: block;
+    flex: 1 1 auto;
+    order: -1;
+    width: 100%;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    z-index: auto;
+    pointer-events: none;
 }
 
 /* The page beside the rail, and the quick settings drawer, which opens from

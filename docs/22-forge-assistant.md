@@ -4112,8 +4112,14 @@ without `data-mc-theme="on"` Left and Right are greyed with a sentence saying
 why.
 
 - **A 48 px strip** (`--mc-theme-rail`), fixed down the window's whole height,
-  its tabs stacked from the top with the selected tab's accent on the side that
-  faces the page. A rail is always icons — a name does not fit across 48 px —
+  its tabs stacked at its foot, just above the header's own buttons, with the
+  selected tab's accent on the side that faces the page. (Stacked from the top
+  until 2026-11-06: "lets make the same for tab bar. It should be bottom
+  justified, so i can reach the button on mobile". The bar's own `::before`,
+  none on a rail before, is the room above the tabs -- a flex item first in
+  order that takes the slack and gives all of it up when the tabs do not fit,
+  so the rail still scrolls from its first tab; `justify-content: flex-end`
+  would have put an overflow above the rail's top, out of a scroll's reach.) A rail is always icons — a name does not fit across 48 px —
   so `installTabIcons` draws them whatever *Tab names* says (`rail()`), and
   puts the names back when the rail goes and the setting says names.
 - **The other buttons apart.** The header's own buttons (quick settings, extra
@@ -4203,7 +4209,8 @@ did not, until §3.48 made the tab rail room the panel stands beside.
 
 `tests/test_transpose_layout.py` (Chromium, the theme's Forge-shaped page with
 the assistant's scripts): the rail down either side — 48 px, the window's
-height, the tabs stacked from the top as icons whatever *Tab names* says and
+height, the tabs stacked at its foot (since 2026-11-06), and from the first
+when they do not fit, as icons whatever *Tab names* says and
 back to names along the top, the buttons at the foot under a line and staying
 there while the tabs scroll, the accent facing the page, no ground; the page
 from the window's top beside it; the selected tab found down the rail, also

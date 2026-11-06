@@ -51,6 +51,11 @@ GEOMETRY = """() => {
         focusRail: document.body.getAttribute('data-forge-assistant-focus-rail'),
         accent: getComputedStyle(nav.querySelector(':scope > button[role="tab"].selected')).boxShadow,
         ground: getComputedStyle(nav, '::before').content, strips: getComputedStyle(nav).boxShadow,
+        spacer: {position: getComputedStyle(nav, '::before').position,
+                 fill: getComputedStyle(nav, '::before').backgroundImage
+                     + ' ' + getComputedStyle(nav, '::before').backgroundColor,
+                 line: getComputedStyle(nav, '::before').borderBottomWidth},
+        scrolled: nav.scrollTop,
         width: document.documentElement.clientWidth, height: innerHeight,
     };
 }"""
@@ -111,7 +116,10 @@ def open_panel(page):
 
 class TestTheTabBarAsARail:
     @pytest.mark.parametrize("side", ["left", "right"])
-    def test_a_slim_rail_down_the_side_tabs_first_and_the_other_buttons_apart_at_its_foot(self, browser, side):
+    def test_a_slim_rail_down_the_side_tabs_at_its_foot_above_the_other_buttons(self, browser, side):
+        """Bottom-justified since 2026-11-06: "I recently made the flyout
+        buttons bottom justified ... lets make the same for tab bar. It should
+        be bottom justified, so i can reach the button on mobile."""
         page = focus_page(browser, width=1280, height=800)
         transposed(page, tabs=side)
         found = geometry(page)
@@ -123,7 +131,9 @@ class TestTheTabBarAsARail:
         assert (nav["left"] == 0) if side == "left" else (nav["right"] == width)
         tops = [tab["top"] for tab in found["tabs"]]
         assert tops == sorted(tops) and len({tab["left"] for tab in found["tabs"]}) == 1, "stacked, one above the next"
-        assert found["tabs"][0]["top"] <= 8
+        assert found["tabs"][0]["top"] > 8, "the room is above the tabs, not below them"
+        assert 0 <= found["actions"]["top"] - found["tabs"][-1]["bottom"] <= 8, \
+            "the tabs stand just above the other buttons"
         assert abs(found["actions"]["bottom"] - height) <= 1, "the other buttons stand at the rail's foot"
         assert found["actionsLine"] != "0px", "a line between the tabs and the other buttons"
         lefts = {round(kid["left"]) for kid in found["actionKids"]}
@@ -132,8 +142,22 @@ class TestTheTabBarAsARail:
         assert found["accent"].endswith("inset") and offsets, found["accent"]
         assert (float(offsets.group(1)), float(offsets.group(2))) == ((-2, 0) if side == "left" else (2, 0)), \
             "the accent on the side that faces the page"
-        assert found["ground"] == "none" and found["strips"] == "none", \
-            "nothing of a bar's ground reaching across the page's padding"
+        assert found["strips"] == "none" and found["spacer"]["position"] == "static" \
+            and found["spacer"]["fill"] == "none rgba(0, 0, 0, 0)" and found["spacer"]["line"] == "0px", \
+            "nothing of a bar's ground reaching across the page's padding: its ::before is only the room"
+
+    def test_tabs_that_do_not_fit_still_scroll_from_the_first(self, browser):
+        """The room above the tabs gives itself up when they do not fit. Pushed
+        to the foot by `justify-content: flex-end` instead, an overflow would be
+        above the rail's top, where no scroll reaches it."""
+        page = focus_page(browser, width=1280, height=420)
+        transposed(page, tabs="left")
+        found = geometry(page)
+        page.close()
+
+        assert found["scrolled"] == 0
+        assert 0 <= found["tabs"][0]["top"] <= 8, "the first tab is at the top, where the scroll starts"
+        assert found["tabs"][-1]["bottom"] > found["actions"]["top"], "the rest scroll under the buttons"
 
     @pytest.mark.parametrize("side", ["left", "right"])
     def test_the_page_starts_at_the_windows_top_beside_the_rail(self, browser, side):

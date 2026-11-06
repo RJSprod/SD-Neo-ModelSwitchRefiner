@@ -543,7 +543,9 @@ root (`data-forge-assistant-rail`, `left` or `right`), and this theme lays its
 header out from it — the same bar, moved by nothing:
 
 - a **48 px strip** (`--mc-theme-rail`) fixed down the window's height on that
-  side, the tabs stacked from the top, the selected tab's accent on the side
+  side, the tabs stacked at its foot above the header's buttons (since
+  2026-11-06; the bar's `::before` is the room above them, and gives it up
+  when they do not fit), the selected tab's accent on the side
   that faces the page; `--mc-theme-header` is 0, so the drawers and the
   results column's hold start at the window's top, and the page is padded by
   the rail's width on its side plus its own 8 px;
