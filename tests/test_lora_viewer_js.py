@@ -9,8 +9,8 @@ The viewer's own stylesheet section is loaded from ``style.css``.
 What is held here is what the user would see go wrong: a slider that moves
 when a finger only scrolled, an Apply that touches a character it should not,
 an Escape that also interrupts a generation, a viewer that never stops waiting
-for its details, a stray tap or a change of tab that applies, a theme rule that
-stretches a trigger out of its row.
+for its details, a tap outside or a change of tab that applies (or reaches the
+page under the viewer), a theme rule that stretches a trigger out of its row.
 """
 
 from __future__ import annotations
@@ -889,17 +889,6 @@ class TestClosingWithoutApplying:
         finally:
             close_page(page, served)
 
-    def test_a_tap_outside_does_nothing(self, browser):
-        page, served = open_page(browser)
-        try:
-            open_viewer(page)
-            row(page, 0).locator(".mc-lv-step").nth(1).click()
-            page.mouse.click(4, 700)
-            assert page.locator(".mc-lv").is_visible()
-            assert weight_of(page, 0) == "0.9"
-        finally:
-            close_page(page, served)
-
     def test_a_change_of_tab_cancels(self, browser):
         page, served = open_page(browser)
         try:
@@ -922,6 +911,163 @@ class TestClosingWithoutApplying:
             assert page.evaluate("window.overlays") == [
                 {"name": "lora-viewer", "open": True, "modal": True},
                 {"name": "lora-viewer", "open": False, "modal": True}]
+        finally:
+            close_page(page, served)
+
+
+BELOW = """() => {
+    // What a tap would reach under the viewer: clicks the page's own
+    // listeners hear, outside the viewer, after the window's capture phase.
+    window.below = [];
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.mc-lv')) window.below.push(e.target.id || e.target.className || e.target.tagName);
+    });
+}"""
+
+TOAST = """() => { const node = document.querySelector('.mc-lv-toast');
+                   return node.hidden ? null : node.textContent; }"""
+
+
+class TestATapOutside:
+    """"Tapping outside of that lora pop up should close it" (2026-11-06): as
+    Escape does -- Cancel, nothing written -- and the page says so when that
+    threw changes away. Until then a tap outside did nothing."""
+
+    def test_a_tap_outside_closes_it_with_nothing_written_and_says_so(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-step").nth(1).click()
+            assert weight_of(page, 0) == "0.9"
+            page.evaluate(BELOW)
+            page.mouse.click(4, 700)                     # the scrim, beside the viewer
+            assert page.locator(".mc-lv").is_hidden() and page.locator(".mc-lv-scrim").is_hidden()
+            assert page.evaluate(BOXES) == {"prompt": PROMPT, "positive": LITERAL_POSITIVE,
+                                            "negative": LITERAL_NEGATIVE}
+            assert page.evaluate("window.inputs") == []
+            assert page.evaluate(TOAST) == "Closed without applying: the change was not written."
+            assert page.evaluate("window.below") == [], "the tap is taken, not handed to the page"
+            assert page.evaluate("document.activeElement.id") == "mc-lora-viewer-txt2img"
+            assert page.evaluate("window.overlays")[-1] == {"name": "lora-viewer", "open": False,
+                                                           "modal": True}
+            page.keyboard.press("Escape")
+            assert page.evaluate("window.forgeEscapes") == 1, "closed, Escape is Forge's again"
+        finally:
+            close_page(page, served)
+
+    def test_with_nothing_changed_it_closes_and_says_nothing(self, browser):
+        page, served = open_page(browser, width=1600, height=900)
+        try:
+            open_viewer(page)
+            page.mouse.click(1500, 500)                  # far right of a centred 880 px viewer
+            assert page.locator(".mc-lv").is_hidden()
+            assert page.evaluate(TOAST) is None
+        finally:
+            close_page(page, served)
+
+    def test_a_press_that_moved_or_began_inside_is_no_tap(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            page.mouse.move(4, 600)
+            page.mouse.down()
+            page.mouse.move(4, 660, steps=4)              # a swipe on the scrim
+            page.mouse.up()
+            assert page.locator(".mc-lv").is_visible()
+            knob = row(page, 0).locator(".mc-lv-knob").bounding_box()
+            page.mouse.move(knob["x"] + knob["width"] / 2, knob["y"] + knob["height"] / 2)
+            page.mouse.down()
+            page.mouse.move(2, knob["y"] + knob["height"] / 2, steps=6)   # dragged past the edge
+            page.mouse.up()
+            assert page.locator(".mc-lv").is_visible(), "a press begun inside is the viewer's"
+            assert weight_of(page, 0) == "-5"
+            edge = page.locator(".mc-lv-foot").bounding_box()
+            page.mouse.move(edge["x"] + 3, edge["y"] + edge["height"] / 2)
+            page.mouse.down()
+            page.mouse.move(edge["x"] - 5, edge["y"] + edge["height"] / 2)   # 8 px, onto the scrim
+            page.mouse.up()
+            assert page.locator(".mc-lv").is_visible(), "begun inside, let go just outside"
+        finally:
+            close_page(page, served)
+
+    def test_on_a_phone_a_finger_on_the_tab_bar_closes_it(self, browser):
+        """On a phone the viewer leaves 8 px of scrim at its sides, and the
+        browser's touch adjustment gives a finger there to the row beside it
+        (as it would a real one): what is outside is the tab bar above."""
+        page, served = open_page(browser, width=390, height=800, touch=True)
+        try:
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-step").nth(1).tap()
+            page.touchscreen.tap(3, 600)                 # adjusted onto the row: the viewer's
+            assert page.locator(".mc-lv").is_visible()
+            page.touchscreen.tap(300, 22)                # the bar, where no tab is
+            page.wait_for_selector(".mc-lv", state="hidden")
+            assert page.evaluate(BOXES)["prompt"] == PROMPT
+            assert page.evaluate(TOAST) == "Closed without applying: the change was not written."
+        finally:
+            close_page(page, served)
+
+    def test_the_tab_bar_still_answers_and_a_tap_on_it_closes_the_viewer(self, browser):
+        page, served = open_page(browser)
+        try:
+            page.evaluate("""() => {
+                window.navPresses = 0;
+                document.getElementById('nav-img2img').addEventListener('click', () => {
+                    window.navPresses += 1;
+                    document.getElementById('tab_txt2img').style.display = 'none';
+                    document.getElementById('tab_img2img').style.display = '';
+                });
+            }""")
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-step").nth(1).click()
+            page.click("#nav-img2img")
+            assert page.locator(".mc-lv").is_hidden()
+            assert page.evaluate("window.navPresses") == 1, "the tab changes too"
+            assert page.evaluate(BOXES)["prompt"] == PROMPT
+        finally:
+            close_page(page, served)
+
+    def test_stepped_aside_for_forges_description_a_tap_is_forges(self, browser):
+        page, served = open_page(browser)
+        try:
+            open_viewer(page)
+            row(page, 0).locator(".mc-lv-thumb").click()
+            page.wait_for_selector(".global-popup", state="visible")
+            page.mouse.click(4, 700)                     # Forge's backdrop puts its popup away
+            page.wait_for_selector(".mc-lv:not([hidden])")
+            assert page.locator(".mc-lv").is_visible(), "back, not closed"
+        finally:
+            close_page(page, served)
+
+
+class TestTheAddBoxHasTheFocus:
+    """"When i open the lora panel we created, the text field should be auto
+    selected, cursor in the field, ready for me to type a character"
+    (2026-11-06)."""
+
+    def test_the_press_that_opens_it_leaves_the_cursor_in_the_add_box(self, browser):
+        page, served = open_page(browser)
+        try:
+            with page.expect_request(lambda request: mc_lora_viewer.NAMES_ROUTE in request.url):
+                open_viewer(page)
+            assert page.evaluate("document.activeElement.className") == "mc-lv-add-input"
+            assert page.locator(".mc-lv-suggest").is_hidden(), "an empty box suggests nothing"
+            page.keyboard.type("det")
+            page.wait_for_selector(".mc-lv-option")
+            assert [o["name"] for o in page.evaluate(SUGGESTED)] == \
+                ["detail_slider", "add_detail_xl", "soft_light_detail"]
+        finally:
+            close_page(page, served)
+
+    def test_on_a_phone_too_and_on_img2img(self, browser):
+        page, served = open_page(browser, width=390, height=800, touch=True)
+        try:
+            page.tap("#mc-lora-viewer-txt2img")
+            page.wait_for_selector(".mc-lv:not([hidden])")
+            assert page.evaluate("document.activeElement.className") == "mc-lv-add-input"
+            page.click(".mc-lv-button-cancel")
+            page.evaluate("(tab) => window.mcLoraViewer.open(tab)", "img2img")
+            assert page.evaluate("document.activeElement.className") == "mc-lv-add-input"
         finally:
             close_page(page, served)
 
@@ -1113,7 +1259,8 @@ class TestAddingOne:
         page, served = open_page(browser)
         try:
             open_viewer(page)
-            assert served.listed == 0, "nothing listed before the box is used"
+            # Listed as the viewer opens, the box having the focus from then
+            # (2026-11-06); until then, when the box was first used.
             typed(page, "det")
             page.wait_for_selector(".mc-lv-option")
             assert [o["name"] for o in page.evaluate(SUGGESTED)] == \

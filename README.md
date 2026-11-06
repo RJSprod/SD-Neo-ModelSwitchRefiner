@@ -8060,7 +8060,9 @@ and, on Txt2Img, the two Literal boxes, in the order they are on screen:
   change it. A tag's second weight, `<lora:x:0.8:0.5>`, is kept as typed; the
   slider is the first.
 
-**Add a LoRA…**, the box under the title, adds one at a time. Typing in it
+**Add a LoRA…**, the box under the title, adds one at a time. It has the
+cursor as the viewer opens, so the first letter you type goes into it (on a
+phone the keyboard comes up with the viewer; since 2026-11-06). Typing in it
 suggests the LoRAs of the folders assigned to the UI Preset you are on — the
 ones the extra networks panel shows you for it (*Model Chain: LoRA folders*;
 nothing assigned is every LoRA, unless the strict reading is on) — matched as
@@ -8075,8 +8077,8 @@ new row marked **New in Prompt**, with its picture and trigger words, at the
 card's own *Preferred weight*, or Forge's default multiplier without one, as a
 press on its card would write it; its bin takes it back, and **Reset all**
 takes out every added one. The names come from
-`GET /model-chain/lora-viewer/names`, once a viewer, when the box is first
-used, with an eight-second limit; no file is read for them. The pictures of
+`GET /model-chain/lora-viewer/names`, once a viewer, as it opens (the box has
+the focus then), with an eight-second limit; no file is read for them. The pictures of
 the names shown are asked of the details route a moment after the typing
 stops, one request at a time with the same limit, and kept while the viewer
 is open: a name seen once is drawn at once after that, and a LoRA added from
@@ -8089,9 +8091,16 @@ separator (*extra_networks_add_text_separator*, a space), and changes nothing
 else in the boxes. Each box it changed gets
 the input event Forge's own controls send, so Generate sends what is on screen,
 and a Literal box is saved as when you leave it. A box whose text changed while
-the viewer was open is left alone, and the page says so. **Cancel**, **Escape**
-and a change of tab close it with nothing changed. A tap outside does nothing,
-so a stray tap cannot throw your changes away.
+the viewer was open is left alone, and the page says so. **Cancel**, **Escape**,
+**a tap outside it** and a change of tab close it with nothing changed (a tap
+outside, since 2026-11-06: it did nothing before). A tap outside that leaves
+changes unwritten says so — *Closed without applying: the change was not
+written.* — and the tap is taken: nothing under the viewer gets it, except
+the tab bar, where a tab still changes the tab. A press that moved (a swipe)
+or that began inside the viewer, such as a slider's knob dragged past its
+edge, is not a tap outside. On a phone the viewer leaves only a thin margin,
+which the browser gives to the viewer under a finger, so there the tap
+outside is a tap on the tab bar.
 
 On a phone, swiping up and down scrolls the list and never moves a slider: a
 slider moves on a sideways drag, a tap on its track or a drag of its knob, and

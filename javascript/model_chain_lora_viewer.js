@@ -70,8 +70,19 @@
 // * Let Escape reach anything else. Forge's own Escape interrupts a running
 //   generation, and the Forge Assistant's leaves focus mode; the viewer takes
 //   Escape on the window's capture phase while it is open, before either.
-// * Close on a stray tap. Nothing outside it closes it but Escape and a change
-//   of tab, which is Cancel.
+// * Hand a tap outside it to the page under it. A tap outside closes it, as
+//   Escape and a change of tab do -- Cancel, nothing written: "Tapping outside
+//   of that lora pop up should close it" (2026-11-06; until then a tap outside
+//   did nothing, so that a stray one could not throw changes away, and when
+//   one does now the page says so). Decided on the tap's click, its last
+//   event, so nothing under the scrim gets what follows the press once the
+//   scrim has gone; a press that moved is a swipe, and one that began inside
+//   the viewer (a knob dragged past its edge) is the viewer's. The tab bar
+//   still answers: a tap on a tab closes the viewer and changes the tab.
+// * Make the add box wait for a tap. It has the focus from the moment the
+//   viewer opens, inside the press that opened it, so a phone's keyboard comes
+//   up with it: "the text field should be auto selected, cursor in the field,
+//   ready for me to type a character" (2026-11-06).
 // * Be covered. It draws on the dialog layer Mini Paint NEO and the assistant
 //   share (`--minipaint-dialog-layer`, 2000) and announces itself with the
 //   `minipaint:overlay` event, which puts the assistant's panel away.
@@ -97,6 +108,7 @@
     const STEP = 0.05;
     const PAD = 11;          // the track's inset: the knob's radius, so its centre reaches both ends
     const TAP_SLOP = 6;      // pixels a finger may move and still be a tap on the track
+    const OUTSIDE_SLOP = 16; // pixels a press outside may move and still be a tap that closes
     const SCROLL_SLOP = 8;   // pixels of vertical travel that make a touch a scroll
     const REPEAT_AFTER = 380;
     const REPEAT_EVERY = 70;
@@ -286,6 +298,8 @@
         known: {}, picturing: null, picturesTimer: 0,
         // Stepped aside for Forge's description editor, and its watch.
         aside: false, popupWatch: null,
+        // A press made outside the viewer, until its click says it was a tap.
+        outside: null,
     };
 
     function build() {
@@ -1529,11 +1543,50 @@
         refold();
     }
 
+    // -- a tap outside ----------------------------------------------------------
+
+    function ours(target) {
+        const nodes = state.nodes;
+        return !!(nodes && target && target.nodeType === 1
+                  && (nodes.dialog.contains(target) || nodes.toast.contains(target)));
+    }
+
+    // A primary press, made by a person, outside the viewer: remembered until
+    // its click. Stepped aside, the page is Forge's description editor's.
+    function onOutsideDown(event) {
+        state.outside = null;
+        if (!state.open || state.aside || !event.isTrusted || event.isPrimary === false
+            || event.button !== 0 || ours(event.target)) return;
+        state.outside = {x: event.clientX, y: event.clientY};
+    }
+
+    // The tap's last event: a press the browser took for a scroll or a drag
+    // sends none. On the scrim it is taken (there is nothing under it to give
+    // it to); on the tab bar it goes on, and the tab changes too.
+    function onOutsideClick(event) {
+        const press = state.outside;
+        state.outside = null;
+        if (!press || !state.open || !event.isTrusted || ours(event.target)) return;
+        if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > OUTSIDE_SLOP) return;
+        if (event.target === state.nodes.scrim) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        const dropped = changes().length;
+        close(false);
+        if (dropped) {
+            toast("Closed without applying: " + (dropped === 1 ? "the change was" : dropped + " changes were")
+                  + " not written.");
+        }
+    }
+
     function listen(on) {
         if (on === state.listening) return;
         state.listening = on;
         const method = on ? "addEventListener" : "removeEventListener";
         window[method]("keydown", onKey, true);
+        window[method]("pointerdown", onOutsideDown, true);
+        window[method]("click", onOutsideClick, true);
         window[method]("resize", onResize);
         if (window.visualViewport) {
             window.visualViewport[method]("resize", measure);
@@ -1594,7 +1647,11 @@
         measure();
         announce(true);
         try {
-            nodes.dialog.focus({preventScroll: true});
+            // The add box, ready to type into: inside the press that opened the
+            // viewer, so a phone's keyboard comes up with it. Its focus lists
+            // the names (listNames), so the first letter typed has them.
+            const field = nodes.add && !nodes.add.disabled ? nodes.add : nodes.dialog;
+            field.focus({preventScroll: true});
         } catch (error) {
             /* focus is a courtesy */
         }
