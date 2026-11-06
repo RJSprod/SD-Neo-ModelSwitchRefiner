@@ -357,3 +357,46 @@ nothing in this feature to fix there, and the ready-wait field is what says so.
 * **No automatic anything.** Every number collected here is for a person to
   read. The release gate for the next change is a shared log, not a threshold
   crossing.
+
+## Settings -> Voice Chat, a page at a time (2026-11-06)
+
+> "The voice chat settings menu is a MESS. I want you to look at it and
+> redesign this settings menu so its easier to navigate."
+
+What it was: one column, about 3,800 px on a desktop and 6,100 px on a phone --
+the access token, the three engine cards, the voice runtime, the speech-to-text
+tiers, the Voice Pipeline, the components list, the recording cleanup, the
+engine's own installer, the voices, the delivery, the cloning, then twenty of
+Forge's own option rows, most of them the stored copy of a value the panels
+above them set -- in the order they were added.
+
+What it is: a row of pages at the top of the install row
+(`mc_voice_ui.pages_nav_html`, `VOICE_PAGES`), each a purpose --
+
+| page | what is on it |
+| --- | --- |
+| Engine | the engine cards, the selected engine's installer and settings, the engine option, Speak replies automatically |
+| Voices | the voices block (list, Test, delivery, cloning), the default voice, test text, speed, pitch, volume, pause, the cloning folder |
+| Dictation | the speech-to-text tiers, Automatically send dictation, the speech-to-text model |
+| Pipeline | the Voice Pipeline row and its eight options |
+| Setup | the access token, the voice runtime and its summary, Installation & Components, the recording cleanup, the voice data directory |
+| All | everything, as one column |
+
+-- and `javascript/voice_chat.js` (`showVoicePage`) hides by a class what is not on
+the page chosen: each part of the install row by its `data-mc-voice-page`
+(`_on_page`), and each of Forge's option blocks by the key-to-page map the row
+carries (`option_pages`, from Python, so there is one list). Nothing is moved,
+so every wiring, poll and repaint finds its nodes where it did, and a row that
+fetches only once it is on screen (`whenOnScreen`) waits for its page. The
+choice is kept in `localStorage` (`mc-voice-settings-page`); while Forge's
+settings search has text every page is shown; the install row redrawn after an
+engine change (`swapSurface`) is put on the page again as it is wired. The row
+wraps on a narrow window rather than scrolling sideways (the swipe-is-Back trap).
+
+**Verified.** `tests/test_voice_settings_pages.py`: every option the section
+registers has a page and every part of the install row is on one; in Chromium
+at phone width each page shows its own and only its own, All shows everything,
+the choice survives a reload, a search shows everything until cleared, and a
+swapped install row keeps the page. Mutations: the search ignored, the choice
+not kept, the options never paged, an option with no page and a part on no page
+each fail a test. Not run on the user's machine.

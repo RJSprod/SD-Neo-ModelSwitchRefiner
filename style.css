@@ -6362,6 +6362,61 @@
     margin: 0.4em 0 0.8em;
 }
 
+/* The section a page at a time (mc_voice_ui.VOICE_PAGES, voice_chat.js
+   `showVoicePage`): a row of pages at the top, one purpose shown. A part of
+   another page is hidden by a class, never moved: `!important` because Forge's
+   settings search writes an inline display on the section's blocks, and the
+   script shows every page while that search has text. On a narrow window the
+   row wraps rather than scrolling sideways: a swipe past the end of a sideways
+   scroller is the browser's Back (CLAUDE.md), and a page out of sight is a
+   page nobody finds. */
+.mc-voice-pages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35em;
+    margin: 0 0 0.2em;
+    padding: 0.25em;
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    background: var(--background-fill-secondary, transparent);
+}
+
+.mc-voice-page-tab {
+    flex: 0 0 auto;
+    min-height: 36px;
+    padding: 0.35em 0.9em;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md, 6px);
+    background: transparent;
+    color: var(--body-text-color-subdued, inherit);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.mc-voice-page-tab:hover,
+.mc-voice-page-tab:focus-visible {
+    color: var(--body-text-color, inherit);
+}
+
+.mc-voice-page-tab[aria-selected="true"] {
+    background: var(--background-fill-primary, transparent);
+    border-color: var(--border-color-primary, currentColor);
+    color: var(--body-text-color, inherit);
+    box-shadow: inset 0 -2px 0 var(--color-accent, currentColor);
+}
+
+.mc-voice-page-part {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6em;
+}
+
+.mc-voice-page-hidden {
+    display: none !important;
+}
+
 .mc-voice-runtime,
 .mc-voice-note {
     color: var(--body-text-color-subdued, inherit);

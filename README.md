@@ -6008,6 +6008,17 @@ microphone settings.
 
 ### Setting it up
 
+**Settings → Voice Chat is a page at a time** (since 2026-11-06). A row of
+pages at its top shows one purpose: **Engine** — which engine speaks, its install
+and its own settings, and *Speak replies automatically*; **Voices** — the voice
+list, Test, the delivery sliders, cloning and the stored voice settings;
+**Dictation** — the speech-to-text qualities and *Automatically send
+dictation*; **Pipeline** — the Voice Pipeline and its stages; **Setup** — the
+access token, the voice runtime, every installer (the recording cleanup's too)
+and the folders. **All** is the whole section in one column, as it was. The page
+you chose is remembered in this browser, and while Forge's settings search has
+text every page is shown, so a match is never hidden on a page you are not on.
+
 **Settings → Voice Chat** has two downloads:
 
 | | |
