@@ -591,6 +591,14 @@ def build() -> dict:
                                value=initial_thread or None, container=False,
                                elem_id=ui.ident("chat", "threads"),
                                elem_classes=ui.classes("threads"))
+            # "I am able to PIN a thread as favorite" (2026-11-06): pinned
+            # threads are listed first, marked, here and in the Forge
+            # Assistant's Threads menu. The label says which way a press goes,
+            # for the thread that is open (_pin_label), and no emoji is written
+            # on the button: the host's theme swaps a button's emoji for an
+            # icon and takes its words with it.
+            pin = gr.Button(_pin_label(_is_pinned(who, initial_thread)), size="sm",
+                            elem_id=ui.ident("chat", "pin"))
             rename = gr.Button("Rename this thread", size="sm")
             rename_box = gr.Textbox(label="New title", visible=False, container=False,
                                     placeholder="New title…",
@@ -785,6 +793,11 @@ def build() -> dict:
 
     to_threads.click(fn=_open_threads, inputs=[character, search],
                      outputs=screens + [threads], queue=False)
+    # The pin's label for the thread that is open, as the screen opens: a
+    # second handler on the same press, the screen's own outputs unchanged.
+    to_threads.click(fn=lambda who, identifier: gr.update(value=_pin_label(
+                         _is_pinned(who, identifier))),
+                     inputs=[character, thread_state], outputs=[pin], queue=False)
     to_character.click(fn=_open_character_screen, inputs=[character],
                        outputs=screens + [character], queue=False)
 
@@ -864,6 +877,8 @@ def build() -> dict:
                  inputs=[character, thread_state, search, revision_state],
                  outputs=[threads, thread_state] + view, queue=False)
 
+    pin.click(fn=_toggle_pin, inputs=[character, thread_state, search],
+              outputs=[threads, pin, status], queue=False)
     rename.click(fn=lambda: (gr.update(visible=True), gr.update(visible=True)),
                  outputs=[rename_box, rename_row], queue=False)
     cancel_rename.click(fn=lambda: (gr.update(value="", visible=False), gr.update(visible=False)),
@@ -1295,7 +1310,16 @@ def _character_choices() -> list[str]:
         return []
 
 
+PIN_MARK = "\U0001f4cc "
+"""In front of a pinned thread's title in the list. A radio's label, never a
+button's: the host's theme swaps the emoji in a button for an icon."""
+
+
 def _thread_choices(who: str, filter_text: str = "") -> list[tuple[str, str]]:
+    """The Threads list: pinned first, marked, then the rest, each most recent first.
+
+    The search matches the title alone, never the mark.
+    """
     if not who:
         return []
     try:
@@ -1304,8 +1328,37 @@ def _thread_choices(who: str, filter_text: str = "") -> list[tuple[str, str]]:
         logger.debug("Model Chain: could not list threads", exc_info=True)
         return []
     needle = (filter_text or "").strip().casefold()
-    return [(info.title, info.identifier) for info in listing
-            if not needle or needle in info.title.casefold()]
+    return [((PIN_MARK + info.title) if getattr(info, "pinned", False) else info.title,
+             info.identifier)
+            for info in listing if not needle or needle in info.title.casefold()]
+
+
+def _is_pinned(who: str, identifier: str) -> bool:
+    if not (who and identifier):
+        return False
+    try:
+        return str(identifier) in _chats().pinned(who)
+    except Exception:
+        logger.debug("Model Chain: could not read the pinned threads", exc_info=True)
+        return False
+
+
+def _pin_label(pinned: bool) -> str:
+    return "Unpin this thread" if pinned else "Pin this thread"
+
+
+def _toggle_pin(who, identifier, filter_text):
+    """Pin the open thread as a favourite, or unpin it. The list, the label, a word."""
+    if not (who and identifier):
+        return gr.update(), gr.update(), ui.notice("Choose a thread first.", "warn")
+    try:
+        pinned = _chats().toggle_pinned(who, identifier)
+    except Exception:
+        logger.warning("Model Chain: a thread could not be pinned", exc_info=True)
+        return gr.update(), gr.update(), ui.notice("That thread could not be pinned.", "warn")
+    return (gr.update(choices=_thread_choices(who, filter_text), value=identifier),
+            gr.update(value=_pin_label(pinned)),
+            ui.notice("Pinned: it stays at the top of Threads." if pinned else "Unpinned."))
 
 
 def _load(who: str, identifier: str):

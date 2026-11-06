@@ -4610,6 +4610,13 @@
             const item = element("button", "forge-assistant-menu-item", thread.title);
             item.type = "button";
             item.setAttribute("role", "menuitem");
+            // Pinned in LLM Studio's Threads (a favourite, listed first): the
+            // mark is the stylesheet's, never a character in the button --
+            // the host's theme swaps a button's emoji for an icon, words and all.
+            if (thread.pinned) {
+                item.classList.add("forge-assistant-thread-pinned");
+                item.setAttribute("aria-label", "Pinned: " + thread.title);
+            }
             item.setAttribute("aria-current",
                               String(thread.thread_id === view.selection.thread));
             item.addEventListener("click", () => {

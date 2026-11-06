@@ -8957,6 +8957,14 @@
     color: var(--color-accent, #2563eb);
 }
 
+/* A thread pinned in LLM Studio's Threads (a favourite, listed first): the pin
+   is drawn here, not written in the button, which the host's theme would turn
+   into an icon with the title gone. Its aria-label says Pinned. */
+.forge-assistant-menu-item.forge-assistant-thread-pinned::before {
+    content: "\1F4CC\00A0";
+    content: "\1F4CC\00A0" / "";
+}
+
 .forge-assistant-conversation {
     display: flex;
     flex-direction: column;

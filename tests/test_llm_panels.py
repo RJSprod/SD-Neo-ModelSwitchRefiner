@@ -4106,3 +4106,114 @@ class TestStoppingGivesTheControlsBack:
 
         assert len(clicks) == 1
         assert len(clicks[0]["outputs"]) == 3
+
+
+class TestAThreadPinnedAsAFavourite:
+    """"Make it so that in LLM studio conversations, I am able to PIN a thread
+    as favorite" (2026-11-06). Pinned threads are listed first and marked, kept
+    beside the chats (``ChatStore.PINS``) so pinning writes no conversation."""
+
+    @staticmethod
+    def _three(store):
+        from prompt_master.chat.history import ChatStore
+
+        chats = ChatStore(store / "chats")
+        made = []
+        for title in ("harbour at night", "a desert road", "the last train"):
+            conversation = chats.new("Ada")
+            conversation.title = title
+            chats.save(conversation)
+            made.append(conversation)
+        return chats, made
+
+    def test_a_pinned_thread_is_listed_first_and_marked(self, store):
+        chats, made = self._three(store)
+        assert mc_llm_chat_panel._toggle_pin("Ada", made[0].identifier, "")[2]
+        listed = mc_llm_chat_panel._thread_choices("Ada")
+        assert listed[0] == (mc_llm_chat_panel.PIN_MARK + "harbour at night", made[0].identifier)
+        assert [title for title, _ in listed[1:]] == ["the last train", "a desert road"]
+
+    def test_the_button_says_which_way_a_press_goes_and_a_second_press_unpins(self, store):
+        chats, made = self._three(store)
+        identifier = made[1].identifier
+        threads, label, note = mc_llm_chat_panel._toggle_pin("Ada", identifier, "")
+        assert label["value"] == "Unpin this thread" and "Pinned" in str(note)
+        assert threads["value"] == identifier
+        threads, label, note = mc_llm_chat_panel._toggle_pin("Ada", identifier, "")
+        assert label["value"] == "Pin this thread" and "Unpinned" in str(note)
+        assert not any(title.startswith(mc_llm_chat_panel.PIN_MARK)
+                       for title, _ in mc_llm_chat_panel._thread_choices("Ada"))
+
+    def test_pinning_writes_no_conversation(self, store):
+        chats, made = self._three(store)
+        path = chats.path_for("Ada", made[0].identifier)
+        before = path.read_bytes()
+        mc_llm_chat_panel._toggle_pin("Ada", made[0].identifier, "")
+        assert path.read_bytes() == before
+
+    def test_the_search_matches_the_title_and_never_the_mark(self, store):
+        chats, made = self._three(store)
+        mc_llm_chat_panel._toggle_pin("Ada", made[0].identifier, "")
+        assert [identifier for _, identifier in
+                mc_llm_chat_panel._thread_choices("Ada", "harbour")] == [made[0].identifier]
+        assert mc_llm_chat_panel._thread_choices("Ada", "\U0001f4cc") == []
+
+    def test_a_deleted_thread_takes_its_pin_with_it(self, store):
+        chats, made = self._three(store)
+        chats.set_pinned("Ada", made[2].identifier, True)
+        chats.delete("Ada", made[2].identifier)
+        assert chats.pinned("Ada") == []
+
+    def test_with_no_thread_open_nothing_is_pinned(self, store):
+        threads, label, note = mc_llm_chat_panel._toggle_pin("Ada", "", "")
+        assert "Choose a thread first" in str(note)
+
+    def test_the_threads_screen_has_the_button_wired_to_the_toggle(self, store):
+        import gradio as gr
+
+        made = []
+        original = gr.components.Component.__init__
+
+        def record(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            made.append(self)
+
+        gr.components.Component.__init__ = record
+        try:
+            mc_llm_chat_panel.build()
+        finally:
+            gr.components.Component.__init__ = original
+        pin = next(component for component in made
+                   if getattr(component, "elem_id", None) == "mc-llm-chat-pin")
+        assert getattr(pin, "value", None) in ("Pin this thread", "Unpin this thread")
+        wired = [kwargs for kind, kwargs in getattr(pin, "_callbacks", [])
+                 if kind == "click" and kwargs.get("fn") is mc_llm_chat_panel._toggle_pin]
+        assert wired, getattr(pin, "_callbacks", [])
+
+    def test_the_assistants_threads_say_which_are_pinned(self, store):
+        import mc_llm_conversation_service as service
+
+        chats, made = self._three(store)
+        chats.set_pinned("Ada", made[1].identifier, True)
+        listed = service.threads("Ada")
+        assert listed[0]["thread_id"] == made[1].identifier and listed[0]["pinned"] is True
+        assert all(row["pinned"] is False for row in listed[1:])
+
+
+class TestTheFoldersOwnRecordsAreNotThreads:
+    def test_a_deleted_threads_tombstone_is_not_a_phantom_new_chat(self, store):
+        """``glob("*.json")`` matches ``.tombstones.json``: until 2026-11-06 every
+        folder a thread had been deleted from listed a *New chat* that was the
+        tombstone file."""
+        from prompt_master.chat.history import ChatStore
+
+        chats = ChatStore(store / "chats")
+        kept = chats.new("Ada")
+        kept.title = "kept"
+        chats.save(kept)
+        gone = chats.new("Ada")
+        chats.save(gone)
+        chats.delete("Ada", gone.identifier)
+        chats.set_pinned("Ada", kept.identifier, True)
+        assert (chats.folder("Ada") / chats.TOMBSTONES).is_file()
+        assert [info.identifier for info in chats.listing("Ada")] == [kept.identifier]

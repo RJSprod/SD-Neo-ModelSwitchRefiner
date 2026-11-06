@@ -1303,10 +1303,15 @@ def character_names() -> list:
 
 
 def threads(character: str) -> list:
-    """The character's threads, most recently used first."""
+    """The character's threads: the pinned ones first, then the rest, most recent first.
+
+    ``pinned`` is LLM Studio's favourite mark (its Threads screen's Pin this
+    thread, 2026-11-06), so the Forge Assistant's Threads menu lists and marks
+    them the same way.
+    """
     try:
         return [{"thread_id": info.identifier, "title": info.title,
-                 "updated": info.updated}
+                 "updated": info.updated, "pinned": bool(getattr(info, "pinned", False))}
                 for info in chats().listing(str(character or ""))]
     except Exception:
         logger.debug("Model Chain: could not list threads for %s", character,

@@ -3766,6 +3766,23 @@ wider than itself, the second is wider and taller than the glass, and an editor
 sized to it had its buttons off the edge. It follows the screen as it changes —
 a rotation, a phone's keyboard coming up — so the buttons stay in reach.
 
+### Favourite threads
+
+**Pin this thread** on Conversation's **Threads** screen pins the thread that is
+open as a favourite (since 2026-11-06); pressed again it reads **Unpin this
+thread**. Pinned threads are listed first, each with a 📌 in front of its title,
+most recently used first among themselves, and the rest follow as before; the
+search box matches the title, never the pin. The Forge Assistant's **⋯ → Threads**
+lists them first too, with the same pin drawn beside them. A pin is kept beside
+the chats (`.pins.json` in the character's folder), so pinning rewrites no
+conversation and changes nobody's order of recency, and deleting a thread takes
+its pin with it.
+
+The same change fixed a phantom in the list: deleting a thread writes a small
+record beside the chats, and every character a thread had been deleted from
+listed an extra *New chat* that was that record. The folder's own files are never
+listed now.
+
 ### Conversation, per message
 
 Tap a message in the transcript and its actions open **inside the bubble**, as

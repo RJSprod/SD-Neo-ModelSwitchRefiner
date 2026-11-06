@@ -4935,3 +4935,37 @@ assistant, a drag, no sheet open and the tab not on screen are left alone.
 Mutations: the press not taken, the exemptions dropped, the close not pressed
 and a drag closing each fail a test. `tests/test_llm_studio_live.py` (the action
 row on real Gradio 4.40.0) passes with it. Not run on the user's machine.
+
+## 44. A thread pinned as a favourite (6 November 2026)
+
+> "Make it so that in LLM studio conversations, I am able to PIN a thread as favorite"
+
+**Where a pin lives.** `ChatStore.PINS`, `.pins.json` beside the chats in the
+character's folder: the ids pinned, most recently pinned first. Not in the
+conversation file: a guarded write would bump the thread's revision and its
+`updated`, refuse while a reply is being written, and rewrite a file an older
+build reads as it always did. `pinned`, `set_pinned` and `toggle_pinned` read and
+write it; `delete` drops the deleted thread's pin.
+
+**How it is listed.** `listing()` returns `ChatInfo.pinned` and sorts the pinned
+first, then the rest, each by `updated`, so every list built on it -- LLM
+Studio's Threads and the Forge Assistant's ⋯ → Threads (`threads()` in
+`mc_llm_conversation_service` carries `pinned`) -- agrees. LLM Studio marks a
+pinned title with 📌 in the radio's label (`PIN_MARK`; the search reads the
+title alone); the assistant marks its menu item with a class and the stylesheet
+draws the pin, because the host's theme replaces the emoji in a *button* with an
+icon and takes the words with it (the Lobe trap). For the same reason the
+Threads screen's **Pin this thread** / **Unpin this thread** button carries no
+emoji; its label is the open thread's (`_pin_label`, written by a second
+handler on the Threads chip's press, the screen's own outputs unchanged).
+
+**A phantom fixed on the way.** `listing()` read `glob("*.json")`, which
+matches `.tombstones.json` -- the record `delete` writes -- so every folder a
+thread had been deleted from listed a *New chat* with the id `.tombstones`. A
+file whose name starts with a dot is the folder's own record and is skipped.
+
+**Verified.** `tests/test_llm_panels.py` (`TestAThreadPinnedAsAFavourite`,
+`TestTheFoldersOwnRecordsAreNotThreads`) and `tests/test_assistant_js.py`
+(`test_a_thread_pinned_in_llm_studio_is_marked_in_the_threads_menu`). Mutations:
+dotfiles listed, pinned not first, a delete keeping its pin, the button not
+wired and the assistant's mark dropped each fail a test.

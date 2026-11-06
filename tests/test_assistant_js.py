@@ -2076,6 +2076,27 @@ class TestEveryMenuHasAWayOut:
         assert found["activated"] == 0
         assert found["role"] == "menuitem"
 
+    def test_a_thread_pinned_in_llm_studio_is_marked_in_the_threads_menu(self):
+        """Pinned in LLM Studio's Threads (2026-11-06): listed first by the
+        conversation service, and marked here by a class the stylesheet draws
+        the pin from -- never a character in the button, which the host's
+        theme would turn into an icon with the title gone."""
+        found = run(PICKER + """
+            const shell = picker();
+            shell.backItem = () => ({});
+            shell.groupLabel = () => ({});
+            shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t2"},
+                conversation: {threads: [{thread_id: "t1", title: "harbour", pinned: true},
+                                         {thread_id: "t2", title: "road", pinned: false}]}})};
+            const items = shell.threadItems().slice(2);
+            console.log(JSON.stringify(items.map((item) => ({
+                text: item.textContent, pinned: item.classList.contains("forge-assistant-thread-pinned"),
+                label: item.getAttribute("aria-label")}))));
+        """, sources=("shell",))
+
+        assert found == [{"text": "harbour", "pinned": True, "label": "Pinned: harbour"},
+                         {"text": "road", "pinned": False, "label": None}]
+
     def test_the_way_out_is_added_where_a_new_menu_cannot_forget_it(self):
         """In `showMenu`, which draws every list -- the ⋯ menu's own and its
         submenus alike -- and not in each builder. A fourth list added later
