@@ -3531,6 +3531,13 @@ which model, on which device, at what context, with a route on to Setup for the
 residency and the estimate. It is a sheet rather than a permanent row because
 everything a top bar takes is taken from the conversation under it.
 
+**A tap outside a sheet closes it** — the model sheet, the workspace chooser,
+Threads, Character, You and Voice alike (since 2026-11-06). The first tap
+outside does only that, as the Forge Assistant's Tap Outside to Close does:
+nothing under it is pressed. A scroll, a drag, a tap on the bars that open the
+sheets, in the Forge Assistant or in a dialog is left alone. On a phone a sheet
+covers the whole workspace, so the page around it is outside.
+
 The chooser lists every `.gguf` under your models folder — the **LLM models
 folder** setting, or `models/` inside the LLM data directory — walked a few
 levels deep so a `publisher/repo/model.gguf` layout is found, with vision

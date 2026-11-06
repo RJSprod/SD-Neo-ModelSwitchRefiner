@@ -4893,3 +4893,45 @@ with its own marks, one tilde not struck and two struck, and Copy giving
 the escaping, the tildes, the delimiters, the transform in `_body`, the Chatbot's
 keyword, the key, `texBack` and the quote colour each fail a test. Not run on
 the user's machine.
+
+## 43. A tap outside a sheet puts it away (6 November 2026)
+
+> "I need the pop ups in LLM studio to close when i tap outside of them"
+
+The pop-ups are the six sheets `mc_llm_overlays` answers for: the shell's
+Workspace and Model and runtime, and Conversation's Threads, Character, You and
+Voice. Each already closes by its own button -- a shell sheet's ✕, a screen's
+‹ Back -- whose handler returns the whole answer of which surface shows, so
+`javascript/llm_studio.js` (`wireSheetTaps`) presses that button when a tap
+lands outside the open sheet, exactly as a person would: nothing about which
+sheet is open is decided in the browser.
+
+**What a tap is**, as the Forge Assistant's Tap Outside to Close has it (docs/22
+§3.42, §3.45): a trusted, primary press of the first button, let go within 16 px
+of where it went down, not cancelled -- the browser cancels a press it takes for
+a scroll, and a press on a scroll bar is not taken at all. And as there, the
+first tap outside does only that: its `pointerdown` is taken from the page as it
+goes down (no focus, no selection, no control under it reacting), its release
+too, and its click and a mouse's own events after it, until the click or the
+next press (`onSheetTrail`, a second at most). A pan is never taken: cancelling
+a pointerdown stops no scroll. Clicks the page makes -- the close pressed here,
+Gradio's own -- are never held.
+
+**Where outside is.** Anywhere on the page but the sheet, while LLM Studio is
+the tab on screen: below 901 px a sheet covers the whole workspace, so on a
+phone what is left to tap is the page around it, Forge's tab bar included. Not
+outside: the bars that open the sheets (Conversation's header, the shell bar --
+their own handlers toggle the sheets, and a close pressed as well would open one
+again), the emotion and start pickers, the Forge Assistant (exempt both ways, as
+`mc_llm_overlays` says), and any dialog drawn over the page (the message editor,
+the LoRA viewer, Gradio's toasts).
+
+**Verified.** `tests/test_llm_studio_sheet_taps_js.py` runs the script in
+Chromium on a page shaped like the studio, with a mouse and with a finger: a tap
+beside the sheet presses its ‹ Back and nothing under it (no click, no focus, no
+`pointerdown` a control could act on); a tap on the page around it does the
+same; the tap after the one that closed lands; a tap inside, an opener, the
+assistant, a drag, no sheet open and the tab not on screen are left alone.
+Mutations: the press not taken, the exemptions dropped, the close not pressed
+and a drag closing each fail a test. `tests/test_llm_studio_live.py` (the action
+row on real Gradio 4.40.0) passes with it. Not run on the user's machine.

@@ -1695,6 +1695,152 @@
         document.addEventListener("keydown", onStartKey);
     }
 
+    // -- a tap outside a sheet puts it away ------------------------------- //
+
+    // "I need the pop ups in LLM studio to close when i tap outside of them"
+    // (2026-11-06). The pop-ups are LLM Studio's sheets (mc_llm_overlays): the
+    // shell's Workspace and Model and runtime, and Conversation's Threads,
+    // Character, You and Voice. Each closes by its own button -- a shell
+    // sheet's ✕, a screen's ‹ Back -- whose handler answers for every surface
+    // at once (mc_llm_overlays.showing), so a tap outside presses that button
+    // as a person would, and nothing about which sheet shows is decided here.
+    //
+    // A tap is what the Forge Assistant's Tap Outside to Close calls one
+    // (docs/22 §3.42, §3.45): a primary press of the first button, trusted,
+    // let go within SHEET_TAP_SLOP pixels of where it went down, and not
+    // cancelled -- the browser cancels a press it takes for a scroll. And, as
+    // there, the first tap outside does only that: the press is taken from the
+    // page as it goes down (no focus, no selection, nothing under it pressed)
+    // and the click after it too, so a tap beside a sheet does not also open a
+    // message's action row or switch a tab. A pan is never the press's to
+    // take (cancelling a pointerdown stops no scroll), and a press on a scroll
+    // bar is not taken at all.
+    //
+    // Outside is anywhere on the page but the sheet while LLM Studio is the
+    // tab on screen: on a phone a sheet covers the whole workspace, so what is
+    // left to tap is the page around it. Not outside: the bars that open the
+    // sheets (their own handlers toggle them, and a close pressed as well
+    // would open one again), the Forge Assistant -- exempt both ways, as
+    // mc_llm_overlays says -- and any dialog or editor drawn over the page.
+    const SHEET_TAP_SLOP = 16;
+    const SHEET_TRAIL_MS = 1000;
+    const STUDIO_ROOT = "mc-llm-studio";
+    const SHEET_CLOSE = ".mc-llm-sheet-head .mc-llm-sheet-back, .mc-llm-sheet-head .mc-llm-icon-button";
+    const NOT_OUTSIDE = [
+        ".mc-llm-chat-header", "#mc-llm-shellbar",
+        ".mc-llm-emotion-picker", ".mc-llm-start-picker",
+        ".forge-assistant", ".forge-assistant-panel", ".forge-assistant-launcher",
+        "dialog", "[role='dialog']", "[aria-modal='true']", ".toast-wrap", ".mc-lv", ".mc-lv-scrim",
+    ].join(", ");
+    let sheetPress = null;
+    let sheetTrailUntil = 0;
+    let sheetTapsWired = false;
+
+    function drawn(node) {
+        if (!node || typeof node.getClientRects !== "function" || !node.getClientRects().length) return false;
+        try {
+            return window.getComputedStyle(node).visibility !== "hidden";
+        } catch (error) {
+            return true;
+        }
+    }
+
+    // The sheet on screen, if one is: there is only ever one (mc_llm_overlays).
+    function openSheet() {
+        const studio = byId(STUDIO_ROOT);
+        if (!drawn(studio)) return null;
+        const sheets = studio.querySelectorAll(".mc-llm-sheet");
+        for (let i = 0; i < sheets.length; i += 1) {
+            if (drawn(sheets[i])) return sheets[i];
+        }
+        return null;
+    }
+
+    // A press on a scroll bar -- the page's or a box's -- is a scroll, not a tap.
+    function onScrollbar(event) {
+        const page = document.documentElement;
+        if (page && (event.clientX >= page.clientWidth || event.clientY >= page.clientHeight)) return true;
+        let node = event.target;
+        while (node && node.nodeType === 1) {
+            if (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth) {
+                const box = node.getBoundingClientRect();
+                const right = box.left + node.clientLeft + node.clientWidth;
+                const bottom = box.top + node.clientTop + node.clientHeight;
+                if ((event.clientX >= right && event.clientX <= box.right)
+                        || (event.clientY >= bottom && event.clientY <= box.bottom)) {
+                    return true;
+                }
+            }
+            node = node.parentElement;
+        }
+        return false;
+    }
+
+    function take(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+    }
+
+    function closeSheet(sheet) {
+        const button = sheet && sheet.querySelector(SHEET_CLOSE);
+        if (!button || button.disabled || !drawn(sheet)) return false;
+        button.click();
+        return true;
+    }
+
+    function onSheetDown(event) {
+        if (!event.isTrusted) return;
+        // A new press ends the last one's trail: a tap that made no click (a
+        // finger that strayed) must not cost the next tap its click.
+        sheetTrailUntil = 0;
+        if (event.isPrimary === false || event.button !== 0) return;
+        const sheet = openSheet();
+        if (!sheet) return;
+        const target = event.target;
+        if (!target || typeof target.closest !== "function") return;
+        if (sheet.contains(target) || target.closest(NOT_OUTSIDE)) return;
+        if (onScrollbar(event)) return;
+        sheetPress = {id: event.pointerId, x: event.clientX, y: event.clientY, sheet: sheet};
+        take(event);
+    }
+
+    function onSheetUp(event) {
+        if (!sheetPress || event.pointerId !== sheetPress.id) return;
+        const press = sheetPress;
+        sheetPress = null;
+        take(event);
+        sheetTrailUntil = Date.now() + SHEET_TRAIL_MS;
+        const moved = Math.hypot(event.clientX - press.x, event.clientY - press.y);
+        if (moved <= SHEET_TAP_SLOP) closeSheet(press.sheet);
+    }
+
+    function onSheetCancel(event) {
+        if (sheetPress && event.pointerId === sheetPress.id) sheetPress = null;
+    }
+
+    // What follows a taken press -- a mouse's own events, a long press's
+    // context menu, the click -- is the press's too, until the click or the
+    // trail's end. Only the browser's: a click the page makes (a Gradio
+    // button pressed by a script, the close pressed above) is never held.
+    function onSheetTrail(event) {
+        if (!event.isTrusted) return;
+        if (!sheetPress && Date.now() > sheetTrailUntil) return;
+        take(event);
+        if (event.type === "click") sheetTrailUntil = 0;
+    }
+
+    function wireSheetTaps() {
+        if (sheetTapsWired) return;
+        sheetTapsWired = true;
+        window.addEventListener("pointerdown", onSheetDown, true);
+        window.addEventListener("pointerup", onSheetUp, true);
+        window.addEventListener("pointercancel", onSheetCancel, true);
+        ["click", "mousedown", "mouseup", "contextmenu"].forEach(function (type) {
+            window.addEventListener(type, onSheetTrail, true);
+        });
+    }
+
     function attempt(what, run) {
         try {
             run();
@@ -1710,6 +1856,7 @@
         attempt("follow the transcript", wireTranscript);
         attempt("draw the action rows", wireBubbles);
         attempt("keep the sheets in view", wireSheets);
+        attempt("close a sheet on a tap outside it", wireSheetTaps);
         attempt("edit in a dialog", wireEditor);
         attempt("wire the emotion picker", wireEmotion);
         attempt("wire the reply start", wireStart);
