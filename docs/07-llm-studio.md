@@ -5096,3 +5096,11 @@ thread's character mattered only when two characters share a thread's id,
 which a test now builds. **Found on the way:** `read_json` answers a missing
 file with `{}`, so a pin to a thread deleted outside LLM Studio listed an
 untitled favourite -- `favourites` asks whether the file is there first.
+
+**Looked at on the page.** Screenshots of the real Gradio 4.40 page at a
+phone's width and a desktop's showed + New thread squeezed beside its heading to
+two lines of half a word each (Gradio's row gives every child a basis of
+nothing; the buttons beside the heading and the drop-down are `flex: 0 0 auto`
+now) and the search box drawn as a text area with a resize grip (one line at
+most now, which Gradio draws as an input). A Chromium check and a build check
+hold each.

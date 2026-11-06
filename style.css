@@ -2757,6 +2757,14 @@
     min-width: 0;
 }
 
+/* The buttons beside a heading or a drop-down keep their own width: Gradio's
+   row gives every child a basis of nothing, and the heading taking the room
+   left squeezed + New thread to two lines of half a word each. */
+#mc-llm-studio .mc-llm-threads-head button,
+#mc-llm-studio .mc-llm-talking-to button {
+    flex: 0 0 auto !important;
+}
+
 #mc-llm-studio .mc-llm-favourites-label {
     color: var(--body-text-color-subdued, inherit);
     font-size: 0.72em;

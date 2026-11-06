@@ -122,3 +122,27 @@ def test_a_favourite_says_whose_thread_it_is_beside_its_title(browser):
         tab.close()
 
     assert found == {"who": "Bob", "after": True, "subdued": "rgb(120, 120, 120)"}
+
+
+def test_new_thread_keeps_its_words_on_one_line_beside_the_heading(browser):
+    """On a phone the heading took the row and squeezed + New thread into two
+    lines of half a word each (found in a screenshot of the real pop-up)."""
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<style>body {{ margin: 0; font: 14px sans-serif; }}
+.row {{ display: flex; flex-wrap: wrap; }} .row > * {{ flex: 1 1 0%; min-width: 0; }}</style>
+<style>{(ROOT / "style.css").read_text(encoding="utf-8")}</style></head><body>
+<div id="mc-llm-studio" style="width: 300px"><div class="row mc-llm-threads-head">
+  <div class="block"><h5>Threads</h5></div>
+  <button id="new" style="flex-grow: 0; min-width: 0px">+ New thread</button>
+</div></div></body></html>"""
+    tab = browser.new_page(viewport={"width": 390, "height": 400})
+    try:
+        tab.set_content(html)
+        found = tab.evaluate("""() => { const button = document.getElementById('new');
+            const line = parseFloat(getComputedStyle(button).lineHeight) || 18;
+            return {height: button.getBoundingClientRect().height, line,
+                    fits: button.scrollWidth <= button.clientWidth + 1}; }""")
+    finally:
+        tab.close()
+
+    assert found["height"] < found["line"] * 1.6 and found["fits"], found

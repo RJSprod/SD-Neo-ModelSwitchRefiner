@@ -1104,6 +1104,9 @@ class TestTheHeaderCarriesTheDestinations:
             assert ids.count(f"mc-llm-chat-{name}") == 1, name
         assert sum(1 for component in built
                    if getattr(component, "placeholder", None) == "*I am so nervous*") == 1
+        search = next(component for component in built
+                      if getattr(component, "elem_id", None) == "mc-llm-chat-search")
+        assert (search.lines, search.max_lines) == (1, 1), "a one-line input, no resize grip"
 
     def test_the_picture_chips_are_where_the_script_looks_for_them(self, store, monkeypatch):
         """Two halves in two languages with nothing between them but these

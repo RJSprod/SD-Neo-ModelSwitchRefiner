@@ -616,8 +616,10 @@ def build() -> dict:
                 gr.Markdown("##### Threads", elem_classes=ui.classes("sheet-label"))
                 new_thread = gr.Button("+ New thread", variant="primary", size="sm", scale=0,
                                        min_width=0, elem_id=ui.ident("chat", "new-thread"))
+            # One line: Gradio draws a box of one line at most as an <input>,
+            # with no resize grip in its corner.
             search = gr.Textbox(label="Find a thread", placeholder="Find a thread…",
-                                show_label=False, container=False,
+                                show_label=False, container=False, lines=1, max_lines=1,
                                 elem_id=ui.ident("chat", "search"))
             # A thread is opened by a tap on it and kept at the top by its star
             # -- "I need a star or a pin or something to keep it at top" --
