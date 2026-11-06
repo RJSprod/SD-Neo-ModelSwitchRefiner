@@ -6215,8 +6215,25 @@ that is stale): it stops the worker, removes the runtime, the model, the
 official voices and the staging area, and installs everything the manifest
 declares — the gated cloning weights too, when a token is saved. Custom voices
 are never touched: each keeps the recording it was made from, and its prepared
-states live under the model's fingerprint, so **Rebuild** in the voice library
-makes the new model's version from the recording you already gave it.
+states live under the model's fingerprint. The reinstall then **rebuilds each
+saved voice for the new model** from the recording you already gave it, one at
+a time, on the install's own row (*Rebuilding saved voice 1 of 2 for the new
+model…*) — when PocketTTS is the selected engine and its cloning weights are
+installed; otherwise, and for any voice whose rebuild fails, **Rebuild** in the
+voice library does the same for one voice. One reinstall runs at a time: a
+second press while one is running is refused before anything is removed.
+
+**A reply is never spoken in a voice PocketTTS was not given.** The worker is
+handed only the voices with prepared data for the model and precision in force,
+so a saved voice left stale — by a reinstall that could not rebuild it, or by a
+change of precision — used to be asked for anyway, and every reply failed in
+the worker (*That voice is not one PocketTTS has been given*) while Test on an
+official voice played. A reply now asks first, as Test always did: a voice that
+cannot be spoken is passed over for the default, or the first voice that is
+ready, and `model_chain.log` says once why — *Voice is reading replies in
+another voice — the saved PocketTTS voice asked for has no prepared data …
+(Rebuild it in Settings → Voice Chat …)*. A PocketTTS that needs a reinstall is
+logged as that, rather than as *not installed*.
 
 **Where the token comes from.** Paste it once under *Settings → Voice Chat →
 Access token* and Voice Chat keeps it for every gated download, for every
