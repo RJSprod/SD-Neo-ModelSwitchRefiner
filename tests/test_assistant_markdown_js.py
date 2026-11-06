@@ -186,28 +186,28 @@ class TestInlines:
 class TestQuotes:
     def test_a_quote_is_marked_with_its_own_marks_inside(self):
         assert one('She said "hello there" to me.') == (
-            '<p>She said <q class="forge-assistant-quote">&quot;hello there&quot;</q> to me.</p>')
+            '<p>She said <span class="forge-assistant-quote">&quot;hello there&quot;</span> to me.</p>')
 
     def test_typographic_quotes_and_dialogue(self):
         out = one('“Curly” then "Hello," she said. "Fine?"')
 
-        assert out.count('<q class="forge-assistant-quote">') == 3
+        assert out.count('<span class="forge-assistant-quote">') == 3
 
     def test_no_quote_in_code_a_link_or_a_measurement(self):
         out = draw('`"code"`', '[a](https://x.y "title")', '5" tall', '```\n"fenced"\n```')
 
-        assert all("<q" not in html for html in out)
+        assert all("forge-assistant-quote" not in html for html in out)
 
     def test_a_quote_inside_emphasis_and_emphasis_inside_a_quote(self):
         assert one('**"Hello," she said.**') == (
-            '<p><strong><q class="forge-assistant-quote">&quot;Hello,&quot;</q> she said.</strong></p>')
+            '<p><strong><span class="forge-assistant-quote">&quot;Hello,&quot;</span> she said.</strong></p>')
         assert one('"a *b* c"') == (
-            '<p><q class="forge-assistant-quote">&quot;a <em>b</em> c&quot;</q></p>')
+            '<p><span class="forge-assistant-quote">&quot;a <em>b</em> c&quot;</span></p>')
 
     def test_a_quote_that_crosses_an_emphasis_is_left_unmarked_and_the_html_whole(self):
         out = one('**"bold** text"')
 
-        assert "<q" not in out
+        assert "forge-assistant-quote" not in out
         assert out == "<p><strong>&quot;bold</strong> text&quot;</p>"
 
     def test_a_quote_and_an_inline_tag_that_cross_are_paired_each_with_its_own(self):
@@ -218,8 +218,20 @@ class TestQuotes:
         # A tag left open inside one that closed is its text, never dropped.
         assert one("<b><i>x</b></i>") == "<p><b>&lt;i&gt;x</b>&lt;/i&gt;</p>"
 
+    def test_a_quotation_is_a_span_never_a_q_element(self):
+        """A Gecko browser's plain-text copy writes a quote mark at each end of
+        a <q> on top of the message's own, so a selection copied from LibreWolf
+        turned "Hello" into ""Hello"" (2026-11-06; checked in a Gecko build):
+        a quotation is a span, and no reply ever comes out with a <q>."""
+        out = draw('Character stepped in the room "Hello" and waves.', '“Curly” and «guillemets»',
+                   '> "quoted" in a block quote', '- "a list item"', '<q>bare</q> "x"')
+
+        assert out[0] == ('<p>Character stepped in the room <span class="forge-assistant-quote">'
+                          '&quot;Hello&quot;</span> and waves.</p>')
+        assert all("<q" not in html for html in out)
+
     def test_a_quote_in_a_table_cell(self):
-        assert '<td><q class="forge-assistant-quote">&quot;q&quot;</q></td>' in one(
+        assert '<td><span class="forge-assistant-quote">&quot;q&quot;</span></td>' in one(
             '| a |\n|---|\n| "q" |')
 
 
@@ -381,7 +393,7 @@ class TestSafety:
         "h6": set(), "ul": set(), "ol": {"start"}, "li": {"class"},
         "span": {"class", "aria-hidden", "data-tex", "data-display"}, "blockquote": set(),
         "hr": set(), "pre": {"class"}, "code": set(), "strong": set(), "em": set(), "del": set(),
-        "q": {"class"}, "a": {"href", "target", "rel"}, "table": set(), "thead": set(),
+        "a": {"href", "target", "rel"}, "table": set(), "thead": set(),
         "tbody": set(), "tr": set(), "th": {"class"}, "td": {"class"}, "b": set(), "i": set(),
         "u": set(), "s": set(), "ins": set(), "mark": set(), "sub": set(), "sup": set(),
         "small": set(), "kbd": set(),

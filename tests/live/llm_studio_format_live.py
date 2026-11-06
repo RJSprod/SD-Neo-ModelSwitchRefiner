@@ -71,7 +71,7 @@ LOOK = """() => {
         tex: [...b.querySelectorAll('annotation')].map((a) => a.textContent),
         displayed: b.querySelectorAll('.katex-display').length,
         errors: b.querySelectorAll('.katex-error').length,
-        quotes: [...b.querySelectorAll('q.mc-llm-quote')].map((q) => ({
+        quotes: [...b.querySelectorAll('span.mc-llm-quote')].map((q) => ({
             text: q.textContent, colour: getComputedStyle(q).color,
             before: getComputedStyle(q, '::before').content})),
         struck: [...b.querySelectorAll('del, s')].map((d) => d.textContent),

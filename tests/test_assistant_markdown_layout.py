@@ -13,6 +13,7 @@ by ``mc_katex`` itself.
 from __future__ import annotations
 
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,7 @@ from test_assistant_layout import ORIGIN, _answer, _launch, page_html, settle  #
 GRADIO_PALETTE = ":root { --color-blue-600: #2563eb; --color-orange-300: #ffb066; }"
 BLUE = "rgb(37, 99, 235)"
 AMBER = "rgb(255, 176, 102)"
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 CONVERSATION = {
     "conversation": {"messages": [
@@ -135,7 +137,7 @@ def test_a_quotation_is_amber_at_night_and_blue_by_day(browser):
     page, _asked, _errors = open_page(browser)
     try:
         draw(page)
-        quote = "document.querySelector('#forge-assistant-root q.forge-assistant-quote')"
+        quote = "document.querySelector('#forge-assistant-root span.forge-assistant-quote')"
         night = page.evaluate(f"""() => {{ const q = {quote};
             return {{colour: getComputedStyle(q).color, text: q.textContent,
                      before: getComputedStyle(q, '::before').content}}; }}""")
@@ -188,3 +190,34 @@ def test_a_displayed_formula_wider_than_the_bubble_scrolls_inside_it(browser):
         page.close()
 
     assert found == {"scrolls": True, "overflow": "auto", "inside": True}
+
+
+def test_llm_studios_quotation_is_coloured_where_the_formatter_draws_it(browser):
+    """LLM Studio's transcript: what ``mc_llm_format.for_chatbot`` draws, under
+    the stylesheet, in the transcript's own ancestors -- coloured by day and at
+    night, its marks the message's own and none of the browser's. A span since
+    2026-11-06 (a <q> copies with a mark more at each end in Gecko), so the
+    stylesheet's rule has to name the element the formatter writes."""
+    import mc_llm_format
+
+    drawn = mc_llm_format.for_chatbot('Character stepped in the room "Hello" and waves.')
+    page = browser.new_page(viewport={"width": 800, "height": 400})
+    try:
+        style = (ROOT_DIR / "style.css").read_text(encoding="utf-8")
+        page.set_content(f"""<!doctype html><html><head><style>{GRADIO_PALETTE}</style>
+            <style>{style}</style></head><body class="dark">
+            <div id="mc-llm-studio"><div class="mc-llm-transcript"><div class="message">
+            <p>{drawn}</p></div></div></div></body></html>""")
+        found = page.evaluate("""() => {
+            const quote = document.querySelector('.mc-llm-quote');
+            const night = getComputedStyle(quote).color;
+            document.body.classList.remove('dark');
+            return {tag: quote.tagName, night, day: getComputedStyle(quote).color,
+                    text: quote.textContent, before: getComputedStyle(quote, '::before').content,
+                    paragraph: document.querySelector('p').textContent};
+        }""")
+    finally:
+        page.close()
+
+    assert found == {"tag": "SPAN", "night": AMBER, "day": BLUE, "text": '"Hello"', "before": "none",
+                     "paragraph": 'Character stepped in the room "Hello" and waves.'}

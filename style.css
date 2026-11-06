@@ -3033,24 +3033,21 @@
    Asked for: "when text is in quotes like "this" i want it to be slightly more
    highlight. I think oobabooga does well with formatting." Oobabooga wraps a
    quotation in <q>, keeps the quote marks and colours the words -- a muted
-   blue by day, amber at night -- and so does this: mc_llm_format marks each
-   quote as <q class="mc-llm-quote"> with its own marks inside it, so the
-   browser's generated ones are switched off. The colours are Gradio's own
+   blue by day, amber at night -- and so does this, but in a span:
+   mc_llm_format marks each quote as <span class="mc-llm-quote"> with its own
+   marks inside it, because a Gecko browser's plain-text copy writes a mark at
+   each end of a <q> on top of them ("Hello" copied as ""Hello"", 2026-11-06).
+   The colours are Gradio's own
    palette (--color-blue-600, --color-orange-300), defined on every Gradio
    page whatever its theme, the nearest to Oobabooga's #3480be and #f5b031;
    `.dark` is on the body under Gradio's night mode. Colour only, so a quote
    in a heading or in bold is still the heading's or the bold's weight. */
-#mc-llm-studio .mc-llm-transcript q.mc-llm-quote {
+#mc-llm-studio .mc-llm-transcript span.mc-llm-quote {
     color: var(--color-blue-600, currentColor);
 }
 
-.dark #mc-llm-studio .mc-llm-transcript q.mc-llm-quote {
+.dark #mc-llm-studio .mc-llm-transcript span.mc-llm-quote {
     color: var(--color-orange-300, currentColor);
-}
-
-#mc-llm-studio .mc-llm-transcript q.mc-llm-quote::before,
-#mc-llm-studio .mc-llm-transcript q.mc-llm-quote::after {
-    content: none;
 }
 
 /* A displayed formula wider than the bubble scrolls inside it, as KaTeX
@@ -9203,18 +9200,13 @@
 
 /* A quotation, as LLM Studio's transcript draws one (mc-llm-quote above):
    Oobabooga's colours from Gradio's own palette, the quote marks the message's
-   own. */
-.forge-assistant-text q.forge-assistant-quote {
+   own, in a span -- a <q> copies with a mark more at each end in Gecko. */
+.forge-assistant-text span.forge-assistant-quote {
     color: var(--color-blue-600, currentColor);
 }
 
-.dark .forge-assistant-text q.forge-assistant-quote {
+.dark .forge-assistant-text span.forge-assistant-quote {
     color: var(--color-orange-300, currentColor);
-}
-
-.forge-assistant-text q.forge-assistant-quote::before,
-.forge-assistant-text q.forge-assistant-quote::after {
-    content: none;
 }
 
 /* A formula: typeset by the vendored KaTeX, and until that has loaded -- or

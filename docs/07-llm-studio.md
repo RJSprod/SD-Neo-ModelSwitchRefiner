@@ -4854,7 +4854,7 @@ does not take, which is where `autoscroll` goes):
   `U+2061 U+2063 … U+2063 U+2061` inline, `U+2062 U+2063 … U+2063 U+2062`
   displayed, all default-ignorable, neither left one a prefix of the other --
   with its text escaped for HTML; each quotation in `<q class="mc-llm-quote">`
-  around its own marks; each lone tilde as `\~`. Cached on the text (an LRU of
+  around its own marks (a `<span>` since §45); each lone tilde as `\~`. Cached on the text (an LRU of
   1024), because every yield of a streaming reply draws the whole thread again.
 - **The Chatbot** is built with `latex_delimiters=mc_llm_format.latex_delimiters()`
   -- those two pairs and nothing else. Not `$`: Gradio would take every dollar on
@@ -4866,7 +4866,7 @@ does not take, which is where `autoscroll` goes):
   `(?P\d+)`). Nobody types U+2061 to U+2063; where marked draws one as
   text after all (math the reading found where marked decided on code), it is
   drawn as nothing.
-- **`style.css`**: `q.mc-llm-quote` in `--color-blue-600` by day and
+- **`style.css`**: `q.mc-llm-quote` (`span.mc-llm-quote` since §45) in `--color-blue-600` by day and
   `--color-orange-300` under `.dark` -- Gradio's own palette, defined on every
   Gradio page, the nearest to Oobabooga's -- the browser's marks switched off;
   `.katex-display` scrolls inside the bubble.
@@ -4969,3 +4969,42 @@ file whose name starts with a dot is the folder's own record and is skipped.
 (`test_a_thread_pinned_in_llm_studio_is_marked_in_the_threads_menu`). Mutations:
 dotfiles listed, pinned not first, a delete keeping its pin, the button not
 wired and the assistant's mark dropped each fail a test.
+
+## 45. A copied quotation keeps one pair of marks (6 November 2026)
+
+The report, after §42: "now when i copy text that includes ", it becomes "".
+So when have a dialogue: Character stepped in the room "Hello" and waves. Now
+the dialogue: Character stepped in the room ""Hello"" and waves. Please fix the
+text so when i copy from this screen by selecting text, i should not get a ""
+where i expect a "."
+
+**Why.** §42 drew a quotation the way Oobabooga does, as an HTML `<q>` around
+the message's own marks, with the browser's generated marks switched off in the
+stylesheet. On screen that is one pair. But a Gecko browser -- LibreWolf, the
+host's -- serialises a selection to plain text with a mark of its own at each
+end of a `<q>`, whatever the stylesheet says, so the clipboard held two pairs.
+Checked in a Gecko build (Zen, driven by Selenium: a selection over
+`Character stepped in the room <q>"Hello"</q> and waves.` copied and pasted
+back gives `""Hello""`, and its `getSelection().toString()` says the same; over
+a `<span>` it gives `"Hello"`). Chromium copies either one once, so no
+Chromium check can see it.
+
+**What changed.** A quotation is a `<span class="mc-llm-quote">` in LLM Studio
+(`mc_llm_format._for_chatbot`) and a `<span class="forge-assistant-quote">` in
+the Forge Assistant's panel (`forge_assistant_markdown.js`, `draw`); the
+stylesheet colours `span.mc-llm-quote` and `span.forge-assistant-quote` as it
+coloured the `q`s (the same specificity), and the rules that switched the
+browser's marks off are gone with the element that had them. DOMPurify keeps a
+span and its class as it kept the `q`. What is saved was never touched.
+
+**Verified.** `tests/test_chat_format.py` and `tests/test_assistant_markdown_js.py`
+(`test_a_quotation_is_a_span_never_a_q_element`: the user's sentence drawn with
+a span, and no `<q` from any case of the shared table, or from a block quote, a
+list item or a bare `<q>` a model wrote; the panel's allow-list no longer has
+`q`), and `tests/test_assistant_markdown_layout.py`
+(`test_llm_studios_quotation_is_coloured_where_the_formatter_draws_it`: the
+formatter's own output under the stylesheet in the transcript's ancestors, a
+span, amber at night and blue by day, no generated marks, the sentence's text
+as written). Five mutations -- either renderer drawing a `<q>` again, and each
+of the three colour rules naming `q` -- each fail a test. Not run in LibreWolf
+itself; the Gecko build stands in for it.

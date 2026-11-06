@@ -3688,7 +3688,10 @@ night (Gradio's own `--color-blue-600` and `--color-orange-300`, so a theme can
 change them). A quotation is on one line and has words in it; it is never in
 code, in a formula, in a link's address or in a tag; `5" tall` is a measurement
 and `"word"s` is not a quotation; quotations do not nest, the outer one is the
-one coloured.
+one coloured. A selection copied from either view gives the quotation's marks
+once: until 2026-11-06 LibreWolf (any Gecko browser) copied `"Hello"` as
+`""Hello""`, because a quotation was drawn as an HTML `<q>` and Gecko's
+plain-text copy writes a mark at each end of one; it is a plain span now.
 
 **One tilde is a tilde**: `3~4 hours and 5~6 days` reads as written, and only
 `~~two~~` strikes through (Gradio's own Markdown struck out whatever lay between
