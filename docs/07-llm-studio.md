@@ -5008,3 +5008,91 @@ span, amber at night and blue by day, no generated marks, the sentence's text
 as written). Five mutations -- either renderer drawing a `<q>` again, and each
 of the three colour rules naming `q` -- each fail a test. Not run in LibreWolf
 itself; the Gecko build stands in for it.
+
+## 46. One Conversation button, and a star on every thread (6 November 2026)
+
+The ask, with a picture of the chips: "It's time to clean up chat controls. The
+current control menu is a MESS ... Each of these buttons opens its own menu
+which is difficult to navigate. And then, some of these menus show up in
+others. What we need is a single pop up that allows me to configure the
+CONVERSATION. So make these all just one "Conversation" button ... The most
+important top level menu should still be there, but everything else can be
+nested as you recommend. So the whole character selection, editing, creation,
+etc, can be nested, while top level is just select from existing or +new ...
+And also make it easy to favorite an existing thread i have with one of my
+characters, so i can quickly load and continue. I need a star or a pin or
+something to keep it at top." And a second picture: the Generation settings,
+which lived in the Character sheet.
+
+**What there was.** Six chips on Conversation's header -- Threads, Character,
+Emotion, Start with, You, Voice -- beside ☰ and the model chip. Four opened a
+sheet each (`SCREENS` = threads, character, persona, voice), two a picker under
+the bar (llm_studio.js opened and put them away), and the Character sheet held
+the Emotion list a second time, the Generation settings, the import and the
+delete. The pin of §44 was a button on the Threads sheet for the open thread.
+
+**What is built.** One chip, **Conversation** (`mc-llm-chat-to-conversation`),
+opening one sheet (`SCREENS = ("conversation",)`, `mc_llm_overlays.CHAT`), whose
+top level is what the conversation is navigated by and whose rest is folded:
+
+| Part | What it is |
+|---|---|
+| **Favourites** (`_favourite_rows`) | Every starred thread of every character, most recently used first, with whose it is; nothing until one is starred. Read cheaply: `ChatStore.favourites(character)` opens only the pinned files, one each, so a long history costs nothing extra |
+| **Talking to** · **+ New** | The drop-down and New; the character editor under them, opened by New here or by Edit in the Character section (llm_studio.js brings it into view either way: `REVEALS`) |
+| **Threads** · **+ New thread** · find | Rows (`_thread_rows`): the thread, and its **star** -- `aria-pressed`, a drawn SVG filled while starred, never an emoji (the Lobe trap) |
+| Folded (`gr.Accordion`) | **Emotion · …** and **Start the next reply with · …**, whose labels say what is in force (`_emotion_label`, `_start_label`, set by `gr.update(label=...)`); **Generation**; **Voice** (`mc_voice_ui.section`); **Character** (Edit, Refresh, System prompt, Import, Delete); **This thread** (Rename, Delete); **You** |
+
+Each part is drawn again from what is stored on every press of the button, by a
+handler of its own on the same press (`_open_conversation`, `_emotion_view`,
+`_start_view`, `mc_voice_ui.section_values`, `_persona_view`). The dot the two
+chips carried is one dot on the Conversation chip, filled while the thread has
+an emotion or a start (read off the heading's `data-emotion` / `data-start`).
+Voice Chat's script marks the Conversation chip where it marked the Voice chip
+(the engine finishing; the press that unlocks audio).
+
+**A row is pressed in the browser and decided in Python**, as the emotion rows
+are: a press writes `{"do": "open"|"star", "character", "thread"}` into
+`mc-llm-chat-thread-at` and presses `mc-llm-chat-thread-now`;
+`_thread_pressed` reads it against what is on disk -- a thread gone meanwhile
+is said, never opened or starred into a pin to nothing, and a character that is
+not one of yours is not a press this page made. A star keeps the pop-up open
+and changes nothing else. A thread of the character you are talking to opens as
+Threads always opened one.
+
+**A favourite with another character** is the part that rests on Gradio. The
+handler remembers it (`_selected`) and answers the drop-down with that
+character; the drop-down's own `change` then runs `_select_character`, which
+opens the thread remembered for the character it is given when the selection
+remembered is that character's -- else its newest, as before. A choice in the
+drop-down remembers nothing first, so it still opens the newest.
+
+**Checked on real Gradio 4.40.0 in Chromium**: `tests/live/llm_studio_conversation_live.py`
+(opt-in through `MC_GRADIO_PYTHON`, `tests/test_llm_studio_conversation_live.py`)
+builds the panel itself (`mc_llm_chat_panel.build()`) on the host the tests
+stand in, with two characters and their threads, and drives it: one chip and
+none of the six; Favourites and Threads as stored, the remembered thread
+marked; the sections folded with what is in force; a star putting the thread
+first and into Favourites with the pop-up still open; an emotion chosen
+relabelling its section and dotting the chip; + New opening the editor in view;
+and Bob's favourite pressed from Ada's pop-up landing on Bob's starred thread,
+not his newest -- the `change` after the press, which no stand-in can say.
+
+**Verified otherwise.** `tests/test_llm_panels.py` (`TestAThreadStarredAsAFavourite`,
+`TestTheSurfaces`, `TestTheHeaderCarriesTheDestinations`), `tests/test_llm_studio_js.py`
+(`TestTheEmotionRows`, `TestTheThreadRows`, `TestThePickersAreGone`, the editor
+brought into view), `tests/test_overlays.py` (three surfaces), the emotion's and
+the start's own files (the sections' labels), `tests/test_voice_ui.py` and
+`tests/test_voice_chat_js.py` (the Conversation chip as Voice Chat's), and
+`tests/test_llm_studio_conversation_css.py` (Chromium, under the real
+stylesheet: the chip's dot with an emotion or a start and none without, a
+starred thread's star in the accent and filled, the thread open marked, a
+favourite's character beside its title). Tests of the six chips and the two
+pickers' opening and closing went with them, at the user's word; the rest were
+translated. Nineteen mutations each fail a test. Three survived a first pass
+and their tests were tightened: the press with a name not one of yours had
+nominated another character's thread, so a missing file answered first; the
+favourites' recency had matched the characters' order; and the remembered
+thread's character mattered only when two characters share a thread's id,
+which a test now builds. **Found on the way:** `read_json` answers a missing
+file with `{}`, so a pin to a thread deleted outside LLM Studio listed an
+untitled favourite -- `favourites` asks whether the file is there first.

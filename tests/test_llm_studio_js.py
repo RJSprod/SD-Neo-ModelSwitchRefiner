@@ -514,13 +514,14 @@ class TestTheElapsedReadout:
 # Keeping an opened section in view
 # --------------------------------------------------------------------------- #
 #
-# Conversation's screens are fixed-height scrolling sheets. Open a disclosure
-# near the bottom of one — the character editor, the advanced sampling settings
-# — and what you opened is below the fold, which is a thing browsers do not fix
-# for you, because the click landed on the heading and the heading was already
-# visible. The rule is arithmetic, so it is run rather than read: the smallest
-# move that brings the opened section into view, and no move at all when it is
-# already there.
+# Conversation's pop-up is a fixed-height scrolling sheet. Open a section near
+# the bottom of it — Generation, You — and what you opened is below the fold,
+# which is a thing browsers do not fix for you, because the click landed on the
+# heading and the heading was already visible. The rule is arithmetic, so it is
+# run rather than read: the smallest move that brings the opened section into
+# view, and no move at all when it is already there. + New and Edit open the
+# character editor elsewhere in the sheet, so after them it is the editor that
+# is brought into view.
 
 SHEET = """
 function section(top, height) {
@@ -530,7 +531,7 @@ function section(top, height) {
 }
 
 const sheet = {
-    id: "mc-llm-chat-character",
+    id: "mc-llm-chat-conversation",
     dataset: {},
     offsetTop: 0,
     clientHeight: VIEW,
@@ -544,7 +545,8 @@ const sheet = {
 globalThis.document = {
     documentElement: {scrollTop: 0, getAttribute: () => null,
                       setAttribute() {}, removeAttribute() {}},
-    querySelector: (selector) => (selector === "#mc-llm-chat-character" ? sheet : null),
+    querySelector: (selector) => (selector === "#mc-llm-chat-conversation" ? sheet
+                                  : (REVEALS[selector] || null)),
     createElement: () => ({className: "", textContent: ""}),
     addEventListener() {},
     readyState: "complete",
@@ -569,14 +571,27 @@ loaded.forEach((fn) => fn());
 // A control inside a section of the sheet, clicked. The section is what the
 // script has to find its way back to — the target itself is a button inside it.
 const opened = section(TOP, HEIGHT);
-sheet.handler({target: {parentElement: opened}});
+const target = {parentElement: opened};
+const REVEALS = {};
+if (PRESSED) {
+    // The press was on + New or on Edit, and the editor is elsewhere.
+    const editor = section(EDITOR_TOP, EDITOR_HEIGHT);
+    REVEALS["#mc-llm-chat-character-editor"] = {parentElement: editor};
+    REVEALS["#" + PRESSED] = {contains: (node) => node === target};
+}
+sheet.handler({target});
 console.log(JSON.stringify({scrollTop: sheet.scrollTop, wired: sheet.dataset.mcLlmInView}));
 """
 
 
-def opened(top: int, height: int, view: int = 400, scrolled: int = 0) -> dict:
-    """Where the sheet ended up after a section at ``top`` was opened."""
+def opened(top: int, height: int, view: int = 400, scrolled: int = 0, pressed: str = "",
+           editor: tuple = (0, 0)) -> dict:
+    """Where the sheet ended up after a section at ``top`` was opened -- or
+    after a press on ``pressed`` (+ New, Edit) opened the editor at ``editor``."""
     harness = (SHEET.replace("SOURCE", SCRIPT.read_text())
+               .replace("EDITOR_TOP", json.dumps(editor[0]))
+               .replace("EDITOR_HEIGHT", json.dumps(editor[1]))
+               .replace("PRESSED", json.dumps(pressed))
                .replace("TOP", json.dumps(top))
                .replace("HEIGHT", json.dumps(height))
                .replace("VIEW", json.dumps(view))
@@ -606,6 +621,19 @@ class TestKeepingAnOpenedSectionInView:
 
     def test_the_sheet_is_wired_once(self):
         assert opened(top=0, height=100)["wired"] == "1"
+
+    def test_new_and_edit_bring_the_editor_into_view_not_the_button(self):
+        """+ New is at the top and Edit far down, in the Character section; the
+        editor is under "Talking to", so it is what has to be shown."""
+        # Edit pressed with the sheet scrolled to the bottom: back up to the editor.
+        assert opened(top=900, height=40, view=400, scrolled=800,
+                      pressed="mc-llm-chat-edit-character", editor=(120, 300))["scrollTop"] == 120
+        # + New pressed at the top: down far enough to show the editor's end.
+        assert opened(top=60, height=40, view=400, scrolled=0,
+                      pressed="mc-llm-chat-new-character", editor=(120, 340))["scrollTop"] == 60
+        # Any other press is still its own section's.
+        assert opened(top=900, height=40, view=400, scrolled=800,
+                      pressed="", editor=(120, 300))["scrollTop"] == 800
 
 
 # --------------------------------------------------------------------------- #
@@ -1900,13 +1928,17 @@ class TestEditOpensTheDialog:
             assert f'"{ui.ident("chat", name)}"' in script, name
 
 
-# -- the thread's emotion ------------------------------------------------------ #
+# -- the rows of the Conversation pop-up -------------------------------------- #
+#
+# The Emotion section's rows and the rows of Favourites and Threads, all drawn
+# by Python and pressed here: a press names what it is on and what to do, into
+# one hidden box, and presses one hidden button. The Emotion and Start with
+# chips and their pickers under the bar went on 2026-11-06 ("make these all just
+# one "Conversation" button"), and with them everything the script did to open
+# and put them away.
 
-EMOTION_PAGE = """
-const chip = element("button", "mc-llm-chat-to-emotion");
-const picker = element("div", "mc-llm-chat-emotion");
-const sheet = new El("div");
-const outside = new El("div");
+ROWS_PAGE = """
+const section = new El("div");
 function emotionRow(where, line, deletable) {
     const choice = new El("button");
     choice.className = "mc-llm-emotion-choice";
@@ -1922,126 +1954,149 @@ function emotionRow(where, line, deletable) {
     where.appendChild(remove);
     return {choice, words, remove};
 }
-const off = emotionRow(picker, "", false);
-const happy = emotionRow(picker, "*I am so happy*", true);
-const sheetSad = emotionRow(sheet, "*I am so sad*", true);
-const emotionBox = element("div", "mc-llm-chat-emotion-at");
-const emotionField = new El("textarea");
-emotionField.value = "";
-emotionField.events = [];
-emotionField.dispatchEvent = (event) => { emotionField.events.push(event.type); return true; };
-emotionBox.appendChild(emotionField);
+const off = emotionRow(section, "", false);
+const happy = emotionRow(section, "*I am so happy*", true);
+function hiddenBox(id) {
+    const box = element("div", id);
+    const field = new El("textarea");
+    field.value = "";
+    field.events = [];
+    field.dispatchEvent = (event) => { field.events.push(event.type); return true; };
+    box.appendChild(field);
+    return field;
+}
+const emotionField = hiddenBox("mc-llm-chat-emotion-at");
 const emotionPresses = [];
 element("button", "mc-llm-chat-emotion-now").click = () => emotionPresses.push(emotionField.value);
+const threadField = hiddenBox("mc-llm-chat-thread-at");
+const threadPresses = [];
+element("button", "mc-llm-chat-thread-now").click = () => threadPresses.push(threadField.value);
+function threadRow(where, who, thread, title) {
+    const row = new El("div");
+    row.className = "mc-llm-thread-row";
+    const open = new El("button");
+    open.className = "mc-llm-thread-open";
+    open.setAttribute("data-character", who);
+    open.setAttribute("data-thread", thread);
+    const words = new El("span");
+    words.className = "mc-llm-thread-title";
+    words.textContent = title;
+    open.appendChild(words);
+    const star = new El("button");
+    star.className = "mc-llm-thread-star";
+    star.setAttribute("data-character", who);
+    star.setAttribute("data-thread", thread);
+    const drawn = new El("svg");
+    const shape = new El("polygon");
+    drawn.appendChild(shape);
+    star.appendChild(drawn);
+    row.appendChild(open);
+    row.appendChild(star);
+    where.appendChild(row);
+    return {open, words, star, shape};
+}
+const threadList = new El("div");
+const harbour = threadRow(threadList, "Ada", "t-harbour", "harbour at night");
+const favourites = new El("div");
+const road = threadRow(favourites, "Bob", "t-road", "a desert road");
 function onDocument(kind, target, extra) {
     (documentListeners[kind] || []).forEach((fn) => fn(Object.assign({target}, extra || {})));
 }
-function pressChip() {
-    chip.dispatchEvent({type: "click", bubbles: true, target: chip});
-    onDocument("click", chip);
-}
-function openNow() { return picker.classList.contains("mc-llm-emotion-open"); }
 """
 
 
-def emotion(rehearsal: str) -> dict:
+def rows(rehearsal: str) -> dict:
     return row([("assistant", "reply 0")], rehearsal + """
-        out.presses = emotionPresses.map((v) => JSON.parse(v));
-        out.fieldEvents = emotionField.events;
-    """, setup=EMOTION_PAGE)
+        out.emotions = emotionPresses.map((v) => JSON.parse(v));
+        out.threads = threadPresses.map((v) => JSON.parse(v));
+        out.fieldEvents = emotionField.events.concat(threadField.events);
+    """, setup=ROWS_PAGE)
 
 
-class TestTheEmotionPicker:
-    def test_the_chip_opens_it_and_presses_it_away(self):
-        found = emotion("""
-            out.before = openNow();
-            pressChip();
-            out.opened = openNow();
-            out.expanded = chip.getAttribute("aria-expanded");
-            pressChip();
-            out.closed = openNow();
-        """)
-
-        assert found["before"] is False
-        assert found["opened"] is True and found["expanded"] == "true"
-        assert found["closed"] is False
-
-    def test_a_press_elsewhere_or_escape_puts_it_away_and_a_press_inside_does_not(self):
-        found = emotion("""
-            pressChip();
-            onDocument("click", off.words);
-            out.afterInside = openNow();
-            onDocument("click", outside);
-            out.afterOutside = openNow();
-            pressChip();
-            onDocument("keydown", outside, {key: "Escape"});
-            out.afterEscape = openNow();
-        """)
-
-        assert found["afterInside"] is True
-        assert found["afterOutside"] is False
-        assert found["afterEscape"] is False
-
+class TestTheEmotionRows:
     def test_a_row_names_its_line_and_what_to_do_and_presses_the_button(self):
         """By its words: a list changed in the other window meanwhile cannot
         turn a press on one line into an answer about another."""
-        found = emotion("""
+        found = rows("""
             onDocument("click", happy.words);
             onDocument("click", off.choice);
             onDocument("click", happy.remove);
         """)
 
-        assert found["presses"] == [{"do": "choose", "line": "*I am so happy*"},
-                                    {"do": "choose", "line": ""},
-                                    {"do": "delete", "line": "*I am so happy*"}]
+        assert found["emotions"] == [{"do": "choose", "line": "*I am so happy*"},
+                                     {"do": "choose", "line": ""},
+                                     {"do": "delete", "line": "*I am so happy*"}]
         assert found["fieldEvents"] == ["input"] * 3
+        assert found["threads"] == []
 
     def test_the_way_it_steers_is_nominated_by_its_name(self):
-        found = emotion("""
+        found = rows("""
             const ways = new El("div");
             ways.className = "mc-llm-emotion-modes";
             const prefill = new El("button");
             prefill.className = "mc-llm-emotion-mode";
             prefill.setAttribute("data-emotion-mode", "prefill");
             ways.appendChild(prefill);
-            picker.appendChild(ways);
-            pressChip();
+            section.appendChild(ways);
             onDocument("click", prefill);
-            out.open = openNow();
         """)
 
-        assert found["presses"] == [{"do": "mode", "line": "prefill"}]
-        assert found["open"] is True
-
-    def test_the_character_sheet_s_rows_are_answered_the_same_way(self):
-        found = emotion("""
-            onDocument("click", sheetSad.choice);
-            onDocument("click", sheetSad.remove);
-        """)
-
-        assert found["presses"] == [{"do": "choose", "line": "*I am so sad*"},
-                                    {"do": "delete", "line": "*I am so sad*"}]
+        assert found["emotions"] == [{"do": "mode", "line": "prefill"}]
 
     def test_a_disabled_row_presses_nothing(self):
-        found = emotion("""
+        found = rows("""
             happy.choice.disabled = true;
             onDocument("click", happy.words);
         """)
 
-        assert found["presses"] == []
+        assert found["emotions"] == []
+
+
+class TestTheThreadRows:
+    """"make it easy to favorite an existing thread i have with one of my
+    characters ... I need a star or a pin or something to keep it at top"
+    (2026-11-06)."""
+
+    def test_a_row_opens_its_thread_by_name_and_whose_it_is(self):
+        found = rows("""
+            onDocument("click", harbour.words);
+            onDocument("click", road.open);
+        """)
+
+        assert found["threads"] == [{"do": "open", "character": "Ada", "thread": "t-harbour"},
+                                    {"do": "open", "character": "Bob", "thread": "t-road"}]
+        assert found["emotions"] == []
+
+    def test_its_star_stars_it_even_pressed_on_the_drawing(self):
+        found = rows("""
+            onDocument("click", harbour.shape);
+            onDocument("click", road.star);
+        """)
+
+        assert found["threads"] == [{"do": "star", "character": "Ada", "thread": "t-harbour"},
+                                    {"do": "star", "character": "Bob", "thread": "t-road"}]
+
+    def test_a_disabled_row_and_a_press_beside_the_rows_press_nothing(self):
+        found = rows("""
+            harbour.open.disabled = true;
+            onDocument("click", harbour.words);
+            onDocument("click", threadList);
+        """)
+
+        assert found["threads"] == []
 
     def test_wiring_again_listens_once(self):
-        found = emotion("""
+        found = rows("""
             rewire(); rewire();
+            onDocument("click", harbour.open);
             onDocument("click", happy.choice);
-            pressChip();
-            out.open = openNow();
         """)
 
-        assert len(found["presses"]) == 1
-        assert found["open"] is True
+        assert len(found["threads"]) == 1 and len(found["emotions"]) == 1
 
-    def test_the_ids_are_the_panel_s(self):
+
+class TestThePickersAreGone:
+    def test_the_ids_are_the_panel_s_and_the_chips_are_not_looked_for(self):
         import sys
         from pathlib import Path
 
@@ -2049,108 +2104,9 @@ class TestTheEmotionPicker:
         import mc_llm_ui as ui
 
         script = SCRIPT.read_text(encoding="utf-8")
-        for name in ("to-emotion", "emotion", "emotion-at", "emotion-now"):
+        for name in ("emotion-at", "emotion-now", "thread-at", "thread-now",
+                     "new-character", "edit-character", "character-editor", "conversation"):
             assert f'"{ui.ident("chat", name)}"' in script, name
-
-
-# -- the start of the next reply --------------------------------------------- #
-
-START_PAGE = EMOTION_PAGE + """
-const startChip = element("button", "mc-llm-chat-to-start");
-const startPicker = element("div", "mc-llm-chat-start");
-const startBox = element("div", "mc-llm-chat-start-text");
-const startField = new El("textarea");
-let focused = 0;
-startField.focus = () => { focused += 1; };
-startBox.appendChild(startField);
-startPicker.appendChild(startBox);
-const setButton = element("button", "mc-llm-chat-start-set");
-const clearButton = element("button", "mc-llm-chat-start-clear");
-startPicker.appendChild(setButton);
-startPicker.appendChild(clearButton);
-function pressStart() {
-    startChip.dispatchEvent({type: "click", bubbles: true, target: startChip});
-    onDocument("click", startChip);
-}
-function startNow() { return startPicker.classList.contains("mc-llm-start-open"); }
-"""
-
-
-def start(rehearsal: str) -> dict:
-    return row([("assistant", "reply 0")], rehearsal, setup=START_PAGE)
-
-
-class TestTheStartBox:
-    def test_the_chip_opens_it_with_the_words_focused_and_presses_it_away(self):
-        found = start("""
-            out.before = startNow();
-            pressStart();
-            out.opened = startNow();
-            out.expanded = startChip.getAttribute("aria-expanded");
-            out.focused = focused;
-            pressStart();
-            out.closed = startNow();
-        """)
-
-        assert found["before"] is False
-        assert found["opened"] is True and found["expanded"] == "true"
-        assert found["focused"] == 1
-        assert found["closed"] is False
-
-    def test_set_clear_enter_a_press_elsewhere_and_escape_put_it_away(self):
-        found = start("""
-            const seen = [];
-            function after(what, how) { pressStart(); how(); seen.push([what, startNow()]); }
-            after("set", () => onDocument("click", setButton));
-            after("clear", () => onDocument("click", clearButton));
-            after("enter", () => onDocument("keydown", startField, {key: "Enter"}));
-            after("outside", () => onDocument("click", outside));
-            after("escape", () => onDocument("keydown", outside, {key: "Escape"}));
-            out.seen = seen;
-        """)
-
-        assert found["seen"] == [["set", False], ["clear", False], ["enter", False],
-                                 ["outside", False], ["escape", False]]
-
-    def test_typing_in_it_and_a_new_line_keep_it_open(self):
-        found = start("""
-            pressStart();
-            onDocument("click", startField);
-            onDocument("keydown", startField, {key: "a"});
-            onDocument("keydown", startField, {key: "Enter", shiftKey: true});
-            out.open = startNow();
-        """)
-
-        assert found["open"] is True
-
-    def test_only_one_of_the_emotion_and_the_start_is_open(self):
-        found = start("""
-            pressChip();
-            pressStart();
-            out.afterStart = [openNow(), startNow()];
-            pressChip();
-            out.afterEmotion = [openNow(), startNow()];
-        """)
-
-        assert found["afterStart"] == [False, True]
-        assert found["afterEmotion"] == [True, False]
-
-    def test_wiring_again_listens_once(self):
-        found = start("""
-            rewire(); rewire();
-            pressStart();
-            out.open = startNow();
-        """)
-
-        assert found["open"] is True
-
-    def test_the_ids_are_the_panel_s(self):
-        import sys
-        from pathlib import Path
-
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        import mc_llm_ui as ui
-
-        script = SCRIPT.read_text(encoding="utf-8")
-        for name in ("to-start", "start", "start-text", "start-set", "start-clear"):
-            assert f'"{ui.ident("chat", name)}"' in script, name
+        for gone in ("to-emotion", "to-start", "to-threads", "to-character", "to-persona"):
+            assert ui.ident("chat", gone) not in script, gone
+        assert "mc-llm-emotion-open" not in script and "mc-llm-start-open" not in script

@@ -134,7 +134,7 @@ function field(id) {
 
 const elements = {};
 ["mc-llm-chat-voice-mic", "mc-llm-chat-send", "mc-llm-chat-stop",
- "mc-llm-chat-to-voice"].forEach(function (id) {
+ "mc-llm-chat-to-conversation"].forEach(function (id) {
     elements[id] = element(id, "BUTTON");
 });
 ["mc-llm-chat-voice-token", "mc-llm-chat-voice-turn", "mc-llm-chat-voice-run-state",
@@ -1177,10 +1177,10 @@ function report(extra) {
         // The Pocket-only waiting state: playback has already stopped and the
         // engine has not released its lane. Read off the chip rather than off a
         // flag inside the module, because what a user meets is the chip.
-        finishing: elements["mc-llm-chat-to-voice"].classList
+        finishing: elements["mc-llm-chat-to-conversation"].classList
             .contains("mc-voice-finishing"),
-        finishingTitle: elements["mc-llm-chat-to-voice"].getAttribute("title") || "",
-        finishingBusy: elements["mc-llm-chat-to-voice"].getAttribute("aria-busy") || "",
+        finishingTitle: elements["mc-llm-chat-to-conversation"].getAttribute("title") || "",
+        finishingBusy: elements["mc-llm-chat-to-conversation"].getAttribute("aria-busy") || "",
         sendHidden: (elements["mc-llm-chat-send"].classList
                      .contains("mc-llm-voice-hidden")),
         stopHidden: (elements["mc-llm-chat-stop"].classList
@@ -2728,7 +2728,7 @@ class TestSpeaking:
             await tick();
             console.log(JSON.stringify(report()));
         """, CONTEXT_STATE='"suspended"', RESUME_WORKS="false")
-        assert "tap Voice or the microphone" in found["status"]
+        assert "tap Conversation or the microphone" in found["status"]
         assert not any(r.get("url", "").endswith("/tts") for r in found["requests"])
 
     def test_a_failed_synthesis_says_so_without_touching_the_transcript(self):
@@ -5721,7 +5721,7 @@ class TestVoiceFinishing:
             elements["mc-llm-chat-stop"].fire("click", {});
             NOW += 2000;
             await pump(8);
-            const during = elements["mc-llm-chat-to-voice"].classList
+            const during = elements["mc-llm-chat-to-conversation"].classList
                 .contains("mc-voice-finishing");
             replies["voice/status"].json.draining = false;
             NOW += 4000;

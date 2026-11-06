@@ -3531,8 +3531,8 @@ which model, on which device, at what context, with a route on to Setup for the
 residency and the estimate. It is a sheet rather than a permanent row because
 everything a top bar takes is taken from the conversation under it.
 
-**A tap outside a sheet closes it** — the model sheet, the workspace chooser,
-Threads, Character, You and Voice alike (since 2026-11-06). The first tap
+**A tap outside a sheet closes it** — the model sheet, the workspace chooser
+and the Conversation pop-up alike (since 2026-11-06). The first tap
 outside does only that, as the Forge Assistant's Tap Outside to Close does:
 nothing under it is pressed. A scroll, a drag, a tap on the bars that open the
 sheets, in the Forge Assistant or in a dialog is left alone. On a phone a sheet
@@ -3639,8 +3639,8 @@ here** is one button along when you want the other thing.
 ### Who said what
 
 Every message carries a face: yours on the right of your messages, the
-character's on the left of its replies. Set them in **Character** and in **You**
-— any image; it is copied, sized down and kept beside the thing it belongs to,
+character's on the left of its replies. Set them in the Conversation pop-up —
+the character editor's **Picture** and the **You** section — any image; it is copied, sized down and kept beside the thing it belongs to,
 so the character's picture goes next to its file exactly where oobabooga keeps
 one. A `.png` character card imported with a picture already has its face.
 
@@ -3711,12 +3711,38 @@ model writes bare — `<br>`, `<b>`, `<i>`, `<u>`, `<sup>`, `<sub>`, `<mark>`,
 `<kbd>` and their like — are drawn, any other HTML is shown as text, and
 entities such as `&rarr;` are their characters.
 
+### The Conversation pop-up
+
+Everything about the conversation is behind one button on its header,
+**Conversation** (since 2026-11-06: "make these all just one "Conversation"
+button"; until then Threads, Character, Emotion, Start with, You and Voice
+were six chips, each opening a menu of its own, and some of those menus showed
+inside others). A small dot on the button says this thread has an emotion or a
+start set. The pop-up is the one the chips' sheets were — over the
+conversation, put away by **‹ Back**, by **☰** or by a tap outside it — and
+reads, top to bottom:
+
+| | |
+| --- | --- |
+| **Favourites** | Every thread you have starred, whoever it is with, most recently used first, each with the character's name beside it. One tap opens it — switching character if it is another's — and the pop-up goes. Not shown until a thread is starred. |
+| **Talking to** · **+ New** | Who you are talking to, from your characters, and a new one. Choosing another opens its newest thread. + New opens the character editor here, under the drop-down. |
+| **Threads** · **+ New thread** | That character's threads, starred first, then the rest, most recently used first; a box finds one by its title. Tap a thread to open it. **Tap its star** (☆) to keep it at the top and in Favourites; tap the filled star again to let it go. |
+| **Emotion · …** | Folded, its label says the emotion on (*Emotion · Off* without one). Open, the list and the way it steers — *A thread's emotion*, below. |
+| **Start the next reply with · …** | Folded, its label says the words kept. Open, the box with **Clear** and **Set** — *Start reply with*, below. |
+| **Generation** | Temperature, top-p, reply tokens and the seed — *Characters*, below. |
+| **Voice** | What is installed and the two switches — *Voice Chat*, below. |
+| **Character** | **Edit**, **↻ Refresh** (re-reads the characters folder), **⤢ System prompt** (the full-page editor, below), **Import a character card**, and **Delete this character**. |
+| **This thread** | **Rename this thread**, and **Delete this thread**. |
+| **You** | Your name, picture and *About you*, with **Save**. |
+
+The sections stay folded until you open one, so the pop-up opens on the lists;
+each is drawn again from what is saved every time the pop-up opens.
+
 ### Characters
 
-**Character** in the Conversation menu is one screen: *Talking to* at the top,
-and under it **Edit**, **New**, **↻ Refresh** (re-reads the characters folder)
-and **⤢ System prompt** (the full-page editor, below). Edit and New open the
-editor on the screen, grouped in the order a character is written:
+**+ New** beside *Talking to* and **Edit** in the pop-up's **Character**
+section open the character editor under *Talking to* (brought into view,
+wherever you pressed), grouped in the order a character is written:
 
 | | |
 | --- | --- |
@@ -3726,12 +3752,13 @@ editor on the screen, grouped in the order a character is written:
 | **Voice** | Which voice reads the character aloud, and its own delivery if it has one. |
 | **Save character** / **Cancel** | Save creates when the editor is on a new character and edits when it is on an existing one; creating over a name already taken is refused. Changing the name renames, picture included. Cancel puts everything back, the Generation settings too. |
 
-Under the editor, **Generation** holds temperature, top-p, reply tokens and
-the seed. They are saved with the character and in force while you talk to
+The pop-up's **Generation** section holds temperature, top-p, reply tokens
+and the seed. They are saved with the character and in force while you talk to
 one — moving one while the editor is shut is remembered on that character —
-and −1 is a new seed for every reply. **Import a character card** takes a
-`.yaml`, `.json`, or a `.png` V2/V3 card with its JSON inside. **Delete this
-character** removes it and its picture and lands you on whichever is left.
+and −1 is a new seed for every reply. In the **Character** section, **Import a
+character card** takes a `.yaml`, `.json`, or a `.png` V2/V3 card with its JSON
+inside, and **Delete this character** removes it and its picture and lands you
+on whichever is left.
 
 #### The system prompt editor
 
@@ -3771,15 +3798,21 @@ a rotation, a phone's keyboard coming up — so the buttons stay in reach.
 
 ### Favourite threads
 
-**Pin this thread** on Conversation's **Threads** screen pins the thread that is
-open as a favourite (since 2026-11-06); pressed again it reads **Unpin this
-thread**. Pinned threads are listed first, each with a 📌 in front of its title,
-most recently used first among themselves, and the rest follow as before; the
-search box matches the title, never the pin. The Forge Assistant's **⋯ → Threads**
-lists them first too, with the same pin drawn beside them. A pin is kept beside
-the chats (`.pins.json` in the character's folder), so pinning rewrites no
-conversation and changes nobody's order of recency, and deleting a thread takes
-its pin with it.
+Every thread in the Conversation pop-up has a **star**: tap it and the thread
+is a favourite — first in its character's **Threads**, and in **Favourites** at
+the top of the pop-up with every other character's, so a thread with any of
+your characters is one tap away; tap it again to let it go (since 2026-11-06:
+"make it easy to favorite an existing thread i have with one of my characters,
+so i can quickly load and continue. I need a star or a pin or something to keep
+it at top"; that morning's first build was a **Pin this thread** button for the
+open thread on the Threads screen). Favourites are most recently used first;
+the rest of a character's threads follow as before, and the search box matches
+the title alone. Opening a favourite with another character chooses that
+character and opens that thread, not its newest. The Forge Assistant's
+**⋯ → Threads** lists the starred first too, with a pin drawn beside them. A
+star is kept beside the chats (`.pins.json` in the character's folder), so
+starring rewrites no conversation and changes nobody's order of recency, and
+deleting a thread takes its star with it.
 
 The same change fixed a phantom in the list: deleting a thread writes a small
 record beside the chats, and every character a thread had been deleted from
@@ -3966,10 +3999,11 @@ way the line is never in a reply, never read aloud and never saved.
   not turn them on again. A line is one line of up to 200 characters, fifty at
   most; `{{char}}` and `{{user}}` in it are the character's name and yours.
   Kept in `emotions.json` under the LLM data root.
-- **Where:** in LLM Studio, the **Emotion** chip between Character and You — its
-  dot is hollow while the thread has none and filled while it has one — opens a
-  small picker under the bar, put away by a press anywhere else or Escape; the
-  same list is in the **Character** sheet under *Talking to*. In the Forge
+- **Where:** in LLM Studio, the **Emotion** section of the Conversation pop-up
+  — folded, its label says the line that is on (*Emotion · Off* without one),
+  and the Conversation button carries a dot while one is on (until 2026-11-06
+  an Emotion chip of its own, with a picker under the bar, and the same list
+  again in the Character sheet). In the Forge
   Assistant, the **⋯** menu's Chat group has **Emotion ›** with the line that is
   on, and while one is on a pill in the composer's row says its word
   (*● happy*) and opens it in one tap.
@@ -4061,10 +4095,11 @@ model wrote after them is kept exactly as it wrote it (a comma straight after
   both, and only your words are in the reply. Words on more than one line keep
   their line breaks. (Oobabooga drops the bias for such a reply; here
   the emotion keeps steering it.)
-- **Where:** in LLM Studio, the **Start with** chip beside Emotion — its dot
-  filled while words are kept — opens a small box under the bar: the words,
-  **Clear** and **Set** (Enter sets, Shift+Enter is a new line; a press
-  elsewhere or Escape puts it away). In the Forge Assistant, the **T** button
+- **Where:** in LLM Studio, the **Start the next reply with** section of the
+  Conversation pop-up — folded, its label says the words kept, and the
+  Conversation button carries a dot while they are — holds the words, **Clear**
+  and **Set** (Enter sets, Shift+Enter is a new line); until 2026-11-06 a Start
+  with chip of its own, with a box under the bar. In the Forge Assistant, the **T** button
   in the composer's row, beside the others, is lit while words are kept and
   opens the same box in the conversation's place.
 - **The cache.** The words are in the saved reply, so llama-server's cache
@@ -6441,15 +6476,17 @@ over plain HTTP exactly as it does anywhere else.
 Playback follows Android's own media route, so a Bluetooth speaker or a pair of
 headphones gets the reply without anything to configure. Mobile browsers also
 suspend audio until the page has been touched, so the first spoken reply after a
-fresh load may ask you to tap Voice or the microphone once — a persisted setting
+fresh load may ask you to tap Conversation or the microphone once — a persisted setting
 is intent, and only a gesture is permission.
 
 ### Using it
 
-Conversation grows a **Voice** chip in its header, next to Threads / Character /
-You / Model, and a microphone beside Send. The chip opens an overlay with the
+Conversation grows a **Voice** section in its pop-up (a chip of its own on
+the header until 2026-11-06, when the header's six chips became one
+**Conversation** button), and a microphone beside Send. The section has the
 same two switches Settings has — they are the same stored values, written the
-moment you tap them, so there is no Apply to remember.
+moment you tap them, so there is no Apply to remember. While an engine is
+still finishing a reply that was stopped, the Conversation button says so.
 
 - **Slide the microphone to the right and hold** to record; let go to
   transcribe. The microphone sits at the left of a short track twice its own
@@ -8223,7 +8260,7 @@ mc_voice_segment.py   where a reply may safely be cut so a sentence can be spoke
 mc_voice_turn.py      one reply on its way to a speaker: identity, bounds, stopping
 mc_voice_engines.py   which engine is selected, and what a voice id means now
 mc_voice_api.py       the browser routes, their auth parity and the audio stream
-mc_voice_ui.py        the Voice chip, overlay and microphone in Conversation
+mc_voice_ui.py        the Voice section of the Conversation pop-up, and the microphone
 
 mc_voice_kokoro.py    Kokoro behind the facade: qualified ids in, sherpa SIDs in
 mc_voice_runtime.py   the Kokoro worker process, its pipe, and its five exits

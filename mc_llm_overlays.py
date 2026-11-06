@@ -1,22 +1,25 @@
-"""One overlay at a time, decided in one place, for all six of them.
+"""One overlay at a time, decided in one place, for all three of them.
 
-LLM Studio has six surfaces that pop over the workspace, and until this module
-it had *three* mechanisms for deciding which was open: the shell's two sheets
-knew about each other, the chat panel's four screens knew about each other,
-and the message action sheet -- a seventh then, a row inside the bubble now --
-knew about nothing. So opening the character editor left the workspace chooser
-underneath it, and tapping a bubble opened an action sheet over whichever of
-those happened to be showing. Three half-drawn panels stacked on one phone
+LLM Studio has three surfaces that pop over the workspace -- the shell's two
+sheets and Conversation's one pop-up (six until 2026-11-06, when the chat
+panel's Threads, Character, You and Voice screens became sections of one
+Conversation pop-up) -- and until this module it had *three* mechanisms for
+deciding which was open: the shell's two sheets knew about each other, the
+chat panel's four screens knew about each other, and the message action sheet
+-- a seventh then, a row inside the bubble now -- knew about nothing. So
+opening the character editor left the workspace chooser underneath it, and
+tapping a bubble opened an action sheet over whichever of those happened to be
+showing. Three half-drawn panels stacked on one phone
 screen, and each mechanism individually correct.
 
 This module is the fourth mechanism that replaces all three. :func:`showing`
 answers "what is visible" for every surface at once, so exclusivity is a
-property of one function rather than a rule six handlers have to remember.
+property of one function rather than a rule every handler has to remember.
 
 How it reaches Gradio
 ---------------------
 A Gradio handler can only write the outputs it declares, so a decision about
-all six is only worth making if every opener *can* write all six. Both
+all of them is only worth making if every opener *can* write all of them. Both
 halves are built in one ``gr.Blocks`` but by two modules, and the shell's
 sheets exist before the chat panel is built — so the components are registered
 here as they are created, and each module asks for the ones it did not build
@@ -49,13 +52,15 @@ logger = logging.getLogger("model_chain")
 SHELL = ("mode", "model")
 """The shell's own sheets: the workspace chooser and the model/runtime sheet."""
 
-CHAT = ("threads", "character", "persona", "voice")
-"""Conversation's screens. The same tuple ``mc_llm_chat_panel.SCREENS`` names."""
+CHAT = ("conversation",)
+"""Conversation's pop-up. The same tuple ``mc_llm_chat_panel.SCREENS`` names.
+
+One since 2026-11-06; Threads, Character, You and Voice were four screens."""
 
 OVERLAYS = SHELL + CHAT
 """Every pop surface in LLM Studio, in the order this module answers in.
 
-Six. The per-message action sheet was the seventh until it became a row inside
+Three. The per-message action sheet was one more until it became a row inside
 the bubble it applies to, which covers nothing and so has nothing to close.
 """
 
@@ -114,7 +119,7 @@ def present(names) -> tuple:
 
 
 def showing(name: str = "") -> dict:
-    """Which of the six is open. Exactly one, or none.
+    """Which of them is open. Exactly one, or none.
 
     The single decision. ``name`` is the surface being opened; everything else
     is closed, including the surfaces the caller has never heard of, which is

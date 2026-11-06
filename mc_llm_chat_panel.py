@@ -34,19 +34,23 @@ cannot create a control in response to a click. The states are:
 
 ``CHAT_HOME``
     Header, transcript, status, composer. Everything else hidden.
-``NAV_SHEET``
-    Threads, Character, You, and the secondary route to the model, to Setup and
-    to the other workspaces.
-``THREADS_SCREEN`` / ``CHARACTER_SCREEN`` / ``PERSONA_SCREEN``
-    One destination each, opened from the nav sheet.
+``CONVERSATION_SHEET``
+    The one pop-up the header's **Conversation** opens (2026-11-06): your
+    favourite threads with any character, who you are talking to and that
+    character's threads, each with a star, and folded under them Emotion,
+    Start the next reply with, Generation, Voice, Character, This thread and
+    You. It replaced six chips -- Threads, Character, Emotion, Start with, You
+    and Voice -- each opening a menu of its own, some of them inside others:
+    "It's time to clean up chat controls ... What we need is a single pop up
+    that allows me to configure the CONVERSATION".
 ``MESSAGE_EDIT_MODE``
     The composer, temporarily replaced by an editor for the selected message.
 ``ATTACHMENT_PREVIEW``
     The picture for the next message, in a compact row above the composer.
 
-Only one of the four screens is ever open: :func:`_screens` is the single
-function that says so, and every handler that opens one returns its whole
-answer rather than toggling a component of its own.
+Only one surface is ever open: :func:`_screens` is the single function that
+says so, and every handler that opens one returns its whole answer rather than
+toggling a component of its own.
 
 Per-message actions, and why they are a row in the bubble
 ---------------------------------------------------------
@@ -142,25 +146,17 @@ Gradio round trip would add nothing: the editor reads and writes through the
 assistant's routes itself.
 """
 
-SCREENS = ("threads", "character", "persona", "voice")
+SCREENS = ("conversation",)
 """The overlay surfaces, in the order :func:`_screens` returns them.
 
-One at a time, always. They occupy the same space -- the whole conversation
-workspace on a narrow display -- so two open at once is two half-drawn panels
-rather than one usable one, and the way that is guaranteed is that there is one
-function which decides, and it decides for all of them at once.
-
-There is no menu among them any more. Threads, Character and You were behind
-one, and a menu whose entire contents are three destinations is a tap in front
-of every one of them: they are buttons in the header now, and the header wraps
-on a narrow display rather than folding back into a menu. What ``\u2630`` opens
-is the shell's own workspace chooser, which is what it opens in every other
-mode -- one button, one behaviour, everywhere in LLM Studio.
-
-Voice is the fourth and joined the tuple rather than inventing a mechanism of
-its own. Everything that follows from being in this list is exactly what a voice
-flyout needs: it takes no room when closed, it closes when another opens, and
-``\u2630`` puts it away with the rest.
+One: the Conversation pop-up. There were four -- Threads, Character, You and
+Voice, each opened by a chip of its own beside Emotion's and Start with's
+pickers -- until 2026-11-06, when the user asked for "a single pop up that
+allows me to configure the CONVERSATION", the rest nested. A tuple still,
+because the overlay registry (:mod:`mc_llm_overlays`) answers for every
+surface in LLM Studio at once: opening this one puts the shell's sheets away,
+and ``\u2630``, which opens the shell's own workspace chooser as it does in
+every other mode, puts this one away.
 """
 
 STREAM_ORDER = ("operation", "transcript", "positions", "composer", "attachment", "status",
@@ -214,8 +210,9 @@ def build() -> dict:
     # Populated at build rather than left for the first character change: the
     # panel opens on the thread it was left on, and a list that starts empty
     # reads as "you have no threads" rather than as "pick a character".
-    initial_threads = _thread_choices(who)
-    initial_thread = prefs.get("thread") or (initial_threads[0][1] if initial_threads else "")
+    initial_threads = _threads(who)
+    initial_thread = prefs.get("thread") or (initial_threads[0].identifier if initial_threads
+                                             else "")
     initial_persona = _persona()
     opened = _load(who, initial_thread)
     initial_rows, initial_map = _view(opened)
@@ -267,38 +264,15 @@ def build() -> dict:
                 header = gr.HTML(_heading(who, opened),
                                  elem_id=ui.ident("chat", "title"),
                                  elem_classes=ui.classes("chat-title"))
-                # Out of the menu and onto the bar. Three destinations behind a
-                # menu is a tap in front of each of them, and they are the three
-                # this mode is navigated by. The row wraps on a narrow display
-                # rather than folding back into a menu -- a second line of
-                # chips is a smaller loss than a hidden one.
-                to_threads = gr.Button("Threads", size="sm", scale=0, min_width=0,
-                                       elem_id=ui.ident("chat", "to-threads"),
-                                       elem_classes=ui.classes("chip-button"))
-                to_character = gr.Button("Character", size="sm", scale=0, min_width=0,
-                                         elem_id=ui.ident("chat", "to-character"),
-                                         elem_classes=ui.classes("chip-button"))
-                # This thread's emotion (mc_llm_emotions): a word and a dot
-                # the stylesheet fills while one is on, read off the heading
-                # beside it, and a small picker under the bar rather than a
-                # sheet -- it takes nothing from the conversation.
-                to_emotion = gr.Button("Emotion", size="sm", scale=0, min_width=0,
-                                       elem_id=ui.ident("chat", "to-emotion"),
-                                       elem_classes=ui.classes("chip-button", "emotion-chip"))
-                # The words the next reply starts with (mc_llm_start_with): the
-                # emotion's chip, dot and box under the bar, for one reply.
-                to_start = gr.Button("Start with", size="sm", scale=0, min_width=0,
-                                     elem_id=ui.ident("chat", "to-start"),
-                                     elem_classes=ui.classes("chip-button", "start-chip"))
-                to_persona = gr.Button("You", size="sm", scale=0, min_width=0,
-                                       elem_id=ui.ident("chat", "to-persona"),
-                                       elem_classes=ui.classes("chip-button"))
-                # Voice sits with the other secondary surfaces because that is
-                # what it is: two switches and a readiness line, behind a tap.
-                # The row wraps on a narrow display exactly as it already does
-                # -- losing a little of the title is a smaller loss than a chip
-                # that is not there.
-                to_voice = mc_voice_ui.chip()
+                # One button for everything about the conversation (2026-11-06):
+                # "make these all just one "Conversation" button". It opens the
+                # one pop-up (CONVERSATION_SHEET above); the dot the stylesheet
+                # puts on it while this thread has an emotion or a start set is
+                # read off the heading beside it, as the two chips' dots were.
+                to_conversation = gr.Button("Conversation", size="sm", scale=0, min_width=0,
+                                            elem_id=ui.ident("chat", "to-conversation"),
+                                            elem_classes=ui.classes("chip-button",
+                                                                    "conversation-chip"))
                 # The runtime, as one tappable word. What it opens -- the model
                 # chooser, Load, Unload, the route to Setup -- is the shell's,
                 # and the shell wires this button to it: Conversation is not
@@ -307,39 +281,6 @@ def build() -> dict:
                 model = gr.Button(_MODEL_LABEL, size="sm", scale=0, min_width=0,
                                   elem_id=ui.ident("chat", "model"),
                                   elem_classes=ui.classes("chip-button"))
-
-            # The Emotion picker. Always built and drawn only while open: which
-            # it is is the browser's (javascript/llm_studio.js opens it from the
-            # chip and puts it away on a press elsewhere or Escape), and what
-            # it lists is Python's, read again on every press of the chip.
-            with gr.Column(elem_id=ui.ident("chat", "emotion"),
-                           elem_classes=ui.classes("emotion-picker")):
-                emotion_title = gr.HTML(_emotion_title(opened),
-                                        elem_classes=ui.classes("emotion-title"))
-                emotion_list = gr.HTML(_emotion_rows(who, getattr(opened, "identifier", "")))
-                with gr.Row(elem_classes=ui.classes("emotion-add")):
-                    emotion_new = gr.Textbox(label=None, show_label=False, container=False,
-                                             lines=1, max_lines=1, scale=1,
-                                             placeholder="*I am so nervous*",
-                                             elem_id=ui.ident("chat", "emotion-new"))
-                    emotion_add = gr.Button("Add", size="sm", scale=0, min_width=64)
-
-            # The Start with box, the same way: opened and put away by the
-            # browser, what it holds and every change Python's.
-            with gr.Column(elem_id=ui.ident("chat", "start"),
-                           elem_classes=ui.classes("start-picker")):
-                start_title = gr.HTML(_start_title(opened),
-                                      elem_classes=ui.classes("emotion-title"))
-                start_text = gr.Textbox(value=_start_of(who, getattr(opened, "identifier", "")),
-                                        label=None, show_label=False, container=False,
-                                        lines=1, max_lines=4, placeholder="The color is blue",
-                                        elem_id=ui.ident("chat", "start-text"))
-                with gr.Row(elem_classes=ui.classes("start-actions")):
-                    start_clear = gr.Button("Clear", size="sm", scale=0, min_width=72,
-                                            elem_id=ui.ident("chat", "start-clear"))
-                    start_set = gr.Button("Set", size="sm", scale=0, min_width=72,
-                                          variant="primary",
-                                          elem_id=ui.ident("chat", "start-set"))
 
             # No height= at all. The height is the space the tab has, worked
             # out in the browser and applied in style.css -- a number here
@@ -389,14 +330,22 @@ def build() -> dict:
             action_at = gr.Textbox(value="", visible=False, container=False,
                                    elem_id=ui.ident("chat", "action-at"))
             nominated = _nominated_buttons()
-            # The Emotion lists' rows, the same way: the browser writes which
-            # line and what to do with it ({"do": "choose"|"delete", "line":
-            # ...}) and presses the button; Python reads it against the list
-            # as it is now (:func:`_emotion_pressed`).
+            # The Emotion section's rows, the same way: the browser writes
+            # which line and what to do with it ({"do": "choose"|"delete",
+            # "line": ...}) and presses the button; Python reads it against the
+            # list as it is now (:func:`_emotion_pressed`).
             emotion_at = gr.Textbox(value="", visible=False, container=False,
                                     elem_id=ui.ident("chat", "emotion-at"))
             emotion_now = gr.Button("Emotion", visible=False,
                                     elem_id=ui.ident("chat", "emotion-now"))
+            # Favourites' and Threads' rows, the same way again: which thread,
+            # whose, and whether to open it or star it ({"do": "open"|"star",
+            # "character": ..., "thread": ...}), read against what is on disk
+            # now (:func:`_thread_pressed`).
+            thread_at = gr.Textbox(value="", visible=False, container=False,
+                                   elem_id=ui.ident("chat", "thread-at"))
+            thread_now = gr.Button("Open or star a thread", visible=False,
+                                   elem_id=ui.ident("chat", "thread-now"))
 
             # THE FORGE ASSISTANT'S PLUMBING, as far as Gradio is concerned.
             #
@@ -574,81 +523,45 @@ def build() -> dict:
                 cancel_edit = gr.Button("Cancel", size="sm", scale=0, min_width=80,
                                         elem_id=ui.ident("chat", "edit-cancel"))
 
-        # -- THREADS_SCREEN ------------------------------------------------- #
+        # -- CONVERSATION_SHEET --------------------------------------------- #
+        #
+        # Everything about the conversation, in one pop-up (2026-11-06): "make
+        # these all just one "Conversation" button ... The most important top
+        # level menu should still be there, but everything else can be nested
+        # ... top level is just select from existing or +new ... make it easy
+        # to favorite an existing thread i have with one of my characters, so
+        # i can quickly load and continue". On top: Favourites, the starred
+        # threads of every character; who you are talking to, with + New; and
+        # that character's threads, each with its star. Under them, folded:
+        # what shapes this thread's replies (Emotion, Start the next reply
+        # with, Generation, Voice), then the character, this thread and you.
 
-        with gr.Column(visible=False, elem_id=ui.ident("chat", "threads"),
-                       elem_classes=ui.classes("sheet", "sheet-screen")) as threads_screen:
+        with gr.Column(visible=False, elem_id=ui.ident("chat", "conversation"),
+                       elem_classes=ui.classes("sheet", "sheet-screen",
+                                               "conversation-sheet")) as conversation_screen:
             with gr.Row(elem_classes=ui.classes("sheet-head")):
-                threads_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
-                                         elem_classes=ui.classes("sheet-back"))
-                gr.Markdown("#### Threads")
-                new_thread = gr.Button("New", variant="primary", size="sm", scale=0,
-                                       min_width=68)
-            search = gr.Textbox(label="Find a thread", placeholder="Filter by title…",
-                                show_label=False, container=False,
-                                elem_id=ui.ident("chat", "search"))
-            threads = gr.Radio(label=None, show_label=False, choices=initial_threads,
-                               value=initial_thread or None, container=False,
-                               elem_id=ui.ident("chat", "threads"),
-                               elem_classes=ui.classes("threads"))
-            # "I am able to PIN a thread as favorite" (2026-11-06): pinned
-            # threads are listed first, marked, here and in the Forge
-            # Assistant's Threads menu. The label says which way a press goes,
-            # for the thread that is open (_pin_label), and no emoji is written
-            # on the button: the host's theme swaps a button's emoji for an
-            # icon and takes its words with it.
-            pin = gr.Button(_pin_label(_is_pinned(who, initial_thread)), size="sm",
-                            elem_id=ui.ident("chat", "pin"))
-            rename = gr.Button("Rename this thread", size="sm")
-            rename_box = gr.Textbox(label="New title", visible=False, container=False,
-                                    placeholder="New title…",
-                                    elem_id=ui.ident("chat", "rename"))
-            with gr.Row(visible=False) as rename_row:
-                save_rename = gr.Button("Save", variant="primary", size="sm")
-                cancel_rename = gr.Button("Cancel", size="sm")
-            # Away from the primary controls and behind its own heading, which
-            # is the only confirmation Gradio can honestly offer: there is no
-            # dialog to put in front of it, so the distance is the deliberation.
-            with gr.Group(elem_classes=ui.classes("destructive")):
-                gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
-                delete = gr.Button("Delete this thread", size="sm", variant="stop")
-
-        # -- CHARACTER_SCREEN ----------------------------------------------- #
-
-        with gr.Column(visible=False, elem_id=ui.ident("chat", "character"),
-                       elem_classes=ui.classes("sheet", "sheet-screen")) as character_screen:
-            with gr.Row(elem_classes=ui.classes("sheet-head")):
-                character_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
-                                           elem_classes=ui.classes("sheet-back"))
-                gr.Markdown("#### Character")
-            character = gr.Dropdown(
-                label="Talking to", choices=_character_choices(),
-                value=who or None, interactive=True,
-                elem_id=ui.ident("chat", "who"))
-            with gr.Row():
-                edit_character = gr.Button("Edit", size="sm")
-                new_character = gr.Button("New", size="sm")
-                refresh_characters = gr.Button("↻ Refresh", size="sm")
-                # The character's system prompt on a page of its own: the
-                # editor the Forge Assistant's ⋯ menu opens, over the whole
-                # window. Browser-only -- it reads and writes through the
-                # assistant's routes -- so the press never reaches the queue.
-                system_open = gr.Button("⤢ System prompt", size="sm",
-                                        elem_id=ui.ident("chat", "system-open"))
-            # The open thread's emotion, beside who it is with: the chip's
-            # picker, kept here too because it is a choice about the character.
-            with gr.Group(elem_classes=ui.classes("emotion-sheet")):
-                gr.Markdown("##### Emotion · this thread", elem_classes=ui.classes("sheet-label"))
-                emotion_sheet_list = gr.HTML(_emotion_rows(who, getattr(opened, "identifier", "")))
-                with gr.Row(elem_classes=ui.classes("emotion-add")):
-                    emotion_sheet_new = gr.Textbox(label=None, show_label=False,
-                                                   container=False, lines=1, max_lines=1,
-                                                   scale=1, placeholder="*I am so nervous*")
-                    emotion_sheet_add = gr.Button("Add", size="sm", scale=0, min_width=64)
+                conversation_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
+                                              elem_classes=ui.classes("sheet-back"))
+                gr.Markdown("#### Conversation")
+            # Every starred thread, whoever it is with, most recently used
+            # first; nothing at all until one is starred. Rows the browser
+            # presses (thread_at above) and Python draws (_favourite_rows).
+            favourites = gr.HTML(_favourite_rows(who, initial_thread),
+                                 elem_id=ui.ident("chat", "favourites"),
+                                 elem_classes=ui.classes("favourites-block"))
+            with gr.Row(elem_classes=ui.classes("talking-to")):
+                character = gr.Dropdown(
+                    label="Talking to", choices=_character_choices(),
+                    value=who or None, interactive=True, scale=1, min_width=0,
+                    elem_id=ui.ident("chat", "who"))
+                new_character = gr.Button("+ New", size="sm", scale=0, min_width=72,
+                                          elem_id=ui.ident("chat", "new-character"))
             # Choosing, editing and creating a character are three things done
-            # to the same object, so they are one screen: the drop-down is who
-            # you are talking to, and the editor under it is that same
-            # character, opened only when it is being changed.
+            # to the same object, so they are in one place: the drop-down is
+            # who you are talking to, and the editor under it is that same
+            # character, opened only when it is being changed -- by + New
+            # beside the drop-down, or by Edit in the Character section below
+            # (javascript/llm_studio.js scrolls it into view either way).
             #
             # Which character the editor is *bound to* is this State and never
             # the drop-down above. They are the same name while an existing
@@ -699,10 +612,54 @@ def build() -> dict:
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
                     close_editor = gr.Button("Cancel", size="sm")
+            with gr.Row(elem_classes=ui.classes("threads-head")):
+                gr.Markdown("##### Threads", elem_classes=ui.classes("sheet-label"))
+                new_thread = gr.Button("+ New thread", variant="primary", size="sm", scale=0,
+                                       min_width=0, elem_id=ui.ident("chat", "new-thread"))
+            search = gr.Textbox(label="Find a thread", placeholder="Find a thread…",
+                                show_label=False, container=False,
+                                elem_id=ui.ident("chat", "search"))
+            # A thread is opened by a tap on it and kept at the top by its star
+            # -- "I need a star or a pin or something to keep it at top" --
+            # which is the 2026-11-06 morning's pin (ChatStore.PINS), a tap
+            # away on every row rather than a button for the open thread.
+            threads = gr.HTML(_thread_rows(who, "", initial_thread),
+                              elem_id=ui.ident("chat", "threads"),
+                              elem_classes=ui.classes("threads"))
+
+            # What shapes this thread's replies. Each section's label says what
+            # is in force (_emotion_label, _start_label), drawn again as the
+            # pop-up opens and as the thread changes.
+            with gr.Accordion(_emotion_label(who, initial_thread), open=False,
+                              elem_id=ui.ident("chat", "emotion"),
+                              elem_classes=ui.classes("section")) as emotion_section:
+                emotion_list = gr.HTML(_emotion_rows(who, getattr(opened, "identifier", "")))
+                with gr.Row(elem_classes=ui.classes("emotion-add")):
+                    emotion_new = gr.Textbox(label=None, show_label=False, container=False,
+                                             lines=1, max_lines=1, scale=1,
+                                             placeholder="*I am so nervous*",
+                                             elem_id=ui.ident("chat", "emotion-new"))
+                    emotion_add = gr.Button("Add", size="sm", scale=0, min_width=64)
+            # The words the next reply starts with (mc_llm_start_with), for one
+            # reply: Set keeps them, the reply that starts from them spends them.
+            with gr.Accordion(_start_label(who, initial_thread), open=False,
+                              elem_id=ui.ident("chat", "start"),
+                              elem_classes=ui.classes("section")) as start_section:
+                start_text = gr.Textbox(value=_start_of(who, getattr(opened, "identifier", "")),
+                                        label=None, show_label=False, container=False,
+                                        lines=1, max_lines=4, placeholder="The color is blue",
+                                        elem_id=ui.ident("chat", "start-text"))
+                with gr.Row(elem_classes=ui.classes("start-actions")):
+                    start_clear = gr.Button("Clear", size="sm", scale=0, min_width=72,
+                                            elem_id=ui.ident("chat", "start-clear"))
+                    start_set = gr.Button("Set", size="sm", scale=0, min_width=72,
+                                          variant="primary",
+                                          elem_id=ui.ident("chat", "start-set"))
             # Saved with the character and in force while talking to one, so
             # outside the editor on purpose -- see ``_remember_sampling``. Every
             # default is the vendored package's own, named rather than copied.
-            with gr.Accordion("Generation", open=False, elem_classes=ui.classes("advanced")):
+            with gr.Accordion("Generation", open=False, elem_id=ui.ident("chat", "generation"),
+                              elem_classes=ui.classes("section")):
                 with gr.Row():
                     temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
                                             step=0.05, value=DEFAULT_TEMPERATURE)
@@ -712,37 +669,59 @@ def build() -> dict:
                     reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
                                              step=64, value=DEFAULT_MAX_REPLY_TOKENS)
                     seed = ui.seed_box(info=f"{RANDOM_SEED}: a new seed each reply")
-            with gr.Accordion("Import a character card", open=False,
-                              elem_classes=ui.classes("advanced")):
-                import_card = gr.File(label="Card: .yaml, .json or a .png with its JSON inside",
-                                      file_types=[".json", ".yaml", ".yml", ".png"],
-                                      elem_id=ui.ident("chat", "import"))
-            with gr.Group(elem_classes=ui.classes("destructive")):
-                gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
-                delete_character = gr.Button("Delete this character", size="sm",
-                                             variant="stop")
+            # Voice: what is ready, and its two switches (mc_voice_ui.section).
+            voice = mc_voice_ui.section()
 
-        # -- PERSONA_SCREEN ------------------------------------------------- #
+            # Then what is changed less often: the character, this thread, you.
+            with gr.Accordion("Character", open=False, elem_id=ui.ident("chat", "character"),
+                              elem_classes=ui.classes("section")):
+                with gr.Row():
+                    edit_character = gr.Button("Edit", size="sm",
+                                               elem_id=ui.ident("chat", "edit-character"))
+                    refresh_characters = gr.Button("↻ Refresh", size="sm")
+                    # The character's system prompt on a page of its own: the
+                    # editor the Forge Assistant's ⋯ menu opens, over the whole
+                    # window. Browser-only -- it reads and writes through the
+                    # assistant's routes -- so the press never reaches the queue.
+                    system_open = gr.Button("⤢ System prompt", size="sm",
+                                            elem_id=ui.ident("chat", "system-open"))
+                with gr.Accordion("Import a character card", open=False,
+                                  elem_classes=ui.classes("advanced")):
+                    import_card = gr.File(label="Card: .yaml, .json or a .png with its JSON inside",
+                                          file_types=[".json", ".yaml", ".yml", ".png"],
+                                          elem_id=ui.ident("chat", "import"))
+                with gr.Group(elem_classes=ui.classes("destructive")):
+                    gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
+                    delete_character = gr.Button("Delete this character", size="sm",
+                                                 variant="stop")
+            with gr.Accordion("This thread", open=False, elem_id=ui.ident("chat", "thread"),
+                              elem_classes=ui.classes("section")):
+                rename = gr.Button("Rename this thread", size="sm")
+                rename_box = gr.Textbox(label="New title", visible=False, container=False,
+                                        placeholder="New title…",
+                                        elem_id=ui.ident("chat", "rename"))
+                with gr.Row(visible=False) as rename_row:
+                    save_rename = gr.Button("Save", variant="primary", size="sm")
+                    cancel_rename = gr.Button("Cancel", size="sm")
+                # Away from the primary controls and behind its own heading,
+                # which is the only confirmation Gradio can honestly offer:
+                # there is no dialog to put in front of it, so the distance is
+                # the deliberation.
+                with gr.Group(elem_classes=ui.classes("destructive")):
+                    gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
+                    delete = gr.Button("Delete this thread", size="sm", variant="stop")
+            with gr.Accordion("You", open=False, elem_id=ui.ident("chat", "persona"),
+                              elem_classes=ui.classes("section")):
+                persona_name = gr.Textbox(label="Your name", value=initial_persona.name)
+                persona_face = gr.Image(label="Your picture", type="pil", sources=["upload"],
+                                        height=96, width=96, show_download_button=False,
+                                        value=_face_value(_persona_face()),
+                                        elem_id=ui.ident("chat", "persona-face"),
+                                        elem_classes=ui.classes("face"))
+                persona_description = gr.Textbox(label="About you", lines=4,
+                                                 value=initial_persona.description)
+                save_persona = gr.Button("Save", variant="primary", size="sm")
 
-        with gr.Column(visible=False, elem_id=ui.ident("chat", "persona"),
-                       elem_classes=ui.classes("sheet", "sheet-screen")) as persona_screen:
-            with gr.Row(elem_classes=ui.classes("sheet-head")):
-                persona_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
-                                         elem_classes=ui.classes("sheet-back"))
-                gr.Markdown("#### You")
-            persona_name = gr.Textbox(label="Your name", value=initial_persona.name)
-            persona_face = gr.Image(label="Your picture", type="pil", sources=["upload"],
-                                    height=96, width=96, show_download_button=False,
-                                    value=_face_value(_persona_face()),
-                                    elem_id=ui.ident("chat", "persona-face"),
-                                    elem_classes=ui.classes("face"))
-            persona_description = gr.Textbox(label="About you", lines=4,
-                                             value=initial_persona.description)
-            save_persona = gr.Button("Save", variant="primary", size="sm")
-
-        # -- VOICE_SCREEN --------------------------------------------------- #
-
-        voice = mc_voice_ui.sheet()
         # Two hidden boxes rather than a component with a value anybody can
         # read: one carries this process's page token into the page, and the
         # other carries an opaque one-shot handle to a reply that has finished.
@@ -774,10 +753,7 @@ def build() -> dict:
     # own and closes anyway -- see :mod:`mc_llm_overlays`. It is built from the
     # registry rather than listed, because what is in it depends on what the
     # shell managed to build.
-    mc_llm_overlays.register("threads", threads_screen)
-    mc_llm_overlays.register("character", character_screen)
-    mc_llm_overlays.register("persona", persona_screen)
-    mc_llm_overlays.register("voice", voice["screen"])
+    mc_llm_overlays.register("conversation", conversation_screen)
     mc_llm_overlays.register_state(OVERLAY_OWNER, surface)
     screens = _screen_outputs(surface)
 
@@ -788,28 +764,32 @@ def build() -> dict:
     # it. Two handlers on one button, which is what makes one control mean the
     # same thing in Conversation as it does in every other mode.
     menu.click(fn=_close_screens, outputs=screens, queue=False)
-    for control in (threads_back, character_back, persona_back, voice["back"]):
-        control.click(fn=_close_screens, outputs=screens, queue=False)
+    conversation_back.click(fn=_close_screens, outputs=screens, queue=False)
 
-    to_threads.click(fn=_open_threads, inputs=[character, search],
-                     outputs=screens + [threads], queue=False)
-    # The pin's label for the thread that is open, as the screen opens: a
-    # second handler on the same press, the screen's own outputs unchanged.
-    to_threads.click(fn=lambda who, identifier: gr.update(value=_pin_label(
-                         _is_pinned(who, identifier))),
-                     inputs=[character, thread_state], outputs=[pin], queue=False)
-    to_character.click(fn=_open_character_screen, inputs=[character],
-                       outputs=screens + [character], queue=False)
+    # The one button opens the one pop-up, and each part of it is drawn again
+    # from what is stored by a handler of its own on the same press -- the
+    # lists and who you are talking to, the sections' labels, Voice's switches,
+    # you -- so what it shows is what is in force, whatever the other window or
+    # Settings changed meanwhile.
+    emotions_drawn = [emotion_list, emotion_section, header]
+    starts_drawn = [start_section, start_text, header]
+    voice_drawn = [voice[name] for name in mc_voice_ui.SECTION_VALUES]
+    persona_drawn = [persona_name, persona_description, persona_face]
+    to_conversation.click(fn=_open_conversation, inputs=[character, thread_state, search],
+                          outputs=screens + [threads, favourites, character], queue=False)
+    to_conversation.click(fn=_emotion_view, inputs=[character, thread_state],
+                          outputs=emotions_drawn, queue=False)
+    to_conversation.click(fn=_start_view, inputs=[character, thread_state],
+                          outputs=starts_drawn, queue=False)
+    to_conversation.click(fn=mc_voice_ui.section_values, outputs=voice_drawn, queue=False)
+    to_conversation.click(fn=_persona_view, outputs=persona_drawn, queue=False)
 
     # -- the thread's emotion ---------------------------------------------- #
     #
-    # Both lists, the picker's heading and the bar's heading (whose mark fills
-    # the chip's dot) are drawn again together, so the chip, the picker and the
-    # Character sheet never disagree about which line is on.
-    emotions_drawn = [emotion_list, emotion_sheet_list, emotion_title, header]
-    for opening in (to_emotion, to_character):
-        opening.click(fn=_emotion_view, inputs=[character, thread_state],
-                      outputs=emotions_drawn, queue=False)
+    # The rows, the section's label and the bar's heading (whose mark fills
+    # the Conversation chip's dot) are drawn again together, so they never
+    # disagree about which line is on.
+    #
     # A change of emotion is a new end to the thread's system prompt, and the
     # conversation is read again under it in the background at once
     # (mc_llm_cache_update): the status line says so quietly until it is done,
@@ -818,75 +798,76 @@ def build() -> dict:
                                outputs=emotions_drawn + [status], queue=False)
     chosen.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
                 show_progress="hidden")
-    for box, button in ((emotion_new, emotion_add), (emotion_sheet_new, emotion_sheet_add)):
-        for event in (button.click, box.submit):
-            added = event(fn=_emotion_added, inputs=[character, thread_state, box],
-                          outputs=emotions_drawn + [status, box], queue=False)
-            added.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
-                       show_progress="hidden")
+    for event in (emotion_add.click, emotion_new.submit):
+        added = event(fn=_emotion_added, inputs=[character, thread_state, emotion_new],
+                      outputs=emotions_drawn + [status, emotion_new], queue=False)
+        added.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
+                   show_progress="hidden")
     # -- the start of the next reply --------------------------------------- #
     #
-    # The box, its heading and the bar's heading (whose mark fills the chip's
-    # dot) together; the reply that starts from it is drawn with the heading
-    # again by every run's settle, which empties the dot.
-    starts_drawn = [start_title, start_text, header]
-    to_start.click(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
-                   queue=False)
+    # The box, the section's label and the bar's heading together; the reply
+    # that starts from it is drawn with the heading again by every run's
+    # settle, which empties the dot, and the section is drawn again from what
+    # is kept as the pop-up next opens.
     for event in (start_set.click, start_text.submit):
         event(fn=_start_written, inputs=[character, thread_state, start_text],
               outputs=starts_drawn + [status], queue=False)
     start_clear.click(fn=lambda who, identifier: _start_written(who, identifier, ""),
                       inputs=[character, thread_state], outputs=starts_drawn + [status],
                       queue=False)
-    to_persona.click(fn=_open_persona,
-                     outputs=screens + [persona_name, persona_description, persona_face],
-                     queue=False)
 
     # -- voice ------------------------------------------------------------- #
     #
     # The two switches are Forge settings and are written the moment they are
-    # tapped, so the flyout and Settings -> Voice Chat are two views of one
+    # tapped, so the pop-up and Settings -> Voice Chat are two views of one
     # value rather than two values that have to be kept in step.
-    to_voice.click(fn=lambda: mc_voice_ui.open_sheet(_screens),
-                   outputs=screens + [voice["readiness"], voice["engine"],
-                                      voice["auto_send"], voice["auto_speak"]], queue=False)
-    # ``input`` and not ``change``, for the reason the thread list gives above:
-    # ``change`` also fires when the server puts a value in, and opening the
-    # flyout puts both stored values in. Listening to it would write the
-    # settings file every time somebody looked at the menu.
+    #
+    # ``input`` and not ``change``: ``change`` also fires when the server puts
+    # a value in, and opening the pop-up puts both stored values in. Listening
+    # to it would write the settings file every time somebody looked.
     voice["auto_send"].input(fn=mc_voice_ui.set_auto_send, inputs=[voice["auto_send"]],
                              outputs=[voice["auto_send"]], queue=False)
     voice["auto_speak"].input(fn=mc_voice_ui.set_auto_speak, inputs=[voice["auto_speak"]],
                               outputs=[voice["auto_speak"]], queue=False)
 
     # -- threads ---------------------------------------------------------- #
-
-    # ``input`` and not ``change``: this code refills the list whenever a
-    # thread is created, deleted or branched, and ``change`` fires on the
-    # refill -- which would re-open the thread the handler had just opened, and
-    # send the reader home from the screen they were working in. Every handler
-    # that moves the value returns the transcript with it, so nothing is lost
-    # by listening only to the tap.
-    _picked(threads)(fn=_open_thread_home, inputs=[character, threads, message],
-                     outputs=[thread_state, message] + view + screens, queue=False)
-    search.change(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
-                  inputs=[character, search], outputs=[threads], queue=False)
+    #
+    # Favourites and Threads are rows Python draws and the browser presses: a
+    # row opens its thread, its star keeps it at the top (javascript/
+    # llm_studio.js nominates into ``thread_at`` and presses ``thread_now``).
+    # A favourite with another character is opened by remembering it and
+    # choosing that character, whose own change handler below opens the
+    # thread remembered for it (:func:`_select_character`).
+    thread_now.click(fn=_thread_pressed,
+                     inputs=[character, thread_at, search, message, thread_state],
+                     outputs=([threads, favourites, character, thread_state, message]
+                              + view + screens), queue=False)
+    search.change(fn=_thread_rows, inputs=[character, search, thread_state],
+                  outputs=[threads], queue=False)
     new_thread.click(fn=_new_thread, inputs=[character, search],
                      outputs=[threads, thread_state] + view + screens, queue=False)
-    delete.click(fn=_delete_thread,
-                 inputs=[character, thread_state, search, revision_state],
-                 outputs=[threads, thread_state] + view, queue=False)
+    removed = delete.click(fn=_delete_thread,
+                           inputs=[character, thread_state, search, revision_state],
+                           outputs=[threads, thread_state] + view, queue=False)
+    # The pop-up stays open over a delete: what it shows of the thread that is
+    # open now -- a star, its emotion, its start -- is drawn again.
+    removed.then(fn=_favourite_rows, inputs=[character, thread_state], outputs=[favourites],
+                 queue=False)
+    removed.then(fn=_emotion_view, inputs=[character, thread_state], outputs=emotions_drawn,
+                 queue=False)
+    removed.then(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
+                 queue=False)
 
-    pin.click(fn=_toggle_pin, inputs=[character, thread_state, search],
-              outputs=[threads, pin, status], queue=False)
     rename.click(fn=lambda: (gr.update(visible=True), gr.update(visible=True)),
                  outputs=[rename_box, rename_row], queue=False)
     cancel_rename.click(fn=lambda: (gr.update(value="", visible=False), gr.update(visible=False)),
                         outputs=[rename_box, rename_row], queue=False)
     for control in (rename_box.submit, save_rename.click):
-        control(fn=_rename_thread,
-                inputs=[character, thread_state, rename_box, search, revision_state],
-                outputs=[threads, rename_box, rename_row, status, header], queue=False)
+        renamed = control(fn=_rename_thread,
+                          inputs=[character, thread_state, rename_box, search, revision_state],
+                          outputs=[threads, rename_box, rename_row, status, header], queue=False)
+        renamed.then(fn=_favourite_rows, inputs=[character, thread_state],
+                     outputs=[favourites], queue=False)
 
     # -- the character and the persona ------------------------------------ #
 
@@ -908,6 +889,14 @@ def build() -> dict:
                                 + [editing, system_preview, character_face]
                                 + voice_fields, queue=False)
     switched.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
+    # Chosen in the pop-up, which stays open: its lists, and the sections of
+    # the thread the change opened, are drawn again.
+    switched.then(fn=_favourite_rows, inputs=[character, thread_state], outputs=[favourites],
+                  queue=False)
+    switched.then(fn=_emotion_view, inputs=[character, thread_state], outputs=emotions_drawn,
+                  queue=False)
+    switched.then(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
+                  queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
@@ -1051,8 +1040,7 @@ def build() -> dict:
         # The thread list is refreshed because an untitled thread has just been
         # named, and the view is read back off disk because the message the
         # editor pointed at may not be the message that is there now.
-        run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
-                 inputs=[character, search], outputs=[threads])
+        run.then(fn=_thread_rows, inputs=[character, search, thread_state], outputs=[threads])
         settled = run.then(fn=_settle, inputs=[character, thread_state], outputs=view)
         # After the view is read back, and on its own: a reply started from
         # your words is read again in the background (mc_llm_cache_update), and
@@ -1122,16 +1110,6 @@ def _nominated_buttons() -> dict:
     return {name: gr.Button(label, visible=False,
                             elem_id=ui.ident("chat", f"{name.replace('_', '-')}-now"))
             for name, label in NOMINATED_ACTIONS}
-
-
-def _picked(component):
-    """The event that fires when a *user* picks, not when this code refills.
-
-    The same helper the shell's model chooser needs and for the same reason,
-    restated rather than imported: this module builds a panel and must not
-    import the shell to do it.
-    """
-    return getattr(component, "input", None) or component.change
 
 
 # --------------------------------------------------------------------------- #
@@ -1310,15 +1288,19 @@ def _character_choices() -> list[str]:
         return []
 
 
-PIN_MARK = "\U0001f4cc "
-"""In front of a pinned thread's title in the list. A radio's label, never a
-button's: the host's theme swaps the emoji in a button for an icon."""
+STAR = ('<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" '
+        'fill="{fill}" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 '
+        '18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>')
+"""A thread's star, filled while it is one of your favourites. Drawn, never
+typed: the host's theme swaps an emoji in a button for an icon and takes the
+button's words with it (the Lobe trap)."""
 
 
-def _thread_choices(who: str, filter_text: str = "") -> list[tuple[str, str]]:
-    """The Threads list: pinned first, marked, then the rest, each most recent first.
+def _threads(who: str, filter_text: str = "") -> list:
+    """The character's threads: starred first, then the rest, each most recent first.
 
-    The search matches the title alone, never the mark.
+    ``ChatStore.listing``'s order; the search matches the title alone.
     """
     if not who:
         return []
@@ -1328,37 +1310,154 @@ def _thread_choices(who: str, filter_text: str = "") -> list[tuple[str, str]]:
         logger.debug("Model Chain: could not list threads", exc_info=True)
         return []
     needle = (filter_text or "").strip().casefold()
-    return [((PIN_MARK + info.title) if getattr(info, "pinned", False) else info.title,
-             info.identifier)
-            for info in listing if not needle or needle in info.title.casefold()]
+    return [info for info in listing if not needle or needle in info.title.casefold()]
 
 
-def _is_pinned(who: str, identifier: str) -> bool:
-    if not (who and identifier):
-        return False
+def _thread_row(who: str, info, current: bool, with_who: bool = False) -> str:
+    """One thread: a tap on it opens it, its star keeps it at the top.
+
+    Two buttons the browser reads (``data-character``, ``data-thread``) and
+    Python decides about: see :func:`_thread_pressed`. Favourites say whose
+    thread it is as well (``with_who``).
+    """
+    prefix = ui.PREFIX
+    whose, identifier = ui.escape(who), ui.escape(info.identifier)
+    title = ui.escape(info.title)
+    pinned = bool(getattr(info, "pinned", False))
+    flags = (f'data-current="{"true" if current else "false"}" '
+             f'data-pinned="{"true" if pinned else "false"}"')
+    named = (f'<span class="{prefix}-thread-who">{whose}</span>' if with_who else "")
+    marked = ' aria-current="true"' if current else ""
+    star_says = (f"Unstar {title}: off the top of the list" if pinned
+                 else f"Star {title}: keep it at the top")
+    return (f'<div class="{prefix}-thread-row" role="listitem" {flags}>'
+            f'<button type="button" class="{prefix}-thread-open" data-character="{whose}" '
+            f'data-thread="{identifier}"{marked}>'
+            f'<span class="{prefix}-thread-title">{title}</span>{named}</button>'
+            f'<button type="button" class="{prefix}-thread-star" data-character="{whose}" '
+            f'data-thread="{identifier}" aria-pressed="{"true" if pinned else "false"}" '
+            f'aria-label="{star_says}" title="{star_says}">'
+            f'{STAR.format(fill="currentColor" if pinned else "none")}</button></div>')
+
+
+def _thread_rows(who: str, filter_text: str = "", current: str = "") -> str:
+    """The Threads list: the character's threads as rows, the open one marked."""
+    prefix = ui.PREFIX
+    if not who:
+        return f'<div class="{prefix}-thread-empty">Choose who you are talking to first.</div>'
+    found = _threads(who, filter_text)
+    if not found:
+        typed = (filter_text or "").strip()
+        note = (f"No thread matches \u201c{ui.escape(typed)}\u201d." if typed
+                else "No threads yet: + New thread starts one.")
+        return f'<div class="{prefix}-thread-empty">{note}</div>'
+    rows = "".join(_thread_row(who, info, info.identifier == (current or "")) for info in found)
+    return f'<div class="{prefix}-thread-list" role="list" aria-label="Threads">{rows}</div>'
+
+
+def _favourites_of_everyone() -> list:
+    """Every starred thread with every character, ``(character, info)``, most recent first."""
+    found = []
+    for name in _character_choices():
+        try:
+            found.extend((name, info) for info in _chats().favourites(name))
+        except Exception:
+            logger.debug("Model Chain: could not read a character's starred threads",
+                         exc_info=True)
+    found.sort(key=lambda pair: -pair[1].updated)
+    return found
+
+
+def _favourite_rows(who: str = "", current: str = "") -> str:
+    """Favourites, on top of the pop-up: the starred threads of every character.
+
+    "make it easy to favorite an existing thread i have with one of my
+    characters, so i can quickly load and continue" (2026-11-06): one tap from
+    the pop-up to any of them, whoever it is with. Nothing at all while none
+    is starred -- the stars on the Threads rows say how one gets here.
+    """
+    found = _favourites_of_everyone()
+    if not found:
+        return ""
+    prefix = ui.PREFIX
+    rows = "".join(_thread_row(name, info, name == who and info.identifier == (current or ""),
+                               with_who=True)
+                   for name, info in found)
+    return (f'<div class="{prefix}-favourites">'
+            f'<div class="{prefix}-favourites-label">Favourites</div>'
+            f'<div class="{prefix}-thread-list" role="list" aria-label="Favourite threads">'
+            f'{rows}</div></div>')
+
+
+THREAD_ACTIONS = ("open", "star")
+"""What a press on a row of Favourites or Threads may ask for."""
+
+
+def _view_saying(note: str, kind: str = "info") -> list:
+    """The view's outputs left as they are but for the status line, which says ``note``.
+
+    The status line is the view's fourth output, as :func:`_refresh` builds it.
+    """
+    view = [gr.update()] * len(_refresh(None, ""))
+    view[3] = ui.notice(note, kind)
+    return view
+
+
+def _thread_pressed(who, nomination, filter_text="", typed="", current=""):
+    """A row of Favourites or Threads was pressed: open its thread, or star it.
+
+    Answers threads, favourites, the character, the thread open, the composer,
+    the view and the surfaces. The nomination names the thread and whose it
+    is, read against what is on disk now: a thread deleted in the other window
+    meanwhile is said, never opened or starred into a pin to nothing.
+
+    A star keeps the pop-up open and changes nothing else. A thread of the
+    character you are talking to opens as Threads always opened one, and the
+    pop-up goes. A favourite with another character is remembered and that
+    character chosen: its change handler (:func:`_select_character`) opens the
+    thread remembered for it, as it opens everything else about a character.
+    """
+    import json
+
+    surfaces = len(_close_screens())
+    unchanged = [gr.update()] * (5 + len(_refresh(None, "")) + surfaces)
     try:
-        return str(identifier) in _chats().pinned(who)
-    except Exception:
-        logger.debug("Model Chain: could not read the pinned threads", exc_info=True)
-        return False
-
-
-def _pin_label(pinned: bool) -> str:
-    return "Unpin this thread" if pinned else "Pin this thread"
-
-
-def _toggle_pin(who, identifier, filter_text):
-    """Pin the open thread as a favourite, or unpin it. The list, the label, a word."""
-    if not (who and identifier):
-        return gr.update(), gr.update(), ui.notice("Choose a thread first.", "warn")
+        asked = json.loads(nomination or "{}")
+    except ValueError:
+        return unchanged
+    if not isinstance(asked, dict) or asked.get("do") not in THREAD_ACTIONS:
+        return unchanged
+    wanted = str(asked.get("thread") or "").strip()
+    whose = str(asked.get("character") or who or "").strip()
+    if not wanted or not whose:
+        return unchanged
+    lists = [_thread_rows(who, filter_text, current), _favourite_rows(who, current)]
     try:
-        pinned = _chats().toggle_pinned(who, identifier)
+        # Another character's only if it is one of yours: Favourites lists no
+        # other, so any other name is not a press this page made.
+        known = whose == (who or "") or whose in _character_choices()
+        there = known and _chats().path_for(whose, wanted).is_file()
     except Exception:
-        logger.warning("Model Chain: a thread could not be pinned", exc_info=True)
-        return gr.update(), gr.update(), ui.notice("That thread could not be pinned.", "warn")
-    return (gr.update(choices=_thread_choices(who, filter_text), value=identifier),
-            gr.update(value=_pin_label(pinned)),
-            ui.notice("Pinned: it stays at the top of Threads." if pinned else "Unpinned."))
+        there = False
+    if not there:
+        return (lists + [gr.update()] * 3 + _view_saying("That thread is no longer there.", "warn")
+                + [gr.update()] * surfaces)
+    if asked["do"] == "star":
+        try:
+            _chats().toggle_pinned(whose, wanted)
+        except Exception:
+            logger.warning("Model Chain: a thread could not be starred", exc_info=True)
+            return (lists + [gr.update()] * 3
+                    + _view_saying("That thread could not be starred.", "warn")
+                    + [gr.update()] * surfaces)
+        return ([_thread_rows(who, filter_text, current), _favourite_rows(who, current)]
+                + [gr.update()] * (3 + len(_refresh(None, ""))) + [gr.update()] * surfaces)
+    if whose != (who or ""):
+        _selected(whose, wanted)
+        return ([gr.update(), gr.update(), gr.update(value=whose), gr.update(), gr.update()]
+                + [gr.update()] * len(_refresh(None, "")) + _close_screens())
+    return ([_thread_rows(who, filter_text, wanted), _favourite_rows(who, wanted), gr.update()]
+            + _open_thread(who, wanted, typed) + _close_screens())
 
 
 def _load(who: str, identifier: str):
@@ -1538,8 +1637,9 @@ def _heading(who: str | None, conversation) -> str:
     """
     person = (getattr(conversation, "character", None) or who or "No character").strip()
     title = getattr(conversation, "title", None) or "No thread"
-    # Read by the stylesheet: the Emotion chip's dot is filled while the
-    # thread has one. Here because every view is drawn with this heading.
+    # Read by the stylesheet: the Conversation chip's dot is filled while the
+    # thread has an emotion or a start set. Here because every view is drawn
+    # with this heading.
     identifier = getattr(conversation, "identifier", "")
     on = "on" if _emotion_of(person, identifier) else "off"
     start = "on" if _start_of(person, identifier) else "off"
@@ -1567,9 +1667,16 @@ def _emotion_of(who, identifier) -> str:
         return ""
 
 
-def _emotion_title(conversation) -> str:
-    title = getattr(conversation, "title", None) or "No thread"
-    return f'<div class="{ui.PREFIX}-emotion-heading">Emotion · {ui.escape(title)}</div>'
+def _short(text, limit: int = 40) -> str:
+    """``text`` on one line, cut to ``limit`` characters with an ellipsis."""
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= limit else words[:limit - 1].rstrip() + "\u2026"
+
+
+def _emotion_label(who, identifier) -> str:
+    """The Emotion section's label, saying what is on while it is folded."""
+    line = _emotion_of(who, identifier)
+    return f"Emotion · {_short(line)}" if line else "Emotion · Off"
 
 
 EMOTION_TRASH = ('<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" '
@@ -1642,10 +1749,10 @@ def _emotion_row(line: str, label: str, on: bool, usable: bool) -> str:
 
 
 def _emotion_view(who, identifier) -> tuple:
-    """Both lists, the picker's heading and the bar's: everything that shows it."""
+    """The rows, the section's label and the bar's heading: everything that shows it."""
     conversation = _load(who, identifier) if who and identifier else None
-    rows = _emotion_rows(who, identifier)
-    return rows, rows, _emotion_title(conversation), _heading(who, conversation)
+    return (_emotion_rows(who, identifier), gr.update(label=_emotion_label(who, identifier)),
+            _heading(who, conversation))
 
 
 def _emotion_choose(who, identifier, line: str) -> tuple[str, str]:
@@ -1678,8 +1785,8 @@ def _emotion_steer(who, identifier, chosen) -> tuple[str, str]:
 
 
 def _emotion_pressed(who, identifier, nomination) -> tuple:
-    """A row of either list was pressed: choose its line (or Off), or delete it --
-    or one of the two ways it steers was.
+    """A row of the Emotion section was pressed: choose its line (or Off), or
+    delete it -- or one of the two ways it steers was.
 
     The nomination names the line by its words, not its place, so a list that
     changed in the other window meanwhile cannot turn a press on one line into
@@ -1738,16 +1845,17 @@ def _start_of(who, identifier) -> str:
         return ""
 
 
-def _start_title(conversation) -> str:
-    title = getattr(conversation, "title", None) or "No thread"
-    return (f'<div class="{ui.PREFIX}-emotion-heading">Start the next reply with · '
-            f'{ui.escape(title)}</div>')
+def _start_label(who, identifier) -> str:
+    """The Start section's label, saying what is kept while it is folded."""
+    words = _start_of(who, identifier)
+    return (f"Start the next reply with · {_short(words)}" if words
+            else "Start the next reply with")
 
 
 def _start_view(who, identifier) -> tuple:
-    """The box with what is kept, its heading and the bar's: everything that shows it."""
+    """The section's label, the box with what is kept, and the bar's heading."""
     conversation = _load(who, identifier) if who and identifier else None
-    return (_start_title(conversation), _start_of(who, identifier),
+    return (gr.update(label=_start_label(who, identifier)), _start_of(who, identifier),
             _heading(who, conversation))
 
 
@@ -1762,8 +1870,8 @@ def _start_written(who, identifier, text) -> tuple:
                        payload={"start_with": text or ""})
     if not outcome.get("ok"):
         note, kind = _refused(outcome)
-        title, _, heading = _start_view(who, identifier)
-        return title, gr.update(), heading, ui.notice(note, kind)
+        label, _, heading = _start_view(who, identifier)
+        return label, gr.update(), heading, ui.notice(note, kind)
     note = ("The next reply starts with your words." if outcome.get("start_with")
             else "The next reply starts freely.")
     return _start_view(who, identifier) + (ui.notice(note),)
@@ -2094,19 +2202,18 @@ def _close_screens() -> list:
     return _screens("")
 
 
-def _open_threads(who, filter_text) -> list:
-    return _screens("threads") + [gr.update(choices=_thread_choices(who, filter_text))]
+def _open_conversation(who, identifier, filter_text="") -> list:
+    """The pop-up, with its lists and who you are talking to read again."""
+    return (_screens("conversation")
+            + [_thread_rows(who, filter_text, identifier), _favourite_rows(who, identifier),
+               gr.update(choices=_character_choices(), value=who or None)])
 
 
-def _open_character_screen(who) -> list:
-    return _screens("character") + [gr.update(choices=_character_choices(),
-                                              value=who or None)]
-
-
-def _open_persona() -> list:
+def _persona_view() -> list:
+    """You, as saved, as the pop-up opens: Settings or the other window may have
+    changed it, and a box showing a stale name is a Save that puts it back."""
     person = _persona()
-    return _screens("persona") + [person.name, person.description,
-                                  _face_value(_persona_face())]
+    return [person.name, person.description, _face_value(_persona_face())]
 
 
 def _offer_attachment():
@@ -2242,7 +2349,7 @@ def _open_from_event(who, wanted, filter_text=""):
     if conversation is None:
         return [gr.update(), gr.update()] + [gr.update()] * len(_refresh(None, ""))
     _selected(who, identifier)
-    return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier), identifier]
+    return ([_thread_rows(who, filter_text, identifier), identifier]
             + _refresh(conversation, conversation.title))
 
 
@@ -2269,11 +2376,26 @@ def _attach_staged(token):
 
 
 def _select_character(who, filter_text, typed=""):
-    """Switch character: reload its threads, open the newest, fill the editor."""
+    """Switch character: reload its threads, open one, fill the editor.
+
+    The newest -- or the thread remembered for this character, when the
+    selection remembered is this character's: a favourite with another
+    character is remembered before that character is chosen
+    (:func:`_thread_pressed`), so choosing it opens the favourite. A choice in
+    the drop-down remembers nothing first, so it opens the newest, as it did.
+    """
     from prompt_master.chat.characters import Character
 
-    choices = _thread_choices(who, filter_text)
-    identifier = choices[0][1] if choices else ""
+    choices = _threads(who, filter_text)
+    identifier = choices[0].identifier if choices else ""
+    remembered = mc_llm_state.preferences()
+    wanted = str(remembered.get("thread") or "")
+    if who and wanted and remembered.get("character") == who:
+        try:
+            if _chats().path_for(who, wanted).is_file():
+                identifier = wanted
+        except Exception:
+            logger.debug("Model Chain: could not look for the thread remembered", exc_info=True)
     conversation = _load(who, identifier)
     lifted, conversation = _lift(who, identifier, conversation, typed)
     try:
@@ -2285,7 +2407,7 @@ def _select_character(who, filter_text, typed=""):
     # The editor follows the selection. It is usually shut, and when it is not,
     # leaving it bound to the character that *was* selected would have the next
     # Save write this character's boxes over that character's file.
-    return ([gr.update(choices=choices, value=identifier or None), identifier, lifted]
+    return ([_thread_rows(who, filter_text, identifier), identifier, lifted]
             + _refresh(conversation, note)
             + [loaded.name, loaded.context, loaded.greeting, loaded.system,
                loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
@@ -2357,11 +2479,6 @@ def _lift(who, identifier, conversation, typed):
     return text, _load(who, identifier)
 
 
-def _open_thread_home(who, identifier, typed=""):
-    """Tapping a thread opens it and returns to the conversation."""
-    return _open_thread(who, identifier, typed) + _close_screens()
-
-
 def _new_thread(who, filter_text):
     if not who:
         return ([gr.update(), ""]
@@ -2376,8 +2493,7 @@ def _new_thread(who, filter_text):
     identifier = (outcome.get("resulting_conversation") or {}).get("thread_id", "")
     conversation = _load(who, identifier)
     _selected(who, identifier)
-    return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier),
-             identifier]
+    return ([_thread_rows(who, filter_text, identifier), identifier]
             + _refresh(conversation, "New thread.")
             + _close_screens())
 
@@ -2405,11 +2521,11 @@ def _delete_thread(who, identifier, filter_text, revision=None):
                        expected=_revision_or_read(revision, who, identifier))
     if not outcome.get("ok"):
         note, kind = _refused(outcome)
-        return ([gr.update(choices=_thread_choices(who, filter_text), value=identifier),
-                 identifier] + _reopen(who, identifier, note, kind))
-    choices = _thread_choices(who, filter_text)
-    following = choices[0][1] if choices else ""
-    return ([gr.update(choices=choices, value=following or None), following]
+        return ([_thread_rows(who, filter_text, identifier), identifier]
+                + _reopen(who, identifier, note, kind))
+    left = _threads(who, filter_text)
+    following = left[0].identifier if left else ""
+    return ([_thread_rows(who, filter_text, following), following]
             + _reopen(who, following, "Deleted."))
 
 
@@ -2428,7 +2544,7 @@ def _rename_thread(who, identifier, title, filter_text, revision=None):
         return (gr.update(), gr.update(visible=False), gr.update(visible=False),
                 ui.notice(note, kind), gr.update())
     renamed = _load(who, identifier)
-    return (gr.update(choices=_thread_choices(who, filter_text), value=identifier),
+    return (_thread_rows(who, filter_text, identifier),
             gr.update(value="", visible=False), gr.update(visible=False),
             ui.notice("Renamed."), _heading(who, renamed))
 
@@ -2683,7 +2799,7 @@ def _branch_here(who, identifier, index, filter_text, revision=None):
     made = (outcome.get("resulting_conversation") or {}).get("thread_id", "")
     branched = _load(who, made)
     _selected(who, made)
-    return ([gr.update(choices=_thread_choices(who, filter_text), value=made), made]
+    return ([_thread_rows(who, filter_text, made), made]
             + _refresh(branched,
                        "Branched — this is a new thread, and the one it came from is "
                        "untouched."))
@@ -2989,7 +3105,7 @@ def _follow_thread(outcome, who, identifier, filter_text=""):
     landed = (outcome.get("resulting_conversation") or {}).get("thread_id") or identifier
     if outcome.get("ok") and landed != identifier:
         _selected(who, landed)
-        moved = gr.update(choices=_thread_choices(who, filter_text), value=landed)
+        moved = _thread_rows(who, filter_text, landed)
     else:
         moved = gr.update()
     for event in _follow(outcome, who, landed if outcome.get("ok") else identifier):

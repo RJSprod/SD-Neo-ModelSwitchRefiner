@@ -490,6 +490,31 @@ class ChatStore:
         return self.set_pinned(character, identifier,
                                str(identifier or "") not in self.pinned(character))
 
+    def favourites(self, character: str) -> list[ChatInfo]:
+        """The character's pinned threads that are still there, one file read each.
+
+        What LLM Studio's Favourites lists for every character at once
+        (2026-11-06): a pin is read beside the chats and only the pinned
+        threads are opened, so a character with a long history costs no more
+        than one with two threads. A pin to a thread that has gone is skipped.
+        """
+        rows = []
+        for identifier in self.pinned(character):
+            path = self.path_for(character, identifier)
+            # Asked first: read_json answers a missing file with {}, which
+            # would list a pin to nothing as an untitled thread.
+            if not path.is_file():
+                continue
+            try:
+                data = read_json(path)
+            except (OSError, ValueError):
+                continue          # one unreadable chat must not hide the rest
+            rows.append(ChatInfo(identifier=identifier,
+                                 title=str(data.get("title") or UNTITLED),
+                                 updated=float(data.get("updated", 0.0) or 0.0),
+                                 pinned=True))
+        return rows
+
     def delete(self, character: str, identifier: str) -> None:
         """Remove one chat, and write down that this id has been used.
 

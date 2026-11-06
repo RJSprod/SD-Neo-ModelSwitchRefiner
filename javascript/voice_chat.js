@@ -59,7 +59,7 @@
         send: "mc-llm-chat-send",
         stop: "mc-llm-chat-stop",
         status: "mc-llm-chat-status",
-        chip: "mc-llm-chat-to-voice",
+        chip: "mc-llm-chat-to-conversation",
         engine: "mc-llm-chat-voice-engine",
         autoSpeak: "mc-llm-chat-voice-auto-speak",
         characterVoice: "mc-llm-chat-character-voice",
@@ -179,7 +179,7 @@
         speakFailed: "The reply was generated, but Voice could not read it aloud.",
         notStreaming: "The reply is being read aloud, but no audio has arrived — something "
             + "between this page and the WebUI may be buffering the whole response.",
-        blocked: "Voice is enabled; tap Voice or the microphone once to allow audio playback.",
+        blocked: "Voice is enabled; tap Conversation or the microphone once to allow audio playback.",
         busy: "Wait for the reply or press Stop.",
         // Section 39. Not "HTTPS is required" -- that is a claim about this
         // extension's policy that stopped being true, and it is not even

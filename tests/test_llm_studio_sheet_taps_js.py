@@ -3,7 +3,7 @@
 "I need the pop ups in LLM studio to close when i tap outside of them"
 (2026-11-06). Run for real in Chromium, with a mouse and with a finger, on a
 page shaped like LLM Studio's: the studio root, the shell bar, Conversation's
-workspace with its header of openers and a transcript, the Threads screen open
+workspace with its header of openers and a transcript, the Conversation pop-up open
 over the workspace's left (as on a wide display) with its own ‹ Back, and the
 Forge Assistant's panel fixed over the page. ‹ Back hides the sheet here, as its
 Gradio handler does there.
@@ -39,7 +39,7 @@ body { margin: 0; font: 14px sans-serif; }
 .mc-llm-chat-header { height: 44px; display: flex; gap: 8px; justify-content: flex-end; }
 #transcript { height: 500px; overflow: auto; }
 #transcript button { display: block; width: 100%; height: 60px; }
-#mc-llm-chat-threads { position: absolute; top: 0; bottom: 0; left: 0; width: 300px;
+#mc-llm-chat-conversation { position: absolute; top: 0; bottom: 0; left: 0; width: 300px;
                        background: #eee; z-index: 20; }
 #assistant { position: fixed; right: 0; bottom: 0; width: 120px; height: 120px; z-index: 100; }
 #assistant button { width: 100%; height: 100%; }
@@ -51,11 +51,11 @@ body { margin: 0; font: 14px sans-serif; }
     <div id="mc-llm-shellbar"><button id="shell-menu">menu</button></div>
     <div id="mc-llm-chat" class="mc-llm-workspace mc-llm-chat-workspace">
       <div class="mc-llm-chat-header">
-        <button id="to-threads" class="mc-llm-chip-button">Threads</button>
+        <button id="to-conversation" class="mc-llm-chip-button">Conversation</button>
       </div>
       <div id="transcript"><button id="bubble">a message</button><div style="height: 1200px"></div></div>
-      <div id="mc-llm-chat-threads" class="mc-llm-sheet mc-llm-sheet-screen">
-        <div class="mc-llm-sheet-head"><button id="back" class="mc-llm-sheet-back">Back</button><h4>Threads</h4></div>
+      <div id="mc-llm-chat-conversation" class="mc-llm-sheet mc-llm-sheet-screen">
+        <div class="mc-llm-sheet-head"><button id="back" class="mc-llm-sheet-back">Back</button><h4>Conversation</h4></div>
         <input id="search" placeholder="Find a thread">
       </div>
     </div>
@@ -66,12 +66,12 @@ body { margin: 0; font: 14px sans-serif; }
 </gradio-app>
 <script>
 window.log = [];
-const sheet = document.getElementById("mc-llm-chat-threads");
+const sheet = document.getElementById("mc-llm-chat-conversation");
 document.getElementById("back").addEventListener("click", function () {
     window.log.push("back"); sheet.classList.add("hide");
 });
-document.getElementById("to-threads").addEventListener("click", function () {
-    window.log.push("threads"); sheet.classList.toggle("hide");
+document.getElementById("to-conversation").addEventListener("click", function () {
+    window.log.push("conversation"); sheet.classList.toggle("hide");
 });
 ["bubble", "shell-menu", "nav-other", "assistant-button"].forEach(function (id) {
     document.getElementById(id).addEventListener("click", function () { window.log.push(id); });
@@ -131,14 +131,14 @@ def open_page(browser, touch=False, sheet_open=True):
     page.route(ORIGIN + "/**", serve)
     page.goto(ORIGIN + "/")
     if not sheet_open:
-        page.evaluate("document.getElementById('mc-llm-chat-threads').classList.add('hide')")
+        page.evaluate("document.getElementById('mc-llm-chat-conversation').classList.add('hide')")
     page.wait_for_timeout(50)
     return page
 
 
 def state(page):
     return page.evaluate("""() => ({log: window.log.slice(), focused: window.focused(),
-        open: !document.getElementById('mc-llm-chat-threads').classList.contains('hide')})""")
+        open: !document.getElementById('mc-llm-chat-conversation').classList.contains('hide')})""")
 
 
 class TestATapOutsideClosesTheSheet:
@@ -201,9 +201,9 @@ class TestWhatIsNotATapOutside:
     def test_an_opener_on_the_bar_is_left_to_its_own_handler(self, browser):
         page = open_page(browser)
         try:
-            page.click("#to-threads")
+            page.click("#to-conversation")
             page.wait_for_timeout(50)
-            assert state(page)["log"] == ["threads"], state(page)
+            assert state(page)["log"] == ["conversation"], state(page)
         finally:
             page.context.close()
 
