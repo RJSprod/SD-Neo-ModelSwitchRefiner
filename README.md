@@ -7968,8 +7968,11 @@ when the UI Preset changes** (on).
 ## LoRA Viewer
 
 Every LoRA in the prompt, with its picture, its trigger words and a slider for
-its weight, behind one button at the end of the prompt tool row: the upright
-sliders after Forge's Apply Styles, on Txt2Img and Img2Img. Pressed, it covers
+its weight, behind one button named **Lora Viewer**, as wide as the prompt boxes,
+directly under the Negative Prompt on Txt2Img and Img2Img — under the Prompt
+while CFG is 1 and the Negative Prompt is put away — and above the Literal row
+(since 2026-11-06: it was the upright sliders after Forge's Apply Styles, at the
+top of the tool row and out of a thumb's reach on a phone). Pressed, it covers
 the page under the tab bar — or beside it, when the Forge Assistant's
 *Transpose View* has put the bar down one side — (centred, and no wider than
 880 px, on a wide screen) with one thin row for each `<lora:…>` or `<lyco:…>` tag in the Prompt
@@ -8250,7 +8253,7 @@ javascript/forge_assistant_focus.js  workspace focus, as a reversible transactio
 javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
 javascript/model_chain_night.js      the quieter night mode's one attribute
 javascript/model_chain_lora_details.js  the LoRA dialog's chips, clipboard, cards and preset watcher
-javascript/model_chain_lora_viewer.js   the LoRA viewer: the tool-row button and the dialog
+javascript/model_chain_lora_viewer.js   the LoRA viewer: the Lora Viewer button under the prompt boxes and the dialog
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension

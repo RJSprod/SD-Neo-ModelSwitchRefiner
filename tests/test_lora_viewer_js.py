@@ -89,7 +89,8 @@ body { margin: 0; background: #000; color: #e6e6e6; font: 14px sans-serif; }
 #tabs > .tab-nav button { width: 80px; }
 .tabitem { padding: 8px; }
 .block textarea { width: 100%; min-height: 60px; display: block; }
-.row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; width: 100%; }
+.row > .block { flex: 1 1 0; min-width: min(160px, 100%); }
 .gradio-button.tool { width: 40px; height: 40px; display: grid; place-items: center; }
 .spacer { height: 1600px; }
 """
@@ -175,13 +176,20 @@ def editor_html(tab: str) -> str:
             f'<button class="save" onclick="closePopup()">Save</button></div>')
 
 
-def page_html(theme_css: str = "") -> str:
+def page_html(theme_css: str = "", cfg_one: bool = False, literals_script: bool = False) -> str:
+    """The page. ``cfg_one`` is the Negative Prompt put away as the Literal
+    script puts it away at CFG 1; ``literals_script`` loads that script as well,
+    with the Literal row where Gradio built it, for the two scripts' placement
+    together."""
     tools = """
         <button id="{p}paste" class="lg secondary gradio-button tool svelte-cmf5ev">&#x2199;&#xfe0f;</button>
         <button id="{tab}_clear_prompt" class="lg secondary gradio-button tool svelte-cmf5ev">&#x1f5d1;&#xfe0f;</button>
         <button id="{tab}_style_apply" class="lg secondary gradio-button tool svelte-cmf5ev">&#x1f4cb;</button>
         <button id="{tab}_restore_progress" class="lg secondary gradio-button tool svelte-cmf5ev" style="display: none">&#x1f300;</button>
         <span class="green-dot"></span>"""
+    NEGATIVE_CLASS = " mc-literal-cfg-collapsed" if cfg_one else ""
+    literal_tag = ('<script src="/javascript/model_chain_literals.js"></script>'
+                   if literals_script else "")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>{HOST_CSS}{FORGE_CSS}{FORGE_POPUP_CSS}{theme_css}</style>
@@ -223,19 +231,36 @@ document.addEventListener("minipaint:overlay", (e) => window.overlays.push(e.det
 <div id="tabs" class="tabs">
   <div class="tab-nav"><button id="nav-txt2img">Txt2img</button><button id="nav-img2img">Img2img</button></div>
   <div id="tab_txt2img" class="tabitem">
-    <div id="txt2img_prompt" class="block"><textarea>{PROMPT}</textarea></div>
-    <div id="mc-krea-creative-literal-positive" class="block"><textarea>{LITERAL_POSITIVE}</textarea></div>
-    <div id="mc-krea-creative-literal-negative" class="block"><textarea>{LITERAL_NEGATIVE}</textarea></div>
+    <div id="txt2img_prompt_container" class="column">
+      <div id="txt2img_prompt_row" class="row prompt-row">
+        <div id="txt2img_prompt" class="block"><textarea>{PROMPT}</textarea></div>
+      </div>
+      <div id="txt2img_neg_prompt_row" class="row prompt-row">
+        <div id="txt2img_neg_prompt" class="block{NEGATIVE_CLASS}"><textarea>blurry</textarea></div>
+        <div id="mc-krea-creative-literal-row" class="row">
+          <div id="mc-krea-creative-literal-positive" class="block"><textarea>{LITERAL_POSITIVE}</textarea></div>
+          <div id="mc-krea-creative-literal-negative" class="block"><textarea>{LITERAL_NEGATIVE}</textarea></div>
+        </div>
+      </div>
+    </div>
     <div id="txt2img_tools" class="row">{tools.format(p="", tab="txt2img")}</div>
     <div class="spacer"></div>
   </div>
   <div id="tab_img2img" class="tabitem" style="display: none;">
-    <div id="img2img_prompt" class="block"><textarea>{IMG2IMG_PROMPT}</textarea></div>
+    <div id="img2img_prompt_container" class="column">
+      <div id="img2img_prompt_row" class="row prompt-row">
+        <div id="img2img_prompt" class="block"><textarea>{IMG2IMG_PROMPT}</textarea></div>
+      </div>
+      <div id="img2img_neg_prompt_row" class="row prompt-row">
+        <div id="img2img_neg_prompt" class="block"><textarea></textarea></div>
+      </div>
+    </div>
     <div id="img2img_tools" class="row">{tools.format(p="i2i_", tab="img2img")}</div>
   </div>
 </div>
 </div>
 </gradio-app>
+{literal_tag}
 <script src="/javascript/model_chain_lora_viewer.js"></script>
 <script>hooks.loaded.forEach((fn) => fn()); hooks.after.forEach((fn) => fn());</script>
 </body></html>"""
@@ -323,12 +348,13 @@ class Served:
             route.fulfill(status=404, body="")
 
 
-def open_page(browser, width=900, height=800, theme_css="", clock=False, touch=False):
+def open_page(browser, width=900, height=800, theme_css="", clock=False, touch=False,
+              cfg_one=False, literals_script=False):
     context = browser.new_context(viewport={"width": width, "height": height}, has_touch=touch)
     page = context.new_page()
     if clock:
         page.clock.install()
-    served = Served(page_html(theme_css))
+    served = Served(page_html(theme_css, cfg_one=cfg_one, literals_script=literals_script))
     page.route(ORIGIN + "/**", served)
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcLoraViewer")
@@ -397,23 +423,79 @@ def typed(page, text):
 # --------------------------------------------------------------------------- #
 
 
+BUTTON_PLACE = """(tab) => {
+    const panel = document.getElementById('tab_' + tab);
+    panel.style.display = 'block';
+    const button = document.getElementById('mc-lora-viewer-' + tab);
+    const holder = button.parentElement;
+    const box = (id) => document.getElementById(id).getBoundingClientRect();
+    const own = button.getBoundingClientRect();
+    return {
+        holder: holder.id, after: holder.previousElementSibling.id,
+        before: holder.nextElementSibling ? holder.nextElementSibling.id : null,
+        text: button.textContent.trim(), svg: !!button.querySelector('svg'),
+        count: document.querySelectorAll('#tab_' + tab + ' .mc-lv-open').length,
+        inTools: !!document.querySelector('#' + tab + '_tools .mc-lv-open'),
+        width: Math.round(own.width), promptWidth: Math.round(box(tab + '_prompt').width),
+        left: Math.round(own.left), promptLeft: Math.round(box(tab + '_prompt').left),
+        top: Math.round(own.top), promptBottom: Math.round(box(tab + '_prompt').bottom),
+        negativeBottom: Math.round(box(tab + '_neg_prompt').bottom),
+    };
+}"""
+
+
 class TestTheButton:
-    def test_one_button_after_apply_styles_on_each_tab_with_its_neighbours_classes(self, browser):
+    """"a button that is named "Lora Viewer" and it should appear below the
+    negative prompt box in the image generation tab. Make it as wide as the
+    prompt input fields and just below negative (or positive when CFG = 1), and
+    above the literals" (2026-11-06)."""
+
+    def test_one_lora_viewer_button_under_the_negative_prompt_as_wide_as_the_boxes(self, browser):
         page, served = open_page(browser)
         try:
-            found = page.evaluate("""() => ['txt2img', 'img2img'].map((tab) => {
-                const button = document.getElementById('mc-lora-viewer-' + tab);
-                return {after: button.previousElementSibling.id, cls: button.className,
-                        count: document.querySelectorAll('#' + tab + '_tools .mc-lv-open').length,
-                        label: button.getAttribute('aria-label'), svg: !!button.querySelector('svg'),
-                        text: button.textContent.trim()};
+            for tab, before in (("txt2img", "mc-krea-creative-literal-row"), ("img2img", None)):
+                found = page.evaluate(BUTTON_PLACE, tab)
+                assert found["after"] == tab + "_neg_prompt", found
+                assert found["before"] == before, found
+                assert found["text"] == "Lora Viewer" and found["svg"], found
+                assert found["count"] == 1 and not found["inTools"], found
+                assert abs(found["width"] - found["promptWidth"]) <= 1, found
+                assert abs(found["left"] - found["promptLeft"]) <= 1, found
+                assert found["top"] >= found["negativeBottom"], found
+        finally:
+            close_page(page, served)
+
+    def test_at_cfg_one_it_is_the_line_under_the_prompt(self, browser):
+        """The Literal script puts the Negative Prompt away while CFG is 1."""
+        page, served = open_page(browser, cfg_one=True)
+        try:
+            found = page.evaluate(BUTTON_PLACE, "txt2img")
+            assert found["after"] == "txt2img_neg_prompt", found
+            assert 0 <= found["top"] - found["promptBottom"] <= 20, found
+            assert abs(found["width"] - found["promptWidth"]) <= 1, found
+        finally:
+            close_page(page, served)
+
+    def test_with_the_literal_script_the_row_follows_it_and_neither_moves_again(self, browser):
+        """Both scripts place their element after the Negative Prompt on every
+        update. Anchored on it alone, each would move its element back in front
+        of the other's on the next update -- so an odd number of updates is what
+        shows a to-and-fro."""
+        page, served = open_page(browser, literals_script=True)
+        try:
+            order = page.evaluate("""() => Array.from(
+                document.getElementById('txt2img_neg_prompt_row').children).map((el) => el.id)""")
+            assert order == ["txt2img_neg_prompt", "mc-lora-viewer-launch-txt2img",
+                             "mc-krea-creative-literal-row"], order
+            changed = page.evaluate("""() => new Promise((resolve) => {
+                let records = 0;
+                const watch = new MutationObserver((list) => { records += list.length; });
+                watch.observe(document.querySelector('gradio-app'), {childList: true, subtree: true});
+                hooks.after.forEach((fn) => fn()); hooks.after.forEach((fn) => fn());
+                hooks.after.forEach((fn) => fn());
+                setTimeout(() => { watch.disconnect(); resolve(records); }, 50);
             })""")
-            assert found == [
-                {"after": "txt2img_style_apply", "cls": "lg secondary gradio-button tool svelte-cmf5ev mc-lv-open",
-                 "count": 1, "label": "LoRAs in this prompt", "svg": True, "text": ""},
-                {"after": "img2img_style_apply", "cls": "lg secondary gradio-button tool svelte-cmf5ev mc-lv-open",
-                 "count": 1, "label": "LoRAs in this prompt", "svg": True, "text": ""},
-            ]
+            assert changed == 0
         finally:
             close_page(page, served)
 

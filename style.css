@@ -11431,8 +11431,9 @@ details.mc-lora-more[open] > summary {
 /* ==========================================================================
    Model Chain -- the LoRA viewer
    ==========================================================================
-   javascript/model_chain_lora_viewer.js: a button after Forge's Apply Styles,
-   and a dialog under the tab bar on the dialog layer Mini Paint NEO's popup and
+   javascript/model_chain_lora_viewer.js: a Lora Viewer button as wide as the
+   prompt boxes, under the Negative Prompt and above the Literal row, and a
+   dialog under the tab bar on the dialog layer Mini Paint NEO's popup and
    the assistant's panel share (2000; everything the assistant draws is below
    it). Every colour is one of the page theme's variables, so it follows
    whichever theme is in use, by day and by night; the three that mean
@@ -11446,6 +11447,38 @@ details.mc-lora-more[open] > summary {
     width: 18px;
     height: 18px;
     pointer-events: none;
+}
+
+/* The button's own line. Its holder sits directly after the Negative Prompt's
+   block inside Forge's negative prompt row -- a Gradio row, which wraps -- and
+   takes the whole line, so the button is as wide as the prompt boxes above it;
+   while CFG is 1 the Negative Prompt is put away and this is the line under the
+   Prompt. The Literal row follows it (model_chain_literals.js). */
+.mc-lv-launch {
+    display: flex;
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+.mc-lv-launch[hidden] {
+    display: none !important;
+}
+
+.mc-lv-launch > .mc-lv-open {
+    display: inline-flex;
+    flex: 1 1 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+}
+
+.mc-lv-open-label {
+    white-space: nowrap;
 }
 
 .mc-lv,

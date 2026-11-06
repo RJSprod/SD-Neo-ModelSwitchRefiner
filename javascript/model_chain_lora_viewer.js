@@ -1,7 +1,12 @@
 // Model Chain -- the LoRA viewer.
 //
-// A button at the end of the prompt tool row, after Forge's Apply Styles, on
-// Txt2Img and Img2Img. Pressed, it covers the page under the tab bar with every
+// A button named Lora Viewer, as wide as the prompt boxes, directly under the
+// Negative Prompt on Txt2Img and Img2Img -- under the Prompt while CFG is 1 and
+// the Negative Prompt is put away, and above the Literal row: "a button that is
+// named "Lora Viewer" ... below the negative prompt box ... as wide as the prompt
+// input fields and just below negative (or positive when CFG = 1), and above the
+// literals" (2026-11-06; it was a tool button after Apply Styles before that, out
+// of a thumb's reach on a phone). Pressed, it covers the page under the tab bar with every
 // LoRA in the prompt -- and on Txt2Img in the two Literal boxes -- one thin row
 // each: its picture, its name, the box it is in, its trigger words (a tap copies
 // one), its weight in a box that takes any number, and a slider from -5 to 5 in
@@ -107,7 +112,7 @@
     const LITERAL_NEGATIVE = "mc-krea-creative-literal-negative";
     const TABS = {
         txt2img: {
-            tools: "txt2img_tools", after: "txt2img_style_apply", panel: "tab_txt2img",
+            negative: "txt2img_neg_prompt", panel: "tab_txt2img",
             boxes: [
                 {id: "txt2img_prompt", label: "Prompt"},
                 {id: LITERAL_POSITIVE, label: "Literal +", literal: true},
@@ -115,7 +120,7 @@
             ],
         },
         img2img: {
-            tools: "img2img_tools", after: "img2img_style_apply", panel: "tab_img2img",
+            negative: "img2img_neg_prompt", panel: "tab_img2img",
             boxes: [{id: "img2img_prompt", label: "Prompt"}],
         },
     };
@@ -1649,33 +1654,47 @@
 
     // -- the button -------------------------------------------------------------------
 
-    // One button per tab, put after Forge's Apply Styles with its neighbours'
-    // classes, so a theme draws it as it draws them. Checked on every update and
-    // added only when missing: an after-update callback that changed the page
-    // every time would raise the next update itself.
-    function ensureButton(tab) {
-        const conf = TABS[tab];
-        const tools = byId(conf.tools);
-        if (!tools) return false;
-        if (byId("mc-lora-viewer-" + tab)) return true;
-        const anchor = byId(conf.after);
-        const template = anchor || tools.querySelector("button");
+    // One button per tab, in a holder of its own placed directly after the
+    // Negative Prompt's block, inside Forge's own negative prompt row: a Gradio
+    // row wraps, and the holder takes the whole line (the stylesheet's
+    // .mc-lv-launch), so the button is as wide as the boxes above it. While CFG
+    // is 1 the Literal script puts the Negative Prompt away
+    // (model_chain_literals.js), and the button is then the line under the
+    // Prompt. The Literal row is placed after this holder by that script, so
+    // the two never trade places.
+    //
+    // Checked on every update and moved or added only when it is not already
+    // there: an after-update callback that changed the page every time would
+    // raise the next update itself. A page without a Negative Prompt (a theme
+    // that took it out) gets nothing -- the viewer is still mcLoraViewer.open().
+    function launcher(tab) {
+        const holder = document.createElement("div");
+        holder.id = "mc-lora-viewer-launch-" + tab;
+        holder.className = "mc-lv-launch";
+        // The mark the Literal script places its row after
+        // (model_chain_literals.js, place): it finds this by the mark alone.
+        holder.setAttribute("data-mc-under-negative", "");
         const button = document.createElement("button");
         button.type = "button";
         button.id = "mc-lora-viewer-" + tab;
-        button.className = ((template && template.className) || "lg secondary gradio-button tool")
-            + " mc-lv-open";
+        button.className = "lg secondary gradio-button mc-lv-open";
         button.title = "LoRAs in this prompt";
-        button.setAttribute("aria-label", "LoRAs in this prompt");
+        button.setAttribute("aria-label", "Lora Viewer: the LoRAs in this prompt");
         button.setAttribute("aria-haspopup", "dialog");
         button.setAttribute("aria-expanded", "false");
-        button.innerHTML = icon("sliders-vertical");
+        button.innerHTML = icon("sliders-vertical") + '<span class="mc-lv-open-label">Lora Viewer</span>';
         button.addEventListener("click", function () { open(tab); });
-        if (anchor && anchor.parentNode) {
-            anchor.parentNode.insertBefore(button, anchor.nextSibling);
-        } else {
-            tools.appendChild(button);
-        }
+        holder.appendChild(button);
+        return holder;
+    }
+
+    function ensureButton(tab) {
+        const conf = TABS[tab];
+        const negative = byId(conf.negative);
+        if (!negative || !negative.parentNode) return false;
+        const holder = byId("mc-lora-viewer-launch-" + tab) || launcher(tab);
+        if (negative.nextElementSibling === holder) return true;
+        negative.parentNode.insertBefore(holder, negative.nextSibling);
         return true;
     }
 
