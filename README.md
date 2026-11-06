@@ -2025,6 +2025,17 @@ typed them. A saved line that still holds a `[[` command, or a tag right after a
 `+` or `-`, is left as it is, because pasted back those would be read in a
 different order.
 
+**And they come back at the end when you recall an image.** PNG Info's *Send to
+txt2img* / *Send to img2img*, a gallery's Send to that reads the image's own
+text, and the paste button all go through Forge's paste, which hands the parsed
+parameters to this extension before it fills a field (`on_infotext_pasted`).
+An image saved before 2026-11-03 — tags in front — is recalled with them after
+the words, in the order they had, the same move the saved text gets. On
+Txt2Img this changes nothing that is generated: the tags are lifted to the
+front again before Forge reads the prompt. Only an image whose own text says
+this extension lifted its tags (`Krea Literal Command Count`) is changed; an
+Img2Img image's or another tool's tags stay where they were typed.
+
 ### Why a switch is slow, and what to check
 
 Read the console. Every transition is now logged, for example:
@@ -8092,7 +8103,8 @@ mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
 mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons
 mc_infotext.py        infotext write + paste-field registration
 mc_saved_prompt.py    LoRA tags at the end of an image's saved prompt: Forge's
-                      create_infotext, wrapped
+                      create_infotext, wrapped; and of a recalled one
+                      (on_infotext_pasted)
 mc_presets.py         named Stage 2 configurations
 mc_spatial_profiles.py     named Spatial layouts
 mc_progress.py        whole-job progress model + measured timings

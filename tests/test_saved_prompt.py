@@ -291,3 +291,60 @@ class TestTheHookMarks:
         p = generate(script, "a woman [[__wildcard__]]", enabled=False,
                      literal_positive="masterpiece", literal_negative="blue hat")
         assert not mc_saved_prompt.lifted(p)
+
+
+# --------------------------------------------------------------------------- #
+# A recalled prompt has its tags at the end too
+# --------------------------------------------------------------------------- #
+
+
+class TestARecalledPromptEndsWithItsTags:
+    """The user's second half (2026-11-06): *when recalling a png info, i would
+    like those lora appended as well when brought back into prompt box.* An
+    image saved before 2026-11-03 has its tags in front, and Forge's paste
+    hands the parsed parameters to ``on_infotext_pasted`` before it fills a
+    field, so that is where the box's text is decided."""
+
+    LIFTED = {"Krea Literal Command Count": "2", "Krea Literal Syntax Version": "1"}
+
+    def test_the_keys_are_the_ones_the_hook_writes(self):
+        import mc_infotext
+
+        assert set(mc_saved_prompt.LIFTED_KEYS) == {mc_infotext.LITERAL_COUNT,
+                                                     mc_infotext.LITERAL_VERSION}
+
+    def test_an_image_saved_with_its_tags_in_front_recalls_them_at_the_end(self):
+        params = {"Prompt": "<lora:a:1> <lora:b:0.5> a woman, red coat", **self.LIFTED}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"] == "a woman, red coat <lora:a:1> <lora:b:0.5>"
+
+    def test_the_recalled_box_gives_stage_one_what_the_image_was_made_from(self):
+        saved = restored("a woman <lora:a:1>, red coat <lora:b:0.5>")
+        assert saved.startswith("<lora:a:1> <lora:b:0.5>")
+        params = {"Prompt": saved, **self.LIFTED}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"].endswith("<lora:a:1> <lora:b:0.5>")
+        assert stage_one(params["Prompt"]) == stage_one(saved)
+
+    def test_an_image_without_the_hooks_record_keeps_its_tags_where_typed(self):
+        """Img2Img and other tools: nothing lifts the tags back there, so a
+        move would change what the box generates."""
+        params = {"Prompt": "<lora:a:1> a woman"}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"] == "<lora:a:1> a woman"
+
+    def test_a_prompt_a_move_could_change_is_left_alone(self):
+        params = {"Prompt": "<lora:a:1> a woman [[keep]]", **self.LIFTED}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"] == "<lora:a:1> a woman [[keep]]"
+
+    def test_nothing_odd_raises(self):
+        for params in (None, {}, {"Prompt": None, **self.LIFTED}, {"Prompt": 3}):
+            mc_saved_prompt.on_infotext_pasted("text", params)
+
+    def test_the_extension_registers_it_with_forges_paste(self):
+        import model_chain  # noqa: F401  -- imported for its registrations
+        from modules import script_callbacks
+
+        assert mc_saved_prompt.on_infotext_pasted in \
+            script_callbacks.registered["infotext_pasted"]

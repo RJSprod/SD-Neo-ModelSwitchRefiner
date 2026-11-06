@@ -165,3 +165,59 @@ def on_app_started(_demo=None, _app=None) -> None:
                            "so saved prompts keep their LoRA tags in front")
     except Exception:
         logger.warning("Model Chain: could not wrap Forge's create_infotext", exc_info=True)
+
+
+LIFTED_KEYS = ("Krea Literal Command Count", "Krea Literal Syntax Version")
+"""The image's own word that this extension lifted payloads out of its prompt.
+
+``mc_infotext.LITERAL_COUNT`` and ``LITERAL_VERSION``, spelled out rather than
+imported so this module stays importable without the infotext module's own
+imports. Every generation the Krea hook lifted a LoRA tag in writes them (a
+protected tag is a literal command), so they are what tells a recalled prompt
+whose tags this extension put in front from one whose tags were typed there."""
+
+
+def recalled(prompt, params) -> str:
+    """``prompt`` with its LoRA tags at the end, when the image says they were lifted.
+
+    The text that goes back into the prompt box when an image is recalled.
+    Images saved before 2026-11-03 carry their LoRA tags in front -- the Krea
+    hook's literal restore put them there and Forge saved that string -- and the
+    user asked for them at the end in the prompt box as well as in the saved
+    text (2026-11-06). Moving them changes nothing that is generated from the
+    box on Txt2Img: :func:`prompt_master.krea.extra_networks.protect` lifts the
+    same tags in the same order, wherever they stand, and the restore puts them
+    in front again (``tests/test_saved_prompt.py`` holds that both saved lines
+    paste to the same Stage 1 prompt).
+
+    Only an image whose record says this extension lifted its tags is changed:
+    a prompt without that record -- an Img2Img image, another tool's, one with
+    no tag lifted -- has its tags where somebody typed them, and nothing here
+    knows better. And :func:`extra_networks.last` refuses whatever a move could
+    change the meaning of (a line still holding ``[[``, a tag after a sign).
+    """
+    if not isinstance(prompt, str) or not isinstance(params, dict):
+        return prompt
+    if not any(key in params for key in LIFTED_KEYS):
+        return prompt
+    from prompt_master.krea import extra_networks
+
+    return extra_networks.last(prompt)
+
+
+def on_infotext_pasted(_infotext, params) -> None:
+    """Put a recalled prompt's LoRA tags at its end. Never raises.
+
+    ``script_callbacks.on_infotext_pasted``: Forge calls it with the parsed
+    parameters before it fills a single field, from PNG Info's Send to buttons,
+    from a gallery's Send to that reads the image's own text, and from the
+    toprow's paste button -- so ``params["Prompt"]`` changed here is what the
+    prompt box receives on every one of them.
+    """
+    try:
+        prompt = params.get("Prompt") if isinstance(params, dict) else None
+        moved = recalled(prompt, params)
+        if isinstance(moved, str) and moved != prompt:
+            params["Prompt"] = moved
+    except Exception:
+        logger.debug("Model Chain: left a recalled prompt as it was saved", exc_info=True)
