@@ -4264,15 +4264,20 @@ with the settings docked in the panel or not. While the tab is already
 generating, Forge covers its Generate with Interrupt and Skip and the **▶**
 does not press it either: it says *Txt2img is already generating.* (red for
 three seconds, and on the status line) and does nothing. It never locks.
-**A right click on the launcher**, with the panel put away, is the same **▶**
-for the workspace you are on — Txt2Img's or Img2Img's Generate, WanGP's on the
-WanGP tab — without opening the panel; the browser's own menu is not shown,
-and the launcher says how it went for three seconds with an outline (the
-accent while WanGP is asked, green taken, red refused, the words as its
-tooltip). The keyboard's menu key on the focused launcher does the same.
-Where there is nothing to generate the browser's menu is left alone, and a
-finger's long press is not a right click: it is how a drag of the launcher
-begins.
+**A right click or a long hold on the launcher**, with the panel put away, is
+the same **▶** for the workspace you are on — Txt2Img's or Img2Img's Generate,
+WanGP's on the WanGP tab — without opening the panel. Any hold counts: a right
+click, the keyboard's menu key on the focused launcher, a finger's or a pen's
+long press on a touch screen (a remote session's included, whether it arrives
+as a touch or as a right click), or the mouse's left button held still on the
+launcher for half a second. While a press is held an accent ring closes in on
+the launcher, and on a phone the hold is felt when it is taken. Each press
+generates once; letting go after it opens nothing, and a press that moves
+first is a drag of the launcher and generates nothing. The browser's own menu
+never shows on the launcher — on a tab with nothing to generate a right click
+or a hold simply does nothing. The launcher says how it went for three seconds
+with an outline (the accent while WanGP is asked, green taken, red refused,
+the words as its tooltip).
 **✕** puts the panel back to the
 launcher, at the launcher's own place; pressing the launcher brings the panel
 back at its own. Both

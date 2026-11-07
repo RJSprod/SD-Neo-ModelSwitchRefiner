@@ -4313,7 +4313,9 @@ pen's long press is not a right click: a touchscreen's context menu arrives
 while the finger is still down, which is how a drag of the launcher begins,
 so a context menu whose own `pointerType` is touch or pen, or that follows a
 touch or pen press on the launcher within two seconds (`LONG_PRESS_MS`, for a
-browser whose context menu is a plain mouse event), is left alone. The answer
+browser whose context menu is a plain mouse event), is left alone. (Both
+reversed in §3.51: every long hold is ▶, and the launcher's menu is never the
+browser's.) The answer
 is on the launcher for three seconds (`showOnLauncher`, `data-generated`: an
 outline in the accent while WanGP is asked, green taken, red refused, the
 words as its tooltip, its own title put back after), because the status line
@@ -4601,3 +4603,84 @@ tests that named *Free Float* name the two rows. Mutations: the launcher
 reading the panel's switch, no migration, the menu setting both and the drag
 reading the panel's switch each fail a test. Not run on the user's machine.
 
+## 3.51 Every long hold on the launcher is ▶ (2026-11-06)
+
+> "I wanted the right click to be the play button on a flyout menu for text
+> to image, image to image, and wan2gp. On remote, that right click is a long
+> press. So I need it to be correctly interpreted. Also add, if I long hold on
+> desktop, then it's the same function as generate. All in all, I want to
+> collect as many as possible "long holds" so I can generate. No menu needed
+> either when I long hold or right click, just generate."
+
+§3.48 made the put-away launcher's context menu ▶ and left a finger's or a
+pen's long press alone, because a finger held on the launcher was taken for a
+drag beginning. On a phone, and through a remote session that sends a long
+press as touch, that is the only right click there is, so the user's never
+generated. Now every way of holding the launcher is ▶, on the workspaces where
+▶ is (Txt2Img, Img2Img, WanGP):
+
+- **Its context menu, from anything** (`launcherMenu`): a mouse's right
+  button, the keyboard's menu key, Ctrl and a press on a Mac, a remote
+  session's long press sent as a right click, and a touchscreen's own long
+  press, whatever `pointerType` it carries. `LONG_PRESS_MS` and the press it
+  read (`launcherPress`) are gone.
+- **A press held still** (`startHold`): a finger, a pen's tip or a mouse's
+  left button held `HOLD_MS` (500 ms) without moving `DRAG_THRESHOLD` presses
+  ▶ by itself, for the browsers and the remote sessions that send no context
+  menu for a hold -- a desktop's mouse among them. A right button's press is
+  its context menu's, a second finger is no hold (and ends the first's), and
+  where there is nothing to generate a hold is not made: a press is a press.
+
+**Whichever comes first takes the press, once.** Chromium on a phone sends its
+long-press menu at the platform's long-press time (400 to 500 ms), usually
+before `HOLD_MS`; Windows sends a touch's press-and-hold, and a right button's,
+on the release. Both lead to one place (`fireHold`): the press is marked
+spent, the drag it began ends where it started, the click its release may
+bring opens nothing (`suppressClick`, which a keyboard activation -- `detail`
+0 -- now never pays for), and the tap count is dropped. A context menu is the
+same press's while it is down and for `HOLD_TAIL_MS` (1 s) after its release,
+and a press that already generated or became a drag gives none; after that a
+context menu is a new request (the menu key). A press whose release this page
+never hears -- let go over WanGP's frame -- is over at the next press anywhere
+(`supersede`), and a hold the page stops watching (the window lost, the page
+hidden, the shell disposed) generates nothing.
+
+**No menu.** The launcher's context menu is never the browser's now, on every
+workspace: where there is nothing to generate it does nothing. Safari's
+callout for a held element is off on the launcher (`-webkit-touch-callout`).
+
+**What it looks like.** From `HOLD_RING_MS` (120 ms) into an armed press -- so
+a tap shows nothing -- an accent ring closes in on the launcher
+(`data-holding`, the `forge-assistant-hold` animation over the rest of
+`HOLD_MS`) and arrives where the busy outline is drawn, which takes over when
+the hold is taken; under reduced motion, which stops every animation in the
+assistant, the ring is simply there. A finger or a pen is over the ring, so
+it feels the hold taken instead (`navigator.vibrate(12)`, where a browser has
+it). The answer stays on the launcher as in §3.48.
+
+**Verified.** `tests/test_assistant_generate_js.py` (node): a hold by a
+finger, a pen and a mouse generates once at `HOLD_MS`, the ring from
+`HOLD_RING_MS`, the release's click spent, a finger buzzed and a mouse not;
+the browser's menu before the time is the hold and the time stops, and one
+after it (on the release) generates nothing more; a press that moves first
+generates nothing, under its menu too; a press let go in time, or whose mouse
+button came up out of sight, is a press; a right button's press is its menu's
+and a second finger no hold; nothing to generate, no hold and no browser
+menu; WanGP's Generate on its tab, and WanGP not loaded said on the launcher;
+a hold ended by the window, by the next press and by disposal; the keyboard
+not swallowed after a hold; a touch, pen or plain context menu, and the menu
+key, each ▶ (translated from "a long press left alone"), and the browser's
+menu prevented where there is nothing to generate (translated from "left
+alone"). `tests/test_assistant_layout.py` (Chromium): a finger held on the
+launcher through the browser's own touch input generates once with the ring
+showing, the browser's menu after it prevented and generating nothing, its
+lifting opening nothing (translated from "generates nothing"); a finger that
+moves first drags the launcher and generates nothing; a mouse held still
+generates, its release opens nothing, a move after it drags nothing while a
+press that moves first does, and the next press opens the panel; the ring's
+time is `HOLD_MS` less `HOLD_RING_MS`, a press a tap long shows none, and under
+reduced motion the ring is a still outline. Twenty-five mutations each fail a
+test; four survived a first pass (the click and the drag hid behind each other
+in one scenario, a test's click was faster than any timer, and disposal had no
+check) and their tests were split and tightened. Not run on the user's machine,
+on a phone or in a Gecko build.

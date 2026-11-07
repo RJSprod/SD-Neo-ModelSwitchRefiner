@@ -7871,6 +7871,13 @@
     -webkit-user-drag: none;
 }
 
+/* A long press on the launcher is Generate (`startHold`), never a callout of
+   the browser's: Safari draws one for a held element without asking the
+   page's context menu. */
+.forge-assistant-launcher {
+    -webkit-touch-callout: none;
+}
+
 .forge-assistant-launcher-label {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -8900,6 +8907,26 @@
 
 .forge-assistant-launcher[data-generated="failed"] {
     outline-color: var(--color-red-500, #ef4444);
+}
+
+/* A hold on the launcher is the same Generate once it has lasted HOLD_MS
+   (`startHold`, 500 ms). From HOLD_RING_MS into the press (120 ms, so a tap
+   shows nothing) an accent ring closes in on the launcher, arriving as HOLD_MS
+   does where the busy outline above is drawn, which takes over when the hold
+   is taken. The ring's look is where it arrives: under reduced motion, which
+   stops every animation in the assistant (below), it is simply there. The
+   duration is HOLD_MS less HOLD_RING_MS; a test holds the three together. */
+.forge-assistant-launcher[data-holding] {
+    outline: 2px solid var(--color-accent, #2563eb);
+    outline-offset: 2px;
+    animation: forge-assistant-hold 380ms linear both;
+}
+
+@keyframes forge-assistant-hold {
+    from {
+        outline-color: transparent;
+        outline-offset: 10px;
+    }
 }
 
 /* Presses still in line, counted on the button's corner. */

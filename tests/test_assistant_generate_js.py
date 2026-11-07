@@ -437,7 +437,11 @@ def test_a_refused_press_is_said_on_the_launcher():
                                   "prevented": True, "calls": 0}
 
 
-def test_the_browsers_menu_where_there_is_nothing_to_generate_or_the_panel_is_open():
+def test_no_browsers_menu_on_the_launcher_even_where_there_is_nothing_to_generate():
+    """"No menu needed either when I long hold or right click, just
+    generate": the launcher's context menu is never the browser's. Where ▶
+    has nothing to press it does nothing; with the panel open the launcher is
+    not on screen and its menu is not asked about."""
     found = run(WORLD + FORGE + LAUNCHER + """
         forgeTab("txt2img");
         const elsewhere = generateShell("tab_settings", null);
@@ -451,34 +455,336 @@ def test_the_browsers_menu_where_there_is_nothing_to_generate_or_the_panel_is_op
         const two = rightClick();
         const b = open.shell.launcherMenu(two);
         await settle();
-        console.log(JSON.stringify({elsewhere: [a, one.prevented], open: [b, two.prevented, tab.generate.clicks || 0]}));
+        console.log(JSON.stringify({elsewhere: [a, one.prevented, elsewhere.shell.told.length],
+                                    open: [b, two.prevented, tab.generate.clicks || 0]}));
     """)
 
-    assert found == {"elsewhere": [False, False], "open": [False, False, 0]}
+    assert found == {"elsewhere": [False, True, 0], "open": [False, False, 0]}
 
 
-def test_a_fingers_long_press_is_a_drag_beginning_not_a_right_click():
-    """A touchscreen's context menu comes while the finger is still down, and
-    a finger held on the launcher is how a drag of it begins."""
+def test_a_fingers_or_a_pens_long_press_is_a_right_click_too():
+    """"On remote, that right click is a long press. So I need it to be
+    correctly interpreted." A touchscreen's own long press arrives as the
+    launcher's context menu -- with a touch or pen pointer, or as a plain
+    mouse event from a browser that sends one -- and each is ▶. So is the
+    keyboard's menu key."""
     found = run(WORLD + FORGE + LAUNCHER + """
         const tab = forgeTab("txt2img");
         const world = generateShell("tab_txt2img", null);
         putAway(world);
-        const touch = rightClick({pointerType: "touch"});
-        const pen = rightClick({pointerType: "pen"});
-        const results = [world.shell.launcherMenu(touch), world.shell.launcherMenu(pen)];
-        // A browser whose context menu is a plain mouse event: the press before it says.
-        world.shell.launcherPress = {type: "touch", at: Date.now()};
-        const older = rightClick({pointerType: undefined});
-        results.push(world.shell.launcherMenu(older));
-        // The keyboard's menu key long after a tap is a right click.
-        world.shell.launcherPress = {type: "touch", at: Date.now() - 5000};
-        const key = rightClick({pointerType: ""});
-        results.push(world.shell.launcherMenu(key));
+        const menus = [rightClick({pointerType: "touch"}), rightClick({pointerType: "pen"}),
+                       rightClick({pointerType: undefined}), rightClick({pointerType: ""})];
+        const results = menus.map((event) => world.shell.launcherMenu(event));
         await settle();
-        console.log(JSON.stringify({results, prevented: [touch.prevented, pen.prevented, older.prevented, key.prevented],
+        console.log(JSON.stringify({results, prevented: menus.map((event) => event.prevented),
                                     clicks: tab.generate.clicks || 0}));
     """)
 
-    assert found == {"results": [False, False, False, True], "prevented": [False, False, False, True],
-                     "clicks": 1}
+    assert found == {"results": [True, True, True, True], "prevented": [True, True, True, True],
+                     "clicks": 4}
+
+
+# The hold: "if I long hold on desktop, then it's the same function as
+# generate. All in all, I want to collect as many as possible "long holds" so
+# I can generate." A press held HOLD_MS on the put-away launcher without moving
+# presses ▶ -- a finger, a pen, a mouse's left button -- and so does the
+# context menu a held press brings; whichever comes first, once.
+
+HOLD = """
+function down(world, extra) {
+    const event = Object.assign({pointerId: 1, pointerType: "touch", isPrimary: true, button: 0,
+                                 clientX: 100, clientY: 100}, extra || {});
+    world.shell.startHold(event);
+    return event;
+}
+function move(world, dx, dy, extra) {
+    world.shell.moveHold(Object.assign({pointerId: 1, pointerType: "touch", buttons: 1,
+                                        clientX: 100 + dx, clientY: 100 + dy}, extra || {}));
+}
+function up(world, extra) {
+    world.shell.letGoHold(Object.assign({pointerId: 1}, extra || {}));
+}
+// The hold's own time: GENERATE_SHOWN's, for the answer on the launcher and
+// the button, run beside it.
+const liveTimers = () => timers.filter((t) => t.live && t.ms !== 3000).map((t) => t.ms);
+// The moment the ring shows, a tap's length into the press.
+const ring = () => timers.filter((t) => t.live && t.ms === 120).forEach((t) => { t.live = false; t.fn(); });
+"""
+
+
+def test_a_hold_presses_generate_once_it_has_lasted_whatever_holds_it():
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const buzzed = [];
+        Object.defineProperty(globalThis, "navigator", {configurable: true,
+                                                        value: {vibrate: (ms) => buzzed.push(ms)}});
+        const seen = [];
+        for (const pointerType of ["touch", "pen", "mouse"]) {
+            const world = generateShell("tab_txt2img", null);
+            const launcher = putAway(world);
+            const before = tab.generate.clicks || 0;
+            down(world, {pointerType});
+            const tap = {ring: launcher.dataset.holding !== undefined, timers: liveTimers()};
+            ring();
+            const holding = {tap, ring: launcher.dataset.holding !== undefined, timers: liveTimers(),
+                             clicks: (tab.generate.clicks || 0) - before};
+            runTimers();
+            await settle();
+            const felt = buzzed.splice(0);
+            seen.push({pointerType, holding, felt, clicks: (tab.generate.clicks || 0) - before,
+                       ring: launcher.dataset.holding !== undefined, said: launcher.dataset.generated,
+                       spent: world.shell.suppressClick === true});
+            up(world);
+            runTimers();
+        }
+        console.log(JSON.stringify(seen));
+    """)
+
+    for seen in found:
+        assert seen["holding"] == {"tap": {"ring": False, "timers": [120, 500]},
+                                   "ring": True, "timers": [500], "clicks": 0}, seen
+        assert seen["clicks"] == 1 and seen["ring"] is False and seen["said"] == "done", seen
+        assert seen["spent"] is True, "the click its release brings opens nothing"
+        # A finger is over the ring: it feels the hold taken. A mouse has nothing to feel with.
+        assert seen["felt"] == ([] if seen["pointerType"] == "mouse" else [12]), seen
+
+
+def test_the_menu_a_hold_brings_is_the_same_press_and_generates_nothing_more():
+    """Whichever comes first: the browser's own long-press menu before the
+    time, or after it (Windows sends a press-and-hold's on the release)."""
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        putAway(world);
+        // The browser's menu first: it is the hold, and the time is stopped.
+        down(world);
+        const early = rightClick({pointerType: "touch"});
+        const took = world.shell.launcherMenu(early);
+        const afterEarly = {clicks: tab.generate.clicks || 0, timers: liveTimers(), took,
+                            prevented: early.prevented, spent: world.shell.suppressClick};
+        runTimers();
+        up(world);
+        const late = rightClick({pointerType: "touch"});
+        const second = world.shell.launcherMenu(late);
+        // The time first, the menu on the release.
+        down(world);
+        runTimers();
+        up(world);
+        const onRelease = rightClick({pointerType: undefined});
+        const third = world.shell.launcherMenu(onRelease);
+        await settle();
+        console.log(JSON.stringify({afterEarly, second: [second, late.prevented],
+                                    third: [third, onRelease.prevented],
+                                    clicks: tab.generate.clicks || 0}));
+    """)
+
+    assert found["afterEarly"] == {"clicks": 1, "timers": [], "took": True, "prevented": True,
+                                   "spent": True}
+    assert found["second"] == [False, True] and found["third"] == [False, True]
+    assert found["clicks"] == 2, "one for each press"
+
+
+def test_a_press_that_moves_first_is_a_drag_and_generates_nothing():
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        const launcher = putAway(world);
+        down(world);
+        ring();
+        move(world, 3, 4);
+        const still = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined};
+        move(world, 0, 7);
+        const moved = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined};
+        runTimers();
+        // The browser's long press can still come under a drag that is short
+        // of its own slop: it is the drag's.
+        const menu = rightClick({pointerType: "touch"});
+        const took = world.shell.launcherMenu(menu);
+        up(world);
+        await settle();
+        console.log(JSON.stringify({still, moved, took, prevented: menu.prevented,
+                                    clicks: tab.generate.clicks || 0,
+                                    spent: !!world.shell.suppressClick}));
+    """)
+
+    assert found["still"] == {"timers": [500], "ring": True}, "a hand is never quite still"
+    assert found["moved"] == {"timers": [], "ring": False}
+    assert found["took"] is False and found["prevented"] is True
+    assert found["clicks"] == 0 and found["spent"] is False
+
+
+def test_a_press_let_go_in_time_is_a_press():
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        const launcher = putAway(world);
+        down(world, {pointerType: "mouse"});
+        ring();
+        up(world, {pointerType: "mouse"});
+        const after = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined,
+                       spent: !!world.shell.suppressClick};
+        runTimers();
+        // A mouse's button let go where the page never heard it: the next
+        // move says so, with no button down.
+        down(world, {pointerType: "mouse"});
+        move(world, 1, 1, {pointerType: "mouse", buttons: 0});
+        const unheard = {timers: liveTimers(), down: world.shell.hold.down};
+        runTimers();
+        await settle();
+        console.log(JSON.stringify({after, unheard, clicks: tab.generate.clicks || 0,
+                                    said: launcher.dataset.generated || ""}));
+    """)
+
+    assert found == {"after": {"timers": [], "ring": False, "spent": False},
+                     "unheard": {"timers": [], "down": False}, "clicks": 0, "said": ""}
+
+
+def test_a_right_buttons_press_is_its_menus_and_a_second_finger_is_no_hold():
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        const launcher = putAway(world);
+        down(world, {pointerType: "mouse", button: 2});
+        const right = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined};
+        const took = world.shell.launcherMenu(rightClick());
+        up(world);
+        await settle();
+        const clicked = tab.generate.clicks || 0;
+        down(world, {pointerId: 3});
+        ring();
+        down(world, {pointerId: 4, isPrimary: false});
+        const two = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined};
+        runTimers();
+        await settle();
+        console.log(JSON.stringify({right, took, clicked, two, clicks: tab.generate.clicks || 0}));
+    """)
+
+    assert found["right"] == {"timers": [], "ring": False}
+    assert found["took"] is True and found["clicked"] == 1
+    assert found["two"] == {"timers": [], "ring": False}
+    assert found["clicks"] == 1
+
+
+def test_where_there_is_nothing_to_generate_a_hold_is_a_press():
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        forgeTab("txt2img");
+        const world = generateShell("tab_settings", null);
+        const launcher = putAway(world);
+        down(world);
+        const held = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined};
+        const menu = rightClick({pointerType: "touch"});
+        const took = world.shell.launcherMenu(menu);
+        console.log(JSON.stringify({held, took, prevented: menu.prevented,
+                                    said: launcher.dataset.generated || ""}));
+    """)
+
+    assert found == {"held": {"timers": [], "ring": False}, "took": False, "prevented": True, "said": ""}
+
+
+def test_on_the_wangp_tab_a_hold_is_wangps_generate_and_waits_for_wangp():
+    found = run(WORLD + LAUNCHER + HOLD + """
+        const world = generateShell("tab_wangp");
+        const launcher = putAway(world);
+        world.bridge.answer = {ok: true, status: "queued"};
+        down(world);
+        runTimers();
+        await settle(); await settle(); await settle();
+        const taken = {calls: world.bridge.calls, said: launcher.dataset.generated, title: launcher.title};
+        up(world);
+        const waiting = generateShell("tab_wangp");
+        const away = putAway(waiting);
+        waiting.bridge.ready = false;
+        down(waiting);
+        ring();
+        const ringed = away.dataset.holding !== undefined;
+        runTimers();
+        console.log(JSON.stringify({taken, notLoaded: {ring: ringed, calls: waiting.bridge.calls,
+                                                       said: away.dataset.generated, title: away.title}}));
+    """)
+
+    assert found["taken"] == {"calls": 1, "said": "done", "title": "Added to WanGP's queue."}
+    assert found["notLoaded"] == {"ring": True, "calls": 0, "said": "failed",
+                                  "title": "WanGP is not loaded yet"}
+
+
+def test_a_hold_the_page_stopped_watching_generates_nothing():
+    """The window lost, the page hidden: nobody is still holding."""
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        const launcher = putAway(world);
+        world.shell.resetHeaderTaps = () => undefined;
+        down(world);
+        ring();
+        world.shell.cancelGestures();
+        const after = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined,
+                       down: world.shell.hold.down};
+        runTimers();
+        await settle();
+        console.log(JSON.stringify({after, clicks: tab.generate.clicks || 0}));
+    """)
+
+    assert found == {"after": {"timers": [], "ring": False, "down": False}, "clicks": 0}
+
+
+def test_a_spent_press_whose_release_was_never_heard_is_over_at_the_next_press():
+    """Let go over WanGP's frame, the release is the frame's. The next press
+    anywhere ends it, and the keyboard's menu key after that is ▶ again."""
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        putAway(world);
+        down(world);
+        runTimers();
+        world.shell.supersede({isPrimary: true, target: null, clientX: 500, clientY: 500});
+        const stillDown = world.shell.hold.down;
+        world.shell.hold.upAt -= 5000;
+        const key = rightClick({pointerType: ""});
+        const took = world.shell.launcherMenu(key);
+        await settle();
+        console.log(JSON.stringify({down: stillDown, took, clicks: tab.generate.clicks || 0}));
+    """)
+
+    assert found == {"down": False, "took": True, "clicks": 2}
+
+
+def test_the_keyboard_is_not_swallowed_after_a_hold():
+    """A finger's hold leaves no click behind in most browsers to take its
+    flag away, and Enter on the launcher afterwards is a press of its own."""
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        putAway(world);
+        const taps = [];
+        world.shell.tapLauncher = (event) => taps.push(event.detail);
+        down(world);
+        runTimers();
+        up(world);
+        const swallowed = [];
+        world.shell.launcherClick({detail: 0, preventDefault() { swallowed.push("enter"); }});
+        down(world, {pointerType: "mouse"});
+        runTimers();
+        up(world, {pointerType: "mouse"});
+        world.shell.launcherClick({detail: 1, preventDefault() { swallowed.push("release"); }});
+        console.log(JSON.stringify({taps, swallowed}));
+    """)
+
+    assert found == {"taps": [0], "swallowed": ["release"]}
+
+
+def test_a_hold_ends_with_the_panel():
+    found = run(WORLD + FORGE + LAUNCHER + HOLD + """
+        const tab = forgeTab("txt2img");
+        const world = generateShell("tab_txt2img", null);
+        const launcher = putAway(world);
+        Object.assign(world.shell, {disposers: [], stopMemory() {}, resetHeaderTaps() {}});
+        down(world);
+        ring();
+        world.shell.dispose();
+        const after = {timers: liveTimers(), ring: launcher.dataset.holding !== undefined};
+        runTimers();
+        await settle();
+        console.log(JSON.stringify({after, clicks: tab.generate.clicks || 0}));
+    """)
+
+    assert found == {"after": {"timers": [], "ring": False}, "clicks": 0}
