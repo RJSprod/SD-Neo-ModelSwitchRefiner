@@ -4,9 +4,9 @@ Three things go into a panel that already works, and the constraint on all
 three is that Conversation must look and behave exactly as it did for somebody
 who never installs a speech model:
 
-    a "Voice" chip in the header, beside Threads / Character / You / Model;
-    a Voice overlay, which is a fourth screen in the panel's existing one-at-a-
-        time surface machinery rather than a new mechanism;
+    a Voice section in the Conversation pop-up, beside Emotion, Generation and
+        the rest (until 2026-11-06 a "Voice" chip in the header and a sheet of
+        its own, a fourth screen in the panel's one-at-a-time surfaces);
     a microphone button in the composer row, beside Send.
 
 Nothing here does inference, downloads anything, or touches a process. It builds
@@ -15,8 +15,8 @@ line. The capture gesture, the audio, the playback and the composer insertion
 are all in ``javascript/voice_chat.js``, where a browser is the only thing that
 can do them.
 
-Why the overlay and not a drawer
---------------------------------
+Why the pop-up and not a drawer
+-------------------------------
 I-9, and the panel's own rule. Conversation's surfaces are absolutely positioned
 inside the workspace: an open one takes *no room in the layout*, so nothing it
 covers can be pushed anywhere -- least of all the composer, off the bottom of a
@@ -58,9 +58,6 @@ import mc_voice_turn as turns
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
 
-SCREEN = "voice"
-"""The name this overlay answers to in the panel's ``SCREENS`` tuple."""
-
 MIC_GLYPH = "\U0001f3a4"
 
 MIC_PX = 44
@@ -79,18 +76,6 @@ one movement, and one handle's travel is both.
 """
 
 NOT_READY = "Voice Chat is not set up. Install both models in Settings → Voice Chat."
-
-
-def chip():
-    """The header control. A chip, because it opens configuration like the rest.
-
-    Not a permanent on/off toggle: the two switches behind it are settings, and
-    a header full of live toggles is a header where one stray tap changes what
-    the next reply does.
-    """
-    return gr.Button("Voice", size="sm", scale=0, min_width=0,
-                     elem_id=ui.ident("chat", "to-voice"),
-                     elem_classes=ui.classes("chip-button"))
 
 
 def microphone():
@@ -464,14 +449,17 @@ def cancel_speech(reason: str = "user") -> bool:
         return False
 
 
-def sheet() -> dict:
-    """The Voice overlay: what is ready, two switches, and a way out."""
-    with gr.Column(visible=False, elem_id=ui.ident("chat", "voice"),
-                   elem_classes=ui.classes("sheet", "sheet-screen")) as screen:
-        with gr.Row(elem_classes=ui.classes("sheet-head")):
-            back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
-                             elem_classes=ui.classes("sheet-back"))
-            gr.Markdown("#### Voice")
+def section() -> dict:
+    """Voice in LLM Studio's Conversation pop-up: what is ready, and two switches.
+
+    A section of that one pop-up since 2026-11-06 -- "make these all just one
+    Conversation button" -- where it had a chip on the bar and a sheet of its
+    own. The ids inside are the ones ``javascript/voice_chat.js`` reads, as
+    they were; what the chip did for that script (the engine still finishing,
+    the press that unlocks audio) the Conversation chip does now.
+    """
+    with gr.Accordion("Voice", open=False, elem_id=ui.ident("chat", "voice"),
+                      elem_classes=ui.classes("section")) as holder:
         engine = gr.HTML(engine_panel(), elem_id=ui.ident("chat", "voice-engine"))
         readiness = gr.HTML(readiness_notice(),
                             elem_id=ui.ident("chat", "voice-readiness"))
@@ -488,7 +476,7 @@ def sheet() -> dict:
             "Voice Chat does not add a rule of its own, and will tell you what your browser "
             "actually said if it refuses.",
             elem_classes=ui.classes("hint"))
-    return {"screen": screen, "back": back, "readiness": readiness, "engine": engine,
+    return {"section": holder, "readiness": readiness, "engine": engine,
             "auto_send": auto_send, "auto_speak": auto_speak}
 
 
@@ -739,17 +727,21 @@ def readiness_notice() -> str:
                      f"still to install. Settings → Voice Chat.", "warn")
 
 
-def open_sheet(screens) -> list:
-    """Open the overlay and refresh what it says.
+SECTION_VALUES = ("readiness", "engine", "auto_send", "auto_speak")
+"""What :func:`section_values` answers, in order: keys of :func:`section`'s dict."""
+
+
+def section_values() -> list:
+    """What the Voice section says, read again as the Conversation pop-up opens.
 
     Read live rather than from what the checkboxes happened to hold: Settings
-    may have changed either switch since this panel was built, and a flyout that
-    shows a stale value is a flyout that turns a setting off by being tapped.
+    may have changed either switch since this panel was built, and a pop-up that
+    shows a stale value is a pop-up that turns a setting off by being tapped.
     """
     current = state.settings()
-    return screens(SCREEN) + [readiness_notice(), engine_panel(),
-                              gr.update(value=current["auto_send"]),
-                              gr.update(value=current["auto_speak"])]
+    return [readiness_notice(), engine_panel(),
+            gr.update(value=current["auto_send"]),
+            gr.update(value=current["auto_speak"])]
 
 
 def set_auto_send(value):

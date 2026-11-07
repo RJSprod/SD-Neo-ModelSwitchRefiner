@@ -392,6 +392,7 @@ class TestTheTab:
         return mc_llm_chat_panel
 
     def test_the_heading_marks_whether_the_chip_s_dot_is_filled(self, thread):
+        """The Conversation chip's dot since 2026-11-06; the Start with chip's before."""
         panel = self.panel()
 
         assert 'data-start="off"' in panel._heading("Ada", thread)
@@ -401,16 +402,22 @@ class TestTheTab:
     def test_opening_the_box_shows_what_is_kept(self, thread):
         write(thread, BLUE)
 
-        title, text, heading = self.panel()._start_view("Ada", thread.identifier)
+        section, text, heading = self.panel()._start_view("Ada", thread.identifier)
 
         assert text == BLUE
-        assert "Start the next reply with" in title
+        assert section["label"] == f"Start the next reply with · {BLUE}"
         assert 'data-start="on"' in heading
+
+    def test_with_nothing_kept_the_section_says_so_plainly(self, thread):
+        section, text, heading = self.panel()._start_view("Ada", thread.identifier)
+
+        assert (section["label"], text) == ("Start the next reply with", "")
+        assert 'data-start="off"' in heading
 
     def test_set_keeps_the_words_through_the_service_and_says_so(self, chats, thread):
         before = chats.load("Ada", thread.identifier).revision
 
-        title, text, heading, status = self.panel()._start_written(
+        section, text, heading, status = self.panel()._start_written(
             "Ada", thread.identifier, BLUE)
 
         assert start_with.for_thread("Ada", thread.identifier) == BLUE
@@ -440,8 +447,12 @@ class TestTheTab:
         assert "Choose a character and a thread first." in status
         assert not start_with.path().exists()
 
-    def test_the_title_is_written_escaped(self, chats, thread):
-        conversation = chats.load("Ada", thread.identifier)
-        conversation.title = "<b>bold</b>"
+    def test_the_label_is_the_words_on_one_line_and_cut(self, thread):
+        """A label is text Gradio writes as text, so nothing in it is markup;
+        what has to be kept from it is a second line and a paragraph."""
+        write(thread, "Well,\n\nthe answer is " + "really " * 12 + "blue")
 
-        assert "<b>" not in self.panel()._start_title(conversation)
+        label = self.panel()._start_label("Ada", thread.identifier)
+
+        assert "\n" not in label and label.endswith("\u2026")
+        assert label.startswith("Start the next reply with · Well, the answer is")

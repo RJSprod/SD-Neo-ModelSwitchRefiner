@@ -204,10 +204,21 @@
     const GENERATE_GLYPH = "\u25b6\ufe0e";  // a play triangle, text style
     const GENERATE_LABEL = "Generate in WanGP";
     const GENERATE_SHOWN = 3000;
-    // A right click on the launcher is ▶ (`launcherMenu`), but not the
-    // context menu of a finger's or a pen's long press: within this long of
-    // one going down on the launcher, its context menu is that press's.
-    const LONG_PRESS_MS = 2000;
+    // A long hold on the put-away launcher is ▶ too, whatever holds it -- a
+    // finger, a pen, a mouse's left button (`startHold`) -- once it has lasted
+    // this long without moving; so is any context menu the launcher is given
+    // (`launcherMenu`), which is how a right click, the menu key, and most
+    // touchscreens' own long press arrive. Whichever comes first takes the
+    // press, and the press generates once.
+    const HOLD_MS = 500;
+    // The ring that closes in on the launcher while a hold is being made
+    // shows once the press has lasted this long, so a tap shows none.
+    const HOLD_RING_MS = 120;
+    // A context menu that comes after its press was let go -- Windows sends a
+    // right button's and a touch's press-and-hold on the release -- is still
+    // that press's for this long, and a press that already generated or
+    // became a drag gives none.
+    const HOLD_TAIL_MS = 1000;
     // The same ▶ on Txt2Img and Img2Img, asked for beside the docked settings:
     // "for the flyout menu in both the text to image and image to image, I
     // would like to have a play button, just like I do for WAN2GP, and its
@@ -2491,6 +2502,8 @@
         if (this.drag) this.endDrag(null, true);
         if (this.strip) this.endStrip(null, true);
         if (this.resizing) this.endResize(null, true);
+        // A hold the page stopped watching generates nothing when it lapses.
+        this.cancelHold(true);
         this.suppressClick = false;
         this.suppressHeaderClick = false;
         this.stripMoved = false;
@@ -2517,6 +2530,7 @@
     Shell.prototype.supersede = function (event) {
         if (!event || !event.isPrimary) return;
         if (this.drag || this.strip || this.resizing) this.cancelGestures();
+        else if (this.hold && this.hold.down) this.cancelHold(true);
         this.suppressClick = false;
         this.stripMoved = false;
         // A new press is nobody's until `startDrag` says it began on the
@@ -2657,11 +2671,12 @@
         this.on(nodes.workspaces, "scroll", () => this.markOverflow());
 
         this.on(nodes.launcher, "click", (event) => this.launcherClick(event));
-        // A right click on the launcher is ▶ (`launcherMenu`); the kind of
-        // press before it says whether it was one.
-        this.on(nodes.launcher, "pointerdown", (event) => {
-            this.launcherPress = {type: event.pointerType || "", at: Date.now()};
-        }, true);
+        // A long hold on the launcher is ▶ (`startHold`), and so is its
+        // context menu (`launcherMenu`); both read the press that began here.
+        this.on(nodes.launcher, "pointerdown", (event) => this.startHold(event), true);
+        this.on(window, "pointermove", (event) => this.moveHold(event));
+        this.on(window, "pointerup", (event) => this.letGoHold(event));
+        this.on(window, "pointercancel", (event) => this.letGoHold(event));
         this.on(nodes.launcher, "contextmenu", (event) => this.launcherMenu(event));
         this.on(nodes.minimize, "click", () => this.close());
         this.on(nodes.chat, "click", () => this.toggleChat());
@@ -3110,29 +3125,161 @@
     // A right click on the launcher is ▶. Asked for: "the play /generate
     // button for text to image, image to image, and wan2gp works well, I want
     // to make a shortcut to this function, so when fly out menu is in button
-    // state minimized, then a right click should invoke generate." So with
-    // the panel put away, the launcher's context menu -- a mouse's right
-    // button, or the keyboard's menu key on it -- presses what ▶ would press
-    // on this workspace (`pressGenerate`), and the browser's own menu is not
-    // shown. Where ▶ has nothing to press (another workspace, Txt2Img
-    // without its Generate on the page) the browser's menu is left alone.
-    // Not a finger's or a pen's long press, which is how a drag of the
-    // launcher begins: a touchscreen's context menu arrives while the finger
-    // is still down. The answer shows on the launcher for GENERATE_SHOWN --
-    // the accent while WanGP is asked, green for taken, red for refused, the
-    // words as its tooltip -- since the status line is in the panel.
+    // state minimized, then a right click should invoke generate." And then,
+    // from a phone and a remote session: "On remote, that right click is a
+    // long press. So I need it to be correctly interpreted. Also add, if I
+    // long hold on desktop, then it's the same function as generate. All in
+    // all, I want to collect as many as possible "long holds" so I can
+    // generate. No menu needed either when I long hold or right click, just
+    // generate."
+    //
+    // So with the panel put away, every way of holding the launcher presses
+    // what ▶ would press on this workspace (`pressGenerate`): its context menu
+    // -- a mouse's right button, the keyboard's menu key, Ctrl and a press on
+    // a Mac, a remote session's long press sent as a right click, a
+    // touchscreen's own long press (`launcherMenu`) -- and a press that is held
+    // HOLD_MS without moving, with a finger, a pen or a mouse's left button
+    // (`startHold`), for the browsers and the remote sessions that send no
+    // context menu for a hold. Whichever comes first takes the press: it
+    // generates once, the drag it began ends, and the click after it opens
+    // nothing; a press that moves first is a drag and generates nothing. The
+    // launcher's context menu is never the browser's, here or on a workspace
+    // with nothing to generate, where a hold does nothing. While a hold is
+    // being made an accent ring closes in on the launcher (`data-holding`),
+    // and a finger feels the moment it is taken; the answer shows on the
+    // launcher for GENERATE_SHOWN -- the accent while WanGP is asked, green
+    // for taken, red for refused, the words as its tooltip -- since the
+    // status line is in the panel.
 
+    /** A press went down on the launcher: the hold it may become. */
+    Shell.prototype.startHold = function (event) {
+        this.cancelHold();
+        if (!event || this.state.panelOpen) return;
+        const hold = this.hold = {
+            pointerId: event.pointerId,
+            type: event.pointerType || "",
+            x: event.clientX,
+            y: event.clientY,
+            down: true,
+            upAt: 0,
+            timer: 0,
+            ring: 0,
+            state: "none",
+        };
+        // One finger, a pen's tip or a mouse's left button: a right button's
+        // press is its context menu's, and a second finger is no hold.
+        if (event.isPrimary === false) return;
+        if (event.button !== undefined && event.button !== 0) return;
+        if (!this.offersGenerate()) return;
+        hold.state = "armed";
+        hold.ring = window.setTimeout(() => {
+            hold.ring = 0;
+            this.showHolding(true);
+        }, HOLD_RING_MS);
+        hold.timer = window.setTimeout(() => {
+            try {
+                this.fireHold(hold);
+            } catch (error) {
+                this.fault(error);
+            }
+        }, HOLD_MS);
+    };
+
+    /** The held press moved: a drag, which no hold or context menu takes. */
+    Shell.prototype.moveHold = function (event) {
+        const hold = this.hold;
+        if (!hold || !hold.down || !event || event.pointerId !== hold.pointerId) return;
+        // A mouse's button let go where this page never heard it.
+        if (event.pointerType === "mouse" && event.buttons === 0) {
+            this.letGoHold(event);
+            return;
+        }
+        if (hold.state === "fired" || hold.state === "moved") return;
+        if (Math.abs(event.clientX - hold.x) < DRAG_THRESHOLD
+            && Math.abs(event.clientY - hold.y) < DRAG_THRESHOLD) return;
+        this.cancelHold();
+        hold.state = "moved";
+    };
+
+    /** The held press came up, or the browser took it. */
+    Shell.prototype.letGoHold = function (event) {
+        const hold = this.hold;
+        if (!hold || !hold.down || (event && event.pointerId !== hold.pointerId)) return;
+        hold.down = false;
+        hold.upAt = Date.now();
+        if (hold.state === "armed") this.cancelHold();
+    };
+
+    /** The hold, if one is being made, made no longer: its time and its ring
+     *  stopped. What it already did stands. `letGo` for the moments the press
+     *  is over whether or not its release was heard -- a new press, the
+     *  window lost, the page hidden; a release over WanGP's frame is the
+     *  frame's, and never reaches this page. */
+    Shell.prototype.cancelHold = function (letGo) {
+        const hold = this.hold;
+        if (!hold) return;
+        if (hold.timer) window.clearTimeout(hold.timer);
+        if (hold.ring) window.clearTimeout(hold.ring);
+        hold.timer = 0;
+        hold.ring = 0;
+        if (hold.state === "armed") hold.state = "let go";
+        if (letGo && hold.down) {
+            hold.down = false;
+            hold.upAt = Date.now();
+        }
+        this.showHolding(false);
+    };
+
+    /** The hold is taken: ▶ is pressed, once, and the press is spent -- no
+     *  drag from it and no click after it. */
+    Shell.prototype.fireHold = function (hold) {
+        if (!hold || hold.state !== "armed") return false;
+        if (hold.timer) window.clearTimeout(hold.timer);
+        if (hold.ring) window.clearTimeout(hold.ring);
+        hold.timer = 0;
+        hold.ring = 0;
+        hold.state = "fired";
+        this.showHolding(false);
+        if (hold.down) {
+            if (this.drag && this.drag.pointerId === hold.pointerId) this.endDrag(null, true);
+            this.suppressClick = true;
+        }
+        this.resetTaps();
+        // The finger is over the ring: it feels the hold taken instead.
+        if ((hold.type === "touch" || hold.type === "pen")
+            && typeof navigator !== "undefined" && navigator && typeof navigator.vibrate === "function") {
+            try {
+                navigator.vibrate(12);
+            } catch (error) { /* not allowed here */ }
+        }
+        return this.generateFromLauncher();
+    };
+
+    /** The launcher's context menu: never the browser's, and ▶ unless the
+     *  press it belongs to has already generated or become a drag. */
     Shell.prototype.launcherMenu = function (event) {
         if (!event || this.state.panelOpen) return false;
-        const press = this.launcherPress;
-        const held = event.pointerType === "touch" || event.pointerType === "pen"
-            || !!(press && (press.type === "touch" || press.type === "pen")
-                  && Date.now() - press.at < LONG_PRESS_MS);
-        if (held) return false;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        const hold = this.hold;
+        const ours = !!(hold && (hold.down || Date.now() - hold.upAt < HOLD_TAIL_MS));
+        if (ours && (hold.state === "fired" || hold.state === "moved")) return false;
+        if (ours && hold.state === "armed") return this.fireHold(hold);
+        if (ours) hold.state = "fired";
+        return this.generateFromLauncher();
+    };
+
+    /** Is there a ▶ on this workspace for the launcher to press? */
+    Shell.prototype.offersGenerate = function () {
         this.applyGenerate();
         const button = this.nodes && this.nodes.generate;
-        if (!button || button.hidden) return false;
-        if (typeof event.preventDefault === "function") event.preventDefault();
+        return !!(button && !button.hidden);
+    };
+
+    /** Press what ▶ would press, from the launcher, and say the answer on it.
+     *  False where there is nothing to press. */
+    Shell.prototype.generateFromLauncher = function () {
+        if (!this.offersGenerate()) return false;
+        const button = this.nodes.generate;
         if (button.disabled) {
             const why = button.title || "Nothing to generate yet.";
             this.tell(why, "warn");
@@ -3151,6 +3298,14 @@
             this.showOnLauncher(ok ? "done" : "failed", said || (ok ? "Generating." : "Not generated."));
         });
         return true;
+    };
+
+    /** The ring that closes in on the launcher while a hold is being made. */
+    Shell.prototype.showHolding = function (on) {
+        const launcher = this.nodes && this.nodes.launcher;
+        if (!launcher || !launcher.dataset) return;
+        if (on) launcher.dataset.holding = "";
+        else if (launcher.dataset.holding !== undefined) delete launcher.dataset.holding;
     };
 
     /** The launcher says what its right click did, for GENERATE_SHOWN (or
@@ -3475,12 +3630,16 @@
     Shell.prototype.launcherClick = function (event) {
         if (this.suppressClick) {
             // Only this gesture's click, and only once. A later keyboard
-            // activation must not be swallowed by a drag that has finished.
+            // activation must not be swallowed by a drag or a hold that has
+            // finished: a keyboard's click has `detail` 0, and a finger's hold
+            // leaves no click behind in most browsers to take the flag away.
             // A drag also ends any press count it interrupted.
             this.suppressClick = false;
-            this.resetTaps();
-            event.preventDefault();
-            return;
+            if (event && event.detail) {
+                this.resetTaps();
+                event.preventDefault();
+                return;
+            }
         }
         this.tapLauncher(event);
     };
@@ -7573,6 +7732,8 @@
         if (this.drag && this.drag.pan && this.drag.pan.stop) this.drag.pan.stop();
         this.unlockScroll();
         window.clearTimeout(this._generateShown);
+        window.clearTimeout(this._launcherShown);
+        this.cancelHold(true);
         this.resetTaps();
         this.resetHeaderTaps();
         this.disposers.forEach((off) => {

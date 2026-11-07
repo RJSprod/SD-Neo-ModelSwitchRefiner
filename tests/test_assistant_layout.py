@@ -56,6 +56,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -2374,31 +2375,193 @@ def test_a_right_click_on_the_put_away_launcher_is_the_play_button(browser):
         page.close()
 
 
-def test_a_fingers_long_press_on_the_launcher_generates_nothing(browser):
-    """A finger held on the launcher is a drag beginning: its context menu --
-    the browser's own after a long press, or a plain mouse event from a
-    browser that sends one -- is not a right click."""
+LAUNCHER_AT = """() => { const r = document.querySelector('.forge-assistant-launcher')
+    .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }"""
+
+HOLDING = """() => { const launcher = document.querySelector('.forge-assistant-launcher');
+    const style = getComputedStyle(launcher);
+    return {holding: launcher.hasAttribute('data-holding'), animation: style.animationName,
+            duration: style.animationDuration, delay: style.animationDelay,
+            generated: launcher.getAttribute('data-generated')}; }"""
+
+# The browser's own menu for a long press: what Chromium on a phone sends while
+# the finger is still down, and Windows on the release. Dispatched by hand,
+# because a headless browser's long press is its own to time.
+MENU = """() => document.querySelector('.forge-assistant-launcher')
+    .dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}))"""
+
+
+def watch_phone(page) -> None:
+    page.evaluate("forgeAssistant.shell.close()")
+    page.evaluate("""() => { window.pressed = 0; window.menus = [];
+        document.getElementById('txt2img_generate').addEventListener('click', () => { window.pressed += 1; });
+        window.addEventListener('contextmenu', (e) => window.menus.push(e.defaultPrevented)); }""")
+    settle(page)
+
+
+def test_a_fingers_long_press_on_the_launcher_is_the_play_button(browser):
+    """"On remote, that right click is a long press. So I need it to be
+    correctly interpreted": a finger held on the put-away launcher presses
+    Generate once, a ring closing in while it is held, and neither the
+    browser's long-press menu nor the finger's lifting does anything more."""
     context, page = open_phone(browser, free_float=False)
     try:
-        page.evaluate("forgeAssistant.shell.close()")
-        page.evaluate("""() => { window.pressed = 0; document.getElementById('txt2img_generate')
-            .addEventListener('click', () => { window.pressed += 1; }); }""")
-        settle(page)
-        box = page.evaluate("""() => { const r = document.querySelector('.forge-assistant-launcher')
-            .getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }""")
+        watch_phone(page)
+        at = page.evaluate(LAUNCHER_AT)
         cdp = page.context.new_cdp_session(page)
         cdp.send("Input.dispatchTouchEvent",
-                 {"type": "touchStart", "touchPoints": [{"x": box["x"], "y": box["y"]}]})
-        page.wait_for_timeout(900)
-        page.evaluate("""() => document.querySelector('.forge-assistant-launcher')
-            .dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}))""")
+                 {"type": "touchStart", "touchPoints": [{"x": at["x"], "y": at["y"]}]})
+        page.wait_for_timeout(250)
+        held = page.evaluate(HOLDING)
+        early = page.evaluate("window.pressed")
+        page.wait_for_timeout(650)
+        taken = page.evaluate(HOLDING)
+        pressed = page.evaluate("window.pressed")
+        page.evaluate(MENU)
         cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         cdp.detach()
-        settle(page)
-        assert page.evaluate("window.pressed") == 0
-        assert page.get_attribute(".forge-assistant-launcher", "data-generated") is None
+        settle(page, 6)
+        assert held["holding"] is True and held["animation"] == "forge-assistant-hold", held
+        assert early == 0, "not before its time"
+        assert taken["holding"] is False and taken["generated"] in ("busy", "done"), taken
+        assert pressed == 1
+        assert page.evaluate("window.pressed") == 1, "the menu after it is the same press"
+        menus = page.evaluate("window.menus")
+        assert menus and all(menus), "no browser menu: %r" % menus
+        assert page.evaluate("forgeAssistant.shell.state.panelOpen") is False, "lifting opens nothing"
+        assert page.get_attribute(".forge-assistant-launcher", "data-generated") == "done"
     finally:
         context.close()
+
+
+def test_a_finger_that_moves_first_drags_the_launcher_and_generates_nothing(browser):
+    context, page = open_phone(browser, free_float=False)
+    try:
+        watch_phone(page)
+        at = page.evaluate(LAUNCHER_AT)
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Input.dispatchTouchEvent",
+                 {"type": "touchStart", "touchPoints": [{"x": at["x"], "y": at["y"]}]})
+        page.wait_for_timeout(100)
+        for step in range(1, 9):
+            page.wait_for_timeout(16)
+            cdp.send("Input.dispatchTouchEvent",
+                     {"type": "touchMove", "touchPoints": [{"x": at["x"] - 8 * step, "y": at["y"] - 12 * step}]})
+        page.wait_for_timeout(800)
+        page.evaluate(MENU)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        cdp.detach()
+        settle(page, 6)
+        after = page.evaluate(LAUNCHER_AT)
+        assert page.evaluate("window.pressed") == 0
+        assert page.evaluate(HOLDING)["holding"] is False
+        assert all(page.evaluate("window.menus")), "a drag's menu is not the browser's either"
+        assert abs(after["y"] - at["y"]) > 40 or abs(after["x"] - at["x"]) > 40, (at, after)
+    finally:
+        context.close()
+
+
+def test_a_mouse_held_on_the_launcher_is_the_play_button_and_opens_nothing(browser):
+    """"if I long hold on desktop, then it's the same function as generate":
+    the left button held still on the put-away launcher. Its release opens
+    nothing, a move once it is taken drags nothing, and the next press opens
+    the panel as ever."""
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        page.evaluate("forgeAssistant.shell.setFreeFloat(true)")
+        settle(page)
+        assert page.evaluate("forgeAssistant.shell.state.panelOpen") is False
+        at = page.evaluate(LAUNCHER_AT)
+        page.mouse.move(at["x"], at["y"])
+        page.mouse.down()
+        page.wait_for_timeout(700)
+        page.mouse.up()
+        settle(page, 6)
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 1, "img2img": 0}
+        assert page.evaluate("forgeAssistant.shell.state.panelOpen") is False, "its release opens nothing"
+        assert page.get_attribute(".forge-assistant-launcher", "data-generated") == "done"
+
+        # Taken, the press is spent: moving now drags nothing, where a press
+        # that moves first would carry the launcher with it.
+        page.mouse.down()
+        page.wait_for_timeout(700)
+        page.mouse.move(at["x"] - 160, at["y"] - 120, steps=6)
+        page.mouse.up()
+        settle(page, 6)
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 2, "img2img": 0}
+        assert page.evaluate(LAUNCHER_AT) == at, "the hold's press moved the launcher"
+        page.mouse.move(at["x"], at["y"])
+        page.mouse.down()
+        page.mouse.move(at["x"] - 160, at["y"] - 120, steps=6)
+        page.mouse.up()
+        settle(page, 6)
+        moved = page.evaluate(LAUNCHER_AT)
+        assert abs(moved["x"] - (at["x"] - 160)) < 4 and abs(moved["y"] - (at["y"] - 120)) < 4, moved
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 2, "img2img": 0}
+
+        page.click(".forge-assistant-launcher")
+        page.wait_for_function("forgeAssistant.shell.state.panelOpen === true", timeout=3000)
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 2, "img2img": 0}
+    finally:
+        page.close()
+
+
+def test_the_rings_time_is_the_holds_time(browser):
+    """The ring shows once a press has lasted longer than a tap, and closes in
+    over exactly the rest of the hold's time. A tap shows none and generates
+    nothing; under reduced motion, which stops the assistant's animations,
+    the ring is simply there."""
+    source = (ROOT / "javascript" / "forge_assistant.js").read_text(encoding="utf-8")
+    hold_ms = int(re.search(r"const HOLD_MS = (\d+);", source).group(1))
+    ring_ms = int(re.search(r"const HOLD_RING_MS = (\d+);", source).group(1))
+    page = open_page(browser, 1600, 900, img2img=True)
+    try:
+        settle(page)
+        page.evaluate("""() => { window.rings = 0; new MutationObserver((records) => {
+            records.forEach((r) => { if (r.target.hasAttribute('data-holding')) window.rings += 1; });
+        }).observe(document.querySelector('.forge-assistant-launcher'),
+                   {attributes: true, attributeFilter: ['data-holding']}); }""")
+        # A press a tap long -- slower than any click a test makes.
+        at = page.evaluate(LAUNCHER_AT)
+        page.mouse.move(at["x"], at["y"])
+        page.mouse.down()
+        page.wait_for_timeout(60)
+        page.mouse.up()
+        page.wait_for_function("forgeAssistant.shell.state.panelOpen === true", timeout=3000)
+        assert page.evaluate("window.rings") == 0, "a tap shows no ring"
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 0, "img2img": 0}
+        page.evaluate("forgeAssistant.shell.close()")
+        settle(page)
+        at = page.evaluate(LAUNCHER_AT)
+        page.mouse.move(at["x"], at["y"])
+        page.mouse.down()
+        page.wait_for_timeout(ring_ms + 80)
+        held = page.evaluate(HOLDING)
+        page.mouse.move(at["x"] + 60, at["y"] - 60, steps=6)
+        page.mouse.up()
+        settle(page)
+        seconds = lambda value: float(value.rstrip("s"))
+        assert held["holding"] is True and held["animation"] == "forge-assistant-hold", held
+        assert round(seconds(held["duration"]) * 1000) + ring_ms == hold_ms, held
+        assert seconds(held["delay"]) == 0, held
+        page.emulate_media(reduced_motion="reduce")
+        settle(page)
+        at = page.evaluate(LAUNCHER_AT)
+        page.mouse.move(at["x"], at["y"])
+        page.mouse.down()
+        page.wait_for_timeout(ring_ms + 80)
+        still = page.evaluate("""() => { const style = getComputedStyle(
+            document.querySelector('.forge-assistant-launcher'));
+            return {animation: style.animationName, line: style.outlineStyle,
+                    colour: style.outlineColor}; }""")
+        page.mouse.move(at["x"] + 60, at["y"] + 60, steps=6)
+        page.mouse.up()
+        settle(page)
+        assert still["animation"] == "none" and still["line"] == "solid", still
+        assert still["colour"] not in ("rgba(0, 0, 0, 0)", "transparent"), still
+        assert page.evaluate(GENERATE)["generated"] == {"txt2img": 0, "img2img": 0}, "both were drags"
+    finally:
+        page.close()
 
 
 CORNER_BOX = """() => {

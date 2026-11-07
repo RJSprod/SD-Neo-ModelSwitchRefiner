@@ -44,6 +44,24 @@ def words(rows):
     return [[bare(cell) for cell in row] for row in rows]
 
 
+def listed(drawn) -> list:
+    """The threads a Favourites or Threads list draws, ``(character, id)``, in order."""
+    import html
+    import re
+
+    return [(html.unescape(who), html.unescape(thread)) for who, thread in re.findall(
+        r'class="mc-llm-thread-open" data-character="([^"]*)" data-thread="([^"]*)"', drawn or "")]
+
+
+def current_in(drawn) -> str:
+    """The thread a list marks as the one open, or ``""``."""
+    import html
+    import re
+
+    found = re.search(r'data-thread="([^"]*)" aria-current="true"', drawn or "")
+    return html.unescape(found.group(1)) if found else ""
+
+
 def _all_shut(tail) -> bool:
     """Whether every value in an overlay answer's tail says "closed".
 
@@ -246,12 +264,16 @@ class TestConversation:
         second.title = "a desert road"
         chats.save(second)
 
-        titles = [title for title, _ in mc_llm_chat_panel._thread_choices("Ada", "harbour")]
+        titles = [info.title for info in mc_llm_chat_panel._threads("Ada", "harbour")]
 
         assert titles == ["harbour at night"]
+        drawn = mc_llm_chat_panel._thread_rows("Ada", "harbour")
+        assert "harbour at night" in drawn and "a desert road" not in drawn
+        assert "No thread matches" in mc_llm_chat_panel._thread_rows("Ada", "nowhere")
 
     def test_a_missing_character_does_not_break_the_thread_list(self):
-        assert mc_llm_chat_panel._thread_choices("", "") == []
+        assert mc_llm_chat_panel._threads("", "") == []
+        assert "Choose who you are talking to first." in mc_llm_chat_panel._thread_rows("", "")
 
 
 class TestTheTabSaysWhichConversationItIsOn:
@@ -338,8 +360,8 @@ class TestTheTabFollowsThePanel:
 
         answered = mc_llm_chat_panel._open_from_event("Ada", conversation.identifier, "")
 
-        assert answered[0]["value"] == conversation.identifier
-        assert conversation.identifier in [value for _, value in answered[0]["choices"]]
+        assert current_in(answered[0]) == conversation.identifier
+        assert ("Ada", conversation.identifier) in listed(answered[0])
         assert answered[1] == conversation.identifier
         assert len(answered) == 2 + width
         assert answered[2:] != [gr.update()] * width, "the transcript is redrawn"
@@ -774,8 +796,8 @@ class TestRegeneratingInTheMiddleBranches:
         identifier = events[-1][1]
 
         assert {event[1] for event in events} == {identifier}
-        assert events[-1][0].get("value") == identifier
-        assert identifier in [value for _, value in events[-1][0].get("choices")]
+        assert current_in(events[-1][0]) == identifier
+        assert ("Ada", identifier) in listed(events[-1][0])
 
     def test_the_thread_it_made_is_the_one_reopened_later(self, store, monkeypatch):
         import mc_llm_state
@@ -1021,12 +1043,14 @@ class TestTheRegenerateIconOnAReply:
 
 
 class TestTheHeaderCarriesTheDestinations:
-    """Threads, Character and You are on the bar, not behind a menu.
+    """One Conversation button on the bar, where six chips were.
 
-    Asked for as "I would like to pull out the THREADS, CHARACTER, and YOU so
-    they appear top layer like the load state. It should not be in a menu unless
-    screen is greatly truncated" -- and the answer to the truncation is that the
-    header wraps, which is a smaller loss than three destinations behind a tap.
+    First asked for as "I would like to pull out the THREADS, CHARACTER, and
+    YOU so they appear top layer like the load state", which grew to six chips
+    -- Threads, Character, Emotion, Start with, You, Voice -- each opening a
+    menu of its own; then, 2026-11-06: "It's time to clean up chat controls.
+    The current control menu is a MESS ... make these all just one
+    "Conversation" button."
     """
 
     def _built_ids(self, monkeypatch):
@@ -1046,13 +1070,43 @@ class TestTheHeaderCarriesTheDestinations:
         mc_llm_chat_panel.build()
         return seen
 
-    def test_the_three_destinations_are_components_of_their_own(self, store, monkeypatch):
+    def test_one_button_opens_the_conversation_and_the_six_chips_are_gone(self, store,
+                                                                           monkeypatch):
         import mc_llm_ui as ui
 
         seen = self._built_ids(monkeypatch)
 
-        for name in ("to-threads", "to-character", "to-persona"):
-            assert ui.ident("chat", name) in seen
+        assert ui.ident("chat", "to-conversation") in seen
+        for name in ("to-threads", "to-character", "to-emotion", "to-start", "to-persona",
+                     "to-voice"):
+            assert ui.ident("chat", name) not in seen, name
+
+    def test_the_pop_up_has_everything_the_chips_opened(self, store, monkeypatch):
+        """Each in one place: the character's emotion rows were in the
+        Character sheet and the Emotion picker both."""
+        import gradio as gr
+
+        built = []
+        original = gr.components.Component.__init__
+
+        def record(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            built.append(self)
+
+        monkeypatch.setattr(gr.components.Component, "__init__", record)
+        mc_llm_chat_panel.build()
+        ids = [getattr(component, "elem_id", None) for component in built]
+        for name in ("conversation", "favourites", "who", "new-character", "character-editor",
+                     "new-thread", "search", "threads", "emotion", "start", "start-text",
+                     "generation", "voice", "voice-auto-send", "voice-auto-speak", "character",
+                     "edit-character", "system-open", "import", "thread", "rename", "persona",
+                     "persona-face"):
+            assert ids.count(f"mc-llm-chat-{name}") == 1, name
+        assert sum(1 for component in built
+                   if getattr(component, "placeholder", None) == "*I am so nervous*") == 1
+        search = next(component for component in built
+                      if getattr(component, "elem_id", None) == "mc-llm-chat-search")
+        assert (search.lines, search.max_lines) == (1, 1), "a one-line input, no resize grip"
 
     def test_the_picture_chips_are_where_the_script_looks_for_them(self, store, monkeypatch):
         """Two halves in two languages with nothing between them but these
@@ -1634,12 +1688,17 @@ class TestTheSurfaces:
                    else value.get("visible") is False for value in tail)
 
     def test_one_surface_is_open_and_the_others_are_not(self):
-        answered = mc_llm_chat_panel._screens("character")
+        answered = mc_llm_chat_panel._screens("conversation")
         shown = self._visible(answered)
 
-        assert answered[0] == "character"
+        assert answered[0] == "conversation"
         assert shown.count(True) == 1
-        assert shown[mc_llm_chat_panel.SCREENS.index("character")] is True
+        assert shown[mc_llm_chat_panel.SCREENS.index("conversation")] is True
+
+    def test_the_conversation_is_the_one_surface(self):
+        """"make these all just one "Conversation" button" (2026-11-06): the
+        Threads, Character, You and Voice screens are sections of it now."""
+        assert mc_llm_chat_panel.SCREENS == ("conversation",)
 
     def test_closing_leaves_the_conversation_alone_on_screen(self):
         answered = mc_llm_chat_panel._close_screens()
@@ -1655,10 +1714,9 @@ class TestTheSurfaces:
         assert all(shown is False for shown in self._visible(answered))
 
     def test_there_is_no_menu_among_the_surfaces(self):
-        """Threads, Character and You are buttons on the header now. A menu
-        whose whole contents are three destinations is a tap in front of each
-        of them, and the button it hung on has a job everywhere else in LLM
-        Studio -- it opens the workspace chooser."""
+        """The one Conversation pop-up is on the header. The button a menu
+        hung on has a job everywhere else in LLM Studio -- it opens the
+        workspace chooser."""
         assert "nav" not in mc_llm_chat_panel.SCREENS
 
     def test_the_menu_button_puts_this_panel_s_own_surfaces_away(self, store):
@@ -1677,12 +1735,16 @@ class TestTheSurfaces:
         assert len(mc_llm_chat_panel._close_screens()) == self._screens_width()
 
     def test_tapping_a_thread_opens_it_and_comes_home(self, store):
+        import json
+
         conversation = self._thread(store)
         screens = self._screens_width()
 
-        answered = mc_llm_chat_panel._open_thread_home("Ada", conversation.identifier)
+        answered = mc_llm_chat_panel._thread_pressed("Ada", json.dumps(
+            {"do": "open", "character": "Ada", "thread": conversation.identifier}))
 
-        assert answered[0] == conversation.identifier
+        assert answered[3] == conversation.identifier
+        assert current_in(answered[0]) == conversation.identifier
         assert answered[-screens] == ""
         assert self._all_closed(answered[-screens + 1:])
 
@@ -1695,26 +1757,30 @@ class TestTheSurfaces:
         assert answered[-screens] == ""
         assert self._all_closed(answered[-screens + 1:])
 
-    def test_the_threads_screen_opens_on_the_current_list(self, store):
-        self._thread(store)
+    def test_the_pop_up_opens_on_the_current_lists(self, store):
+        conversation = self._thread(store)
 
-        answered = mc_llm_chat_panel._open_threads("Ada", "")
+        answered = mc_llm_chat_panel._open_conversation("Ada", conversation.identifier, "")
 
-        assert answered[0] == "threads"
+        assert answered[0] == "conversation"
         assert self._visible(answered)[
-            mc_llm_chat_panel.SCREENS.index("threads")] is True
-        assert len(answered[-1].get("choices")) == 1
+            mc_llm_chat_panel.SCREENS.index("conversation")] is True
+        threads, favourites, character = answered[-3:]
+        assert listed(threads) == [("Ada", conversation.identifier)]
+        assert current_in(threads) == conversation.identifier
+        assert favourites == "", "nothing starred, no Favourites"
+        assert character["value"] == "Ada"
 
-    def test_the_persona_screen_opens_on_what_is_saved(self, store):
+    def test_you_are_read_again_as_the_pop_up_opens(self, store):
         from prompt_master.chat.characters import Persona, save_persona
         import mc_llm_paths
 
         save_persona(mc_llm_paths.app_paths(), Persona(name="Rin", description="a reader"))
 
-        answered = mc_llm_chat_panel._open_persona()
+        answered = mc_llm_chat_panel._persona_view()
 
         # The picture is last, and is None until one has been chosen.
-        assert answered[-3:] == ["Rin", "a reader", None]
+        assert answered == ["Rin", "a reader", None]
 
 
 class TestTheComposer:
@@ -2683,8 +2749,8 @@ class TestPanelsOpenWhereTheyWereLeft:
         built = mc_llm_chat_panel.build()
 
         assert built["transcript"].value == []
-        assert mc_llm_chat_panel._thread_choices("Ada") == [
-            ("harbour at night", conversation.identifier)]
+        assert [(info.title, info.identifier) for info in mc_llm_chat_panel._threads("Ada")] \
+            == [("harbour at night", conversation.identifier)]
 
     def test_the_persona_is_filled_in_from_disk(self, store):
         from prompt_master.chat.characters import Persona, save_persona
@@ -4108,55 +4174,93 @@ class TestStoppingGivesTheControlsBack:
         assert len(clicks[0]["outputs"]) == 3
 
 
-class TestAThreadPinnedAsAFavourite:
+def pressed(do, character, thread) -> str:
+    """A nomination as javascript/llm_studio.js writes it for a thread row."""
+    import json
+
+    return json.dumps({"do": do, "character": character, "thread": thread})
+
+
+class TestAThreadStarredAsAFavourite:
     """"Make it so that in LLM studio conversations, I am able to PIN a thread
-    as favorite" (2026-11-06). Pinned threads are listed first and marked, kept
-    beside the chats (``ChatStore.PINS``) so pinning writes no conversation."""
+    as favorite" (2026-11-06, morning) and, that evening, "make it easy to
+    favorite an existing thread i have with one of my characters, so i can
+    quickly load and continue. I need a star or a pin or something to keep it
+    at top": a star on every thread in the Conversation pop-up, and Favourites
+    -- every starred thread with every character -- on top of it. Pins are
+    kept beside the chats (``ChatStore.PINS``), so starring writes no
+    conversation."""
 
     @staticmethod
-    def _three(store):
+    def _three(store, who="Ada"):
         from prompt_master.chat.history import ChatStore
 
         chats = ChatStore(store / "chats")
         made = []
         for title in ("harbour at night", "a desert road", "the last train"):
-            conversation = chats.new("Ada")
+            conversation = chats.new(who)
             conversation.title = title
             chats.save(conversation)
             made.append(conversation)
         return chats, made
 
-    def test_a_pinned_thread_is_listed_first_and_marked(self, store):
-        chats, made = self._three(store)
-        assert mc_llm_chat_panel._toggle_pin("Ada", made[0].identifier, "")[2]
-        listed = mc_llm_chat_panel._thread_choices("Ada")
-        assert listed[0] == (mc_llm_chat_panel.PIN_MARK + "harbour at night", made[0].identifier)
-        assert [title for title, _ in listed[1:]] == ["the last train", "a desert road"]
+    @staticmethod
+    def _characters(store, *names):
+        from prompt_master.chat.characters import Character
 
-    def test_the_button_says_which_way_a_press_goes_and_a_second_press_unpins(self, store):
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        for name in names:
+            held.save(Character(name=name, context="someone"))
+        return held
+
+    @staticmethod
+    def _star(who, thread, current=""):
+        return mc_llm_chat_panel._thread_pressed(who, pressed("star", who, thread), "", "",
+                                                 current)
+
+    def test_a_starred_thread_is_listed_first_its_star_filled(self, store):
+        chats, made = self._three(store)
+
+        answered = self._star("Ada", made[0].identifier)
+
+        assert [thread for _who, thread in listed(answered[0])] == [
+            made[0].identifier, made[2].identifier, made[1].identifier]
+        first = answered[0].split('<div class="mc-llm-thread-row"')[1]
+        assert 'data-pinned="true"' in first and 'aria-pressed="true"' in first
+        assert 'fill="currentColor"' in first, "a filled star"
+        assert answered[0].count('aria-pressed="true"') == 1
+
+    def test_a_second_press_unstars_it_and_the_pop_up_stays(self, store):
+        import gradio as gr
+
         chats, made = self._three(store)
         identifier = made[1].identifier
-        threads, label, note = mc_llm_chat_panel._toggle_pin("Ada", identifier, "")
-        assert label["value"] == "Unpin this thread" and "Pinned" in str(note)
-        assert threads["value"] == identifier
-        threads, label, note = mc_llm_chat_panel._toggle_pin("Ada", identifier, "")
-        assert label["value"] == "Pin this thread" and "Unpinned" in str(note)
-        assert not any(title.startswith(mc_llm_chat_panel.PIN_MARK)
-                       for title, _ in mc_llm_chat_panel._thread_choices("Ada"))
 
-    def test_pinning_writes_no_conversation(self, store):
+        self._star("Ada", identifier)
+        answered = self._star("Ada", identifier)
+
+        assert chats.pinned("Ada") == []
+        assert 'aria-pressed="true"' not in answered[0]
+        assert answered[2:] == [gr.update()] * (len(answered) - 2), \
+            "nothing else changes and the pop-up is not put away"
+
+    def test_starring_writes_no_conversation(self, store):
         chats, made = self._three(store)
         path = chats.path_for("Ada", made[0].identifier)
         before = path.read_bytes()
-        mc_llm_chat_panel._toggle_pin("Ada", made[0].identifier, "")
+
+        self._star("Ada", made[0].identifier)
+
         assert path.read_bytes() == before
 
-    def test_the_search_matches_the_title_and_never_the_mark(self, store):
+    def test_the_search_matches_the_title_alone(self, store):
         chats, made = self._three(store)
-        mc_llm_chat_panel._toggle_pin("Ada", made[0].identifier, "")
-        assert [identifier for _, identifier in
-                mc_llm_chat_panel._thread_choices("Ada", "harbour")] == [made[0].identifier]
-        assert mc_llm_chat_panel._thread_choices("Ada", "\U0001f4cc") == []
+        self._star("Ada", made[0].identifier)
+
+        assert [info.identifier for info in mc_llm_chat_panel._threads("Ada", "harbour")] \
+            == [made[0].identifier]
+        assert mc_llm_chat_panel._threads("Ada", "star") == []
 
     def test_a_deleted_thread_takes_its_pin_with_it(self, store):
         chats, made = self._three(store)
@@ -4164,11 +4268,169 @@ class TestAThreadPinnedAsAFavourite:
         chats.delete("Ada", made[2].identifier)
         assert chats.pinned("Ada") == []
 
-    def test_with_no_thread_open_nothing_is_pinned(self, store):
-        threads, label, note = mc_llm_chat_panel._toggle_pin("Ada", "", "")
-        assert "Choose a thread first" in str(note)
+    def test_favourites_are_every_characters_starred_threads_most_recent_first(self, store):
+        self._characters(store, "Ada", "Bob")
+        chats, ada = self._three(store, "Ada")
+        _, bob = self._three(store, "Bob")
+        chats.set_pinned("Ada", ada[1].identifier, True)
+        chats.set_pinned("Bob", bob[0].identifier, True)
+        later = chats.load("Bob", bob[0].identifier)
+        chats.save(later)                       # used since: the most recent, Bob's or not
 
-    def test_the_threads_screen_has_the_button_wired_to_the_toggle(self, store):
+        drawn = mc_llm_chat_panel._favourite_rows("Ada", ada[1].identifier)
+
+        assert listed(drawn) == [("Bob", bob[0].identifier), ("Ada", ada[1].identifier)]
+        assert current_in(drawn) == ada[1].identifier
+        assert '<span class="mc-llm-thread-who">Bob</span>' in drawn, "whose it is"
+        assert drawn.count('aria-pressed="true"') == 2
+
+    def test_a_pin_to_a_thread_gone_from_disk_hides_none_of_the_others(self, store):
+        """A file removed outside LLM Studio leaves its pin behind: it is
+        skipped, and the character's other favourites are still listed."""
+        self._characters(store, "Ada")
+        chats, made = self._three(store, "Ada")
+        chats.set_pinned("Ada", made[0].identifier, True)
+        chats.set_pinned("Ada", made[1].identifier, True)
+        chats.path_for("Ada", made[1].identifier).unlink()
+
+        assert [info.identifier for info in chats.favourites("Ada")] == [made[0].identifier]
+        assert listed(mc_llm_chat_panel._favourite_rows("Ada", "")) == [("Ada", made[0].identifier)]
+
+    def test_an_unreadable_starred_thread_hides_none_of_the_others(self, store):
+        self._characters(store, "Ada")
+        chats, made = self._three(store, "Ada")
+        chats.set_pinned("Ada", made[0].identifier, True)
+        chats.set_pinned("Ada", made[2].identifier, True)
+        chats.path_for("Ada", made[2].identifier).write_text("{not json", encoding="utf-8")
+
+        assert [info.identifier for info in chats.favourites("Ada")] == [made[0].identifier]
+
+    def test_with_nothing_starred_there_are_no_favourites(self, store):
+        self._characters(store, "Ada")
+        self._three(store, "Ada")
+
+        assert mc_llm_chat_panel._favourite_rows("Ada", "") == ""
+
+    def test_a_favourite_with_the_character_open_opens_it_and_comes_home(self, store):
+        self._characters(store, "Ada")
+        chats, made = self._three(store)
+        chats.set_pinned("Ada", made[1].identifier, True)
+        screens = len(mc_llm_chat_panel._close_screens())
+
+        answered = mc_llm_chat_panel._thread_pressed(
+            "Ada", pressed("open", "Ada", made[1].identifier), "", "", made[2].identifier)
+
+        assert answered[3] == made[1].identifier
+        assert current_in(answered[0]) == made[1].identifier
+        assert current_in(answered[1]) == made[1].identifier
+        assert answered[-screens] == ""
+
+    def test_a_favourite_with_another_character_chooses_that_character_and_opens_it(
+            self, store):
+        """Remembered, then the character chosen: its own change handler opens
+        the thread remembered for it, and only then."""
+        import mc_llm_state
+
+        self._characters(store, "Ada", "Bob")
+        chats, ada = self._three(store, "Ada")
+        _, bob = self._three(store, "Bob")
+        wanted = bob[1].identifier              # not Bob's newest
+        screens = len(mc_llm_chat_panel._close_screens())
+
+        answered = mc_llm_chat_panel._thread_pressed(
+            "Ada", pressed("open", "Bob", wanted), "", "", ada[0].identifier)
+
+        assert answered[2]["value"] == "Bob"
+        assert answered[-screens] == "", "the pop-up goes"
+        assert mc_llm_state.preferences().get("character") == "Bob"
+        assert mc_llm_state.preferences().get("thread") == wanted
+        switched = mc_llm_chat_panel._select_character("Bob", "")
+        assert switched[1] == wanted
+        assert current_in(switched[0]) == wanted
+
+    def test_choosing_a_character_in_the_list_still_opens_its_newest(self, store):
+        import mc_llm_state
+
+        self._characters(store, "Ada", "Bob")
+        chats, ada = self._three(store, "Ada")
+        _, bob = self._three(store, "Bob")
+        mc_llm_state.remember(character="Ada", thread=ada[0].identifier)
+
+        switched = mc_llm_chat_panel._select_character("Bob", "")
+
+        assert switched[1] == bob[2].identifier
+
+    def test_a_thread_remembered_for_someone_else_is_not_opened_by_its_name(self, store):
+        """What is remembered is a character's thread: Bob's thread that happens
+        to carry the id remembered for Ada is not the one asked for."""
+        import mc_llm_state
+        from prompt_master.chat.history import Conversation
+
+        self._characters(store, "Ada", "Bob")
+        chats, ada = self._three(store, "Ada")
+        twin = Conversation(identifier=ada[0].identifier, character="Bob", title="same id")
+        chats.save(twin)                         # Bob's oldest, with Ada's thread's id
+        _, bob = self._three(store, "Bob")
+        mc_llm_state.remember(character="Ada", thread=ada[0].identifier)
+
+        switched = mc_llm_chat_panel._select_character("Bob", "")
+
+        assert switched[1] == bob[2].identifier
+
+    def test_a_thread_gone_meanwhile_is_said_and_neither_opened_nor_starred(self, store):
+        import gradio as gr
+
+        chats, made = self._three(store)
+        chats.delete("Ada", made[0].identifier)
+        screens = len(mc_llm_chat_panel._close_screens())
+
+        for do in ("open", "star"):
+            answered = mc_llm_chat_panel._thread_pressed(
+                "Ada", pressed(do, "Ada", made[0].identifier))
+            assert "no longer there" in answered[5 + 3], do
+            assert answered[3] == gr.update(), "no thread opened"
+            assert answered[-screens:] == [gr.update()] * screens, "the pop-up stays"
+        assert chats.pinned("Ada") == []
+
+    def test_a_press_that_is_not_one_changes_nothing(self, store):
+        import gradio as gr
+
+        chats, made = self._three(store)
+        width = (5 + len(mc_llm_chat_panel._refresh(None, ""))
+                 + len(mc_llm_chat_panel._close_screens()))
+        for nomination in ("", "not json", "[1]", pressed("rename", "Ada", made[0].identifier),
+                           pressed("open", "Ada", ""), pressed("star", "", made[0].identifier)):
+            answered = mc_llm_chat_panel._thread_pressed("", nomination)
+            assert answered == [gr.update()] * width, nomination
+        assert chats.pinned("Ada") == []
+
+    def test_a_name_that_is_not_one_of_your_characters_opens_nothing(self, store):
+        import gradio as gr
+
+        self._characters(store, "Ada")
+        chats, made = self._three(store, "Ada")
+        _, eve = self._three(store, "Eve")       # threads on disk, but no character Eve
+
+        answered = mc_llm_chat_panel._thread_pressed(
+            "Ada", pressed("open", "Eve", eve[0].identifier))
+
+        assert answered[2] == gr.update(), "no character chosen"
+        assert "no longer there" in answered[5 + 3]
+
+    def test_a_title_is_written_escaped(self, store):
+        from prompt_master.chat.history import ChatStore
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.title = '<b>"bold"</b>'
+        chats.save(conversation)
+
+        drawn = mc_llm_chat_panel._thread_rows("Ada")
+
+        assert "<b>" not in drawn and "&lt;b&gt;" in drawn
+        assert 'aria-label="Star &lt;b&gt;&quot;bold&quot;&lt;/b&gt;: keep it at the top"' in drawn
+
+    def test_the_rows_are_wired_to_the_hidden_box_and_button_the_script_presses(self, store):
         import gradio as gr
 
         made = []
@@ -4183,21 +4445,26 @@ class TestAThreadPinnedAsAFavourite:
             mc_llm_chat_panel.build()
         finally:
             gr.components.Component.__init__ = original
-        pin = next(component for component in made
-                   if getattr(component, "elem_id", None) == "mc-llm-chat-pin")
-        assert getattr(pin, "value", None) in ("Pin this thread", "Unpin this thread")
-        wired = [kwargs for kind, kwargs in getattr(pin, "_callbacks", [])
-                 if kind == "click" and kwargs.get("fn") is mc_llm_chat_panel._toggle_pin]
-        assert wired, getattr(pin, "_callbacks", [])
+        by_id = {getattr(component, "elem_id", None): component for component in made}
+        now = by_id["mc-llm-chat-thread-now"]
+        wired = [kwargs for kind, kwargs in getattr(now, "_callbacks", [])
+                 if kind == "click" and kwargs.get("fn") is mc_llm_chat_panel._thread_pressed]
+        assert wired and by_id["mc-llm-chat-thread-at"] in wired[0]["inputs"]
+        script = (pathlib.Path(mc_llm_chat_panel.__file__).resolve().parent
+                  / "javascript" / "llm_studio.js").read_text(encoding="utf-8")
+        for name in ("mc-llm-chat-thread-at", "mc-llm-chat-thread-now"):
+            assert f'"{name}"' in script, name
+        assert "mc-llm-chat-pin" not in by_id, "the morning's Pin button is a star on every row"
 
     def test_the_assistants_threads_say_which_are_pinned(self, store):
         import mc_llm_conversation_service as service
 
         chats, made = self._three(store)
         chats.set_pinned("Ada", made[1].identifier, True)
-        listed = service.threads("Ada")
-        assert listed[0]["thread_id"] == made[1].identifier and listed[0]["pinned"] is True
-        assert all(row["pinned"] is False for row in listed[1:])
+        listed_there = service.threads("Ada")
+        assert listed_there[0]["thread_id"] == made[1].identifier
+        assert listed_there[0]["pinned"] is True
+        assert all(row["pinned"] is False for row in listed_there[1:])
 
 
 class TestTheFoldersOwnRecordsAreNotThreads:

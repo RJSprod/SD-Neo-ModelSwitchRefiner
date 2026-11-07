@@ -1,4 +1,4 @@
-"""One overlay at a time, across all six surfaces and in both directions.
+"""One overlay at a time, across every surface and in both directions.
 
 LLM Studio had three independent ideas of "only one at a time": the shell's two
 sheets knew about each other, Conversation's four screens knew about each other,
@@ -7,11 +7,11 @@ own, which is exactly why the failure was so easy to reach -- opening the
 character editor left the workspace chooser underneath it, and tapping a bubble
 opened an action sheet over whichever of those happened to be showing.
 
-The sheet is a row inside the bubble now, which covers nothing, so the surfaces
-are six. Specification O01 asks for every ordered pair. That is what
+The sheet is a row inside the bubble now, which covers nothing, and since
+2026-11-06 Conversation's four screens are one pop-up, so the surfaces are
+three. Specification O01 asks for every ordered pair. That is what
 :meth:`TestExclusivity.test_every_ordered_pair_of_surfaces` does, from the one
-function that decides, rather than from six handlers that each have to
-remember.
+function that decides, rather than from handlers that each have to remember.
 """
 
 from __future__ import annotations
@@ -63,13 +63,14 @@ class TestTheDecision:
     def test_closing_closes_everything(self):
         assert not any(mc_llm_overlays.showing("").values())
 
-    def test_the_six_are_the_six(self):
+    def test_the_three_are_the_three(self):
         """A pop surface added without joining this tuple is a pop surface that
         opens over the others, which is the whole defect this replaced. The
         message actions are not among them: a row inside a bubble covers
-        nothing, and a seventh entry for it would be a surface nothing opens."""
-        assert mc_llm_overlays.OVERLAYS == (
-            "mode", "model", "threads", "character", "persona", "voice")
+        nothing, and an entry for it would be a surface nothing opens. Nor are
+        Threads, Character, You and Voice since 2026-11-06: sections of the one
+        Conversation pop-up."""
+        assert mc_llm_overlays.OVERLAYS == ("mode", "model", "conversation")
         assert set(mc_llm_studio.SHEETS) | set(mc_llm_chat_panel.SCREENS) \
             == set(mc_llm_overlays.OVERLAYS)
         assert "actions" not in mc_llm_overlays.OVERLAYS
@@ -77,10 +78,10 @@ class TestTheDecision:
 
 class TestExclusivity:
     def test_every_ordered_pair_of_surfaces(self):
-        """All 21, both ways round. O01."""
+        """Every pair, both ways round. O01."""
         pairs = list(itertools.permutations(mc_llm_overlays.OVERLAYS, 2))
 
-        assert len(pairs) == 30, "six surfaces make 30 ordered pairs"
+        assert len(pairs) == 6, "three surfaces make 6 ordered pairs"
         for opened, other in pairs:
             showing = mc_llm_overlays.showing(opened)
 
@@ -93,7 +94,7 @@ class TestExclusivity:
         not there."""
         mc_llm_overlays.register("actions", Component("sheet"))
         assert mc_llm_overlays.registered("actions") is None
-        assert "actions" not in mc_llm_overlays.showing("threads")
+        assert "actions" not in mc_llm_overlays.showing("conversation")
 
 
 class TestReachingGradio:
@@ -109,7 +110,7 @@ class TestReachingGradio:
         failed to build -- must not leave every handler in the other panel
         expecting an output that is not there."""
         assert mc_llm_overlays.closes(mc_llm_studio.SHEETS) == ()
-        assert mc_llm_overlays.components(("mode", "threads")) == []
+        assert mc_llm_overlays.components(("mode", "conversation")) == []
 
     def test_the_foreign_values_are_all_closed_and_of_two_shapes(self):
         build_registry()
@@ -165,13 +166,13 @@ class TestThePanelsAgree:
     def test_the_chat_panel_answers_in_the_shape_its_outputs_expect(self):
         build_registry()
 
-        answered = mc_llm_chat_panel._screens("threads")
+        answered = mc_llm_chat_panel._screens("conversation")
         components = mc_llm_overlays.components(mc_llm_chat_panel.SCREENS) \
             + mc_llm_overlays.foreign(mc_llm_chat_panel.SCREENS,
                                       mc_llm_chat_panel.OVERLAY_OWNER)[0]
 
         assert len(answered) == 1 + len(components)
-        assert answered[0] == "threads"
+        assert answered[0] == "conversation"
 
     def test_the_shell_answers_in_the_shape_its_outputs_expect(self):
         build_registry()
@@ -189,11 +190,11 @@ class TestThePanelsAgree:
         order = list(mc_llm_chat_panel.SCREENS) \
             + list(mc_llm_overlays.closes(mc_llm_chat_panel.SCREENS))
 
-        answered = mc_llm_chat_panel._screens("character")
+        answered = mc_llm_chat_panel._screens("conversation")
         visibilities = answered[1:1 + len(order)]
 
         for name, update in zip(order, visibilities):
-            assert update.get("visible") is (name == "character"), name
+            assert update.get("visible") is (name == "conversation"), name
 
     def test_opening_a_shell_sheet_closes_the_chat_screens(self):
         build_registry()

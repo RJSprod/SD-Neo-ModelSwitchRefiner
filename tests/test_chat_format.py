@@ -135,9 +135,18 @@ class TestWhatTheChatbotIsGiven:
 
     def test_a_quote_is_marked_with_its_own_marks_inside(self):
         assert fmt.for_chatbot('She said "hi" and left') \
-            == 'She said <q class="mc-llm-quote">"hi"</q> and left'
+            == 'She said <span class="mc-llm-quote">"hi"</span> and left'
         assert fmt.for_chatbot("“Curly”") \
-            == '<q class="mc-llm-quote">“Curly”</q>'
+            == '<span class="mc-llm-quote">“Curly”</span>'
+
+    def test_a_quotation_is_a_span_never_a_q_element(self):
+        """A Gecko browser's plain-text copy writes a quote mark at each end of
+        a <q> on top of the message's own, so a selection copied from LibreWolf
+        turned "Hello" into ""Hello"" (2026-11-06; checked in a Gecko build)."""
+        assert fmt.for_chatbot('Character stepped in the room "Hello" and waves.') == (
+            'Character stepped in the room <span class="mc-llm-quote">"Hello"</span> and waves.')
+        for case in CASES:
+            assert "<q" not in fmt.for_chatbot(case["text"]), case["text"]
 
     def test_a_lone_tilde_is_escaped_and_a_double_one_is_still_a_strikethrough(self):
         """Gradio 4.40's marked strikes out what lies between two single tildes."""
@@ -252,7 +261,7 @@ class TestTheTranscript:
         body = panel._body(message)
 
         assert body.startswith('<img src="data:image/png;base64,AAAA"')
-        assert body.endswith('<q class="mc-llm-quote">"here"</q>')
+        assert body.endswith('<span class="mc-llm-quote">"here"</span>')
 
     def test_the_chatbot_is_built_with_the_two_invisible_pairs_as_its_delimiters(self, monkeypatch):
         import gradio as gr

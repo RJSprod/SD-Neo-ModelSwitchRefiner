@@ -60,7 +60,10 @@ only open a quote, met while looking for the close of one, ends the search, so
 in ``"word"s here "ok"`` the quote is ``"ok"``. Quotes do not nest: the outer
 one is marked. They are drawn the way Oobabooga draws them, the
 quote marks kept and the words between them coloured -- blue by day, amber at
-night (``style.css``).
+night (``style.css``) -- but in a ``<span>``, never Oobabooga's ``<q>``: a Gecko
+browser's plain-text copy writes a quote mark at each end of a ``<q>`` on top of
+the marks inside it, so a selection copied from LibreWolf turned ``"Hello"``
+into ``""Hello""`` (2026-11-06, checked in a Gecko build).
 
 What LLM Studio gets
 --------------------
@@ -83,9 +86,10 @@ in three ways and no others:
    and where marked does draw one as text -- math our rules found where marked
    decided on code -- they show as nothing. The math is escaped for HTML on the
    way, because Gradio puts it back into the HTML exactly as it found it.
-2. Every quote is wrapped in ``<q class="mc-llm-quote">``, the quote marks
+2. Every quote is wrapped in ``<span class="mc-llm-quote">``, the quote marks
    inside it: marked passes an inline tag through and still formats what is in
-   it, and DOMPurify keeps ``q`` and its class.
+   it, and DOMPurify keeps ``span`` and its class. A span and not a ``<q>``,
+   because Gecko's plain-text copy adds a mark at each end of a ``<q>``.
 3. A tilde on its own is escaped (``\\~``). Gradio's marked strikes out
    whatever lies between two single tildes (``/^(~~?)(?=[^\\s~])…\\1/``), so
    ``3~4 hours and 5~6 days`` came out half struck; ``~~`` is still a
@@ -576,8 +580,8 @@ def _for_chatbot(text: str) -> str:
             continue
         found = atoms(body)
         quotes, tildes = marks(body, found)
-        before = {start: f'<q class="{QUOTE_CLASS}">' for start, _end in quotes}
-        after = {end: "</q>" for _start, end in quotes}
+        before = {start: f'<span class="{QUOTE_CLASS}">' for start, _end in quotes}
+        after = {end: "</span>" for _start, end in quotes}
         lone = set(tildes)
         maths = {start: (end, payload) for start, end, kind, payload in found if kind == MATH}
         out = []
@@ -603,7 +607,7 @@ def for_chatbot(text) -> str:
     """A message's words as LLM Studio's transcript is given them.
 
     The math between the Chatbot's own invisible delimiters and escaped for
-    HTML, each quote in ``<q class="mc-llm-quote">``, each lone tilde escaped;
+    HTML, each quote in ``<span class="mc-llm-quote">``, each lone tilde escaped;
     code and everything else exactly as written. Display only -- see the module
     docstring.
     """

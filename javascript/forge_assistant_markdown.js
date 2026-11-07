@@ -25,7 +25,7 @@
 // -------------------------------
 // The words are escaped and every element and attribute in the result is one
 // this file writes: paragraphs, headings, lists, a table, block quotes, rules,
-// code, emphasis, <q> for a quotation, a few inline tags a model writes bare
+// code, emphasis, a span for a quotation, a few inline tags a model writes bare
 // (<br>, <sup>, <b>...: written again by this file, never copied, and never
 // with an attribute), and links whose address passes `safeUrl` -- http, https,
 // mailto or a path on this page -- opened in a new tab without an opener. A
@@ -1418,8 +1418,13 @@
             if (node.t === "to" || node.t === "tc") return escapeHtml(node.v);
             if (node.t === "delim") return escapeHtml(node.c.repeat(node.n));
             if (node.t === "wrap") {
-                const open = node.tag === "q" ? '<q class="forge-assistant-quote">' : "<" + node.tag + ">";
-                return open + draw(node.children) + "</" + node.tag + ">";
+                // A quotation is a span, never a <q>: a Gecko browser's plain-text
+                // copy writes a mark at each end of a <q> on top of the message's
+                // own, so a copied "Hello" came out ""Hello"" (2026-11-06).
+                if (node.tag === "q") {
+                    return '<span class="forge-assistant-quote">' + draw(node.children) + "</span>";
+                }
+                return "<" + node.tag + ">" + draw(node.children) + "</" + node.tag + ">";
             }
             return "";
         }).join("");

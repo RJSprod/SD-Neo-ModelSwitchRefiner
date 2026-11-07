@@ -1112,12 +1112,11 @@
 
     // -- a section that opens stays where it can be read -------------------- //
 
-    // Conversation's screens are fixed-height scrolling sheets: the menu, the
-    // threads, the character, the persona, in the room the workspace has. Open
-    // a disclosure near the bottom of one -- the character editor, the advanced
-    // sampling settings -- and what you opened is below the fold, which is a
-    // thing browsers do not fix for you: the click landed on the heading, and
-    // the heading was already visible.
+    // Conversation's pop-up is a fixed-height scrolling sheet, in the room the
+    // workspace has. Open a section near the bottom of it -- the character
+    // editor, Generation, You -- and what you opened is below the fold, which
+    // is a thing browsers do not fix for you: the click landed on the heading,
+    // and the heading was already visible.
     //
     // So the section is brought back after it has opened. Not by the browser's
     // own scrollIntoView: that scrolls every scrollable ancestor including the
@@ -1157,13 +1156,27 @@
 
     // The scrolling surfaces this applies to, by this extension's own ids.
     const SHEETS = [
-        "mc-llm-chat-nav",
-        "mc-llm-chat-threads",
-        "mc-llm-chat-character",
-        "mc-llm-chat-persona",
+        "mc-llm-chat-conversation",
         "mc-llm-model-sheet",
         "mc-llm-mode-sheet",
     ];
+
+    // Presses that open something elsewhere in the sheet, and what they open:
+    // the character editor sits under "Talking to", and Edit is in the
+    // Character section further down -- so after either it is the editor that
+    // is brought into view, not the button.
+    const REVEALS = {
+        "mc-llm-chat-new-character": "mc-llm-chat-character-editor",
+        "mc-llm-chat-edit-character": "mc-llm-chat-character-editor",
+    };
+
+    function revealOf(target) {
+        for (const id of Object.keys(REVEALS)) {
+            const button = byId(id);
+            if (button && button.contains(target)) return byId(REVEALS[id]);
+        }
+        return null;
+    }
 
     function wireSheet(id) {
         const sheet = byId(id);
@@ -1173,7 +1186,7 @@
             const target = event.target;
             window.setTimeout(function () {
                 try {
-                    keepInView(sheet, target);
+                    keepInView(sheet, revealOf(target) || target);
                 } catch (error) {
                     console.error("Model Chain: could not keep the sheet in view", error);
                 }
@@ -1516,194 +1529,84 @@
     // independent features, and the first of them throwing took the six after
     // it down with it. They are wired in no particular order and none of them
     // needs any other to have run.
-    // -- the thread's emotion ---------------------------------------------- //
+    // -- the thread's emotion, and the rows of the Conversation pop-up ----- //
 
-    // The chip opens a picker under the bar; a press elsewhere or Escape puts
-    // it away. Which line is on, and every change to the list, is Python's:
-    // a row press is nominated through one hidden box and one hidden button
-    // (mc_llm_chat_panel._emotion_pressed), the line named by its words, as
-    // the action row's presses are. The rows are the same in the Character
-    // sheet, and one listener answers both.
-    const EMOTION_CHIP = "mc-llm-chat-to-emotion";
-    const EMOTION_PICKER = "mc-llm-chat-emotion";
+    // Rows Python draws and the browser presses, in the one Conversation
+    // pop-up (2026-11-06, which replaced the Emotion and Start with chips and
+    // their pickers under the bar with sections of it). A press is nominated
+    // through one hidden box and one hidden button, as the action row's are:
+    // which line and what to do with it for the Emotion section
+    // (mc_llm_chat_panel._emotion_pressed), which thread, whose, and whether
+    // to open it or star it for Favourites and Threads (_thread_pressed). Each
+    // is named by what it is, never by its place, so a list changed in the
+    // other window meanwhile cannot turn a press on one row into an answer
+    // about another. Which line is on, which thread is starred, and every
+    // change to either, is Python's.
     const EMOTION_AT = "mc-llm-chat-emotion-at";
     const EMOTION_NOW = "mc-llm-chat-emotion-now";
-    const EMOTION_OPEN = "mc-llm-emotion-open";
     const EMOTION_ROWS = ".mc-llm-emotion-choice, .mc-llm-emotion-delete, .mc-llm-emotion-mode";
-    let emotionWired = false;
+    const THREAD_AT = "mc-llm-chat-thread-at";
+    const THREAD_NOW = "mc-llm-chat-thread-now";
+    const THREAD_ROWS = ".mc-llm-thread-open, .mc-llm-thread-star";
+    let rowsWired = false;
 
-    function emotionOpen() {
-        const picker = byId(EMOTION_PICKER);
-        return !!picker && picker.classList.contains(EMOTION_OPEN);
-    }
-
-    // Under the chip, its right edge on the chip's: the chip's place on the
-    // bar depends on how wide the chips after it are.
-    function placeEmotion(picker, chip) {
-        const stage = picker.offsetParent || picker.parentElement;
-        if (!stage || typeof chip.getBoundingClientRect !== "function") return;
-        const box = stage.getBoundingClientRect();
-        const at = chip.getBoundingClientRect();
-        picker.style.top = Math.round(at.bottom - box.top + 6) + "px";
-        picker.style.right = Math.max(8, Math.round(box.right - at.right)) + "px";
-    }
-
-    function showEmotion(open) {
-        const picker = byId(EMOTION_PICKER);
-        if (!picker) return false;
-        const chip = clickable(EMOTION_CHIP);
-        if (open && chip) placeEmotion(picker, chip);
-        picker.classList.toggle(EMOTION_OPEN, !!open);
-        if (chip) chip.setAttribute("aria-expanded", String(!!open));
-        return true;
-    }
-
-    function nominateEmotion(what, line) {
-        const box = byId(EMOTION_AT);
+    function nominateTo(boxId, buttonId, value) {
+        const box = byId(boxId);
         if (!box) return false;
         const field = box.tagName === "TEXTAREA" || box.tagName === "INPUT"
             ? box : box.querySelector("textarea, input");
         if (!field) return false;
-        field.value = JSON.stringify({do: what, line: line});
+        field.value = JSON.stringify(value);
         field.dispatchEvent(new Event("input", {bubbles: true}));
-        window.setTimeout(function () { press(EMOTION_NOW); }, 0);
+        window.setTimeout(function () { press(buttonId); }, 0);
         return true;
     }
 
-    function onEmotionClick(event) {
+    function nominateEmotion(what, line) {
+        return nominateTo(EMOTION_AT, EMOTION_NOW, {do: what, line: line});
+    }
+
+    function nominateThread(what, character, thread) {
+        return nominateTo(THREAD_AT, THREAD_NOW, {do: what, character: character, thread: thread});
+    }
+
+    function onRowClick(event) {
         const target = event.target;
         if (!target || typeof target.closest !== "function") return;
+        const thread = target.closest(THREAD_ROWS);
+        if (thread) {
+            if (thread.disabled) return;
+            nominateThread(thread.classList.contains("mc-llm-thread-star") ? "star" : "open",
+                           thread.getAttribute("data-character") || "",
+                           thread.getAttribute("data-thread") || "");
+            return;
+        }
         const row = target.closest(EMOTION_ROWS);
-        if (row) {
-            if (row.disabled) return;
-            if (row.classList.contains("mc-llm-emotion-mode")) {
-                // The way every thread's emotion steers: system prompt or prefill.
-                nominateEmotion("mode", row.getAttribute("data-emotion-mode") || "");
-            } else {
-                nominateEmotion(row.classList.contains("mc-llm-emotion-delete") ? "delete"
-                    : "choose", row.getAttribute("data-emotion") || "");
-            }
-            return;
-        }
-        if (!emotionOpen()) return;
-        const picker = byId(EMOTION_PICKER);
-        const chip = clickable(EMOTION_CHIP);
-        if ((picker && picker.contains(target)) || (chip && chip.contains(target))) return;
-        showEmotion(false);
-    }
-
-    function wireEmotion() {
-        const chip = clickable(EMOTION_CHIP);
-        if (chip && chip.dataset.mcLlmEmotion !== "1") {
-            chip.dataset.mcLlmEmotion = "1";
-            chip.setAttribute("aria-haspopup", "dialog");
-            chip.setAttribute("aria-expanded", "false");
-            chip.addEventListener("click", function () { showEmotion(!emotionOpen()); });
-        }
-        if (emotionWired) return;
-        emotionWired = true;
-        document.addEventListener("click", onEmotionClick);
-        document.addEventListener("keydown", function (event) {
-            if (event.key === "Escape" && emotionOpen()) showEmotion(false);
-        });
-    }
-
-    // -- the start of the next reply -------------------------------------- //
-
-    // The emotion's box, for one reply: the chip opens it under the bar with
-    // the words in the box focused, and Set, Clear, Enter, a press elsewhere
-    // or Escape put it away. A press on either chip is a press outside the
-    // other's box, so only one of the two is ever open. What is kept is Python's
-    // (mc_llm_chat_panel._start_written); the reply that starts from it
-    // spends it, and the next settle empties the chip's dot.
-    const START_CHIP = "mc-llm-chat-to-start";
-    const START_PICKER = "mc-llm-chat-start";
-    const START_TEXT = "mc-llm-chat-start-text";
-    const START_DONE = ["mc-llm-chat-start-set", "mc-llm-chat-start-clear"];
-    const START_OPEN = "mc-llm-start-open";
-    let startWired = false;
-
-    function startOpen() {
-        const picker = byId(START_PICKER);
-        return !!picker && picker.classList.contains(START_OPEN);
-    }
-
-    function startField() {
-        const box = byId(START_TEXT);
-        if (!box) return null;
-        return box.tagName === "TEXTAREA" || box.tagName === "INPUT"
-            ? box : box.querySelector("textarea, input");
-    }
-
-    function showStart(open) {
-        const picker = byId(START_PICKER);
-        if (!picker) return false;
-        const chip = clickable(START_CHIP);
-        if (open && chip) placeEmotion(picker, chip);
-        picker.classList.toggle(START_OPEN, !!open);
-        if (chip) chip.setAttribute("aria-expanded", String(!!open));
-        if (open) {
-            const field = startField();
-            if (field && typeof field.focus === "function") {
-                window.setTimeout(function () { field.focus(); }, 0);
-            }
-        }
-        return true;
-    }
-
-    function onStartClick(event) {
-        if (!startOpen()) return;
-        const target = event.target;
-        if (!target || typeof target.closest !== "function") return;
-        for (const id of START_DONE) {
-            const done = byId(id);
-            if (done && done.contains(target)) {
-                // After Gradio has read the box: its own click runs first.
-                window.setTimeout(function () { showStart(false); }, 0);
-                return;
-            }
-        }
-        const picker = byId(START_PICKER);
-        const chip = clickable(START_CHIP);
-        if ((picker && picker.contains(target)) || (chip && chip.contains(target))) return;
-        showStart(false);
-    }
-
-    function onStartKey(event) {
-        if (!startOpen()) return;
-        if (event.key === "Escape") {
-            showStart(false);
-            return;
-        }
-        const field = startField();
-        if (event.key === "Enter" && !event.shiftKey && field && event.target === field) {
-            window.setTimeout(function () { showStart(false); }, 0);
+        if (!row || row.disabled) return;
+        if (row.classList.contains("mc-llm-emotion-mode")) {
+            // The way every thread's emotion steers: system prompt or prefill.
+            nominateEmotion("mode", row.getAttribute("data-emotion-mode") || "");
+        } else {
+            nominateEmotion(row.classList.contains("mc-llm-emotion-delete") ? "delete"
+                : "choose", row.getAttribute("data-emotion") || "");
         }
     }
 
-    function wireStart() {
-        const chip = clickable(START_CHIP);
-        if (chip && chip.dataset.mcLlmStart !== "1") {
-            chip.dataset.mcLlmStart = "1";
-            chip.setAttribute("aria-haspopup", "dialog");
-            chip.setAttribute("aria-expanded", "false");
-            chip.addEventListener("click", function () { showStart(!startOpen()); });
-        }
-        if (startWired) return;
-        startWired = true;
-        document.addEventListener("click", onStartClick);
-        document.addEventListener("keydown", onStartKey);
+    function wireRows() {
+        if (rowsWired) return;
+        rowsWired = true;
+        document.addEventListener("click", onRowClick);
     }
 
     // -- a tap outside a sheet puts it away ------------------------------- //
 
     // "I need the pop ups in LLM studio to close when i tap outside of them"
     // (2026-11-06). The pop-ups are LLM Studio's sheets (mc_llm_overlays): the
-    // shell's Workspace and Model and runtime, and Conversation's Threads,
-    // Character, You and Voice. Each closes by its own button -- a shell
-    // sheet's ✕, a screen's ‹ Back -- whose handler answers for every surface
-    // at once (mc_llm_overlays.showing), so a tap outside presses that button
-    // as a person would, and nothing about which sheet shows is decided here.
+    // shell's Workspace and Model and runtime, and Conversation's one pop-up.
+    // Each closes by its own button -- a shell sheet's ✕, the pop-up's ‹ Back
+    // -- whose handler answers for every surface at once
+    // (mc_llm_overlays.showing), so a tap outside presses that button as a
+    // person would, and nothing about which sheet shows is decided here.
     //
     // A tap is what the Forge Assistant's Tap Outside to Close calls one
     // (docs/22 §3.42, §3.45): a primary press of the first button, trusted,
@@ -1728,7 +1631,6 @@
     const SHEET_CLOSE = ".mc-llm-sheet-head .mc-llm-sheet-back, .mc-llm-sheet-head .mc-llm-icon-button";
     const NOT_OUTSIDE = [
         ".mc-llm-chat-header", "#mc-llm-shellbar",
-        ".mc-llm-emotion-picker", ".mc-llm-start-picker",
         ".forge-assistant", ".forge-assistant-panel", ".forge-assistant-launcher",
         "dialog", "[role='dialog']", "[aria-modal='true']", ".toast-wrap", ".mc-lv", ".mc-lv-scrim",
     ].join(", ");
@@ -1858,8 +1760,7 @@
         attempt("keep the sheets in view", wireSheets);
         attempt("close a sheet on a tap outside it", wireSheetTaps);
         attempt("edit in a dialog", wireEditor);
-        attempt("wire the emotion picker", wireEmotion);
-        attempt("wire the reply start", wireStart);
+        attempt("wire the pop-up's rows", wireRows);
         attempt("count the seconds", function () { watchActivity(); tick(); });
         attempt("fit the workspace", function () { watchWindow(); fit(); });
     }

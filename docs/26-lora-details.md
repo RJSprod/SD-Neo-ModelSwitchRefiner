@@ -290,7 +290,8 @@ slider's ends with hold-to-repeat, a vertical swipe that never moves a slider
 orange one below 0, the tick on a trigger already in the prompt, **+N** for the
 pills that do not fit, the amber row for a tag that names no LoRA, the picture's
 fallbacks, two rows for a LoRA in two boxes, a tag with named weights shown
-fixed, Escape as Cancel, a tap outside that does nothing, a change of tab as
+fixed, Escape as Cancel, a tap outside that does nothing (a tap outside is
+Cancel since §8.7), a change of tab as
 Cancel, and the assistant's panel stepping aside.
 
 ### 8.3 Tests
@@ -338,7 +339,7 @@ bound to the visible display area."
 | One at a time, compact, bound | One box under the title (38 px, 16 px text so a phone does not zoom), its list inside the dialog under it as a flex item capped at 45 % of the viewer and scrolling, the rows giving way; never a popup over the window's edge. A choice empties the box for the next |
 | Already in the prompt | Marked *In the prompt*; chosen, the row it has is shown (scrolled to, flashed), not added twice |
 | The keys | ↑ ↓ round the list, Enter adds the one chosen or the first, Escape puts the list away, then what was typed, before it closes the viewer (taken on the window's capture phase as before) |
-| No live connection | One request with an 8 s deadline, when the box is first used in a viewer; failed or late, the list says so and typing again asks again. The details of an added row are one more request of its own, so the full load's Try again does not cut it short |
+| No live connection | One request with an 8 s deadline, when the box is first used in a viewer (as the viewer opens since §8.7, the box having the focus then); failed or late, the list says so and typing again asks again. The details of an added row are one more request of its own, so the full load's Try again does not cut it short |
 
 Tests: `tests/test_lora_viewer.py` (the listing: every LoRA without folders,
 only the preset's with and without subfolders, nothing under the strict
@@ -389,3 +390,35 @@ survived a first pass -- a size hold against a theme's button rule and a
 guard behind a watch `close` already disconnects were taken out as changing
 nothing, and a test of a row with no card was added. Not run on the user's
 machine; Forge's real editor and its LoRA cards were stood in for.
+
+### 8.7 The add box ready to type into, and a tap outside that closes (2026-11-06)
+
+Two asks in one message: "When i open the lora panel we created, the text
+field should be auto selected, cursor in the field, ready for me to type a
+character"; and "Tapping outside of that lora pop up should close it" -- the
+reverse of §8.2's "a tap outside that does nothing".
+
+| Question | Decision |
+|---|---|
+| Which field | **Add a LoRA…** (`.mc-lv-add-input`), focused by `open` inside the press that opened the viewer, so a phone's keyboard comes up with it (a focus outside a press shows no keyboard on a phone). The dialog takes the focus only if the box is missing or disabled |
+| The names | The box's focus lists them (`listNames`), so they are asked **as the viewer opens**, once a viewer, with the 8 s deadline -- no longer when the box is first used. An empty box still suggests nothing |
+| What a tap outside does | **Cancel**, as Escape and a change of tab: nothing written. When that leaves changes unwritten the page says so (*Closed without applying: the change was not written.*, the toast), because the old rule existed so that a stray tap could not throw changes away silently |
+| What is a tap outside | A trusted primary press whose target is outside the dialog and the toast, heard on the window's capture phase while the viewer is open (`onOutsideDown`), and its **click** -- the tap's last event, so nothing under the scrim gets what follows the press once the scrim is gone -- within 16 px of where it went down (`onOutsideClick`, `OUTSIDE_SLOP`). A press the browser takes for a scroll or a drag sends no click; a press begun inside the viewer (a knob dragged past its edge, a press on its foot let go on the scrim) is the viewer's |
+| What under it gets the tap | Nothing on the scrim: its click is stopped. On the tab bar the click goes on, so a tab still changes the tab (which cancels the viewer as before) |
+| Stepped aside | While Forge's description editor is up the page is Forge's: a press then is not recorded, and its backdrop brings the viewer back as before |
+| On a phone | The viewer leaves 8 px of scrim at each side, and Chromium's touch adjustment gives a finger there to the row beside it -- as a real finger is -- so on a phone the tap outside is in practice a tap on the tab bar |
+
+Tests: `tests/test_lora_viewer_js.py` -- `TestATapOutside` (Cancel with the
+toast and the tap taken, the focus back on the button and Escape Forge's
+again; nothing changed and nothing said; a swipe, a knob dragged out and a
+press begun inside and let go 8 px outside are no tap; a finger on the margin
+adjusted onto the viewer and on the bar closing it; a tab on the bar closing
+the viewer and changing the tab; stepped aside, Forge's backdrop bringing it
+back), `TestTheAddBoxHasTheFocus` (the cursor in the box after the press, the
+names asked as it opens, the first letters typed suggesting; on a phone and on
+Img2Img too), and `test_a_tap_outside_does_nothing` translated into the first
+of those. Ten mutations: seven failed a test at once; three survived -- the
+stepped-aside guard was in both handlers and the press's cancel had its own
+listener, and a browser sends no click after a cancelled press -- and the
+duplicates were taken out, after which the one guard left fails its test.
+Not run on the user's machine or in a Gecko build.

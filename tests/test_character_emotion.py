@@ -1481,11 +1481,33 @@ class TestTheTab:
         return mc_llm_chat_panel
 
     def test_the_heading_marks_whether_the_chip_s_dot_is_filled(self, thread):
+        """The Conversation chip's dot since 2026-11-06; the Emotion chip's before."""
         panel = self.panel()
 
         assert 'data-emotion="off"' in panel._heading("Ada", thread)
         choose(thread, HAPPY)
         assert 'data-emotion="on"' in panel._heading("Ada", thread)
+
+    def test_the_section_says_what_is_on_while_it_is_folded(self, thread):
+        panel = self.panel()
+
+        rows, section, heading = panel._emotion_view("Ada", thread.identifier)
+        assert section["label"] == "Emotion · Off"
+        choose(thread, HAPPY)
+        rows, section, heading = panel._emotion_view("Ada", thread.identifier)
+        assert section["label"] == f"Emotion · {HAPPY}"
+        assert f'aria-checked="true" data-emotion="{HAPPY}"' in rows
+        assert 'data-emotion="on"' in heading
+
+    def test_a_long_line_is_cut_in_the_label(self, thread):
+        line = "*" + "very " * 20 + "nervous*"
+        emotions.add(line)
+        choose(thread, line)
+
+        label = self.panel()._emotion_label("Ada", thread.identifier)
+
+        assert label.startswith("Emotion · *very very") and label.endswith("\u2026")
+        assert len(label) <= len("Emotion · ") + 40
 
     def test_the_rows_are_off_and_the_list_with_the_thread_s_own_checked(self, thread):
         panel = self.panel()
@@ -1555,7 +1577,8 @@ class TestTheTab:
                                        '{"do": "choose", "line": "*I am so happy*"}')
 
         assert emotions.for_thread("Ada", thread.identifier) == HAPPY
-        assert 'data-emotion="on"' in drawn[3]
+        assert drawn[1]["label"] == f"Emotion · {HAPPY}"
+        assert 'data-emotion="on"' in drawn[2]
 
     def test_a_press_deletes_the_line(self, thread):
         panel = self.panel()

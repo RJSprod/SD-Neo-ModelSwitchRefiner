@@ -20,6 +20,8 @@ immediately, and that the marker refuses in each of the four ways it has to.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 import mc_llm_chat_panel
@@ -89,9 +91,16 @@ def _collect(monkeypatch):
 
 
 class TestTheControlsAreThere:
-    def test_the_header_has_a_voice_chip(self):
+    def test_the_conversation_chip_is_the_way_to_voice(self):
+        """A Voice chip of its own until 2026-11-06; Voice is a section of the
+        Conversation pop-up now, and its chip is the one voice_chat.js marks
+        while the engine finishes and unlocks audio from."""
         build()
-        assert find(None, "mc-llm-chat-to-voice") is not None
+        assert find(None, "mc-llm-chat-to-conversation") is not None
+        assert find(None, "mc-llm-chat-to-voice") is None
+        script = (pathlib.Path(mc_voice_ui.__file__).resolve().parent
+                  / "javascript" / "voice_chat.js").read_text(encoding="utf-8")
+        assert 'chip: "mc-llm-chat-to-conversation"' in script
 
     def test_the_composer_has_a_microphone(self):
         build()
@@ -146,16 +155,15 @@ class TestTheControlsAreThere:
         assert mic.__dict__.get("interactive") is not False
         assert mic.__dict__.get("visible") is not False
 
-    def test_voice_is_one_of_the_panel_s_own_surfaces(self):
-        """Not a new mechanism. Everything that follows from being in SCREENS is
-        what a flyout needs: no room when closed, closed when another opens, and
-        put away by the menu button with the rest."""
-        assert mc_voice_ui.SCREEN in mc_llm_chat_panel.SCREENS
-        answered = mc_llm_chat_panel._screens("voice")
-        shown = [update.get("visible")
-                 for update in answered[1:1 + len(mc_llm_chat_panel.SCREENS)]]
-        assert shown.count(True) == 1
-        assert shown[mc_llm_chat_panel.SCREENS.index("voice")] is True
+    def test_voice_is_a_section_of_the_conversation_pop_up(self):
+        """Not a surface of its own any more: folded inside the one pop-up,
+        which is in SCREENS and so takes no room when closed, closes when
+        another opens and is put away by the menu button with the rest."""
+        assert "voice" not in mc_llm_chat_panel.SCREENS
+        build()
+        section = find(None, "mc-llm-chat-voice")
+        assert section is not None and type(section).__name__ == "Accordion"
+        assert section.value == "Voice", "an Accordion's label is its first argument"
 
     def test_the_flyout_has_both_switches(self):
         build()
@@ -377,7 +385,8 @@ class TestTheFlyout:
         and a flyout showing a stale value is a flyout that turns a setting off
         by being tapped."""
         host.shared.opts.set(mc_voice_state.OPT_AUTO_SPEAK, True)
-        answered = mc_voice_ui.open_sheet(mc_llm_chat_panel._screens)
+        answered = mc_voice_ui.section_values()
+        assert len(answered) == len(mc_voice_ui.SECTION_VALUES)
         assert answered[-1].get("value") is True
         assert answered[-2].get("value") is False
 
