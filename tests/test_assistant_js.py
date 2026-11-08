@@ -4309,3 +4309,144 @@ class TestDraggingTheWorkspaceStrip:
         assert '[data-overflow="none"]' not in css, (
             "it all fits, so there is no mask at all -- a rule here would be a "
             "gradient over a row that ends where it looks like it ends")
+
+
+class TestADrawerKeepsThePeekingBar:
+    """Asked for: "I should be able to open extra networks in focus mode and
+    be able to type / search, scroll, and investigate extra networks". With
+    the bar hidden in focus mode, a drawer opened from the peeking bar went
+    when the moment did, under the hand searching in it. A drawer that goes
+    with the bar (the theme marks it `forge-assistant-focus-keep`) holds the
+    bar for as long as it is drawn."""
+
+    def kept(self, drawn):
+        return """
+            const drawer = {getClientRects: () => (DRAWN ? [{}] : []), contains: () => false,
+                            matches: () => false};
+            document.querySelectorAll = (selector) => (selector === ".forge-assistant-focus-keep" ? [drawer] : []);
+        """.replace("DRAWN", "true" if drawn else "false")
+
+    def test_an_open_drawer_holds_the_bar_and_a_closed_one_does_not(self):
+        found = run(PICKER + PEEK + self.kept(True) + """
+            const {shell} = peeking();
+            shell.peekBar();
+            fire();
+            const held = {mode: shell.focus.barMode, timers: live().map((t) => t.ms)};
+            console.log(JSON.stringify({held, asked: shell.peekHeld()}));
+        """, sources=("shell",))
+
+        assert found["held"] == {"mode": "peek", "timers": [4000]}, "the moment starts again"
+        assert found["asked"] is True
+
+    def test_a_drawer_not_drawn_lets_the_moment_end(self):
+        found = run(PICKER + PEEK + self.kept(False) + """
+            const {shell} = peeking();
+            shell.peekBar();
+            fire();
+            console.log(JSON.stringify({asked: shell.peekHeld(), timers: live().length,
+                                        modes: shell.focus.modes}));
+        """, sources=("shell",))
+
+        assert found["asked"] is False and found["timers"] == 0
+        assert found["modes"][-1] == "hidden"
+
+
+CONVERSATION_AT_END = """
+function talking(options) {
+    const shell = Object.create(NS.Shell.prototype);
+    const transcript = Object.assign({scrollTop: 120, scrollHeight: 2400, clientHeight: 300}, options || {});
+    shell.nodes = {transcript, jump: {hidden: false, textContent: ""}, input: {hidden: true, focus() {}},
+                   menu: {hidden: true, dataset: {}}};
+    shell.state = {conversationExpanded: true};
+    shell.store = {check() {}, clearUnread() {}};
+    shell.showOpen = (open) => { shell.state.panelOpen = open; };
+    shell.applyChat = () => {};
+    shell._save = () => {};
+    shell.following = false;
+    shell.lastScrollTop = 120;
+    return {shell, transcript, jump: shell.nodes.jump};
+}
+"""
+
+
+class TestTheConversationOpensAtItsLatest:
+    """Asked for: "sometimes when i open conversation mode it is not at the
+    most recent message by default. Lets fix this." Opening the panel, or
+    showing the conversation with Chat, lands on the latest message and
+    follows it again; a transcript drawn again after a time with no box --
+    the panel put away, a menu or the docked settings in its place -- is put
+    back at the end while it follows, because a reply that landed meanwhile
+    could not be followed into a box with no height."""
+
+    def test_opening_the_panel_follows_and_lands_at_the_end(self):
+        found = run(CONVERSATION_AT_END + """
+            const {shell, transcript, jump} = talking();
+            shell.open();
+            console.log(JSON.stringify({following: shell.following, top: transcript.scrollTop,
+                                        jump: jump.hidden, open: shell.state.panelOpen}));
+        """)
+
+        assert found == {"following": True, "top": 2400, "jump": True, "open": True}
+
+    def test_chat_showing_the_conversation_lands_at_the_end_and_folding_it_does_not(self):
+        found = run(CONVERSATION_AT_END + """
+            const {shell, transcript} = talking();
+            shell.state.conversationExpanded = false;
+            shell.toggleChat();
+            const shown = {expanded: shell.state.conversationExpanded, following: shell.following,
+                           top: transcript.scrollTop};
+            shell.following = false;
+            transcript.scrollTop = 500;
+            shell.toggleChat();
+            console.log(JSON.stringify({shown, folded: {expanded: shell.state.conversationExpanded,
+                                                        following: shell.following, top: transcript.scrollTop}}));
+        """)
+
+        assert found["shown"] == {"expanded": True, "following": True, "top": 2400}
+        assert found["folded"] == {"expanded": False, "following": False, "top": 500}
+
+    def test_back_from_the_docked_settings_by_chat_lands_at_the_end(self):
+        found = run(CONVERSATION_AT_END + """
+            const {shell, transcript} = talking();
+            shell.dockedNow = true;
+            shell.currentWorkspace = () => "tab_txt2img";
+            shell.setDocked = () => { shell.dockedNow = false; };
+            shell.toggleChat();
+            console.log(JSON.stringify({following: shell.following, top: transcript.scrollTop}));
+        """)
+
+        assert found == {"following": True, "top": 2400}
+
+    def test_drawn_again_while_following_it_goes_to_the_end(self):
+        found = run(CONVERSATION_AT_END + """
+            const {shell, transcript} = talking({clientHeight: 0});
+            shell.following = true;
+            shell.transcriptShown();
+            const hidden = transcript.scrollTop;
+            transcript.clientHeight = 300;
+            transcript.scrollHeight = 3100;
+            shell.transcriptShown();
+            const shown = transcript.scrollTop;
+            transcript.scrollTop = 700;
+            shell.transcriptShown();
+            console.log(JSON.stringify({hidden, shown, again: transcript.scrollTop}));
+        """)
+
+        assert found["hidden"] == 120, "no box, nothing to scroll"
+        assert found["shown"] == 3100
+        assert found["again"] == 700, "only the moment it is drawn again"
+
+    def test_drawn_again_while_reading_it_is_where_the_reader_was(self):
+        found = run(CONVERSATION_AT_END + """
+            const {shell, transcript, jump} = talking({clientHeight: 0});
+            shell.lastScrollTop = 640;
+            shell.settled = true;
+            shell.transcriptShown();
+            transcript.clientHeight = 300;
+            transcript.scrollTop = 0;
+            shell.transcriptShown();
+            console.log(JSON.stringify({top: transcript.scrollTop, following: shell.following,
+                                        jump: jump.hidden}));
+        """)
+
+        assert found == {"top": 640, "following": False, "jump": False}

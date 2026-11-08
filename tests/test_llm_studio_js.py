@@ -2110,3 +2110,162 @@ class TestThePickersAreGone:
         for gone in ("to-emotion", "to-start", "to-threads", "to-character", "to-persona"):
             assert ui.ident("chat", gone) not in script, gone
         assert "mc-llm-emotion-open" not in script and "mc-llm-start-open" not in script
+
+
+# --------------------------------------------------------------------------- #
+# Jump to latest, a thread opened, and the transcript drawn again
+# --------------------------------------------------------------------------- #
+
+JUMP = r"""
+const mutations = [];
+const resizes = [];
+const listeners = {};
+
+function made(tag) {
+    const node = {tagName: tag.toUpperCase(), hidden: false, attributes: {}, handlers: {},
+                  classList: {names: new Set(), contains(n) { return this.names.has(n); }},
+                  setAttribute(k, v) { this.attributes[k] = String(v); },
+                  getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; },
+                  addEventListener(kind, fn) { (this.handlers[kind] = this.handlers[kind] || []).push(fn); }};
+    Object.defineProperty(node, "className", {set(v) { v.split(/\s+/).forEach((n) => node.classList.names.add(n)); }});
+    return node;
+}
+
+// A box as a browser keeps one: a scroll clamped to what there is to scroll,
+// nothing at all while it is not drawn, and its offset kept for when it is.
+const box = {height: 2000, client: 400, top: 1600, hidden: false};
+const bubbles = {
+    tagName: "DIV", dataset: {},
+    style: {setProperty() {}, removeProperty() {}, getPropertyValue: () => ""},
+    querySelectorAll: () => [], querySelector: () => null,
+    addEventListener: (kind, fn) => { (listeners[kind] = listeners[kind] || []).push(fn); },
+};
+Object.defineProperties(bubbles, {
+    scrollHeight: {get: () => (box.hidden ? 0 : box.height)},
+    clientHeight: {get: () => (box.hidden ? 0 : box.client)},
+    scrollTop: {get: () => (box.hidden ? 0 : box.top),
+                set: (v) => { if (!box.hidden) box.top = Math.max(0, Math.min(v, box.height - box.client)); }},
+});
+
+let thread = "thread-a";
+const marker = {getAttribute: (k) => (k === "data-mc-key" ? thread + ":0123456789ab" : null)};
+const holder = {
+    tagName: "DIV", dataset: {}, offsetParent: {}, children: [],
+    style: {setProperty() {}, removeProperty() {}, getPropertyValue: () => ""},
+    scrollHeight: 400, clientHeight: 400, scrollTop: 0,
+    querySelectorAll: () => [bubbles],
+    querySelector: (selector) => (selector === ".mc-llm-meta" && thread ? marker : null),
+    appendChild(child) { this.children.push(child); return child; },
+    addEventListener() {},
+    getBoundingClientRect: () => ({top: 240, height: 400, bottom: 0, left: 0, right: 0}),
+};
+
+globalThis.document = {
+    documentElement: {scrollTop: 0, getAttribute: () => null, setAttribute() {}, removeAttribute() {}},
+    querySelector: (selector) => (selector === "#mc-llm-chat-transcript" ? holder : null),
+    createElement: (tag) => made(tag),
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.setInterval = () => 0;
+globalThis.MutationObserver = function (callback) { mutations.push(callback); this.observe = () => {}; };
+globalThis.ResizeObserver = function (callback) { resizes.push(callback); this.observe = () => {}; };
+globalThis.gradioApp = () => globalThis.document;
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+
+const jump = () => holder.children.find((c) => c.classList.contains("mc-llm-jump")) || null;
+const scrollTo = (top) => { bubbles.scrollTop = top; (listeners.scroll || []).forEach((fn) => fn()); };
+const wheel = (dy) => (listeners.wheel || []).forEach((fn) => fn({deltaY: dy, deltaMode: 0}));
+const arrive = (height) => { box.height = height; mutations.forEach((fn) => fn([])); };
+const resize = () => resizes.forEach((fn) => fn([]));
+const press = () => (jump().handlers.click || []).forEach((fn) => fn({}));
+const seen = () => ({top: bubbles.scrollTop, hidden: jump() ? jump().hidden : null});
+
+SCENARIO
+"""
+
+
+def jumping(scenario: str) -> dict:
+    harness = JUMP.replace("SOURCE", SCRIPT.read_text()).replace("SCENARIO", scenario)
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestJumpToLatest:
+    """"if i am scrolled away from the most recent message, i should see a
+    option to scroll back and scroll locks to the bottom ... a button that
+    does not appear when i am at the bottom already"."""
+
+    def test_it_shows_away_from_the_end_and_never_at_it(self):
+        found = jumping("""
+            const out = {start: seen()};
+            // A wheel turned up at the end undocks before it scrolls; one that
+            // scrolls nothing leaves the reader at the end, and no button.
+            wheel(-120);
+            out.turned = seen();
+            scrollTo(900);
+            out.away = seen();
+            scrollTo(1600);
+            out.back = seen();
+            console.log(JSON.stringify(out));
+        """)
+
+        assert found["start"] == {"top": 1600, "hidden": True}
+        assert found["turned"] == {"top": 1600, "hidden": True}
+        assert found["away"] == {"top": 900, "hidden": False}
+        assert found["back"] == {"top": 1600, "hidden": True}, "scrolled back to the end, it goes"
+
+    def test_pressed_it_goes_to_the_end_and_follows_again(self):
+        found = jumping("""
+            wheel(-120); scrollTo(300);
+            press();
+            const pressed = seen();
+            arrive(2600);
+            console.log(JSON.stringify({pressed, arrived: seen()}));
+        """)
+
+        assert found["pressed"] == {"top": 1600, "hidden": True}
+        assert found["arrived"] == {"top": 2200, "hidden": True}, "docked: the next reply is followed"
+
+    def test_a_thread_opened_lands_at_its_latest_message(self):
+        """Gradio keeps one scroller for every thread, so a reader who had
+        scrolled up in one stayed undocked in the next."""
+        found = jumping("""
+            wheel(-120); scrollTo(500);
+            arrive(2000);
+            const same = seen();
+            thread = "thread-b";
+            arrive(3200);
+            console.log(JSON.stringify({same, opened: seen()}));
+        """)
+
+        assert found["same"] == {"top": 500, "hidden": False}, "the same thread: the reader's place"
+        assert found["opened"] == {"top": 2800, "hidden": True}
+
+    def test_drawn_again_it_is_put_at_the_end_while_docked(self):
+        """A reply that landed while the tab was hidden could not be followed
+        into a box with no height; the transcript's box coming back is heard."""
+        found = jumping("""
+            box.hidden = true;
+            arrive(2900);
+            box.hidden = false;
+            const before = seen();
+            resize();
+            console.log(JSON.stringify({before, shown: seen()}));
+        """)
+
+        assert found["before"]["top"] == 1600, "the reply could not be followed while hidden"
+        assert found["shown"] == {"top": 2500, "hidden": True}

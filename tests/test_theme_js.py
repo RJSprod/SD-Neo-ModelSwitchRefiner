@@ -720,3 +720,30 @@ class TestTheTabsOrder:
         actions = re.search(r"#tabs > \.tab-nav > \.mc-theme-actions \{\s*order: (\d+);", style)
 
         assert actions and int(actions.group(1)) > 1000
+
+
+class TestTheTagACardWrites:
+    """The drawer dims a card whose tag is in the prompt (`markApplied`); the
+    tag is read off the card's own click, as Forge Neo writes it
+    (modules/ui_extra_networks.py, `cardClicked('{tabname}', {prompt}, ...)`
+    with the LoRA page's prompt from extensions-builtin/sd_forge_lora: a
+    JavaScript string expression, its name JSON-quoted)."""
+
+    def test_the_type_and_the_name_whatever_the_weight_and_the_words_after(self):
+        found = run(r"""
+            const card = (click) => ({getAttribute: (k) => (k === "onclick" ? click : null)});
+            out.plain = T.cardTag(card('cardClicked(\'txt2img\', "<lora:detail_tweaker:" + opts.extra_networks_default_multiplier + ">", "", true);'));
+            out.preferred = T.cardTag(card('cardClicked(\'txt2img\', "<lora:style:" + 0.6 + ">" + " a trigger, words", "neg", true);'));
+            out.quoted = T.cardTag(card('cardClicked(\'img2img\', "<lora:Bob\'s \\"best\\" one:" + 1 + ">", "", true);'));
+            out.lyco = T.cardTag(card("cardClicked('txt2img', '<lyco:Detail:1>')"));
+            out.embedding = T.cardTag(card('cardClicked(\'txt2img\', "easynegative", "", false);'));
+            out.none = T.cardTag(card(""));
+            out.key = T.tagKey("LoRA", " detail ");
+        """)
+
+        assert found["plain"] == "lora:detail_tweaker"
+        assert found["preferred"] == "lora:style"
+        assert found["quoted"] == "lora:Bob's \"best\" one"
+        assert found["lyco"] == "lora:Detail", "Forge loads <lyco:...> as a LoRA"
+        assert found["embedding"] is None and found["none"] is None
+        assert found["key"] == "lora:detail"

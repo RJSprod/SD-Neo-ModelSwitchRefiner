@@ -1988,8 +1988,12 @@
         networks.open = !!open;
         eachHost((entry) => setClass(entry.host, NETWORKS_OPEN_CLASS, networks.open));
         if (state.header) setAttr(state.header.networksToggle, "aria-expanded", networks.open ? "true" : "false");
-        // Open, the shown page's cards have a width again to share out.
-        if (networks.open) scheduleCards();
+        // Open, the shown page's cards have a width again to share out, and
+        // the prompt may have changed while it was shut.
+        if (networks.open) {
+            scheduleCards();
+            scheduleApplied();
+        }
     }
 
     function toggleNetworks() {
@@ -2027,6 +2031,11 @@
         }
         sortShown(pageId);
         layoutCards(entry);
+        // The marks of what the prompt has -- and so, since every update of
+        // the page shows the page again (`installNetworks`), of a prompt the
+        // page wrote with no typing: a picture's settings pasted, a style
+        // applied.
+        scheduleApplied();
     }
 
     // The cards containers this script has had Forge sort. A rendering of a
@@ -2207,6 +2216,103 @@
         rememberTitles(networks.titles);
     }
 
+    // -- what the prompt already has -------------------------------------------- //
+    //
+    // Asked for: "in extra networks, i would like to see some sort of
+    // indication of which are already applied in the prompt, so lets make them
+    // take a slightly transparent dark overlay when that lora is already in
+    // the prompt text." A card is applied when its tag -- the `<type:name:`
+    // that Forge's `cardClicked` in its onclick would write -- is in one of
+    // the boxes the LoRA viewer reads: the Prompt, and on Txt2Img the two
+    // Literal boxes. The test is Forge's own, the one its click uses to take
+    // such a tag out again: the type and the name, whatever the weight; and
+    // `<lyco:` is a LoRA, as Forge loads it. Kept as the boxes are typed in,
+    // as the drawer opens or shows a page, and at every update of the page;
+    // only a class is written, and only when it changes.
+
+    const NETWORKS_APPLIED_CLASS = "mc-theme-network-applied";
+    const APPLIED_BOXES = {
+        txt2img: ["txt2img_prompt", "mc-krea-creative-literal-positive", "mc-krea-creative-literal-negative"],
+        img2img: ["img2img_prompt"],
+    };
+    const APPLIED_SELECTOR = Object.keys(APPLIED_BOXES)
+        .map((tab) => APPLIED_BOXES[tab].map((id) => "#" + id).join(", ")).join(", ");
+    // In a box: <lora:name>, <lora:name:0.8>, <lora:name:0.8:0.5>, ...
+    const PROMPT_TAG = /<([A-Za-z_][\w-]*):([^:<>]+)(?::[^<>]*)?>/g;
+    // In a card's onclick: the tag Forge writes, its name as a JavaScript
+    // string holds it ("<lora:name:" + weight + ">"), escapes and all.
+    const CARD_TAG = /<([A-Za-z_][\w-]*):((?:[^:<>\\"]|\\.)+)[:>]/;
+
+    function tagKey(type, name) {
+        const kind = String(type).toLowerCase();
+        return (kind === "lyco" ? "lora" : kind) + ":" + String(name).trim();
+    }
+
+    function boxField(id) {
+        const holder = document.getElementById(id);
+        if (!holder) return null;
+        if (holder.matches && holder.matches("textarea, input")) return holder;
+        return holder.querySelector("textarea, input");
+    }
+
+    /** Every tag in a tab's boxes, as `type:name`. */
+    function appliedTags(tabname) {
+        const found = new Set();
+        (APPLIED_BOXES[tabname] || []).forEach((id) => {
+            const field = boxField(id);
+            const text = field ? String(field.value || "") : "";
+            PROMPT_TAG.lastIndex = 0;
+            let match;
+            while ((match = PROMPT_TAG.exec(text))) found.add(tagKey(match[1], match[2]));
+        });
+        return found;
+    }
+
+    /** The tag a card's click writes, as `type:name`, or null for a card that
+     *  writes none (an embedding's name, a checkpoint). Read once a click. */
+    function cardTag(card) {
+        const click = card.getAttribute("onclick") || "";
+        if (card.mcThemeTagFrom === click) return card.mcThemeTag;
+        const match = CARD_TAG.exec(click);
+        let tag = null;
+        if (match) {
+            let name = match[2];
+            if (name.indexOf("\\") >= 0) {
+                try { name = JSON.parse('"' + name + '"'); } catch (error) { /* as written */ }
+            }
+            tag = tagKey(match[1], name);
+        }
+        card.mcThemeTagFrom = click;
+        card.mcThemeTag = tag;
+        return tag;
+    }
+
+    function markApplied(entry, tabname) {
+        const networks = state.networks;
+        if (!networks || !networks.open) return;
+        const applied = appliedTags(tabname);
+        entry.pages.forEach((page) => {
+            queryAll(".card", page).forEach((card) => {
+                const tag = cardTag(card);
+                setClass(card, NETWORKS_APPLIED_CLASS, !!tag && applied.has(tag));
+            });
+        });
+    }
+
+    /** Marked again on the next frame -- once, however many asked. */
+    function scheduleApplied() {
+        const networks = state.networks;
+        if (!networks || networks.appliedFrame) return;
+        networks.appliedFrame = 1;
+        const run = function () {
+            networks.appliedFrame = 0;
+            if (state.networks === networks) {
+                attempt("mark what the prompt has", () => eachHost((entry, tabname) => markApplied(entry, tabname)));
+            }
+        };
+        if (typeof requestAnimationFrame === "function") requestAnimationFrame(run); else run();
+    }
+
     /** The host's mark and the button's state. The button's glyph -- the
      *  names, or the names struck through -- is drawn only when it changes:
      *  a new glyph is a change to a child list. */
@@ -2298,6 +2404,23 @@
                                          titles: titlesState() !== "hidden", perRow: 0, card: null, frame: 0};
             const remembered = networksOpenState();
             networks.open = remembered ? remembered === "open" : config.networks === "open";
+            // Typed into a box the marks read, or written there by Forge's
+            // card click (its `updateInput`): marked again.
+            networks.onInput = function (event) {
+                const target = event && event.target;
+                if (target && typeof target.closest === "function" && target.closest(APPLIED_SELECTOR)) {
+                    scheduleApplied();
+                }
+            };
+            document.addEventListener("input", networks.onInput, true);
+            // And a card pressed, whatever its click wrote and however: the
+            // mark is read a frame later, after the card's own handler.
+            networks.onCardClick = function (event) {
+                const target = event && event.target;
+                if (target && typeof target.closest === "function"
+                    && target.closest("." + NETWORKS_PAGE_CLASS + " .card")) scheduleApplied();
+            };
+            document.addEventListener("click", networks.onCardClick, true);
         }
         if (networks.setting !== config.networksWidth) {
             // The setting, first read or since changed, wins over a width
@@ -2335,7 +2458,10 @@
                 || nav.querySelector(":scope > .extra-networks-controls-div");
             if (!gathered) return;
             if (!entry) {
-                const chrome = make("div", "mc-theme-networks",
+                // Marked to go with the bar, as the quick settings are: in the
+                // Forge Assistant's focus mode an open drawer keeps a peeking
+                // bar there, and what is done in it renews the moment.
+                const chrome = make("div", "mc-theme-networks " + FOCUS_KEEP_CLASS,
                                     {id: NETWORKS_ID + "-" + tabname, role: "complementary",
                                      "aria-label": "Extra networks", "data-mc-theme-tab": tabname});
                 const head = make("div", "mc-theme-networks-head");
@@ -2468,6 +2594,9 @@
                 }
                 if (entry.chrome.parentElement) entry.chrome.parentElement.removeChild(entry.chrome);
             });
+            if (networks.onInput) document.removeEventListener("input", networks.onInput, true);
+            if (networks.onCardClick) document.removeEventListener("click", networks.onCardClick, true);
+            queryAll("." + NETWORKS_APPLIED_CLASS).forEach((card) => setClass(card, NETWORKS_APPLIED_CLASS, false));
             state.networks = null;
         }
         if (state.header) setAttr(state.header.networksToggle, "aria-expanded", "false");
@@ -2896,6 +3025,7 @@
         parseInfotext, showNetworksPage, toggleNetworks, setNetworks, pressBar, SHOW_CONTROLS,
         NETWORKS_LAYOUTS, perRowRange, perRowNearest, explainCards, setPerRow, setTitles,
         NETWORKS_COLUMNS, NETWORKS_UNTITLED_CLASS, QUICK_TAP_PX,
+        NETWORKS_APPLIED_CLASS, cardTag, tagKey, appliedTags,
         scrollPlan, scrollBoundary, explainScroll, explainBrake, SCROLL_ATTRIBUTE, SCROLL_SETTINGS_CLASS,
         RESULTS_HOLD, SCROLL_HOLD, SCROLL_ROW, BRAKE_CLIP_ATTRIBUTE, BRAKE_LOCK_ATTRIBUTE, BRAKE_QUIET_FRAMES,
         icons: Object.keys(ICONS),

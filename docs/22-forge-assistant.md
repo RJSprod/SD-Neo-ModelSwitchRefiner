@@ -4684,3 +4684,64 @@ test; four survived a first pass (the click and the drag hid behind each other
 in one scenario, a test's click was faster than any timer, and disposal had no
 check) and their tests were split and tightened. Not run on the user's machine,
 on a phone or in a Gecko build.
+
+## 3.52 The conversation at its latest; extra networks in focus mode (2026-11-08)
+
+> "I noticed that sometimes when i open conversation mode it is not at the
+> most recent message by default. Lets fix this."
+
+> "Extra networks view does not work correctly in focus. Lets make sure it is
+> properly supported. I should be able to open extra networks in focus mode
+> and be able to type / search, scroll, and investigate extra networks...
+> everything should work like normal"
+
+**The conversation at its latest.** Opening the panel (`open`) and showing the
+conversation with Chat (`toggleChat`, from folded, from a menu, from the docked
+settings or WanGP's prompt) follow the latest message again and go to it
+(`toLatest`), wherever the reader had scrolled before. And the transcript drawn
+again after a time with no box -- the panel put away, the conversation folded, a
+menu or the docked view in its place -- is put right as it shows
+(`transcriptShown`, from a `ResizeObserver` on the transcript): following, the
+end; reading, the reader's place. A reply that landed while it had no box could
+not be followed (`toBottom` into a box with no height scrolls nothing), and it
+came back short of it, still "following", with no Jump to latest to say so. The
+button itself was already there (§3.25, §3.32): shown away from the end, never at
+it. LLM Studio's tab gained the same in docs/07 §47.
+
+**Extra networks in focus mode.** Two things the test page showed:
+
+- **Forge's own overlays were taken out with the chrome.** Focus mode hides every
+  child of the workspace's path that is not the workspace, a dialog or marked to
+  keep, and Forge appends its popup (`popup()`, in `.main`: a card's details, its
+  metadata editor, LoRA Details' dialog), the picture lightbox (`#lightboxModal`)
+  and Generate's right-click menu (`#context-menu`) beside that path -- so in
+  focus mode a card could not be looked into at all, and the LoRA viewer's ⓘ,
+  which steps aside for Forge's popup (docs/26 §8.6), left nothing on screen. The
+  rule leaves the three alone now (by attribute, not by id, so its weight stays a
+  class's), and the popup and the lightbox, at Forge's 1001, are lifted above the
+  focused workspace, its kept bar and the drawers that hang from it
+  (`--forge-assistant-workspace-layer` + 3), under the panel as on the page.
+- **A drawer opened from the peeking bar went with the moment.** With the bar
+  hidden in focus mode the theme's drawers are drawn only while the bar is, and
+  the peek ends four seconds after the last thing done on the bar -- so the
+  extra networks drawer opened from a peek vanished under a hand searching or
+  scrolling in it. `peekHeld` now holds the moment while anything marked
+  `forge-assistant-focus-keep` is drawn: an open drawer that goes with the bar.
+  The theme marks the extra networks drawer's head so, as it marked the quick
+  settings; closed, the moment ends as ever. Entering focus with the bar hidden
+  still shows neither drawer.
+
+With the bar shown (the default) the drawer already typed, filtered and scrolled
+in focus mode on the test page; that is now held too.
+
+**Verified.** `tests/test_assistant_js.py` (node): an open drawer holds the bar and
+a closed one lets the moment end; opening the panel, Chat from folded and back from
+the docked settings each land at the end; drawn again while following, at the end,
+only at the moment it is drawn; while reading, at the reader's place.
+`tests/test_assistant_layout.py` (Chromium): a reply landing behind the ⋯ menu is
+on screen when the menu goes; away from the end Jump to latest shows and, pressed,
+is the end again. `tests/test_theme_layout.py` (Chromium,
+`TestExtraNetworksInFocusMode`): Forge's popup, lightbox and menu drawn in focus
+mode, the popup on top; a drawer opened from the peeking bar still there after the
+moment, searchable, and gone with the bar once closed. Fourteen mutations each fail
+a test. Not run on the user's machine or in a Gecko build.

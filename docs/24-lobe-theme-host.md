@@ -1124,3 +1124,54 @@ sat at rest, the buttons taking Generate's place at the bottom while its row is
 away, and the row back under the buttons on a press. Not run on the user's
 phone.
 
+## Extra networks: what the prompt has, names on hover, and focus mode (2026-11-08)
+
+> "In extra networks, i would like to see some sort of indication of which are
+> already applied in the prompt, so lets make them take a slightly transparent
+> dark overlay when that lora is already in the prompt text."
+
+> "Also, i want to see the lora name revealed in extra networks if i have names
+> hidden, but i hover over it with my cursor"
+
+**What the prompt already has** (`markApplied`, `NETWORKS_APPLIED_CLASS`). A card's
+tag is read off its own click, as Forge Neo writes it -- `cardClicked('{tabname}',
+"<lora:" + alias + ":" + weight + ">" ..., ...)`, the name a JSON-quoted JavaScript
+string (`modules/ui_extra_networks.py`, `extensions-builtin/sd_forge_lora`) -- as
+`type:name` (`cardTag`, cached per click, escapes undone), `<lyco:` read as a LoRA
+(`tagKey`). The prompt's tags are every `<type:name>` and `<type:name:...>` in the
+boxes the LoRA viewer reads (`APPLIED_BOXES`: the Prompt, and on Txt2Img both Literal
+boxes). A card is applied when its `type:name` is among them, whatever the weight:
+the test Forge's own click uses to take a tag out again
+(`tryToRemoveExtraNetworkFromPrompt`). Marked again, on the next frame and once,
+when a box is typed in (an `input` listener in the capture phase), a card is pressed
+(its click, whatever it wrote and however), the drawer opens, and a page is shown --
+which every update of the page does, so a prompt the page wrote with no typing (a
+picture's settings pasted, a style applied) is read at the next update. Only while
+the drawer is open; only a class is written, and only when it changes. An embedding's
+card writes no tag and is never marked.
+
+The overlay (`::after` on the card) is Gradio's darkest neutral (`--neutral-950`) at
+45% opacity, so the section still states no colour of its own; Forge's card is
+positioned and clips, its picture, name band and buttons placed in it, and the name
+band and the buttons are lifted over the overlay (z 1 and 2) so the name stays as
+readable as on any card.
+
+**Names on hover.** With the names hidden (the drawer's names button), the card a
+mouse is over shows its band, under `@media (hover: hover)`: a finger's tap leaves
+`:hover` on what it tapped, and a phone says it cannot hover.
+
+**In focus mode** (docs/22 §3.52): the drawer's head is marked
+`forge-assistant-focus-keep`, so an open drawer keeps a peeking bar, and itself,
+until it is closed; and Forge's popup, lightbox and context menu are drawn over the
+focused workspace.
+
+Tests: `TestWhatThePromptHas` (Chromium: a typed tag dims its card with the name over
+the overlay, `<lyco:...>` and any weight count, a word or a longer name does not; a
+card pressed is marked and another tab's prompt marks nothing here; a prompt the page
+wrote is read at the next update; one changed while the drawer was shut is read when
+it opens; a Literal box counts), `TestNamesOnHover` (a card under the mouse shows its
+name; on an emulated phone a hover reveals nothing), `TestTheTagACardWrites` (node:
+Forge Neo's own click strings, quotes and escapes, an embedding's). Thirteen mutations
+each fail a test; one survived a first pass (a mark scheduled at every update, which
+the page shown at every update already does) and the redundant call was taken out.
+Not run on the user's machine.

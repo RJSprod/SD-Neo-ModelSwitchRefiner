@@ -3919,6 +3919,13 @@ end (or keep pushing down once you are there) and it is docked again. There is
 no "close enough to the bottom": the end is the end, so a streaming reply cannot
 pull you back while you are anywhere above it. Gradio's own Chatbot autoscroll
 is switched off; this rule is the only thing that moves the transcript.
+While you are away from the end, a **↓ Jump to latest** button sits over the
+bottom of the transcript; it takes you to the latest message and docks you
+again, and it is never there while you are at the end. A thread you open
+always opens at its latest message, wherever you had scrolled to in the one
+before. And when the transcript is shown again (you come back to LLM Studio's tab,
+or the window or the panel changes size) while it is docked, it is put back at the
+end: a reply that finished while it was hidden is on screen when you return.
 
 The threads list, the character (chat with, edit, or create) and your persona
 are behind **☰** in the header, each on its own screen, and every one of them is
@@ -4370,7 +4377,13 @@ while a mouse rests on it or you type into one of its fields. So does moving
 either of them: the moment you drag the launcher or the panel's header —
 even a little jiggle, past the few pixels that make a press a drag — the bar
 comes, stays for as long as you hold on, and goes four seconds after you let
-go. A drag is no press, so the panel neither opens nor closes for it. A press on the
+go. A drag is no press, so the panel neither opens nor closes for it. A drawer
+you open from the bar while it is there for its moment -- the extra networks,
+the quick settings -- keeps the bar, and itself, on screen until you close it,
+so you can search, scroll and look into cards as long as you like. Forge's own
+pop-ups work in focus mode as on the page: a card's details and metadata
+editor, LoRA Details' dialog, the picture viewer and Generate's right-click
+menu all show over the focused workspace. A press on the
 launcher still does what it always did (the panel opens after its 300 ms);
 two presses still go back and three still turn focus off. Super Focused has no
 tab bar at all, whatever this setting says, and no tap brings it.
@@ -4932,6 +4945,11 @@ away from it by any amount** — any wheel upward, a finger moved down the
 transcript, ↑, Page Up or Home, or the scrollbar, read from the gesture as it
 starts so a chunk arriving in the same instant cannot pin you back — and docked
 again only when you scroll down to the very end (or push down once there).
+Opening the panel, or showing the conversation with **Chat**, always lands on
+the latest message and docks it again, wherever you had scrolled to before you
+put it away; and the conversation coming back from behind a menu or the docked
+settings is put back at the end while it is docked, so a reply that landed
+while it was out of view is on screen.
 
 **Pictures** can be pasted into either composer, or chosen with the panel's
 paperclip — or attached for you by **Auto Attach**, above. One per message, and
@@ -7701,7 +7719,8 @@ one second.
   back on a generation tab it is as it was; under the assistant's focus mode,
   with the bar it keeps shown or peeking, the header's button opens it over
   the workspace's right edge from the bar's bottom, in either layout, and with
-  that bar hidden it stays out of the workspace. A page is taken only once Forge's script has wired it (it
+  that bar hidden it stays out of the workspace -- unless you open it while
+  the bar is peeking: then it keeps the bar, and itself, until you close it. A page is taken only once Forge's script has wired it (it
   does so after the page's HTML arrives, later than the page's load), and is
   drawn at the drawer's density: the search box on a row of its own, as tall
   as a button, its magnifier in its left padding and centred (Forge draws the
@@ -7735,7 +7754,18 @@ one second.
   the band Forge draws over the bottom of each card's picture, the name and
   the description in it, leaving the picture alone; Forge's search still
   finds a card by its name. Both are the drawer's: every page in it, both
-  generation tabs' drawers, remembered per browser.
+  generation tabs' drawers, remembered per browser. With the names hidden, the
+  card under the mouse shows its own (a finger's tap does not: only a pointer
+  that can hover reveals one).
+- **What the prompt already has is dimmed.** A card whose tag is already in
+  the tab's **Prompt** -- or, on Txt2Img, in either **Literal** box, the boxes
+  the LoRA viewer reads -- takes a slightly transparent dark overlay over its
+  picture, its name still drawn over it. A card counts as in the prompt when
+  its type and name are there, whatever the weight (`<lora:name:0.6>`, a
+  second weight, or none), the same test Forge's own click uses to take the tag
+  out again; `<lyco:...>` is a LoRA, as Forge loads it. The marks follow what you
+  type, a card you press, and a prompt the page writes for you (a picture's
+  settings pasted, a style applied) at the page's next update.
 - **Extra networks newest created first.** At the first start with this
   build, Forge's own *Default sorting method* and *Default sorting order* for
   Extra Networks cards (Settings, Extra Networks) are set to *Date Created*
