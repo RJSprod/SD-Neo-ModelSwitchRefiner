@@ -1458,7 +1458,10 @@
    does on the page, over the workspace's right edge from the bar's bottom,
    and in both layouts: the column layout's grid is not drawn in focus mode,
    where the workspace is its own scroller and has no header to stick
-   under. */
+   under. A drawer open while the bar peeks keeps the bar peeking, and so
+   itself drawn, until it is closed: the script marks its head
+   `forge-assistant-focus-keep`, and the assistant holds the moment while
+   such a thing is drawn (`peekHeld`). */
 :root[data-mc-theme="on"] body.forge-assistant-focused:not([data-forge-assistant-focus-bar="shown"]):not([data-forge-assistant-focus-bar="peek"]) .mc-theme-networks-host > .mc-theme-networks,
 :root[data-mc-theme="on"] body.forge-assistant-focused:not([data-forge-assistant-focus-bar="shown"]):not([data-forge-assistant-focus-bar="peek"]) .mc-theme-networks-host > .mc-theme-networks-page.mc-theme-networks-shown {
     display: none !important;
@@ -1727,6 +1730,39 @@
    band whether it is drawn or not. */
 :root[data-mc-theme="on"] .mc-theme-networks-untitled > .mc-theme-networks-page .card .actions {
     display: none;
+}
+
+/* With the names hidden, a card a mouse is over shows its own: asked for, "i
+   want to see the lora name revealed in extra networks if i have names
+   hidden, but i hover over it with my cursor". A pointer that can hover
+   only: a finger's tap leaves `:hover` on what it tapped. */
+@media (hover: hover) {
+    :root[data-mc-theme="on"] .mc-theme-networks-untitled > .mc-theme-networks-page .card:hover .actions {
+        display: block;
+    }
+}
+
+/* A card whose tag is already in the prompt (`markApplied`): a slightly
+   transparent dark overlay over its picture, its name over the overlay so it
+   stays as readable as on any card. Forge's card is positioned and clips, and
+   its picture, its name and its buttons are placed in it; the overlay comes
+   after them, the name and the buttons are lifted over it. */
+:root[data-mc-theme="on"] .mc-theme-networks-page .card.mc-theme-network-applied::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    /* Gradio's darkest neutral, which is dark by day and by night. */
+    background: var(--neutral-950);
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-page .card.mc-theme-network-applied > .actions {
+    z-index: 1;
+}
+
+:root[data-mc-theme="on"] .mc-theme-networks-page .card.mc-theme-network-applied > .button-row {
+    z-index: 2;
 }
 
 /* -- Forge's popups: a card's metadata editor, as a dialog ------------------- */
@@ -2380,6 +2416,33 @@
 
 /* The state, as a button: one mark and one word, never wrapped, and what it
    cannot say is behind the tap. */
+/* Jump to latest, over the transcript's bottom edge while the reader is away
+   from the end (`paintJump` in javascript/llm_studio.js), never at it. */
+#mc-llm-studio #mc-llm-chat-transcript {
+    position: relative;
+}
+
+#mc-llm-studio .mc-llm-jump {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    z-index: 3;
+    transform: translateX(-50%);
+    padding: 0.3em 0.9em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    background: var(--background-fill-primary);
+    color: var(--body-text-color);
+    box-shadow: var(--shadow-drop-lg);
+    font: inherit;
+    font-size: 0.85em;
+    cursor: pointer;
+}
+
+#mc-llm-studio .mc-llm-jump[hidden] {
+    display: none;
+}
+
 #mc-llm-studio .mc-llm-chip-button {
     flex: 0 0 auto;
     max-width: 12em;
@@ -10045,9 +10108,29 @@
    `[hidden]` is excluded from the "not" list deliberately: something already
    hidden stays hidden, and comes back hidden. The workspace's own tab bar,
    when the script keeps it, is not chrome to take out (below), and nor is
-   what another part of the page marked to go with it. */
-body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root):not(#forge-assistant-root):not([role="dialog"]):not([aria-modal="true"]):not(.forge-assistant-focus-bar):not(.forge-assistant-focus-keep) {
+   what another part of the page marked to go with it.
+
+   Nor are Forge's own overlays, which it appends beside the workspace's
+   path and shows only when something in the workspace asks: its popup
+   (`popup()` in `.main` -- a card's details, its metadata editor, LoRA
+   Details' dialog), the picture lightbox (`#lightboxModal` in the app) and
+   Generate's right-click menu (`#context-menu`). Taken out with the chrome,
+   an extra network card could not be looked into in focus mode: asked for,
+   "I should be able to open extra networks in focus mode and be able to type
+   / search, scroll, and investigate extra networks". By attribute rather
+   than by id, so the rule's weight stays a class's. */
+body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root):not(#forge-assistant-root):not([role="dialog"]):not([aria-modal="true"]):not(.forge-assistant-focus-bar):not(.forge-assistant-focus-keep):not(.global-popup):not([id="lightboxModal"]):not([id="context-menu"]) {
     display: none !important;
+}
+
+/* Forge draws its popup and its lightbox at 1001, which is under the focused
+   workspace (`--forge-assistant-workspace-layer`, 1100). In focus mode they
+   are over it, and over the kept bar and the drawers that hang from it, as
+   they are over the page outside focus mode -- and under the assistant's
+   panel, as they are there too. */
+body.forge-assistant-focused .global-popup,
+body.forge-assistant-focused [id="lightboxModal"] {
+    z-index: calc(var(--forge-assistant-workspace-layer, 1100) + 3) !important;
 }
 
 /* The workspace's own tab bar, kept along the top of the window: the strip

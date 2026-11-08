@@ -238,6 +238,7 @@
         const gap = bottomGap(position);
         if (moved < 0 && gap > FOLLOW_END_PX) state.pinned = false;
         else if (moved > 0 && gap <= FOLLOW_END_PX) state.pinned = true;
+        paintJump(state, position);
     }
 
     // A gesture, read as it starts: any upward one undocks when there is
@@ -246,6 +247,44 @@
     function wheeled(state, position, dy) {
         if (dy < 0 && position.scrollTop > 0) state.pinned = false;
         else if (dy > 0 && bottomGap(position) <= FOLLOW_END_PX) state.pinned = true;
+        paintJump(state, position);
+    }
+
+    // Jump to latest: shown while the reader is away from the end, never at
+    // it. Asked for: "if i am scrolled away from the most recent message, i
+    // should see a option to scroll back and scroll locks to the bottom ... a
+    // button that does not appear when i am at the bottom already". Pressed,
+    // the transcript is docked again and goes to its end (`toLatest`).
+    const JUMP_CLASS = "mc-llm-jump";
+
+    function jumpWanted(state, position) {
+        return !!state && !state.pinned && bottomGap(position) > FOLLOW_END_PX;
+    }
+
+    function paintJump(state, position) {
+        const button = state && state.jump;
+        if (!button) return;
+        const hidden = !jumpWanted(state, position);
+        if (button.hidden !== hidden) button.hidden = hidden;
+    }
+
+    function toLatest(state, target) {
+        state.pinned = true;
+        target.scrollTop = target.scrollHeight;
+        state.last = target.scrollTop;
+        state.offset = target.scrollTop;
+        paintJump(state, target);
+    }
+
+    // The thread the transcript shows, read off its first message's marker,
+    // whose key is the thread and a digest of the words (`_meta` in
+    // mc_llm_chat_panel.py); null while it shows no message.
+    function threadOf(holder) {
+        const marker = holder && holder.querySelector ? holder.querySelector("." + META_CLASS) : null;
+        const key = marker && marker.getAttribute ? marker.getAttribute("data-mc-key") : null;
+        if (!key) return null;
+        const cut = key.lastIndexOf(":");
+        return cut > 0 ? key.slice(0, cut) : key;
     }
 
     // What the scroll position should be once new content has landed, or null
@@ -268,16 +307,55 @@
         return null;
     }
 
+    function jumpButton(holder) {
+        if (!holder || typeof holder.appendChild !== "function"
+            || typeof document.createElement !== "function") return null;
+        const children = holder.children || [];
+        let button = null;
+        for (let index = 0; index < children.length; index += 1) {
+            const child = children[index];
+            if (child.classList && child.classList.contains(JUMP_CLASS)) button = child;
+        }
+        if (button) return button;
+        button = document.createElement("button");
+        button.type = "button";
+        button.className = JUMP_CLASS;
+        button.textContent = "\u2193 Jump to latest";
+        button.setAttribute("aria-label", "Jump to the latest message");
+        button.hidden = true;
+        button.addEventListener("click", function () {
+            const target = scroller(holder);
+            if (target) toLatest(watch(target), target);
+            button.hidden = true;
+        });
+        holder.appendChild(button);
+        return button;
+    }
+
     function wireTranscript() {
         const holder = byId("mc-llm-chat-transcript");
         if (!holder || holder.dataset.mcLlmFollow === "1") return;
         if (typeof MutationObserver !== "function") return;
         holder.dataset.mcLlmFollow = "1";
 
-        const observer = new MutationObserver(function () {
+        // Where the transcript should be, now: on new content, on a box that
+        // changed -- the tab shown again after a reply landed while it was
+        // hidden, when nothing could scroll a box with no height, or the
+        // window resized -- and on a thread opened.
+        const anchor = function () {
             const target = scroller(holder);
             if (!target) return;
             const state = watch(target);
+            state.jump = jumpButton(holder);
+            // A thread opens at its newest message, whatever the reader did
+            // in the one before: Gradio keeps the same scroller for every
+            // thread, so a reader who had scrolled up stayed undocked in the
+            // next. Read off the first message's marker.
+            const thread = threadOf(holder);
+            if (thread && thread !== holder.mcLlmThread) {
+                if (holder.mcLlmThread !== undefined) state.pinned = true;
+                holder.mcLlmThread = thread;
+            }
             const wanted = anchorTo(state, {
                 scrollTop: target.scrollTop,
                 scrollHeight: target.scrollHeight,
@@ -289,13 +367,26 @@
             // Ours, not the reader's: the scroll event this fires changes
             // nothing.
             state.last = target.scrollTop;
-        });
+            paintJump(state, target);
+        };
+        // The jump button's own show and hide are attribute changes, which
+        // this does not hear.
+        const observer = new MutationObserver(anchor);
         observer.observe(holder, {childList: true, subtree: true, characterData: true});
+        if (typeof ResizeObserver === "function") {
+            const sized = new ResizeObserver(anchor);
+            sized.observe(holder);
+        }
 
         // Start watching now rather than at the first mutation, so the reader's
         // position is already being recorded when the first reply arrives.
         const target = scroller(holder);
-        if (target) watch(target);
+        if (target) {
+            const state = watch(target);
+            state.jump = jumpButton(holder);
+            holder.mcLlmThread = threadOf(holder);
+            paintJump(state, target);
+        }
     }
 
     // -- a row of actions in every bubble ----------------------------------- //

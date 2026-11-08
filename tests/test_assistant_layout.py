@@ -3335,3 +3335,63 @@ def test_on_a_phone_a_finger_drags_the_panel_down_past_the_bottom_without_a_boun
         assert landed == drawn, ("no bounce", drawn, landed)
     finally:
         context.close()
+
+
+TRANSCRIPT_END = """() => { const t = document.querySelector('.forge-assistant-transcript');
+    return {gap: Math.round(t.scrollHeight - t.scrollTop - t.clientHeight), height: t.clientHeight,
+            scrolls: t.scrollHeight > t.clientHeight + 1000,
+            following: forgeAssistant.shell.following,
+            jump: document.querySelector('.forge-assistant-jump').hidden}; }"""
+
+GROW = """(px) => { const t = document.querySelector('.forge-assistant-transcript');
+    // A reply's height of its own: the transcript is a flex column, and a
+    // block left to shrink would make nothing to scroll.
+    const block = document.createElement('div'); block.style.flex = '0 0 auto';
+    block.style.height = px + 'px'; block.textContent = 'reply';
+    t.appendChild(block); }"""
+
+
+def test_the_conversation_is_at_its_latest_message_whenever_it_shows(browser):
+    """"sometimes when i open conversation mode it is not at the most recent
+    message by default": a reply that lands while the conversation has no box
+    -- here behind the ⋯ menu, which takes its place -- could not be followed,
+    and the transcript came back short of it. Drawn again it is put at the
+    end while it follows. Away from it, Jump to latest shows, and takes the
+    reader back. (Opening the panel lands on the latest message too: the node
+    tests hold it, since this page's store draws its own conversation on
+    open.)"""
+    page = open_page(browser, 1600, 900)
+    try:
+        page.evaluate("""() => { const shell = forgeAssistant.shell; shell.open();
+            shell.state.conversationExpanded = true; shell.applyChat(); }""")
+        page.evaluate(GROW, 3000)
+        page.evaluate("forgeAssistant.shell.toLatest()")
+        settle(page, 4)
+        first = page.evaluate(TRANSCRIPT_END)
+        assert first["scrolls"] is True and first["gap"] <= 2, first
+
+        page.evaluate("forgeAssistant.shell.toggleMenu('utilities')")
+        settle(page, 3)
+        assert page.evaluate(TRANSCRIPT_END)["height"] == 0, "the menu has the conversation's place"
+        page.evaluate(GROW, 2000)
+        page.evaluate("forgeAssistant.shell.closeMenu()")
+        settle(page, 4)
+        back = page.evaluate(TRANSCRIPT_END)
+        assert back["height"] > 0 and back["scrolls"] is True and back["gap"] <= 2, back
+
+        # The reader scrolls up, puts the panel away and opens it again.
+        box = page.evaluate("""() => { const r = document.querySelector('.forge-assistant-transcript')
+            .getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }""")
+        page.mouse.move(*box)
+        page.mouse.wheel(0, -1500)
+        settle(page, 6)
+        page.wait_for_timeout(200)
+        away = page.evaluate(TRANSCRIPT_END)
+        assert away["following"] is False and away["gap"] > 1000 and away["jump"] is False, away
+        # Away from the end, Jump to latest shows; pressed, it is the end again.
+        page.click(".forge-assistant-jump")
+        settle(page, 4)
+        jumped = page.evaluate(TRANSCRIPT_END)
+        assert jumped["following"] is True and jumped["gap"] <= 2 and jumped["jump"] is True, jumped
+    finally:
+        page.close()

@@ -5104,3 +5104,46 @@ nothing; the buttons beside the heading and the drop-down are `flex: 0 0 auto`
 now) and the search box drawn as a text area with a resize grip (one line at
 most now, which Gradio draws as an input). A Chromium check and a build check
 hold each.
+
+## 47. Jump to latest, and a thread opened at its end (8 November 2026)
+
+> "I noticed that sometimes when i open conversation mode it is not at the
+> most recent message by default. Lets fix this. Also, if i am scrolled away
+> from the most recent message, i should see a option to scroll back and
+> scroll locks to the bottom of the page / most recent messages. I would like
+> to see this as a button that does not appear when i am at the bottom
+> already."
+
+The transcript's follow (§ on docking, `javascript/llm_studio.js`) acted only
+when content changed, and two of its gaps were the "sometimes":
+
+- **A thread opened kept the last thread's place.** Gradio keeps the one
+  scroller for every thread, so a reader who had scrolled up in one stayed
+  undocked in the next and it opened away from its end. The thread is read off
+  the first message's marker -- its `data-mc-key` is the thread and a digest
+  (`_meta` in `mc_llm_chat_panel.py`; `threadOf`) -- and a different thread docks
+  the transcript: it opens at its newest message.
+- **A reply that landed while the tab was hidden** could not be followed: a box
+  with no height has nowhere to scroll, and `scroller()` finds nothing to watch.
+  Nothing moved the transcript when the tab showed again. A `ResizeObserver` on
+  the transcript's holder now anchors again whenever its box changes -- the tab
+  shown, the window or the panel resized -- by the same decision as new content
+  (`anchorTo`): docked, the end; reading, where the reader was.
+
+**Jump to latest** (`mc-llm-jump`, made by `jumpButton` in the holder, over the
+transcript's bottom edge) shows while the reader is undocked *and* away from the
+end (`jumpWanted`): a wheel turned up at the end undocks before it scrolls, and
+one that scrolls nothing leaves the reader at the end with no button. Pressed,
+it docks the transcript and goes to the end (`toLatest`); scrolled back to the
+end by hand, it goes. Painted on every scroll, gesture and anchoring
+(`paintJump`); its own show and hide are attribute changes, which the content
+observer does not hear. A holder that cannot take a child, or a page with no
+`createElement`, has no button and follows as before.
+
+**Verified.** `tests/test_llm_studio_js.py` (`TestJumpToLatest`, a box that
+scrolls as a browser's does -- clamped, nothing while not drawn, its offset kept):
+shown away from the end and never at it, a wheel at the end showing nothing;
+pressed, at the end and followed again; a thread opened at its latest message,
+the same thread keeping the reader's place; drawn again after a reply landed
+while hidden, at the end. The anchoring tests before them pass unchanged. Eight
+mutations each fail a test. Not run on real Gradio 4.40 or on the user's machine.

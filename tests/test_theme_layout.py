@@ -92,7 +92,9 @@ body { background: var(--body-background-fill); color: var(--body-text-color); f
        --button-secondary-border-color: #2b2b2b; --button-secondary-text-color: #d9d9d9;
        --button-cancel-background-fill: #d93025; --button-cancel-text-color: #fff; --button-cancel-border-color: #d93025;
        --color-accent: #fff; --primary-500: #fff; --font-mono: monospace; --size-4: 16px; --size-8: 32px;
-       --shadow-drop-lg: none; }
+       --shadow-drop-lg: none;
+       /* Gradio 4.40's neutral palette, dark end (gradio/themes/utils/colors.py). */
+       --neutral-950: #0f0f0f; }
 .app { padding: var(--size-4) var(--size-8); font-size: var(--body-text-size); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; }
 .unequal-height { align-items: flex-start; }
@@ -4045,3 +4047,230 @@ class TestReorderingTheTabs:
         assert across == along, "a swipe across the bar reorders nothing"
         assert moved > scrolled, "and scrolls the page"
         assert state["pressed"] == []
+
+
+APPLIED = """() => [...document.querySelectorAll('#txt2img_lora_cards .card')].slice(0, 3).map((c) => {
+    const after = getComputedStyle(c, '::after');
+    return {name: c.dataset.name, applied: c.classList.contains('mc-theme-network-applied'),
+            overlay: after.content !== 'none', colour: after.backgroundColor, opacity: after.opacity,
+            band: getComputedStyle(c.querySelector('.actions')).zIndex}; })"""
+
+
+def drawer_on_lora(page):
+    page.evaluate(FORGE_WIRES)
+    page.click(".mc-theme-networks-toggle")
+    page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+    settle(page)
+
+
+def write_prompt(page, text, box="#txt2img_prompt textarea", event=True):
+    page.evaluate("""([box, text, event]) => { const area = document.querySelector(box); area.value = text;
+        if (event) area.dispatchEvent(new Event('input', {bubbles: true})); }""", [box, text, event])
+    settle(page, 3)
+
+
+class TestWhatThePromptHas:
+    """"in extra networks, i would like to see some sort of indication of
+    which are already applied in the prompt, so lets make them take a
+    slightly transparent dark overlay when that lora is already in the prompt
+    text." A card whose tag -- the type and the name its click writes -- is
+    in the Prompt (or a Literal box) is dimmed, whatever the weight, as
+    Forge's own click reads it."""
+
+    def test_a_card_whose_lora_is_in_the_prompt_is_dimmed_and_its_name_is_over_it(self, browser):
+        page = open_page(browser)
+        try:
+            drawer_on_lora(page)
+            none = page.evaluate(APPLIED)
+            write_prompt(page, "a cat, <lora:detail:0.7>")
+            typed = page.evaluate(APPLIED)
+            write_prompt(page, "a cat, <lyco:style> and <lora:detail:-0.25:0.5>")
+            both = page.evaluate(APPLIED)
+            write_prompt(page, "a cat, detail, <lora:details:1>")
+            gone = page.evaluate(APPLIED)
+        finally:
+            page.close()
+
+        assert [card["applied"] for card in none] == [False, False]
+        detail, style = typed
+        assert detail["applied"] is True and detail["overlay"] is True, detail
+        assert detail["colour"] == "rgb(15, 15, 15)" and detail["opacity"] == "0.45", detail
+        assert detail["band"] == "1", "the name is over the overlay"
+        assert style["applied"] is False and style["overlay"] is False
+        assert [card["applied"] for card in both] == [True, True], "<lyco:...> is a LoRA, any weight"
+        assert [card["applied"] for card in gone] == [False, False], "a word or a longer name is not the tag"
+
+    def test_a_card_pressed_is_marked_and_another_tabs_prompt_marks_nothing_here(self, browser):
+        page = open_page(browser)
+        try:
+            drawer_on_lora(page)
+            write_prompt(page, "<lora:detail:1>", box="#img2img_prompt textarea")
+            other = page.evaluate(APPLIED)
+            page.click("#txt2img_lora_cards .card[data-name='style']")
+            settle(page, 3)
+            pressed = page.evaluate(APPLIED)
+        finally:
+            page.close()
+
+        assert [card["applied"] for card in other] == [False, False]
+        assert [card["applied"] for card in pressed] == [False, True]
+
+    def test_a_prompt_the_page_wrote_is_read_at_the_next_update(self, browser):
+        """A picture's settings pasted, a style applied: the page writes the
+        box with no typing, and the marks follow at Forge's next update."""
+        page = open_page(browser)
+        try:
+            drawer_on_lora(page)
+            write_prompt(page, "<lora:style:1>", event=False)
+            before = page.evaluate(APPLIED)
+            page.evaluate("hooks.after.forEach((fn) => fn())")
+            settle(page, 3)
+            after = page.evaluate(APPLIED)
+        finally:
+            page.close()
+
+        assert [card["applied"] for card in before] == [False, False]
+        assert [card["applied"] for card in after] == [False, True]
+
+    def test_a_prompt_changed_while_the_drawer_was_shut_is_read_when_it_opens(self, browser):
+        page = open_page(browser)
+        try:
+            drawer_on_lora(page)
+            page.click(".mc-theme-networks-toggle")
+            settle(page)
+            write_prompt(page, "<lora:detail:1>")
+            page.click(".mc-theme-networks-toggle")
+            settle(page, 3)
+            found = page.evaluate(APPLIED)
+        finally:
+            page.close()
+
+        assert [card["applied"] for card in found] == [True, False]
+
+    def test_a_literal_box_counts_as_the_lora_viewer_counts_it(self, browser):
+        page = open_page(browser)
+        try:
+            drawer_on_lora(page)
+            page.evaluate("""() => { const block = document.createElement('div');
+                block.id = 'mc-krea-creative-literal-positive';
+                block.appendChild(document.createElement('textarea'));
+                document.getElementById('tab_txt2img').appendChild(block); }""")
+            write_prompt(page, "<lora:detail:0.6>", box="#mc-krea-creative-literal-positive textarea")
+            found = page.evaluate(APPLIED)
+        finally:
+            page.close()
+
+        assert [card["applied"] for card in found] == [True, False]
+
+
+class TestNamesOnHover:
+    """"i want to see the lora name revealed in extra networks if i have names
+    hidden, but i hover over it with my cursor"."""
+
+    def test_with_the_names_hidden_the_card_under_the_mouse_shows_its_own(self, browser):
+        page = open_page(browser)
+        names = """() => [...document.querySelectorAll('#txt2img_lora_cards .card')].slice(0, 2)
+            .map((c) => getComputedStyle(c.querySelector('.actions')).display)"""
+        try:
+            drawer_on_lora(page)
+            page.click("#mc-theme-networks-txt2img .mc-theme-networks-titles")
+            settle(page, 3)
+            hidden = page.evaluate(names)
+            page.hover("#txt2img_lora_cards .card[data-name='style']")
+            hovered = page.evaluate(names)
+            page.mouse.move(2, 2)
+            left = page.evaluate(names)
+        finally:
+            page.close()
+
+        assert hidden == ["none", "none"]
+        assert hovered == ["none", "block"]
+        assert left == ["none", "none"]
+
+    def test_a_finger_reveals_nothing(self, browser):
+        """A tap leaves `:hover` on what it tapped: only a pointer that can
+        hover reveals a name. A phone's browser says it cannot."""
+        context = browser.new_context(viewport={"width": 1600, "height": 900}, is_mobile=True, has_touch=True)
+        page = open_page(browser, context=context)
+        try:
+            drawer_on_lora(page)
+            page.click("#mc-theme-networks-txt2img .mc-theme-networks-titles")
+            settle(page, 3)
+            hovers = page.evaluate("matchMedia('(hover: hover)').matches")
+            page.hover("#txt2img_lora_cards .card[data-name='style']")
+            shown = page.evaluate("""() => getComputedStyle(document.querySelector(
+                "#txt2img_lora_cards .card[data-name='style'] .actions")).display""")
+        finally:
+            context.close()
+
+        assert hovers is False
+        assert shown == "none"
+
+
+class TestExtraNetworksInFocusMode:
+    """"Extra networks view does not work correctly in focus ... I should be
+    able to open extra networks in focus mode and be able to type / search,
+    scroll, and investigate extra networks... everything should work like
+    normal"."""
+
+    OVERLAYS = """() => { const q = (s) => document.querySelector(s);
+        const drawn = (el) => !!el && getComputedStyle(el).display !== 'none' && el.getClientRects().length > 0;
+        const inner = q('.global-popup-inner').getBoundingClientRect();
+        const hit = document.elementFromPoint(inner.left + inner.width / 2, inner.top + 20);
+        const root = q('.forge-assistant-focus-root');
+        return {popup: drawn(q('.global-popup')), onTop: q('.global-popup-inner').contains(hit),
+                above: Number(getComputedStyle(q('.global-popup')).zIndex) > Number(getComputedStyle(root).zIndex),
+                lightbox: drawn(q('#lightboxModal')), menu: drawn(q('#context-menu'))}; }"""
+
+    def test_forges_own_overlays_show_over_the_focused_workspace(self, browser):
+        """A card's details, its metadata editor and LoRA Details' dialog are
+        Forge's popup, beside the workspace's path, which focus mode took out
+        with the page's chrome; the picture lightbox and Generate's
+        right-click menu were taken with it."""
+        page = open_page(browser, dict(ICONS), width=1280, height=800, assistant=USER_CSS_WHOLE, popup=True)
+        try:
+            page.evaluate("""() => { const app = document.querySelector('gradio-app');
+                const box = document.createElement('div'); box.id = 'lightboxModal';
+                // Not hit: the popup is asked about under it.
+                box.style.cssText = 'display: flex; position: fixed; z-index: 1001; inset: 0; pointer-events: none';
+                const menu = document.createElement('nav'); menu.id = 'context-menu';
+                menu.style.cssText = 'display: block; position: absolute; z-index: 10000; left: 40px; top: 40px';
+                menu.textContent = 'Generate forever';
+                app.appendChild(box); app.appendChild(menu); }""")
+            settle(page, 4)
+            enter_focus(page, "tab_txt2img")
+            found = page.evaluate(self.OVERLAYS)
+        finally:
+            page.close()
+
+        assert found == {"popup": True, "onTop": True, "above": True, "lightbox": True, "menu": True}
+
+    def test_a_drawer_opened_from_the_peeking_bar_stays_while_it_is_open(self, browser):
+        """With the bar hidden in focus mode the drawer is shown only while the
+        bar is, and it went with the moment, under a hand searching in it. An
+        open drawer holds the bar; closed, the moment ends as ever."""
+        state = """() => { const head = document.getElementById('mc-theme-networks-txt2img');
+            return {mode: document.body.getAttribute('data-forge-assistant-focus-bar'),
+                    drawn: !!head && head.getClientRects().length > 0,
+                    held: forgeAssistant.shell.peekHeld()}; }"""
+        page = focus_page(browser)
+        try:
+            page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+            enter_focus(page, "tab_txt2img")
+            page.evaluate("forgeAssistant.shell.peekBar()")
+            settle(page, 4)
+            page.click(".mc-theme-networks-toggle")
+            page.click("[data-mc-theme-tab='txt2img'][data-mc-theme-page='txt2img_lora']")
+            page.mouse.move(5, 790)
+            page.wait_for_timeout(4600)
+            kept = page.evaluate(state)
+            page.fill("#txt2img_lora_extra_search", "det")
+            page.click(".mc-theme-networks-toggle")
+            page.mouse.move(5, 790)
+            settle(page, 4)
+            closed = page.evaluate(state)
+        finally:
+            page.close()
+
+        assert kept == {"mode": "peek", "drawn": True, "held": True}, kept
+        assert closed["drawn"] is False and closed["held"] is False, closed

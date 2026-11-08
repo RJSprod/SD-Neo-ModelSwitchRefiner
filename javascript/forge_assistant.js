@@ -2716,6 +2716,16 @@
             nodes.jump.hidden = true;
         });
         this.on(nodes.transcript, "scroll", () => this.scrolledTranscript());
+        // The transcript drawn again after a time with no box -- the panel
+        // put away, the conversation folded, a menu or the docked settings in
+        // its place. A reply that landed meanwhile could not be followed (a
+        // box with no height has nowhere to scroll), so the place is put right
+        // as it shows. See `transcriptShown`.
+        if (typeof ResizeObserver === "function" && nodes.transcript) {
+            const shown = new ResizeObserver(() => this.transcriptShown());
+            shown.observe(nodes.transcript);
+            this.disposers.push(() => shown.disconnect());
+        }
         // Leaving the end is read from the gesture, not from where it left the
         // transcript. See `leaveBottom`. Passive: nothing here prevents a scroll.
         this.on(nodes.transcript, "wheel", (event) => this.wheelTranscript(event),
@@ -3611,6 +3621,11 @@
 
     Shell.prototype.open = function () {
         this.showOpen(true);
+        // The conversation opens at its latest message: asked for, "sometimes
+        // when i open conversation mode it is not at the most recent message
+        // by default. Lets fix this." A reader who had scrolled up before it
+        // was put away comes back to the end; Jump to latest is for the rest.
+        this.toLatest();
         // One of the moments the panel looks, because nothing is pushed to it
         // while no reply is on its way. See `Store.check`.
         this.store.check();
@@ -3788,11 +3803,15 @@
             this.state.conversationExpanded = true;
             this.applyChat();
             this._save();
+            this.toLatest();
             return;
         }
         this.state.conversationExpanded = menuUp ? true : !this.state.conversationExpanded;
         this.applyChat();          // which places the panel for its new size
         this._save();
+        // Chat showing the conversation shows it at its latest message, as
+        // opening the panel does.
+        if (this.state.conversationExpanded) this.toLatest();
     };
 
     /** A click on the panel that began as a press on the header's own space
@@ -4355,13 +4374,20 @@
      *  on what it tapped and focus on the button it pressed, and either would
      *  hold the bar for good: so hover counts for a mouse alone, and focus
      *  only where the browser draws it (`:focus-visible`: the keyboard's, or a
-     *  text box being typed in). */
+     *  text box being typed in). And a drawer that goes with the bar, open --
+     *  the theme's quick settings, its extra networks -- holds it for as long
+     *  as it is drawn: the drawer is shown only while the bar is, and one
+     *  opened from a peek went with the moment, under a hand searching or
+     *  scrolling in it. Asked for: "I should be able to open extra networks
+     *  in focus mode and be able to type / search, scroll, and investigate". */
     Shell.prototype.peekHeld = function () {
         // The launcher or the panel being dragged: the moment starts again
         // from the release.
         if (this.drag && this.drag.moved) return true;
-        const nodes = [this.focus.keptBar()].concat(
-            Array.prototype.slice.call(document.querySelectorAll("." + FOCUS_KEEP_CLASS)));
+        const kept = Array.prototype.slice.call(document.querySelectorAll("." + FOCUS_KEEP_CLASS));
+        if (kept.some((node) => typeof node.getClientRects === "function"
+                      && node.getClientRects().length > 0)) return true;
+        const nodes = [this.focus.keptBar()].concat(kept);
         const active = document.activeElement;
         const matches = (node, selector) => {
             try {
@@ -6906,6 +6932,30 @@
     // latest message, whatever the box did.
     Shell.prototype.pin = function (following) {
         if (following) this.toBottom();
+    };
+
+    /** Follow the latest message again, and go to it. */
+    Shell.prototype.toLatest = function () {
+        this.following = true;
+        this.toBottom();
+        if (this.nodes && this.nodes.jump) this.nodes.jump.hidden = true;
+    };
+
+    /** The transcript has a box again after it had none: following, at the
+     *  end; reading, where the reader was. */
+    Shell.prototype.transcriptShown = function () {
+        const transcript = this.nodes && this.nodes.transcript;
+        if (!transcript) return;
+        const shown = transcript.clientHeight > 0;
+        const was = this.transcriptDrawn;
+        this.transcriptDrawn = shown;
+        if (!shown || was) return;
+        if (this.following) {
+            this.toBottom();
+        } else if (typeof this.lastScrollTop === "number" && transcript.scrollTop !== this.lastScrollTop) {
+            transcript.scrollTop = this.lastScrollTop;
+        }
+        this.showJumpNow();
     };
 
     Shell.prototype.showJump = function (view) {
