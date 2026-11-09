@@ -102,8 +102,7 @@ RUN_STATE = chat.STREAM_ORDER.index("run_state")
 
 def run_reply(store, monkeypatch, **kwargs):
     _chats, conversation = thread(store, monkeypatch, **kwargs)
-    return list(chat._send("Ada", conversation.identifier, "hello love",
-                           None, None, None, None, None))
+    return list(chat._send("Ada", conversation.identifier, "hello love", None))
 
 
 class TestTheTurnReachesTheBrowser:

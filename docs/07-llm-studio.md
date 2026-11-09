@@ -5147,3 +5147,149 @@ pressed, at the end and followed again; a thread opened at its latest message,
 the same thread keeping the reader's place; drawn again after a reply landed
 while hidden, at the end. The anchoring tests before them pass unchanged. Eight
 mutations each fail a test. Not run on real Gradio 4.40 or on the user's machine.
+
+## 48. Each thread's generation settings, more of them, and the thread lists folded (9 November 2026)
+
+> "It seems for LLM studio that my generation settings (like temperature) are
+> not being kept. I have to keep setting them again when i return to the
+> conversation. These should be kept per conversation. I would also like more
+> controls there, surfaced to the interface. Im not able to get random enough
+> output, and infact, i get a lot of repetition. Lets surface controls that can
+> help with that. Last thing, the favroite threads needs to be collapsed on
+> open. Right now, the conversation button opens a menu that has a list of
+> threads, and i dont want that at the top level, i should have to open up a
+> menu to see those thread and choose what to apply."
+
+**What there was.** Four controls in the pop-up's Generation section --
+Temperature, Top-p, Reply tokens, Seed -- that were the *character's*: the same
+components as the character editor's sampling, written to the character's file
+by `_remember_sampling` whenever one moved, and loaded from it only by a change
+of character (`_select_character`). Gradio draws a component at the value it
+was built with, and Forge builds the page once, so every page loaded later
+showed the package's defaults -- and the tab sent what it showed with every
+reply (`_settings` in the payload, which the service let override the
+character's). A reload put every reply back at 0.85 while the choice sat in the
+file. Worse for the second complaint: a seed typed once stayed in the file while
+the box showed -1 again, and a request's -1 meant "no preference", which
+`_capture` answered with the file's seed -- every Regenerate the same reply.
+
+**What is built.** `mc_llm_generation.py`:
+
+- **Each thread's choices**, by character and thread, in `generation.json`
+  beside `emotions.json` and `start_with.json` -- not in the conversation's
+  file, for the emotion's reason (a write there is a revision). Sparse: only
+  what the thread chose (`choose`, `for_thread`); `None` forgets one;
+  `reset`; a value out of range held at its end as llama-server's soft limits
+  hold one (`value_of`); `carry` for a branch (`_branch_from`) -- the same
+  conversation carried on; `forget` on delete. A new thread has none.
+- **The defaults** (`base`): the package's own for the four (a blank
+  `Character`'s: 0.85, 0.95, 512 tokens, a new seed each reply) -- never the
+  four in a character's file -- and for the rest llama-server's own order: its
+  built-in default (b10621's `common_params_sampling`), the model file's
+  recommendation (`general.sampling.*`, read with `mc_gguf.describe`;
+  llama-server's `common_init_sampler_from_model` makes it the default of every
+  request that does not say, and this extension sets no sampling flag that
+  would stop it), then the managed profile's fields (`sampler_arguments`, sent
+  with every request). That is what an untouched control shows.
+- **Every request reads them where it is built** (`mc_llm_conversation_ops._capture`):
+  the four from the thread's choice, else the package's default, under what a
+  request names for itself (`settings`, which the external API can still send,
+  its allowed names now every `KEYS`); the rest only as chosen
+  (`request_fields` -> `ChatRequest.sampling`). A thread's -1 is a choice and
+  draws a seed; a request's -1 still says nothing. The conversation read again
+  after a change of emotion (`_thread_request`) budgets its window with the
+  same reply tokens (`_reply_tokens`), where it used the character's. The tab sends no settings at
+  all now (`_send`, `_regenerate`, `_continue`, `_resend` and their row
+  handlers lost the four arguments), so a page drawn before a change cannot
+  send the old values; the Forge Assistant's panel never sent any.
+- **On the wire** a thread's fields go after the profile's, so its choice of
+  top-k wins over the catalogue's: `REQUEST_SAMPLER_FIELDS` and
+  `request_sampling` in the vendored `llama_client` (a whitelist, as the
+  profile's is) and `request_body` in `mc_llm_slot_cache`. `mc_llm_sessions`
+  passes `sampling=` to the client only when there is some, as it passes
+  `save=`, so a client or a test double from before the keyword is called as it
+  always was.
+
+**The controls** are what b10621 reads from a request
+(`tools/server/server-schema.cpp`) that bear on variety and repetition, in
+three groups drawn two to a row: Temperature, Dynamic temperature, Min-p,
+Top-p, XTC and its threshold, Top-k; Repeat penalty, Penalty range, Presence
+and Frequency penalty, DRY, DRY range, DRY base, DRY allowed length; Reply
+tokens and Seed. Read from llama-server's source, two facts decided the ranges:
+the server gives the repetition samplers every token of the prompt
+(`server-context.cpp`, `init_sampler`), but each looks back only as far as its
+range, **64 tokens** by default -- less than one reply, so a phrase repeated
+from an earlier reply was never penalised -- and both ranges are refused below
+zero (`set_hard_limits`, no -1 for "the whole context"), so their sliders run
+from 0 (off) to 4096 and 8192. Left out: Mirostat (it replaces the rest of the
+chain), adaptive-p (it acts only when named in a request's `samplers`),
+typical-p and top-nσ.
+
+**In the pop-up** (`mc_llm_chat_panel.py`): the section is built from
+`mc_llm_generation.SETTINGS` (`_generation_control`), every control out of
+Forge's `ui-config.json` as the seed box is (`do_not_save_to_config`: the host
+writes a labelled control's stored value and a slider's range back over what is
+built, and these share labels with the tab's other panels). Each control keeps
+what it says for the open thread on `input` and again on `release`
+(`_generation_chosen`), so the value kept is the last whichever request lands
+last; the section is drawn from what is kept as the pop-up opens, after another
+character is chosen and after a delete (`_generation_view`); its label says what
+the thread chose (`label`: *Generation · Temperature 1.1 · DRY 0.8 · +2*);
+**Reset to defaults** forgets them (`_generation_reset`). The character editor
+no longer carries the four, and **Save character** leaves the character's file
+as it has them.
+
+**The thread lists folded.** Favourites and Threads are folded sections
+(`favourites-section`, `threads-section`), folded again every time the pop-up
+opens by a handler of their own on the same press (`_thread_lists_folded`) --
+`gr.update(open=False)` folds an accordion the user opened, because Gradio
+compares it with the component's current value, which the click changed.
+Favourites' label counts them and the section is there only once one is
+starred (`_favourites_section`, after a star and after a delete). **+ New
+thread** moved to the pop-up's head, beside ‹ Back, so starting a thread is
+still one tap.
+
+**Found on the way.** On a phone the sliders' labels scrolled *over* the
+pop-up's sticky head: Gradio 4.40 draws every labelled control's title at
+`--layer-4` (`BlockTitle.svelte`, `position: relative; z-index:
+var(--layer-4)`), and the head sat at 2 -- true of the old Seed box too, hidden
+until there were sixteen labels. Sheet heads are one layer above it now.
+
+**Verified.** `tests/test_llm_generation.py` (the table against the client's
+whitelist and llama-server's limits and defaults; what a thread keeps; `base`
+with a stand-in model file and profile; every way of asking in a thread, the
+tab's Send, a request's own settings, the seed; the client asked only when there
+is something; new threads, branches, deletes); `tests/test_llm_slot_cache.py`
+(both clients' bodies: the thread's fields after the profile's, nothing off the
+whitelist); `tests/test_llm_panels.py` (`TestTheGenerationSection`,
+`TestTheThreadListsAreFolded`, and the `_remember_sampling` tests translated to
+the thread: a control kept and drawn back, the character left alone, Save
+keeping its sampling, nothing kept without a thread, a thread's random seed);
+`tests/test_assistant_v3_js.py` (New chat names no thread);
+`tests/test_llm_studio_conversation_css.py` (+ New thread on one line on the
+head, a Gradio title scrolled under the head staying under it). **On real Gradio
+4.40.0 in Chromium** (`tests/live/llm_studio_conversation_live.py`): both lists
+folded as the pop-up opens and folded again after Threads was opened, + New
+thread on the head, sixteen sliders, a DRY value typed kept with the thread and
+the section relabelled, a value changed behind the page drawn on the next open,
+another thread showing its own, + New thread from a tuned thread at the
+defaults, and the tuned thread's value there again after the page was loaded
+again. Fifty-eight mutations each fail a test (two survived a first pass: one
+changed nothing and was replaced; the other found the redraw after another
+character was chosen untested, which a test now holds). Not run against a real
+llama-server or on the user's machine.
+
+**Then, the same day: the defaults until a thread changes one.**
+
+> "It should be default until I override for a thread. And then kept for that
+> thread through sessions"
+
+The first build started a new thread with the settings of the one it was made
+from (`like` on `create_thread`, sent by the tab's + New thread and by the
+panel's New chat) and took an untouched setting's four from the character's
+file. Both went: a new thread starts at the defaults (the service no longer
+understands `like`, and neither view sends it), and the four's default is the
+package's -- the file's were written by the old sliders, whatever they showed,
+a typed seed among them, and nothing shows them any more. A branch still
+carries its thread's, being the same conversation. Ten of the fifty-eight
+mutations are this round's.

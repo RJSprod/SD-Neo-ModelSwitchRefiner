@@ -3724,19 +3724,24 @@ reads, top to bottom:
 
 | | |
 | --- | --- |
-| **Favourites** | Every thread you have starred, whoever it is with, most recently used first, each with the character's name beside it. One tap opens it — switching character if it is another's — and the pop-up goes. Not shown until a thread is starred. |
+| **+ New thread** | On the pop-up's head, beside ‹ Back: a new thread with the character you are talking to, at the default generation settings. |
+| **Favourites · 3** | Folded, its label counts them. Open, every thread you have starred, whoever it is with, most recently used first, each with the character's name beside it. One tap opens it — switching character if it is another's — and the pop-up goes. Not shown until a thread is starred. |
 | **Talking to** · **+ New** | Who you are talking to, from your characters, and a new one. Choosing another opens its newest thread. + New opens the character editor here, under the drop-down. |
-| **Threads** · **+ New thread** | That character's threads, starred first, then the rest, most recently used first; a box finds one by its title. Tap a thread to open it. **Tap its star** (☆) to keep it at the top and in Favourites; tap the filled star again to let it go. |
+| **Threads** | Folded. Open, that character's threads, starred first, then the rest, most recently used first; a box finds one by its title. Tap a thread to open it. **Tap its star** (☆) to keep it at the top and in Favourites; tap the filled star again to let it go. |
 | **Emotion · …** | Folded, its label says the emotion on (*Emotion · Off* without one). Open, the list and the way it steers — *A thread's emotion*, below. |
 | **Start the next reply with · …** | Folded, its label says the words kept. Open, the box with **Clear** and **Set** — *Start reply with*, below. |
-| **Generation** | Temperature, top-p, reply tokens and the seed — *Characters*, below. |
+| **Generation · …** | Folded, its label says what this thread chose (*Generation · Temperature 1.1 · DRY 0.8*; *Generation* when it chose nothing). Open, every sampling control, kept with the thread — *Generation settings*, below. |
 | **Voice** | What is installed and the two switches — *Voice Chat*, below. |
 | **Character** | **Edit**, **↻ Refresh** (re-reads the characters folder), **⤢ System prompt** (the full-page editor, below), **Import a character card**, and **Delete this character**. |
 | **This thread** | **Rename this thread**, and **Delete this thread**. |
 | **You** | Your name, picture and *About you*, with **Save**. |
 
-The sections stay folded until you open one, so the pop-up opens on the lists;
-each is drawn again from what is saved every time the pop-up opens.
+Every section is folded until you open one, and **Favourites** and
+**Threads** are folded again every time the pop-up opens: a list is opened when
+there is something to choose from it (since 2026-11-09: "the favorite threads
+needs to be collapsed on open ... i dont want that at the top level, i should
+have to open up a menu to see those thread"). Each part is drawn again from
+what is saved every time the pop-up opens.
 
 ### Characters
 
@@ -3750,15 +3755,15 @@ wherever you pressed), grouped in the order a character is written:
 | **Context** | Who the character is; shown to the model before the first line. |
 | **System prompt** | *In force* is the prompt the model is actually given, composed as it will be sent, and it follows the boxes as you type. **Copy into override** puts it in the override box, where it becomes the character's own; empty the box again and the character goes back to the built prompt. It never overwrites an override already written. |
 | **Voice** | Which voice reads the character aloud, and its own delivery if it has one. |
-| **Save character** / **Cancel** | Save creates when the editor is on a new character and edits when it is on an existing one; creating over a name already taken is refused. Changing the name renames, picture included. Cancel puts everything back, the Generation settings too. |
+| **Save character** / **Cancel** | Save creates when the editor is on a new character and edits when it is on an existing one; creating over a name already taken is refused. Changing the name renames, picture included. Cancel puts everything back. |
 
-The pop-up's **Generation** section holds temperature, top-p, reply tokens
-and the seed. They are saved with the character and in force while you talk to
-one — moving one while the editor is shut is remembered on that character —
-and −1 is a new seed for every reply. In the **Character** section, **Import a
-character card** takes a `.yaml`, `.json`, or a `.png` V2/V3 card with its JSON
-inside, and **Delete this character** removes it and its picture and lands you
-on whichever is left.
+A reply is sampled at its thread's own settings, or the defaults —
+*Generation settings*, below. The temperature, top-p, reply tokens and seed a
+character's file may still hold (the old sliders wrote them there; an imported
+card can bring them) are not used, and **Save character** leaves them in the
+file as they are. In the **Character** section, **Import a character card** takes a `.yaml`,
+`.json`, or a `.png` V2/V3 card with its JSON inside, and **Delete this
+character** removes it and its picture and lands you on whichever is left.
 
 #### The system prompt editor
 
@@ -3818,6 +3823,71 @@ The same change fixed a phantom in the list: deleting a thread writes a small
 record beside the chats, and every character a thread had been deleted from
 listed an extra *New chat* that was that record. The folder's own files are never
 listed now.
+
+### Generation settings
+
+How a thread's replies are sampled is **kept with the thread** (since
+2026-11-09: "my generation settings (like temperature) are not being kept. I
+have to keep setting them again when i return to the conversation. These should
+be kept per conversation"). Until then the four controls there were saved on
+the character but drawn at the package's defaults whenever Forge built the
+page, and the tab sent what it drew with every reply — so after a reload the
+reply went out at the defaults while your choice sat in the file; and a seed
+typed once stayed in the file while the box showed −1, so every Regenerate
+came back the same.
+
+Every thread is at the **defaults** until you change something in it, and
+what you change is kept for that thread, across sessions (the same day: "It
+should be default until I override for a thread. And then kept for that thread
+through sessions"). Open **Conversation → Generation**: each control is written
+for the open thread the moment it moves, and the section is drawn from what the
+thread keeps every time the pop-up opens. Every reply in the thread — Send,
+Regenerate, Continue, Send again, from LLM Studio or the Forge Assistant's
+panel — is made from it. The defaults are LLM Studio's own for temperature
+(0.85), top-p (0.95), reply tokens (512) and the seed (a new one each reply) —
+never what a character's file holds — and for the rest what llama-server uses:
+the managed model's profile, else the model file's own recommendation, else
+llama-server's default. That is what an untouched control shows, and only what
+a thread changed is sent beyond those four.
+
+| Variety | |
+| --- | --- |
+| **Temperature** | Higher is more varied. |
+| **Dynamic temperature** | 0 is off. The temperature moves this much either way, higher where the model is unsure of the next word. |
+| **Min-p** | 0 is off. Drops words far less likely than the likeliest; it keeps a high temperature coherent. |
+| **Top-p** | 1 is off. |
+| **XTC** · **XTC threshold** | 0 is off. How often the likeliest words are taken out of the running when others are likely too (above the threshold), so the model reaches past its stock phrases. |
+| **Top-k** | 0 is off. |
+
+| Repetition | |
+| --- | --- |
+| **Repeat penalty** | 1 is off. |
+| **Penalty range** | How many tokens back the repeat, presence and frequency penalties look; 0 turns them off. |
+| **Presence penalty** · **Frequency penalty** | 0 is off. |
+| **DRY** | 0 is off; 0.8 is a usual start. Penalises carrying on a run of words already written, more the longer the run. |
+| **DRY range** | How many tokens back DRY looks; 0 turns it off. |
+| **DRY base** · **DRY allowed length** | How fast DRY's penalty grows with the run, and how many tokens may repeat before it starts. |
+
+**Length and seed**: **Reply tokens**, and the **Seed** (−1 is a new seed for
+every reply; a seed of your own repeats a reply exactly).
+
+For replies that repeat themselves from one to the next, the ranges matter as
+much as the strengths: llama-server reads the whole conversation into the
+penalties and DRY, but looks back only **64 tokens** unless told otherwise —
+less than one reply — so a phrase repeated from an earlier reply goes
+unpenalised until **DRY range** (or **Penalty range**) is raised, to 2048 say.
+**DRY** at 0.8 with a range like that is the usual cure; **XTC** at 0.5 with
+its threshold at 0.1, and **Min-p** at 0.05 to 0.1 with **Temperature** at 1.0
+to 1.2, give more varied wording.
+
+**Reset to defaults** forgets the thread's changes. A new thread — **+ New
+thread**, or the Forge Assistant's **New chat** — starts at the defaults,
+whichever thread you were in; a branch (Regenerate or Send again in the middle
+of a thread, **Branch from here**) keeps its thread's, being the same
+conversation carried on; deleting a thread forgets them.
+They are kept beside the threads (`generation.json` in the LLM data folder),
+not in the conversation's own file, so changing one never makes the other
+window's next message stale.
 
 ### Conversation, per message
 

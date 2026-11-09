@@ -166,6 +166,11 @@ LISTED = """(id) => [...document.querySelectorAll('#' + id + ' .mc-llm-thread-op
 LABEL = """(id) => { const box = document.querySelector('#' + id);
     const label = box && box.querySelector('.label-wrap span, button span');
     return label ? label.textContent.trim() : null; }"""
+# Whether each list is drawn but folded away: in the page, with no box on screen.
+FOLDED = """(ids) => ids.map((id) => { const list = document.querySelector('#' + id);
+    return !!list && list.getClientRects().length === 0; })"""
+DRY = "#mc-llm-chat-generation-dry-multiplier input[type=number]"
+VALUE = "(selector) => { const box = document.querySelector(selector); return box ? box.value : null; }"
 
 
 def main() -> int:
@@ -202,6 +207,15 @@ def main() -> int:
             page.wait_for_function("document.querySelectorAll('#mc-llm-chat-threads .mc-llm-thread-open').length === 3",
                                    timeout=10000)
             found["opened"] = {
+                "folded": page.evaluate(FOLDED, ["mc-llm-chat-favourites", "mc-llm-chat-threads"]),
+                "favourites_label": page.evaluate(LABEL, "mc-llm-chat-favourites-section"),
+                "threads_label": page.evaluate(LABEL, "mc-llm-chat-threads-section"),
+                "new_thread_on_top": page.evaluate("""() => { const button = document.querySelector(
+                    '#mc-llm-chat-new-thread');
+                    return !!button && !!button.closest('.mc-llm-conversation-head')
+                        && button.getClientRects().length > 0; }"""),
+                "generation_controls": page.evaluate("""() => document.querySelectorAll(
+                    '#mc-llm-chat-generation input[type=range]').length"""),
                 "favourites": page.evaluate(LISTED, "mc-llm-chat-favourites"),
                 "threads": page.evaluate(LISTED, "mc-llm-chat-threads"),
                 "emotion_label": page.evaluate(LABEL, "mc-llm-chat-emotion"),
@@ -210,12 +224,17 @@ def main() -> int:
                     'thread', 'persona'].map((id) => !!document.querySelector('#mc-llm-chat-' + id))"""),
             }
 
-            # Star Ada's "harbour at night": the star fills, it goes first, and
-            # Favourites gains it beside Bob's.
+            # Star Ada's "harbour at night" -- its list opened first: the star
+            # fills, it goes first, and Favourites gains it beside Bob's.
+            page.click("#mc-llm-chat-threads-section .label-wrap")
             page.click("#mc-llm-chat-threads .mc-llm-thread-row:has-text('harbour at night') .mc-llm-thread-star")
             page.wait_for_function("""() => [...document.querySelectorAll('#mc-llm-chat-favourites .mc-llm-thread-open')]
                 .length === 2""", timeout=10000)
+            page.wait_for_function("""() => { const l = document.querySelector(
+                '#mc-llm-chat-favourites-section .label-wrap span');
+                return l && l.textContent.trim() === 'Favourites · 2'; }""", timeout=10000)
             found["starred"] = {
+                "favourites_label": page.evaluate(LABEL, "mc-llm-chat-favourites-section"),
                 "favourites": page.evaluate(LISTED, "mc-llm-chat-favourites"),
                 "threads": page.evaluate(LISTED, "mc-llm-chat-threads"),
                 "still_open": page.evaluate(OPEN),
@@ -236,6 +255,85 @@ def main() -> int:
                     '#mc-llm-chat-title .mc-llm-heading').getAttribute('data-emotion')"""),
             }
 
+            # A generation setting, moved in the thread open ("the last train"):
+            # kept with that thread on the server, the section relabelled.
+            page.click("#mc-llm-chat-generation .label-wrap")
+            page.wait_for_selector(DRY, state="visible", timeout=10000)
+            page.fill(DRY, "0.8")
+            page.locator(DRY).blur()
+            page.wait_for_function("""() => { const l = document.querySelector('#mc-llm-chat-generation .label-wrap span');
+                return l && l.textContent.trim() === 'Generation · DRY 0.8'; }""", timeout=10000)
+            page.wait_for_timeout(400)      # the release after the last input
+            import mc_llm_generation
+
+            found["generation"] = {
+                "label": page.evaluate(LABEL, "mc-llm-chat-generation"),
+                "kept": mc_llm_generation.for_thread("Ada", made["the last train"]),
+            }
+
+            # Back, and the pop-up again: the lists folded again though Threads
+            # was left open, and the setting drawn from what is kept -- changed
+            # meanwhile behind the page, as another window would change it.
+            page.click("#mc-llm-chat-conversation .mc-llm-sheet-back")
+            page.wait_for_function("() => !(" + OPEN + ")()", timeout=10000)
+            mc_llm_generation.choose("Ada", made["the last train"], "dry_multiplier", 1.25)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_function("(selector) => document.querySelector(selector).value === '1.25'",
+                                   arg=DRY, timeout=10000)
+            found["reopened"] = {
+                "folded": page.evaluate(FOLDED, ["mc-llm-chat-favourites", "mc-llm-chat-threads"]),
+                "dry": page.evaluate(VALUE, DRY),
+                "label": page.evaluate(LABEL, "mc-llm-chat-generation"),
+            }
+
+            # Another of Ada's threads: its own settings, which are none.
+            page.click("#mc-llm-chat-threads-section .label-wrap")
+            page.click("#mc-llm-chat-threads .mc-llm-thread-row:has-text('a desert road') .mc-llm-thread-open")
+            page.wait_for_function("() => document.querySelector('#mc-llm-chat-title .mc-llm-heading')"
+                                   ".textContent.includes('a desert road')", timeout=15000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_function("""() => { const l = document.querySelector('#mc-llm-chat-generation .label-wrap span');
+                return l && l.textContent.trim() === 'Generation'; }""", timeout=10000)
+            found["other_thread"] = {"dry": page.evaluate(VALUE, DRY),
+                                     "label": page.evaluate(LABEL, "mc-llm-chat-generation")}
+
+            # "It should be default until I override for a thread": + New thread
+            # pressed in the tuned thread starts at the defaults ...
+            page.click("#mc-llm-chat-threads-section .label-wrap")
+            page.click("#mc-llm-chat-threads .mc-llm-thread-row:has-text('the last train') .mc-llm-thread-open")
+            page.wait_for_function("() => document.querySelector('#mc-llm-chat-title .mc-llm-heading')"
+                                   ".textContent.includes('the last train')", timeout=15000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.click("#mc-llm-chat-new-thread")
+            page.wait_for_function("() => !(" + OPEN + ")()", timeout=10000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_function("""() => { const l = document.querySelector('#mc-llm-chat-generation .label-wrap span');
+                return l && l.textContent.trim() === 'Generation'; }""", timeout=10000)
+            found["new_thread"] = {"dry": page.evaluate(VALUE, DRY),
+                                   "label": page.evaluate(LABEL, "mc-llm-chat-generation"),
+                                   "heading": page.evaluate(HEADING)}
+
+            # ... "and then kept for that thread through sessions": the page
+            # loaded again, the tuned thread opened, its setting still there.
+            page.reload()
+            page.wait_for_selector("#mc-llm-chat-to-conversation", timeout=30000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.click("#mc-llm-chat-threads-section .label-wrap")
+            page.click("#mc-llm-chat-threads .mc-llm-thread-row:has-text('the last train') .mc-llm-thread-open")
+            page.wait_for_function("() => document.querySelector('#mc-llm-chat-title .mc-llm-heading')"
+                                   ".textContent.includes('the last train')", timeout=15000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_function("(selector) => document.querySelector(selector).value === '1.25'",
+                                   arg=DRY, timeout=10000)
+            found["next_session"] = {"dry": page.evaluate(VALUE, DRY),
+                                     "label": page.evaluate(LABEL, "mc-llm-chat-generation")}
+
             # + New opens the editor under "Talking to".
             page.click("#mc-llm-chat-new-character")
             page.wait_for_selector("#mc-llm-chat-character-editor", state="visible", timeout=10000)
@@ -245,8 +343,10 @@ def main() -> int:
                 return {shown: editor.height > 0, inView: editor.top >= box.top - 1 && editor.top < box.bottom}; }""")
             page.click("#mc-llm-chat-character-editor button:has-text('Cancel')")
 
-            # Bob's favourite, from Ada: the pop-up goes, Bob is chosen, and the
-            # thread open is the starred one -- not Bob's newest.
+            # Bob's favourite, from Ada -- Favourites opened first: the pop-up
+            # goes, Bob is chosen, and the thread open is the starred one -- not
+            # Bob's newest.
+            page.click("#mc-llm-chat-favourites-section .label-wrap")
             page.click("#mc-llm-chat-favourites .mc-llm-thread-row:has-text(\"bob's first walk\") .mc-llm-thread-open")
             page.wait_for_function("() => document.querySelector('#mc-llm-chat-title .mc-llm-heading')"
                                    ".textContent.includes(\"bob's first walk\")", timeout=15000)
@@ -270,6 +370,29 @@ def main() -> int:
                      & set(found.get("chips", [])))),
         "Favourites lists the starred thread, whose it is": opened.get("favourites") == [
             {"who": "Bob", "title": "bob's first walk", "current": False, "starred": True}],
+        "both lists open folded, Favourites counted, + New thread on top": (
+            opened.get("folded") == [True, True]
+            and opened.get("favourites_label") == "Favourites · 1"
+            and opened.get("threads_label") == "Threads"
+            and opened.get("new_thread_on_top") is True),
+        "the Generation section has every slider": opened.get("generation_controls") == 16,
+        "a generation setting is kept with the thread and relabels the section": (
+            found.get("generation", {}).get("label") == "Generation · DRY 0.8"
+            and found.get("generation", {}).get("kept") == {"dry_multiplier": 0.8}),
+        "the pop-up again: lists folded again, the setting drawn from what is kept": (
+            found.get("reopened", {}).get("folded") == [True, True]
+            and float(found.get("reopened", {}).get("dry") or -1) == 1.25
+            and found.get("reopened", {}).get("label") == "Generation · DRY 1.25"),
+        "another thread has its own settings": (
+            float(found.get("other_thread", {}).get("dry") or -1) == 0.0
+            and found.get("other_thread", {}).get("label") == "Generation"),
+        "+ New thread from a tuned thread starts at the defaults": (
+            float(found.get("new_thread", {}).get("dry") or -1) == 0.0
+            and found.get("new_thread", {}).get("label") == "Generation"
+            and "the last train" not in (found.get("new_thread", {}).get("heading") or "")),
+        "the tuned thread keeps its setting in the next session": (
+            float(found.get("next_session", {}).get("dry") or -1) == 1.25
+            and found.get("next_session", {}).get("label") == "Generation · DRY 1.25"),
         "Threads lists Ada's, the remembered one marked": (
             [row["title"] for row in opened.get("threads", [])]
             == ["the last train", "a desert road", "harbour at night"]
@@ -280,6 +403,7 @@ def main() -> int:
             and opened.get("start_label") == "Start the next reply with"),
         "a star puts the thread first and in Favourites, the pop-up open": (
             starred.get("still_open") is True
+            and starred.get("favourites_label") == "Favourites · 2"
             and [row["title"] for row in starred.get("threads", [])][0] == "harbour at night"
             and starred.get("threads", [{}])[0].get("starred") is True
             and {row["title"] for row in starred.get("favourites", [])}

@@ -2564,11 +2564,14 @@
     align-items: center;
     flex: 0 0 auto;
     gap: 0.5em;
-    /* The way back is always on screen, whatever the sheet is scrolled to. */
+    /* The way back is always on screen, whatever the sheet is scrolled to --
+       and over what scrolls under it: Gradio 4.40 draws every labelled
+       control's title at --layer-4 (BlockTitle's `z-index`), which painted the
+       Generation sliders' labels over ‹ Back on a phone (2026-11-09). */
     background: var(--background-fill-primary, inherit);
     position: sticky;
     top: 0;
-    z-index: 2;
+    z-index: calc(var(--layer-4, 40) + 1);
 }
 
 /* Whatever the sheet's title is drawn with -- a heading, or the excerpt of the
@@ -2795,8 +2798,9 @@
 }
 
 /* -- the Conversation pop-up ----------------------------------------------
-   Favourites, who you are talking to, that character's threads, then the
-   folded sections. Rows are two buttons each: the thread, and its star. */
+   + New thread on its head; Favourites, who you are talking to, that
+   character's threads, then the sections -- every list folded until it is
+   opened (2026-11-09). Rows are two buttons each: the thread, and its star. */
 #mc-llm-studio .mc-llm-talking-to {
     align-items: flex-end;
     flex-wrap: nowrap !important;
@@ -2808,33 +2812,14 @@
     min-width: 0;
 }
 
-#mc-llm-studio .mc-llm-threads-head {
-    align-items: center;
-    flex-wrap: nowrap !important;
-    gap: 0.5em;
-    margin-top: 0.4em;
-}
-
-#mc-llm-studio .mc-llm-threads-head > :first-child {
-    flex: 1 1 auto;
-    min-width: 0;
-}
-
-/* The buttons beside a heading or a drop-down keep their own width: Gradio's
-   row gives every child a basis of nothing, and the heading taking the room
-   left squeezed + New thread to two lines of half a word each. */
-#mc-llm-studio .mc-llm-threads-head button,
+/* The buttons beside a heading or a drop-down keep their own width, on one
+   line: Gradio's row gives every child a basis of nothing, and the heading
+   taking the room left squeezed + New thread to two lines of half a word each.
+   On the pop-up's head since 2026-11-09, beside ‹ Back and the heading. */
+#mc-llm-studio .mc-llm-conversation-head button,
 #mc-llm-studio .mc-llm-talking-to button {
     flex: 0 0 auto !important;
-}
-
-#mc-llm-studio .mc-llm-favourites-label {
-    color: var(--body-text-color-subdued, inherit);
-    font-size: 0.72em;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    padding: 0 0.3em 0.35em;
-    text-transform: uppercase;
+    white-space: nowrap;
 }
 
 #mc-llm-studio .mc-llm-thread-list {
@@ -2926,8 +2911,9 @@
     padding: 0.5em 0.3em;
 }
 
-/* The sections under the lists, one line each while folded: the label says
-   what is in force (Emotion · Off, Start the next reply with · …). */
+/* The sections, one line each while folded: the label says what is in force
+   (Favourites · 3, Emotion · Off, Start the next reply with · …, Generation ·
+   Temperature 1.1 · DRY 0.8). */
 #mc-llm-studio .mc-llm-conversation-sheet .mc-llm-section {
     margin-top: 0.2em;
 }
@@ -3572,8 +3558,8 @@
     z-index: 25;
 }
 
-/* The thread list scrolls inside the pop-up, so a long history leaves the
-   sections under it a short scroll away. */
+/* The thread list scrolls inside its section, so a long history opened leaves
+   the sections under it a short scroll away. */
 #mc-llm-studio .mc-llm-threads {
     max-height: 45vh;
     overflow-y: auto;

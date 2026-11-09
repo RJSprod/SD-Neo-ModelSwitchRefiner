@@ -441,7 +441,11 @@ def _settings(raw) -> dict:
         return {}
     if not isinstance(raw, dict):
         raise Refused(INVALID_INPUT, "settings must be an object.")
-    allowed = {"temperature", "top_p", "reply_tokens", "seed"}
+    import mc_llm_generation
+
+    # The four every request has carried, and the sampler fields a thread can
+    # choose beyond them (mc_llm_generation.SETTINGS), by the same names.
+    allowed = set(mc_llm_generation.KEYS)
     unknown = set(raw) - allowed
     if unknown:
         raise Refused(INVALID_INPUT,
@@ -878,6 +882,9 @@ def _create_thread(envelope: Envelope) -> dict:
         return conversation
 
     committed = store_module.create(store, key, build, receipt=receipt)
+    # A new thread starts at the default generation settings, whichever thread
+    # was open (2026-11-09: "It should be default until I override for a
+    # thread"); only a branch carries a thread's on (_branch_from).
     publish(CONVERSATION_CHANGED, key, revision=committed.revision, kind_detail="created")
     return _accepted(envelope, key, committed.revision)
 
@@ -910,10 +917,12 @@ def _delete_thread(envelope: Envelope) -> dict:
                       issued_at=envelope.issued_at, payload_digest=envelope.digest())
     store_module.remove(store, key, envelope.expected_revision, receipt=receipt)
     import mc_llm_emotions
+    import mc_llm_generation
     import mc_llm_start_with
 
     mc_llm_emotions.forget(key.character, key.thread_id)
     mc_llm_start_with.forget(key.character, key.thread_id)
+    mc_llm_generation.forget(key.character, key.thread_id)
     publish(THREAD_DELETED, key)
     return _accepted(envelope, key, 0)
 
@@ -1042,10 +1051,13 @@ def _branch_from(store, key: Key, expected, index: int, operation_id: str,
     committed = store_module.create(store, made,
                                     lambda: source.branch(index, identifier), receipt=receipt)
     # A branch carries on from here, and the emotion the replies were being
-    # written in is part of what "here" is -- as the response prefix is.
+    # written in is part of what "here" is -- as the response prefix is, and as
+    # the settings they were sampled with are.
     import mc_llm_emotions
+    import mc_llm_generation
 
     mc_llm_emotions.carry(key.character, key.thread_id, committed.conversation.identifier)
+    mc_llm_generation.carry(key.character, key.thread_id, committed.conversation.identifier)
     return committed
 
 

@@ -269,7 +269,7 @@ class TestWhatTheRunLeftBehind:
         chats.save(conversation)
         monkeypatch.setattr(sessions, "conversation", lambda request, cancel: iter(events))
         frames = list(mc_llm_chat_panel._send("Ada", conversation.identifier, "ask again",
-                                              None, 0.7, 0.9, 256, -1))
+                                              None))
         assert ops.drain(timeout=10)
         return frames[-1][mc_llm_chat_panel.STREAM_ORDER.index("operation")]
 

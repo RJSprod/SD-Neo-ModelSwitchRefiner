@@ -413,6 +413,17 @@ class TestANewThreadFromTheMenu:
                          "conversation": {"character": "Ada", "thread_id": ""},
                          "expected": None}
 
+    def test_a_new_thread_starts_at_its_defaults(self):
+        """"It should be default until I override for a thread" (2026-11-09):
+        New chat names no thread to start from, whichever this page is on."""
+        found = run_both(THREADS + """
+            const store = threadStore(MADE);
+            store.createThread().then(() => store.createThread("Bob")).then(() =>
+                console.log(JSON.stringify(store.sent.map((sent) => sent.payload))));
+        """)
+
+        assert found == [{}, {}]
+
     def test_the_panel_moves_onto_the_new_thread(self):
         found = run_both(THREADS + """
             const store = threadStore(MADE);

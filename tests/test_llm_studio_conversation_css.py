@@ -126,13 +126,17 @@ def test_a_favourite_says_whose_thread_it_is_beside_its_title(browser):
 
 def test_new_thread_keeps_its_words_on_one_line_beside_the_heading(browser):
     """On a phone the heading took the row and squeezed + New thread into two
-    lines of half a word each (found in a screenshot of the real pop-up)."""
+    lines of half a word each (found in a screenshot of the real pop-up). On
+    the pop-up's head since 2026-11-09, beside ‹ Back and the heading, with
+    the thread lists folded under it."""
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <style>body {{ margin: 0; font: 14px sans-serif; }}
 .row {{ display: flex; flex-wrap: wrap; }} .row > * {{ flex: 1 1 0%; min-width: 0; }}</style>
 <style>{(ROOT / "style.css").read_text(encoding="utf-8")}</style></head><body>
-<div id="mc-llm-studio" style="width: 300px"><div class="row mc-llm-threads-head">
-  <div class="block"><h5>Threads</h5></div>
+<div id="mc-llm-studio" style="width: 300px">
+<div class="row mc-llm-sheet-head mc-llm-conversation-head">
+  <button class="mc-llm-sheet-back" style="flex-grow: 0; min-width: 76px">‹ Back</button>
+  <div class="block"><h4>Conversation</h4></div>
   <button id="new" style="flex-grow: 0; min-width: 0px">+ New thread</button>
 </div></div></body></html>"""
     tab = browser.new_page(viewport={"width": 390, "height": 400})
@@ -146,3 +150,47 @@ def test_new_thread_keeps_its_words_on_one_line_beside_the_heading(browser):
         tab.close()
 
     assert found["height"] < found["line"] * 1.6 and found["fits"], found
+
+
+def test_a_control_scrolled_under_the_pop_ups_head_stays_under_it(browser):
+    """Gradio 4.40 draws every labelled control's title at ``--layer-4``
+    (``BlockTitle.svelte``: ``position: relative; z-index: var(--layer-4)``),
+    and the sticky head of a sheet sat at 2: the Generation section's labels
+    scrolled over ‹ Back on a phone (a screenshot of the real pop-up,
+    2026-11-09)."""
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<style>body {{ margin: 0; font: 14px sans-serif; }} :root {{ --layer-4: 40; }}
+.row {{ display: flex; flex-wrap: wrap; }} .row > * {{ flex: 1 1 0%; min-width: 0; }}
+.title {{ display: inline-block; position: relative; z-index: var(--layer-4); }}</style>
+<style>{(ROOT / "style.css").read_text(encoding="utf-8")}</style></head><body>
+<div id="mc-llm-studio" style="position: relative; height: 600px">
+<div id="sheet" class="mc-llm-sheet" style="position: absolute; inset: 0; overflow-y: auto;
+     z-index: 20; display: block; animation: none">
+  <div class="row mc-llm-sheet-head mc-llm-conversation-head">
+    <button class="mc-llm-sheet-back" style="flex-grow: 0; min-width: 76px">‹ Back</button>
+    <div class="block"><h4>Conversation</h4></div>
+  </div>
+  <div style="height: 300px"></div>
+  <div class="block"><label><span id="title" class="title">Repeat penalty</span></label></div>
+  <div style="height: 2000px"></div>
+</div></div></body></html>"""
+    tab = browser.new_page(viewport={"width": 390, "height": 600})
+    try:
+        tab.set_content(html)
+        found = tab.evaluate("""() => {
+            const sheet = document.getElementById('sheet');
+            const title = document.getElementById('title');
+            const head = sheet.querySelector('.mc-llm-sheet-head');
+            // Scroll the title's middle onto the head's middle.
+            for (let step = 0; step < 3; step += 1) {
+                const at = title.getBoundingClientRect(), on = head.getBoundingClientRect();
+                sheet.scrollTop += (at.top + at.height / 2) - (on.top + on.height / 2);
+            }
+            const box = title.getBoundingClientRect(), over = head.getBoundingClientRect();
+            const top = document.elementFromPoint(box.left + 4, box.top + box.height / 2);
+            return {under: box.top >= over.top && box.bottom <= over.bottom,
+                    head: head.contains(top)}; }""")
+    finally:
+        tab.close()
+
+    assert found == {"under": True, "head": True}

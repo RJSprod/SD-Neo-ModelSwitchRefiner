@@ -753,8 +753,7 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
     projector -- is a refusal the caller sees, not a reply that fails a second
     later with nobody watching.
     """
-    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
-                                               DEFAULT_TOP_P)
+    from prompt_master.chat.characters import DEFAULT_TEMPERATURE, DEFAULT_TOP_P
     from prompt_master.chat.prompt import build, needs_vision
     from prompt_master.core.models import RANDOM_SEED, draw_seed
 
@@ -764,10 +763,17 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
     character = _character(key.character)
     persona = _persona()
     settings = envelope.payload.get("settings") or {}
+    # The thread's own generation settings (mc_llm_generation), under what a
+    # request names for itself: kept with the thread, so every view's reply in
+    # it -- the tab's, the panel's -- is made from them. What it did not choose
+    # is the package's default, never the four in the character's file
+    # (2026-11-09: "It should be default until I override for a thread").
+    chosen = _generation_of(key)
 
-    tokens = _whole(settings.get("reply_tokens"), character.max_reply_tokens,
-                    DEFAULT_MAX_REPLY_TOKENS)
-    resolved = _whole(character.seed, RANDOM_SEED)
+    tokens = _reply_tokens(chosen, settings)
+    # A new seed each reply unless the thread chose one. A request's -1 says
+    # nothing and leaves the thread's choice in force, as it always did.
+    resolved = _whole(chosen.get("seed"), RANDOM_SEED)
     if resolved == RANDOM_SEED:
         resolved = draw_seed()
     asked = _whole(settings.get("seed"), RANDOM_SEED)
@@ -803,11 +809,12 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
         prefilled=bool(prefill),
         start_with=start,
         needs_vision=needs_vision(wire),
-        temperature=_fraction(settings.get("temperature"), character.temperature,
+        temperature=_fraction(settings.get("temperature"), chosen.get("temperature"),
                               DEFAULT_TEMPERATURE),
-        top_p=_fraction(settings.get("top_p"), character.top_p, DEFAULT_TOP_P),
+        top_p=_fraction(settings.get("top_p"), chosen.get("top_p"), DEFAULT_TOP_P),
         max_tokens=tokens,
         seed=asked if asked != RANDOM_SEED else resolved,
+        sampling=_sampling_of(chosen, settings),
     )
     if request.needs_vision and not _sees():
         raise service.Refused(service.VISION_UNAVAILABLE,
@@ -879,6 +886,45 @@ def _emotion_opening(emotion: str) -> str:
     return mc_llm_emotions.opening(emotion)
 
 
+def _reply_tokens(chosen: dict, settings=None) -> int:
+    """The reply's budget -- and so the prompt's window: what a request names,
+    else what the thread chose, else the package's default. One answer for the
+    reply and for the conversation read again after a change of emotion, so
+    both trim the history to the same window."""
+    from prompt_master.chat.characters import DEFAULT_MAX_REPLY_TOKENS
+
+    return _whole((settings or {}).get("reply_tokens"), chosen.get("reply_tokens"),
+                  DEFAULT_MAX_REPLY_TOKENS)
+
+
+def _generation_of(key: Key) -> dict:
+    """What the thread chose of its generation settings; ``{}`` when it cannot be read."""
+    try:
+        import mc_llm_generation
+
+        return mc_llm_generation.for_thread(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's generation settings",
+                     exc_info=True)
+        return {}
+
+
+def _sampling_of(chosen: dict, settings: dict) -> dict:
+    """The sampler fields beyond the four this request carries: what the thread
+    chose, under what the request names for itself. Only what was chosen or
+    named -- anything else is left to llama-server and the model's profile, as
+    it always was."""
+    try:
+        import mc_llm_generation
+
+        found = mc_llm_generation.request_fields(chosen)
+        found.update(mc_llm_generation.request_fields(settings))
+        return found
+    except Exception:
+        logger.debug("Model Chain: could not read a request's sampler fields", exc_info=True)
+        return {}
+
+
 def _emotion_of(key: Key) -> str:
     """The thread's emotion, ``""`` for Off -- and Off when it cannot be read."""
     try:
@@ -938,8 +984,7 @@ def _thread_request(key: Key):
     update after a change of emotion reads. ``None`` for a thread with nothing in
     it yet. Built when the update's turn comes, so a reply that was being
     written meanwhile is in it."""
-    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
-                                               DEFAULT_TOP_P)
+    from prompt_master.chat.characters import DEFAULT_TEMPERATURE, DEFAULT_TOP_P
     from prompt_master.chat.prompt import build, needs_vision
 
     import mc_llm_conversation_service as service
@@ -953,15 +998,13 @@ def _thread_request(key: Key):
     every = _every_picture()
     wire = build(character, persona, _with_pictures(list(conversation.messages), every),
                  context_size=_context_size(),
-                 reply_tokens=_whole(None, character.max_reply_tokens,
-                                     DEFAULT_MAX_REPLY_TOKENS),
+                 reply_tokens=_reply_tokens(_generation_of(key)),
                  every_picture=every,
                  system_extra=_emotion_note(_emotion_of(key), character, persona,
                                             _emotion_mode()))
     return sessions.ChatRequest(
         messages=wire, needs_vision=needs_vision(wire), max_tokens=1, seed=0,
-        temperature=_fraction(None, character.temperature, DEFAULT_TEMPERATURE),
-        top_p=_fraction(None, character.top_p, DEFAULT_TOP_P),
+        temperature=DEFAULT_TEMPERATURE, top_p=DEFAULT_TOP_P,
         conversation=service.conversation_name(key))
 
 def _execute(operation: Operation, plan: dict) -> None:

@@ -731,7 +731,7 @@ def client(base_url: str, api_key: str, sampling, server: Server):
 
 def _define_client():
     import httpx
-    from prompt_master.inference.llama_client import LlamaClient
+    from prompt_master.inference.llama_client import LlamaClient, request_sampling
     from prompt_master.inference.local_only import check_messages
     from prompt_master.inference.sse import assistant_chunks
 
@@ -748,27 +748,34 @@ def _define_client():
             super().__init__(base_url, api_key, sampling)
             self.saved_caches = server
 
-        def request_body(self, messages, max_tokens, seed, temperature, top_p) -> dict:
+        def request_body(self, messages, max_tokens, seed, temperature, top_p,
+                         sampling=None) -> dict:
             payload = {"model": "prompt-master", "messages": messages,
                        "temperature": temperature, "top_p": top_p,
                        "max_tokens": max_tokens, "seed": seed, "stream": True,
                        "reasoning_effort": "none",
                        "chat_template_kwargs": {"enable_thinking": False, "thinking": False}}
             payload.update(self.sampling)
+            # The thread's own choices after the profile's, as the vendored
+            # client puts them (mc_llm_generation).
+            payload.update(request_sampling(sampling))
             return payload
 
         def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
                                 cancel=None, temperature=0.85, top_p=0.95,
-                                save: bool = True) -> str:
+                                save: bool = True, sampling=None) -> str:
             """``save`` false: restore as usual, but keep no file of this reply's
             slot -- a reply started from the thread's emotion, whose cache holds a
-            line no later prompt has (:mod:`mc_llm_cache_update` saves after it)."""
+            line no later prompt has (:mod:`mc_llm_cache_update` saves after it).
+            ``sampling``: the thread's own sampler fields (:mod:`mc_llm_generation`)."""
             server = self.saved_caches
             if not conversation or server is None or not active():
+                extra = {"sampling": sampling} if sampling else {}
                 return self.stream_chat(messages, max_tokens, seed, on_text, cancel,
-                                        temperature=temperature, top_p=top_p)
+                                        temperature=temperature, top_p=top_p, **extra)
             check_messages(messages)
-            payload = self.request_body(messages, max_tokens, seed, temperature, top_p)
+            payload = self.request_body(messages, max_tokens, seed, temperature, top_p,
+                                        sampling)
             pinned = server.restore(conversation, dict(payload))
             payload.update(slot_fields(pinned))
             found: dict = {}

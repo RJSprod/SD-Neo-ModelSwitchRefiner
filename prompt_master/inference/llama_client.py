@@ -10,6 +10,29 @@ from .local_only import check_base_url, check_messages
 from .sse import assistant_chunks
 
 
+REQUEST_SAMPLER_FIELDS = ("min_p", "top_k", "dynatemp_range", "xtc_probability",
+                          "xtc_threshold", "repeat_penalty", "presence_penalty",
+                          "frequency_penalty", "repeat_last_n", "dry_multiplier", "dry_base",
+                          "dry_allowed_length", "dry_penalty_last_n")
+"""The sampler keys one request may carry beyond temperature and top_p.
+
+A conversation thread's own choices (``mc_llm_generation`` in the extension
+around this package), applied after the profile's fixed fields so a thread's
+choice wins. A whitelist for the profile's reason: whatever reaches here ends up
+in a JSON body, and "whatever the caller passed" is not a thing to put in one.
+Every name is llama-server's own (``tools/server/server-schema.cpp``).
+"""
+
+
+def request_sampling(sampling: dict | None) -> dict:
+    """``sampling`` filtered to :data:`REQUEST_SAMPLER_FIELDS`, numbers only."""
+    if not sampling:
+        return {}
+    return {key: sampling[key] for key in REQUEST_SAMPLER_FIELDS
+            if key in sampling and isinstance(sampling[key], (int, float))
+            and not isinstance(sampling[key], bool)}
+
+
 class LlamaClient:
     """A client for the local llama-server, and for nothing else.
 
@@ -36,7 +59,7 @@ class LlamaClient:
         self.sampling = {key: sampling[key] for key in SAMPLER_FIELDS
                          if sampling and key in sampling and sampling[key] is not None}
 
-    def stream_chat(self, messages: list[dict], max_tokens: int, seed: int, on_text: Callable[[str], None], cancel: threading.Event | None = None, temperature: float = 0.85, top_p: float = 0.95) -> str:
+    def stream_chat(self, messages: list[dict], max_tokens: int, seed: int, on_text: Callable[[str], None], cancel: threading.Event | None = None, temperature: float = 0.85, top_p: float = 0.95, sampling: dict | None = None) -> str:
         # Before the body is built, so an image llama-server would have had to
         # fetch never reaches a request at all. See local_only.check_messages.
         check_messages(messages)
@@ -44,6 +67,9 @@ class LlamaClient:
         # smart-negative pass overrides them with upstream's cooler 0.3 / 0.9.
         payload = {"model":"prompt-master","messages":messages,"temperature":temperature,"top_p":top_p,"max_tokens":max_tokens,"seed":seed,"stream":True,"reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":False,"thinking":False}}
         payload.update(self.sampling)
+        # A request's own sampler fields after the profile's: a conversation
+        # thread's choice of top-k beats the catalogue's (REQUEST_SAMPLER_FIELDS).
+        payload.update(request_sampling(sampling))
         pieces = []
         with httpx.Client(timeout=httpx.Timeout(600, connect=10), headers={"Authorization":f"Bearer {self.api_key}"}) as client:
             with client.stream("POST", f"{self.base_url}/v1/chat/completions", json=payload) as response:
