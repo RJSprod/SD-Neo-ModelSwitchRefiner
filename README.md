@@ -5056,6 +5056,14 @@ no engine warmed, nothing synthesised — even if changing the setting had
 failed. (The server may still note, at most once every ten minutes, that
 replies are not being read aloud; that line is a note, not audio work.)
 
+While it is on, a reply the panel asks for is read aloud on this page, by Voice
+Chat's speaker, from its first sentence — whichever tab you are on. The server
+names the reply's speech in its answer to Send, Regenerate, Continue and Send
+again, and the panel hands it to Voice Chat (until 2026-11-09 nothing did, and
+every reply asked for here was synthesised for thirty seconds for nobody and
+dropped). The panel's **Stop** stays up for as long as the reply is read aloud,
+which goes on after its last word is written, and silences it.
+
 **When something is happening** the panel says which thing: waiting for
 resources, preparing the model, generating, saving. Never "Ready" while a reply
 is waiting for the card, which is a gap measured in tens of seconds on a cold
@@ -6655,6 +6663,17 @@ still finishing a reply that was stopped, the Conversation button says so.
   press ends the response.
 - Turning *Speak replies automatically* off mid-answer stops that answer.
   Turning it on mid-answer applies to the next one.
+- Replies asked for from the **Forge Assistant's panel** are read aloud the same
+  way, on the page that asked, whichever tab it is on.
+- **A browser that has not yet let the page make a sound** — a page nobody has
+  touched since it loaded — does not lose the reply. The status line says the
+  browser is holding the audio back, and the first tap or key anywhere on the
+  page starts it. Nothing tapped within 25 seconds of the reply arriving and the
+  reply is let go, with *audio is locked until a gesture* in `model_chain.log`.
+- A reply no page opened the audio of — nothing was listening for it — is let go
+  by the server after thirty seconds, and `model_chain.log` says so: *Voice turn …
+  was not read aloud — no page opened its audio within 30 s*. That line is the
+  first thing to look for when a reply was written and not spoken.
 - A reply already spoken cannot be unspoken. What Stop guarantees is that
   nothing *further* is said — which is the one thing streaming changes about the
   old promise that a cancelled reply was never read aloud.

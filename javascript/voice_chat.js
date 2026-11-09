@@ -180,6 +180,10 @@
         notStreaming: "The reply is being read aloud, but no audio has arrived — something "
             + "between this page and the WebUI may be buffering the whole response.",
         blocked: "Voice is enabled; tap Conversation or the microphone once to allow audio playback.",
+        // The streamed reply's word for the same thing. The reply is not given
+        // up: the next tap or key anywhere on the page starts it (`holdForTap`).
+        held: "The browser is holding this reply's audio back until the page is used — "
+            + "tap anywhere on the page to hear it.",
         busy: "Wait for the reply or press Stop.",
         // Section 39. Not "HTTPS is required" -- that is a claim about this
         // extension's policy that stopped being true, and it is not even
@@ -702,17 +706,41 @@
     // permission. Every explicit voice gesture resumes it -- pressing the mic,
     // opening the Voice flyout, changing either switch -- so by the time a reply
     // arrives the common case is already unlocked.
+    //
+    // Bounded (2026-11-09). The Web Audio specification keeps `resume()`
+    // pending -- neither resolved nor rejected -- for as long as the browser
+    // will not let the context start, and Chromium and Firefox both do, so an
+    // unbounded wait for it held a reply with the speaker marked busy until the
+    // server had given up on it. A real resume takes milliseconds; past
+    // UNLOCK_WAIT_MS the answer is "not yet", and a streamed reply then waits for
+    // the page to be used (`holdForTap`) instead of waiting on nothing.
+    const UNLOCK_WAIT_MS = 1500;
+
     function unlock() {
         const ctx = audioContext();
         if (!ctx) return Promise.resolve(false);
         if (ctx.state !== "suspended") return Promise.resolve(true);
+        let asked;
         try {
-            return Promise.resolve(ctx.resume()).then(function () {
-                return ctx.state !== "suspended";
-            }).catch(function () { return false; });
+            asked = Promise.resolve(ctx.resume());
         } catch (error) {
             return Promise.resolve(false);
         }
+        return new Promise(function (resolve) {
+            let timer = 0;
+            let settled = false;
+            const settle = function (value) {
+                if (settled) return;
+                settled = true;
+                window.clearTimeout(timer);
+                resolve(value);
+            };
+            timer = window.setTimeout(function () {
+                settle(ctx.state !== "suspended");
+            }, UNLOCK_WAIT_MS);
+            asked.then(function () { settle(ctx.state !== "suspended"); },
+                       function () { settle(false); });
+        });
     }
 
     // -- the adaptive playback buffer --------------------------------------- //
@@ -901,6 +929,9 @@
     function stopSpeaking(alsoTellServer, reason) {
         const turnId = speech ? speech.id : "";
         const mode = speech ? speech.interrupt : "";
+        // A reply waiting for a tap is stopped like one that is playing: the
+        // tap must not start it afterwards.
+        endTapWait();
         stopPlayback();
         speech = null;
         setVoiceBusy(false);
@@ -1072,52 +1103,133 @@
         announceAudioFocus("speech");
 
         unlock().then(function (unlocked) {
+            // Superseded while the browser was asked -- the next reply, Stop,
+            // the switch turned off. That turn has been stopped on both sides
+            // already, and opening its stream now would start a reply nobody
+            // is waiting for.
+            if (speech !== state) return null;
             if (!unlocked) {
-                say(MESSAGES.blocked, "warn");
-                // Not fatal and not silent: the stream is still cancelled so the
-                // server stops synthesising for a speaker that will not play,
-                // and the reason is reported so it appears in the log rather
-                // than only in a status line the panel is about to overwrite.
-                if (speech === state) stopSpeaking(true, "audio is locked until a gesture");
+                holdForTap(state);
                 return null;
             }
-            return fetch(url(ROUTES.stream), {
-                method: "POST",
-                credentials: "same-origin",
-                headers: headers({"Content-Type": "application/json"}),
-                body: JSON.stringify({turn: turnId}),
-                signal: state.controller ? state.controller.signal : undefined,
-            }).then(function (response) {
-                if (!response.ok || !response.body || !response.body.getReader) {
-                    throw new Error("stream");
-                }
-                state.headersAt = nowMs();
-                const rate = parseInt(response.headers.get("X-Model-Chain-Voice-Rate")
-                                      || "24000", 10) || 24000;
-                const stamped = response.headers.get("X-Model-Chain-Voice-Turn");
-                if (stamped && stamped !== turnId) throw new Error("turn");
-                // What Stop will mean on *this* reply, from the engine it was
-                // frozen onto rather than from whichever is selected by the
-                // time somebody presses the button.
-                state.interrupt = response.headers.get("X-Model-Chain-Voice-Interrupt")
-                    || "cancel";
-                return pump(state, response.body.getReader(), rate);
-            });
-        }).catch(function (error) {
-            if (speech !== state) return;
-            if (!error || error.name === "AbortError") {
-                stopSpeaking(false);
+            return openStream(state);
+        }).catch(function (error) { streamFailed(state, error); });
+    }
+
+    function openStream(state) {
+        const turnId = state.id;
+        return fetch(url(ROUTES.stream), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: headers({"Content-Type": "application/json"}),
+            body: JSON.stringify({turn: turnId}),
+            signal: state.controller ? state.controller.signal : undefined,
+        }).then(function (response) {
+            if (!response.ok || !response.body || !response.body.getReader) {
+                throw new Error("stream");
+            }
+            state.headersAt = nowMs();
+            const rate = parseInt(response.headers.get("X-Model-Chain-Voice-Rate")
+                                  || "24000", 10) || 24000;
+            const stamped = response.headers.get("X-Model-Chain-Voice-Turn");
+            if (stamped && stamped !== turnId) throw new Error("turn");
+            // What Stop will mean on *this* reply, from the engine it was
+            // frozen onto rather than from whichever is selected by the time
+            // somebody presses the button.
+            state.interrupt = response.headers.get("X-Model-Chain-Voice-Interrupt")
+                || "cancel";
+            return pump(state, response.body.getReader(), rate);
+        });
+    }
+
+    function streamFailed(state, error) {
+        if (speech !== state) return;
+        if (!error || error.name === "AbortError") {
+            stopSpeaking(false);
+            return;
+        }
+        say(MESSAGES.speakFailed, "warn");
+        console.warn("Model Chain: Voice could not play a reply", error);
+        state.endReason = "error";
+        // Reported rather than only shown. The status line this writes to is
+        // the panel's own, and the panel overwrites it with "Reply complete." a
+        // moment later -- so a user watching for an explanation sees nothing at
+        // all.
+        stopSpeaking(true, "the stream could not be played: "
+                     + ((error && error.message) || "unknown"));
+    }
+
+    // -- a reply the browser will not let play yet ---------------------------- //
+    //
+    // A reply can reach a page the browser has not yet let make a sound: one
+    // nobody has touched since it loaded, or reloaded after a restart of the
+    // WebUI. The reply used to be cancelled there and then, and the next one met
+    // the same refusal. Now it waits for the page to be used: the first press or
+    // key anywhere on it resumes the audio -- inside the gesture, which is what
+    // the browser asks for -- and opens the reply's stream, if the reply is still
+    // the one to speak. The server keeps a turn nobody has opened for
+    // `mc_voice_turn.CLIENT_WAIT` (30 s, from its first sentence), so the wait
+    // ends sooner than that, and then as it always did: cancelled, with the
+    // reason in model_chain.log.
+    const TAP_WAIT_MS = 25000;
+    // `pointerdown` and `keydown` are where a mouse and a keyboard grant the
+    // page its activation; a finger grants it on the release, `pointerup` and
+    // `touchend`. Each is asked: one that does not grant it leaves the resume
+    // pending and the wait in place.
+    const TAP_EVENTS = ["pointerdown", "pointerup", "touchend", "keydown"];
+    let tapWait = null;
+
+    function holdForTap(state) {
+        endTapWait();
+        const left = state.seenAt + TAP_WAIT_MS - nowMs();
+        if (left <= 0) {
+            stopSpeaking(true, "audio is locked until a gesture");
+            return;
+        }
+        say(MESSAGES.held, "warn");
+        const record = {state: state, timer: 0, listener: null};
+        record.listener = function () {
+            if (tapWait !== record) return;
+            const ctx = audioContext();
+            if (!ctx) return;
+            let asked;
+            try {
+                // Here and not in a promise callback: a resume asked for a
+                // moment later is no longer the user's.
+                asked = Promise.resolve(ctx.state === "suspended" ? ctx.resume() : null);
+            } catch (error) {
                 return;
             }
-            say(MESSAGES.speakFailed, "warn");
-            console.warn("Model Chain: Voice could not play a reply", error);
-            state.endReason = "error";
-            // Reported rather than only shown. The status line this writes to
-            // is the panel's own, and the panel overwrites it with "Reply
-            // complete." a moment later -- so a user watching for an
-            // explanation sees nothing at all.
-            stopSpeaking(true, "the stream could not be played: "
-                         + ((error && error.message) || "unknown"));
+            asked.then(function () {
+                if (tapWait !== record || ctx.state === "suspended") return;
+                endTapWait();
+                if (speech !== state) return;
+                openStream(state).catch(function (error) { streamFailed(state, error); });
+            }, function () { /* not granted by this one: the wait goes on */ });
+        };
+        TAP_EVENTS.forEach(function (name) {
+            window.addEventListener(name, record.listener, true);
+        });
+        record.timer = window.setTimeout(function () {
+            if (tapWait !== record) return;
+            endTapWait();
+            if (speech !== state) return;
+            // What the next reply needs, now that this one is gone.
+            say(MESSAGES.blocked, "warn");
+            stopSpeaking(true, "audio is locked until a gesture");
+        }, left);
+        tapWait = record;
+    }
+
+    function endTapWait() {
+        const record = tapWait;
+        if (!record) return;
+        tapWait = null;
+        window.clearTimeout(record.timer);
+        TAP_EVENTS.forEach(function (name) {
+            try {
+                window.removeEventListener(name, record.listener, true);
+            } catch (error) { /* a window without it keeps a listener that does nothing */ }
         });
     }
 
@@ -1937,6 +2049,9 @@
         if (voiceBusy === wanted) return;
         voiceBusy = wanted;
         applyComposerState();
+        // The Forge Assistant's panel keeps its Stop up while a reply is read
+        // aloud, which goes on long after the reply's last word was written.
+        announceSpeech();
     }
 
     // Shows Stop while either half is working, and Send when neither is. Only
@@ -2893,6 +3008,31 @@
         lastToken = token;
         setFinishing(false);
         speakCompleted(token);
+    }
+
+    // A reply asked for from the Forge Assistant's panel. Its speech turn is
+    // made when the server accepts the reply, as the tab's is, and only the
+    // page that asked can open its audio -- but the tab hands its turns over
+    // through the hidden field above, and nothing handed the panel's over until
+    // 2026-11-09: every reply sent from the panel was synthesised for thirty
+    // seconds for nobody and dropped (`mc_voice_turn.CLIENT_WAIT`), which is
+    // what "the voice chat TTS stops working and does not recover" was. The
+    // panel now passes the turn from its command's answer to the facade's
+    // `followTurn`. Each turn is followed once: a command retried after a lost
+    // answer is answered again with the same turn, and that second answer must
+    // not start the reply again from its first word.
+    const followed = [];
+    const FOLLOWED_KEPT = 32;
+
+    function followTurn(turnId) {
+        const id = String(turnId || "").trim();
+        if (!id) return false;
+        if (followed.indexOf(id) >= 0) return true;
+        followed.push(id);
+        if (followed.length > FOLLOWED_KEPT) followed.shift();
+        setFinishing(false);
+        speakTurn(id);
+        return true;
     }
 
     // The non-streaming fallback, kept whole from V1: one completed reply, one
@@ -7336,6 +7476,14 @@
             stopSpeaking(settings.origin !== "automatic", settings.origin || "any");
             announceSpeech();
             return true;
+        },
+
+        // A reply the panel asked for, read aloud from its speech turn. True
+        // when the turn is being (or has been) followed, false for no turn.
+        followTurn: function (turnId) {
+            let taken = false;
+            attempt("read a reply aloud", function () { taken = followTurn(turnId); });
+            return taken;
         },
     };
 

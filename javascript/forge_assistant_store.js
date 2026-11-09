@@ -264,6 +264,10 @@
         this.pictures = new Map();       // picture address -> Promise of a blob URL
         this.listeners = new Set();
         this.speech = {playing: false, owner: "", operation: ""};
+        // Whether this page's speaker is reading a reply aloud, as Voice Chat
+        // says (`hearSpeaker`), and the unsubscribe it handed back.
+        this.speaking = false;
+        this._speaker = null;
         // Whether replies are read aloud: Voice Chat's "Speak replies
         // automatically", as the server last said. `null` until it has said,
         // because "off" is a claim -- see `setReadAloud`.
@@ -349,6 +353,7 @@
             unreadTotal: Array.from(this.unread.values())
                 .reduce((total, count) => total + count, 0),
             speech: Object.assign({}, this.speech),
+            speaking: !!this.speaking,
             readAloud: this.readAloud,
             storageAvailable: this.storageAvailable,
             cacheUpdate: this.updatingCache(),
@@ -1150,6 +1155,7 @@
             body: JSON.stringify(envelope),
         }).then((outcome) => {
             this.after(outcome);
+            if (generating) this.speak(outcome);
             settle();
             return outcome;
         }).catch((error) => {
@@ -1166,6 +1172,53 @@
                             message: "Checking whether your message was sent…",
                             retryable: true}};
         });
+    };
+
+    /** Hand a reply's speech turn to the page's one speaker, Voice Chat.
+     *
+     * The server makes a speech turn for every reply this panel asks for while
+     * read-aloud is on, and starts synthesising it at once; the page that asked
+     * has to open its audio stream, or the server drops it after thirty seconds
+     * (`mc_voice_turn.CLIENT_WAIT`). LLM Studio's tab is handed the turn in its
+     * reply's first frame; nothing handed it to this panel, so every reply sent
+     * from here went unspoken -- "the voice chat TTS stops working and does not
+     * recover" (2026-11-09) was the user chatting here, beside an image tab. The
+     * answer to the command carries it (`speech_turn_id`), and this passes it on.
+     * An answer to a command sent again after a lost one carries the same turn,
+     * and is passed on too: it is the first this page has heard of it, and
+     * Voice Chat follows a turn once however often it is handed over. A page
+     * without Voice Chat's facade has nothing to play it with.
+     */
+    Store.prototype.speak = function (outcome) {
+        const turn = outcome && outcome.ok && outcome.speech_turn_id;
+        if (!turn) return false;
+        const speech = NS.speech;
+        if (!speech || typeof speech.followTurn !== "function") return false;
+        this.hearSpeaker(speech);
+        try {
+            return !!speech.followTurn(String(turn));
+        } catch (error) {
+            return false;
+        }
+    };
+
+    /** Whether the page's speaker is reading something aloud, from Voice Chat.
+     * A reply is read for as long again after its last word is written, and the
+     * panel's Stop has to be there for all of it. Heard from the first reply
+     * this panel hands over, because Voice Chat's script loads after this one.
+     */
+    Store.prototype.hearSpeaker = function (speech) {
+        if (this._speaker || typeof speech.subscribeSpeech !== "function") return;
+        try {
+            this._speaker = speech.subscribeSpeech((found) => {
+                const playing = !!(found && found.playing);
+                if (this.speaking === playing) return;
+                this.speaking = playing;
+                this.announce();
+            });
+        } catch (error) {
+            this._speaker = null;
+        }
     };
 
     Store.prototype.after = function (outcome) {
@@ -1769,6 +1822,12 @@
                 this._abort.abort();
             } catch (error) { /* already gone */ }
         }
+        if (typeof this._speaker === "function") {
+            try {
+                this._speaker();
+            } catch (error) { /* already gone */ }
+        }
+        this._speaker = null;
         this.listeners.clear();
     };
 

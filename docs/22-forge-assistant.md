@@ -4745,3 +4745,69 @@ is the end again. `tests/test_theme_layout.py` (Chromium,
 mode, the popup on top; a drawer opened from the peeking bar still there after the
 moment, searchable, and gone with the bar once closed. Fourteen mutations each fail
 a test. Not run on the user's machine or in a Gecko build.
+
+## 3.53 The panel's replies are read aloud (2026-11-09)
+
+> "Sometimes the voice chat TTS stops working and does not recover, like in my
+> latest log. Please address this issue"
+
+**What the log said.** Over a day and a half of `model_chain.log`, every reply
+for which the server said *Voice will read this reply aloud* went on to
+synthesise its first sentences and was then interrupted, with no *Voice is
+streaming turn … to a browser* in between and no playback report after: no page
+ever opened its audio, and the server let each turn go after
+`mc_voice_turn.CLIENT_WAIT` (30 s from its first sentence). The line that says so
+was a debug one, so the log showed only the engine being interrupted. Every one
+of those replies was asked for from this panel, beside an image tab; the replies
+sent from LLM Studio's tab in the same log were spoken, which is what "sometimes"
+and "does not recover" were -- it recovered whenever the conversation moved back
+to the tab.
+
+**Why.** A reply's speech turn is made when the server accepts the reply
+(`mc_llm_conversation_ops.begin`, `mc_voice_ui.begin_speech`), and only the page
+that asked can open its audio. The tab is handed its turn in its follower's first
+frame (a hidden field Voice Chat watches); the panel stamped `voice` on the
+command (`stampVoice`) and was never handed the turn at all, so a panel with
+*Read aloud* on had the server synthesise every reply for nobody.
+
+**What was built.**
+
+- The command's answer carries the turn: `speech_turn_id` in `begin`'s answer, ""
+  when the reply is not to be spoken (voice off, or Voice Chat said no). A command
+  sent again after a lost answer is answered with the same record, turn included.
+- The store passes it to Voice Chat, the page's one speaker (`Store.speak`, from
+  `send`, for the four commands that ask for a reply), through the facade's new
+  `followTurn(turnId)`. Duplicates are passed on too -- the retried answer is the
+  first this page hears of the turn -- and Voice Chat follows a turn once however
+  often it is handed over (`followed`, the last thirty-two). A turn from the panel
+  is not something the tab's hidden field said: the poll that watches the field is
+  left as it was, so it never takes the field's old value for news.
+- **Stop stays up while the reply is read aloud.** A reply is read for a minute or
+  two after its last word is written; the panel's Stop was the operation's alone.
+  The store hears Voice Chat's speaker (`hearSpeaker`, `subscribeSpeech`, once,
+  from the first reply it hands over, because Voice Chat's script loads after this
+  one) and says `speaking` in its snapshot; `render` keeps Stop up for it, and
+  Stop already silenced the page (`stopReply`). Voice Chat now tells its
+  subscribers when the speaker starts and stops (`setVoiceBusy`).
+- The server's drop is said at INFO: *Voice turn … was not read aloud — no page
+  opened its audio within 30 s, so the speech made for it was dropped*, with the
+  turn's first eight characters and nothing of the reply.
+
+And the speaker recovers by itself when the browser holds sound back: Voice
+Chat's `unlock()` no longer waits on a `resume()` that never answers, and a reply
+the browser will not let play waits for the next tap anywhere on the page
+(docs/16, *A reply the browser holds back*).
+
+**Verified.** `tests/test_conversation_ops.py`: the answer names the turn, "" when
+voice is off or refused, and a command sent again is answered with the same turn
+and makes no second one. `tests/test_assistant_speaks_js.py` (node, the real store
+and shell): the turn handed over for each of the four commands, not for a refusal,
+an empty turn or a command that asks for no reply; a duplicate's handed over; a
+page without Voice Chat and a speaker that throws leave the send as it was; the
+speaker heard once, `speaking` said and announced, the subscription let go on
+`dispose`; Stop up while reading. `tests/test_voice_chat_js.py`: `followTurn`
+opens and plays the turn's stream, once however often it is handed over, refuses
+nothing to follow, and does not wake the tab's last turn; subscribers hear the
+speaker start and stop. `tests/test_voice_turn.py`: the drop is said at INFO with
+no word of the reply. Twenty-three mutations across the change (docs/16 lists the
+speaker's) each fail a test. Not run on the user's machine.

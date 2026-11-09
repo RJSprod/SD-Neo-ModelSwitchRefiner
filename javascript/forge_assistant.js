@@ -6661,7 +6661,7 @@
         this.renderStatus(view);
         nodes.send.disabled = !this.canSend(view);
         const busy = !!(view.operation && !view.operation.terminal);
-        nodes.stop.hidden = !(busy || view.speech.playing);
+        nodes.stop.hidden = !(busy || view.speech.playing || view.speaking);
         this.applySuppression();
     };
 

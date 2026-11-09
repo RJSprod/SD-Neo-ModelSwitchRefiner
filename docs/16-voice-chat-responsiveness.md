@@ -400,3 +400,59 @@ the choice survives a reload, a search shows everything until cleared, and a
 swapped install row keeps the page. Mutations: the search ignored, the choice
 not kept, the options never paged, an option with no page and a part on no page
 each fail a test. Not run on the user's machine.
+
+## A reply the browser holds back (2026-11-09)
+
+Found while reading the user's log for docs/22 §3.53 (a panel's replies were
+never handed to the speaker), and fixed with it, because both end the same way:
+a reply the server synthesised for nobody.
+
+**What it did.** Browsers suspend Web Audio until the page has been used, and
+`unlock()` waited for `AudioContext.resume()` to say yes or no. The Web Audio
+specification keeps that promise pending -- neither resolved nor rejected -- for
+as long as the context is not allowed to start, and Chromium and Firefox both do:
+a streamed reply that met it stayed "speaking" with nothing opened until the
+server dropped the turn, and where a browser did answer no, the reply was
+cancelled there and then.
+
+**What it does now.**
+
+- `unlock()` is bounded (`UNLOCK_WAIT_MS`, 1.5 s; a real resume takes
+  milliseconds). Past it the answer is "not yet".
+- A streamed reply that meets "not yet" waits for the page to be used
+  (`holdForTap`): the status line says *The browser is holding this reply's audio
+  back until the page is used — tap anywhere on the page to hear it*, and the
+  first `pointerdown`, `pointerup`, `touchend` or `keydown` anywhere on the page
+  resumes the audio inside that event -- where the browser lets it -- and opens the
+  reply's stream if the reply is still the one to speak. A mouse and a key grant
+  the page its sound as they go down, a finger as it lifts, so an event that does
+  not grant it leaves the wait in place.
+- The wait is given up `TAP_WAIT_MS` (25 s) after the reply reached the page,
+  inside the server's own `CLIENT_WAIT` (30 s from the first sentence), and then as
+  before: the turn is cancelled with *audio is locked until a gesture*, which
+  `model_chain.log` names, and the status line goes back to saying how to let the
+  next reply play. A tap the browser refuses -- some answer a resume they will not
+  grant with a refusal rather than silence -- leaves the wait in place. Stop, the
+  next reply and the switch turned off end the wait at once (`stopSpeaking` ->
+  `endTapWait`), and none of the page's listeners outlives it.
+- A reply replaced while the browser was being asked is never opened afterwards:
+  the answer to the old ask finds it is no longer the one to speak.
+
+The completed-reply fallback (`speakCompleted`, one WAV) keeps its sentence about
+tapping Conversation or the microphone; it has nothing held on the server to wait
+for.
+
+**Verified.** `tests/test_voice_chat_js.py` (`TestAReplyTheBrowserHoldsBack`): a
+reply the browser holds back opens nothing, says so and listens for one tap, which
+plays it and stops the listening; the tab's own reply waits the same way; a
+finger's press waits for its release; a wait nobody ends is given up 25 s after
+the reply arrived, with the reason, the status line saying so, and a later tap
+starts nothing; a tap the browser refuses leaves the wait for the next one; Stop
+while it waits lets go of the taps at once; a reply replaced while the browser was asked is
+never opened; the wait is shorter than the server's. Mutations -- the bound
+removed, the wait replaced by the old cancel, the first event ending the wait,
+the release events left out, the wait never given up, Stop leaving it, the
+deadline counted from the wait rather than the reply, the replaced reply's check
+removed, a refused tap taken for a failed stream, the status line left promising
+after the wait gave up -- each fail a test. Not run on the user's machine or in a
+Gecko build.
