@@ -1269,15 +1269,40 @@
         return null;
     }
 
+    // A section's own toggle: Gradio 4.40 draws an Accordion's heading as
+    // `button.label-wrap`, with the class `open` while it is open.
+    function toggleOf(target, sheet) {
+        let node = target;
+        while (node && node !== sheet) {
+            if (node.classList && node.classList.contains("label-wrap")) return node;
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    // Only a press that opens something moves the sheet: a section's heading,
+    // once the section has opened, and + New and Edit, which open the
+    // character editor. A press on anything in a section -- a slider, a box, a
+    // switch, a row of a list, a button -- leaves the sheet where the reader
+    // put it, and so does a heading that closed its section (2026-11-09:
+    // "interacting with the options in the conversation menu often makes the
+    // menu scroll without me taking action"). The first build moved the sheet
+    // after every press in it, and with Generation open -- taller than the
+    // sheet -- every slider and box in it sent the sheet back to Generation's
+    // heading.
     function wireSheet(id) {
         const sheet = byId(id);
         if (!sheet || sheet.dataset.mcLlmInView === "1") return;
         sheet.dataset.mcLlmInView = "1";
         sheet.addEventListener("click", function (event) {
             const target = event.target;
+            const reveal = revealOf(target);
+            const toggle = reveal ? null : toggleOf(target, sheet);
+            if (!reveal && !toggle) return;
             window.setTimeout(function () {
                 try {
-                    keepInView(sheet, revealOf(target) || target);
+                    if (toggle && !(toggle.classList && toggle.classList.contains("open"))) return;
+                    keepInView(sheet, reveal || toggle);
                 } catch (error) {
                     console.error("Model Chain: could not keep the sheet in view", error);
                 }

@@ -3743,6 +3743,12 @@ needs to be collapsed on open ... i dont want that at the top level, i should
 have to open up a menu to see those thread"). Each part is drawn again from
 what is saved every time the pop-up opens.
 
+The pop-up stays where you scrolled it while you use what is in it — a slider,
+a box, a switch, an emotion, a star — and while the answer is drawn. Only
+opening a section moves it, and then only as far as it takes to show what the
+section opened (until 2026-11-09 every press did, and a control half way down
+Generation sent the pop-up back to Generation's heading).
+
 ### Characters
 
 **+ New** beside *Talking to* and **Edit** in the pop-up's **Character**

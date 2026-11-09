@@ -522,6 +522,14 @@ class TestTheElapsedReadout:
 # view, and no move at all when it is already there. + New and Edit open the
 # character editor elsewhere in the sheet, so after them it is the editor that
 # is brought into view.
+#
+# And nothing else moves it (2026-11-09: "interacting with the options in the
+# conversation menu often makes the menu scroll without me taking action"):
+# the first build moved the sheet after *every* press in it, read as the
+# opening of the section pressed in, so with Generation open -- taller than
+# the sheet -- every slider and box in it sent the sheet back to Generation's
+# heading. Only a section's own heading (Gradio 4.40's `button.label-wrap`,
+# `open` once it has opened) and + New and Edit move it now.
 
 SHEET = """
 function section(top, height) {
@@ -568,10 +576,19 @@ SOURCE
 
 loaded.forEach((fn) => fn());
 
-// A control inside a section of the sheet, clicked. The section is what the
-// script has to find its way back to — the target itself is a button inside it.
+// What was pressed, inside a section of the sheet: the section's own heading
+// (Gradio 4.40's `button.label-wrap`, `open` once the section has opened, or
+// not when the press closed it), or a control in it -- a slider, a box, a
+// switch. NESTED puts the heading in a section inside the section.
 const opened = section(TOP, HEIGHT);
-const target = {parentElement: opened};
+const holder = NESTED ? {parentElement: opened, classList: {contains: () => false}} : opened;
+const heading = {parentElement: holder,
+                 classList: {contains: (name) => name === "label-wrap" || (name === "open" && OPENS)}};
+// A press lands on the heading's words, the <span> inside Gradio's button.
+const target = PRESSED_KIND === "heading" ? heading
+    : (PRESSED_KIND === "heading-words"
+        ? {parentElement: heading, classList: {contains: () => false}}
+        : {parentElement: holder, classList: {contains: () => false}});
 const REVEALS = {};
 if (PRESSED) {
     // The press was on + New or on Edit, and the editor is elsewhere.
@@ -585,10 +602,16 @@ console.log(JSON.stringify({scrollTop: sheet.scrollTop, wired: sheet.dataset.mcL
 
 
 def opened(top: int, height: int, view: int = 400, scrolled: int = 0, pressed: str = "",
-           editor: tuple = (0, 0)) -> dict:
-    """Where the sheet ended up after a section at ``top`` was opened -- or
-    after a press on ``pressed`` (+ New, Edit) opened the editor at ``editor``."""
+           editor: tuple = (0, 0), kind: str = "heading", opens: bool = True,
+           nested: bool = False) -> dict:
+    """Where the sheet ended up after a section at ``top`` was opened by its
+    heading -- or after a press on ``pressed`` (+ New, Edit) opened the editor
+    at ``editor``. ``kind="control"`` presses something inside the section
+    instead, and ``opens=False`` is a heading whose press closed it."""
     harness = (SHEET.replace("SOURCE", SCRIPT.read_text())
+               .replace("PRESSED_KIND", json.dumps(kind))
+               .replace("OPENS", json.dumps(opens))
+               .replace("NESTED", json.dumps(nested))
                .replace("EDITOR_TOP", json.dumps(editor[0]))
                .replace("EDITOR_HEIGHT", json.dumps(editor[1]))
                .replace("PRESSED", json.dumps(pressed))
@@ -634,6 +657,39 @@ class TestKeepingAnOpenedSectionInView:
         # Any other press is still its own section's.
         assert opened(top=900, height=40, view=400, scrolled=800,
                       pressed="", editor=(120, 300))["scrollTop"] == 800
+
+    def test_a_heading_in_a_section_inside_a_section_brings_the_outer_one(self):
+        """Import a character card is a section inside Character."""
+        assert opened(top=300, height=320, view=400, scrolled=0, nested=True)["scrollTop"] == 220
+
+    def test_a_press_on_the_heading_s_words_is_the_heading_s(self):
+        """Gradio 4.40 draws the label as a <span> in the button, which is
+        where a press on it lands."""
+        assert opened(top=300, height=320, view=400, scrolled=0,
+                      kind="heading-words")["scrollTop"] == 220
+
+
+class TestAPressOnAnOptionLeavesTheSheetWhereItIs:
+    """The user's report, 2026-11-09. Each of these moved the sheet in the first
+    build; on a real Gradio 4.40 page (``tests/live/llm_studio_conversation_live.py``)
+    the DRY box and the last slider sent it from 1189 and 1639 back to 353."""
+
+    def test_a_control_deep_in_a_section_taller_than_the_sheet(self):
+        """Generation open, the reader at its DRY controls, one of them pressed."""
+        assert opened(top=353, height=1700, view=866, scrolled=1189,
+                      kind="control")["scrollTop"] == 1189
+
+    def test_a_control_in_a_section_that_runs_below_the_fold(self):
+        assert opened(top=300, height=320, view=400, scrolled=0,
+                      kind="control")["scrollTop"] == 0
+
+    def test_a_control_in_a_section_scrolled_part_way_off_the_top(self):
+        assert opened(top=0, height=200, view=400, scrolled=150,
+                      kind="control")["scrollTop"] == 150
+
+    def test_a_heading_that_closed_its_section(self):
+        assert opened(top=300, height=320, view=400, scrolled=0,
+                      opens=False)["scrollTop"] == 0
 
 
 # --------------------------------------------------------------------------- #
