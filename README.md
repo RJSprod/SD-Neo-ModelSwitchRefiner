@@ -3724,7 +3724,7 @@ reads, top to bottom:
 
 | | |
 | --- | --- |
-| **+ New thread** | On the pop-up's head, beside ‹ Back: a new thread with the character you are talking to, starting with the generation settings of the thread you were in. |
+| **+ New thread** | On the pop-up's head, beside ‹ Back: a new thread with the character you are talking to, at the default generation settings. |
 | **Favourites · 3** | Folded, its label counts them. Open, every thread you have starred, whoever it is with, most recently used first, each with the character's name beside it. One tap opens it — switching character if it is another's — and the pop-up goes. Not shown until a thread is starred. |
 | **Talking to** · **+ New** | Who you are talking to, from your characters, and a new one. Choosing another opens its newest thread. + New opens the character editor here, under the drop-down. |
 | **Threads** | Folded. Open, that character's threads, starred first, then the rest, most recently used first; a box finds one by its title. Tap a thread to open it. **Tap its star** (☆) to keep it at the top and in Favourites; tap the filled star again to let it go. |
@@ -3757,11 +3757,11 @@ wherever you pressed), grouped in the order a character is written:
 | **Voice** | Which voice reads the character aloud, and its own delivery if it has one. |
 | **Save character** / **Cancel** | Save creates when the editor is on a new character and edits when it is on an existing one; creating over a name already taken is refused. Changing the name renames, picture included. Cancel puts everything back. |
 
-A reply is sampled at its thread's own settings — *Generation settings*,
-below. A character's own temperature, top-p, reply tokens and seed (in its
-file, as an imported card brings them) are what a thread of it that has chosen
-none of those is sampled at, and **Save character** leaves them as they are. In
-the **Character** section, **Import a character card** takes a `.yaml`,
+A reply is sampled at its thread's own settings, or the defaults —
+*Generation settings*, below. The temperature, top-p, reply tokens and seed a
+character's file may still hold (the old sliders wrote them there; an imported
+card can bring them) are not used, and **Save character** leaves them in the
+file as they are. In the **Character** section, **Import a character card** takes a `.yaml`,
 `.json`, or a `.png` V2/V3 card with its JSON inside, and **Delete this
 character** removes it and its picture and lands you on whichever is left.
 
@@ -3836,16 +3836,19 @@ reply went out at the defaults while your choice sat in the file; and a seed
 typed once stayed in the file while the box showed −1, so every Regenerate
 came back the same.
 
-Open **Conversation → Generation**. Each control is written for the open thread
-the moment it moves, and the section is drawn from what the thread keeps every
-time the pop-up opens. Every reply in the thread — Send, Regenerate, Continue,
-Send again, from LLM Studio or the Forge Assistant's panel — is made from it. A
-setting the thread has not chosen shows, and is sampled at, what applies
-without a choice: the character's own for temperature, top-p, reply tokens and
-the seed; for the rest, what llama-server uses — the managed model's profile,
-else the model file's own recommendation, else llama-server's default. Only
-what a thread chose is sent beyond the four, so a thread nobody has touched
-replies exactly as before.
+Every thread is at the **defaults** until you change something in it, and
+what you change is kept for that thread, across sessions (the same day: "It
+should be default until I override for a thread. And then kept for that thread
+through sessions"). Open **Conversation → Generation**: each control is written
+for the open thread the moment it moves, and the section is drawn from what the
+thread keeps every time the pop-up opens. Every reply in the thread — Send,
+Regenerate, Continue, Send again, from LLM Studio or the Forge Assistant's
+panel — is made from it. The defaults are LLM Studio's own for temperature
+(0.85), top-p (0.95), reply tokens (512) and the seed (a new one each reply) —
+never what a character's file holds — and for the rest what llama-server uses:
+the managed model's profile, else the model file's own recommendation, else
+llama-server's default. That is what an untouched control shows, and only what
+a thread changed is sent beyond those four.
 
 | Variety | |
 | --- | --- |
@@ -3877,9 +3880,11 @@ unpenalised until **DRY range** (or **Penalty range**) is raised, to 2048 say.
 its threshold at 0.1, and **Min-p** at 0.05 to 0.1 with **Temperature** at 1.0
 to 1.2, give more varied wording.
 
-**Reset to defaults** forgets the thread's choices. **+ New thread** starts a
-thread with the settings of the one you were in (the Forge Assistant's **New
-chat** too); a branch keeps its thread's; deleting a thread forgets them.
+**Reset to defaults** forgets the thread's changes. A new thread — **+ New
+thread**, or the Forge Assistant's **New chat** — starts at the defaults,
+whichever thread you were in; a branch (Regenerate or Send again in the middle
+of a thread, **Branch from here**) keeps its thread's, being the same
+conversation carried on; deleting a thread forgets them.
 They are kept beside the threads (`generation.json` in the LLM data folder),
 not in the conversation's own file, so changing one never makes the other
 window's next message stale.

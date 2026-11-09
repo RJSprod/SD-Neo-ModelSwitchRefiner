@@ -33,13 +33,13 @@ def asking(monkeypatch, pieces=("Oh,", " hello!")):
     return asked
 
 
-def created(character="Ada", like=None, operation_id="create-1"):
+def created(character="Ada", operation_id="create-1", payload=None):
     body = {"protocol_version": service.PROTOCOL_VERSION,
             "server_epoch": service.SERVER_EPOCH, "operation_id": operation_id,
             "action": service.CREATE_THREAD,
             "conversation": {"character": character, "thread_id": ""},
             "expected_revision": None,
-            "payload": {"like": like} if like is not None else {}}
+            "payload": payload or {}}
     return service.submit(body)
 
 
@@ -187,15 +187,16 @@ class Configuration:
 
 
 class TestWhatAppliesWithoutAChoice:
-    def test_llama_servers_defaults_and_the_characters_four(self):
-        from prompt_master.chat.characters import Character
+    def test_the_packages_four_and_llama_servers_defaults(self):
+        """"It should be default until I override for a thread" (2026-11-09):
+        the package's own for the four, whatever a character's file holds."""
+        from prompt_master.chat import characters
 
-        found = generation.base(Character(name="Ada", temperature=0.4, top_p=0.9,
-                                          max_reply_tokens=900, seed=99),
-                                configuration=Configuration())
+        found = generation.base(configuration=Configuration())
 
         assert (found["temperature"], found["top_p"], found["reply_tokens"],
-                found["seed"]) == (0.4, 0.9, 900, 99)
+                found["seed"]) == (characters.DEFAULT_TEMPERATURE, characters.DEFAULT_TOP_P,
+                                   characters.DEFAULT_MAX_REPLY_TOKENS, -1)
         assert found["top_k"] == 40 and found["min_p"] == 0.05
         assert found["dry_multiplier"] == 0.0 and found["repeat_last_n"] == 64
 
@@ -218,7 +219,7 @@ class TestWhatAppliesWithoutAChoice:
         assert (from_the_file["top_k"], from_the_file["min_p"],
                 from_the_file["repeat_penalty"], from_the_file["repeat_last_n"]) == (
                     64, 0.0, 1.05, 256)
-        assert from_the_file["temperature"] == 0.85, "the four are the character's"
+        assert from_the_file["temperature"] == 0.85, "the four are the package's"
 
         with_a_profile = generation.base(configuration=Configuration(
             model=model, profile=Profile({"top_k": 20, "repeat_penalty": 1.1})))
@@ -273,22 +274,28 @@ class TestEveryRequestInTheThread:
         assert request.sampling == {"dry_multiplier": 0.8, "dry_penalty_last_n": 2048,
                                     "min_p": 0.1}
 
-    def test_a_thread_that_chose_nothing_is_sampled_as_it_always_was(self, chats, thread,
+    def test_a_thread_that_chose_nothing_is_sampled_at_the_defaults(self, chats, thread,
                                                                     monkeypatch):
-        """The character's four, and nothing beyond them for the profile and
+        """The package's four -- never the four in the character's file, which
+        nothing shows any more -- and nothing beyond them for the profile and
         llama-server to be overruled with."""
         from dataclasses import replace
 
         import mc_llm_conversation_service as svc
+        from prompt_master.chat import characters
+        from prompt_master.core import models
 
         held = svc._characters()
         held.save(replace(held.load("Ada"), temperature=0.4, max_reply_tokens=300, seed=11))
+        monkeypatch.setattr(models, "draw_seed", lambda: 1111)
         asked = asking(monkeypatch)
 
         run("send", thread, payload={"text": "Again?"})
 
         request = asked[-1]
-        assert (request.temperature, request.max_tokens, request.seed) == (0.4, 300, 11)
+        assert (request.temperature, request.top_p, request.max_tokens, request.seed) == (
+            characters.DEFAULT_TEMPERATURE, characters.DEFAULT_TOP_P,
+            characters.DEFAULT_MAX_REPLY_TOKENS, 1111)
         assert request.sampling == {}
 
     def test_every_view_and_every_way_of_asking_uses_them(self, chats, thread, monkeypatch):
@@ -318,11 +325,12 @@ class TestEveryRequestInTheThread:
         assert generation.for_thread("Ada", thread.identifier) == {"temperature": 1.3,
                                                                    "top_k": 80}
 
-    def test_a_threads_random_seed_is_random_whatever_the_character_holds(
-            self, thread, monkeypatch):
+    def test_the_seed_is_new_each_reply_unless_the_thread_chose_one(self, thread,
+                                                                    monkeypatch):
         """The 2026-11-09 Regenerate that came back the same: the box showed -1
         while the character's file held a seed, and a request's -1 left that
-        seed in force. A thread's -1 is a choice and draws a fresh one."""
+        seed in force. The file's seed is no thread's; a thread's own is kept,
+        and a request's -1 still says nothing."""
         from dataclasses import replace
 
         import mc_llm_conversation_service as svc
@@ -334,13 +342,17 @@ class TestEveryRequestInTheThread:
         monkeypatch.setattr(models, "draw_seed", lambda: next(drawn))
         asked = asking(monkeypatch)
 
-        run("send", thread, payload={"text": "Hi.", "settings": {"seed": -1}},
-            operation_id="send-1")
-        assert asked[-1].seed == 99, "a request's -1 says nothing, as it always said"
+        run("send", thread, payload={"text": "Hi."}, operation_id="send-1")
+        assert asked[-1].seed == 1111, "the character's leftover seed is not the default"
+
+        generation.choose("Ada", thread.identifier, "seed", 4242)
+        run("send", thread, payload={"text": "Hi again.", "settings": {"seed": -1}},
+            operation_id="send-2")
+        assert asked[-1].seed == 4242, "a request's -1 says nothing, as it always said"
 
         generation.choose("Ada", thread.identifier, "seed", -1)
-        run("send", thread, payload={"text": "Hi again."}, operation_id="send-2")
-        assert asked[-1].seed == 1111
+        run("send", thread, payload={"text": "And again."}, operation_id="send-3")
+        assert asked[-1].seed == 2222
 
     def test_the_tabs_send_does_not_overrule_them(self, thread, monkeypatch):
         """The reported bug: the tab sent its sliders with every reply, and they
@@ -370,6 +382,44 @@ class TestEveryRequestInTheThread:
         assert refused["ok"] is False and refused["error"]["code"] == service.INVALID_INPUT
         for key in generation.KEYS:
             assert service._settings({key: 1}) == {key: 1}, key
+
+
+class TestTheConversationReadAgain:
+    """After a change of emotion the thread is read again in the background, and
+    its prompt has to begin as the next reply's will -- the history trimmed to
+    the same window, which the reply's budget decides."""
+
+    def _built_with(self, monkeypatch):
+        from prompt_master.chat import prompt
+
+        seen = []
+        real = prompt.build
+
+        def recording(*args, **kwargs):
+            seen.append(kwargs.get("reply_tokens"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(prompt, "build", recording)
+        return seen
+
+    def test_with_the_threads_own_budget_else_the_default(self, thread, monkeypatch):
+        from dataclasses import replace
+
+        import mc_llm_conversation_ops as ops
+        import mc_llm_conversation_service as svc
+        import mc_llm_conversation_store as store_module
+        from prompt_master.chat import characters
+
+        held = svc._characters()
+        held.save(replace(held.load("Ada"), max_reply_tokens=300))
+        seen = self._built_with(monkeypatch)
+        key = store_module.key_of(thread)
+
+        ops._thread_request(key)
+        generation.choose("Ada", thread.identifier, "reply_tokens", 900)
+        ops._thread_request(key)
+
+        assert seen == [characters.DEFAULT_MAX_REPLY_TOKENS, 900]
 
 
 class TestTheClientIsAskedOnlyWhenThereIsSomething:
@@ -431,33 +481,25 @@ class TestTheClientIsAskedOnlyWhenThereIsSomething:
 
 
 class TestThreadsMadeFromAThread:
-    def test_a_new_thread_starts_from_the_one_it_was_made_from(self, thread):
+    def test_a_new_thread_starts_at_the_defaults_whatever_was_open(self, thread):
+        """"It should be default until I override for a thread. And then kept
+        for that thread through sessions" (2026-11-09): a thread tuned is not
+        where a new one starts, from the tab or from the panel."""
         generation.choose("Ada", thread.identifier, "dry_multiplier", 0.8)
 
-        outcome = created(like=thread.identifier)
+        outcome = created()
 
         made = outcome["resulting_conversation"]["thread_id"]
         assert outcome["ok"] is True and made != thread.identifier
-        assert generation.for_thread("Ada", made) == {"dry_multiplier": 0.8}
-
-    def test_a_new_thread_made_from_nothing_starts_from_nothing(self, thread):
-        generation.choose("Ada", thread.identifier, "dry_multiplier", 0.8)
-
-        plain = created()["resulting_conversation"]["thread_id"]
-        nowhere = created(like="not-a-thread", operation_id="create-2")[
-            "resulting_conversation"]["thread_id"]
-
-        assert generation.for_thread("Ada", plain) == {}
-        assert generation.for_thread("Ada", nowhere) == {}
-
-    def test_a_deleted_threads_leftover_is_not_where_a_thread_starts(self, thread):
-        """Only a thread that is there is started from: a record left behind
-        by a thread deleted outside LLM Studio names nothing."""
-        generation.choose("Ada", "gone-thread", "top_k", 9)
-
-        made = created(like="gone-thread")["resulting_conversation"]["thread_id"]
-
         assert generation.for_thread("Ada", made) == {}
+        assert generation.for_thread("Ada", thread.identifier) == {"dry_multiplier": 0.8}
+
+    def test_a_thread_to_start_from_is_not_something_it_takes(self, thread):
+        """The first build of this round named one (``like``) and carried its
+        settings; the service no longer understands the field."""
+        refused = created(payload={"like": thread.identifier})
+
+        assert refused["ok"] is False and refused["error"]["code"] == service.INVALID_INPUT
 
     def test_a_branch_carries_them(self, thread):
         generation.choose("Ada", thread.identifier, "top_k", 0)

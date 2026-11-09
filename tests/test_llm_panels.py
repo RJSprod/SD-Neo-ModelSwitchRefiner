@@ -1805,26 +1805,32 @@ class TestTheGenerationSection:
         assert dict(zip(mc_llm_generation.KEYS, answered[1:-1]))["top_k"] == 40
         assert "back to its defaults" in answered[-1]
 
-    def test_a_new_thread_starts_from_the_one_open(self, store, characters):
-        """+ New thread names the thread it was pressed in; the new one starts
-        with its settings, so a thread tuned for variety is not the last."""
+    def test_a_new_thread_starts_at_its_defaults(self, store, characters):
+        """"It should be default until I override for a thread. And then kept
+        for that thread through sessions" (2026-11-09): a thread tuned for
+        variety keeps it, and + New thread from it starts at the defaults."""
         import mc_llm_generation
 
         identifier = self._thread()
         mc_llm_chat_panel._generation_chosen("xtc_probability")("Ada", identifier, 0.5)
 
-        answered = mc_llm_chat_panel._new_thread("Ada", "", identifier)
+        answered = mc_llm_chat_panel._new_thread("Ada", "")
 
         made = answered[1]
         assert made and made != identifier
-        assert mc_llm_generation.for_thread("Ada", made) == {"xtc_probability": 0.5}
+        assert mc_llm_generation.for_thread("Ada", made) == {}
+        assert mc_llm_chat_panel._generation_view("Ada", made)[0] == {"label": "Generation"}
+        assert mc_llm_generation.for_thread("Ada", identifier) == {"xtc_probability": 0.5}
 
-    def test_new_thread_is_wired_with_the_thread_open(self, store, monkeypatch):
+    def test_new_thread_names_no_thread_to_start_from(self, store, monkeypatch):
+        """Who you are talking to and the search; not the thread open."""
         built = _built(monkeypatch)
 
         (kind, kwargs), = _by_id(built, "new-thread")._callbacks
 
-        assert kwargs["fn"] is mc_llm_chat_panel._new_thread and len(kwargs["inputs"]) == 3
+        assert kwargs["fn"] is mc_llm_chat_panel._new_thread
+        assert [one.elem_id for one in kwargs["inputs"]] == [
+            "mc-llm-chat-who", "mc-llm-chat-search"]
 
 
 class TestTheThreadListsAreFolded:
@@ -3692,10 +3698,10 @@ class TestConversationDefaults:
         return dict(zip(mc_llm_generation.KEYS,
                         mc_llm_chat_panel._generation_view("Ada", identifier)[1:]))
 
-    def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self, store):
+    def test_a_cleared_box_falls_back_to_the_default(self, store):
         """A box emptied forgets the thread's choice: the setting is drawn -- and
-        a reply sampled -- at the character's value, or llama-server's default
-        for one the character has none of."""
+        a reply sampled -- at the default (the package's for the four, never the
+        character file's; llama-server's for the rest)."""
         identifier = self._ada_and_a_thread(store)
         for key, value in (("temperature", 1.2), ("reply_tokens", 256), ("top_k", 7)):
             mc_llm_chat_panel._generation_chosen(key)("Ada", identifier, value)
@@ -3704,7 +3710,7 @@ class TestConversationDefaults:
             mc_llm_chat_panel._generation_chosen(key)("Ada", identifier, None)
 
         drawn = self._drawn(identifier)
-        assert (drawn["temperature"], drawn["reply_tokens"], drawn["top_k"]) == (0.4, 900, 40)
+        assert (drawn["temperature"], drawn["reply_tokens"], drawn["top_k"]) == (0.85, 512, 40)
 
     def test_a_slider_value_still_wins_over_the_saved_one(self, store):
         identifier = self._ada_and_a_thread(store)
@@ -4190,12 +4196,12 @@ class TestSeedsAreRandomUntilSomebodyChoosesOne:
 
         assert Character(name="").seed == RANDOM_SEED
 
-    def test_a_thread_can_be_given_a_random_seed_back(self, store):
-        """So a thread whose character holds a seed can be given a fresh one
-        each reply -- its -1 is a choice, where a request's -1 says nothing --
-        and the section shows the seed that is in force, not -1 over a fixed
-        one (the 2026-11-09 report: the box showed -1 while the file's seed made
-        every Regenerate the same reply)."""
+    def test_a_characters_leftover_seed_is_no_threads(self, store):
+        """The 2026-11-09 report: the box showed -1 while a seed typed once sat
+        in the character's file and made every Regenerate the same reply. That
+        seed is no thread's default -- an untouched thread is a new seed each
+        reply, and shows it -- and a seed a thread chose is kept, as is its -1
+        given back."""
         from prompt_master.core.models import RANDOM_SEED
         from prompt_master.chat.characters import Character
 
@@ -4208,6 +4214,10 @@ class TestSeedsAreRandomUntilSomebodyChoosesOne:
         chats.save(conversation)
         seed_at = 1 + mc_llm_generation.KEYS.index("seed")
 
+        assert mc_llm_chat_panel._generation_view("Ada", conversation.identifier)[
+            seed_at] == RANDOM_SEED
+
+        mc_llm_chat_panel._generation_chosen("seed")("Ada", conversation.identifier, 99)
         assert mc_llm_chat_panel._generation_view("Ada", conversation.identifier)[seed_at] == 99
 
         mc_llm_chat_panel._generation_chosen("seed")("Ada", conversation.identifier,

@@ -5180,23 +5180,25 @@ the box showed -1 again, and a request's -1 meant "no preference", which
   file, for the emotion's reason (a write there is a revision). Sparse: only
   what the thread chose (`choose`, `for_thread`); `None` forgets one;
   `reset`; a value out of range held at its end as llama-server's soft limits
-  hold one (`value_of`); `carry` for a branch (`_branch_from`) and for a new
-  thread made from another (`create_thread`'s new `like`, only a thread that
-  is there); `forget` on delete.
-- **What applies without a choice** (`base`), in llama-server's own order: its
+  hold one (`value_of`); `carry` for a branch (`_branch_from`) -- the same
+  conversation carried on; `forget` on delete. A new thread has none.
+- **The defaults** (`base`): the package's own for the four (a blank
+  `Character`'s: 0.85, 0.95, 512 tokens, a new seed each reply) -- never the
+  four in a character's file -- and for the rest llama-server's own order: its
   built-in default (b10621's `common_params_sampling`), the model file's
   recommendation (`general.sampling.*`, read with `mc_gguf.describe`;
   llama-server's `common_init_sampler_from_model` makes it the default of every
   request that does not say, and this extension sets no sampling flag that
   would stop it), then the managed profile's fields (`sampler_arguments`, sent
-  with every request). The four come from the character, as they always have.
-  That is what an untouched control shows.
+  with every request). That is what an untouched control shows.
 - **Every request reads them where it is built** (`mc_llm_conversation_ops._capture`):
-  the four from the thread's choice over the character's, under what a request
-  names for itself (`settings`, which the external API can still send, its
-  allowed names now every `KEYS`); the rest only as chosen
+  the four from the thread's choice, else the package's default, under what a
+  request names for itself (`settings`, which the external API can still send,
+  its allowed names now every `KEYS`); the rest only as chosen
   (`request_fields` -> `ChatRequest.sampling`). A thread's -1 is a choice and
-  draws a seed; a request's -1 still says nothing. The tab sends no settings at
+  draws a seed; a request's -1 still says nothing. The conversation read again
+  after a change of emotion (`_thread_request`) budgets its window with the
+  same reply tokens (`_reply_tokens`), where it used the character's. The tab sends no settings at
   all now (`_send`, `_regenerate`, `_continue`, `_resend` and their row
   handlers lost the four arguments), so a page drawn before a change cannot
   send the old values; the Forge Assistant's panel never sent any.
@@ -5234,9 +5236,8 @@ last; the section is drawn from what is kept as the pop-up opens, after another
 character is chosen and after a delete (`_generation_view`); its label says what
 the thread chose (`label`: *Generation · Temperature 1.1 · DRY 0.8 · +2*);
 **Reset to defaults** forgets them (`_generation_reset`). The character editor
-no longer carries the four, and **Save character** keeps the character's own as
-its file has them. + New thread passes the thread open (`like`); so does the
-Forge Assistant's New chat for the same character (`createThread`).
+no longer carries the four, and **Save character** leaves the character's file
+as it has them.
 
 **The thread lists folded.** Favourites and Threads are folded sections
 (`favourites-section`, `threads-section`), folded again every time the pop-up
@@ -5264,14 +5265,31 @@ whitelist); `tests/test_llm_panels.py` (`TestTheGenerationSection`,
 `TestTheThreadListsAreFolded`, and the `_remember_sampling` tests translated to
 the thread: a control kept and drawn back, the character left alone, Save
 keeping its sampling, nothing kept without a thread, a thread's random seed);
-`tests/test_assistant_v3_js.py` (New chat's `like`);
+`tests/test_assistant_v3_js.py` (New chat names no thread);
 `tests/test_llm_studio_conversation_css.py` (+ New thread on one line on the
 head, a Gradio title scrolled under the head staying under it). **On real Gradio
 4.40.0 in Chromium** (`tests/live/llm_studio_conversation_live.py`): both lists
 folded as the pop-up opens and folded again after Threads was opened, + New
 thread on the head, sixteen sliders, a DRY value typed kept with the thread and
 the section relabelled, a value changed behind the page drawn on the next open,
-another thread showing its own. Forty-eight mutations each fail a test (two
-survived a first pass: one changed nothing and was replaced; the other found
-the redraw after another character was chosen untested, which a test now
-holds). Not run against a real llama-server or on the user's machine.
+another thread showing its own, + New thread from a tuned thread at the
+defaults, and the tuned thread's value there again after the page was loaded
+again. Fifty-eight mutations each fail a test (two survived a first pass: one
+changed nothing and was replaced; the other found the redraw after another
+character was chosen untested, which a test now holds). Not run against a real
+llama-server or on the user's machine.
+
+**Then, the same day: the defaults until a thread changes one.**
+
+> "It should be default until I override for a thread. And then kept for that
+> thread through sessions"
+
+The first build started a new thread with the settings of the one it was made
+from (`like` on `create_thread`, sent by the tab's + New thread and by the
+panel's New chat) and took an untouched setting's four from the character's
+file. Both went: a new thread starts at the defaults (the service no longer
+understands `like`, and neither view sends it), and the four's default is the
+package's -- the file's were written by the old sliders, whatever they showed,
+a typed seed among them, and nothing shows them any more. A branch still
+carries its thread's, being the same conversation. Ten of the fifty-eight
+mutations are this round's.

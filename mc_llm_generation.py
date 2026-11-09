@@ -22,20 +22,24 @@ write there is a new revision of the conversation, which would make the other
 window's next Send stale. Every request in the thread is made from them,
 whichever view sends it (``mc_llm_conversation_ops._capture``).
 
-A setting a thread has not chosen follows what applies without a choice
-(:func:`base`): the character's, for the four it has always had, and for the
-rest what llama-server uses for a request that does not say -- the managed
-profile's sampler fields (sent with every request), else the model file's own
-recommendation (``general.sampling.*``, which llama-server takes as its
-default), else llama-server's built-in default. That is what is drawn for it,
-and nothing more than the four is sent for it (:func:`request_fields`), so a
-thread nobody has touched is sampled exactly as it was. What a thread chose is
-sent after the profile's fields, so the thread's choice wins.
+"It should be default until I override for a thread. And then kept for that
+thread through sessions" (the same day). A setting a thread has not chosen is
+the default (:func:`base`): the package's own for the four LLM Studio has
+always sent -- temperature 0.85, top-p 0.95, 512 reply tokens, a new seed each
+reply -- and for the rest what llama-server uses for a request that does not
+say: the managed profile's sampler fields (sent with every request), else the
+model file's own recommendation (``general.sampling.*``, which llama-server
+takes as its default), else llama-server's built-in default. That is what is
+drawn for it, and nothing more than the four is sent for it
+(:func:`request_fields`). The four in a character's own file -- written there
+by the sliders until 2026-11-09, whatever they showed, a seed typed once among
+them -- are not a default: nothing shows them any more, and a value nobody can
+see is not one anybody chose.
 
-A new thread starts with the choices of the thread it was made from, as a
-branch does (:func:`carry`); **Reset** puts a thread back to what applies
-without a choice (:func:`reset`); a deleted thread's are forgotten
-(:func:`forget`).
+A new thread starts at the defaults; a branch -- the same conversation carried
+on from one of its messages -- keeps its thread's choices (:func:`carry`);
+**Reset** puts a thread back to the defaults (:func:`reset`); a deleted
+thread's are forgotten (:func:`forget`).
 
 **The controls** (:data:`SETTINGS`) are what llama-server b10621 reads from a
 request (``tools/server/server-schema.cpp``) that bear on variety and
@@ -82,9 +86,10 @@ class Setting:
 
     ``default`` is llama-server b10621's own for a request that does not say.
     ``model_key`` is the name the model file may recommend a value under
-    (``general.sampling.<model_key>``). ``character`` names the attribute of
-    the character the setting has always been read from; those four are sent
-    with every request whether a thread chose them or not.
+    (``general.sampling.<model_key>``). ``vendored`` names the field of the
+    vendored package's ``Character`` whose default is this setting's -- the
+    package's own, named rather than copied; those four are sent with every
+    request whether a thread chose them or not.
     """
 
     key: str
@@ -97,20 +102,20 @@ class Setting:
     whole: bool = False
     info: str = ""
     model_key: str = ""
-    character: str = ""
+    vendored: str = ""
 
 
 SETTINGS: tuple[Setting, ...] = (
     # Drawn two to a row, in this order: each pair is two halves of one idea.
     # -- variety ----------------------------------------------------------- #
     Setting("temperature", "Temperature", VARIETY, 0.0, 2.0, 0.05, 0.8,
-            info="Higher is more varied", character="temperature"),
+            info="Higher is more varied", vendored="temperature"),
     Setting("dynatemp_range", "Dynamic temperature", VARIETY, 0.0, 1.5, 0.05, 0.0,
             info="0 = off; ± this, higher where the model is unsure"),
     Setting("min_p", "Min-p", VARIETY, 0.0, 1.0, 0.01, 0.05, info="0 = off",
             model_key="min_p"),
     Setting("top_p", "Top-p", VARIETY, 0.0, 1.0, 0.01, 0.95, info="1 = off",
-            character="top_p"),
+            vendored="top_p"),
     Setting("xtc_probability", "XTC", VARIETY, 0.0, 1.0, 0.05, 0.0,
             info="0 = off; how often the likeliest words are dropped",
             model_key="xtc_probability"),
@@ -138,9 +143,9 @@ SETTINGS: tuple[Setting, ...] = (
             info="Tokens repeated before it starts"),
     # -- length and seed --------------------------------------------------- #
     Setting("reply_tokens", "Reply tokens", LENGTH, 64, 4096, 64, 512, whole=True,
-            character="max_reply_tokens"),
+            vendored="max_reply_tokens"),
     Setting("seed", "Seed", LENGTH, -1, 2 ** 31 - 2, 1, -1, whole=True,
-            info="-1: a new seed each reply", character="seed"),
+            info="-1: a new seed each reply", vendored="seed"),
 )
 """Every control, in the order they are drawn."""
 
@@ -148,11 +153,11 @@ BY_KEY = {setting.key: setting for setting in SETTINGS}
 
 KEYS = tuple(setting.key for setting in SETTINGS)
 
-SENT_ALWAYS = tuple(setting.key for setting in SETTINGS if setting.character)
+SENT_ALWAYS = tuple(setting.key for setting in SETTINGS if setting.vendored)
 """The four every request carries, chosen or not: they have their own fields on
 the request (``ChatRequest.temperature`` and the rest)."""
 
-SENT_IF_CHOSEN = tuple(setting.key for setting in SETTINGS if not setting.character)
+SENT_IF_CHOSEN = tuple(setting.key for setting in SETTINGS if not setting.vendored)
 """The rest, sent only for a thread that chose them (:func:`request_fields`).
 Their names are llama-server's own; ``prompt_master.inference.llama_client``
 lets exactly these through (``REQUEST_SAMPLER_FIELDS``)."""
@@ -287,8 +292,9 @@ def reset(character, thread_id) -> None:
 
 
 def carry(character, source_thread, made_thread) -> None:
-    """Give a thread made from another -- a branch, or a new thread started
-    from one -- the choices of the one it came from. Never fails a caller."""
+    """Give a branch the choices of the thread it was made from: the same
+    conversation, carried on from one of its messages. (A new thread is not
+    made from one, and starts at the defaults.) Never fails a caller."""
     try:
         if not str(source_thread or "").strip() or not str(made_thread or "").strip():
             return
@@ -380,34 +386,33 @@ def profile_fields(configuration=None) -> dict:
     return found
 
 
-def base(character=None, configuration=None) -> dict:
-    """Every setting's value for a thread that chose none, by key.
+def base(configuration=None) -> dict:
+    """Every setting's default, by key: its value for a thread that chose none.
 
-    In llama-server's own order of precedence for the settings beyond the four:
-    its built-in default, then the model file's recommendation, then the
-    managed profile's field. The four come from the character, as they always
-    have -- or the package's defaults, for no character.
+    The four the package's own (a blank ``Character``'s, named rather than
+    copied). The rest in llama-server's own order of precedence: its built-in
+    default, then the model file's recommendation, then the managed profile's
+    field.
     """
+    from prompt_master.chat.characters import Character
+
     found = {setting.key: value_of(setting, setting.default) for setting in SETTINGS
-             if not setting.character}
+             if not setting.vendored}
     if configuration is None:
         configuration = _configuration()
     found.update(model_recommendations(configuration))
     found.update(profile_fields(configuration))
-    if character is None:
-        from prompt_master.chat.characters import Character
-
-        character = Character(name="")
+    blank = Character(name="")
     for setting in SETTINGS:
-        if setting.character:
-            kept = value_of(setting, getattr(character, setting.character, None))
+        if setting.vendored:
+            kept = value_of(setting, getattr(blank, setting.vendored, None))
             found[setting.key] = (kept if kept is not None
                                   else value_of(setting, setting.default))
     return found
 
 
 def in_force(record, defaults: dict) -> dict:
-    """Every setting's value for a thread: its choice, else what applies without one."""
+    """Every setting's value for a thread: its choice, else the default."""
     found = dict(defaults)
     found.update(_clean(record))
     return found

@@ -671,10 +671,11 @@ def build() -> dict:
                                           elem_id=ui.ident("chat", "start-set"))
             # How this thread's replies are sampled, kept with the thread
             # (mc_llm_generation, 2026-11-09: "These should be kept per
-            # conversation"). Drawn from what the thread chose -- and, for what it
-            # did not, from what applies without a choice -- as the pop-up opens
-            # and as the thread changes under it, and written the moment a
-            # control moves. Its label says what the thread chose.
+            # conversation ... It should be default until I override for a
+            # thread"). Drawn from what the thread chose -- and, for what it did
+            # not, from the default -- as the pop-up opens and as the thread
+            # changes under it, and written the moment a control moves. Its
+            # label says what the thread chose.
             initial_generation = _generation_values(who, initial_thread)
             with gr.Accordion(_generation_label(who, initial_thread), open=False,
                               elem_id=ui.ident("chat", "generation"),
@@ -895,9 +896,7 @@ def build() -> dict:
     pressed.then(fn=_favourites_section, outputs=[favourites_section], queue=False)
     search.change(fn=_thread_rows, inputs=[character, search, thread_state],
                   outputs=[threads], queue=False)
-    # The thread open as + New thread is pressed is the one the new thread
-    # starts its generation settings from (mc_llm_generation.carry).
-    new_thread.click(fn=_new_thread, inputs=[character, search, thread_state],
+    new_thread.click(fn=_new_thread, inputs=[character, search],
                      outputs=[threads, thread_state] + view + screens, queue=False)
     removed = delete.click(fn=_delete_thread,
                            inputs=[character, thread_state, search, revision_state],
@@ -1973,15 +1972,11 @@ def _generation_record(who, identifier) -> dict:
 
 
 def _generation_values(who, identifier) -> dict:
-    """Every setting's value for the thread, by key: its choice, else its default."""
+    """Every setting's value for the thread, by key: its choice, else the default."""
     import mc_llm_generation
 
-    try:
-        character = _characters().load(who) if who else None
-    except Exception:
-        character = None
     return mc_llm_generation.in_force(_generation_record(who, identifier),
-                                      mc_llm_generation.base(character))
+                                      mc_llm_generation.base())
 
 
 def _generation_label(who, identifier) -> str:
@@ -2025,7 +2020,7 @@ def _generation_chosen(key: str):
 
 
 def _generation_reset(who, identifier) -> list:
-    """Forget the thread's choices: every control back to what applies without one."""
+    """Forget the thread's choices: every control back to its default."""
     import mc_llm_generation
 
     if not who or not identifier:
@@ -2661,12 +2656,11 @@ def _lift(who, identifier, conversation, typed):
     return text, _load(who, identifier)
 
 
-def _new_thread(who, filter_text, current=""):
+def _new_thread(who, filter_text):
     """Start a thread with ``who``: greeted, opened, the pop-up put away.
 
-    ``current`` is the thread open as + New thread was pressed. Its generation
-    settings are the new thread's to start with (mc_llm_generation.carry, on the
-    service's side): a thread tuned for variety is not the last one that is.
+    At the default generation settings, whichever thread was open (2026-11-09:
+    "It should be default until I override for a thread").
     """
     if not who:
         return ([gr.update(), ""]
@@ -2674,8 +2668,7 @@ def _new_thread(who, filter_text, current=""):
                 + _screens("threads"))  # stay where the message can be read
     import mc_llm_conversation_service as service
 
-    like = str(current or "").strip()
-    outcome = _command(service.CREATE_THREAD, who, "", payload={"like": like} if like else None)
+    outcome = _command(service.CREATE_THREAD, who, "")
     if not outcome.get("ok"):
         note, kind = _refused(outcome)
         return ([gr.update(), ""] + _refresh(None, note, kind) + _screens("threads"))
@@ -3768,10 +3761,10 @@ def _save_character(editing, name, context, greeting, system, face=None, voice="
     a name that is already taken rather than writing over it -- overwriting a
     character silently is the same loss by a shorter road.
 
-    The character's own sampling -- what a thread of it that chose none is
-    sampled at -- is left as its file has it (a new one starts at the
-    package's): the Generation controls are each thread's now
-    (:mod:`mc_llm_generation`), and Save is about the boxes the editor shows.
+    The sampling in the character's file is left as the file has it (a new one
+    gets the package's): the Generation controls are each thread's now, over
+    the defaults (:mod:`mc_llm_generation`), and Save is about the boxes the
+    editor shows -- it does not drop what it does not show.
     """
     from prompt_master.chat.characters import Character
 

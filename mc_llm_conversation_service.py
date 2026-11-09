@@ -428,10 +428,6 @@ def _payload(raw, action: str) -> dict:
         found["voice"] = bool(raw.get("voice"))
     if "settings" in raw:
         found["settings"] = _settings(raw.get("settings"))
-    if "like" in raw:
-        # create_thread only: the thread the new one is made from, whose
-        # generation settings it starts with (mc_llm_generation.carry).
-        found["like"] = _identifier(raw.get("like"), "like", required=False)
     unknown = set(raw) - set(found) - {"settings"}
     if unknown:
         raise Refused(INVALID_INPUT,
@@ -886,19 +882,9 @@ def _create_thread(envelope: Envelope) -> dict:
         return conversation
 
     committed = store_module.create(store, key, build, receipt=receipt)
-    # Started from a thread of the same character -- the one open where + New
-    # thread was pressed -- it starts with that thread's generation settings,
-    # so a thread tuned for variety is not the last one that is.
-    like = str(envelope.payload.get("like") or "").strip()
-    if like and like != identifier:
-        try:
-            if store.path_for(character, like).is_file():
-                import mc_llm_generation
-
-                mc_llm_generation.carry(character, like, identifier)
-        except Exception:
-            logger.debug("Model Chain: could not start a thread from another's settings",
-                         exc_info=True)
+    # A new thread starts at the default generation settings, whichever thread
+    # was open (2026-11-09: "It should be default until I override for a
+    # thread"); only a branch carries a thread's on (_branch_from).
     publish(CONVERSATION_CHANGED, key, revision=committed.revision, kind_detail="created")
     return _accepted(envelope, key, committed.revision)
 

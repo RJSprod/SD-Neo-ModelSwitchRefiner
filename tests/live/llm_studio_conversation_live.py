@@ -299,6 +299,41 @@ def main() -> int:
             found["other_thread"] = {"dry": page.evaluate(VALUE, DRY),
                                      "label": page.evaluate(LABEL, "mc-llm-chat-generation")}
 
+            # "It should be default until I override for a thread": + New thread
+            # pressed in the tuned thread starts at the defaults ...
+            page.click("#mc-llm-chat-threads-section .label-wrap")
+            page.click("#mc-llm-chat-threads .mc-llm-thread-row:has-text('the last train') .mc-llm-thread-open")
+            page.wait_for_function("() => document.querySelector('#mc-llm-chat-title .mc-llm-heading')"
+                                   ".textContent.includes('the last train')", timeout=15000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.click("#mc-llm-chat-new-thread")
+            page.wait_for_function("() => !(" + OPEN + ")()", timeout=10000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_function("""() => { const l = document.querySelector('#mc-llm-chat-generation .label-wrap span');
+                return l && l.textContent.trim() === 'Generation'; }""", timeout=10000)
+            found["new_thread"] = {"dry": page.evaluate(VALUE, DRY),
+                                   "label": page.evaluate(LABEL, "mc-llm-chat-generation"),
+                                   "heading": page.evaluate(HEADING)}
+
+            # ... "and then kept for that thread through sessions": the page
+            # loaded again, the tuned thread opened, its setting still there.
+            page.reload()
+            page.wait_for_selector("#mc-llm-chat-to-conversation", timeout=30000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.click("#mc-llm-chat-threads-section .label-wrap")
+            page.click("#mc-llm-chat-threads .mc-llm-thread-row:has-text('the last train') .mc-llm-thread-open")
+            page.wait_for_function("() => document.querySelector('#mc-llm-chat-title .mc-llm-heading')"
+                                   ".textContent.includes('the last train')", timeout=15000)
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_function("(selector) => document.querySelector(selector).value === '1.25'",
+                                   arg=DRY, timeout=10000)
+            found["next_session"] = {"dry": page.evaluate(VALUE, DRY),
+                                     "label": page.evaluate(LABEL, "mc-llm-chat-generation")}
+
             # + New opens the editor under "Talking to".
             page.click("#mc-llm-chat-new-character")
             page.wait_for_selector("#mc-llm-chat-character-editor", state="visible", timeout=10000)
@@ -351,6 +386,13 @@ def main() -> int:
         "another thread has its own settings": (
             float(found.get("other_thread", {}).get("dry") or -1) == 0.0
             and found.get("other_thread", {}).get("label") == "Generation"),
+        "+ New thread from a tuned thread starts at the defaults": (
+            float(found.get("new_thread", {}).get("dry") or -1) == 0.0
+            and found.get("new_thread", {}).get("label") == "Generation"
+            and "the last train" not in (found.get("new_thread", {}).get("heading") or "")),
+        "the tuned thread keeps its setting in the next session": (
+            float(found.get("next_session", {}).get("dry") or -1) == 1.25
+            and found.get("next_session", {}).get("label") == "Generation · DRY 1.25"),
         "Threads lists Ada's, the remembered one marked": (
             [row["title"] for row in opened.get("threads", [])]
             == ["the last train", "a desert road", "harbour at night"]

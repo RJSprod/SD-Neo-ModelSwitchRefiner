@@ -1254,11 +1254,7 @@
             conversation: {character: who, thread_id: ""},
             expected_revision: null,
         });
-        // Made from the thread this page is on, when it is the same
-        // character's: the new one starts with its generation settings, as the
-        // tab's + New thread does (mc_llm_generation).
-        const like = this.selection.character === who ? String(this.selection.thread || "") : "";
-        envelope.payload = like ? {like} : {};
+        envelope.payload = {};
         return this.send(envelope).then((outcome) => {
             const made = outcome && outcome.ok && outcome.resulting_conversation;
             if (!made || !made.thread_id) return outcome;
