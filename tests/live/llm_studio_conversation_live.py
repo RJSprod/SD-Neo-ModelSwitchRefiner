@@ -171,6 +171,28 @@ FOLDED = """(ids) => ids.map((id) => { const list = document.querySelector('#' +
     return !!list && list.getClientRects().length === 0; })"""
 DRY = "#mc-llm-chat-generation-dry-multiplier input[type=number]"
 VALUE = "(selector) => { const box = document.querySelector(selector); return box ? box.value : null; }"
+# The pop-up's own scroll, and where something in it is: the pop-up put so
+# that `selector` stands at `share` of its height, and read back as the
+# pop-up's scroll and the thing's distance from the pop-up's top edge.
+SHEET_TOP = "() => document.querySelector('#mc-llm-chat-conversation').scrollTop"
+PUT = """([selector, share]) => { const sheet = document.querySelector('#mc-llm-chat-conversation');
+    const it = document.querySelector(selector).getBoundingClientRect();
+    sheet.scrollTop = Math.max(0, sheet.scrollTop + it.top - sheet.getBoundingClientRect().top
+                               - sheet.clientHeight * share); }"""
+WHERE = """(selector) => { const sheet = document.querySelector('#mc-llm-chat-conversation');
+    return {top: sheet.scrollTop, at: Math.round(document.querySelector(selector).getBoundingClientRect().top
+                                                 - sheet.getBoundingClientRect().top)}; }"""
+# Marks the `n`th match of `selector` (from the end when negative) so it can
+# be named; a row a redraw replaces is named by its section instead.
+MARK = """([selector, n]) => { const all = document.querySelectorAll(selector);
+    all[n < 0 ? all.length + n : n].setAttribute('data-probe', 'pressed'); }"""
+
+
+def _same(record, scrolled: bool = True) -> bool:
+    """Whether the pop-up and the thing in it were where they had been put --
+    put, with ``scrolled``, somewhere the pop-up had been scrolled to."""
+    return bool(record) and record.get("before") == record.get("after") \
+        and (not scrolled or record.get("before", {}).get("top", 0) > 0)
 
 
 def main() -> int:
@@ -357,6 +379,66 @@ def main() -> int:
                 "transcript": page.evaluate("""() => document.querySelector('#mc-llm-chat-transcript')
                     .textContent.includes("Tell me about bob's first walk.")"""),
             }
+
+            # The pop-up holds where it is put while an option in it is used
+            # (2026-11-09: "interacting with the options in the conversation
+            # menu often makes the menu scroll without me taking action"). The
+            # first build moved it after every press in it: the DRY box and the
+            # last slider, near the end of Generation -- taller than the pop-up
+            # -- sent it from 1189 and 1639 back to Generation's heading at 353.
+            # A section's heading still brings what it opened into view.
+            page.click("#mc-llm-chat-to-conversation")
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_timeout(300)
+            heading_before = page.evaluate(SHEET_TOP)
+            page.click("#mc-llm-chat-generation .label-wrap")
+            page.wait_for_selector(DRY, state="visible", timeout=10000)
+            page.wait_for_timeout(400)
+            held = {"heading": {"before": heading_before, "after": page.evaluate(SHEET_TOP)}}
+
+            def used(name, selector, act, measured=None):
+                page.evaluate(PUT, [selector, 0.5])
+                before = page.evaluate(WHERE, measured or selector)
+                act()
+                page.wait_for_timeout(900)      # the server's answer, drawn
+                held[name] = {"before": before, "after": page.evaluate(WHERE, measured or selector)}
+
+            def dry():
+                page.click(DRY)
+                page.keyboard.press("Control+A")
+                page.keyboard.type("0.6")
+                page.evaluate("() => document.activeElement && document.activeElement.blur()")
+
+            used("dry box", DRY, dry)
+            held["dry label"] = page.evaluate(LABEL, "mc-llm-chat-generation")
+            page.evaluate(MARK, ["#mc-llm-chat-generation input[type=range]", -1])
+            slider = "input[type=range][data-probe=pressed]"
+            used("slider pressed", slider, lambda: page.click(slider))
+            used("slider moved by a key", slider, lambda: page.keyboard.press("ArrowRight"))
+            # An emotion row near the pop-up's foot, its section running on
+            # below the fold -- a window short enough for that, as a phone's is
+            # -- and its list drawn again by the server's answer. (The first
+            # build happened to leave this one alone: the row it would have
+            # scrolled to was gone, redrawn, by the time it looked.)
+            page.set_viewport_size({"width": 1200, "height": 520})
+            page.wait_for_timeout(300)
+            page.click("#mc-llm-chat-emotion .label-wrap")
+            page.wait_for_selector("#mc-llm-chat-emotion .mc-llm-emotion-choice >> nth=2",
+                                   state="visible", timeout=10000)
+            page.wait_for_timeout(400)
+            page.evaluate(MARK, ["#mc-llm-chat-emotion .mc-llm-emotion-choice", 2])
+            choice = ".mc-llm-emotion-choice[data-probe=pressed]"
+            page.evaluate(PUT, [choice, 0.85])
+            before = page.evaluate(WHERE, "#mc-llm-chat-emotion")
+            below = page.evaluate("""() => { const sheet = document.querySelector('#mc-llm-chat-conversation');
+                return document.querySelector('#mc-llm-chat-emotion').getBoundingClientRect().bottom
+                    > sheet.getBoundingClientRect().bottom; }""")
+            page.click(choice)
+            page.wait_for_timeout(900)
+            held["emotion row"] = {"before": before, "below the fold": below,
+                                   "after": page.evaluate(WHERE, "#mc-llm-chat-emotion")}
+            held["emotion label"] = page.evaluate(LABEL, "mc-llm-chat-emotion")
+            found["held"] = held
             browser.close()
     finally:
         demo.close()
@@ -418,6 +500,19 @@ def main() -> int:
             and "bob's first walk" in (found.get("favourite", {}).get("heading") or "")
             and found.get("favourite", {}).get("open") is False
             and found.get("favourite", {}).get("transcript") is True),
+        "a section's heading brings what it opened into view": (
+            found.get("held", {}).get("heading", {}).get("after", 0)
+            > found.get("held", {}).get("heading", {}).get("before", 0)),
+        "the pop-up holds while the DRY box is pressed and typed into": (
+            _same(found.get("held", {}).get("dry box"))
+            and found.get("held", {}).get("dry label") == "Generation · DRY 0.6"),
+        "the pop-up holds while a slider is pressed and moved by a key": (
+            _same(found.get("held", {}).get("slider pressed"))
+            and _same(found.get("held", {}).get("slider moved by a key"))),
+        "the pop-up holds while an emotion is chosen and its list drawn again": (
+            found.get("held", {}).get("emotion row", {}).get("below the fold") is True
+            and _same(found.get("held", {}).get("emotion row"), scrolled=False)
+            and (found.get("held", {}).get("emotion label") or "").startswith("Emotion · *")),
         "no script errors": not errors,
     }
     print(json.dumps({"checks": checks, "found": found, "errors": errors, "made": made}, indent=1))

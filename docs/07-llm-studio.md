@@ -1306,6 +1306,10 @@ and the page is the one thing this tab does not move. The rule is arithmetic —
 already visible, taller than the drawer, or below the fold — so it is run in
 the test harness rather than described.
 
+Only a press on a section's heading does this, since 2026-11-09 (§49): the
+first build did it after *every* press in the drawer, and a press on anything
+inside an open section moved it.
+
 ### 13.3 The load report that was never in that format
 
 §12.2 said the load report was missing because it had not been flushed yet.
@@ -5293,3 +5297,56 @@ package's -- the file's were written by the old sliders, whatever they showed,
 a typed seed among them, and nothing shows them any more. A branch still
 carries its thread's, being the same conversation. Ten of the fifty-eight
 mutations are this round's.
+
+## 49. The pop-up holds its place while its options are used (9 November 2026)
+
+> "A small bug, interacting with the options in the conversation menu often
+> makes the menu scroll without me taking action. Let's make the menu hold its
+> current position through configuration updates."
+
+**What it was.** §13.2's rule -- a section opened near the foot of the pop-up is
+brought into view -- was wired to every press in the pop-up, not to the
+opening of a section: `wireSheet` listened for any click, waited 80 ms
+(`OPEN_SETTLE_MS`) for "the section to open", and then scrolled the pop-up to
+show the section the press had landed in. A press on a control is not an
+opening, and the rule's own case for a section taller than the pop-up -- show
+its beginning, "where the control you just pressed is" -- is wrong for a
+control half way down it. Generation, open, is taller than the pop-up: on a
+real Gradio 4.40 page the DRY box near its end, centred at a scroll of 1189 and
+pressed, sent the pop-up back to Generation's heading at 353, and the last
+slider, at 1639, did the same. A control in a section that ran on below the
+fold moved it to show the section's end. The 80 ms landed with the server's
+answer -- the section's label, redrawn -- which is why it read as the
+configuration update moving the menu.
+
+**What it does now.** Only a press that opens something moves the pop-up: a
+section's heading (Gradio 4.40's `button.label-wrap`, read up from the words
+inside it, and only once the section is `open` -- a heading that closed its
+section moves nothing), and + New and Edit, which open the character editor
+elsewhere in it (`REVEALS`). A press on anything in a section -- a slider, a
+box, a switch, a row of a list, a button -- leaves the pop-up where the reader
+put it (`toggleOf` in `javascript/llm_studio.js`). The Workspace and Model
+sheets, which the same listener serves, have nothing a press reveals and
+lose nothing.
+
+**Checked.** Gradio's own updates were measured first and move nothing: on the
+real page, with the fix, the DRY box pressed and typed into, a slider pressed
+and moved by a key, an emotion chosen (its list drawn again), Start's Set, a
+thread's star, a Voice switch and a heading pressed to close its section each
+left the pop-up's scroll and the control's place in it exactly as they were,
+while opening Generation from the top and You at the foot still brought them
+into view. The Forge Assistant panel's Emotion submenu, rebuilt the same way
+after each choice, keeps its place already: Chromium keeps a box's scroll when
+it is emptied and refilled in one go (500 stays 500) and loses it only if
+layout is read while it is empty (0), which nothing in that rebuild does.
+
+**Verified.** `tests/test_llm_studio_js.py`: the opened-section arithmetic, now
+pressed on the heading (and on the words inside it, and on a heading in a
+section inside a section); a control deep in a section taller than the pop-up,
+one in a section running below the fold and one in a section scrolled part
+way off the top, and a heading that closed its section, each leave it where
+it was. `tests/live/llm_studio_conversation_live.py` (opt-in, real Gradio 4.40
+in Chromium): the DRY box and the last slider hold, which they did not with
+the first build put back, an emotion chosen in a short window holds through
+its list's redraw, and Generation's heading still brings it into view. Five
+mutations each fail a test. Not run on the user's machine or in a Gecko build.
