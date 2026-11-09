@@ -187,6 +187,37 @@ class TestWhatBreezeRefusesAtThePress:
         assert settled(found["id"])["phase"] == "done"
 
 
+class TestNothingOfTheUsersInTheLog:
+    """The user's rule: no file of theirs and no text of theirs in a log line.
+    A render's name went into the card's turn as its label -- an output name,
+    an LLM Studio render's the first words of its message, a design's its
+    description -- and every line the turn system writes about the card said it
+    (2026-11-09). And keeping a design logged the name it was kept under."""
+
+    def test_a_render_and_a_design_are_logged_by_the_engine_alone(self, breeze, caplog):
+        import logging
+
+        breeze["runtime"].seconds = 4.0
+        with caplog.at_level(logging.DEBUG, logger="model_chain"):
+            found = box.render(breeze["pipeline"]["id"], "Speaker 1: A line of mine.",
+                               breeze["configuration"]["id"],
+                               name="LLM Studio · words I wrote to my character")
+            assert settled(found["id"])["phase"] == "done"
+            queued = box.design("A voice only I would describe, low and slow.", seed=7,
+                                configuration_id=breeze["configuration"]["id"])
+            assert settled(queued["id"])["phase"] == "done"
+            kept = box.keep_design(queued["id"], "The name I kept it under")
+
+        assert kept["title"] == "The name I kept it under"
+        labels = [request["label"] for request in breeze["turns"].requests]
+        assert labels == ["Breeze TTS 2", "Breeze TTS 2"], labels
+        said = "\n".join(record.getMessage() for record in caplog.records)
+        assert "kept a designed voice" in said, "the keep was not logged at all"
+        for private in ("words I wrote", "only I would describe", "The name I kept",
+                        "A line of mine"):
+            assert private not in said, private
+
+
 class TestWhatARenderHandsTheRuntime:
     def test_lines_carry_their_directions_and_voices_their_words(self, breeze):
         found = box.render(breeze["pipeline"]["id"],
@@ -210,8 +241,10 @@ class TestWhatARenderHandsTheRuntime:
         assert breeze["runtime"].load_options == [job.options], \
             "the load is told the attention the render uses"
         request, = breeze["turns"].requests
+        # The engine alone: the turn's label is what the card's log lines say,
+        # and the render's name ("Drama 1") is the user's.
         assert (request["guest"], request["need_vram"], request["label"]) == \
-            ("Breeze", 9 * _GB, "Breeze TTS 2 — Drama 1")
+            ("Breeze", 9 * _GB, "Breeze TTS 2")
 
     def test_vibevoice_is_handed_the_same_lines_and_drops_the_directions(self):
         import mc_voice_vibevoice_runtime as runtime

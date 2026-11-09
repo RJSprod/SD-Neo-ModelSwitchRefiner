@@ -122,6 +122,66 @@ class TestTheFilter:
         assert mc_log_privacy.NoPaths().filter(record) is True
 
 
+# PocketTTS's own warning, in the shape its library writes it through logging and
+# its worker's stderr carries it here -- with words that are not the user's.
+CHUNK = ("WARNING:pocket_tts.models.text_chunking:Chunk has 64 tokens (max 50), "
+         "generation may skip words: 'the start of a reply that...'")
+
+
+class TestALibraryLineAWorkerForwarded:
+    """Every speech worker's stderr is logged a line at a time, and a library's
+    line is not this extension's to vouch for: PocketTTS quotes the chunk it
+    is reading -- the start of the reply -- and that reached the user's
+    model_chain.log seven times in a day (2026-11-09)."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("Model Chain: " + CHUNK,
+         "Model Chain: WARNING:pocket_tts.models.text_chunking:Chunk has 64 tokens (max 50), "
+         "generation may skip words: " + mc_log_privacy.QUOTED),
+        # Words that hold a quotation mark of their own lose all of it.
+        ("Model Chain: WARNING:pocket_tts.x:skip words: 'you don't say that...'",
+         "Model Chain: WARNING:pocket_tts.x:skip words: " + mc_log_privacy.QUOTED),
+        ('Model Chain: Voice Pipeline worker — ERROR:lavasr.io:could not read "a phrase" now',
+         "Model Chain: Voice Pipeline worker — ERROR:lavasr.io:could not read "
+         + mc_log_privacy.QUOTED),
+        ("Model Chain: INFO:x:a [“curly”] one", "Model Chain: INFO:x:a [" + mc_log_privacy.QUOTED),
+    ])
+    def test_what_it_quotes_is_left_out(self, text, expected):
+        assert mc_log_privacy.unquote(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        "Model Chain: WARNING:transformers.modeling_utils:The model's weights were not tied",
+        'Model Chain: Voice is not reading replies aloud — "Speak replies automatically" is off',
+        "Model Chain: [sopro] ready — 'x' as it always said",
+        "Model Chain: PocketTTS worker: ready — cpu, int8, 1 step(s)",
+        "Model Chain: the setting ‘Count each image once’ is on",
+    ])
+    def test_every_other_line_is_left_as_it_was(self, text):
+        assert mc_log_privacy.unquote(text) == text
+
+    def test_it_never_reaches_a_handler(self, sink):
+        mc_memory._make_logger()
+        logging.getLogger("model_chain").info("Model Chain: %s", CHUNK)
+        written = sink.getvalue()
+        assert "start of a reply" not in written
+        assert "generation may skip words: " + mc_log_privacy.QUOTED in written
+
+    def test_pockettts_s_own_drain_writes_it_without_the_words(self, sink):
+        import io as _io
+
+        import mc_voice_pocket_runtime
+
+        mc_memory._make_logger()
+        started = types.SimpleNamespace(stderr=_io.BytesIO(
+            (CHUNK + "\nPocketTTS worker: interrupted turn drained: unit of 46 chars\n")
+            .encode("utf-8")))
+        mc_voice_pocket_runtime._drain_stderr(started)
+        written = sink.getvalue()
+        assert "start of a reply" not in written
+        assert "generation may skip words" in written, "the warning itself is kept"
+        assert "PocketTTS worker: interrupted turn drained: unit of 46 chars" in written
+
+
 class TestTheLinesThatUsedToCarryOne:
     """Each used to say a path or a user's file name; none does now, so none
     needs the placeholder either."""
@@ -179,6 +239,8 @@ class TestTheLinesThatUsedToCarryOne:
         ("mc_voice_box", "saved “%s” to %s"),
         ("mc_llm_runtime", "llama-server log — %s"),
         ("mc_llm_chat_panel", "attachments into %s"),
+        ("mc_voice_box", "kept a designed voice as “%s”"),
+        ("mc_voice_box", "label=f\"{_label(engine)} — {job.name}\""),
     ])
     def test_the_old_wording_is_gone(self, module, gone):
         source = (pathlib.Path(mc_log_privacy.__file__).parent / f"{module}.py").read_text(

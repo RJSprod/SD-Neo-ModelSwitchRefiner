@@ -5177,6 +5177,13 @@ A filter on the extension's logger holds the rule for anything a future line
 might carry anyway: an absolute path that reaches a line, its arguments or a
 traceback is replaced by `<path>` before it is written anywhere. A `<path>`
 in your log is a line that should not have carried one, and is worth reporting.
+The same filter shortens a line a speech worker's library wrote (in Python
+logging's own shape, `WARNING:pocket_tts.…:`): from its first opening quotation
+mark it says `…`, because PocketTTS's warning about a long chunk quotes the
+reply it is reading. And the Voice Box asks for a card under its engine's name
+alone (*Breeze TTS 2*), never a render's name, so the card's lines — *asked
+for*, *has*, *stays warm* — and the image model's park reasons name no render
+of yours.
 
 ### Is it really on the GPU?
 
