@@ -764,10 +764,17 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
     character = _character(key.character)
     persona = _persona()
     settings = envelope.payload.get("settings") or {}
+    # The thread's own generation settings (mc_llm_generation), under what a
+    # request names for itself and over the character's: kept with the thread,
+    # so every view's reply in it -- the tab's, the panel's -- is made from them.
+    chosen = _generation_of(key)
 
-    tokens = _whole(settings.get("reply_tokens"), character.max_reply_tokens,
-                    DEFAULT_MAX_REPLY_TOKENS)
-    resolved = _whole(character.seed, RANDOM_SEED)
+    tokens = _whole(settings.get("reply_tokens"), chosen.get("reply_tokens"),
+                    character.max_reply_tokens, DEFAULT_MAX_REPLY_TOKENS)
+    # A thread's -1 is a choice (a new seed each reply), and so is a seed it
+    # chose; a request's -1 says nothing and leaves the thread's choice, or the
+    # character's, in force -- as it always left the character's.
+    resolved = _whole(chosen.get("seed"), character.seed, RANDOM_SEED)
     if resolved == RANDOM_SEED:
         resolved = draw_seed()
     asked = _whole(settings.get("seed"), RANDOM_SEED)
@@ -803,11 +810,13 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
         prefilled=bool(prefill),
         start_with=start,
         needs_vision=needs_vision(wire),
-        temperature=_fraction(settings.get("temperature"), character.temperature,
-                              DEFAULT_TEMPERATURE),
-        top_p=_fraction(settings.get("top_p"), character.top_p, DEFAULT_TOP_P),
+        temperature=_fraction(settings.get("temperature"), chosen.get("temperature"),
+                              character.temperature, DEFAULT_TEMPERATURE),
+        top_p=_fraction(settings.get("top_p"), chosen.get("top_p"), character.top_p,
+                        DEFAULT_TOP_P),
         max_tokens=tokens,
         seed=asked if asked != RANDOM_SEED else resolved,
+        sampling=_sampling_of(chosen, settings),
     )
     if request.needs_vision and not _sees():
         raise service.Refused(service.VISION_UNAVAILABLE,
@@ -877,6 +886,34 @@ def _emotion_opening(emotion: str) -> str:
     import mc_llm_emotions
 
     return mc_llm_emotions.opening(emotion)
+
+
+def _generation_of(key: Key) -> dict:
+    """What the thread chose of its generation settings; ``{}`` when it cannot be read."""
+    try:
+        import mc_llm_generation
+
+        return mc_llm_generation.for_thread(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's generation settings",
+                     exc_info=True)
+        return {}
+
+
+def _sampling_of(chosen: dict, settings: dict) -> dict:
+    """The sampler fields beyond the four this request carries: what the thread
+    chose, under what the request names for itself. Only what was chosen or
+    named -- anything else is left to llama-server and the model's profile, as
+    it always was."""
+    try:
+        import mc_llm_generation
+
+        found = mc_llm_generation.request_fields(chosen)
+        found.update(mc_llm_generation.request_fields(settings))
+        return found
+    except Exception:
+        logger.debug("Model Chain: could not read a request's sampler fields", exc_info=True)
+        return {}
 
 
 def _emotion_of(key: Key) -> str:

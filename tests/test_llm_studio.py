@@ -787,7 +787,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
 
         chat, chats, conversation = self._thread(store, monkeypatch)
 
-        run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
+        run = chat._send("Ada", conversation.identifier, "hello love", None)
         next(run)          # the composer clears and the run starts
         next(run)          # the first chunk arrives
         run.close()        # what a refresh, or a closed tab, does
@@ -807,7 +807,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
 
         chat, chats, conversation = self._thread(store, monkeypatch)
 
-        run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
+        run = chat._send("Ada", conversation.identifier, "hello love", None)
         accepted = next(run)
         next(run)
         chat._cancel(accepted[0])
@@ -821,7 +821,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
                                                                    monkeypatch):
         chat, chats, conversation = self._thread(store, monkeypatch)
 
-        list(chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None))
+        list(chat._send("Ada", conversation.identifier, "hello love", None))
 
         saved = chats.load("Ada", conversation.identifier)
         assert saved.messages[1].text == "Hello there"
@@ -837,7 +837,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
 
         chat, chats, conversation = self._thread(store, monkeypatch, pieces=())
 
-        run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
+        run = chat._send("Ada", conversation.identifier, "hello love", None)
         next(run)
         run.close()
 
@@ -870,8 +870,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
         monkeypatch.setattr(chat.mc_llm_runtime, "config", lambda *args, **kwargs: seeing)
 
         list(chat._send("Ada", conversation.identifier, "what is this",
-                        Image.new("RGB", (16, 16), (200, 30, 30)),
-                        None, None, None, None))
+                        Image.new("RGB", (16, 16), (200, 30, 30))))
 
         saved = chats.load("Ada", conversation.identifier)
         assert mc_llm_attachments.locate(saved.messages[0].image_path) is not None
@@ -888,8 +887,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
         monkeypatch.setattr(chat.mc_llm_runtime, "config", lambda *args, **kwargs: seeing)
 
         list(chat._send("Ada", conversation.identifier, "what is this",
-                        Image.new("RGB", (16, 16), (200, 30, 30)),
-                        None, None, None, None))
+                        Image.new("RGB", (16, 16), (200, 30, 30))))
 
         shown = chat._transcript(chats.load("Ada", conversation.identifier))[0][0]
         # After the row's marker, which every bubble now starts with.
@@ -909,8 +907,7 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
         monkeypatch.setattr(chat.mc_llm_runtime, "config", lambda *args, **kwargs: blind)
 
         answers = list(chat._send("Ada", conversation.identifier, "what is this",
-                                  Image.new("RGB", (16, 16), (200, 30, 30)),
-                                  None, None, None, None))
+                                  Image.new("RGB", (16, 16), (200, 30, 30))))
 
         assert "no vision projector" in answers[0][5]
         assert chats.load("Ada", conversation.identifier).messages == []

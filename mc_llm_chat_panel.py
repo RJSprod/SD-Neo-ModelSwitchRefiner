@@ -110,6 +110,7 @@ import gradio as gr
 
 import mc_llm_attachments
 import mc_llm_format
+import mc_llm_generation
 import mc_llm_overlays
 import mc_llm_paths
 import mc_llm_runtime
@@ -201,10 +202,6 @@ what follows is a conversation whose earlier turn now says something else.
 
 def build() -> dict:
     """Assemble the panel. Returns the handles the shell needs."""
-    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
-                                               DEFAULT_TOP_P)
-    from prompt_master.core.models import RANDOM_SEED
-
     prefs = mc_llm_state.preferences()
     who = prefs.get("character") or ""
     # Populated at build rather than left for the first character change: the
@@ -539,16 +536,29 @@ def build() -> dict:
         with gr.Column(visible=False, elem_id=ui.ident("chat", "conversation"),
                        elem_classes=ui.classes("sheet", "sheet-screen",
                                                "conversation-sheet")) as conversation_screen:
-            with gr.Row(elem_classes=ui.classes("sheet-head")):
+            with gr.Row(elem_classes=ui.classes("sheet-head", "conversation-head")):
                 conversation_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
                                               elem_classes=ui.classes("sheet-back"))
                 gr.Markdown("#### Conversation")
+                # On top, unfolded: starting a thread is the one thing about
+                # threads that needs no list (2026-11-06: "top level is just
+                # select from existing or +new").
+                new_thread = gr.Button("+ New thread", variant="primary", size="sm", scale=0,
+                                       min_width=0, elem_id=ui.ident("chat", "new-thread"))
             # Every starred thread, whoever it is with, most recently used
-            # first; nothing at all until one is starred. Rows the browser
-            # presses (thread_at above) and Python draws (_favourite_rows).
-            favourites = gr.HTML(_favourite_rows(who, initial_thread),
-                                 elem_id=ui.ident("chat", "favourites"),
-                                 elem_classes=ui.classes("favourites-block"))
+            # first. Folded, and folded again whenever the pop-up opens
+            # (2026-11-09: "the favorite threads needs to be collapsed on open
+            # ... i should have to open up a menu to see those thread"); its
+            # label counts them. Rows the browser presses (thread_at above) and
+            # Python draws (_favourite_rows).
+            starred = len(_favourites_of_everyone())
+            with gr.Accordion(_favourites_label(starred), open=False, visible=bool(starred),
+                              elem_id=ui.ident("chat", "favourites-section"),
+                              elem_classes=ui.classes("section",
+                                                      "threads-section")) as favourites_section:
+                favourites = gr.HTML(_favourite_rows(who, initial_thread),
+                                     elem_id=ui.ident("chat", "favourites"),
+                                     elem_classes=ui.classes("favourites-block"))
             with gr.Row(elem_classes=ui.classes("talking-to")):
                 character = gr.Dropdown(
                     label="Talking to", choices=_character_choices(),
@@ -612,22 +622,24 @@ def build() -> dict:
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
                     close_editor = gr.Button("Cancel", size="sm")
-            with gr.Row(elem_classes=ui.classes("threads-head")):
-                gr.Markdown("##### Threads", elem_classes=ui.classes("sheet-label"))
-                new_thread = gr.Button("+ New thread", variant="primary", size="sm", scale=0,
-                                       min_width=0, elem_id=ui.ident("chat", "new-thread"))
-            # One line: Gradio draws a box of one line at most as an <input>,
-            # with no resize grip in its corner.
-            search = gr.Textbox(label="Find a thread", placeholder="Find a thread…",
-                                show_label=False, container=False, lines=1, max_lines=1,
-                                elem_id=ui.ident("chat", "search"))
-            # A thread is opened by a tap on it and kept at the top by its star
-            # -- "I need a star or a pin or something to keep it at top" --
-            # which is the 2026-11-06 morning's pin (ChatStore.PINS), a tap
-            # away on every row rather than a button for the open thread.
-            threads = gr.HTML(_thread_rows(who, "", initial_thread),
-                              elem_id=ui.ident("chat", "threads"),
-                              elem_classes=ui.classes("threads"))
+            # The character's threads, folded as Favourites are and for the same
+            # word, folded again whenever the pop-up opens.
+            with gr.Accordion("Threads", open=False,
+                              elem_id=ui.ident("chat", "threads-section"),
+                              elem_classes=ui.classes("section",
+                                                      "threads-section")) as threads_section:
+                # One line: Gradio draws a box of one line at most as an <input>,
+                # with no resize grip in its corner.
+                search = gr.Textbox(label="Find a thread", placeholder="Find a thread…",
+                                    show_label=False, container=False, lines=1, max_lines=1,
+                                    elem_id=ui.ident("chat", "search"))
+                # A thread is opened by a tap on it and kept at the top by its
+                # star -- "I need a star or a pin or something to keep it at top"
+                # -- which is the 2026-11-06 morning's pin (ChatStore.PINS), a tap
+                # away on every row rather than a button for the open thread.
+                threads = gr.HTML(_thread_rows(who, "", initial_thread),
+                                  elem_id=ui.ident("chat", "threads"),
+                                  elem_classes=ui.classes("threads"))
 
             # What shapes this thread's replies. Each section's label says what
             # is in force (_emotion_label, _start_label), drawn again as the
@@ -657,20 +669,28 @@ def build() -> dict:
                     start_set = gr.Button("Set", size="sm", scale=0, min_width=72,
                                           variant="primary",
                                           elem_id=ui.ident("chat", "start-set"))
-            # Saved with the character and in force while talking to one, so
-            # outside the editor on purpose -- see ``_remember_sampling``. Every
-            # default is the vendored package's own, named rather than copied.
-            with gr.Accordion("Generation", open=False, elem_id=ui.ident("chat", "generation"),
-                              elem_classes=ui.classes("section")):
-                with gr.Row():
-                    temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
-                                            step=0.05, value=DEFAULT_TEMPERATURE)
-                    top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
-                                      value=DEFAULT_TOP_P)
-                with gr.Row():
-                    reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
-                                             step=64, value=DEFAULT_MAX_REPLY_TOKENS)
-                    seed = ui.seed_box(info=f"{RANDOM_SEED}: a new seed each reply")
+            # How this thread's replies are sampled, kept with the thread
+            # (mc_llm_generation, 2026-11-09: "These should be kept per
+            # conversation"). Drawn from what the thread chose -- and, for what it
+            # did not, from what applies without a choice -- as the pop-up opens
+            # and as the thread changes under it, and written the moment a
+            # control moves. Its label says what the thread chose.
+            initial_generation = _generation_values(who, initial_thread)
+            with gr.Accordion(_generation_label(who, initial_thread), open=False,
+                              elem_id=ui.ident("chat", "generation"),
+                              elem_classes=ui.classes("section")) as generation_section:
+                generation = {}
+                for group, heading in mc_llm_generation.GROUPS:
+                    gr.Markdown(f"##### {heading}", elem_classes=ui.classes("sheet-label"))
+                    members = [setting for setting in mc_llm_generation.SETTINGS
+                               if setting.group == group]
+                    for start in range(0, len(members), 2):
+                        with gr.Row(elem_classes=ui.classes("generation-row")):
+                            for setting in members[start:start + 2]:
+                                generation[setting.key] = _generation_control(
+                                    setting, initial_generation[setting.key])
+                generation_reset = gr.Button("Reset to defaults", size="sm",
+                                             elem_id=ui.ident("chat", "generation-reset"))
             # Voice: what is ready, and its two switches (mc_voice_ui.section).
             voice = mc_voice_ui.section()
 
@@ -749,7 +769,10 @@ def build() -> dict:
                 "send": send, "stop": stop, "speech_turn": voice_plumbing["turn"],
                 "run_state": voice_plumbing["run_state"], "revision": revision_state}
     stream = [streamed[name] for name in STREAM_ORDER]
-    sampling = [temperature, top_p, reply_tokens, seed]
+    # The Generation section's label and controls, in mc_llm_generation.KEYS
+    # order: what ``_generation_view`` answers.
+    generation_drawn = ([generation_section]
+                        + [generation[key] for key in mc_llm_generation.KEYS])
     # The State first, then one visibility per surface: the order
     # :func:`_screens` answers in. The tail is the surfaces this panel does not
     # own and closes anyway -- see :mod:`mc_llm_overlays`. It is built from the
@@ -779,6 +802,12 @@ def build() -> dict:
     persona_drawn = [persona_name, persona_description, persona_face]
     to_conversation.click(fn=_open_conversation, inputs=[character, thread_state, search],
                           outputs=screens + [threads, favourites, character], queue=False)
+    # Favourites and Threads folded again on every open: their lists are opened
+    # to be chosen from (2026-11-09).
+    to_conversation.click(fn=_thread_lists_folded,
+                          outputs=[favourites_section, threads_section], queue=False)
+    to_conversation.click(fn=_generation_view, inputs=[character, thread_state],
+                          outputs=generation_drawn, queue=False)
     to_conversation.click(fn=_emotion_view, inputs=[character, thread_state],
                           outputs=emotions_drawn, queue=False)
     to_conversation.click(fn=_start_view, inputs=[character, thread_state],
@@ -818,6 +847,23 @@ def build() -> dict:
                       inputs=[character, thread_state], outputs=starts_drawn + [status],
                       queue=False)
 
+    # -- the thread's generation settings ----------------------------------- #
+    #
+    # Each control keeps what it says for the open thread the moment it moves
+    # (``input``: a person moving it, never the server drawing it) and again as
+    # it is let go (``release``, a slider's), so the value kept is the last one
+    # whichever request lands last. Reset forgets them all.
+    for key in mc_llm_generation.KEYS:
+        control = generation[key]
+        keep = _generation_chosen(key)
+        control.input(fn=keep, inputs=[character, thread_state, control],
+                      outputs=[generation_section, status], queue=False)
+        if hasattr(control, "release"):
+            control.release(fn=keep, inputs=[character, thread_state, control],
+                            outputs=[generation_section, status], queue=False)
+    generation_reset.click(fn=_generation_reset, inputs=[character, thread_state],
+                           outputs=generation_drawn + [status], queue=False)
+
     # -- voice ------------------------------------------------------------- #
     #
     # The two switches are Forge settings and are written the moment they are
@@ -840,13 +886,18 @@ def build() -> dict:
     # A favourite with another character is opened by remembering it and
     # choosing that character, whose own change handler below opens the
     # thread remembered for it (:func:`_select_character`).
-    thread_now.click(fn=_thread_pressed,
-                     inputs=[character, thread_at, search, message, thread_state],
-                     outputs=([threads, favourites, character, thread_state, message]
-                              + view + screens), queue=False)
+    pressed = thread_now.click(fn=_thread_pressed,
+                               inputs=[character, thread_at, search, message, thread_state],
+                               outputs=([threads, favourites, character, thread_state, message]
+                                        + view + screens), queue=False)
+    # A star changes how many favourites there are, and the first makes the
+    # section appear.
+    pressed.then(fn=_favourites_section, outputs=[favourites_section], queue=False)
     search.change(fn=_thread_rows, inputs=[character, search, thread_state],
                   outputs=[threads], queue=False)
-    new_thread.click(fn=_new_thread, inputs=[character, search],
+    # The thread open as + New thread is pressed is the one the new thread
+    # starts its generation settings from (mc_llm_generation.carry).
+    new_thread.click(fn=_new_thread, inputs=[character, search, thread_state],
                      outputs=[threads, thread_state] + view + screens, queue=False)
     removed = delete.click(fn=_delete_thread,
                            inputs=[character, thread_state, search, revision_state],
@@ -855,6 +906,9 @@ def build() -> dict:
     # open now -- a star, its emotion, its start -- is drawn again.
     removed.then(fn=_favourite_rows, inputs=[character, thread_state], outputs=[favourites],
                  queue=False)
+    removed.then(fn=_favourites_section, outputs=[favourites_section], queue=False)
+    removed.then(fn=_generation_view, inputs=[character, thread_state],
+                 outputs=generation_drawn, queue=False)
     removed.then(fn=_emotion_view, inputs=[character, thread_state], outputs=emotions_drawn,
                  queue=False)
     removed.then(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
@@ -883,11 +937,11 @@ def build() -> dict:
                      character_voice["delivery"]] + character_voice["sliders"])
 
     editor = ([character_editor, editing, name, context, greeting, system]
-              + sampling + [system_preview, status, character_face] + voice_fields)
+              + [system_preview, status, character_face] + voice_fields)
 
     switched = character.change(fn=_select_character, inputs=[character, search, message],
                                 outputs=[threads, thread_state, message] + view
-                                + [name, context, greeting, system] + sampling
+                                + [name, context, greeting, system]
                                 + [editing, system_preview, character_face]
                                 + voice_fields, queue=False)
     switched.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
@@ -899,6 +953,8 @@ def build() -> dict:
                   queue=False)
     switched.then(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
                   queue=False)
+    switched.then(fn=_generation_view, inputs=[character, thread_state],
+                  outputs=generation_drawn, queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
@@ -913,15 +969,9 @@ def build() -> dict:
                    outputs=[system_preview], queue=False)
     edit_system.click(fn=_adopt_system_prompt, inputs=[name, context, system],
                       outputs=[system, status], queue=False)
-    # `input` rather than `change`: `change` also fires when these are *set*
-    # from a character being loaded, which would write the file back the moment
-    # it was read. Only a person moving the control reaches here.
-    for control in sampling:
-        control.input(fn=_remember_sampling, inputs=[character, editing] + sampling,
-                      outputs=[], queue=False)
     saving = save_character.click(
         fn=_save_character,
-        inputs=([editing, name, context, greeting, system] + sampling + [character_face]
+        inputs=([editing, name, context, greeting, system] + [character_face]
                 + [character_voice["chosen"], character_voice["custom"]]
                 + character_voice["sliders"]),
         outputs=[character, editing, status], queue=False)
@@ -1008,7 +1058,9 @@ def build() -> dict:
 
     # -- sending, and the three ways of asking again ---------------------- #
 
-    sent = [character, thread_state, message, attachment] + sampling + [revision_state]
+    # No sampling controls among them: a reply is sampled at the thread's own
+    # settings, read where its request is built (mc_llm_generation).
+    sent = [character, thread_state, message, attachment, revision_state]
     replying = send.click(fn=_send, inputs=sent, outputs=stream, show_progress="minimal")
     # The same pathway from the keyboard. Gradio fires ``submit`` on Enter for
     # a composer that is one line tall, which is what this one starts as.
@@ -1020,7 +1072,7 @@ def build() -> dict:
     # the wrong conversation. Continue and Send again from here can land in a
     # branch too -- Continue on an earlier reply, and Send again from here
     # always (specification S8).
-    asking = where + sampling + [search, revision_state]
+    asking = where + [search, revision_state]
     regenerating = nominated["regenerate"].click(
         fn=_regenerate_reply, inputs=asking,
         outputs=[threads, thread_state] + stream, show_progress="minimal")
@@ -1375,8 +1427,11 @@ def _favourite_rows(who: str = "", current: str = "") -> str:
 
     "make it easy to favorite an existing thread i have with one of my
     characters, so i can quickly load and continue" (2026-11-06): one tap from
-    the pop-up to any of them, whoever it is with. Nothing at all while none
-    is starred -- the stars on the Threads rows say how one gets here.
+    the pop-up to any of them, whoever it is with, once the section is opened
+    -- it is folded, and its label says how many (:func:`_favourites_label`).
+    Nothing at all while none is starred, and no section either
+    (:func:`_favourites_section`): the stars on the Threads rows say how one
+    gets here.
     """
     found = _favourites_of_everyone()
     if not found:
@@ -1386,7 +1441,6 @@ def _favourite_rows(who: str = "", current: str = "") -> str:
                                with_who=True)
                    for name, info in found)
     return (f'<div class="{prefix}-favourites">'
-            f'<div class="{prefix}-favourites-label">Favourites</div>'
             f'<div class="{prefix}-thread-list" role="list" aria-label="Favourite threads">'
             f'{rows}</div></div>')
 
@@ -1879,6 +1933,139 @@ def _start_written(who, identifier, text) -> tuple:
     return _start_view(who, identifier) + (ui.notice(note),)
 
 
+# -- the thread's generation settings ----------------------------------------- #
+#
+# Kept with the thread (mc_llm_generation) and read where every request in it
+# is built, so these controls only have to show what is kept and keep what is
+# moved: nothing a reply is sent with comes from them.
+
+
+def _generation_control(setting, value):
+    """One control of the Generation section, opened on ``value``.
+
+    Out of Forge's ``ui-config.json``, as the seed box is (:func:`ui.seed_box`):
+    the host writes a labelled control's stored value -- and a slider's range --
+    back over what is built, and these share their labels with other controls
+    in LLM Studio's tab. Their values are the thread's and nothing else's.
+    """
+    ident = ui.ident("chat", "generation-" + setting.key.replace("_", "-"))
+    if setting.key == "seed":
+        return ui.seed_box(info=setting.info, value=value, elem_id=ident)
+    control = gr.Slider(label=setting.label, minimum=setting.minimum,
+                        maximum=setting.maximum, step=setting.step, value=value,
+                        info=setting.info or None, elem_id=ident)
+    control.do_not_save_to_config = True
+    return control
+
+
+def _generation_record(who, identifier) -> dict:
+    """What the thread chose; ``{}`` for none, or when it cannot be read."""
+    import mc_llm_generation
+
+    if not who or not identifier:
+        return {}
+    try:
+        return mc_llm_generation.for_thread(who, identifier)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's generation settings",
+                     exc_info=True)
+        return {}
+
+
+def _generation_values(who, identifier) -> dict:
+    """Every setting's value for the thread, by key: its choice, else its default."""
+    import mc_llm_generation
+
+    try:
+        character = _characters().load(who) if who else None
+    except Exception:
+        character = None
+    return mc_llm_generation.in_force(_generation_record(who, identifier),
+                                      mc_llm_generation.base(character))
+
+
+def _generation_label(who, identifier) -> str:
+    import mc_llm_generation
+
+    return mc_llm_generation.label(_generation_record(who, identifier))
+
+
+def _generation_view(who, identifier) -> list:
+    """The section's label and every control, in ``mc_llm_generation.KEYS`` order."""
+    import mc_llm_generation
+
+    values = _generation_values(who, identifier)
+    return ([gr.update(label=_generation_label(who, identifier))]
+            + [values[key] for key in mc_llm_generation.KEYS])
+
+
+def _generation_chosen(key: str):
+    """The handler for one control: keep what it says for the open thread.
+
+    Answers the section's label and the status line, which stays as it is
+    unless the choice could not be kept. Fired as the control moves and again
+    as it is let go (a slider's ``release``), so the last value is the one kept
+    whichever request arrives last.
+    """
+    import mc_llm_generation
+
+    def chosen(who, identifier, value):
+        try:
+            record = mc_llm_generation.choose(who, identifier, key, value)
+        except mc_llm_generation.Refused as refusal:
+            return gr.update(), ui.notice(str(refusal), "warn")
+        except Exception:
+            logger.warning("Model Chain: a thread's generation setting could not be kept",
+                           exc_info=True)
+            return gr.update(), ui.notice("That setting could not be kept.", "error")
+        return gr.update(label=mc_llm_generation.label(record)), gr.update()
+
+    chosen.__name__ = f"_generation_chosen_{key}"
+    return chosen
+
+
+def _generation_reset(who, identifier) -> list:
+    """Forget the thread's choices: every control back to what applies without one."""
+    import mc_llm_generation
+
+    if not who or not identifier:
+        return _generation_view(who, identifier) + [
+            ui.notice("Choose a character and a thread first.", "warn")]
+    try:
+        mc_llm_generation.reset(who, identifier)
+    except Exception:
+        logger.warning("Model Chain: a thread's generation settings could not be reset",
+                       exc_info=True)
+        return _generation_view(who, identifier) + [
+            ui.notice("The settings could not be reset.", "error")]
+    return _generation_view(who, identifier) + [
+        ui.notice("This thread is back to its defaults.")]
+
+
+# -- the thread lists, folded -------------------------------------------------- #
+
+
+def _favourites_label(count: int | None = None) -> str:
+    """``Favourites · N``: how many are starred, whoever they are with."""
+    if count is None:
+        count = len(_favourites_of_everyone())
+    return f"Favourites · {count}" if count else "Favourites"
+
+
+def _favourites_section() -> dict:
+    """The Favourites section's label and whether it is there: not until one is starred."""
+    count = len(_favourites_of_everyone())
+    return gr.update(label=_favourites_label(count), visible=bool(count))
+
+
+def _thread_lists_folded() -> tuple:
+    """Favourites and Threads folded, as the pop-up opens: a list is opened to be
+    chosen from, never shown at the top level (2026-11-09)."""
+    count = len(_favourites_of_everyone())
+    return (gr.update(open=False, label=_favourites_label(count), visible=bool(count)),
+            gr.update(open=False))
+
+
 def _cache_status(who, identifier):
     """The status line while the conversation is read again, and Ready after.
 
@@ -1997,8 +2184,7 @@ STALE_NOMINATION = "That message is no longer in the thread. Reopen it and try a
 """What a row says when its message has moved out from under it."""
 
 
-def _regenerate_reply(who, identifier, positions, at, temperature, top_p,
-                      reply_tokens, seed, filter_text="", revision=None):
+def _regenerate_reply(who, identifier, positions, at, filter_text="", revision=None):
     """Regenerate the reply whose row was pressed.
 
     A translation and nothing else: the nomination becomes a message index and
@@ -2012,32 +2198,27 @@ def _regenerate_reply(who, identifier, positions, at, temperature, top_p,
                                       "That reply is no longer in the thread. Reopen it "
                                       "and try again.", "warn"))
         return
-    yield from _regenerate(who, identifier, index, temperature, top_p, reply_tokens,
-                           seed, filter_text, revision)
+    yield from _regenerate(who, identifier, index, filter_text, revision)
 
 
-def _continue_at(who, identifier, positions, at, temperature, top_p, reply_tokens, seed,
-                 filter_text="", revision=None):
+def _continue_at(who, identifier, positions, at, filter_text="", revision=None):
     """Continue the reply whose row was pressed; :func:`_continue` does the rest."""
     index = _nominated(positions, at)
     if index == NO_SELECTION:
         yield _here(identifier, _idle(_load(who, identifier), "", None, STALE_NOMINATION,
                                       "warn"))
         return
-    yield from _continue(who, identifier, index, temperature, top_p, reply_tokens, seed,
-                         filter_text, revision)
+    yield from _continue(who, identifier, index, filter_text, revision)
 
 
-def _resend_at(who, identifier, positions, at, temperature, top_p, reply_tokens, seed,
-               filter_text="", revision=None):
+def _resend_at(who, identifier, positions, at, filter_text="", revision=None):
     """Answer again the prompt whose row was pressed; :func:`_resend` does the rest."""
     index = _nominated(positions, at)
     if index == NO_SELECTION:
         yield _here(identifier, _idle(_load(who, identifier), "", None, STALE_NOMINATION,
                                       "warn"))
         return
-    yield from _resend(who, identifier, index, temperature, top_p, reply_tokens, seed,
-                       filter_text, revision)
+    yield from _resend(who, identifier, index, filter_text, revision)
 
 
 def _stale(who, identifier) -> list:
@@ -2412,7 +2593,6 @@ def _select_character(who, filter_text, typed=""):
     return ([_thread_rows(who, filter_text, identifier), identifier, lifted]
             + _refresh(conversation, note)
             + [loaded.name, loaded.context, loaded.greeting, loaded.system,
-               loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
                loaded.name or NOT_EDITING,
                _system_preview(loaded.name, loaded.context, loaded.system),
                _face_value(_character_face(loaded.name))]
@@ -2481,14 +2661,21 @@ def _lift(who, identifier, conversation, typed):
     return text, _load(who, identifier)
 
 
-def _new_thread(who, filter_text):
+def _new_thread(who, filter_text, current=""):
+    """Start a thread with ``who``: greeted, opened, the pop-up put away.
+
+    ``current`` is the thread open as + New thread was pressed. Its generation
+    settings are the new thread's to start with (mc_llm_generation.carry, on the
+    service's side): a thread tuned for variety is not the last one that is.
+    """
     if not who:
         return ([gr.update(), ""]
                 + _refresh(None, "Choose a character first.", "warn")
                 + _screens("threads"))  # stay where the message can be read
     import mc_llm_conversation_service as service
 
-    outcome = _command(service.CREATE_THREAD, who, "")
+    like = str(current or "").strip()
+    outcome = _command(service.CREATE_THREAD, who, "", payload={"like": like} if like else None)
     if not outcome.get("ok"):
         note, kind = _refused(outcome)
         return ([gr.update(), ""] + _refresh(None, note, kind) + _screens("threads"))
@@ -2846,8 +3033,7 @@ def _delete_from(who, identifier, index, revision=None):
 # --------------------------------------------------------------------------- #
 
 
-def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed,
-          revision=None):
+def _send(who, identifier, text, picture, revision=None):
     """Add your message to the thread, then follow the reply to it.
 
     Nothing here streams any more, and nothing here saves. The command goes to
@@ -2869,8 +3055,10 @@ def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed
         yield _idle(conversation, text, gr.update(), "Write a message first.", "warn")
         return
 
-    payload = {"text": text or "", "settings": _settings(temperature, top_p, reply_tokens,
-                                                         seed)}
+    # No sampling: the thread's own generation settings are read where the
+    # request is built (mc_llm_generation), so what is sent is what is kept --
+    # and a page drawn before they changed cannot send the old ones.
+    payload = {"text": text or ""}
     if picture is not None:
         if not mc_llm_runtime.config().sees:
             yield _idle(conversation, text, gr.update(),
@@ -2891,28 +3079,7 @@ def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed
     yield from _follow(outcome, who, identifier, text, clearing=True)
 
 
-def _settings(temperature, top_p, reply_tokens, seed) -> dict:
-    """The four sampling controls, as the envelope carries them.
-
-    ``None`` for a box that has been cleared, and the service falls back to the
-    character's own value exactly as the panel did -- so a cleared box still
-    runs at the settings the standalone application would have used rather than
-    at a literal invented somewhere.
-    """
-    found = {}
-    for name, value in (("temperature", temperature), ("top_p", top_p),
-                        ("reply_tokens", reply_tokens), ("seed", seed)):
-        try:
-            found[name] = float(value) if value is not None else None
-        except (TypeError, ValueError):
-            found[name] = None
-        if found[name] is None:
-            found.pop(name)
-    return found
-
-
-def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed,
-                filter_text="", revision=None):
+def _regenerate(who, identifier, index, filter_text="", revision=None):
     """Write this reply again — as a version at the end, as a branch in the middle.
 
     Two behaviours because there are two situations, and one of them used to be
@@ -2952,14 +3119,11 @@ def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed,
         return
     outcome = _command(service.REGENERATE, who, identifier,
                        expected=_revision_or(revision, conversation),
-                       index=_last_reply(conversation, index),
-                       payload={"settings": _settings(temperature, top_p, reply_tokens,
-                                                      seed)})
+                       index=_last_reply(conversation, index))
     yield from _follow_thread(outcome, who, identifier, filter_text)
 
 
-def _continue(who, identifier, index, temperature, top_p, reply_tokens, seed,
-              filter_text="", revision=None):
+def _continue(who, identifier, index, filter_text="", revision=None):
     """Carry the reply on from where it stopped.
 
     On the final reply that is what it always was. On an earlier one it now
@@ -2977,14 +3141,11 @@ def _continue(who, identifier, index, temperature, top_p, reply_tokens, seed,
         return
     outcome = _command(service.CONTINUE, who, identifier,
                        expected=_revision_or(revision, conversation),
-                       index=_last_reply(conversation, index),
-                       payload={"settings": _settings(temperature, top_p, reply_tokens,
-                                                      seed)})
+                       index=_last_reply(conversation, index))
     yield from _follow_thread(outcome, who, identifier, filter_text)
 
 
-def _resend(who, identifier, index, temperature, top_p, reply_tokens, seed,
-            filter_text="", revision=None):
+def _resend(who, identifier, index, filter_text="", revision=None):
     """Answer this message of yours again, in a branch.
 
     It used to drop everything after it. ``truncate_after(index)`` then
@@ -3009,9 +3170,7 @@ def _resend(who, identifier, index, temperature, top_p, reply_tokens, seed,
                                       "Choose one of your messages first.", "warn"))
         return
     outcome = _command(service.RESEND_FROM_USER, who, identifier,
-                       expected=_revision_or(revision, conversation), index=index,
-                       payload={"settings": _settings(temperature, top_p, reply_tokens,
-                                                      seed)})
+                       expected=_revision_or(revision, conversation), index=index)
     yield from _follow_thread(outcome, who, identifier, filter_text)
 
 
@@ -3323,31 +3482,6 @@ def _tidy(conversation, index: int) -> None:
         conversation.delete(index)
 
 
-def _number(value, *fallbacks) -> int:
-    """``value`` as a whole number, or the first fallback that is one.
-
-    Exists because a Gradio number box that has been cleared hands back
-    ``None`` and a slider that has never been touched can hand back whatever
-    the browser last had -- and the answer to either is the value the character
-    was saved with, never a crash and never a literal invented here.
-    """
-    for candidate in (value,) + fallbacks:
-        try:
-            return int(float(candidate))
-        except (TypeError, ValueError):
-            continue
-    return 0
-
-
-def _decimal(value, *fallbacks) -> float:
-    for candidate in (value,) + fallbacks:
-        try:
-            return float(candidate)
-        except (TypeError, ValueError):
-            continue
-    return 0.0
-
-
 def _cancel(operation_id):
     """Stop the reply, and put the controls back.
 
@@ -3460,16 +3594,12 @@ def _editor_fields(character, editing: str, note: str, kind: str = "info") -> li
     """One state of the editor, in the order the outputs are wired.
 
     Every handler that touches the editor returns this, so none of them can
-    leave the name box, the sampling and the character being written to
-    describing three different characters.
+    leave the name box and the character being written to describing two
+    different characters. The generation settings are not in it: they are the
+    thread's (:mod:`mc_llm_generation`), drawn by the Generation section.
     """
-    blank = _blank_character()
     return [gr.update(visible=True), editing,
             character.name, character.context, character.greeting, character.system or "",
-            _decimal(character.temperature, blank.temperature),
-            _decimal(character.top_p, blank.top_p),
-            _number(character.max_reply_tokens, blank.max_reply_tokens),
-            _number(character.seed, blank.seed),
             _system_preview(character.name, character.context, character.system),
             ui.notice(note, kind),
             # The picture this character has, if it has one. Read off disk with
@@ -3543,7 +3673,7 @@ def _blank_voice_fields() -> list:
 
 def _closed_editor(note: str, kind: str = "info") -> list:
     """The editor shut, with everything in it left exactly as it was."""
-    return ([gr.update(visible=False), gr.update()] + [gr.update()] * 9
+    return ([gr.update(visible=False), gr.update()] + [gr.update()] * 5
             + [ui.notice(note, kind), gr.update()] + _blank_voice_fields())
 
 
@@ -3608,23 +3738,16 @@ def _open_character(who):
 
 
 def _new_character():
-    """Clear the editor for a character that does not exist yet.
-
-    The sampling is reset with the rest of it. Leaving it alone would have a
-    new character silently inherit the settings of whichever one was selected
-    when New was pressed -- which is how a character nobody gave a seed to ends
-    up with somebody else's.
-    """
+    """Clear the editor for a character that does not exist yet."""
     return _editor_fields(_blank_character(), NOT_EDITING,
                           "New character: a name and Save character create it.")
 
 
 def _cancel_character(who):
-    """Shut the editor and put the sampling back to the selected character's.
+    """Shut the editor and put its boxes back to the selected character's.
 
-    Cancel has to undo what New did to the boxes outside the editor, or a user
-    who thought better of creating a character is left talking to their old one
-    at a new one's settings.
+    Cancel has to undo what New did to them, or the next Edit opens on a
+    character nobody created.
     """
     try:
         loaded = _characters().load(who) if who else None
@@ -3637,55 +3760,18 @@ def _cancel_character(who):
     return fields
 
 
-def _remember_sampling(who, editing, temperature, top_p, reply_tokens, seed):
-    """Keep the Advanced generation settings on the character being talked to.
-
-    These four already *load* with a character -- :func:`_select_character`
-    returns them -- but nothing wrote them back without pressing Save character,
-    which lives on the editor screen and is about the editor's boxes. The
-    accordion is not in the editor: it is in the flyout, beside the character
-    you are talking to. So setting a seed there and carrying on chatting set it
-    for that reply and for nothing afterwards, and the next session opened on
-    whatever the file still said. Setting the same seed every time is not a
-    workflow; it is a control that does not remember.
-
-    Only while the editor is shut. With it open these four belong to the edit,
-    and Save and Cancel are what decide their fate -- writing them out from
-    under Cancel would make Cancel a lie.
-
-    Never fatal and never noisy: this is a side effect of moving a slider, and a
-    character file that cannot be written is reported by the next thing that
-    tries to write it properly rather than by a toast nobody asked for.
-    """
-    wanted = str(who or "").strip()
-    if not wanted or str(editing or NOT_EDITING) != NOT_EDITING:
-        return
-    from dataclasses import replace
-
-    try:
-        store = _characters()
-        character = store.load(wanted)
-        blank = _blank_character()
-        store.save(
-            replace(character,
-                    temperature=_decimal(temperature, blank.temperature),
-                    top_p=_decimal(top_p, blank.top_p),
-                    max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
-                    seed=_number(seed, blank.seed)),
-            previous_name=wanted)
-    except Exception:
-        logger.debug("Model Chain: could not remember the sampling for %r", wanted,
-                     exc_info=True)
-
-
-def _save_character(editing, name, context, greeting, system, temperature, top_p,
-                    reply_tokens, seed, face=None, voice="", voice_custom=False,
-                    *voice_values):
+def _save_character(editing, name, context, greeting, system, face=None, voice="",
+                    voice_custom=False, *voice_values):
     """Write the editor to disk, creating or renaming as ``editing`` says.
 
     ``editing`` and not the drop-down, which is the whole fix. Creating refuses
     a name that is already taken rather than writing over it -- overwriting a
     character silently is the same loss by a shorter road.
+
+    The character's own sampling -- what a thread of it that chose none is
+    sampled at -- is left as its file has it (a new one starts at the
+    package's): the Generation controls are each thread's now
+    (:mod:`mc_llm_generation`), and Save is about the boxes the editor shows.
     """
     from prompt_master.chat.characters import Character
 
@@ -3700,7 +3786,13 @@ def _save_character(editing, name, context, greeting, system, temperature, top_p
                 ui.notice(f"There is already a character called {wanted}. Give this one "
                           f"another name, or press Edit to change that one.", "warn")]
 
-    blank = _blank_character()
+    kept = _blank_character()
+    if not creating:
+        try:
+            kept = store.load(editing)
+        except Exception:
+            logger.debug("Model Chain: could not read %r's sampling to keep it", editing,
+                         exc_info=True)
     # Values or ``None``s, and the difference is the checkbox: a character with
     # no delivery of its own follows Settings → Voice Chat, and keeps following
     # it when that changes. See mc_voice_ui.character_profile.
@@ -3713,10 +3805,8 @@ def _save_character(editing, name, context, greeting, system, temperature, top_p
     engine_fields = _voice_engine_fields(editing or wanted, voice, delivery)
     character = Character(
         name=wanted, context=context or "", greeting=greeting or "",
-        temperature=_decimal(temperature, blank.temperature),
-        top_p=_decimal(top_p, blank.top_p),
-        max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
-        seed=_number(seed, blank.seed), system=system or "",
+        temperature=kept.temperature, top_p=kept.top_p,
+        max_reply_tokens=kept.max_reply_tokens, seed=kept.seed, system=system or "",
         **engine_fields)
     try:
         store.save(character, previous_name=None if creating else editing)

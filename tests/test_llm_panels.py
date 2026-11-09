@@ -750,8 +750,7 @@ class TestRegeneratingInTheMiddleBranches:
 
     def _run(self, chat, identifier, index):
         """Regenerate to completion, and hand back the events it yielded."""
-        return list(chat._regenerate("Ada", identifier, index,
-                                     None, None, None, None, ""))
+        return list(chat._regenerate("Ada", identifier, index, ""))
 
     # -- the middle: a branch ------------------------------------------------ #
 
@@ -957,7 +956,7 @@ class TestTheRegenerateIconOnAReply:
         # The second reply of three: mid-thread, so this also proves the icon
         # branches rather than truncating, because it is the same handler.
         events = list(chat._regenerate_reply("Ada", conversation.identifier, positions, "1",
-                                             None, None, None, None, ""))
+                                             ""))
 
         assert [message.text for message in
                 chats.load("Ada", conversation.identifier).messages] == [
@@ -975,8 +974,7 @@ class TestTheRegenerateIconOnAReply:
         branching = TestRegeneratingInTheMiddleBranches()
         chat, chats, conversation = branching._thread(store, monkeypatch)
 
-        events = list(chat._regenerate_reply("Ada", conversation.identifier, [], "4",
-                                             None, None, None, None, ""))
+        events = list(chat._regenerate_reply("Ada", conversation.identifier, [], "4", ""))
 
         assert len(events) == 1
         assert [message.text for message in
@@ -991,7 +989,7 @@ class TestTheRegenerateIconOnAReply:
 
         for ordinal in ("0", "2", "nowhere"):
             for event in chat._regenerate_reply("Ada", conversation.identifier, positions,
-                                                ordinal, None, None, None, None, ""):
+                                                ordinal, ""):
                 assert len(event) == width
 
     def test_the_pair_the_browser_presses_is_in_the_panel(self, monkeypatch):
@@ -1246,70 +1244,93 @@ class TestWhoSaidWhat:
         from PIL import Image
 
         mc_llm_chat_panel._save_character("Ada", "Ada", "a reader of maps", "hello", "",
-                                          0.8, 0.9, 512, -1,
                                           Image.new("RGB", (20, 20), (10, 90, 200)))
 
         assert mc_llm_chat_panel._character_face("Ada") is not None
 
-    def test_the_sampling_follows_the_character_being_talked_to(self, store, characters):
-        """The reported bug: the seed had to be set again every time.
+    def _thread(self, who="Ada"):
+        chats = mc_llm_chat_panel._chats()
+        conversation = chats.new(who)
+        chats.save(conversation)
+        return conversation.identifier
 
-        These four already load with a character. Nothing wrote them back
-        without pressing Save character, which is on the editor screen -- and
-        the accordion holding them is not: it is in the flyout, beside whoever
-        you are talking to. So setting a seed there set it for that reply and
-        for nothing after it.
+    def test_the_sampling_follows_the_thread_being_talked_in(self, store, characters):
+        """The reported bug, twice over: the seed had to be set again every
+        time, and then (2026-11-09) every generation setting did -- "I have to
+        keep setting them again when i return to the conversation. These should
+        be kept per conversation."
+
+        A control moved in the Generation section is kept with the thread the
+        moment it moves, and is what the section is drawn with when the pop-up
+        opens on that thread again; another thread of the same character is not
+        touched by it.
         """
-        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, 4242,
-                                          None)
-        assert mc_llm_chat_panel._characters().load("Ada").seed == 4242
+        import mc_llm_generation
 
-        mc_llm_chat_panel._remember_sampling("Ada", mc_llm_chat_panel.NOT_EDITING,
-                                             0.7, 0.85, 256, -1)
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", None)
+        first, second = self._thread(), self._thread()
 
-        found = mc_llm_chat_panel._characters().load("Ada")
-        assert found.seed == -1
-        assert found.max_reply_tokens == 256
-        assert abs(found.temperature - 0.7) < 1e-6
+        for key, value in (("seed", 4242), ("temperature", 0.7), ("reply_tokens", 256),
+                           ("dry_multiplier", 0.8)):
+            mc_llm_chat_panel._generation_chosen(key)("Ada", first, value)
 
-    def test_it_leaves_the_rest_of_the_character_alone(self, store, characters):
-        """A slider is not an edit of the name, the context or the voice."""
+        drawn = mc_llm_chat_panel._generation_view("Ada", first)
+        values = dict(zip(mc_llm_generation.KEYS, drawn[1:]))
+        assert values["seed"] == 4242 and values["reply_tokens"] == 256
+        assert abs(values["temperature"] - 0.7) < 1e-6 and values["dry_multiplier"] == 0.8
+        assert "Temperature 0.7" in drawn[0]["label"]
+        untouched = dict(zip(mc_llm_generation.KEYS,
+                             mc_llm_chat_panel._generation_view("Ada", second)[1:]))
+        assert untouched["seed"] == -1 and untouched["dry_multiplier"] == 0.0
+
+    def test_it_leaves_the_character_alone(self, store, characters):
+        """A slider is not an edit of the character: not of its name, its
+        context or its voice, and not of its own sampling either, which is what
+        a thread of it that chose none is sampled at."""
         mc_llm_chat_panel._save_character("Ada", "Ada", "a reader of maps", "hello there",
-                                          "", 0.8, 0.9, 512, 7, None)
+                                          "", None)
+        before = mc_llm_chat_panel._characters().load("Ada")
+        identifier = self._thread()
 
-        mc_llm_chat_panel._remember_sampling("Ada", mc_llm_chat_panel.NOT_EDITING,
-                                             0.8, 0.9, 512, -1)
+        mc_llm_chat_panel._generation_chosen("seed")("Ada", identifier, 31)
+        mc_llm_chat_panel._generation_chosen("temperature")("Ada", identifier, 1.4)
 
         found = mc_llm_chat_panel._characters().load("Ada")
         assert found.context == "a reader of maps"
         assert found.greeting == "hello there"
-        assert found.seed == -1
+        assert (found.seed, found.temperature) == (before.seed, before.temperature)
 
-    def test_it_does_not_write_while_the_editor_is_open(self, store, characters):
-        """With the editor open these belong to the edit, and Save and Cancel
-        decide their fate. Writing them out from under Cancel would make Cancel
-        a lie."""
-        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, 7, None)
+    def test_saving_the_character_keeps_its_own_sampling(self, store, characters):
+        """The editor no longer carries the four (they are the thread's), so
+        Save writes the character's own as its file has them rather than the
+        package's defaults over them."""
+        from dataclasses import replace
 
-        mc_llm_chat_panel._remember_sampling("Ada", "Ada", 0.1, 0.1, 64, -1)
+        held = mc_llm_chat_panel._characters()
+        held.save(replace(held.load("Ada"), seed=7, temperature=0.4, max_reply_tokens=900))
 
-        assert mc_llm_chat_panel._characters().load("Ada").seed == 7
+        mc_llm_chat_panel._save_character("Ada", "Ada", "renamed context", "", "", None)
 
-    def test_it_does_nothing_without_a_character(self, store, characters):
-        """Nobody selected is not an invitation to write somebody."""
-        before = sorted(mc_llm_chat_panel._characters().names())
+        found = held.load("Ada")
+        assert (found.seed, found.temperature, found.max_reply_tokens) == (7, 0.4, 900)
+        assert found.context == "renamed context"
 
-        mc_llm_chat_panel._remember_sampling("", mc_llm_chat_panel.NOT_EDITING,
-                                             0.8, 0.9, 512, -1)
+    def test_it_does_nothing_without_a_thread(self, store, characters):
+        """Nobody selected, or no thread open, is not an invitation to write
+        somebody: the setting is refused with a sentence, and nothing is kept."""
+        import mc_llm_generation
 
-        assert sorted(mc_llm_chat_panel._characters().names()) == before
+        label, note = mc_llm_chat_panel._generation_chosen("temperature")("", "", 0.8)
+        assert label == {} and "Open a thread first" in note
+        label, note = mc_llm_chat_panel._generation_chosen("temperature")("Ada", "", 0.8)
+        assert label == {} and "Open a thread first" in note
+        assert not mc_llm_generation.path().exists()
 
     def test_and_emptying_the_box_takes_it_away(self, store, characters):
         from PIL import Image
 
-        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, -1,
-                                          Image.new("RGB", (20, 20)))
-        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, -1, None)
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", Image.new("RGB", (20, 20)))
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", None)
 
         assert mc_llm_chat_panel._character_face("Ada") is None
 
@@ -1638,6 +1659,248 @@ class TestTheFooterGoesAway:
 
         assert '[data-mc-footer="hidden"] gradio-app footer' in css
         assert '[data-mc-footer="hidden"] gradio-app > footer' not in css
+
+
+def _built(monkeypatch):
+    """Every component the panel builds, in the order it builds them (the
+    stand-in records layout blocks too), each with the bindings made on it
+    kept as ``_dependencies`` so what is chained after them can be read."""
+    import gradio as gr
+
+    built = []
+    original = gr.components.Component.__init__
+    bound = gr.components.Component._record
+
+    def record(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self._dependencies = []
+        built.append(self)
+
+    def keep(self, kind, kwargs):
+        dependency = bound(self, kind, kwargs)
+        self._dependencies.append(dependency)
+        return dependency
+
+    monkeypatch.setattr(gr.components.Component, "__init__", record)
+    monkeypatch.setattr(gr.components.Component, "_record", keep)
+    mc_llm_chat_panel.build()
+    return built
+
+
+def _by_id(built, name):
+    import mc_llm_ui as ui
+
+    found = [one for one in built if getattr(one, "elem_id", None) == ui.ident("chat", name)]
+    assert len(found) == 1, name
+    return found[0]
+
+
+class TestTheGenerationSection:
+    """Each thread's generation settings, in the Conversation pop-up
+    (2026-11-09): "These should be kept per conversation ... more controls
+    there ... Im not able to get random enough output, and infact, i get a lot
+    of repetition." """
+
+    @pytest.fixture
+    def characters(self, store):
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        held.save(Character(name="Ada", context="an existing character"))
+        return held
+
+    def _thread(self, who="Ada"):
+        chats = mc_llm_chat_panel._chats()
+        conversation = chats.new(who)
+        chats.save(conversation)
+        return conversation.identifier
+
+    def test_every_setting_has_a_control_out_of_the_hosts_ui_config(self, store, monkeypatch):
+        """Their values are the thread's: Forge's ``ui-config.json`` writes a
+        labelled control's stored value and a slider's range back over what is
+        built, and these share labels with other controls in the tab."""
+        import mc_llm_generation
+
+        built = _built(monkeypatch)
+
+        for setting in mc_llm_generation.SETTINGS:
+            control = _by_id(built, "generation-" + setting.key.replace("_", "-"))
+            assert control.do_not_save_to_config is True, setting.key
+            if setting.key != "seed":
+                assert (control.minimum, control.maximum, control.step) == (
+                    setting.minimum, setting.maximum, setting.step), setting.key
+                assert control.label == setting.label
+
+    def test_each_control_keeps_what_it_says_as_it_moves_and_as_it_is_let_go(
+            self, store, monkeypatch):
+        import mc_llm_generation
+
+        built = _built(monkeypatch)
+        for setting in mc_llm_generation.SETTINGS:
+            control = _by_id(built, "generation-" + setting.key.replace("_", "-"))
+            kinds = {kind: kwargs for kind, kwargs in control._callbacks}
+            assert kinds["input"]["fn"].__name__ == f"_generation_chosen_{setting.key}"
+            assert kinds["input"]["inputs"][-1] is control
+            assert kinds["release"]["fn"].__name__ == f"_generation_chosen_{setting.key}"
+            assert kinds["input"]["queue"] is False
+
+    def test_the_pop_up_draws_it_again_as_it_opens(self, store, monkeypatch):
+        built = _built(monkeypatch)
+
+        opened = [kwargs["fn"].__name__ for kind, kwargs
+                  in _by_id(built, "to-conversation")._callbacks if kind == "click"]
+
+        assert "_generation_view" in opened and "_thread_lists_folded" in opened
+
+    def test_it_is_drawn_again_when_the_thread_changes_under_the_open_pop_up(
+            self, store, monkeypatch):
+        """The pop-up stays open over another character chosen and over a delete,
+        and the thread open after either has settings of its own."""
+        built = _built(monkeypatch)
+        section = _by_id(built, "generation")
+        delete = next(one for one in built if getattr(one, "value", None)
+                      == "Delete this thread")
+
+        for changed in (_by_id(built, "who"), delete):
+            redrawn = [chained.kwargs["fn"] for dependency in changed._dependencies
+                       for chained in dependency.chained
+                       if section in (chained.kwargs.get("outputs") or [])]
+            assert redrawn == [mc_llm_chat_panel._generation_view], changed
+
+    def test_a_control_moved_is_kept_and_drawn_back(self, store, characters):
+        import mc_llm_generation
+
+        identifier = self._thread()
+
+        label, note = mc_llm_chat_panel._generation_chosen("dry_multiplier")(
+            "Ada", identifier, 0.8)
+        drawn = mc_llm_chat_panel._generation_view("Ada", identifier)
+
+        assert label == {"label": "Generation · DRY 0.8"} and note == {}
+        assert drawn[0] == {"label": "Generation · DRY 0.8"}
+        assert dict(zip(mc_llm_generation.KEYS, drawn[1:]))["dry_multiplier"] == 0.8
+        assert len(drawn) == 1 + len(mc_llm_generation.KEYS)
+
+    def test_a_value_that_is_no_number_is_said_and_not_kept(self, store, characters):
+        import mc_llm_generation
+
+        identifier = self._thread()
+
+        label, note = mc_llm_chat_panel._generation_chosen("top_k")("Ada", identifier, "x")
+
+        assert label == {} and "takes a number" in note
+        assert mc_llm_generation.for_thread("Ada", identifier) == {}
+
+    def test_reset_puts_the_thread_back_to_its_defaults(self, store, characters):
+        import mc_llm_generation
+
+        identifier = self._thread()
+        mc_llm_chat_panel._generation_chosen("top_k")("Ada", identifier, 0)
+
+        answered = mc_llm_chat_panel._generation_reset("Ada", identifier)
+
+        assert mc_llm_generation.for_thread("Ada", identifier) == {}
+        assert answered[0] == {"label": "Generation"}
+        assert dict(zip(mc_llm_generation.KEYS, answered[1:-1]))["top_k"] == 40
+        assert "back to its defaults" in answered[-1]
+
+    def test_a_new_thread_starts_from_the_one_open(self, store, characters):
+        """+ New thread names the thread it was pressed in; the new one starts
+        with its settings, so a thread tuned for variety is not the last."""
+        import mc_llm_generation
+
+        identifier = self._thread()
+        mc_llm_chat_panel._generation_chosen("xtc_probability")("Ada", identifier, 0.5)
+
+        answered = mc_llm_chat_panel._new_thread("Ada", "", identifier)
+
+        made = answered[1]
+        assert made and made != identifier
+        assert mc_llm_generation.for_thread("Ada", made) == {"xtc_probability": 0.5}
+
+    def test_new_thread_is_wired_with_the_thread_open(self, store, monkeypatch):
+        built = _built(monkeypatch)
+
+        (kind, kwargs), = _by_id(built, "new-thread")._callbacks
+
+        assert kwargs["fn"] is mc_llm_chat_panel._new_thread and len(kwargs["inputs"]) == 3
+
+
+class TestTheThreadListsAreFolded:
+    """"the favroite threads needs to be collapsed on open ... i dont want that
+    at the top level, i should have to open up a menu to see those thread and
+    choose what to apply" (2026-11-09)."""
+
+    def _stars(self, store, count):
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        mc_llm_chat_panel._characters().save(Character(name="Ada"))
+        chats = mc_llm_chat_panel._chats()
+        made = []
+        for _ in range(count):
+            conversation = chats.new("Ada")
+            chats.save(conversation)
+            chats.set_pinned("Ada", conversation.identifier, True)
+            made.append(conversation.identifier)
+        return made
+
+    def test_both_lists_are_built_folded_inside_sections(self, store, monkeypatch):
+        import mc_llm_ui as ui
+
+        self._stars(store, 2)
+        built = _built(monkeypatch)
+        favourites = _by_id(built, "favourites-section")
+        threads = _by_id(built, "threads-section")
+
+        assert favourites.open is False and threads.open is False
+        # The label is the first argument, which the stand-in keeps as the value.
+        assert (favourites.label or favourites.value) == "Favourites · 2"
+        assert favourites.visible is True
+        order = [getattr(one, "elem_id", None) for one in built]
+        at = {name: order.index(ui.ident("chat", name))
+              for name in ("favourites-section", "favourites", "threads-section", "search",
+                           "threads", "new-thread")}
+        assert at["favourites-section"] < at["favourites"] < at["threads-section"]
+        assert at["threads-section"] < at["search"] < at["threads"]
+        assert at["new-thread"] < at["favourites-section"], "+ New thread is on top"
+
+    def test_no_favourites_no_section(self, store, monkeypatch):
+        built = _built(monkeypatch)
+
+        assert _by_id(built, "favourites-section").visible is False
+
+    def test_opening_the_pop_up_folds_them_again(self, store):
+        self._stars(store, 1)
+
+        favourites, threads = mc_llm_chat_panel._thread_lists_folded()
+
+        assert favourites == {"open": False, "label": "Favourites · 1", "visible": True}
+        assert threads == {"open": False}
+
+    def test_a_star_shows_the_section_and_counts_it(self, store):
+        assert mc_llm_chat_panel._favourites_section() == {"label": "Favourites",
+                                                           "visible": False}
+        self._stars(store, 3)
+
+        assert mc_llm_chat_panel._favourites_section() == {"label": "Favourites · 3",
+                                                           "visible": True}
+
+    def test_a_star_and_a_delete_redraw_the_section(self, store, monkeypatch):
+        """The first star makes it appear and every star recounts it; a thread
+        deleted may have been a favourite."""
+        built = _built(monkeypatch)
+        section = _by_id(built, "favourites-section")
+        delete = next(one for one in built if getattr(one, "value", None)
+                      == "Delete this thread")
+
+        for pressed in (_by_id(built, "thread-now"), delete):
+            redrawn = [chained for dependency in pressed._dependencies
+                       for chained in dependency.chained
+                       if section in (chained.kwargs.get("outputs") or [])]
+            assert [chained.kwargs["fn"] for chained in redrawn] == [
+                mc_llm_chat_panel._favourites_section], pressed
 
 
 class TestTheSurfaces:
@@ -3412,18 +3675,45 @@ class TestConversationDefaults:
         assert set(built) == {"status", "transcript", "header", "persona",
                               "model", "modes", "chip"}
 
-    def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self):
+    def _ada_and_a_thread(self, store):
         from prompt_master.chat.characters import Character
 
-        saved = Character(name="Ada", temperature=0.4, max_reply_tokens=900)
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        mc_llm_chat_panel._characters().save(
+            Character(name="Ada", temperature=0.4, max_reply_tokens=900))
+        chats = mc_llm_chat_panel._chats()
+        conversation = chats.new("Ada")
+        chats.save(conversation)
+        return conversation.identifier
 
-        assert mc_llm_chat_panel._decimal(None, saved.temperature) == 0.4
-        assert mc_llm_chat_panel._number("", saved.max_reply_tokens) == 900
-        assert mc_llm_chat_panel._number(None, None, 512) == 512
+    def _drawn(self, identifier):
+        import mc_llm_generation
 
-    def test_a_slider_value_still_wins_over_the_saved_one(self):
-        assert mc_llm_chat_panel._decimal(1.2, 0.4) == 1.2
-        assert mc_llm_chat_panel._number(256, 900) == 256
+        return dict(zip(mc_llm_generation.KEYS,
+                        mc_llm_chat_panel._generation_view("Ada", identifier)[1:]))
+
+    def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self, store):
+        """A box emptied forgets the thread's choice: the setting is drawn -- and
+        a reply sampled -- at the character's value, or llama-server's default
+        for one the character has none of."""
+        identifier = self._ada_and_a_thread(store)
+        for key, value in (("temperature", 1.2), ("reply_tokens", 256), ("top_k", 7)):
+            mc_llm_chat_panel._generation_chosen(key)("Ada", identifier, value)
+
+        for key in ("temperature", "reply_tokens", "top_k"):
+            mc_llm_chat_panel._generation_chosen(key)("Ada", identifier, None)
+
+        drawn = self._drawn(identifier)
+        assert (drawn["temperature"], drawn["reply_tokens"], drawn["top_k"]) == (0.4, 900, 40)
+
+    def test_a_slider_value_still_wins_over_the_saved_one(self, store):
+        identifier = self._ada_and_a_thread(store)
+
+        mc_llm_chat_panel._generation_chosen("temperature")("Ada", identifier, 1.2)
+        mc_llm_chat_panel._generation_chosen("reply_tokens")("Ada", identifier, 256)
+
+        drawn = self._drawn(identifier)
+        assert (drawn["temperature"], drawn["reply_tokens"]) == (1.2, 256)
 
 
 class TestTheCharacterMenu:
@@ -3449,8 +3739,7 @@ class TestTheCharacterMenu:
     def test_creating_one_keeps_the_one_that_was_selected(self, characters):
         editor = mc_llm_chat_panel._new_character()
 
-        mc_llm_chat_panel._save_character(editor[1], "Grace", "someone else", "", "",
-                                          0.85, 0.95, 512, -1)
+        mc_llm_chat_panel._save_character(editor[1], "Grace", "someone else", "", "")
 
         assert sorted(mc_llm_chat_panel._character_choices()) == ["Ada", "Grace"]
         assert characters.load("Ada").context == "an existing character"
@@ -3464,10 +3753,9 @@ class TestTheCharacterMenu:
     def test_a_second_save_edits_rather_than_creating_again(self, characters):
         editor = mc_llm_chat_panel._new_character()
         _dropdown, editing, _note = mc_llm_chat_panel._save_character(
-            editor[1], "Grace", "first", "", "", 0.85, 0.95, 512, -1)
+            editor[1], "Grace", "first", "", "")
 
-        mc_llm_chat_panel._save_character(editing, "Grace", "second", "", "",
-                                          0.85, 0.95, 512, -1)
+        mc_llm_chat_panel._save_character(editing, "Grace", "second", "", "")
 
         assert sorted(mc_llm_chat_panel._character_choices()) == ["Ada", "Grace"]
         assert characters.load("Grace").context == "second"
@@ -3476,7 +3764,7 @@ class TestTheCharacterMenu:
         """Overwriting somebody's character silently is the same loss by a
         shorter road."""
         _dropdown, _editing, note = mc_llm_chat_panel._save_character(
-            "", "Ada", "hijack", "", "", 0.85, 0.95, 512, -1)
+            "", "Ada", "hijack", "", "")
 
         assert "already a character" in note
         assert characters.load("Ada").context == "an existing character"
@@ -3490,8 +3778,7 @@ class TestTheCharacterMenu:
     def test_renaming_moves_the_character_rather_than_copying_it(self, characters):
         editor = mc_llm_chat_panel._open_character("Ada")
 
-        mc_llm_chat_panel._save_character(editor[1], "Ada Lovelace", "renamed", "", "",
-                                          0.85, 0.95, 512, -1)
+        mc_llm_chat_panel._save_character(editor[1], "Ada Lovelace", "renamed", "", "")
 
         assert mc_llm_chat_panel._character_choices() == ["Ada Lovelace"]
 
@@ -3530,19 +3817,21 @@ class TestTheCharacterMenu:
         assert dropdown["value"] is None
         assert "No characters yet" in note
 
-    def test_cancel_puts_the_sampling_back(self, characters):
-        """New resets the boxes, and they are the boxes the *conversation*
-        uses -- so thinking better of it has to restore them."""
+    def test_cancel_puts_the_boxes_back(self, characters):
+        """New empties the editor's boxes -- so thinking better of it has to
+        restore them to the character selected, or the next Edit opens on a
+        character nobody created. (The sampling was among them until the
+        Generation controls became each thread's, 2026-11-09.)"""
         from prompt_master.chat.characters import Character
 
-        characters.save(Character(name="Ada", temperature=0.4, seed=99))
+        characters.save(Character(name="Ada", context="a reader of maps"))
         mc_llm_chat_panel._new_character()
 
         restored = mc_llm_chat_panel._cancel_character("Ada")
 
         assert restored[0] == {"visible": False}
-        assert restored[6] == 0.4
-        assert restored[9] == 99
+        assert restored[2] == "Ada"
+        assert restored[3] == "a reader of maps"
 
 
 class TestACharacterHasItsOwnVoice:
@@ -3574,7 +3863,7 @@ class TestACharacterHasItsOwnVoice:
         character saved by this build resolves on a build that predates it.
         """
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "a mathematician", "", "", 0.85, 0.95, 512, -1, None,
+            "Ada", "Ada", "a mathematician", "", "", None,
             "official:af_nicole", False)
         loaded = characters.load("Ada")
         assert loaded.voice == "kokoro:official:af_nicole"
@@ -3589,7 +3878,7 @@ class TestACharacterHasItsOwnVoice:
         characters.save(Character(name="Ada", sopro_voice="sopro:clone:abc",
                                   sopro_speed=0.9))
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
+            "Ada", "Ada", "", "", "", None, "official:af_nicole", False)
         loaded = characters.load("Ada")
         assert loaded.sopro_voice == "sopro:clone:abc"
         assert loaded.voices["sopro"] == "sopro:clone:abc"
@@ -3607,7 +3896,7 @@ class TestACharacterHasItsOwnVoice:
                                   pocket_voice="pocket:official:alba", pocket_temperature=0.6,
                                   pocket_speed=1.1))
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
+            "Ada", "Ada", "", "", "", None, "official:af_nicole", False)
         loaded = characters.load("Ada")
         assert loaded.voices == {"kokoro": "kokoro:official:af_nicole",
                                  "sopro": "sopro:clone:abc",
@@ -3620,9 +3909,9 @@ class TestACharacterHasItsOwnVoice:
 
         characters.save(Character(name="Grace"))
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
+            "Ada", "Ada", "", "", "", None, "official:af_nicole", False)
         mc_llm_chat_panel._save_character(
-            "Grace", "Grace", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_heart",
+            "Grace", "Grace", "", "", "", None, "official:af_heart",
             False)
         assert characters.load("Ada").voice == "kokoro:official:af_nicole"
         assert characters.load("Grace").voice == "kokoro:official:af_heart"
@@ -3631,7 +3920,7 @@ class TestACharacterHasItsOwnVoice:
         """Unset rather than defaulted, which is the whole of how a character
         keeps following Settings when Settings changes."""
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "", False, 1.5, 3.0, 2.0,
+            "Ada", "Ada", "", "", "", None, "", False, 1.5, 3.0, 2.0,
             400.0)
         loaded = characters.load("Ada")
         assert loaded.voice_profile == {"speed": None, "pitch": None, "gain": None,
@@ -3639,7 +3928,7 @@ class TestACharacterHasItsOwnVoice:
 
     def test_its_own_delivery_is_saved_and_read_back(self, characters):
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "", True, 1.15, -2.5, 1.0,
+            "Ada", "Ada", "", "", "", None, "", True, 1.15, -2.5, 1.0,
             250.0)
         loaded = characters.load("Ada")
         assert loaded.voice_profile == {"speed": 1.15, "pitch": -2.5, "gain": 1.0,
@@ -3647,7 +3936,7 @@ class TestACharacterHasItsOwnVoice:
 
     def test_the_editor_opens_on_what_the_character_holds(self, characters):
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", True,
+            "Ada", "Ada", "", "", "", None, "official:af_nicole", True,
             1.15, -2.5, 0.0, 0.0)
         fields = mc_llm_chat_panel._open_character("Ada")
         voice = fields[-(3 + len(mc_voice_ui.delivery_controls())):]
@@ -3692,7 +3981,7 @@ class TestACharacterHasItsOwnVoice:
         that a character with four nulls in it reads as configured, and the
         difference between unset and set-to-the-default is the inheritance."""
         mc_llm_chat_panel._save_character(
-            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "", False)
+            "Ada", "Ada", "", "", "", None, "", False)
         text = characters.resolve("Ada").read_text(encoding="utf-8")
         assert "voice_speed" not in text
         assert "voice:" not in text
@@ -3743,12 +4032,12 @@ class TestTheSystemPromptIsVisible:
     def test_opening_the_editor_fills_it_in(self, characters):
         opened = mc_llm_chat_panel._open_character("Ada")
 
-        assert "You are Ada" in opened[10]
+        assert "You are Ada" in opened[6]
 
     def test_a_new_character_previews_the_bare_wrapper(self, characters):
         created = mc_llm_chat_panel._new_character()
 
-        assert "the character" in created[10]
+        assert "the character" in created[6]
 
     def test_editing_it_copies_it_into_the_override_box(self, characters):
         """One press, because the alternative is selecting eight lines of
@@ -3797,7 +4086,7 @@ class TestTheSystemPromptIsVisible:
         # about: that every handler answers with the *same* shape.
         import mc_voice_ui
 
-        assert shapes == {13 + 3 + len(mc_voice_ui.delivery_controls())}
+        assert shapes == {9 + 3 + len(mc_voice_ui.delivery_controls())}
 
 
 class TestSeedsAreRandomUntilSomebodyChoosesOne:
@@ -3901,19 +4190,33 @@ class TestSeedsAreRandomUntilSomebodyChoosesOne:
 
         assert Character(name="").seed == RANDOM_SEED
 
-    def test_a_character_can_hold_a_random_seed(self, store):
-        """So a character with a seed can be given one back."""
+    def test_a_thread_can_be_given_a_random_seed_back(self, store):
+        """So a thread whose character holds a seed can be given a fresh one
+        each reply -- its -1 is a choice, where a request's -1 says nothing --
+        and the section shows the seed that is in force, not -1 over a fixed
+        one (the 2026-11-09 report: the box showed -1 while the file's seed made
+        every Regenerate the same reply)."""
         from prompt_master.core.models import RANDOM_SEED
         from prompt_master.chat.characters import Character
 
+        import mc_llm_generation
+
         (store / "characters").mkdir(parents=True, exist_ok=True)
-        held = mc_llm_chat_panel._characters()
-        held.save(Character(name="Ada", seed=99))
+        mc_llm_chat_panel._characters().save(Character(name="Ada", seed=99))
+        chats = mc_llm_chat_panel._chats()
+        conversation = chats.new("Ada")
+        chats.save(conversation)
+        seed_at = 1 + mc_llm_generation.KEYS.index("seed")
 
-        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.85, 0.95, 512,
-                                          RANDOM_SEED)
+        assert mc_llm_chat_panel._generation_view("Ada", conversation.identifier)[seed_at] == 99
 
-        assert held.load("Ada").seed == RANDOM_SEED
+        mc_llm_chat_panel._generation_chosen("seed")("Ada", conversation.identifier,
+                                                     RANDOM_SEED)
+
+        assert mc_llm_chat_panel._generation_view("Ada", conversation.identifier)[
+            seed_at] == RANDOM_SEED
+        assert mc_llm_generation.for_thread("Ada", conversation.identifier) == {
+            "seed": RANDOM_SEED}
 
 
 class TestNoSeedBoxIsRestoredByTheHost:

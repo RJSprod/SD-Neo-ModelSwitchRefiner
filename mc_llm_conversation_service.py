@@ -428,6 +428,10 @@ def _payload(raw, action: str) -> dict:
         found["voice"] = bool(raw.get("voice"))
     if "settings" in raw:
         found["settings"] = _settings(raw.get("settings"))
+    if "like" in raw:
+        # create_thread only: the thread the new one is made from, whose
+        # generation settings it starts with (mc_llm_generation.carry).
+        found["like"] = _identifier(raw.get("like"), "like", required=False)
     unknown = set(raw) - set(found) - {"settings"}
     if unknown:
         raise Refused(INVALID_INPUT,
@@ -441,7 +445,11 @@ def _settings(raw) -> dict:
         return {}
     if not isinstance(raw, dict):
         raise Refused(INVALID_INPUT, "settings must be an object.")
-    allowed = {"temperature", "top_p", "reply_tokens", "seed"}
+    import mc_llm_generation
+
+    # The four every request has carried, and the sampler fields a thread can
+    # choose beyond them (mc_llm_generation.SETTINGS), by the same names.
+    allowed = set(mc_llm_generation.KEYS)
     unknown = set(raw) - allowed
     if unknown:
         raise Refused(INVALID_INPUT,
@@ -878,6 +886,19 @@ def _create_thread(envelope: Envelope) -> dict:
         return conversation
 
     committed = store_module.create(store, key, build, receipt=receipt)
+    # Started from a thread of the same character -- the one open where + New
+    # thread was pressed -- it starts with that thread's generation settings,
+    # so a thread tuned for variety is not the last one that is.
+    like = str(envelope.payload.get("like") or "").strip()
+    if like and like != identifier:
+        try:
+            if store.path_for(character, like).is_file():
+                import mc_llm_generation
+
+                mc_llm_generation.carry(character, like, identifier)
+        except Exception:
+            logger.debug("Model Chain: could not start a thread from another's settings",
+                         exc_info=True)
     publish(CONVERSATION_CHANGED, key, revision=committed.revision, kind_detail="created")
     return _accepted(envelope, key, committed.revision)
 
@@ -910,10 +931,12 @@ def _delete_thread(envelope: Envelope) -> dict:
                       issued_at=envelope.issued_at, payload_digest=envelope.digest())
     store_module.remove(store, key, envelope.expected_revision, receipt=receipt)
     import mc_llm_emotions
+    import mc_llm_generation
     import mc_llm_start_with
 
     mc_llm_emotions.forget(key.character, key.thread_id)
     mc_llm_start_with.forget(key.character, key.thread_id)
+    mc_llm_generation.forget(key.character, key.thread_id)
     publish(THREAD_DELETED, key)
     return _accepted(envelope, key, 0)
 
@@ -1042,10 +1065,13 @@ def _branch_from(store, key: Key, expected, index: int, operation_id: str,
     committed = store_module.create(store, made,
                                     lambda: source.branch(index, identifier), receipt=receipt)
     # A branch carries on from here, and the emotion the replies were being
-    # written in is part of what "here" is -- as the response prefix is.
+    # written in is part of what "here" is -- as the response prefix is, and as
+    # the settings they were sampled with are.
     import mc_llm_emotions
+    import mc_llm_generation
 
     mc_llm_emotions.carry(key.character, key.thread_id, committed.conversation.identifier)
+    mc_llm_generation.carry(key.character, key.thread_id, committed.conversation.identifier)
     return committed
 
 

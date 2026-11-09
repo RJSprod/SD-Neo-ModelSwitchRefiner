@@ -962,6 +962,45 @@ class TestTheReply:
 
         assert server.chats()[-1] == expected
 
+    def test_a_threads_own_sampling_goes_out_after_the_profiles(self, server, folder,
+                                                               monkeypatch):
+        """A thread's choice of top-k beats the managed profile's (2026-11-09,
+        mc_llm_generation), in both clients' bodies, and a key the whitelist
+        does not name never reaches the server."""
+        profile = {"top_k": 64, "min_p": 0.05, "repeat_penalty": 1.10}
+        chosen = {"top_k": 0, "dry_multiplier": 0.8, "dry_penalty_last_n": 2048,
+                  "logit_bias": {"1": 5}, "samplers": "x"}
+        from prompt_master.inference.llama_client import LlamaClient
+
+        LlamaClient("http://127.0.0.1:58915", "k", profile).stream_chat(
+            [{"role": "user", "content": "hi"}], 512, 7, lambda _text: None, sampling=chosen)
+        expected = server.chats()[-1]
+        client = self.saving(folder, profile)
+
+        client.stream_conversation("Ada/thread-1", [{"role": "user", "content": "hi"}], 512,
+                                   7, lambda _text: None, sampling=chosen)
+        sent = server.chats()[-1]
+
+        for body in (expected, sent):
+            assert (body["top_k"], body["min_p"], body["repeat_penalty"]) == (0, 0.05, 1.10)
+            assert (body["dry_multiplier"], body["dry_penalty_last_n"]) == (0.8, 2048)
+            assert "logit_bias" not in body and "samplers" not in body
+        assert {key: sent[key] for key in expected} == expected
+
+    def test_without_its_saving_server_the_sampling_still_goes_out(self, server, folder,
+                                                                  monkeypatch):
+        """No saved caches running: the vendored method, with the thread's own
+        fields still on the body."""
+        import mc_llm_slot_cache as slot_cache
+
+        client = self.saving(folder)
+        monkeypatch.setattr(slot_cache, "active", lambda: False)
+
+        client.stream_conversation("Ada/thread-1", [{"role": "user", "content": "hi"}], 512,
+                                   7, lambda _text: None, sampling={"xtc_probability": 0.5})
+
+        assert server.chats()[-1]["xtc_probability"] == 0.5
+
 
 class TestReadingTheSlot:
     def test_the_slot_is_read_off_the_verbose_field(self):

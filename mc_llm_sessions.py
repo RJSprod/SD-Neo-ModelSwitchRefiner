@@ -679,6 +679,12 @@ class ChatRequest:
     end of the prefilled line. The caller shows them as the reply's start, so
     what streams is the rest exactly as the model wrote it, its first space
     included."""
+    sampling: dict = field(default_factory=dict)
+    """The thread's own sampler fields beyond the four above -- min-p, top-k,
+    the penalties, DRY, XTC (:mod:`mc_llm_generation`) -- and only those it
+    chose. Sent after the model profile's, so a thread's choice wins; empty is
+    the request as it always was, and a client is then called exactly as it
+    always was."""
 
 
 def _prefill(request: ChatRequest) -> str:
@@ -719,6 +725,10 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
         yield Event(STATUS, "Replying…")
 
         text = ""
+        # The thread's own sampler fields, asked of the client only when there
+        # are some, as ``save`` is below: a client from before the keyword, or a
+        # thread that chose none, is called exactly as it always was.
+        own_sampling = {"sampling": dict(request.sampling)} if request.sampling else {}
         # A client that can save a conversation's cache is asked to, for a
         # request that says which conversation it is. Everything else -- a test
         # double, a server started without the folder, a reply with no
@@ -733,13 +743,13 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
                 return saving(request.conversation, request.messages, request.max_tokens,
                               request.seed, on_text, cancel.event,
                               temperature=request.temperature, top_p=request.top_p,
-                              **unsaved)
+                              **unsaved, **own_sampling)
         else:
             def work(on_text):
                 return client.stream_chat(request.messages, request.max_tokens,
                                           request.seed, on_text, cancel.event,
                                           temperature=request.temperature,
-                                          top_p=request.top_p)
+                                          top_p=request.top_p, **own_sampling)
         # llama-server sends a prefilled reply back with its line at the front;
         # the line is taken off here, before anything shows, speaks or saves it.
         line = _prefill(request)

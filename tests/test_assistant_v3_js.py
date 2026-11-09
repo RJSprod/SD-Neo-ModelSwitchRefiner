@@ -413,6 +413,27 @@ class TestANewThreadFromTheMenu:
                          "conversation": {"character": "Ada", "thread_id": ""},
                          "expected": None}
 
+    def test_it_starts_from_the_thread_this_page_is_on(self):
+        """The new thread starts with the generation settings of the thread it
+        was made from (2026-11-09): the page names that thread, as the tab's
+        + New thread does."""
+        found = run_both(THREADS + """
+            const store = threadStore(MADE);
+            store.createThread().then(() => console.log(JSON.stringify(store.sent[0].payload)));
+        """)
+
+        assert found == {"like": "t1"}
+
+    def test_another_characters_thread_starts_from_nothing(self):
+        """A thread of Ada's is not where a new thread with Bob starts from."""
+        found = run_both(THREADS + """
+            const store = threadStore(MADE);
+            store.createThread("Bob").then(() => console.log(JSON.stringify(
+                {payload: store.sent[0].payload, who: store.sent[0].conversation.character})));
+        """)
+
+        assert found == {"payload": {}, "who": "Bob"}
+
     def test_the_panel_moves_onto_the_new_thread(self):
         found = run_both(THREADS + """
             const store = threadStore(MADE);
